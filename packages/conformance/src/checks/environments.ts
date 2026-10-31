@@ -3,7 +3,7 @@
 // (docs/design/environments.md).
 import { randomUUID } from 'node:crypto';
 
-import { CoffreError } from '@coffre/client';
+import { CoffreError, type AuditEntryView } from '@coffre/client';
 
 import { using } from '../database.ts';
 import type { Deployment } from '../harness.ts';
@@ -176,10 +176,16 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   try {
     const read = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
-    const logged = async (path: string) => (await admin.api.audit.list({ path, limit: 200, sealed: '1' })).entries
-      .filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email && entry.metadata.via !== undefined).length;
-    // Listed once sealed and projected, a tick or two on (T166).
-    expect(await listed(async () => await logged(PROD) >= 1 && await logged(DEV) >= 1), "the read through the reference is not in both the source's log and the holder's");
+    // On the whole log, filed at the source, the holder beside it, once sealed and projected, a tick or two on (T166).
+    // 0.15 lists reads by member and on the whole log, not by place (D160): the source's page and the holder's say so.
+    const through = (entries: AuditEntryView[]) => entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email
+      && `${entry.project}/${entry.environment}/${entry.key}` === source && (entry.metadata.via as { path?: unknown } | undefined)?.path === `${DEV}/${HELD}`);
+    expect(await listed(async () => through((await admin.api.audit.list({ limit: 200, sealed: '1' })).entries).length >= 1),
+      "the read through the reference is not on the whole log, filed at its source with the holder beside it");
+    for (const path of [PROD, DEV]) {
+      const page = await admin.api.audit.list({ path, limit: 200, sealed: '1' });
+      expect(page.readsOmitted === 'path' || through(page.entries).length >= 1, `${path}'s log neither lists the read through the reference nor says where it is`, page.readsOmitted);
+    }
 
     // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its
     // project could be, since the reference is held there too, and archiving it stops no one else's read.

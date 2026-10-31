@@ -32,7 +32,7 @@ import {
   HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, sensitiveFrom, type ChangePoint,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
-import { readsPage, readsStanding, type ReadFilter, type ReadPlaces } from '../src/db/reads.ts';
+import { readsByStanding, readsPage, readsStanding } from '../src/db/reads.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import { sessionCookieName } from '../src/auth.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -1370,94 +1370,49 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
   const counted = createDatabase(app.client);
   const ADA = 'user:ada@acme.example';
   const OTHER = 'user:other@acme.example';
-  // A project of 20 keys, read all day by others; Ada's few reads among them; a quiet environment, its 5 keys read
-  // once, long ago; a fork, read in; and market/busy's reference into market/dev, read through, which a reader whose
-  // role leaves market/dev out never sees, however much of it there is (review r2).
-  await root.projects.create('uses', { name: 'Uses' });
-  for (const path of ['uses/e', 'uses/quiet']) await root.environments.create(path, { name: path });
-  await root.secrets.set('uses/e', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`KEY_${i}`, `value-${i}`])));
-  await root.secrets.set('uses/quiet', Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`QUIET_${i}`, `value-${i}`])));
-  await root.environments.create('uses/e-eu', { name: 'e-eu', from: 'e', inherit: true });
-  // And a fork of market/busy, which reads its reference into market/dev in the fork: at three places.
-  await root.environments.create('market/busy-eu', { name: 'busy-eu', from: 'busy', inherit: true });
   const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
-  const [project] = await ids(sql`projects WHERE slug = 'uses'`);
-  const [e] = await ids(sql`environments WHERE slug = 'e' AND project_id = ${project}`);
-  const [quiet] = await ids(sql`environments WHERE slug = 'quiet' AND project_id = ${project}`);
-  const [fork] = await ids(sql`environments WHERE slug = 'e-eu'`);
-  const keys = await ids(sql`secrets WHERE environment_id = ${e} ORDER BY key`);
-  const quietKeys = await ids(sql`secrets WHERE environment_id = ${quiet}`);
+  // Ada's reads are of market's keys, of their current versions, as the offboarding report weighs them; everyone else's
+  // are of keys anywhere, in forks and through references whose source moves on (review r5): none is on her pages.
+  await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`READS_COST_${i}`, `value-${i}`])));
+  // A member, whose report the page reads.
+  await root.members.add(ADA).catch(() => {});
   const [market] = await ids(sql`projects WHERE slug = 'market'`);
   const [dev] = await ids(sql`environments WHERE slug = 'dev' AND project_id = ${market}`);
-  const [prod] = await ids(sql`environments WHERE slug = 'prod' AND project_id = ${market}`);
-  const [busy] = await ids(sql`environments WHERE slug = 'busy' AND project_id = ${market}`);
-  const [busyFork] = await ids(sql`environments WHERE slug = 'busy-eu' AND project_id = ${market}`);
-  const [holder] = await ids(sql`secrets WHERE key = 'DEV_API_KEY'`);
-  const [devKey] = await ids(sql`secrets WHERE key = 'API_KEY' AND environment_id = ${dev}`);
-  // A key of the test's own there, whatever the tests before it left (review r4).
-  await root.secrets.set('market/prod', { READS_COST_KEY: 'prod-value' });
-  const [prodKey] = await ids(sql`secrets WHERE environment_id = ${prod} AND key = 'READS_COST_KEY'`);
+  const keys = (await db.owner.execute<{ id: string; version: string }>(sql`
+    SELECT CAST(id AS text) AS id, CAST(current_version_id AS text) AS version FROM secrets WHERE environment_id = ${dev} AND key LIKE 'READS_COST_%' ORDER BY key`));
   const now = Date.now();
   const day = (at: number) => new Date(at).toISOString().slice(0, 10);
   await db.owner.execute(sql`SELECT make_reads_day(${day(now - 86_400_000)}::date), make_reads_day(${day(now)}::date)`);
   const array = (values: readonly string[]) => sql.raw(`ARRAY[${values.map((value) => `'${value}'`).join(',')}]::uuid[]`);
   let next = 5_000_000;
   /**
-   * `count` reads numbered on from the last, asked from `from` ms ago, one every `every` ms, by `principal`, of one of
-   * `secretIds` in turn, filed at `environment`; read in a fork, through a reference into `source`'s key, or both: each
-   * with its places as the projector writes them, a row at each place naming all the others.
+   * `count` reads numbered on from the last, asked from `from` ms ago, one every `every` ms, by `principal`: of Ada's
+   * keys, at their versions, or of keys of nowhere in particular, each read in a fork of its own of `forks`, and
+   * through a reference to one of `sources`, whichever are given.
    */
-  const plant = async (count: number, principal: string, secretIds: readonly string[], environment: string, from: number, every: number,
-    options: { fork?: string; source?: { environment: string; key: string } } = {}) => {
+  const plant = async (count: number, principal: string, from: number, every: number, options: { own?: boolean; forks?: number; sources?: number } = {}) => {
     const first = next;
     next += count;
+    const pick = (n: number | undefined) => (n === undefined ? sql`NULL::uuid` : sql`md5(${String(first)} || '-' || (g % ${n}))::uuid`);
     await db.owner.execute(sql`
       INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
-      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * ${every}, gen_random_uuid(), 1, ${principal}, (${array(secretIds)})[1 + g % ${secretIds.length}],
-             ${environment}::uuid, ${[e, quiet, fork].includes(environment) ? project : market}::uuid, ${options.fork ?? null}::uuid, ${options.source?.key ?? null}::uuid, ${options.source?.environment ?? null}::uuid,
-             ${options.source === undefined ? null : market}::uuid, NULL, decode(repeat('00', 16), 'hex')
+      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * ${every}, gen_random_uuid(), 1, ${principal},
+             ${options.own === true ? sql`(${array(keys.map((key) => key.id))})[1 + g % ${keys.length}]` : sql`gen_random_uuid()`},
+             ${options.own === true ? sql`${dev}::uuid` : sql`gen_random_uuid()`}, ${market}::uuid, ${pick(options.forks)},
+             ${pick(options.sources)}, ${options.sources === undefined ? sql`NULL::uuid` : sql`gen_random_uuid()`}, ${options.sources === undefined ? sql`NULL::uuid` : sql`${market}::uuid`},
+             ${options.own === true ? sql`(${array(keys.map((key) => key.version))})[1 + g % ${keys.length}]` : sql`NULL::uuid`}, decode(repeat('00', 16), 'hex')
         FROM generate_series(1, ${count}) g`);
-    const filed: [string, SQL][] = [[environment, sql`secret`]];
-    if (options.fork !== undefined) filed.push([options.fork, sql`secret`]);
-    if (options.source !== undefined) filed.push([options.source.environment, sql`source`]);
-    for (const [at, secret] of filed) {
-      const partners = array(filed.map(([other]) => other).filter((other) => other !== at).sort());
-      await db.owner.execute(sql`
-        INSERT INTO log_read_places (environment, partners, at, number, principal, secret)
-        SELECT ${at}::uuid, ${partners}, at, number, principal, ${secret}
-          FROM log_reads WHERE number > ${first} AND number <= ${first + count}`);
-      await db.owner.execute(sql`INSERT INTO log_read_partners (environment, partners) VALUES (${at}::uuid, ${partners}) ON CONFLICT DO NOTHING`);
-    }
-  };
-  const place = (places: Partial<ReadPlaces>): ReadPlaces => ({ projectIds: [], environmentIds: [], secretIds: [], except: [], ...places });
-  // A reader of both projects whose role leaves market/dev out, as an Auditor's scope does.
-  const scoped = place({ projectIds: [project!, market!], except: [dev!] });
-  const filters: Record<string, ReadFilter> = {
-    'every read': { limit: 100 },
-    "a person's reads": { actors: [ADA], limit: 100 },
-    "a person's older page": { actors: [ADA], before: { at: now - 2 * 3_600_000 }, limit: 100 },
-    "a key's reads": { places: [place({ secretIds: [keys[0]!] })], limit: 100 },
-    "an environment's reads": { places: [place({ environmentIds: [e!] })], limit: 100 },
-    "a quiet environment's reads": { places: [place({ environmentIds: [quiet!] })], limit: 100 },
-    "a project's reads": { places: [place({ projectIds: [project!] })], limit: 100 },
-    "a project's reads, an environment left out": { places: [place({ projectIds: [project!], except: [quiet!] })], limit: 100 },
-    "a fork's reads": { places: [place({ environmentIds: [fork!] })], limit: 100 },
-    "a source's, read through a reference": { places: [place({ environmentIds: [dev!] })], limit: 100 },
-    'a person at a place': { actors: [ADA], places: [place({ environmentIds: [e!] })], limit: 100 },
-    "a person's reads of a key": { actors: [ADA], places: [place({ secretIds: [keys[0]!] })], limit: 100 },
-    "a scoped reader's whole log, a protected environment left out": { places: [scoped], limit: 100 },
-    "a scoped reader's page of a person, a protected environment left out": { actors: [ADA], places: [scoped], limit: 100 },
-    "a scoped reader's page of market/busy": { places: [place({ environmentIds: [busy!] }), scoped], limit: 100 },
-    // Of its fork, where every read is also at market/dev, through the reference: none read, however many (review r3).
-    "a scoped reader's page of market/busy's fork": { places: [place({ environmentIds: [busyFork!] }), scoped], limit: 100 },
   };
   const reads: Record<string, () => Promise<unknown>> = {
-    ...Object.fromEntries(Object.entries(filters).map(([name, filter]) => [name, () => readsPage(counted, filter)])),
+    'every read': () => readsPage(counted, { limit: 100 }),
+    "a member's reads": () => readsPage(counted, { actors: [ADA], limit: 100 }),
+    "a member's older page": () => readsPage(counted, { actors: [ADA], before: { at: now - 2 * 3_600_000 }, limit: 100 }),
     'how far the reads are listed': () => readsStanding(counted),
-    // Whole pages through the API, every statement each makes, the vault's vouching aside.
+    "an offboarding report's reads, and how far they are listed": () => readsByStanding(counted, [ADA]),
+    // Whole pages and the report through the API, every statement each makes, the vault's vouching aside.
     'through the API, the whole log': () => root.audit.list({ sealed: '1', limit: 50 }),
-    "through the API, a person's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
-    "through the API, an environment's page": () => root.audit.list({ path: 'uses/e', sealed: '1', limit: 50 }),
+    "through the API, a member's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
+    "through the API, a member's report": () => root.members.get(ADA),
   };
   const pages = async () => {
     const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
@@ -1469,66 +1424,53 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
       app.recorded = null;
       read[name] = [];
       for (const statement of statements) {
+        // A report's transaction's own statements read nothing to measure.
+        if (!/^\s*(select|with)\b/i.test(statement.text)) continue;
         const work = await app.work(statement);
         read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
       }
     }
     return read;
   };
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_reads, log_read_places`);
-  try {
-    // Today's: 20,000 reads of the project's keys by another member, Ada's 2,000 among them through the day, the quiet
-    // keys read once each, 18 hours ago, 100 reads in the fork, 50 through market/busy's reference into market/dev.
-    await plant(20_000, OTHER, keys, e!, 12 * 3_600_000, 2_000);
-    await plant(2_000, ADA, keys, e!, 10 * 3_600_000, 15_000);
-    await plant(5, OTHER, quietKeys, quiet!, 18 * 3_600_000, 1);
-    await plant(100, OTHER, keys, e!, 9 * 3_600_000, 100_000, { fork: fork! });
-    await plant(50, OTHER, [holder!], busy!, 8 * 3_600_000, 200_000, { source: { environment: dev!, key: devKey! } });
-    await plant(100, OTHER, [holder!], busy!, 8 * 3_600_000, 100_000, { fork: busyFork!, source: { environment: dev!, key: devKey! } });
-    await settle();
-    const small = await pages();
-    // market/dev's page lists the reads through market/busy's reference into it, while no newer read of its own hides them.
-    const page = (name: string) => readsPage(counted, filters[name]!).then(({ rows }) => rows);
-    assert.ok((await page("a source's, read through a reference")).every((read) => read.secret === holder && read.source === devKey));
-    // Five times the traffic since, every key and place, all newer than what the pages above show: 100,000 more reads
-    // of the project's keys by the other member, 10,000 in the fork; 100,000 of market/dev's key, which the scoped
-    // reader may not see, and 20,000 through the reference into it; 10,000 of Ada's own, older than her page; and
-    // 100,000 of hers elsewhere, newer than her reads of the project (review r1).
-    await plant(100_000, OTHER, keys, e!, 6 * 3_600_000, 200);
-    await plant(10_000, OTHER, keys, e!, 5 * 3_600_000, 300, { fork: fork! });
-    await plant(100_000, OTHER, [devKey!], dev!, 5 * 3_600_000, 150);
-    await plant(20_000, OTHER, [holder!], busy!, 5 * 3_600_000, 700, { source: { environment: dev!, key: devKey! } });
-    await plant(50_000, OTHER, [holder!], busy!, 5 * 3_600_000, 300, { fork: busyFork!, source: { environment: dev!, key: devKey! } });
-    await plant(10_000, ADA, keys, e!, 20 * 3_600_000, 500);
-    await plant(100_000, ADA, [prodKey!], prod!, 4 * 3_600_000, 100);
-    await settle();
-    const grown = await pages();
-    for (const [name, statements] of Object.entries(small)) {
+  const flat = (small: Awaited<ReturnType<typeof pages>>, grown: Awaited<ReturnType<typeof pages>>, names: readonly string[]) => {
+    for (const name of names) {
+      const statements = small[name]!;
       assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
-      if (!name.startsWith('through the API')) assert.ok(statements.length <= 2, `${name} is one statement, or two`);
       for (const [i, { text, pages: before }] of statements.entries()) {
         const { pages: after, plan } = grown[name]![i]!;
         assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the log grown, ${before} before:\n${plan}`);
       }
     }
-    // And they read what was planted, every page full but the quiet one, of what it asked and nothing a reader may not see.
-    for (const name of Object.keys(filters)) {
-      const rows = await page(name);
-      if (name === "a quiet environment's reads") assert.equal(rows.length, 5);
-      else if (name.startsWith("a scoped reader's page of market/busy")) assert.equal(rows.length, 0, name);
-      else assert.equal(rows.length, 100, name);
-    }
-    assert.ok((await page("a person's reads")).every((read) => read.principal === ADA));
-    assert.ok((await page('a person at a place')).every((read) => read.principal === ADA && read.environment === e));
-    assert.ok((await page("a person's reads of a key")).every((read) => read.principal === ADA && read.secret === keys[0]));
-    assert.ok((await page("a key's reads")).every((read) => read.secret === keys[0]));
-    assert.ok((await page("a fork's reads")).every((read) => read.place === fork));
-    assert.ok((await page("a project's reads, an environment left out")).every((read) => !quietKeys.includes(read.secret)));
-    assert.ok((await page("a scoped reader's whole log, a protected environment left out")).every((read) => read.environment !== dev && read.sourceEnvironment !== dev));
-    assert.ok((await page("a scoped reader's page of a person, a protected environment left out")).every((read) => read.principal === ADA));
+  };
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
+  try {
+    // Today's: 20,000 reads by another member, a tenth in forks and a twentieth through references; and Ada's 2,000 of
+    // her keys through the day.
+    await plant(18_000, OTHER, 12 * 3_600_000, 2_000);
+    await plant(1_000, OTHER, 11 * 3_600_000, 20_000, { forks: 50 });
+    await plant(1_000, OTHER, 11 * 3_600_000, 20_000, { sources: 50 });
+    await plant(2_000, ADA, 10 * 3_600_000, 15_000, { own: true });
+    await settle();
+    const small = await pages();
+    // Twenty times the others' since, all newer than what the pages show: reads anywhere, in 5,000 forks, and through
+    // references repointed to 20,000 sources between them.
+    await plant(300_000, OTHER, 6 * 3_600_000, 50);
+    await plant(50_000, OTHER, 5 * 3_600_000, 200, { forks: 5_000 });
+    await plant(50_000, OTHER, 5 * 3_600_000, 200, { sources: 20_000 });
+    await settle();
+    flat(small, await pages(), Object.keys(reads));
+    // And Ada's own, older than her page: her pages read as many, her report all of hers, as 0.14's did.
+    await plant(100_000, ADA, 20 * 3_600_000, 300, { own: true });
+    await settle();
+    flat(small, await pages(), ['every read', "a member's reads", 'how far the reads are listed', 'through the API, the whole log', "through the API, a member's page"]);
+    // And they read what was planted: full pages, Ada's hers alone, her report each of her keys once.
+    const page = (filter: Parameters<typeof readsPage>[1]) => readsPage(counted, filter).then(({ rows }) => rows);
+    assert.equal((await page({ limit: 100 })).length, 100);
+    const hers = await page({ actors: [ADA], limit: 100 });
+    assert.ok(hers.length === 100 && hers.every((read) => read.principal === ADA));
+    const report = await readsByStanding(counted, [ADA]);
+    assert.deepEqual(new Set(report.reads.map((read) => read.secret)), new Set(keys.map((key) => key.id)));
   } finally {
-    await db.owner.execute(sql`DELETE FROM log_read_places WHERE number > 5000000`);
     await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 5000000`);
-    await db.owner.execute(sql`DELETE FROM log_read_partners`);
   }
 });

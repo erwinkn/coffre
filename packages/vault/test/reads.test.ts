@@ -83,7 +83,7 @@ test("a change a read is derived from, edited since its seal, stops the projecti
   assert.match((await checked()).join('\n'), /does not hold to the pair that sealed it|does not hold to its MAC/);
 });
 
-test("two projectors at once write each read and each of its places once, and the whole log's check finds nothing", async () => {
+test("two projectors at once write each read once, and the whole log's check finds nothing", async () => {
   const tick = await signer();
   await reads(6);
   await tick();
@@ -91,7 +91,6 @@ test("two projectors at once write each read and each of its places once, and th
   const other: Database = ENGINE === 'postgres' ? db.owner : db.vault;
   await Promise.all([projectReads(logStore(db.vault), await keys(), { atOnce: 2 }), projectReads(logStore(other), await keys(), { atOnce: 3 })]);
   assert.equal(await count('log_reads'), 6);
-  assert.equal(await count('log_read_places'), 6);
   assert.deepEqual(await checked(), []);
 });
 
@@ -105,9 +104,8 @@ test("the whole log's check holds the range the projector stopped in, as far as 
   assert.equal(listed.length, 2);
   assert.deepEqual(await checked(), []);
   const deleted = BigInt(listed[0]!.number);
-  await run(db.owner, sql`DELETE FROM log_read_places WHERE number = ${deleted}`);
   await run(db.owner, sql`DELETE FROM log_reads WHERE number = ${deleted}`);
-  assert.deepEqual(await checked(), [`read ${deleted} is sealed but not listed`, `read ${deleted} is not listed at a place it was read`]);
+  assert.deepEqual(await checked(), [`read ${deleted} is sealed but not listed`]);
 });
 
 test("a read through a Cloudflare binding is its service's, as the binding's object names it (review r3)", async () => {
@@ -137,7 +135,7 @@ test("a read of a day with no reads' partition yet makes it: a log older than th
   await reads(2);
   await tick();
   const day = new Date().toISOString().slice(0, 10).replaceAll('-', '');
-  for (const table of ['log_reads', 'log_read_places']) await run(db.owner, sql.raw(`DROP TABLE ${table}_${day}`));
+  await run(db.owner, sql.raw(`DROP TABLE log_reads_${day}`));
   await projectReads(logStore(db.vault), await keys());
   assert.equal(await count('log_reads'), 2);
   assert.deepEqual(await checked(), []);

@@ -14,7 +14,19 @@ const PAGE_SIZE = 50;
  * apart from sealing, so that a projector behind or stopped shows rather
  * than leaves reads missing unsaid. An instance before 0.15 says nothing.
  */
-export function ReadsLag({ reads }: { reads: { through: string | null; behind: boolean; forged?: true } | undefined }) {
+export function ReadsLag({ reads, omitted }: { reads: { through: string | null; behind: boolean; forged?: true } | undefined; omitted?: 'path' | 'scope' | undefined }) {
+  // 0.15 lists reads on the whole log and by member, to whoever reads the whole log, and each person's own (D160).
+  if (omitted !== undefined) {
+    return (
+      <div style={{ marginBottom: '1.25rem' }}>
+        <Notice>
+          {omitted === 'path'
+            ? 'Reads are listed on the whole audit log and on each member’s page, not here.'
+            : 'Reads are listed to those who read the whole audit log; your own are on your page.'}
+        </Notice>
+      </div>
+    );
+  }
   if (reads?.behind !== true && reads?.forged !== true) return null;
   return (
     <div style={{ marginBottom: '1.25rem' }}>
@@ -70,7 +82,7 @@ export function ActionsLog({ member }: { member: string }) {
 
   return (
     <>
-      <ReadsLag reads={first?.ok === true ? first.reads : undefined} />
+      <ReadsLag reads={first?.ok === true ? first.reads : undefined} omitted={first?.ok === true ? first.readsOmitted : undefined} />
       <section className="card" aria-label="Actions log">
         {shown.length === 0 ? (
           <EmptyState title="Nothing yet" />

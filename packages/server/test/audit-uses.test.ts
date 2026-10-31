@@ -24,7 +24,7 @@ import { READS_BEHIND_MS, readsListed } from '../src/api/audit.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { logReadPartners, logReadPlaces, logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
+import { logReads, logReadsCursor, logUses, secrets } from './db/tables.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { openVaultDatabase } from './db/engine.ts';
 
@@ -117,15 +117,20 @@ async function every(client: CoffreClient, query: { actor?: string; path?: strin
 const reads = (entries: AuditEntryView[]) => entries.filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow')
   .map((entry) => `${entry.actorId} ${entry.project}/${entry.environment}/${entry.key} v${entry.version} ${String(entry.metadata.purpose)} ${entry.log}`);
 
-test('a read is on every list that would have shown its 0.14 entry: the whole log, its member, its key, environment and project, with its version and token', async () => {
+test("a read is on the whole log and its member's page, with its version and token; under 0.14's log on its key's, environment's and project's too, which in 0.15 say where reads are (D160)", async () => {
   assert.equal((await ada.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'dev-key');
   await root.secrets.set('market/dev', { API_KEY: 'dev-key-2' });
   assert.equal((await ada.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'dev-key-2');
   if (LOG === '0.15') assert.equal((await usesLogged(db.owner)).length, 2, 'each read is a use');
 
   const expected = [`ada@acme.example market/dev/API_KEY v2 reveal ${LOG}`, `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`];
-  for (const query of [{}, { actor: ADA }, { actor: 'ada@acme.example' }, { path: 'market/dev/API_KEY' }, { path: 'market/dev' }, { path: 'market' }]) {
+  for (const query of [{}, { actor: ADA }, { actor: 'ada@acme.example' }]) {
     assert.deepEqual(reads(await every(root, query)), expected, JSON.stringify(query));
+  }
+  for (const path of ['market/dev/API_KEY', 'market/dev', 'market']) {
+    assert.deepEqual(reads(await every(root, { path })), LOG === '0.15' ? [] : expected, path);
+    const page = await root.audit.list({ path, sealed: '1', limit: 10 });
+    assert.deepEqual([page.readsOmitted, page.reads], LOG === '0.15' ? ['path', undefined] : [undefined, undefined], path);
   }
   for (const query of [{ path: 'market/prod' }, { path: 'market/dev/OTHER' }, { actor: BOB }, { decision: 'deny' }]) {
     assert.deepEqual(reads(await every(root, query)), [], JSON.stringify(query));
@@ -140,7 +145,7 @@ test('a read is on every list that would have shown its 0.14 entry: the whole lo
   assert.deepEqual(reads(old), LOG === '0.15' ? [] : expected);
 });
 
-test('a reader of some places sees the reads there and nowhere else, and none in an environment their role leaves out', async () => {
+test("under 0.14's log, a reader of some places sees the reads there and nowhere else, and none in an environment their role leaves out", { skip: LOG !== '0.14' }, async () => {
   await ada.secrets.reveal('market/dev/API_KEY');
   const admin = bearer((await root.tokens.issue(`user:${ROOT}`, { label: 'reader', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
   await admin.secrets.reveal('market/prod/OTHER');
@@ -161,38 +166,56 @@ test('a reader of some places sees the reads there and nowhere else, and none in
   assert.deepEqual(reads(await every(bob, { path: 'market' })), reads(await every(bob)), 'by path, the same places');
 });
 
-test('a read through a reference is in its source\'s log and its holder\'s, of the source\'s version; one in a fork, in the fork\'s and its parent\'s', async () => {
+test("under 0.15's log, a reader of some places sees no one's reads but their own, on their own page, and every page says so (D160)", { skip: LOG !== '0.15' }, async () => {
+  await ada.secrets.reveal('market/dev/API_KEY');
+  // Bob owns market: he audits it and reads its values, but not the whole log.
+  await root.members.add(BOB, { role: 'member' });
+  await root.access.set(BOB, { market: 'owner' });
+  const bob = clientFor(deps, 'bob@acme.example');
+  const bobs = bearer((await bob.tokens.issue(BOB, { label: 'bob', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
+  await bobs.secrets.reveal('market/prod/OTHER');
+  assert.deepEqual(reads(await every(bob, { actor: BOB })), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`], 'his own reads');
+  for (const query of [{}, { actor: ADA }, { path: 'market' }, { path: 'market/dev/API_KEY' }]) {
+    assert.deepEqual(reads(await every(bob, query)), [], JSON.stringify(query));
+    const page = await bob.audit.list({ ...query, sealed: '1', limit: 10 });
+    assert.equal(page.readsOmitted, 'path' in query ? 'path' : 'scope', JSON.stringify(query));
+  }
+  // The whole log's reader sees both.
+  assert.deepEqual(reads(await every(root)), [`bob@acme.example market/prod/OTHER v1 reveal ${LOG}`, `ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`]);
+});
+
+test("a read through a reference is filed at its source, of the source's version, its holder beside it; one in a fork, at its key, the fork beside it", async () => {
   await root.secrets.set('market/prod', { SOURCE: 'prod-source' });
   await root.secrets.set('market/prod', { SOURCE: 'prod-source-2' });
   await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/SOURCE' } });
   assert.equal((await ada.secrets.reveal('market/dev/HELD')).values.HELD, 'prod-source-2');
-  for (const path of ['market/prod', 'market/prod/SOURCE', 'market/dev', 'market/dev/HELD']) {
-    const shown = (await every(root, { path })).filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.metadata.via !== undefined);
-    assert.equal(shown.length, 1, path);
+  // On the whole log and the member's page; under 0.14's log on each place's too.
+  const pages = (paths: string[]) => [{}, { actor: ADA }, ...(LOG === '0.14' ? paths.map((path) => ({ path })) : [])];
+  for (const query of pages(['market/prod', 'market/prod/SOURCE', 'market/dev', 'market/dev/HELD'])) {
+    const shown = (await every(root, query)).filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.metadata.via !== undefined);
+    assert.equal(shown.length, 1, JSON.stringify(query));
     const [read] = shown as [AuditEntryView];
     // Filed as 0.14 filed it: at the source, the reference's holder beside it.
-    assert.deepEqual([read.project, read.environment, read.key, read.version, (read.metadata.via as { path?: unknown }).path], ['market', 'prod', 'SOURCE', 2, 'market/dev/HELD'], path);
+    assert.deepEqual([read.project, read.environment, read.key, read.version, (read.metadata.via as { path?: unknown }).path], ['market', 'prod', 'SOURCE', 2, 'market/dev/HELD'], JSON.stringify(query));
   }
-  assert.deepEqual(reads(await every(root, { path: 'market/prod/API_KEY' })), []);
 
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
   await root.access.set(ADA, { 'market/dev-eu': 'developer' });
   const fork = bearer((await clientFor(deps, 'ada@acme.example').tokens.issue(ADA, { label: 'fork', expiresInMinutes: 60, scope: { 'market/dev': 'viewer', 'market/dev-eu': 'viewer' } })).token);
   assert.equal((await fork.secrets.reveal('market/dev-eu/OTHER')).values.OTHER, 'dev-other');
-  for (const path of ['market/dev-eu', 'market/dev', 'market/dev/OTHER']) {
-    const shown = (await every(root, { path })).filter((entry) => entry.action === 'secret.read' && entry.key === 'OTHER');
-    assert.equal(shown.length, 1, path);
-    assert.deepEqual([shown[0]!.environment, (shown[0]!.metadata.through as { slug?: unknown }).slug], ['dev', 'dev-eu'], path);
+  for (const query of pages(['market/dev-eu', 'market/dev', 'market/dev/OTHER'])) {
+    const shown = (await every(root, query)).filter((entry) => entry.action === 'secret.read' && entry.key === 'OTHER');
+    assert.equal(shown.length, 1, JSON.stringify(query));
+    assert.deepEqual([shown[0]!.environment, (shown[0]!.metadata.through as { slug?: unknown }).slug], ['dev', 'dev-eu'], JSON.stringify(query));
   }
-  assert.deepEqual((await every(root, { path: 'market/prod' })).filter((entry) => entry.key === 'OTHER' && entry.action === 'secret.read'), []);
 });
 
-test('a read through a reference within one environment is in the logs of both its keys there, once each (review r3)', async () => {
+test('a read through a reference within one environment is listed once (review r3)', async () => {
   await root.secrets.set('market/dev', { HELD: { ref: 'market/dev/API_KEY' } });
   assert.equal((await ada.secrets.reveal('market/dev/HELD')).values.HELD, 'dev-key');
-  for (const path of [undefined, 'market/dev', 'market/dev/HELD', 'market/dev/API_KEY']) {
-    const shown = (await every(root, path === undefined ? {} : { path })).filter((entry) => entry.action === 'secret.read' && entry.metadata.via !== undefined);
-    assert.equal(shown.length, 1, path ?? "the whole log");
+  for (const query of [{}, { actor: ADA }]) {
+    const shown = (await every(root, query)).filter((entry) => entry.action === 'secret.read' && entry.metadata.via !== undefined);
+    assert.equal(shown.length, 1, JSON.stringify(query));
   }
 });
 
@@ -233,7 +256,7 @@ test('a read the vault does not vouch for is shown forged: edited, renumbered, o
   assert.deepEqual([reads?.forged, reads?.behind], [true, true]);
 });
 
-test("the whole log's check holds the reads listed to the uses sealed: one deleted, edited, planted or missing at a place, each named", { skip: LOG !== '0.15' }, async () => {
+test("the whole log's check holds the reads listed to the uses sealed: one deleted, edited, given to another member or listed twice, each named", { skip: LOG !== '0.15' }, async () => {
   await root.secrets.set('market/prod', { SOURCE: 'prod-source' });
   await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/SOURCE' }, THIRD: 'third', FOURTH: 'fourth' });
   // Five reads, each sealed by a pair of its own, so that the check goes a stretch for each.
@@ -245,22 +268,19 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
   assert.ok(sealed.kept && sealed.ok, JSON.stringify(sealed));
   const numbers = (await db.owner.select({ number: logReads.number }).from(logReads).orderBy(logReads.number)).map((row) => row.number);
   assert.equal(numbers.length, 5);
-  const [deleted, edited, held, moved, copied] = numbers as [bigint, bigint, bigint, bigint, bigint];
-  // Whoever owns the database deletes a read; edits another; deletes the set of places the reference's read is at;
-  // says a fourth was Bob's at its place; and lists the last twice, a moment apart. A read planted at a time no use of
-  // the log's sealed near, or under a number none did, every page shows forged, by its MAC (above).
-  await db.owner.delete(logReadPlaces).where(eq(logReadPlaces.number, deleted));
+  const [deleted, edited, , moved, copied] = numbers as [bigint, bigint, bigint, bigint, bigint];
+  // Whoever owns the database deletes a read; edits another; says a fourth was Bob's, off Ada's page and the offboarding
+  // report; and lists the last twice, a moment apart. A read planted at a time no use of the log's sealed near, or under
+  // a number none did, every page shows forged, by its MAC (above).
   await db.owner.delete(logReads).where(eq(logReads.number, deleted));
   await db.owner.update(logReads).set({ credential: randomUUID() }).where(eq(logReads.number, edited));
-  await db.owner.update(logReadPlaces).set({ principal: BOB }).where(eq(logReadPlaces.number, moved));
-  const [pair] = await db.owner.select().from(logReadPlaces).where(eq(logReadPlaces.number, held)).limit(1);
-  await db.owner.delete(logReadPartners).where(and(eq(logReadPartners.environment, pair!.environment), eq(logReadPartners.partners, pair!.partners)));
+  await db.owner.update(logReads).set({ principal: BOB }).where(eq(logReads.number, moved));
   const [copy] = await db.owner.select().from(logReads).where(eq(logReads.number, copied));
   await db.owner.insert(logReads).values({ ...copy!, at: copy!.at + 1 });
   const verdict = await root.audit.verifyReads();
   assert.ok(verdict.kept && !verdict.ok);
   // The client stops at the first stretch that fails, the deleted read's; the vault's stretches go on past each.
-  assert.deepEqual(verdict.problems, [`read ${deleted} is sealed but not listed`, `read ${deleted} is not listed at a place it was read`]);
+  assert.deepEqual(verdict.problems, [`read ${deleted} is sealed but not listed`]);
   const named: string[] = [];
   for (let from = 'start'; ;) {
     const stretch = await deps.vault.verifyReads!({ from });
@@ -272,8 +292,7 @@ test("the whole log's check holds the reads listed to the uses sealed: one delet
   for (const problem of [
     `read ${deleted} is sealed but not listed`,
     `read ${edited} is listed otherwise than the log sealed it`,
-    `read ${held}'s places are not listed together, so no page there lists it`,
-    `read ${moved} is listed otherwise at a place it was read`,
+    `read ${moved} is listed otherwise than the log sealed it`,
     `read ${copied} is listed twice`,
   ]) assert.ok(named.includes(problem), `${problem}, among ${JSON.stringify(named)}`);
 });
@@ -335,25 +354,27 @@ test('the offboarding report names what someone read under either log, current u
   assert.deepEqual([rotated.exposed.length, rotated.rotated], [0, 1]);
 });
 
-test("a reference's read is its source's then: an auditor of a source it no longer reads sees none of its later reads, by member too", async () => {
+test("a reference's read is its source's then: repointed, its earlier read stays at the old source and its later is at the new; under 0.14's log, on each source's page too", async () => {
   await root.environments.create('market/stage', { name: 'stage' });
   await root.secrets.set('market/prod', { SOURCE: 'prod-source' });
   await root.secrets.set('market/stage', { OTHER_SOURCE: 'stage-source' });
   await root.secrets.set('market/dev', { HELD: { ref: 'market/prod/SOURCE' } });
-  // Bob audits prod alone. A read through the reference to prod; the holder repointed to stage; a read now.
-  await root.members.add(BOB, { role: 'member' });
-  await root.access.set(BOB, { 'market/prod': 'auditor' });
-  const bob = clientFor(deps, 'bob@acme.example');
   const reader = bearer((await root.tokens.issue(`user:${ROOT}`, { label: 'reader', expiresInMinutes: 60, scope: { market: 'viewer' } })).token);
   assert.equal((await reader.secrets.reveal('market/dev/HELD')).values.HELD, 'prod-source');
   await root.secrets.set('market/dev', { HELD: { ref: 'market/stage/OTHER_SOURCE' } });
   assert.equal((await reader.secrets.reveal('market/dev/HELD')).values.HELD, 'stage-source');
-  for (const query of [{}, { actor: `user:${ROOT}` }, { path: 'market/prod' }, { path: 'market/prod/SOURCE' }]) {
-    const shown = (await every(bob, query)).filter((entry) => entry.action === 'secret.read');
-    assert.deepEqual(shown.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`), ['market/prod/SOURCE'], JSON.stringify(query));
+  const held = (entries: AuditEntryView[]) => entries.filter((entry) => entry.action === 'secret.read' && (entry.metadata.via as { path?: unknown } | undefined)?.path === 'market/dev/HELD')
+    .map((entry) => `${entry.project}/${entry.environment}/${entry.key}`);
+  for (const query of [{}, { actor: `user:${ROOT}` }]) assert.deepEqual(held(await every(root, query)), ['market/stage/OTHER_SOURCE', 'market/prod/SOURCE'], JSON.stringify(query));
+  if (LOG === '0.14') {
+    // Bob audits prod alone: its log names the earlier read alone.
+    await root.members.add(BOB, { role: 'member' });
+    await root.access.set(BOB, { 'market/prod': 'auditor' });
+    const bob = clientFor(deps, 'bob@acme.example');
+    for (const query of [{}, { actor: `user:${ROOT}` }, { path: 'market/prod' }, { path: 'market/prod/SOURCE' }]) {
+      assert.deepEqual(held(await every(bob, query)), ['market/prod/SOURCE'], JSON.stringify(query));
+    }
   }
-  // The whole log's reader sees both, each at its source then.
-  assert.deepEqual((await every(root, { path: 'market/dev/HELD' })).filter((entry) => entry.action === 'secret.read').map((entry) => entry.key), ['OTHER_SOURCE', 'SOURCE']);
 });
 
 test('the offboarding report names every source a reference read while they read through it', async () => {

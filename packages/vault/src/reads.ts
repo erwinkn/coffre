@@ -42,12 +42,6 @@ export type ReadRow = {
 };
 
 /**
- * A read at one of its places (`log_read_places`), under a key filed there,
- * with every place it is at besides (`partners`, sorted; none at one place).
- */
-export type ReadPlace = { environment: string; partners: string[]; at: number; number: bigint; principal: string; secret: string };
-
-/**
  * How far the projector has gone: every use at or below `through` is
  * projected; `pair`, the signed pair at or below it; `at`, the signed time
  * of the newest pair whose uses are all projected, which the pages say they
@@ -74,15 +68,10 @@ export type ReadsStore = Pick<LogReader, 'tiles'> & {
   objects(asked: readonly { object: string; below: bigint; first: boolean }[]): Promise<Sealed[]>;
   /** The reads' days these are (`make_reads_day` on Postgres), once a store: a log older than the days made ahead holds uses of others. */
   makeReadsDays(days: readonly string[]): Promise<void>;
-  /** The reads and their places, each read once by its number, and the cursor on to `cursor`, never back: one write. */
-  writeReads(reads: readonly ReadRow[], places: readonly ReadPlace[], cursor: ReadsCursor): Promise<void>;
-  /**
-   * What the listing holds of a stretch (`checkReads`): its reads numbered
-   * in `(after, upto]` at times in `[from, to]`; for each of `places`, the
-   * principal its row names, or null for none; and whether its set of
-   * places is listed (`log_read_partners`).
-   */
-  listing(stretch: { after: bigint; upto: bigint; from: number; to: number }, places: readonly ReadPlace[]): Promise<{ reads: ReadRow[]; places: (string | null)[]; pairs: boolean[] }>;
+  /** The reads, each once by its number, and the cursor on to `cursor`, never back: one write. */
+  writeReads(reads: readonly ReadRow[], cursor: ReadsCursor): Promise<void>;
+  /** What the listing holds of a stretch (`checkReads`): its reads numbered in `(after, upto]` at times in `[from, to]`. */
+  listing(stretch: { after: bigint; upto: bigint; from: number; to: number }): Promise<ReadRow[]>;
 };
 
 /** How many entries one step of the projector reads: a tick's worth at R44's 1,000 uses a second, and more. */
@@ -211,13 +200,13 @@ export async function projectReads(store: ReadsStore, keys: { verifiers: PairVer
     // Where a step before this one stopped inside the range, on from there.
     const left = range.uses.filter((entry) => entry.number > cursor.through);
     const chunk = left.slice(0, atOnce);
-    const { reads, places } = await derive(store, keys.mac, chunk);
+    const reads = await derive(store, keys.mac, chunk);
     // Its time, once a range is whole: the pair's, as signed, which every read of it is at or below.
     const moved = chunk.length === left.length ? { through: pair.upto, pair: pair.upto, at: pair.at } : { through: chunk.at(-1)!.number, pair: cursor.pair, at: cursor.at };
     cursor = { ...moved, mac: cursorMac(keys.mac, moved) };
     // Each read's day there to hold it: uses of a log older than the days made ahead (review r4).
     await store.makeReadsDays([...new Set(reads.map((read) => new Date(read.at).toISOString().slice(0, 10)))]);
-    await store.writeReads(reads, places, cursor);
+    await store.writeReads(reads, cursor);
     projected += reads.length;
   }
   return { through: cursor.through, sealed: head.upto, projected };
@@ -231,11 +220,10 @@ const PROBLEMS_NAMED = 20;
  * time, from the pair at `from` (T166, steer 3): the explicit check of
  * the whole log, `coffre verify log`, never a page's. Each range is read
  * whole and held to the trees (`sealedRange`), its uses derived again as
- * the projector derives them, and each read and each of its places held to
- * the listing, as far as the projector has gone: the range it stands in
- * too, to the cursor. A read deleted from it, edited, renumbered or listed
- * twice, a place row deleted or changed, a set of places dropped, each is
- * named; and a range that does not hold, which stops the projector there.
+ * the projector derives them, and each read held to the listing, as far as
+ * the projector has gone: the range it stands in too, to the cursor. A
+ * read deleted from it, edited, renumbered or listed twice, each is named;
+ * and a range that does not hold, which stops the projector there.
  * A read planted under a number, or at a time, no use of the range may
  * have, it reads no further for: every page shows that one forged, by its
  * MAC. Below retention's cut no use is left to hold a read to: the check
@@ -283,7 +271,7 @@ export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerif
 
 /** What a range's uses, derived again, find wrong in the listing between `after` and `upto` (`checkReads`). */
 async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly LogEntry[], range: { after: bigint; upto: bigint; floor: number; signedAt: number }): Promise<string[]> {
-  const { reads, places } = await derive(store, mac, uses);
+  const reads = await derive(store, mac, uses);
   if (reads.length === 0) return [];
   const problems: string[] = [];
   // Every time a use of the range may be at: none is below the floor the pair under it signed, nor, but for a clock
@@ -291,9 +279,9 @@ async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly Log
   // A loop, not spread arguments: a range after an outage holds more uses than a call takes arguments (review r5).
   let [from, to] = [range.floor, range.signedAt];
   for (const read of reads) [from, to] = [Math.min(from, read.at), Math.max(to, read.at)];
-  const listing = await store.listing({ after: range.after, upto: range.upto, from, to }, places);
+  const listing = await store.listing({ after: range.after, upto: range.upto, from, to });
   const listed = new Map<bigint, ReadRow>();
-  for (const read of listing.reads) {
+  for (const read of listing) {
     if (listed.has(read.number)) problems.push(`read ${read.number} is listed twice`);
     listed.set(read.number, read);
   }
@@ -304,12 +292,6 @@ async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly Log
     else if (!readHolds(mac, row) || !row.mac.equals(read.mac)) problems.push(`read ${read.number} is listed otherwise than the log sealed it`);
   }
   for (const number of listed.keys()) problems.push(`read ${number} is listed, but the log seals no such use`);
-  places.forEach((place, i) => {
-    const principal = listing.places[i];
-    if (principal == null) problems.push(`read ${place.number} is not listed at a place it was read`);
-    else if (principal !== place.principal) problems.push(`read ${place.number} is listed otherwise at a place it was read`);
-    if (!listing.pairs[i]) problems.push(`read ${place.number}'s places are not listed together, so no page there lists it`);
-  });
   return problems;
 }
 
@@ -372,11 +354,9 @@ function wayObject(use: { credential: string; purpose: number }): string {
  * refused) is projected as the log says it, its account and place unknown:
  * shown, never dropped. Each change read is held to its MAC: one a writer
  * edited since its seal stops the projection (fail closed), never derives
- * a read from it. Its places: its key's environment, the fork, the
- * source's, each a row for each key filed there (a reference's holder and
- * its source in one environment, two), with all its places besides.
+ * a read from it.
  */
-async function derive(store: ReadsStore, mac: Buffer, entries: readonly LogEntry[]): Promise<{ reads: ReadRow[]; places: ReadPlace[] }> {
+async function derive(store: ReadsStore, mac: Buffer, entries: readonly LogEntry[]): Promise<ReadRow[]> {
   const holds = authentic(mac);
   const read = async (asked: { object: string; below: bigint; first: boolean; use: bigint }[]) => (await store.objects(asked)).map((change, i) => {
     if (change !== null && !holds(change)) throw new Error(`change ${change.number}, which use ${asked[i]!.use} is read from, does not hold to its MAC: edited since its seal`);
@@ -390,9 +370,7 @@ async function derive(store: ReadsStore, mac: Buffer, entries: readonly LogEntry
   const keys = uses.map((_, i) => keyOf(sealed[2 * i + 1]!));
   const through = uses.flatMap((use, i) => (keys[i]?.source == null ? [] : [{ i, object: logObject('secret', keys[i]!.source!), below: use.number, first: false, use: use.number }]));
   const sources = new Map((await read(through)).map((object, j) => [through[j]!.i, keyOf(object)]));
-  const reads: ReadRow[] = [];
-  const places: ReadPlace[] = [];
-  uses.forEach((use, i) => {
+  return uses.map((use, i) => {
     const key = keys[i];
     const source = key?.source == null ? null : sources.get(i) ?? null;
     const row: Omit<ReadRow, 'mac'> = {
@@ -410,20 +388,11 @@ async function derive(store: ReadsStore, mac: Buffer, entries: readonly LogEntry
       sourceProject: source?.projectId ?? null,
       version: key?.source == null ? (key?.version ?? null) : (source?.version ?? null),
     };
-    reads.push({ ...row, mac: readMac(mac, row) });
-    // Each place the read is at, and each key filed there: its holder at its own and the fork's, the source at the source's.
-    const filed: [string, string][] = [[row.environment, row.secret]];
-    if (row.place !== null) filed.push([row.place, row.secret]);
-    if (row.source !== null && row.sourceEnvironment !== null) filed.push([row.sourceEnvironment, row.source]);
-    const at = [...new Set(filed.map(([environment]) => environment))];
-    for (const [environment, secret] of new Map(filed.map((pair) => [pair.join(':'), pair])).values()) {
-      places.push({ environment, partners: at.filter((other) => other !== environment).sort(), at: row.at, number: row.number, principal: row.principal, secret });
-    }
+    return { ...row, mac: readMac(mac, row) };
   });
-  return { reads, places };
 }
 
-/** The place of a read whose key's object names none: no environment's, so no place's page lists it, but the whole log's and its member's. */
+/** The place of a read whose key's object names none: no environment's; the whole log and its member's page list it. */
 export const NOWHERE = '00000000-0000-0000-0000-000000000000';
 
 /**

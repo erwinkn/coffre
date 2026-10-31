@@ -6,7 +6,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
-import type { ReadPlace, ReadRow, ReadsCursor, ReadsStore } from './reads.ts';
+import type { ReadRow, ReadsCursor, ReadsStore } from './reads.ts';
 import type { RetentionStore } from './retention.ts';
 
 /**
@@ -576,23 +576,22 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       }
       return found;
     },
-    async writeReads(reads, places, cursor) {
+    async writeReads(reads, cursor) {
       if (postgres) {
         const json = (rows: readonly object[]) => JSON.stringify(rows, (_, value: unknown) => (typeof value === 'bigint' ? String(value) : Buffer.isBuffer(value) ? value.toString('hex') : value));
         const wire = reads.map((row) => ({ ...row, mac: row.mac.toString('hex') }));
-        await rowsOf(db, sql`SELECT project_reads(${json(wire)}::jsonb, ${json(places)}::jsonb, ${String(cursor.through)}::bigint, ${String(cursor.pair)}::bigint, ${cursor.at}::bigint, ${cursor.mac}::bytea)`);
+        await rowsOf(db, sql`SELECT project_reads(${json(wire)}::jsonb, ${String(cursor.through)}::bigint, ${String(cursor.pair)}::bigint, ${cursor.at}::bigint, ${cursor.mac}::bytea)`);
         return;
       }
       // A few statements however many reads, rows by the hundred: the transaction holds the file's one writer as briefly as
       // it can, so that neither the vault's own transactions, queued behind it, nor the app's, waiting on its lock, are kept.
-      // One read and its places were a statement each (review r5's CI: a run of a thousand held the writer for seconds).
+      // A read was a statement (review r5's CI: a run of a thousand held the writer for seconds).
       const values = <T>(rows: readonly T[], size: number) => Array.from({ length: Math.ceil(rows.length / size) }, (_, i) => rows.slice(i * size, (i + 1) * size));
-      const sets = [...new Map(places.map((place) => [`${place.environment}:${place.partners.join(',')}`, place])).values()];
       await db.transaction(async (raw) => {
         const tx = raw as unknown as Database;
         const [cut] = await rowsOf<{ sealed: string | number | null }>(tx, sql`SELECT max(upto) AS sealed FROM log_checkpoints`);
         if (cut?.sealed == null || cursor.through > BigInt(cut.sealed)) throw new Error(`reads through ${cursor.through} are past the newest pair`);
-        // The projector's row over any other at its number (ReplaceOnConflict), each place once.
+        // The projector's row over any other at its number (ReplaceOnConflict).
         for (const rows of values(reads, SQLITE_ROWS)) {
           await rowsOf(tx, sql`INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
             VALUES ${sql.join(rows.map((row) => sql`(${row.number}, ${row.at}, ${row.credential}, ${row.purpose}, ${row.principal}, ${row.secret}, ${row.environment}, ${row.project},
@@ -601,19 +600,10 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
               environment = excluded.environment, project = excluded.project, place = excluded.place, source = excluded.source, source_environment = excluded.source_environment,
               source_project = excluded.source_project, version = excluded.version, mac = excluded.mac`);
         }
-        for (const rows of values(places, SQLITE_ROWS)) {
-          await rowsOf(tx, sql`INSERT INTO log_read_places (environment, partners, at, number, principal, secret)
-            VALUES ${sql.join(rows.map((place) => sql`(${place.environment}, ${JSON.stringify(place.partners)}, ${place.at}, ${place.number}, ${place.principal}, ${place.secret})`), sql`, `)}
-            ON CONFLICT (environment, partners, at, number, secret) DO UPDATE SET principal = excluded.principal`);
-        }
-        for (const rows of values(sets, SQLITE_ROWS)) {
-          await rowsOf(tx, sql`INSERT INTO log_read_partners (environment, partners)
-            VALUES ${sql.join(rows.map((place) => sql`(${place.environment}, ${JSON.stringify(place.partners)})`), sql`, `)} ON CONFLICT DO NOTHING`);
-        }
         await rowsOf(tx, sql`UPDATE log_reads_cursor SET through = ${cursor.through}, pair = ${cursor.pair}, at = ${cursor.at}, mac = ${cursor.mac} WHERE only_row AND through < ${cursor.through}`);
       });
     },
-    async listing({ after, upto, from, to }, places) {
+    async listing({ after, upto, from, to }) {
       const big = (value: bigint | number) => (postgres ? sql`CAST(${String(value)} AS bigint)` : sql`${value}`);
       const found = await rowsOf<{
         number: string | number; at: string | number; credential: string; purpose: string | number; principal: string; secret: string; environment: string; project: string;
@@ -621,39 +611,11 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       }>(db, sql`SELECT number, at, ${text('credential')} AS credential, purpose, principal, ${text('secret')} AS secret, ${text('environment')} AS environment, ${text('project')} AS project,
           ${text('place')} AS place, ${text('source')} AS source, ${text('source_environment')} AS source_environment, ${text('source_project')} AS source_project, ${text('version')} AS version, mac
         FROM log_reads WHERE at >= ${big(from)} AND at <= ${big(to)} AND number > ${big(after)} AND number <= ${big(upto)}`);
-      const reads = found.map((row): ReadRow => ({
+      return found.map((row): ReadRow => ({
         number: BigInt(row.number), at: Number(row.at), credential: row.credential, purpose: Number(row.purpose), principal: row.principal, secret: row.secret,
         environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
         sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac),
       }));
-      // Each place by its unique index, a probe each, a few hundred to a statement; each set of places by its key.
-      const set = (partners: readonly string[]) => (postgres
-        ? sql`CAST(${`{${partners.join(',')}}`} AS uuid[])`
-        : sql`${JSON.stringify(partners)}`);
-      const key = (p: { environment: string; partners: readonly string[]; at?: number; number?: bigint; secret?: string }) => `${p.environment}:${p.partners.join(',')}:${p.at ?? ''}:${p.number ?? ''}:${p.secret ?? ''}`;
-      const listedAt = new Map<string, string>();
-      const paired = new Set<string>();
-      const partnersOf = (value: string | string[]) => (Array.isArray(value) ? value : (JSON.parse(value) as string[]));
-      for (let i = 0; i < places.length; i += 500) {
-        const chunk = places.slice(i, i + 500);
-        const rows = await rowsOf<{ environment: string; partners: string | string[]; at: string | number; number: string | number; principal: string; secret: string }>(db, sql`
-          SELECT ${text('environment')} AS environment, ${sql.raw(postgres ? 'CAST(to_json(partners) AS text)' : 'partners')} AS partners, at, number, principal, ${text('secret')} AS secret
-            FROM log_read_places WHERE (environment, partners, at, number, secret) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${set(p.partners)}, ${big(p.at)}, ${big(p.number)}, ${id(p.secret)})`), sql`, `)})`);
-        for (const row of rows) listedAt.set(key({ ...row, partners: partnersOf(row.partners), at: Number(row.at), number: BigInt(row.number) }), row.principal);
-      }
-      const sets = [...new Map(places.map((p) => [key({ environment: p.environment, partners: p.partners }), p])).values()];
-      for (let i = 0; i < sets.length; i += 500) {
-        const chunk = sets.slice(i, i + 500);
-        const rows = await rowsOf<{ environment: string; partners: string | string[] }>(db, sql`
-          SELECT ${text('environment')} AS environment, ${sql.raw(postgres ? 'CAST(to_json(partners) AS text)' : 'partners')} AS partners FROM log_read_partners
-            WHERE (environment, partners) IN (VALUES ${sql.join(chunk.map((p) => sql`(${id(p.environment)}, ${set(p.partners)})`), sql`, `)})`);
-        for (const row of rows) paired.add(key({ environment: row.environment, partners: partnersOf(row.partners) }));
-      }
-      return {
-        reads,
-        places: places.map((place) => listedAt.get(key(place)) ?? null),
-        pairs: places.map((place) => paired.has(key({ environment: place.environment, partners: place.partners }))),
-      };
     },
     async makeDays(days) {
       if (!postgres) return;
@@ -671,9 +633,8 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       }
       const from = Date.parse(`${day}T00:00:00Z`);
       await rowsOf(db, sql`DELETE FROM log_reads WHERE at >= ${from} AND at < ${from + 86_400_000}`);
-      await rowsOf(db, sql`DELETE FROM log_read_places WHERE at >= ${from} AND at < ${from + 86_400_000}`);
     },
   };
 }
 
-export type { ReadPlace, ReadRow, ReadsCursor };
+export type { ReadRow, ReadsCursor };

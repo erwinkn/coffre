@@ -26,10 +26,11 @@ import {
   type RecordedChange,
   type Signed,
 } from '../db/queries.ts';
-import { readsPage, readsStanding, type ListedRead, type ReadPlaces } from '../db/reads.ts';
+import { readsPage, readsStanding, type ListedRead } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import { traceFields, type ApiContext } from './context.ts';
+import { keeps015 } from './changes.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
 import { ownerOf } from './personal.ts';
@@ -270,7 +271,7 @@ export type AuditQuery = {
 export async function listAudit(
   ctx: ApiContext,
   query: AuditQuery,
-): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; reads?: ReadsListed }> {
+): Promise<{ entries: AuditEntryView[]; more: boolean; next: string | null; hidden?: HiddenCount[]; reads?: ReadsListed; readsOmitted?: ReadsOmitted }> {
   const filter: AuditFilter = {
     decision: query.decision,
     excludeActions: query.detail === true ? undefined : DETAIL_ACTIONS,
@@ -329,17 +330,21 @@ export async function listAudit(
   // counts, and one that does not ask reads nothing for them, and always fills with what it shows.
   const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
 
-  // The reads 0.15's log records, each a use, as the vault's projector lists them (T166): anyone's, at the places the
-  // caller reads and the path names, but never a refusal (one the vault refuses before it writes a use is the app's
-  // entry), nor below its log's end; and how far they are listed.
-  const used = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
+  // The reads 0.15's log records, each a use, as the vault's projector lists them (T166), and how far they are listed:
+  // on the whole log and by member, as its other records, to whoever reads the whole log; and to anyone, their own.
+  // Not at a place: in 0.15 no page of a project, environment or key lists them (D160), and a reader of some places
+  // sees no one's but their own. Never a refusal (one the vault refuses before it writes a use is the app's entry), nor
+  // below its log's end.
+  const own = filter.actors !== undefined && filter.actors.length === 1 && filter.actors[0] === formatMember(caller.principal);
+  const asked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
+  const used = asked && query.path === undefined && (filter.within === undefined || own);
 
   // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
   const counting = recorded && counted;
   const [old, sealed, reads, standing, reach] = await Promise.all([
     before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
     recorded ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit }) : { rows: [], more: false },
-    used ? readsPage(ctx.db, { actors: filter.actors, places: readPlaces(filter), before: start, limit: query.limit }) : { rows: [], more: false },
+    used ? readsPage(ctx.db, { actors: filter.actors, before: start, limit: query.limit }) : { rows: [], more: false },
     used ? readsStanding(ctx.db) : null,
     counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
@@ -369,7 +374,9 @@ export async function listAudit(
   const next = page.oldStop === null && change === null ? null : `${page.oldStop ?? '-'}:${change === null ? '-' : pointText(change)}`;
   const entries = withOrigins(page.entries, origins);
   const shown = standing === null ? null : readsListed(standing, vouches.cursorForged);
-  const listed = shown === null ? {} : { reads: shown };
+  // A page that would have listed reads under 0.14's log says where they are under 0.15's: `readsOmitted`.
+  const omitted = asked && !used && (await keeps015(ctx.vault)) ? { readsOmitted: query.path !== undefined ? 'path' as const : 'scope' as const } : {};
+  const listed = { ...(shown === null ? {} : { reads: shown }), ...omitted };
   if (!counted) return { entries, more: next !== null, next, ...listed };
   // The page's stretch of each log, from where it stopped there to where it started; to the first entry when nothing
   // older is left; nothing when the page before was the last of it. 0.14's stops at its oldest entry shown, or where
@@ -498,20 +505,6 @@ function sealedStream(changes: { read: Read<ChangePoint>[]; more: boolean }, use
   return { read, more: changes.more || uses.more || i < changes.read.length || j < uses.read.length };
 }
 
-/**
- * The places a page's reads are held to (`readsPage`): those its caller
- * reads, as `within` lists them, and its path's, by its narrowest part.
- */
-function readPlaces(filter: AuditFilter): ReadPlaces[] {
-  const places: ReadPlaces[] = [];
-  const { within } = filter;
-  if (within !== undefined) places.push({ projectIds: within.projectIds, environmentIds: within.environmentIds, secretIds: [], except: within.except ?? [] });
-  const none = { projectIds: [], environmentIds: [], secretIds: [], except: [] };
-  if (filter.secretId !== undefined) places.push({ ...none, secretIds: [filter.secretId] });
-  else if (filter.environmentId !== undefined) places.push({ ...none, environmentIds: [filter.environmentId] });
-  else if (filter.projectId !== undefined) places.push({ ...none, projectIds: [filter.projectId] });
-  return places;
-}
 
 /**
  * The entries of 0.15's log a page read that the vault does not vouch for
@@ -562,6 +555,15 @@ export type ReadsListed = {
   /** The vault does not vouch for where the reads' listing stands: its cursor was moved around the projector. */
   forged?: true;
 };
+
+/**
+ * Why a page lists no reads of 0.15's log (T166, D160), where 0.14's would
+ * have listed its reads' entries: `path`, it is a project's, environment's
+ * or key's, whose reads the whole log and each member's page list in 0.15;
+ * `scope`, its reader reads some places only, and sees their own reads
+ * alone, on their own page.
+ */
+export type ReadsOmitted = 'path' | 'scope';
 
 /** How far behind the newest pair the reads' listing is said to be behind: a few ticks, so that the one a seal takes says nothing. */
 export const READS_BEHIND_MS = 5_000;

@@ -24,8 +24,6 @@ export const SERVER_TABLES = [
   'log_checkpoints',
   'log_config',
   'log_fence',
-  'log_read_partners',
-  'log_read_places',
   'log_reads',
   'log_reads_cursor',
   'log_tiles',

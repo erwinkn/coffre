@@ -106,10 +106,13 @@ async function usesAudited(
     expect(entry.version === held.find((found) => found.key === key)?.version, `the entry for ${key} names another version`, entry);
     return entry;
   });
+  // On the reader's own page, whole: the read may ride on a cover from the minute before. Not on the key's: 0.15 lists
+  // reads on the whole log and by member, never by place (D160), and the key's page says so.
+  const theirs = await everyAuditEntry(admin.api, { actor: reader.member });
   for (const entry of read) {
-    // Its whole log: the read may ride on a cover from the minute before, past a page of the key's newer reads.
-    const own = await everyAuditEntry(admin.api, `${DEV}/${String(entry.key)}`);
-    expect(own.some((found) => found.log === '0.15' && found.seq === entry.seq), `the read is not in ${String(entry.key)}'s log`, { read: entry, newest: own.slice(0, 5) });
+    expect(theirs.some((found) => found.log === '0.15' && found.seq === entry.seq), `the read of ${String(entry.key)} is not on ${reader.email}'s page`, { read: entry, newest: theirs.slice(0, 5) });
+    const page = await admin.api.audit.list({ path: `${DEV}/${String(entry.key)}`, sealed: '1', limit: 1 });
+    expect(page.readsOmitted === 'path', `${String(entry.key)}'s page does not say where its reads are listed`, page.readsOmitted);
   }
   await using(deployment.database(), async (sql) => {
     for (const entry of read) {
@@ -368,10 +371,10 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
 }
 
 /** The whole log, detail included, newest first: 0.14's entries, and the sign-ins 0.15's records. */
-export async function everyAuditEntry(api: CoffreClient, path?: string): Promise<AuditEntryView[]> {
+export async function everyAuditEntry(api: CoffreClient, query: { actor?: string } = {}): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: string | undefined; ; ) {
-    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1', ...(path === undefined ? {} : { path }) });
+    const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1', ...query });
     all.push(...entries);
     if (next === null) return all;
     before = next;

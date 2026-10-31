@@ -9,9 +9,9 @@ import type { ChangePoint } from './queries.ts';
 // vault's projector writes once, from the sealed objects at its number, under
 // a MAC of the vault's that covers its number too (`log_reads`): whose read it
 // was, its key's place, the fork it was read in, through a reference its
-// source then, the version read; and a row for each place it is at, with the
-// place it is at besides (`log_read_places`). These reads list them, a page at
-// a time, each from an index read newest first and no further than a page.
+// source then, the version read. These reads list them on the whole log and
+// by member (no page of a place lists them in 0.15: D160), a page at a time,
+// each from an index read newest first and no further than a page.
 
 /** A read as a page lists it: the projector's row, and the names of what it names, as the rows say them now. */
 export type ListedRead = {
@@ -49,13 +49,9 @@ export type ListedRead = {
  * caller's role leaves out). A read is at its key's environment, at the fork
  * it was read in, and through a reference at its source's.
  */
-export type ReadPlaces = { projectIds: readonly string[]; environmentIds: readonly string[]; secretIds: readonly string[]; except: readonly string[] };
-
 export type ReadFilter = {
   /** The members whose reads, as the log names them: `user:ada@acme.example`, `token:ci`. */
   actors?: readonly string[];
-  /** Each must hold: a page's path, and the places its caller reads. */
-  places?: readonly ReadPlaces[];
   before?: ChangePoint;
   limit: number;
 };
@@ -68,145 +64,25 @@ const bigint = (value: number | bigint) => sql`CAST(${String(value)} AS bigint)`
 /**
  * The newest reads `filter` asks for, newest first by `(at, number)`, as
  * 0.15's records are listed, below `before`: up to `limit`, and whether there
- * are more.
- *
- * Every read, by the projection's own index; a member's, by
- * `log_reads_principal_idx`; at some places, from the places they name and
- * the sets of places a read there is at (`log_read_partners`), each set the
- * caller may see whole (`sets`), by `log_read_places`' indexes, the
- * member's or the key's where a page asks for one. On Postgres each through
- * a function that holds its plan to its index (migration 0049). However many
- * reads the log holds, a page reads as many index entries as it shows, for
- * each set it reads, and none of a set it may not see: a quiet place costs
- * a probe of each day it may hold a read, never a read. Two statements: the
- * sets, then the page.
+ * are more. Every read, by the projection's own index; a member's, by
+ * `log_reads_principal_idx`, through a function that holds its plan to it
+ * (migration 0049). However many reads the log holds, a page reads as many
+ * index entries as it shows. No page of a place lists reads in 0.15 (D160).
  */
 export async function readsPage(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean }> {
   const engine = dialect.engineOf(db);
   const take = filter.limit + 1;
   const actors = filter.actors?.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
   if (actors?.length === 0) return { rows: [], more: false };
-  const places = filter.places ?? [];
-  if (places.some(empty)) return { rows: [], more: false };
-  const point = { at: filter.before?.at ?? MAX, number: filter.before?.number ?? MAX };
-  const streams: SQL[] = [];
-  if (places.length === 0) {
-    if (actors === undefined) {
-      streams.push(sql`SELECT r.at, r.number FROM log_reads r WHERE (r.at, r.number) < (${bigint(point.at)}, ${bigint(point.number)}) ORDER BY r.at DESC, r.number DESC LIMIT ${take}`);
-    } else {
-      for (const actor of actors) streams.push(stream(engine, 'by', { principal: actor }, point, take));
-    }
-  } else {
-    const { sets, keys } = await setsOf(db, places);
-    for (const { environment, partners } of sets) {
-      for (const principal of actors ?? [null]) {
-        for (const secret of keys ?? [null]) {
-          const kind = principal === null ? (secret === null ? 'in' : 'of') : secret === null ? 'byIn' : 'byOf';
-          streams.push(stream(engine, kind, { principal, secret, environment, partners }, point, take));
-        }
-      }
-    }
-  }
-  if (streams.length === 0) return { rows: [], more: false };
+  const [at, number] = [bigint(filter.before?.at ?? MAX), bigint(filter.before?.number ?? MAX)];
+  const streams = actors === undefined
+    ? [sql`SELECT r.at, r.number FROM log_reads r WHERE (r.at, r.number) < (${at}, ${number}) ORDER BY r.at DESC, r.number DESC LIMIT ${take}`]
+    : actors.map((actor) => (engine === 'postgres'
+      ? sql`SELECT * FROM log_reads_by(${actor}, ${at}, ${number}, ${take})`
+      : sql`SELECT at, number FROM log_reads WHERE principal = ${actor} AND (at, number) < (${at}, ${number}) ORDER BY at DESC, number DESC LIMIT ${take}`));
   const found = sql`SELECT DISTINCT f.at, f.number FROM (${sql.join(streams.map((each) => sql`SELECT * FROM (${each}) s`), sql` UNION ALL `)}) f ORDER BY f.at DESC, f.number DESC LIMIT ${take}`;
   const rows = await dialect.rowsOf<Row>(db, listed(engine, found));
-  // Each read where its own columns, which its MAC covers, place it: the place rows only find it (fail closed).
-  return { rows: rows.slice(0, filter.limit).map(read).filter((row) => places.every((list) => within(row, list))), more: rows.length > filter.limit };
-}
-
-/**
- * Whether a read is at one of `list`'s places and at none it leaves out, by
- * its own columns: its key's environment and project, the fork it was read
- * in, its source's environment and project; for a list of keys, the key it
- * names or its source.
- */
-function within(row: ListedRead, list: ReadPlaces): boolean {
-  const at: [string, string][] = [[row.environment, row.project]];
-  if (row.place !== null) at.push([row.place, row.project]);
-  if (row.sourceEnvironment !== null) at.push([row.sourceEnvironment, row.sourceProject ?? row.project]);
-  if (at.some(([environment]) => list.except.includes(environment))) return false;
-  if (list.secretIds.length > 0) return list.secretIds.includes(row.secret) || (row.source !== null && list.secretIds.includes(row.source));
-  return at.some(([environment, project]) => list.environmentIds.includes(environment) || list.projectIds.includes(project));
-}
-
-/** One index's stream of `(at, number)`, newest first, below `point`, at most `take` reads: on Postgres its function, on SQLite its read. */
-function stream(
-  engine: dialect.Engine, kind: 'by' | 'in' | 'of' | 'byIn' | 'byOf',
-  on: { principal?: string | null; secret?: string | null; environment?: string; partners?: readonly string[] },
-  point: { at: number | bigint; number: number | bigint }, take: number,
-): SQL {
-  const [at, number] = [bigint(point.at), bigint(point.number)];
-  if (engine === 'postgres') {
-    const id = (value: string | null | undefined) => sql`CAST(${value} AS uuid)`;
-    const set = sql`CAST(${`{${(on.partners ?? []).join(',')}}`} AS uuid[])`;
-    switch (kind) {
-      case 'by': return sql`SELECT * FROM log_reads_by(${on.principal}, ${at}, ${number}, ${take})`;
-      case 'in': return sql`SELECT * FROM log_reads_in(${id(on.environment)}, ${set}, ${at}, ${number}, ${take})`;
-      case 'of': return sql`SELECT * FROM log_reads_of(${id(on.secret)}, ${id(on.environment)}, ${set}, ${at}, ${number}, ${take})`;
-      case 'byIn': return sql`SELECT * FROM log_reads_by_in(${on.principal}, ${id(on.environment)}, ${set}, ${at}, ${number}, ${take})`;
-      case 'byOf': return sql`SELECT * FROM log_reads_by_of(${on.principal}, ${id(on.secret)}, ${id(on.environment)}, ${set}, ${at}, ${number}, ${take})`;
-    }
-  }
-  const below = sql`(at, number) < (${at}, ${number})`;
-  if (kind === 'by') return sql`SELECT at, number FROM log_reads WHERE principal = ${on.principal} AND ${below} ORDER BY at DESC, number DESC LIMIT ${take}`;
-  const conditions = [
-    sql`environment = ${on.environment}`, sql`partners = ${JSON.stringify(on.partners ?? [])}`, below,
-    ...(on.principal == null ? [] : [sql`principal = ${on.principal}`]),
-    ...(on.secret == null ? [] : [sql`secret = ${on.secret}`]),
-  ];
-  // A read through a reference within one environment is at it under two keys: once.
-  return sql`SELECT DISTINCT at, number FROM log_read_places WHERE ${sql.join(conditions, sql` AND `)} ORDER BY at DESC, number DESC LIMIT ${take}`;
-}
-
-/** Whether a list of places holds nothing: no project, environment or key to be in. */
-function empty(places: ReadPlaces): boolean {
-  return places.projectIds.length === 0 && places.environmentIds.length === 0 && places.secretIds.length === 0;
-}
-
-/**
- * The sets of places a page at `places` reads: each place one of them
- * names (a key's environment, and its forks', for a key) with the places a
- * read there is at besides, as `log_read_partners` lists them, kept where
- * the set holds a place each list names, and none left out, so that every
- * read a set stands for is one the caller may see, and the page reads no
- * read it may not. The keys a page of keys names. One statement.
- */
-async function setsOf(db: Queryable, places: readonly ReadPlaces[]): Promise<{ sets: { environment: string; partners: string[] }[]; keys: string[] | null }> {
-  const engine = dialect.engineOf(db);
-  const postgres = engine === 'postgres';
-  const text = (column: string) => sql.raw(postgres ? `CAST(${column} AS text)` : column);
-  const keys = [...new Set(places.flatMap((p) => p.secretIds))];
-  // The pages ask for at most one list of keys: a path's.
-  const keyed = places.find((p) => p.secretIds.length > 0);
-  const ids = (values: readonly string[]) => (values.length === 0 ? sql`NULL` : sql.join(values.map((value) => (postgres ? sql`CAST(${value} AS uuid)` : sql`${value}`)), sql`, `));
-  const named = [...new Set(places.flatMap((p) => p.environmentIds))];
-  const projects = [...new Set(places.flatMap((p) => p.projectIds))];
-  // Where the places' reads are: the environments named, those of the projects named, and a key's own and its forks'.
-  // With each set, the projects of the places in it that are among those: a place outside them is in no list.
-  const rows = await dialect.rowsOf<{ environment: string; partners: string | string[]; projects: string | null }>(db, sql`
-    WITH RECURSIVE named(id) AS (
-      SELECT e.id FROM environments e WHERE e.id IN (${ids(named)}) OR e.project_id IN (${ids(projects)})
-        OR e.id IN (SELECT s.environment_id FROM secrets s WHERE s.id IN (${ids(keys)}))
-      UNION SELECT e.id FROM environments e JOIN named n ON e.parent_id = n.id WHERE ${keyed === undefined ? sql`FALSE` : sql`TRUE`}
-    ), places AS (
-      SELECT e.id, e.project_id FROM environments e JOIN named n ON n.id = e.id
-    )
-    SELECT ${text('p.environment')} AS environment, ${sql.raw(postgres ? 'CAST(to_json(p.partners) AS text)' : 'p.partners')} AS partners,
-      ${postgres
-        ? sql`(SELECT string_agg(CAST(q.id AS text) || ':' || CAST(q.project_id AS text), ',') FROM places q WHERE q.id = p.environment OR q.id = ANY(p.partners))`
-        : sql`(SELECT group_concat(q.id || ':' || q.project_id, ',') FROM places q WHERE q.id = p.environment OR q.id IN (SELECT value FROM json_each(p.partners)))`} AS projects
-      FROM log_read_partners p JOIN named n ON n.id = p.environment`);
-  const except = new Set(places.flatMap((p) => p.except));
-  const sets = rows.flatMap((row) => {
-    const partners = Array.isArray(row.partners) ? row.partners : (JSON.parse(row.partners) as string[]);
-    const projectOf = new Map((row.projects ?? '').split(',').filter((pair) => pair !== '').map((pair) => pair.split(':') as [string, string]));
-    const at = [row.environment, ...partners];
-    if (at.some((place) => except.has(place))) return [];
-    const holds = (list: ReadPlaces) => list.secretIds.length > 0
-      || at.some((place) => list.environmentIds.includes(place) || (projectOf.has(place) && list.projectIds.includes(projectOf.get(place)!)));
-    return places.every(holds) ? [{ environment: row.environment, partners }] : [];
-  });
-  return { sets, keys: keyed === undefined ? null : [...keyed.secretIds] };
+  return { rows: rows.slice(0, filter.limit).map(read), more: rows.length > filter.limit };
 }
 
 type Row = {

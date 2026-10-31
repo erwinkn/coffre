@@ -161,7 +161,7 @@ export function AuditPage() {
         )}
       </div>
 
-      <ReadsLag reads={result.reads} />
+      <ReadsLag reads={result.reads} omitted={result.readsOmitted} />
 
       <section className="card card-wide" aria-label="Audit entries">
         {shown.length === 0 ? (

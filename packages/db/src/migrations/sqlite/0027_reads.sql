@@ -1,23 +1,4 @@
 -- The audit pages' reads, a sealed projection of 0.15's uses (T166; postgres 0049_reads). SQLite has one writer and no partitions: the projector writes these directly.
-CREATE TABLE `log_read_partners` (
-	`environment` text NOT NULL,
-	`partners` text NOT NULL,
-	PRIMARY KEY(`environment`, `partners`)
-);
---> statement-breakpoint
-CREATE TABLE `log_read_places` (
-	`environment` text NOT NULL,
-	`partners` text NOT NULL,
-	`at` integer NOT NULL,
-	`number` integer NOT NULL,
-	`principal` text NOT NULL,
-	`secret` text NOT NULL
-);
---> statement-breakpoint
-CREATE UNIQUE INDEX `log_read_places_place_idx` ON `log_read_places` (`environment`,`partners`,`at`,`number`,`secret`);--> statement-breakpoint
-CREATE INDEX `log_read_places_member_idx` ON `log_read_places` (`principal`,`environment`,`partners`,`at`,`number`);--> statement-breakpoint
-CREATE INDEX `log_read_places_key_idx` ON `log_read_places` (`secret`,`environment`,`partners`,`at`,`number`);--> statement-breakpoint
-CREATE INDEX `log_read_places_member_key_idx` ON `log_read_places` (`principal`,`secret`,`environment`,`partners`,`at`,`number`);--> statement-breakpoint
 CREATE TABLE `log_reads` (
 	`number` integer NOT NULL,
 	`at` integer NOT NULL,

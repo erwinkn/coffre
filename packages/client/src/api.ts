@@ -1195,6 +1195,7 @@ export type Api = {
         behind: boolean;
         forged?: true;
       };
+      readsOmitted?: "path" | "scope";
     };
   };
   "GET /audit/verification": {

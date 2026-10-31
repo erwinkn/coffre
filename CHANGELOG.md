@@ -230,13 +230,16 @@
   a checkpoint seals into a row of its own (`log_reads`, migration 0049):
   whose read it was, of which key and version, where, through which
   reference or fork, all from the sealed log at the use's number, under a
-  MAC over every column. The projector runs apart from sealing: on
+  MAC over every column. In 0.15 reads are listed on the whole log and by
+  member, to whoever reads the whole log, and to anyone their own; a
+  project's, environment's or key's page lists none and says so
+  (`readsOmitted`), until pages by place in 0.15.x (D160). The projector runs apart from sealing: on
   Workers, an object of the checkpointer's class named `reads`, which the
   vault starts beside it; on Node, after each tick. It derives nothing
   from a range that does not hold to the pair that sealed it. The audit
   page, a member's Activity, `coffre audit`, MCP's `read_audit_log`,
   `GET /api/audit?sealed=1`, the offboarding report and `coffre verify
-  instance` list each where 0.14's entry stood. Each is vouched for by the
+  instance` list each. Each is vouched for by the
   vault (`Vault.vouch`) and marked forged when it fails. When the
   projection is behind, the pages and the offboarding report say how far reads are listed (`reads`); retention drops no day the projector has yet to read.
   `coffre verify log`, the audit page's whole-log check and conformance
@@ -245,7 +248,7 @@
   and the app's request and operation, which the use does not keep, are
   not shown. A use is the request: one the vault refused after logging it
   (the bulk cap's) shows as a read too. `GET /api/me` names the request's
-  credential (`credentialId`). About 1.3 KB of projection a read.
+  credential (`credentialId`). About 340 bytes of projection a read.
   `docs/design/0.15-plan.md`, "As built: T166".
 - **0.15's token issues, revokes and sign-outs are on the audit pages,
   behind its switch.** Under the switch the vault writes no `token.create`,

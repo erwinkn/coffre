@@ -15930,8 +15930,9 @@ const LISTED_WITHIN_MS = 2e4;
 /**
 * Reveal the canary once, and find its `secret.read` in the audit log: by
 * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
-* and names no operation (T166), the token's own read of the canary, by
-* its credential, for a reveal, of the version the token lists: the use
+* and names no operation (T166), the token's own read of the canary, on
+* its own page (0.15 lists reads by member, never by place: D160), by its
+* credential, for a reveal, of the version the token lists: the use
 * the reveal made, or the one within the minute before it that it rode on
 * (a cover is of the same credential, purpose and key), once listed, which
 * may take a few seconds (`LISTED_WITHIN_MS`).
@@ -15942,10 +15943,10 @@ async function tokenReveal(api, canary, token) {
 	const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
 	expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
 	const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
-	const list = async () => {
+	const list = async (query) => {
 		try {
 			return await api.audit.list({
-				path,
+				...query,
 				actor: token.member,
 				limit: 50,
 				sealed: "1"
@@ -15955,14 +15956,16 @@ async function tokenReveal(api, canary, token) {
 			throw error;
 		}
 	};
-	let { entries, reads } = await list();
+	const first = await list({ path });
+	let { entries, reads } = first;
 	const read = entries.filter((entry) => entry.operationId === operationId);
-	if (read.length === 0 && reads !== void 0) {
+	if (read.length === 0 && (reads !== void 0 || first.readsOmitted !== void 0)) {
 		expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
-		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.project === canary.project && entry.environment === canary.environment && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+		({entries, reads} = await list({}));
 		for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
 			await new Promise((resolve) => setTimeout(resolve, 250));
-			({entries, reads} = await list());
+			({entries, reads} = await list({}));
 		}
 		const [used] = ownOf(entries);
 		expect(used !== void 0, `the reveal is logged 0 times, not once: no read of ${canary.key} by the token's credential since the minute before it, listed within ${LISTED_WITHIN_MS / 1e3} s (reads listed through ${reads?.through ?? "none"})`, entries.slice(0, 3));
@@ -18428,6 +18431,8 @@ async function audit(args) {
 	const reads = result.reads;
 	if (reads?.forged === true) process.stderr.write("Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n");
 	else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? "none yet"}; newer reads are not listed yet.\n`);
+	if (result.readsOmitted === "path") process.stderr.write("Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n");
+	else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n");
 }
 /**
 * An Owner's acceptance that audit entries `<from>` to `<to>` are lost for

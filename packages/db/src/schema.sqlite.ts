@@ -39,12 +39,6 @@ const int64 = customType<{ data: bigint; driverData: number | bigint }>({
 });
 
 const time = (name: string) => integer(name, { mode: 'timestamp_ms' });
-/** A list of ids, as Postgres's `uuid[]` reads, kept as JSON. */
-const ids = customType<{ data: string[]; driverData: string }>({
-  dataType: () => 'text',
-  toDriver: (value) => JSON.stringify(value),
-  fromDriver: (value) => JSON.parse(value) as string[],
-});
 const now = sql`(CAST(unixepoch('subsec') * 1000 AS INTEGER))`;
 const createdAt = () => time('created_at').notNull().default(now);
 const flag = (name: string) => integer(name, { mode: 'boolean' });
@@ -980,32 +974,6 @@ export const logReads = sqliteTable(
     uniqueIndex('log_reads_number_idx').on(table.at, table.number),
     index('log_reads_principal_idx').on(table.principal, table.at, table.number),
   ],
-);
-
-/** A read at each place it is at (schema.ts); `partners`, JSON. */
-export const logReadPlaces = sqliteTable(
-  'log_read_places',
-  {
-    environment: text().notNull(),
-    partners: ids('partners').notNull(),
-    at: integer({ mode: 'number' }).notNull(),
-    number: int64('number').notNull(),
-    principal: text().notNull(),
-    secret: text().notNull(),
-  },
-  (table) => [
-    uniqueIndex('log_read_places_place_idx').on(table.environment, table.partners, table.at, table.number, table.secret),
-    index('log_read_places_member_idx').on(table.principal, table.environment, table.partners, table.at, table.number),
-    index('log_read_places_key_idx').on(table.secret, table.environment, table.partners, table.at, table.number),
-    index('log_read_places_member_key_idx').on(table.principal, table.secret, table.environment, table.partners, table.at, table.number),
-  ],
-);
-
-/** Each place reads were at, with the places each was at besides (schema.ts); `partners`, JSON. */
-export const logReadPartners = sqliteTable(
-  'log_read_partners',
-  { environment: text().notNull(), partners: ids('partners').notNull() },
-  (table) => [primaryKey({ name: 'log_read_partners_pkey', columns: [table.environment, table.partners] })],
 );
 
 /** How far the projector has gone (schema.ts). */

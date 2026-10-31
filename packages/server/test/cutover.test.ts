@@ -158,7 +158,7 @@ test("an instance kept by 0.14, cut over by the app's door: its token serves thr
  * roles' change, what a token's issue record does. The audit pages know an issue by how its payload starts too, so
  * the roles' change is neither listed nor counted as one (T164, review r1 of W261).
  */
-test("0.14's reads from before the cutover are listed beside 0.15's after it: on the whole log's page, the place's, the key's and each member's, newest first (T166)", async () => {
+test("0.14's reads from before the cutover are listed beside 0.15's after it, on the whole log's page and each member's, newest first; a place's page keeps 0.14's and says where 0.15's are (T166, D160)", async () => {
   await old.root.projects.create('market');
   await old.root.environments.create('market/dev');
   await old.root.secrets.set('market/dev', { A: 'one' });
@@ -172,8 +172,10 @@ test("0.14's reads from before the cutover are listed beside 0.15's after it: on
   await now.vault.listReads();
   const readsOf = async (query: { path?: string; actor?: string }) => (await now.root.audit.list({ ...query, sealed: '1', limit: 100 })).entries
     .filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.key === 'A').map((entry) => [entry.log, entry.version]);
-  for (const query of [{}, { path: 'market' }, { path: 'market/dev' }, { path: 'market/dev/A' }]) {
-    assert.deepEqual(await readsOf(query), [['0.15', 1], ['0.14', 1]], JSON.stringify(query));
+  assert.deepEqual(await readsOf({}), [['0.15', 1], ['0.14', 1]]);
+  for (const path of ['market', 'market/dev', 'market/dev/A']) {
+    assert.deepEqual(await readsOf({ path }), [['0.14', 1]], path);
+    assert.equal((await now.root.audit.list({ path, sealed: '1', limit: 1 })).readsOmitted, 'path', path);
   }
   assert.deepEqual(await readsOf({ actor: CI }), [['0.15', 1]]);
   assert.deepEqual(await readsOf({ actor: `user:${ROOT}` }), [['0.14', 1]]);

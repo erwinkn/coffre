@@ -1129,38 +1129,6 @@ export const logReads = pgTable(
   ],
 );
 
-/**
- * A read at each place it is at (`log_reads`), once for each key filed
- * there: its key's environment, the fork it was read in, a reference's
- * source's; with every place it is at besides (`partners`, sorted; none
- * for a read at one place), so that a page reads only the sets of places
- * its reader may see whole, and never past a read at one it may not.
- */
-export const logReadPlaces = pgTable(
-  'log_read_places',
-  {
-    environment: uuid().notNull(),
-    partners: uuid().array().notNull(),
-    at: bigint({ mode: 'number' }).notNull(),
-    number: bigint({ mode: 'bigint' }).notNull(),
-    principal: text().notNull(),
-    secret: uuid().notNull(),
-  },
-  (table) => [
-    uniqueIndex('log_read_places_place_idx').on(table.environment, table.partners, table.at, table.number, table.secret),
-    index('log_read_places_member_idx').on(table.principal, table.environment, table.partners, table.at, table.number),
-    index('log_read_places_key_idx').on(table.secret, table.environment, table.partners, table.at, table.number),
-    index('log_read_places_member_key_idx').on(table.principal, table.secret, table.environment, table.partners, table.at, table.number),
-  ],
-);
-
-/** Each place reads were at, with the places each was at besides: the sets of places a page reads by. */
-export const logReadPartners = pgTable(
-  'log_read_partners',
-  { environment: uuid().notNull(), partners: uuid().array().notNull() },
-  (table) => [primaryKey({ name: 'log_read_partners_pkey', columns: [table.environment, table.partners] })],
-);
-
 /** How far the projector has gone: the number every use at or below it is projected, and when. */
 export const logReadsCursor = pgTable(
   'log_reads_cursor',

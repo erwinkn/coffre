@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "7946e73a-270d-4329-8898-e65267423792",
+  "id": "ac9de351-064a-492b-8dc7-b21dd128fb26",
   "prevId": "654b1165-9b5f-4fbe-b1e2-47bf02425767",
   "tables": {
     "audit_chain_head": {
@@ -1842,136 +1842,6 @@
           "value": "\"log_fence\".\"only_row\""
         }
       }
-    },
-    "log_read_partners": {
-      "name": "log_read_partners",
-      "columns": {
-        "environment": {
-          "name": "environment",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "partners": {
-          "name": "partners",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "log_read_partners_pkey": {
-          "columns": [
-            "environment",
-            "partners"
-          ],
-          "name": "log_read_partners_pkey"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "log_read_places": {
-      "name": "log_read_places",
-      "columns": {
-        "environment": {
-          "name": "environment",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "partners": {
-          "name": "partners",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "at": {
-          "name": "at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "number": {
-          "name": "number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "principal": {
-          "name": "principal",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "secret": {
-          "name": "secret",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "log_read_places_place_idx": {
-          "name": "log_read_places_place_idx",
-          "columns": [
-            "environment",
-            "partners",
-            "at",
-            "number",
-            "secret"
-          ],
-          "isUnique": true
-        },
-        "log_read_places_member_idx": {
-          "name": "log_read_places_member_idx",
-          "columns": [
-            "principal",
-            "environment",
-            "partners",
-            "at",
-            "number"
-          ],
-          "isUnique": false
-        },
-        "log_read_places_key_idx": {
-          "name": "log_read_places_key_idx",
-          "columns": [
-            "secret",
-            "environment",
-            "partners",
-            "at",
-            "number"
-          ],
-          "isUnique": false
-        },
-        "log_read_places_member_key_idx": {
-          "name": "log_read_places_member_key_idx",
-          "columns": [
-            "principal",
-            "secret",
-            "environment",
-            "partners",
-            "at",
-            "number"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
     },
     "log_reads": {
       "name": "log_reads",

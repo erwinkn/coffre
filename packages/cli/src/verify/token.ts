@@ -79,8 +79,9 @@ const LISTED_WITHIN_MS = 20_000;
 /**
  * Reveal the canary once, and find its `secret.read` in the audit log: by
  * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
- * and names no operation (T166), the token's own read of the canary, by
- * its credential, for a reveal, of the version the token lists: the use
+ * and names no operation (T166), the token's own read of the canary, on
+ * its own page (0.15 lists reads by member, never by place: D160), by its
+ * credential, for a reveal, of the version the token lists: the use
  * the reveal made, or the one within the minute before it that it rode on
  * (a cover is of the same credential, purpose and key), once listed, which
  * may take a few seconds (`LISTED_WITHIN_MS`).
@@ -91,9 +92,9 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
   const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
   expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
   const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
-  const list = async () => {
+  const list = async (query: { path?: string }) => {
     try {
-      return await api.audit.list({ path, actor: token.member, limit: 50, sealed: '1' });
+      return await api.audit.list({ ...query, actor: token.member, limit: 50, sealed: '1' });
     } catch (error) {
       if (error instanceof CoffreError && error.status === 403) {
         throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
@@ -101,16 +102,20 @@ async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Pro
       throw error;
     }
   };
-  let { entries, reads } = await list();
+  const first = await list({ path });
+  let { entries, reads } = first;
   const read = entries.filter((entry) => entry.operationId === operationId);
-  // A server that keeps 0.15's log says how far its reads are listed.
-  if (read.length === 0 && reads !== undefined) {
+  // A server that keeps 0.15's log lists its reads on the whole log and by member, never by place (D160), and says so:
+  // the token's own page lists its own, whatever it audits.
+  if (read.length === 0 && (reads !== undefined || first.readsOmitted !== undefined)) {
     expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
     const ownOf = (listed: typeof entries) => listed.filter((entry) => entry.log === '0.15' && entry.action === 'secret.read' && entry.key === canary.key
+      && entry.project === canary.project && entry.environment === canary.environment
       && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === 'reveal' && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+    ({ entries, reads } = await list({}));
     for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
       await new Promise((resolve) => setTimeout(resolve, 250));
-      ({ entries, reads } = await list());
+      ({ entries, reads } = await list({}));
     }
     const own = ownOf(entries);
     const [used] = own;
