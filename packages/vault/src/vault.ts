@@ -286,7 +286,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
     cutover: false,
     marked: false,
     verifier: null,
-    uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses), undefined, options.callsEndWithRequest === true),
+    uses: new UseCache(useLimits(options.uses?.connections ?? DEFAULT_CONNECTIONS, options.uses), { callsEndWithRequest: options.callsEndWithRequest === true }),
     verified: START,
     reported: new Set(),
     since: null,

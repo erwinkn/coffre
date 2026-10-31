@@ -622,7 +622,7 @@ test("a call that never settles, as a Workers call whose request ended, gives it
   const pathFor = (lapses: boolean) => {
     let readies = 0;
     const path: UsePath = {
-      db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), undefined, lapses),
+      db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: lapses }),
       ready: () => (readies++ === 0 ? new Promise<void>(() => {}) : Promise.resolve()),
     };
     return { path, readies: () => readies };
@@ -660,7 +660,7 @@ test('a call whose wait before its statement ends past its deadline sends nothin
   });
   let lift = () => {};
   const path: UsePath = {
-    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), undefined, true),
+    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: true }),
     ready: () => new Promise<void>((resolve) => (lift = resolve)),
   };
   const at = Date.now() - 2_900;

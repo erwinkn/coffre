@@ -113,7 +113,7 @@ export const HELD_PAST_DEADLINE_MS = 2_000;
 /**
  * An isolate's admission, seal cache and covers. Bounded: past `max` entries, a map starts over.
  *
- * A call holds its place in admission until it settles. With `lapses` (Workers), at most until `HELD_PAST_DEADLINE_MS`
+ * A call holds its place in admission until it settles. With `callsEndWithRequest` (Workers), at most until `HELD_PAST_DEADLINE_MS`
  * past its deadline, settled or not; without (Node), until it settles, as it always does there, its I/O never torn
  * down under it: a call stuck queued for the hot pool or reading past its deadline (`oldWrite`) holds the pool too,
  * and counts until it lets go, so that no call abandoned piles more on the pool (review r1 of #438).
@@ -138,10 +138,10 @@ export class UseCache {
   readonly limits: UseLimits;
   readonly max: number;
 
-  constructor(limits: UseLimits, max = 10_000, lapses = false) {
+  constructor(limits: UseLimits, { max = 10_000, callsEndWithRequest = false }: { max?: number; callsEndWithRequest?: boolean } = {}) {
     this.limits = limits;
     this.max = max;
-    this.#lapses = lapses;
+    this.#lapses = callsEndWithRequest;
   }
 
   /** How many calls hold a place now: admitted, not settled, and not lapsed. */
@@ -814,21 +814,27 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
  * admission, as they hold the call's connection: what the vault reads
  * after the statement (`oldWrite`) is within the same place and deadline.
  * Past the deadline, the call starts nothing more, neither the statement
- * after `ready` nor the reads after it: its answer has gone. A round of a
+ * after `ready` nor, the race lost, the reads after it: its answer has gone. A round of a
  * batch is one call, its statements made in turn within it.
  */
 async function raced<R, T>(path: UsePath, deadline: number, call: () => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const release = path.cache.admit(deadline);
+  // Whether the race is lost: once it is, `then` starts nothing. The timer alone says so, never the clock, so that a
+  // statement that answered first is decided on, its entry written (Fable's review of #438).
+  let lost = false;
   const running = (async () => {
     await path.ready?.();
     sendsBy(deadline);
     const row = await call();
-    sendsBy(deadline);
+    if (lost) throw Object.assign(new Error('a use that lost its race starts nothing more'), { code: '57014' });
     return then(row);
   })().finally(release);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<'late'>((resolve) => {
-    timer = setTimeout(() => resolve('late'), Math.max(0, deadline - Date.now()));
+    timer = setTimeout(() => {
+      lost = true;
+      resolve('late');
+    }, Math.max(0, deadline - Date.now()));
   });
   try {
     const first = await Promise.race([running, late]);

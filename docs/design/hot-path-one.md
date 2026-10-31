@@ -248,7 +248,9 @@ allowed on objects that the change path has sealed.
      connection is closed by its deadline at the latest, which drops what
      Hyperdrive had not sent, and Postgres ends within 2 s what it had.
      On Node a call always settles, so its place is held until it does,
-     as its pool connection is.
+     as its pool connection is. That bounds the pool, not time: a read on
+     the vault's main login (`oldWrite`) or the cutover's seal wait holds
+     its place until its own timeouts end it.
 2. **The call.**
    - The isolate MACs the request as the checkpointer checks it: `entryMac`
      over the uses tree and the row's columns, under the log's one MAC key
