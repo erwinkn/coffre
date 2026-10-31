@@ -1905,7 +1905,9 @@ async function offboard(args: string[]): Promise<void> {
     );
   });
   // 0.15's reads are named once listed: reads sealed since may add to these. An instance before 0.15 says nothing.
-  if (report.reads?.behind === true) {
+  if (report.reads?.forged === true) {
+    process.stdout.write('  reads: FORGED: the vault does not vouch for how far they are listed; reads missing here may add to these\n');
+  } else if (report.reads?.behind === true) {
     process.stdout.write(`  reads are listed through ${report.reads.through ?? 'none yet'}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
   }
 
@@ -1979,8 +1981,20 @@ async function audit(args: string[]): Promise<void> {
     // alone records; a server before 0.15 ignores it.
     sealed: '1',
   });
+  // 0.15's reads are listed once the vault's projector has caught up with the log, apart from sealing: say when it lags,
+  // on stderr, after the entries, in either form (review r9: `--json` said nothing of reads missing). An instance before
+  // 0.15 sends no `reads`.
+  const notices = () => {
+    const reads = result.reads;
+    if (reads?.forged === true) process.stderr.write('Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n');
+    else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? 'none yet'}; newer reads are not listed yet.\n`);
+    // 0.15 lists reads on the whole log and by member, not by place (D160); a reader of some places sees their own alone.
+    if (result.readsOmitted === 'path') process.stderr.write('Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n');
+    else if (result.readsOmitted === 'scope') process.stderr.write('Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n');
+  };
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);
+    notices();
     return;
   }
 
@@ -1997,14 +2011,7 @@ async function audit(args: string[]): Promise<void> {
     const forged = entry.forged === true ? '  FORGED: the vault does not vouch for it' : '';
     process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}${forged}\n`);
   }
-  // 0.15's reads are listed once the vault's projector has caught up with the log, apart from sealing: say when it lags.
-  // An instance before 0.15 sends no `reads`.
-  const reads = result.reads;
-  if (reads?.forged === true) process.stderr.write('Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n');
-  else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? 'none yet'}; newer reads are not listed yet.\n`);
-  // 0.15 lists reads on the whole log and by member, not by place (D160); a reader of some places sees their own alone.
-  if (result.readsOmitted === 'path') process.stderr.write('Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n');
-  else if (result.readsOmitted === 'scope') process.stderr.write('Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n');
+  notices();
 }
 
 /**

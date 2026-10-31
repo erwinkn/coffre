@@ -18355,7 +18355,8 @@ async function offboard(args) {
 	report.exposed.forEach((entry, index) => {
 		process.stdout.write(`  ${names[index].padEnd(width)}  v${String(entry.version).padEnd(4)} ${entry.how} ${entry.at.slice(0, 10)}\n`);
 	});
-	if (report.reads?.behind === true) process.stdout.write(`  reads are listed through ${report.reads.through ?? "none yet"}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
+	if (report.reads?.forged === true) process.stdout.write("  reads: FORGED: the vault does not vouch for how far they are listed; reads missing here may add to these\n");
+	else if (report.reads?.behind === true) process.stdout.write(`  reads are listed through ${report.reads.through ?? "none yet"}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
 	if (report.apps.length > 0) {
 		process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);
 		const width = Math.max(...report.apps.map((app) => app.name.length));
@@ -18423,8 +18424,16 @@ async function audit(args) {
 		detail: values.detail ? "1" : void 0,
 		sealed: "1"
 	});
+	const notices = () => {
+		const reads = result.reads;
+		if (reads?.forged === true) process.stderr.write("Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n");
+		else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? "none yet"}; newer reads are not listed yet.\n`);
+		if (result.readsOmitted === "path") process.stderr.write("Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n");
+		else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n");
+	};
 	if (values.json) {
 		process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);
+		notices();
 		return;
 	}
 	for (const entry of result.entries.reverse()) {
@@ -18439,11 +18448,7 @@ async function audit(args) {
 		const forged = entry.forged === true ? "  FORGED: the vault does not vouch for it" : "";
 		process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}${forged}\n`);
 	}
-	const reads = result.reads;
-	if (reads?.forged === true) process.stderr.write("Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n");
-	else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? "none yet"}; newer reads are not listed yet.\n`);
-	if (result.readsOmitted === "path") process.stderr.write("Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n");
-	else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n");
+	notices();
 }
 /**
 * An Owner's acceptance that audit entries `<from>` to `<to>` are lost for

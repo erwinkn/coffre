@@ -20,8 +20,8 @@ function entry(seq: number, fields: Record<string, unknown>) {
   };
 }
 
-/** `coffre audit <args>` against a coffre answering every listing with `entries`; the queries it was sent. */
-async function audit(t: test.TestContext, entries: unknown[], args: string[]) {
+/** `coffre audit <args>` against a coffre answering every listing with `entries`, and `more` beside them; the queries it was sent. */
+async function audit(t: test.TestContext, entries: unknown[], args: string[], more: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), 'coffre-audit-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const queries: URLSearchParams[] = [];
@@ -29,7 +29,7 @@ async function audit(t: test.TestContext, entries: unknown[], args: string[]) {
     const url = new URL(req.url ?? '/', 'http://coffre');
     assert.equal(url.pathname, '/api/audit');
     queries.push(url.searchParams);
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries }));
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ entries, ...more }));
   });
   t.after(() => new Promise<void>((resolve) => (server.close(() => resolve()), server.closeAllConnections())));
   server.listen(0, '127.0.0.1');
@@ -89,4 +89,23 @@ test("audit asks for 0.15's sealed log too, and never for the counts of what a p
     assert.equal(listed.code, 0, listed.stderr);
     assert.deepEqual([listed.queries[0]!.get('sealed'), listed.queries[0]!.has('hidden')], ['1', false], args.join(' '));
   }
+});
+
+test("audit says on stderr when 0.15's reads lag, are not vouched for, or are listed elsewhere, as text or --json, which prints the entries alone (T166, review r9)", async (t) => {
+  for (const [more, said] of [
+    [{ reads: { through: '2026-10-17T10:00:00.000Z', behind: true } }, /Reads are sealed through 2026-10-17T10:00:00\.000Z; newer reads are not listed yet\./],
+    [{ reads: { through: null, behind: true, forged: true } }, /Reads: FORGED: the vault does not vouch for how far they are listed/],
+    [{ readsOmitted: 'path' }, /Reads are not listed by place/],
+    [{ readsOmitted: 'scope' }, /Reads are listed to whoever reads the whole log/],
+  ] as const) {
+    for (const json of [false, true]) {
+      const listed = await audit(t, [entry(1, {})], json ? ['--json'] : [], more);
+      assert.equal(listed.code, 0, listed.stderr);
+      assert.match(listed.stderr, said, `${JSON.stringify(more)}${json ? ' --json' : ''}`);
+      if (json) assert.deepEqual((JSON.parse(listed.stdout) as { seq: number }[]).map((e) => e.seq), [1]);
+    }
+  }
+  // Reads listed through the newest pair: nothing said.
+  const current = await audit(t, [entry(1, {})], ['--json'], { reads: { through: '2026-10-17T10:00:00.000Z', behind: false } });
+  assert.equal(current.stderr, '');
 });
