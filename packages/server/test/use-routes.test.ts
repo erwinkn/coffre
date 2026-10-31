@@ -301,11 +301,15 @@ test('0.15: past its uses in flight, the isolate refuses a read at once, by the 
   const refused = await send(new Request(`${ORIGIN}/api/reveals`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'market/dev/API_KEY' }) }));
   assert.equal(refused.status, 503, await refused.clone().text());
   assert.equal(refused.headers.get('retry-after'), '1', "the vault's own: an isolate's calls in flight free up in a moment");
+  // Busy, and why: never that coffre cannot reach what it depends on (T170).
+  const overloaded = 'coffre is busy: it has as many uses under way as it can take; try again in a moment';
+  assert.deepEqual(await refused.json(), { error: 'unavailable', message: overloaded, reason: 'busy' });
   // The same through the credential proxy, coffre's own refusal, the vault's Retry-After with it.
   const { handle } = await handleFor(DEV);
   const used = await send(new Request(`${ORIGIN}/use/market/dev/api/thing`, { headers: { 'x-api-key': handle } }));
   assert.equal(used.status, 503, await used.clone().text());
   assert.deepEqual([used.headers.get('coffre-proxy'), used.headers.get('retry-after')], ['refused', '1']);
+  assert.deepEqual(await used.json(), { error: 'credential_proxy', message: overloaded, reason: 'busy' });
   assert.deepEqual(await usesLogged(), []);
 });
 
