@@ -1,0 +1,18 @@
+// `pnpm smoke` only: a local Postgres on 127.0.0.1:56145 and test-only values.
+{
+  "name": "vpc-postgres-probe-local",
+  "main": "worker.ts",
+  "compatibility_date": "2026-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "LocalProbe" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LocalProbe"] }],
+  "vars": {
+    "PG_HOST": "127.0.0.1",
+    "PG_PORT": "56145",
+    "PG_DATABASE": "postgres",
+    "PG_USER": "dev_readonly",
+    "DEV_READONLY_PASSWORD": "local-smoke-password-not-a-secret",
+    "PROBE_KEY": "local-smoke-probe-key-0123456789abcdef"
+  }
+}
