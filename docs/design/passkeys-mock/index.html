@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Passkeys mock (T176): coffre</title>
+<!--
+  A mock of the passkey screens of docs/design/passkeys.md, in coffre's own
+  styles: packages/ui's globals.css and its fonts, read from this checkout
+  (run `pnpm install` first). The markup copies what the dev stack's pages
+  render. Mock data only; no WebAuthn. Serve the repository root and open
+  /docs/design/passkeys-mock/.
+-->
+<link rel="stylesheet" href="../../../packages/ui/node_modules/@fontsource-variable/inter/opsz.css">
+<link rel="stylesheet" href="../../../packages/ui/node_modules/@fontsource-variable/jetbrains-mono/wght.css">
+<link rel="stylesheet" href="../../../packages/ui/src/styles/globals.css">
+<style>
+  /* Only what the mock adds: its switcher, outside coffre's element, and what the new screens need. */
+  .mock-bar {
+    position: fixed; z-index: 100; left: 50%; bottom: 1rem; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.5rem;
+    border-radius: 999px; background: #1f2023; color: #f2f2f3; box-shadow: 0 8px 28px -8px rgb(0 0 0 / 0.5);
+    font: 13px/1.2 system-ui, sans-serif;
+  }
+  .mock-bar button, .mock-bar select {
+    font: inherit; color: inherit; background: #2d2e33; border: 1px solid #3b3c42; border-radius: 999px;
+    padding: 0.3rem 0.7rem; cursor: pointer;
+  }
+  .mock-bar select { max-width: 22rem; }
+  .mock-bar .mock-tag { padding: 0 0.4rem; color: #a9abb3; }
+  .coffre { padding-bottom: 4rem; }
+
+  .pk-touch {
+    display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin: 0.25rem auto 1rem;
+    border-radius: 50%; background: var(--accent-wash); color: var(--accent);
+  }
+  .pk-touch.is-good { background: var(--green-wash); color: var(--green); }
+  .signin-actions { display: grid; gap: 0.5rem; padding: 0 1.5rem 1.25rem; }
+  .signin-actions .btn { justify-content: center; height: 2.5rem; font-weight: 550; }
+  .signin-actions .signin-error { padding: 0; }
+  .signin-foot { padding: 0 1.5rem 1.25rem; color: var(--ink-3); font-size: 0.8125rem; text-align: center; }
+  .signin-foot a { color: var(--accent); }
+  .pk-list { display: grid; gap: 0.375rem; margin: 0; padding: 0 1.5rem 1.25rem; list-style: none; }
+  .dialog .pk-list { padding: 0.75rem 0 0; }
+  .signin .stack-notice { margin: 0 1.5rem 1.25rem; }
+  .pk-list li { display: flex; align-items: center; gap: 0.5rem; color: var(--ink-2); font-size: 0.8125rem; }
+  .pk-act {
+    margin: 0.75rem 0 0.25rem; padding: 0.625rem 0.75rem; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--subtle); font-size: 0.8125rem;
+  }
+  .pk-act .mono { color: var(--ink); }
+  .pk-chip { display: inline-flex; align-items: center; gap: 0.3rem; }
+  .card-head-actions { margin-left: auto; display: flex; gap: 0.5rem; align-items: flex-start; }
+  .card-head { display: flex; gap: 1rem; align-items: flex-start; }
+  .card-head > div:first-child { flex: 1; }
+  .stack-notice { margin-bottom: 1.25rem; }
+  .notice-actions { display: flex; gap: 0.5rem; margin-top: 0.625rem; }
+  .menu-float { position: absolute; right: 0; top: 2.75rem; z-index: 40; }
+  .page-actions { position: relative; }
+  .check-row { display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.5rem; color: var(--ink-2); font-size: 0.8125rem; }
+  .check-row input { margin-top: 0.2rem; }
+  .terminal {
+    margin: 0 0 1rem; padding: 0.75rem 0.875rem; border-radius: var(--radius); background: var(--float);
+    color: var(--on-float); font: 12.5px/1.6 var(--font-mono); white-space: pre-wrap;
+  }
+  .terminal .dim { color: var(--on-float-2); }
+</style>
+</head>
+<body>
+<div class="coffre" id="root" data-theme="light"></div>
+
+<div class="mock-bar" role="navigation" aria-label="Mock screens">
+  <span class="mock-tag">Mock</span>
+  <button type="button" id="prev" aria-label="Previous screen">‹</button>
+  <select id="pick" aria-label="Screen"></select>
+  <button type="button" id="next" aria-label="Next screen">›</button>
+  <button type="button" id="theme">Dark</button>
+</div>
+
+<script>
+const ICONS = {"Fingerprint":"<path d=\"M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4\"></path><path d=\"M14 13.12c0 2.38 0 6.38-1 8.88\"></path><path d=\"M17.29 21.02c.12-.6.43-2.3.5-3.02\"></path><path d=\"M2 12a10 10 0 0 1 18-6\"></path><path d=\"M2 16h.01\"></path><path d=\"M21.8 16c.2-2 .131-5.354 0-6\"></path><path d=\"M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2\"></path><path d=\"M8.65 22c.21-.66.45-1.32.57-2\"></path><path d=\"M9 6.8a6 6 0 0 1 9 5.2v2\"></path>","KeyRound":"<path d=\"M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z\"></path><circle cx=\"16.5\" cy=\"7.5\" r=\".5\" fill=\"currentColor\"></circle>","ShieldCheck":"<path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"></path><path d=\"m9 12 2 2 4-4\"></path>","Smartphone":"<rect width=\"14\" height=\"20\" x=\"5\" y=\"2\" rx=\"2\" ry=\"2\"></rect><path d=\"M12 18h.01\"></path>","Usb":"<circle cx=\"10\" cy=\"7\" r=\"1\"></circle><circle cx=\"4\" cy=\"20\" r=\"1\"></circle><path d=\"M4.7 19.3 19 5\"></path><path d=\"m21 3-3 1 2 2Z\"></path><path d=\"M9.26 7.68 5 12l2 5\"></path><path d=\"m10 14 5 2 3.5-3.5\"></path><path d=\"m18 12 1-1 1 1-1 1Z\"></path>","Cloud":"<path d=\"M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z\"></path>","Plus":"<path d=\"M5 12h14\"></path><path d=\"M12 5v14\"></path>","Pencil":"<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\"></path><path d=\"m15 5 4 4\"></path>","Trash2":"<path d=\"M10 11v6\"></path><path d=\"M14 11v6\"></path><path d=\"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6\"></path><path d=\"M3 6h18\"></path><path d=\"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\"></path>","RotateCcw":"<path d=\"M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8\"></path><path d=\"M3 3v5h5\"></path>","Terminal":"<path d=\"M12 19h8\"></path><path d=\"m4 17 6-6-6-6\"></path>","TriangleAlert":"<path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3\"></path><path d=\"M12 9v4\"></path><path d=\"M12 17h.01\"></path>","Info":"<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"M12 16v-4\"></path><path d=\"M12 8h.01\"></path>","CircleCheck":"<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"m16 9-5.5 5.5L8 12\"></path>","Monitor":"<rect width=\"20\" height=\"14\" x=\"2\" y=\"3\" rx=\"2\"></rect><line x1=\"8\" x2=\"16\" y1=\"21\" y2=\"21\"></line><line x1=\"12\" x2=\"12\" y1=\"17\" y2=\"21\"></line>","LogOut":"<path d=\"m16 17 5-5-5-5\"></path><path d=\"M21 12H9\"></path><path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"></path>","User":"<path d=\"M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2\"></path><circle cx=\"12\" cy=\"7\" r=\"4\"></circle>","Link":"<path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"></path><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"></path>","Sun":"<circle cx=\"12\" cy=\"12\" r=\"4\"></circle><path d=\"M12 2v2\"></path><path d=\"M12 20v2\"></path><path d=\"m4.93 4.93 1.41 1.41\"></path><path d=\"m17.66 17.66 1.41 1.41\"></path><path d=\"M2 12h2\"></path><path d=\"M20 12h2\"></path><path d=\"m6.34 17.66-1.41 1.41\"></path><path d=\"m19.07 4.93-1.41 1.41\"></path>","Folder":"<path d=\"M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z\"></path>","Users":"<path d=\"M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2\"></path><path d=\"M16 3.128a4 4 0 0 1 0 7.744\"></path><path d=\"M22 21v-2a4 4 0 0 0-3-3.87\"></path><circle cx=\"9\" cy=\"7\" r=\"4\"></circle>","ScrollText":"<path d=\"M15 12h-5\"></path><path d=\"M15 8h-5\"></path><path d=\"M19 17V5a2 2 0 0 0-2-2H4\"></path><path d=\"M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3\"></path>","Settings":"<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\"></path><circle cx=\"12\" cy=\"12\" r=\"3\"></circle>","Search":"<path d=\"m21 21-4.34-4.34\"></path><circle cx=\"11\" cy=\"11\" r=\"8\"></circle>","PanelLeft":"<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"></rect><path d=\"M9 3v18\"></path>","Ellipsis":"<circle cx=\"12\" cy=\"12\" r=\"1\"></circle><circle cx=\"19\" cy=\"12\" r=\"1\"></circle><circle cx=\"5\" cy=\"12\" r=\"1\"></circle>","Clock":"<circle cx=\"12\" cy=\"12\" r=\"10\"></circle><path d=\"M12 6v6l4 2\"></path>","Lock":"<rect width=\"18\" height=\"11\" x=\"3\" y=\"11\" rx=\"2\" ry=\"2\"></rect><path d=\"M7 11V7a5 5 0 0 1 10 0v4\"></path>","X":"<path d=\"M18 6 6 18\"></path><path d=\"m6 6 12 12\"></path>","UserRoundCog":"<path d=\"m14.305 19.53.923-.382\"></path><path d=\"m15.228 16.852-.923-.383\"></path><path d=\"m16.852 15.228-.383-.923\"></path><path d=\"m16.852 20.772-.383.924\"></path><path d=\"m19.148 15.228.383-.923\"></path><path d=\"m19.53 21.696-.382-.924\"></path><path d=\"M2 21a8 8 0 0 1 10.434-7.62\"></path><path d=\"m20.772 16.852.924-.383\"></path><path d=\"m20.772 19.148.924.383\"></path><circle cx=\"10\" cy=\"8\" r=\"5\"></circle><circle cx=\"18\" cy=\"18\" r=\"3\"></circle>","Laptop":"<path d=\"M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z\"></path><path d=\"M20.054 15.987H3.946\"></path>","Loader":"<path d=\"M12 2v4\"></path><path d=\"m16.2 7.8 2.9-2.9\"></path><path d=\"M18 12h4\"></path><path d=\"m16.2 16.2 2.9 2.9\"></path><path d=\"M12 18v4\"></path><path d=\"m4.9 19.1 2.9-2.9\"></path><path d=\"M2 12h4\"></path><path d=\"m4.9 4.9 2.9 2.9\"></path>","Layers":"<path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"></path><path d=\"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12\"></path><path d=\"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17\"></path>","Hash":"<line x1=\"4\" x2=\"20\" y1=\"9\" y2=\"9\"></line><line x1=\"4\" x2=\"20\" y1=\"15\" y2=\"15\"></line><line x1=\"10\" x2=\"8\" y1=\"3\" y2=\"21\"></line><line x1=\"16\" x2=\"14\" y1=\"3\" y2=\"21\"></line>","ShieldAlert":"<path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"></path><path d=\"M12 8v4\"></path><path d=\"M12 16h.01\"></path>","Moon":"<path d=\"M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401\"></path>"};
+const icon = (name, size = 16) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] ?? ''}</svg>`;
+const BRAND = '<svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"><path d="M25.77 10.94A11 11 0 1 0 26.95 14.9L17.92 16.81A4 4 0 1 1 17.08 13.45Z" fill="currentColor"></path></svg>';
+const spinner = () => `<span class="spinner" style="display:inline-flex">${icon('Loader', 14)}</span>`;
+
+// ---- Layouts, as the dev stack renders them -------------------------------
+
+function solo(body) {
+  return `<div class="solo">
+    <div class="solo-top"><span class="brand">${BRAND}<span class="brand-name">coffre</span></span></div>
+    <main class="solo-main" id="content">${body}</main>
+  </div>`;
+}
+
+function shell(active, main, { confirmed = null } = {}) {
+  const nav = [['Projects', 'Folder'], ['Users', 'Users'], ['Service accounts', 'KeyRound'], ['Audit', 'ScrollText'], ['Settings', 'Settings']]
+    .map(([label, i]) => `<a href="#" class="nav-link${label === active ? ' active' : ''}"${label === active ? ' aria-current="page"' : ''}>${icon(i)}<span class="nav-label">${label}</span></a>`).join('');
+  const chip = confirmed === null ? '' :
+    `<span class="tag tag-green pk-chip" title="Your passkey confirmed this session. Changes that need it go without asking until then.">${icon('ShieldCheck', 13)}Confirmed · ${confirmed}</span>`;
+  return `<div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar-head"><a href="#" class="brand sidebar-brand">${BRAND}<span class="brand-name">coffre</span></a></div>
+      <nav class="sidebar-nav" aria-label="Sections">${nav}</nav>
+      <div class="sidebar-foot">
+        <button type="button" class="account"><span class="avatar" aria-hidden="true">a</span>
+          <span class="account-text"><span class="account-name">admin@acme.example</span><span class="account-role">Owner</span></span></button>
+        <a aria-label="Account settings" href="#" class="btn btn-quiet btn-icon sidebar-foot-settings">${icon('UserRoundCog')}</a>
+      </div>
+    </aside>
+    <div class="main">
+      <header class="header">
+        <button type="button" class="btn btn-quiet btn-icon header-sidebar" aria-label="Collapse sidebar">${icon('PanelLeft')}</button>
+        <div class="header-end">${chip}
+          <button type="button" class="search-trigger" aria-label="Search">${icon('Search', 14)}<span class="search-label">Search…</span><kbd aria-hidden="true">⌘K</kbd></button>
+        </div>
+      </header>
+      <main class="content" id="content">${main}</main>
+    </div>
+  </div>`;
+}
+
+const pageHead = (title, { actions = '', avatar = null, meta = '' } = {}) => `<header class="page-head">
+  <div class="page-head-text">${avatar === null ? '' : `<span class="avatar avatar-lg" aria-hidden="true">${avatar}</span>`}
+    <div style="min-width:0"><h1 class="page-title"><span>${title}</span></h1>${meta === '' ? '' : `<div class="page-meta">${meta}</div>`}</div>
+  </div>${actions === '' ? '' : `<div class="page-actions">${actions}</div>`}
+</header>`;
+
+const tabs = (label, items, active) => `<nav class="tabs" aria-label="${label}">${items
+  .map(([name, i]) => `<a href="#"${name === active ? ' class="active" aria-current="page"' : ''}>${icon(i, 15)}${name}</a>`).join('')}</nav>`;
+
+const dialog = (inner, { wide = false } = {}) =>
+  `<div class="overlay" aria-hidden="true"></div><div role="dialog" aria-modal="true" class="dialog${wide ? ' dialog-wide' : ''}">${inner}</div>`;
+
+const ACCOUNT_TABS = [['Profile', 'User'], ['Passkeys', 'Fingerprint'], ['Sessions', 'Monitor'], ['Connected apps', 'Link'], ['Appearance', 'Sun']];
+const USER_TABS = [['Access', 'Folder'], ['Connected apps', 'Link'], ['Activity', 'ScrollText']];
+
+// ---- Mock data --------------------------------------------------------------
+
+const ADA_PASSKEYS = [
+  { name: 'YubiKey 5C', kind: 'This device only', icon: 'Usb', added: '12 Sep', used: '2 min ago', sessions: 2 },
+  { name: 'iCloud Keychain', kind: 'Synced', icon: 'Cloud', added: '12 Sep', used: 'yesterday', sessions: 1 },
+];
+
+function projectsTable() {
+  return `<section class="card" aria-label="Projects"><div class="dt-wrap"><table class="dt projects stacks">
+    <thead><tr><th class="n">#</th><th class="col-project"><span class="th">${icon('Folder', 14)}Project</span></th>
+      <th><span class="th">${icon('Layers', 14)}Environments</span></th><th class="col-shrink col-secrets"><span class="th">${icon('Hash', 14)}Secrets</span></th></tr></thead>
+    <tbody>
+      <tr class="row-link"><td class="n">1</td><td class="col-project"><span class="cell-project"><span class="tile tile-green" aria-hidden="true">m</span><a href="#" class="cell-link stretch">market</a></span></td>
+        <td class="col-envs"><span class="env-links"><a href="#" class="env-link">dev<span class="count">4</span></a><a href="#" class="env-link">prod<span class="count">4</span></a></span></td><td class="col-secrets num nowrap">8</td></tr>
+      <tr class="row-link"><td class="n">2</td><td class="col-project"><span class="cell-project"><span class="tile tile-violet" aria-hidden="true">b</span><a href="#" class="cell-link stretch">billing</a></span></td>
+        <td class="col-envs"><span class="env-links"><a href="#" class="env-link">dev<span class="count">6</span></a><a href="#" class="env-link">staging<span class="count">6</span></a><a href="#" class="env-link">prod<span class="count">7</span></a></span></td><td class="col-secrets num nowrap">19</td></tr>
+    </tbody></table></div></section>`;
+}
+
+function bobAccess() {
+  return `<section class="card" aria-label="Project access"><div class="dt-wrap"><table class="dt grants stacks">
+    <thead><tr><th class="n">#</th><th class="col-principal"><span class="th">${icon('Folder', 14)}Project</span></th>
+      <th><span class="th">${icon('ShieldCheck', 14)}Permissions</span></th><th class="col-expires"><span class="th">${icon('Clock', 14)}Expires</span></th>
+      <th class="col-actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody><tr><td class="n">1</td><td class="col-lead"><span class="cell-project"><span class="tile tile-green" aria-hidden="true">m</span><a href="#" class="cell-link">market</a></span></td>
+      <td class="col-access"><span class="tag">Developer: dev</span></td><td class="col-expires cell-mono cell-muted is-never">Never</td>
+      <td class="col-actions"><button class="act act-danger" type="button">Revoke</button></td></tr></tbody></table></div></section>`;
+}
+
+function bobPage(extra = '', { menu = false, role = 'Member', confirmed = null } = {}) {
+  const actions = `<button type="button" aria-label="Actions for bob@acme.example" class="btn btn-icon">${icon('Ellipsis')}</button>${menu ? `<div role="menu" class="menu menu-float">
+      <div role="menuitem" class="menu-item">${icon('Pencil', 14)}Change global role</div>
+      <div role="menuitem" class="menu-item">${icon('Fingerprint', 14)}Reset passkeys…</div>
+      <div role="separator" class="menu-sep"></div>
+      <div role="menuitem" class="menu-item menu-item-danger">${icon('X', 14)}Remove user…</div></div>` : ''}`;
+  return shell('Users', pageHead('bob@acme.example', { avatar: 'b', meta: `<span class="tag">${role}</span><span class="tag tag-outline pk-chip">${icon('Fingerprint', 12)}2 passkeys</span>`, actions })
+    + tabs('User sections', USER_TABS, 'Access') + bobAccess()
+    + `<div class="table-actions"><button class="btn btn-primary">${icon('Pencil', 14)}Edit access</button></div>`, { confirmed }) + extra;
+}
+
+// ---- Screens ------------------------------------------------------------------
+// Each is a function of its state, which the buttons marked data-to move along.
+
+const SCREENS = [
+  {
+    id: 'signin',
+    title: '1 · Sign-in: confirm with a passkey',
+    render: (s) => solo(`<section class="card signin" aria-labelledby="t">
+      <div class="signin-head">
+        <div class="pk-touch${s === 'done' ? ' is-good' : ''}">${icon(s === 'done' ? 'CircleCheck' : 'Fingerprint', 26)}</div>
+        <h1 class="signin-title" id="t">${s === 'done' ? 'Signed in' : 'Confirm it’s you'}</h1>
+        <p class="signin-lede">${s === 'done'
+          ? 'Taking you to Projects…'
+          : 'GitHub signed you in as <span class="mono">admin@acme.example</span>. Acme secrets also asks for one of your passkeys.'}</p>
+      </div>
+      ${s === 'done' ? '' : `<ul class="pk-list" aria-label="Your passkeys">
+          ${ADA_PASSKEYS.map((p) => `<li>${icon(p.icon, 14)}${p.name}<span class="cell-muted">· ${p.kind.toLowerCase()}</span></li>`).join('')}
+        </ul>
+        <div class="signin-actions">
+          <button class="btn btn-primary" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
+            ${s === 'waiting' ? `${spinner()}Waiting for your passkey…` : `${icon('Fingerprint', 14)}Use passkey`}</button>
+          ${s === 'failed' ? `<div class="signin-error"><p class="error-line" role="alert">That passkey did not answer for this site. Try again, or another one.</p></div>` : ''}
+        </div>
+        <p class="signin-foot">Lost your passkeys? An Owner can reset them. · <a href="#">Use another account</a></p>`}
+    </section>`),
+    states: ['ready', 'waiting', 'done', 'failed'],
+    after: { waiting: 'done' },
+  },
+  {
+    id: 'enroll',
+    title: '2 · First sign-in under required: add a passkey',
+    render: (s) => solo(`<section class="card signin" aria-labelledby="t">
+      <div class="signin-head">
+        <div class="pk-touch${s === 'done' ? ' is-good' : ''}">${icon(s === 'done' ? 'CircleCheck' : 'KeyRound', 26)}</div>
+        <h1 class="signin-title" id="t">${s === 'done' ? 'Passkey added' : 'Add a passkey to finish signing in'}</h1>
+        <p class="signin-lede">${s === 'done'
+          ? '<strong>iCloud Keychain</strong> is your passkey for Acme secrets. Next time, GitHub and a touch of it sign you in.'
+          : 'Acme secrets asks for a passkey on top of GitHub, so a stolen GitHub account is not enough. It stays in your device or password manager; coffre keeps only its public key.'}</p>
+      </div>
+      ${s === 'reset' ? `<div class="notice notice-info stack-notice">${icon('Info')}<div><strong>Ada Admin reset your passkeys on 31 Oct.</strong> Add a new one to sign in.</div></div>` : ''}
+      <div class="signin-actions">
+        ${s === 'done'
+          ? `<button class="btn btn-primary">Continue</button>`
+          : `<button class="btn btn-primary" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
+              ${s === 'waiting' ? `${spinner()}Waiting for your device…` : `${icon('Plus', 14)}Add passkey`}</button>`}
+      </div>
+      ${s === 'done' ? '' : `<p class="signin-foot">Signing in as <span class="mono">bob@acme.example</span> with GitHub. · <a href="#">Not you?</a></p>`}
+    </section>`),
+    states: ['ready', 'waiting', 'done', 'reset'],
+    after: { waiting: 'done' },
+  },
+  {
+    id: 'prompt',
+    title: '3 · optional: the prompt to add one',
+    render: (s) => shell('Projects', pageHead('Projects')
+      + (s === 'dismissed' ? '' : `<div class="notice notice-info stack-notice">${icon('Fingerprint')}<div>
+          <p><strong>Add a passkey.</strong> Signing in will then take GitHub and a touch of your passkey, so a stolen GitHub account is not enough.</p>
+          <div class="notice-actions"><button class="btn btn-primary btn-sm" data-to="dismissed">${icon('Plus', 14)}Add passkey</button><button class="btn btn-quiet btn-sm" data-to="dismissed">Not now</button></div>
+        </div></div>`)
+      + projectsTable()
+      + `<div class="table-actions"><button class="btn btn-primary">${icon('Plus', 14)}New project</button></div>`),
+    states: ['shown', 'dismissed'],
+  },
+  {
+    id: 'fresh',
+    title: '4 · Fresh check: making someone an Owner',
+    render: (s) => bobPage(s === 'done' ? '' : dialog(`
+      <h2 class="dialog-title">Confirm it’s you</h2>
+      <p class="dialog-body">Touch one of your passkeys to make this change. One touch covers changes like it for the next 5 minutes.</p>
+      <div class="pk-act">Make <span class="mono">bob@acme.example</span> an <strong>Owner</strong> of the whole instance</div>
+      ${s === 'failed' ? `<p class="error-line" role="alert" style="margin-top:.5rem">No passkey answered. Nothing was changed.</p>` : ''}
+      <div class="dialog-actions">
+        <button type="button" class="btn">Cancel</button>
+        <button type="button" class="btn btn-primary" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
+          ${s === 'waiting' ? `${spinner()}Waiting for your passkey…` : `${icon('Fingerprint', 14)}Use passkey`}</button>
+      </div>`), { role: s === 'done' ? 'Owner' : 'Member', confirmed: s === 'done' ? '5 min' : null }),
+    states: ['ask', 'waiting', 'done', 'failed'],
+    after: { waiting: 'done' },
+  },
+  {
+    id: 'fresh-add',
+    title: '5 · Fresh check, no passkey yet (optional)',
+    render: (s) => bobPage(s === 'done' ? '' : dialog(`
+      <h2 class="dialog-title">Add a passkey to change roles</h2>
+      <p class="dialog-body">Changing who holds what takes a touch of your passkey, and you have none yet. Add one now: it confirms this change too, and from then on you sign in with GitHub and the passkey.</p>
+      <div class="pk-act">Make <span class="mono">bob@acme.example</span> a <strong>Maintainer</strong> of <span class="mono">market/prod</span></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn">Cancel</button>
+        <button type="button" class="btn btn-primary" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
+          ${s === 'waiting' ? `${spinner()}Waiting for your device…` : `${icon('Plus', 14)}Add passkey and confirm`}</button>
+      </div>`), { confirmed: s === 'done' ? '5 min' : null }),
+    states: ['ask', 'waiting', 'done'],
+    after: { waiting: 'done' },
+  },
+  {
+    id: 'passkeys',
+    title: '6 · Account → Passkeys',
+    render: (s) => {
+      const rows = ADA_PASSKEYS.map((p, i) => `<tr><td><span class="cell-account">${icon(p.icon, 15)}<span class="cell-stack">
+          <span>${p.name} ${i === 0 ? '<span class="tag tag-blue">Signed in this browser</span>' : ''}</span><small>${p.kind}</small></span></span></td>
+        <td class="nowrap cell-muted" data-label="Added">${p.added}</td>
+        <td class="nowrap cell-muted" data-label="Last used">${p.used}</td>
+        <td class="col-actions"><span class="acts"><button class="act" type="button">${icon('Pencil', 13)}Rename</button><button class="act act-danger" type="button" data-to="${i === 0 ? 'remove' : ''}">${icon('Trash2', 13)}Remove</button></span></td></tr>`).join('');
+      const remove = s !== 'remove' ? '' : dialog(`
+        <h2 class="dialog-title">Remove <span class="mono">YubiKey 5C</span>?</h2>
+        <p class="dialog-body">It will no longer sign you in or confirm changes, and the 2 sessions it confirmed are signed out, this one included. You keep iCloud Keychain.</p>
+        <div class="dialog-actions"><button type="button" class="btn" data-to="list">Cancel</button><button type="button" class="btn btn-danger">${icon('Fingerprint', 14)}Confirm with a passkey and remove</button></div>`);
+      return shell('', pageHead('Account', { actions: `<button class="btn" type="submit">${icon('LogOut', 14)}Sign out</button>` })
+        + tabs('Account sections', ACCOUNT_TABS, 'Passkeys')
+        + `<section class="card" aria-labelledby="pk"><div class="card-head"><div>
+            <h2 class="card-title" id="pk">Passkeys</h2>
+            <p class="card-desc">Signing in takes GitHub and one of these. A change to who holds what, a new service token or a terminal’s sign-in takes a touch too, at most every 5 minutes.</p></div>
+            <div class="card-head-actions"><button class="btn btn-sm">${icon('Plus', 14)}Add passkey</button></div></div>
+          <div class="dt-wrap"><table class="dt stacks stacks-inline"><thead><tr><th>Passkey</th><th class="col-shrink">Added</th><th class="col-shrink">Last used</th><th class="col-actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+          <tbody>${rows}</tbody></table></div></section>
+          <p class="hint section-foot">This instance requires a passkey at sign-in. Lost them all? An Owner can reset them.</p>`, { confirmed: '3 min' }) + remove;
+    },
+    states: ['list', 'remove'],
+  },
+  {
+    id: 'sessions',
+    title: '7 · Account → Sessions: what confirmed each',
+    render: () => {
+      const row = (i, where, sub, confirmed, last, expires, current = false) => `<tr><td><span class="cell-account">${icon(i, 15)}<span class="cell-stack">
+          <span>${where} ${current ? '<span class="tag tag-blue">This browser</span>' : ''}</span><small>${sub}</small></span></span></td>
+        <td class="nowrap cell-muted" data-label="Confirmed with">${confirmed}</td>
+        <td class="nowrap cell-muted" data-label="Last active">${last}</td><td class="nowrap cell-muted" data-label="Expires">${expires}</td>
+        <td class="col-actions"><button class="act" type="submit">${icon('LogOut', 13)}Sign out</button></td></tr>`;
+      return shell('', pageHead('Account', { actions: `<button class="btn" type="submit">${icon('LogOut', 14)}Sign out</button>` })
+        + tabs('Account sections', ACCOUNT_TABS, 'Sessions')
+        + `<section class="card" aria-labelledby="s"><div class="card-head"><div><h2 class="card-title" id="s">Sessions</h2>
+            <p class="card-desc">Browsers and command lines signed in as you, and the passkey that last confirmed each.</p></div></div>
+          <div class="dt-wrap"><table class="dt stacks stacks-inline"><thead><tr><th>Where</th><th class="col-shrink">Confirmed with</th><th class="col-shrink">Last active</th><th class="col-shrink">Expires</th><th class="col-actions"><span class="visually-hidden">Actions</span></th></tr></thead><tbody>
+          ${row('Monitor', 'Firefox on macOS', 'via GitHub · <span class="mono">81.65.12.4</span>', '<span class="tag tag-green pk-chip">YubiKey 5C · 3 min left</span>', '2s ago', 'in 10h', true)}
+          ${row('Smartphone', 'Safari on iOS', 'via GitHub · <span class="mono">81.65.12.9</span>', 'iCloud Keychain', '1h ago', 'in 6h')}
+          ${row('Terminal', 'coffre CLI on ada-mbp', 'approved in Firefox on macOS', 'YubiKey 5C', '12 min ago', 'in 29d')}
+          ${row('Monitor', 'Chrome on Linux', 'via GitHub · <span class="mono">81.65.12.4</span>', '<span class="tag tag-amber">No passkey</span>', '3d ago', 'in 9h')}
+          </tbody></table></div></section>
+          <p class="hint section-foot">A session no passkey confirmed was signed in before passkeys were required; it asks for one at its next page.</p>`);
+    },
+    states: ['list'],
+  },
+  {
+    id: 'reset',
+    title: '8 · Owner: reset someone’s passkeys',
+    render: (s) => bobPage(s === 'menu' ? '' : s === 'done' ? '' : dialog(`
+      <h2 class="dialog-title">Reset <span class="mono">bob@acme.example</span>’s passkeys?</h2>
+      <p class="dialog-body">For someone who lost theirs. Removes their 2 passkeys and signs out their 3 browser and CLI sessions. At their next sign-in with GitHub, they add a new passkey and see that you reset them.</p>
+      <ul class="pk-list"><li>${icon('Usb', 14)}YubiKey 5C <span class="cell-muted">· last used 2 days ago</span></li><li>${icon('Cloud', 14)}1Password <span class="cell-muted">· last used 3 weeks ago</span></li></ul>
+      <label class="check-row"><input type="checkbox">Also revoke their 1 personal token</label>
+      <label class="check-row"><input type="checkbox">Also disconnect their 1 connected app</label>
+      <div class="dialog-actions"><button type="button" class="btn" data-to="menu">Cancel</button>
+        <button type="button" class="btn btn-danger" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
+          ${s === 'waiting' ? `${spinner()}Waiting for your passkey…` : `${icon('Fingerprint', 14)}Confirm with your passkey and reset`}</button></div>`), { menu: s === 'menu', confirmed: s === 'done' ? '5 min' : null }),
+    states: ['menu', 'confirm', 'waiting', 'done'],
+    after: { waiting: 'done' },
+  },
+  {
+    id: 'cli',
+    title: '9 · CLI: approve a change in the browser',
+    render: (s) => solo(`
+      <div class="terminal"><span class="dim">$</span> coffre access set bob@acme.example --role owner
+This change needs a touch of your passkey. Approve it in your browser:
+
+  https://secrets.acme.example/auth/device?code=QJXM-4WTP
+
+${s === 'done' ? 'Waiting for approval... approved.\nbob@acme.example is now an Owner.' : '<span class="dim">Waiting for approval...</span>'}</div>
+      <section class="card signin" aria-labelledby="t">
+        ${s === 'done'
+          ? `<div class="signin-head"><div class="pk-touch is-good">${icon('CircleCheck', 26)}</div><h1 class="signin-title" id="t">Approved</h1>
+             <p class="signin-lede">Your terminal goes on with its command. For the next 5 minutes, its changes that need a passkey go without asking.</p></div>`
+          : `<div class="signin-head"><h1 class="signin-title" id="t">Approve this terminal?</h1>
+            <p class="signin-lede">Only if you just ran this yourself and it shows this code. It gets your access for 30 days, and for 5 minutes, changes that need a passkey.</p></div>
+          <p class="device-code" aria-label="Code">QJXM-4WTP</p>
+          <dl class="facts device-facts">
+            <div class="fact"><dt>To run</dt><dd class="mono">coffre access set bob@acme.example --role owner</dd></div>
+            <div class="fact"><dt>Client</dt><dd><span class="cell-account">${icon('Terminal', 14)}coffre CLI on ada-mbp</span></dd></div>
+            <div class="fact"><dt>Requested from</dt><dd class="mono">81.65.12.4</dd></div>
+          </dl>
+          <div class="device-actions"><button class="btn btn-quiet">Cancel</button><button class="btn">Deny</button>
+            <button class="btn btn-primary" data-to="${s === 'waiting' ? '' : 'waiting'}" ${s === 'waiting' ? 'aria-busy="true" disabled' : ''}>
+              ${s === 'waiting' ? `${spinner()}Waiting for your passkey…` : `${icon('Fingerprint', 14)}Approve with passkey`}</button></div>`}
+      </section>`),
+    states: ['ask', 'waiting', 'done'],
+    after: { waiting: 'done' },
+  },
+];
+
+// ---- The switcher ----------------------------------------------------------------
+
+const root = document.getElementById('root');
+const pick = document.getElementById('pick');
+let current = { screen: 0, state: 0 };
+
+for (const [i, screen] of SCREENS.entries()) {
+  for (const [j, state] of screen.states.entries()) {
+    const option = new Option(screen.states.length > 1 ? `${screen.title} (${state})` : screen.title, `${i}:${j}`);
+    pick.add(option);
+  }
+}
+
+function show(screen, state) {
+  current = { screen, state };
+  const s = SCREENS[screen];
+  root.innerHTML = s.render(s.states[state]);
+  pick.value = `${screen}:${state}`;
+  location.hash = `${s.id}/${s.states[state]}`;
+  const next = s.after?.[s.states[state]];
+  if (next !== undefined) setTimeout(() => current.screen === screen && current.state === state && show(screen, s.states.indexOf(next)), 1400);
+}
+
+root.addEventListener('click', (event) => {
+  const target = event.target.closest('[data-to]');
+  if (target === null || target.dataset.to === '') return;
+  event.preventDefault();
+  show(current.screen, SCREENS[current.screen].states.indexOf(target.dataset.to));
+});
+pick.addEventListener('change', () => show(...pick.value.split(':').map(Number)));
+const step = (by) => {
+  const options = [...pick.options].map((option) => option.value);
+  const at = options.indexOf(pick.value);
+  show(...options[(at + by + options.length) % options.length].split(':').map(Number));
+};
+document.getElementById('prev').addEventListener('click', () => step(-1));
+document.getElementById('next').addEventListener('click', () => step(1));
+document.getElementById('theme').addEventListener('click', (event) => {
+  const dark = root.dataset.theme !== 'dark';
+  root.dataset.theme = dark ? 'dark' : 'light';
+  document.body.style.background = dark ? '#262626' : '';
+  event.target.textContent = dark ? 'Light' : 'Dark';
+});
+
+const [id, state] = location.hash.slice(1).split('/');
+const at = Math.max(0, SCREENS.findIndex((screen) => screen.id === id));
+show(at, Math.max(0, SCREENS[at].states.indexOf(state)));
+</script>
+</body>
+</html>
