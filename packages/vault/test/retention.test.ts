@@ -459,7 +459,7 @@ test('review r2: a day that waits on the same lock for a day is an alarm', { ski
   const held: LogStore = Object.assign(Object.create(store) as LogStore, { dropDay: async () => Promise.reject(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })) });
   const alerts: string[] = [];
   let t = clock;
-  const keep = upkeep(cp, held, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, held, { keepDays: 1, signingKey: seed, now: () => t, alert: (m) => alerts.push(m) });
   await keep();
   t += DAY_MS - 3_600_000;
   await keep();
@@ -479,7 +479,7 @@ test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits wi
   // Three days on, today's and tomorrow's days (made ahead) are due: nothing signed past their end yet.
   let t = clock + 3 * DAY_MS;
   const alerts: string[] = [];
-  const keep = upkeep(cp, store, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, store, { keepDays: 1, signingKey: seed, now: () => t, alert: (m) => alerts.push(m) });
   await keep();
   assert.match((await retain(cp, store, { keepDays: 1, macKey, now: () => t })).waiting?.reason ?? '', /is not past the day's end yet/);
   for (let i = 0; i < 3; i += 1) {
@@ -510,7 +510,7 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
   const old = Date.now() - 900_000 - 60_000 - 3000 - 3_600_000 - 60_000;
   await run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) VALUES ('token:a', ${randomUUID()}, ${old}), ('token:a', ${randomUUID()}, ${Date.now()})`);
   const alerts: string[] = [];
-  const keep = upkeep(cp, store, { keepDays: null, seed, now, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, store, { keepDays: null, signingKey: seed, now, alert: (m) => alerts.push(m) });
   await keep();
   await keep();
   assert.deepEqual(alerts, []);

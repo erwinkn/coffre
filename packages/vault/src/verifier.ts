@@ -1,11 +1,11 @@
-import { pairSigners, pairVerifiers, verifyLog, type LogEntry, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
+import { splitNote, verifyLog, type LogEntry, type PairNotes, type PairVerifiers, type StoredPair } from '@coffre/core/merkle';
 import type { TreeVerification } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { loggedChange } from './changes.ts';
-import { logOrigin } from './checkpointer.ts';
-import { authentic, logMacKey, retentionCut, type LogMacKey } from './log-entry.ts';
+import { logKeys } from './log-checkpointer.ts';
+import { authentic, retentionCut, rotationOf, tagOf, type LogMacKey } from './log-entry.ts';
 import { purposeOf } from './log-replay.ts';
 import { logStore } from './log-store.ts';
 import { requestsUnique } from './store.ts';
@@ -30,19 +30,28 @@ import { requestsUnique } from './store.ts';
  * Worker's call has a limit on its CPU time. Nor can this check see an
  * entry deleted or reordered before its tick (R51's window; a change
  * answers only once sealed, so this is a use's).
+ *
+ * Across a rotation of the vault's signing key (T168, formal/Rotation.tla):
+ * the newest pair may be under a key the vault replaced while the log moves
+ * on from it, never at or past that key's rotation (RotationProbed), nor
+ * past a pair held outside under the current key (AnchorKeyHeld); above it,
+ * an entry under that key counts below its rotation, or while there is none
+ * yet (PendingAccepted). Above a pair under the current key, the current
+ * key's entries alone (BoundaryChecked): every rotation to it is sealed at
+ * or below, whether the database still holds its row or not.
  */
 
-/** The keys a check needs: the trees' public keys, and the entries' MAC key. */
-export type VerifierKeys = { verifiers: PairVerifiers; mac: LogMacKey };
+/** One key's part of a check: its log's origin, its trees' public keys, its entries' MAC key. */
+export type KeyCheck = { origin: string; verifiers: PairVerifiers; mac: LogMacKey };
 
-/** The verifier's keys from the vault's first signing seed, as the checkpointer has them (log-checkpointer.ts). */
+/** The keys a check needs, from each of the vault's signing keys: the one it signs with, then those it replaced. */
+export type VerifierKeys = { current: KeyCheck; previous: KeyCheck[] };
+
+/** The verifier's keys from the vault's signing keys, as the checkpointer has them (log-checkpointer.ts). */
 export async function verifierKeys(seeds: readonly Uint8Array[]): Promise<VerifierKeys> {
-  const seed = seeds[0]!;
-  const signers = await pairSigners(await logOrigin(seed), seed);
-  return {
-    verifiers: await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey }),
-    mac: logMacKey(seed),
-  };
+  const { current, previous } = await logKeys(seeds);
+  const check = ({ origin, verifiers, mac }: KeyCheck): KeyCheck => ({ origin, verifiers, mac });
+  return { current: check(current), previous: previous.map(check) };
 }
 
 export type VerifyOptions = {
@@ -73,25 +82,26 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
     // From the newest pair, which its signatures and the pairs held outside vouch for. It walks no use below it, so
     // retention's cut is not its to check: the newest pair and the signer's are at or above every cut.
     const newest = await store.newest();
+    const keyed = await underKeys(store, keys, newest, options.anchors ?? []);
     // Each entry's request, seen once (RequestIdChecked): a change's by its id, a use's by its time and id, which its MAC
     // covers. A copy below the start is what the database's unique indexes refuse, which every check holds to standing.
     const requests = new Set<string>();
-    const macHolds = authentic(keys.mac);
     const check = (entry: LogEntry): string | null => {
-      if (!macHolds(entry)) return 'its MAC does not hold';
+      const refused = keyed.vouch(entry);
+      if (refused !== null) return refused;
       const request = entry.tree === 'changes' ? `c:${String(entry.columns[1])}` : `u:${entry.at}:${String(entry.columns[1])}`;
       if (requests.has(request)) return 'a second entry under the request of another: a replay';
       requests.add(request);
       return malformed(entry);
     };
     const verdict = await verifyLog(store, {
-      verifiers: keys.verifiers,
+      verifiers: [keys.current, ...keys.previous].map((key) => key.verifiers),
       check,
       ...(newest === null ? {} : { newest }),
       ...(options.anchors === undefined ? {} : { anchors: options.anchors }),
       above: ABOVE_NEWEST,
     });
-    const problems = [...verdict.problems];
+    const problems = [...keyed.problems, ...verdict.problems];
     if (!(await requestsUnique(tx))) problems.push('the indexes that keep each request to one entry are gone: a copy of an entry would pass');
     return { verdict, problems };
   }, SNAPSHOT);
@@ -110,6 +120,77 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
 }
 
 /**
+ * The key the newest pair is under, held to the rotations (T168): a key the
+ * vault replaced is taken only below its own rotation, and never above a
+ * pair held outside under the current key; and which keys vouch for an
+ * entry above it. The rotations are read only when the newest pair is under
+ * a replaced key: a statement more on the rare check that meets one.
+ */
+async function underKeys(
+  store: ReturnType<typeof logStore>,
+  keys: VerifierKeys,
+  newest: StoredPair | null,
+  anchors: readonly PairNotes[],
+): Promise<{ problems: string[]; vouch: (entry: LogEntry) => string | null }> {
+  const problems: string[] = [];
+  const current = authentic(keys.current.mac);
+  const replaced = keys.previous.map((key) => ({ key, holds: authentic(key.mac) }));
+  const under = newest === null ? keys.current : (signerOf(newest.notes, [keys.current, ...keys.previous]) ?? keys.current);
+  // Which replaced key an entry is under, by its MAC's tag, and whether it holds.
+  const by = (entry: LogEntry) => {
+    const mac = entry.columns.at(-1);
+    const tag = mac instanceof Uint8Array ? tagOf(mac) : null;
+    return replaced.find((r) => tag !== null && r.key.mac.tag.equals(tag) && r.holds(entry)) ?? null;
+  };
+  if (under === keys.current) {
+    return { problems, vouch: (entry) => (current(entry) ? null : by(entry) !== null ? 'under a key the log moved on from' : 'its MAC does not hold') };
+  }
+  // The rotations, each authentic under the key it moves the log to: where each key it moves from stops counting.
+  const until = new Map<string, bigint>();
+  for (const entry of await store.rotations()) {
+    const r = rotationOf(entry);
+    const to = r === null ? undefined : [keys.current, ...keys.previous].find((key) => key.origin === r.to);
+    if (r !== null && to !== undefined && authentic(to.mac)(entry) && !until.has(r.from)) until.set(r.from, entry.number);
+  }
+  const retired = until.get(under.origin);
+  if (retired !== undefined && newest!.upto >= retired) {
+    problems.push(`checkpoint ${newest!.upto}: under ${under.origin}, at or past the rotation that retired it (${retired})`);
+  }
+  for (const notes of anchors) {
+    const at = signerOf(notes, [keys.current]) === null ? null : uptoOf(notes);
+    if (at !== null && at < newest!.upto) problems.push(`checkpoint ${newest!.upto}: under ${under.origin}, a replaced key, past the pair held outside under the current key (up to ${at})`);
+  }
+  return {
+    problems,
+    vouch(entry) {
+      if (current(entry)) return null;
+      const r = by(entry);
+      if (r === null) return 'its MAC does not hold';
+      // The newest pair's key while no rotation retired it yet (the rotation under way); any replaced key below its own.
+      const bound = until.get(r.key.origin) ?? (r.key === under ? null : -1n);
+      return bound === null || entry.number < bound ? null : 'under a key the log moved on from, past its rotation';
+    },
+  };
+}
+
+/** The key that signed a pair, by the name its changes note is signed under (each key's own, `<origin>/changes`): not verified, which verifyLog does. */
+function signerOf(notes: PairNotes, keys: readonly KeyCheck[]): KeyCheck | null {
+  let names: string[];
+  try {
+    names = splitNote(notes.changes).signatures.map((s) => s.name);
+  } catch {
+    return null;
+  }
+  return keys.find((key) => names.includes(key.verifiers.changes.name)) ?? null;
+}
+
+/** A pair's place, from its changes note's fourth line, `upto <n>`; null for a note that does not read so. */
+function uptoOf(notes: PairNotes): bigint | null {
+  const line = notes.changes.split('\n')[3] ?? '';
+  return /^upto \d{1,19}$/.test(line) ? BigInt(line.slice(5)) : null;
+}
+
+/**
  * Why an entry is none a release writes, from the columns its tree seals
  * (log-entry.ts): a change whose payload names no object, or another than
  * its own; a use of no purpose. Null for one that reads, a retention
@@ -117,7 +198,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
  */
 function malformed(entry: LogEntry): string | null {
   const c = entry.columns;
-  if (retentionCut(entry) !== null) return null;
+  if (retentionCut(entry) !== null || rotationOf(entry) !== null) return null;
   if (entry.tree === 'changes') {
     // [at, request, object, actor, payload, seal, mac]
     const [object, payload, seal] = [c[2], c[4], c[5]];

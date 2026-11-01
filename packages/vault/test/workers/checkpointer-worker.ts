@@ -8,6 +8,9 @@ type Env = {
   VAULT_HYPERDRIVE: { connectionString: string };
   VAULT_KEY: string;
   SIGNING_KEY: string;
+  /** The signing keys a deploy replaced (T168), a JSON array; the log's keys under each, for the witness. */
+  PREVIOUS_SIGNING_KEYS?: string;
+  PREVIOUS_LOG_KEYS?: string;
   WITNESS_KEY: string;
   LOG_KEYS: string;
   CHECKPOINTER: Namespace;
@@ -22,11 +25,12 @@ export const Vault = vault((env: Env) => ({
   checkpointer: env.CHECKPOINTER,
   kek: { id: 'checkpointer-workers-test', key: env.VAULT_KEY },
   signingKey: env.SIGNING_KEY,
+  previousSigningKeys: JSON.parse(env.PREVIOUS_SIGNING_KEYS ?? '[]') as string[],
   owners: ['root@acme.example'],
   witnesses: [durableWitness(env.WITNESS), r2Archive(env.ARCHIVE)],
 }));
 export const CoffreCheckpointer = checkpointer();
-export const CoffreWitness = witness((env: Env) => ({ name: 'witness.test', key: env.WITNESS_KEY, log: JSON.parse(env.LOG_KEYS) }));
+export const CoffreWitness = witness((env: Env) => ({ name: 'witness.test', key: env.WITNESS_KEY, log: JSON.parse(env.LOG_KEYS), previous: JSON.parse(env.PREVIOUS_LOG_KEYS ?? '[]') }));
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

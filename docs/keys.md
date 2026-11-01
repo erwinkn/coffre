@@ -60,12 +60,17 @@ running with the old vault key, as for the seconds a deploy takes, writes nothin
 after the rotation: its calls fail until it is replaced. And a vault key, once
 replaced, cannot come back as `kek`: the vault refuses to write under it.
 
-**Not yet on 0.15's log.** Its checkpoints, and the MACs of its entries, are
-under the vault's first signing key alone, so a rotation that changes the
-signing key leaves the checkpointer refusing the log and every change failing
-at its seal; uses go on. A local vault key derives the signing key, so do not
-rotate it, nor the signing key, on 0.15 until 0.15.1 (T168).
-With AWS KMS and a `signingKey` of its own, the KEK alone may rotate, as above.
+On 0.15's log the same holds, and the checkpointer does the moving
+([audit-tree.md](design/audit-tree.md), "A rotation"). At its first start
+under the new key it writes a rotation entry, past which the old key vouches
+for nothing, seals it within a tick under the new key, and carries its
+memory of the last pair across. A use from a vault still under the old key is
+refused as `superseded` (503, `Retry-After`: the retry reaches a vault under
+the new one), and its changes are refused by the database. A witness keeps
+cosigning if its settings name the log's keys under the old signing key in
+`previous`. Restoring a backup from before the rotation takes the same
+configuration: the old key in `previousKeks`, the checkpointer's memory reset
+([restore.md](restore.md)).
 
 The app key, `APP_KEY`, rotates the same way: the new one becomes
 `auditChainKey`, the old one moves to `previousAuditChainKeys`, and the
@@ -237,6 +242,21 @@ signingKey: env.SIGNING_KEY, // new: KMS needs one
 The vault signs under the new `signingKey` from then on. Its first call is
 a rotation, as with a new local vault key: the local vault key's key verifies what came
 before it, and nothing after.
+
+## Rotating a signing key
+
+With a key service, the vault's signing key is `signingKey`, which nothing
+derives. To rotate it, make 32 new random bytes `signingKey`, and move the
+old one to `previousSigningKeys`, where it stays for good, as a replaced
+vault key does:
+
+```ts
+signingKey: env.SIGNING_KEY,                    // new
+previousSigningKeys: [env.OLD_SIGNING_KEY],     // the one it replaced, the newest first
+```
+
+The rotation is then the one above: the old key verifies what it signed
+before, and nothing after.
 
 New versions are wrapped by KMS from then on. Versions written before still
 open with the local key, which must stay configured and escrowed until a

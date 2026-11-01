@@ -462,16 +462,74 @@ the vault's signing seed, cut to twelve (D162). The tag is public, one per
 key (HKDF of the seed under a label of its own, `coffre.log.tag.v1`), and
 names the key, so that once the signing key rotates (T168) the database
 can refuse a replaced key's entries and a reader knows which key to check
-one under; it vouches for nothing by itself. The HMAC covers the tree and
+one under ("A rotation", below); it vouches for nothing by itself. The HMAC covers the tree and
 every column but the number and the MAC (`macData`, KindInMac). The
 change path (PR 4) and the use path (PR 5) compute it when they write an
 entry; the checkpointer checks it before it seals anything.
 
 **The log's origin** is derived from the vault's signing key:
 `coffre.log/<the first 8 bytes of SHA-256 of the changes key, hex>`. Each
-tree's origin is that plus `/changes` or `/uses`. A new signing key starts
-a new log; how a rotation carries the trees across is the cutover's
-(PR 9).
+tree's origin is that plus `/changes` or `/uses`. A rotation of the key
+keeps the trees and moves them to the new key's origin (below).
+
+**A rotation** (T168, W277; the spec: [`formal/Rotation.tla`](../../formal/Rotation.tla),
+[formal.md](../formal.md#rotationtla)). A deployment moves to a new
+signing key, a new local KEK or a new `signingKey` beside a key service,
+and keeps the old one configured (`previousKeks`, `previousSigningKeys`).
+The vault's signing keys are then `[new, …previous]`, and the log's rule is
+R41's: a replaced key vouches only for what came before the rotation.
+- **The boundary is an entry.** At its first start under the new key, the
+  checkpointer finds the log under another (the `to` of the newest
+  rotation entry, else the key of its head) and writes the rotation: a
+  change of the log's own object `log_object('log', 'key')`, its payload
+  naming both keys by origin, its MAC the new key's. `log_rotate` writes
+  it under the barrier's locks (the issue lock, then the fence, both
+  exclusive), and in the same transaction adds the old key's tag to
+  `log_fence.retired` (migration 0049). It reads `retired` again under
+  them: a start that rotated first leaves nothing to do. Then it ticks, so
+  that the rotation is sealed under the new key within a tick.
+- **Old isolates write nothing past it.** A use whose MAC names a retired
+  key is `superseded` (the app answers 503, `Retry-After`; a newer isolate
+  answers the retry), in `use_credential`'s own statement, on the fence row
+  it reads already: no extra read on the hot path. A change under one is
+  refused by a trigger on `log_changes`, whoever writes it. Each check runs
+  under the lock the rotation takes exclusive, in the statement that takes
+  the number, so no entry under the old key lands past the rotation.
+  Without this an old isolate's entry past the boundary would hold every
+  tick from then on, and every change would fail at its seal.
+- **The signer carries its memory across.** It opens its memory, and the
+  database's newest pair, under any key it holds; a pair under a replaced
+  key only below that key's rotation, and never at or above a pair it
+  remembers under its own. It seals an entry under a replaced key only
+  below its rotation, from the boundary it wrote or read at its open,
+  never from the database again. Its first pair under the new key extends
+  the old key's trees, and is the one it remembers from then on. With its
+  memory lost at that moment, it takes the database's newest pair, under
+  the old key, alarmed as any lost memory is, and rotates as above.
+- **The verifier** takes a newest pair under a replaced key while the log
+  moves on from it: below its rotation, and not above the pair held outside
+  under the current key; above it, that key's entries count below its
+  rotation, or while there is none yet. Above a pair under the current
+  key, the current key's alone. It reads the rotation entries only when
+  the newest pair is under a replaced key.
+- **A replaced key never comes back.** A checkpointer whose own key a
+  rotation retired refuses to open, and the trigger refuses its entries.
+- **Witnesses.** The witness's object takes `previous`, the log's keys
+  under each replaced key: the pair it holds may be under one, and the
+  first pair under the new key it cosigns must extend it.
+- **The window.** Until the rotation is sealed, someone who holds the old
+  key and writes the database can delete the rotation entry and sign over
+  its place with the old key, and no check sees it: R51's window, normally
+  the moment between the rotation and the tick right after it. What the
+  old key forged before the rotation verifies like the rest, as under
+  0.14 ([keys.md](../keys.md)).
+- **Seals.** A use checks an object's seal under every key the vault holds,
+  the replaced ones included, whatever the change's number: one who holds
+  the old key and writes the database can still seal a row the use takes,
+  though its change entry is refused by every tick and named by every
+  check (BoundaryChecked). Holding seals to the boundary too needs each
+  input's change number in the use's row; not done here (T168's scope is
+  the log).
 
 **Nothing it awaits is unbounded** (T169). On W278's Cloudflare bench, one
 tick waited 25 minutes on a connection that never answered, until a
@@ -548,7 +606,7 @@ cutover's seal. Now:
   back too (`HotPathOneStall`, EXPECTED).
 
 **On Node** (`packages/vault/src/checkpointer-node.ts`):
-- `runCheckpointer({ database, seed, memory, witnesses })` ticks every
+- `runCheckpointer({ database, signingKeys, memory, witnesses })` ticks every
   500 ms, a tick after the last ends. A tick that throws is an alarm, kept
   once; `stop()` closes the checkpointer, so a handle kept after it never
   ticks beside a runner started over the same file.
@@ -600,13 +658,16 @@ configured by the same `vault(env => …)`.
 in by listing them in its vault config (`witnesses: […]`). They are R40's
 optional capability, wired where the pairs are signed, in the vault.
 - **`durableWitness(env.WITNESS)`** is a Durable Object of its own,
-  `witness(env => ({ name, key, log }))`. It cosigns a pair only if both
+  `witness(env => ({ name, key, log, previous }))`. It cosigns a pair only if both
   trees extend the one it holds. Its client sends each tree's proof from
   the sizes the object holds; on a 409 it learns those sizes and sends
   again. It passes the try's abort signal to the object's request.
   A pair it holds that no longer opens (its settings now name other keys,
   a record damaged) is refused, never forgotten into a fresh witness: a
-  new witness is a new name (Fable's review).
+  new witness is a new name (Fable's review). After a rotation of the
+  vault's signing key, `previous` names the log's keys under the replaced
+  one: the pair it holds opens under them, and only a pair under `log`
+  that extends it is cosigned (T168).
 - **`r2Archive(env.ARCHIVE)`** puts each pair it is sent under
   `audit/<upto>.json` without overwriting. The pump sends the newest pair,
   so one a slow put skipped over is not kept; the next, which extends it,

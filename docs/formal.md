@@ -39,15 +39,17 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - Four more hold the workload-access design before it is built
   ([below](#workload-access)): `formal/Workload.tla` and the three
   `formal/Workload*.tla` beside it.
-- Four hold 0.15's rewrite of the vault and the audit log, the spec its
+- Five hold 0.15's rewrite of the vault and the audit log, the spec its
   code follows ([below](#015-the-hot-path-sealing-and-the-cutover)):
   - [`formal/HotPathOne.tla`](../formal/HotPathOne.tla): uses, changes,
     sealed inputs, covers, the deadline and the bulk cap;
   - [`formal/Seal.tla`](../formal/Seal.tla): sealing into two Merkle trees;
   - [`formal/Migration015.tla`](../formal/Migration015.tla): the cutover
-    from 0.14.
+    from 0.14;
   - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
-    that the audit pages read ([below](#readstla)).
+    that the audit pages read ([below](#readstla));
+  - [`formal/Rotation.tla`](../formal/Rotation.tla): the log across a
+    rotation of the vault's signing key.
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -1941,6 +1943,72 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
 
+### Rotation.tla
+
+0.15's log across a rotation of the vault's signing key (T168, W277;
+[audit-tree.md](design/audit-tree.md), "A rotation"). Everything the log's
+integrity rests on comes from that key: its trees' signing keys, so every
+pair, and its entries' MAC key. A deploy moves the vault to a new key B (a
+new local KEK, or a new `signingKey` beside a key service) and keeps the
+old one, A, as previous; isolates still under A serve beside B's for the
+moments it takes. Each MAC names its key (its first four bytes, the key's
+tag), so the database can tell them apart.
+
+**The parties.**
+- **Writers** under A, and under B once deployed, each append as Seal.tla's
+  appends do: the fence's lock shared, then the number, then a commit or an
+  abort. The fence holds `retired`, the keys the log moved on from.
+- **The signer** opens as `Checkpointer.open`, its memory and the
+  database's newest row each under a key it holds; writes the rotation
+  entry when the log is under another key than its own (the newest
+  rotation's `to`, else its head's key), under the barrier's locks, adding
+  that key to `retired`; and ticks. It remembers a pair before writing it,
+  and a crash can fall between any two steps, the rotation and its first
+  pair under B among them. The deploy replaces it whatever it was doing,
+  a pair remembered and not written included (the rotation mid-tick).
+- **The verifier** checks the newest pair, the pair held outside (the
+  signer's memory) and the entries above, with the vault's keys.
+- **Eve** holds A (it leaked: why one rotates) and writes the database past
+  every lock and trigger: entries under A at numbers she takes, pairs
+  under A at any place over entries she chooses, rows and entries deleted.
+- **A restore** puts back a backup taken at any moment, the signer's memory
+  reset by hand ([restore.md](restore.md)); **a rollback** starts the
+  signer under A again, B previous.
+
+| protection, in the code | turned off, TLC finds |
+|---|---|
+| a writer under a retired key is refused (RetiredRefused: `use_credential`'s `superseded`, the trigger on `log_changes`, migration 0049) | `OldWritesBelowBoundary`: an isolate under A commits past the rotation; and `LogWorks`: no tick can seal past its entry, every change fails at its seal |
+| ... in the statement that takes its number, under the lock (RefusedUnderLock) | `OldWritesBelowBoundary`: a writer that checked before the rotation took its number after it |
+| the rotation written under the barrier's locks, exclusive (RotateUnderLock: `log_rotate`) | `OldWritesBelowBoundary`: a writer under the lock, its check passed, numbered past the rotation |
+| the signer opens its memory under a previous key (MemoryUnderPrevious) | `LogWorks`: "the signer remembers a pair it did not sign", the bug T168 found |
+| ... and the database's newest row (RowUnderPrevious) | `LogWorks`: after a restore (the memory reset), "not a pair signed by this log" |
+| a previous key vouches for an entry only below its rotation, in a tick (from the boundary the signer wrote or read at its open) and in the verifier (BoundaryChecked) | `SealedBelowBoundary`, `VerifiedSound`: Eve's entry under A past the rotation sealed, and passed |
+| a pair under a previous key is taken only below that key's rotation (RotationProbed) | `VerifiedSound`: Eve's pair under A over the rotation, before its first seal, passed |
+| ... and never above a pair under the current key held outside (AnchorKeyHeld) | `VerifiedSound`: the rotation's row deleted once sealed, Eve's pair under A above the memory's passed |
+| the verifier takes the rotation under way: the newest pair under A while no rotation from A is at or below it (PendingAccepted) | `NoFalseAlarm`: every check alarms between the deploy and the rotation's first seal |
+| a signer whose key the log moved on from signs nothing, and the trigger refuses its rotation (KeyNeverBack + RetiredRefused, each covering the other) | `NoOldPairOverRotation`: a config rolled back to A, A signs pairs over its own rotation |
+
+Liveness (`LogWorks`, `RotationDeploy`; weak fairness on the signer's steps
+and a writer holding the lock): every entry an honest writer commits is
+sealed in time, the signer never left refusing, across the deploy, a crash
+and a restore.
+
+`EXPECTED` (`RotationWindow`): Eve deletes the rotation entry before its
+first seal and signs a pair under A over its place. No check sees it: the
+database no longer shows the rotation, and the memory still holds A's
+pair. This is R51's window for the rotation, normally the moment between
+its write and the tick right after it, longer only if the signer crashes
+between the two. The signer itself is not fooled: it counts from the
+rotation it wrote, so it seals nothing under A past it
+(`SealedBelowBoundary` holds there).
+
+**Not modelled:** two signers at once, which the hosts rule out (one Durable
+Object, one runner per memory), though `log_rotate` reads the fence again
+under its locks; the kinds of entries and the two trees, retention, witnesses
+and time, the same for every key (Seal.tla's); a rotation through a third key
+(the code's rule is the same for each); seals, which a use checks under every
+key the vault holds (see audit-tree.md, "A rotation").
+
 ## TLC
 
 [TLC](https://github.com/tlaplus/tlaplus) is the TLA+ tools' explicit-state
@@ -1980,7 +2048,7 @@ shards 10.9 (5.8 and 5.5 here).
 | hotpath-skew | 5.4 min | 29 min | 11.0 min (measured) |
 | seal | 4.9 min | 23 min | about 10 min (estimated) |
 | seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
-| seal-retention | 3.9 min | not measured | about 8 min (estimated) |
+| seal-retention | 6.5 min, Rotation's 2.6 of it | not measured | about 13 min (estimated) |
 
 Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
@@ -2020,7 +2088,8 @@ every pull request that is not a version-only bump:
     - `hotpath-skew` (its slack and clock-skew scenarios);
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
-    - `seal-retention` (SealRetention and SealRetentionCrash);
+    - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
+      four, 2.6 minutes of it here);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints

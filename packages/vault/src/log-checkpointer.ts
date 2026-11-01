@@ -1,22 +1,47 @@
-import { pairSigners } from '@coffre/core/merkle';
+import { randomUUID } from 'node:crypto';
+
+import { pairSigners, pairVerifiers, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
 
 import { Checkpointer, FenceClosed, logOrigin, type Alarm, type CheckpointStore, type Fence, type Memory, type Witness } from './checkpointer.ts';
-import { authentic, logMacKey } from './log-entry.ts';
+import { authentic, entryMac, KEY_OBJECT, logMacKey, rotationOf, rotationPayload, type LogMacKey } from './log-entry.ts';
 import type { LogStore } from './log-store.ts';
 import { DAY_MS, dayOf, retain } from './retention.ts';
+
+/** One signing seed's keys of the log: its origin, the trees' signers and verifiers under it, and the entries' MAC key. */
+export type LogKey = { origin: string; signers: PairSigners; verifiers: PairVerifiers; mac: LogMacKey };
+
+export async function logKey(seed: Uint8Array): Promise<LogKey> {
+  const origin = await logOrigin(seed);
+  const signers = await pairSigners(origin, seed);
+  return { origin, signers, verifiers: await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey }), mac: logMacKey(seed) };
+}
+
+/**
+ * The vault's keys of the log, from its signing keys (`signingKeys`, the one
+ * it signs with first): no two may share a MAC tag, which is how the
+ * database tells a replaced key's entries from the current one's (T168).
+ */
+export async function logKeys(seeds: readonly Uint8Array[]): Promise<{ current: LogKey; previous: LogKey[] }> {
+  const [current, ...previous] = await Promise.all(seeds.map((seed) => logKey(seed)));
+  if (current === undefined) throw new Error('the vault has no signing key');
+  const clash = previous.find((key) => key.mac.tag.equals(current.mac.tag));
+  if (clash !== undefined) throw new Error(`the signing key's log tag is that of a key it replaced (${clash.origin}): make another signing key`);
+  return { current, previous };
+}
 
 /**
  * The checkpointer as a host runs it, on Node (`runCheckpointer`) or in its
  * Durable Object (`CheckpointerObject`): the trees' keys and the MAC key
- * from the vault's signing seed, the log's origin from that key, and every
- * alarm handed to `record` as well as returned by `alarms`, where whoever
- * watches the log reads them (R40's plugin): refused ticks, changes answered
+ * from each of the vault's signing keys, the log's origin from each, the log
+ * moved on to the first when it is under another (T168), and every alarm
+ * handed to `record` as well as returned by `alarms`, where whoever watches
+ * the log reads them (R40's plugin): refused ticks, changes answered
  * unwitnessed (R51), a memory found behind the database.
  */
 export type HostOptions = {
-  store: CheckpointStore;
-  /** The vault's signing seed: the first of `signingKeys`. */
-  seed: Uint8Array;
+  store: LogStore;
+  /** The vault's signing keys (`ResolvedVaultConfig.signingKeys`): the one it signs with, then those it replaced. */
+  signingKeys: readonly Uint8Array[];
   memory: Memory;
   witnesses?: readonly Witness[];
   /** Where each alarm is kept; it is also logged. */
@@ -28,12 +53,24 @@ export type HostOptions = {
 };
 
 export async function openLogCheckpointer(options: HostOptions): Promise<Checkpointer> {
-  const signers = await pairSigners(await logOrigin(options.seed), options.seed);
+  const { current, previous } = await logKeys(options.signingKeys);
   const now = options.now ?? Date.now;
-  return Checkpointer.open(options.store, signers, {
+  const store = options.store;
+  return Checkpointer.open(store, current.signers, {
     memory: options.memory,
     witnesses: options.witnesses,
-    authentic: authentic(logMacKey(options.seed)),
+    authentic: authentic(current.mac),
+    previous: previous.map((key) => ({ origin: key.origin, verifiers: key.verifiers, authentic: authentic(key.mac) })),
+    rotations: {
+      read: () => store.rotations(),
+      of: rotationOf,
+      async write(from) {
+        const retired = previous.find((key) => key.origin === from);
+        if (retired === undefined) throw new Error(`the log is under ${from}, a key the vault does not hold`);
+        const row = { at: now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(from, current.origin), seal: null };
+        return store.rotate({ ...row, mac: entryMac(current.mac, { tree: 'changes', row }) }, retired.mac.tag);
+      },
+    },
     now,
     ...(options.fence === undefined ? {} : { fence: options.fence }),
     ...(options.tickBoundMs === undefined ? {} : { tickBoundMs: options.tickBoundMs }),
@@ -75,9 +112,9 @@ export const daysAround = (t: number) => Array.from({ length: DAYS_AHEAD + 2 }, 
  * day waiting longer than `WAITING_ALARM_MS`. A quiet log, whose pairs do not
  * pass a day's end until something is logged, waits with no alarm.
  */
-export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: number | null; seed: Uint8Array; now?: () => number; alert: (message: string) => void }): () => Promise<void> {
+export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: number | null; signingKey: Uint8Array; now?: () => number; alert: (message: string) => void }): () => Promise<void> {
   const now = options.now ?? Date.now;
-  const macKey = logMacKey(options.seed);
+  const macKey = logMacKey(options.signingKey);
   let madeFor: string | null = null;
   let retained = -Infinity;
   let pruned = -Infinity;

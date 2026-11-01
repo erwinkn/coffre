@@ -295,13 +295,13 @@ export function vault<Env>(configure_: (env: Env) => WorkersVaultConfig): typeof
 /**
  * 0.15's checkpointer, the Durable Object class a deployment binds beside
  * the vault, configured by the same `vault(env => …)`: its Hyperdrive, its
- * signing key, its witnesses. `export const CoffreCheckpointer = checkpointer()`.
+ * signing keys (the one it signs with, and those it replaced: T168), its witnesses. `export const CoffreCheckpointer = checkpointer()`.
  */
 export function checkpointer() {
   return checkpointerObject((env: object) => {
     if (configure === null) throw new Error('the vault Worker must export default vault(…)');
     const config = configure(env as never);
-    return { hyperdrive: config.database.hyperdrive, seed: resolveVaultConfig(config).signingKeys[0]!, witnesses: config.witnesses };
+    return { hyperdrive: config.database.hyperdrive, signingKeys: resolveVaultConfig(config).signingKeys, witnesses: config.witnesses };
   });
 }
 

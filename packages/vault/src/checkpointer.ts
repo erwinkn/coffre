@@ -66,6 +66,12 @@ import { isUnavailable } from '@coffre/db/dialect';
  * `Fence`, so that its host opens another while the database still holds
  * the old one's statement (Seal.tla's Fenced); a change waits at most
  * `SEAL_WAIT_MS` for its seal, then answers `Unsealed`.
+ *
+ * Across a rotation of the vault's signing key (T168, formal/Rotation.tla):
+ * the signer opens its memory and the database's newest pair under a key it
+ * replaced, too (MemoryUnderPrevious, RowUnderPrevious), writes the rotation
+ * entry when the log is under another key than its own, and seals an entry
+ * under a replaced key only below that key's rotation (BoundaryChecked).
  */
 
 /** What the checkpointer needs of the database. Postgres and SQLite implement it; so do the tests. */
@@ -438,6 +444,30 @@ type Pump = {
 
 type Pending = { next: { pair: Pair; notes: PairNotes }; edges: Record<TreeName, Edge>; tiles: Record<TreeName, Tile[]> };
 
+/**
+ * A key the log was under before the signer's (T168): its origin, which
+ * names it in a rotation, its pairs' verifiers, and its entries' MAC check.
+ */
+export type PreviousKey = { origin: string; verifiers: PairVerifiers; authentic: (entry: LogEntry) => boolean };
+
+/**
+ * The log's rotations (T168): how the signer reads them, and writes its own
+ * when the log is under another key than the one it signs with.
+ */
+export type Rotations = {
+  /** Every rotation entry the database holds, by number: one for each key the log moved on from, so few. */
+  read(): Promise<LogEntry[]>;
+  /** The keys an entry moves the log between, by origin, if it is a rotation; null for any other. */
+  of(entry: LogEntry): { from: string; to: string } | null;
+  /**
+   * The rotation from `from` to the signer's key, written under the
+   * barrier's locks and retiring `from` in the fence, so that no writer
+   * under it appends past it (RotateUnderLock, RetiredRefused): its number,
+   * or null if the log moved on from `from` already.
+   */
+  write(from: string): Promise<bigint | null>;
+};
+
 type Options = {
   memory: Memory;
   witnesses?: readonly Witness[];
@@ -448,6 +478,10 @@ type Options = {
    * tick would be sealed into the uses tree, and pruned with the uses.
    */
   authentic: (entry: LogEntry) => boolean;
+  /** The keys the signer replaced, the newest first (T168): each opens a pair under it, and vouches for entries below its rotation. */
+  previous?: readonly PreviousKey[];
+  /** The log's rotations, read and written: without them, a log under a previous key is refused. */
+  rotations?: Rotations;
   /** Where alarms go: refused ticks, unwitnessed changes, memory and database out of step. */
   alert?: (message: string) => void;
   freshMs?: number;
@@ -466,8 +500,15 @@ type Options = {
 export class Checkpointer {
   private store: CheckpointStore;
   private signers: PairSigners;
-  private options: Required<Omit<Options, 'witnesses' | 'fence'>> & { witnesses: readonly Witness[] };
+  private options: Required<Omit<Options, 'witnesses' | 'fence' | 'previous' | 'rotations'>> & { witnesses: readonly Witness[] };
   private fence: Fence;
+  /**
+   * Each replaced key that may still vouch for an entry the signer has yet
+   * to seal, with the number of the rotation that retired it: below it, and
+   * never at or past it (BoundaryChecked). Read or written at its open, never
+   * again from the database, whose row a writer could delete.
+   */
+  private retired: { key: PreviousKey; until: bigint }[];
   private edges: Record<TreeName, Edge>;
   private head: { pair: Pair; notes: PairNotes };
   private running: Promise<unknown> = Promise.resolve();
@@ -498,10 +539,19 @@ export class Checkpointer {
   /** The log's public keys, which open its pairs. */
   readonly verifiers: PairVerifiers;
 
-  private constructor(store: CheckpointStore, signers: PairSigners, verifiers: PairVerifiers, options: Options & { fence: Fence }, edges: Record<TreeName, Edge>, head: { pair: Pair; notes: PairNotes }) {
+  private constructor(
+    store: CheckpointStore,
+    signers: PairSigners,
+    verifiers: PairVerifiers,
+    options: Options & { fence: Fence },
+    edges: Record<TreeName, Edge>,
+    head: { pair: Pair; notes: PairNotes },
+    retired: { key: PreviousKey; until: bigint }[] = [],
+  ) {
     this.store = store;
     this.fence = options.fence;
     this.signers = signers;
+    this.retired = retired;
     this.verifiers = verifiers;
     // Each default by itself: an option passed as undefined takes it too.
     this.options = {
@@ -556,15 +606,31 @@ export class Checkpointer {
     // Everything this checkpointer does to the database and its memory, its open included, goes through its fence.
     const fence = options.fence ?? new Fence();
     store = fence.store(store);
-    options = { ...options, memory: fence.memory(options.memory), fence };
+    // The rotations' reads and write too (T168): one a closed checkpointer started never lands as its own.
+    options = { ...options, memory: fence.memory(options.memory), fence, ...(options.rotations === undefined ? {} : { rotations: fence.store(options.rotations) }) };
     const verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
+    const own: PreviousKey = { origin: originOf(signers), verifiers, authentic: options.authentic };
+    const keys = [own, ...(options.previous ?? [])];
+    // A pair under whichever key signed it: the signer's, or one it replaced.
+    const opened = async (notes: PairNotes) => {
+      for (const key of keys) {
+        const pair = await openPair(notes, key.verifiers);
+        if (pair !== null) return { pair, notes, key };
+      }
+      return null;
+    };
+    // The rotations the log holds, each MAC'd by the key it moves the log to (one the signer holds): where each key it
+    // moved on from stops vouching. One from the signer's own key: a replaced key, back, which signs nothing more.
+    const rotations = options.rotations === undefined ? [] : await readRotations(options.rotations, keys);
+    const retiredAt = (origin: string) => rotations.find((r) => r.from === origin)?.number ?? null;
+    const own_ = retiredAt(own.origin);
+    if (own_ !== null) throw new Error(`the log moved on from this signer's key (${own.origin}) at ${own_}: a replaced key signs nothing more`);
     const record = await options.memory.last();
-    let mine: { pair: Pair; notes: PairNotes } | null = null;
+    let mine: { pair: Pair; notes: PairNotes; key: PreviousKey } | null = null;
     if (record !== null) {
       const notes = decodePair(record);
-      const pair = notes === null ? null : await openPair(notes, verifiers);
-      if (pair === null) throw new Error('the signer remembers a pair it did not sign');
-      mine = { pair, notes: notes! };
+      mine = notes === null ? null : await opened(notes);
+      if (mine === null) throw new Error('the signer remembers a pair it did not sign');
     }
     const row = await store.newest();
     if (row === null) {
@@ -575,14 +641,28 @@ export class Checkpointer {
       // genesis already remembered (a crash before its write) is written as it was, never signed again.
       const empty = { size: 0, root: EMPTY_ROOT };
       // Its time is 0: it seals nothing, and no clock is trusted before the first entry holds it (the tick's rule).
-      const genesis = mine ?? (await signPair(signers, 0n, 0, { changes: empty, uses: empty }));
+      const genesis = mine ?? { ...(await signPair(signers, 0n, 0, { changes: empty, uses: empty })), key: own };
       await options.memory.remember(encodePair(genesis.notes));
       await rewrite(store, { upto: 0n, notes: genesis.notes }, { changes: [], uses: [] });
-      return new Checkpointer(store, signers, verifiers, { ...options, fence }, { changes: Edge.empty(), uses: Edge.empty() }, genesis);
+      return Checkpointer.moved(store, signers, verifiers, { ...options, fence }, { changes: Edge.empty(), uses: Edge.empty() }, genesis, rotations);
     }
-    const newest = await openPair(row.notes, verifiers);
-    if (newest === null || newest.upto !== row.upto) throw new Error(`the newest checkpoint (${row.upto}) is not a pair signed by this log`);
-    let head = { pair: newest, notes: row.notes };
+    const found = await opened(row.notes);
+    if (found === null || found.pair.upto !== row.upto) {
+      throw new Error(`the newest checkpoint (${row.upto}) is not a pair signed by this log${keys.length > 1 ? ' under any key the vault holds' : ''}`);
+    }
+    if (found.key !== own) {
+      // A pair under a key the signer replaced is the newest only while the log is moving on from it: below its rotation
+      // (RotationProbed), and never at or above a pair the signer remembers under its own (AnchorKeyHeld).
+      const until = retiredAt(found.key.origin);
+      if (until !== null && row.upto >= until) {
+        throw new Error(`the newest checkpoint (${row.upto}) is under ${found.key.origin}, at or past the rotation that retired it (${until})`);
+      }
+      if (mine?.key === own && row.upto >= mine.pair.upto) {
+        throw new Error(`the newest checkpoint (${row.upto}) is under ${found.key.origin}, a key the signer replaced, at or past the pair it remembers under its own (${mine.pair.upto})`);
+      }
+    }
+    const newest = found.pair;
+    let head: { pair: Pair; notes: PairNotes; key: PreviousKey } = found;
     let edges = await loadEdges(store, newest);
     if (mine !== null && !samePair(mine.pair, newest)) {
       if (mine.pair.upto === newest.upto) throw new Error(`the database's checkpoint at ${newest.upto} is not the pair the signer signed`);
@@ -632,7 +712,40 @@ export class Checkpointer {
       }
       await options.memory.remember(encodePair(row.notes));
     }
-    return new Checkpointer(store, signers, verifiers, { ...options, fence }, edges, head);
+    return Checkpointer.moved(store, signers, verifiers, { ...options, fence }, edges, head, rotations);
+  }
+
+  /**
+   * The checkpointer over its head, the log moved on to the signer's key
+   * first if it is under another (T168): the key of the newest rotation, or
+   * else the key of the head. The rotation goes in before anything is sealed
+   * under the signer's key, under the barrier's locks; every key it replaced
+   * vouches from then on only below its rotation.
+   */
+  private static async moved(
+    store: CheckpointStore,
+    signers: PairSigners,
+    verifiers: PairVerifiers,
+    options: Options & { fence: Fence },
+    edges: Record<TreeName, Edge>,
+    head: { pair: Pair; notes: PairNotes; key: PreviousKey },
+    rotations: { number: bigint; from: string; to: string }[],
+  ): Promise<Checkpointer> {
+    const own = originOf(signers);
+    const at = rotations.at(-1)?.to ?? head.key.origin;
+    const boundaries = new Map(rotations.map((r) => [r.from, r.number]));
+    if (at !== own) {
+      if (options.rotations === undefined) throw new Error(`the log is under ${at}, not this signer's key (${own}), and it cannot write the rotation`);
+      const number = await options.rotations.write(at);
+      if (number === null) throw new Error(`the log moved on from ${at} meanwhile: open again`);
+      boundaries.set(at, number);
+      options.alert?.(`the audit log moves on from ${at} to this signer's key, ${own}, at ${number}: entries under ${at} count only below it`);
+    }
+    const retired = (options.previous ?? []).flatMap((key) => {
+      const until = boundaries.get(key.origin);
+      return until === undefined || until <= head.pair.upto ? [] : [{ key, until }];
+    });
+    return new Checkpointer(store, signers, verifiers, options, edges, { pair: head.pair, notes: head.notes }, retired);
   }
 
   /**
@@ -743,7 +856,7 @@ export class Checkpointer {
     for (const e of entries) {
       if (e.number <= previous || e.number > upto) failures.push(`${e.number}: outside the window (${previous}, ${upto}]: two entries with one number, or out of order`);
       else if (!TREES.includes(e.tree)) failures.push(`${e.number}: in no tree`);
-      else if (!this.options.authentic(e)) failures.push(`${e.number}: its MAC does not hold`);
+      else if (!this.vouched(e)) failures.push(`${e.number}: ${this.retired.some((r) => e.number >= r.until && r.key.authentic(e)) ? 'under a key the log moved on from, past its rotation' : 'its MAC does not hold'}`);
       // A use takes its number within its deadline of `at`; an entry much older than the pair the signer holds is a
       // replay, e.g. the copy of a use whose day was dropped, which no lookup can match.
       else if (e.at < pair.at - this.options.freshMs) failures.push(`${e.number}: at ${e.at}, older than the signer's pair (${pair.at}): a replay`);
@@ -802,6 +915,11 @@ export class Checkpointer {
     const writeMs = performance.now() - t1;
     this.commit(this.pending);
     return result(true, writeMs);
+  }
+
+  /** Whether a key vouches for an entry: the signer's, or one it replaced, below that key's rotation (BoundaryChecked). */
+  private vouched(e: LogEntry): boolean {
+    return this.options.authentic(e) || this.retired.some((r) => e.number < r.until && r.key.authentic(e));
   }
 
   /**
@@ -1078,4 +1196,27 @@ const said = (heads: Record<TreeName, { size: number }>) => `changes ${heads.cha
 function appendWindow(edges: Record<TreeName, Edge>, entries: readonly LogEntry[]): Record<TreeName, Tile[]> {
   const leaves = (tree: TreeName) => entries.filter((e) => e.tree === tree).map((e) => entryLeaf(tree, e.number, e.columns));
   return { changes: edges.changes.append(leaves('changes')), uses: edges.uses.append(leaves('uses')) };
+}
+
+/** A log's origin, from its trees' signers: each tree's key is named `<origin>/<tree>` (`treeOrigin`). */
+function originOf(signers: PairSigners): string {
+  const name = signers.changes.name;
+  if (!name.endsWith('/changes')) throw new Error(`the changes tree's key is named ${name}, not <origin>/changes`);
+  return name.slice(0, -'/changes'.length);
+}
+
+/**
+ * The log's rotations, by number, each authentic under the key it moves the
+ * log to, which the signer holds; one per key moved from, the first. Others
+ * (a writer's, under no such key) are none: the tick refuses their entries.
+ */
+async function readRotations(rotations: Rotations, keys: readonly PreviousKey[]): Promise<{ number: bigint; from: string; to: string }[]> {
+  const found: { number: bigint; from: string; to: string }[] = [];
+  for (const entry of (await rotations.read()).sort((a, b) => (a.number < b.number ? -1 : 1))) {
+    const r = rotations.of(entry);
+    const to = r === null ? undefined : keys.find((key) => key.origin === r.to);
+    if (r === null || to === undefined || !to.authentic(entry) || found.some((f) => f.from === r.from)) continue;
+    found.push({ number: entry.number, ...r });
+  }
+  return found;
 }

@@ -565,7 +565,9 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
   const { cache } = path;
   const { request, key, coverKey, known } = made;
   const way = input.way ?? 'credential';
-  if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured') return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
+  if (row.state === 'late' || row.state === 'ahead' || row.state === 'unconfigured' || row.state === 'superseded') {
+    return { outcome: busy(row.state, row.state === 'unconfigured' ? 5 : 1), row, checked: null, request };
+  }
   if (names !== undefined && row.state === 'unknown') return { unknown: true };
   if (names !== undefined && row.state === 'nowhere') return { nowhere: true };
   if (row.state !== null && !((names !== undefined && (row.state === 'moved' || row.state === 'archived')) || (row.state === 'decide' && !decided))) {

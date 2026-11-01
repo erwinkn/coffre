@@ -138,9 +138,10 @@ previousAuditChainKeys?, rotateAfterDays? }` (the app keys `auditChainKey`
 replaced, which verify the log from before each rotation; the days a value may go unchanged before the UI and
 `coffre list` flag it for rotation: 365 if left out, `null` for none)
 and, for the vault, `{ database, kek, previousKeks?, owners,
-signingKey?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
+signingKey?, previousSigningKeys?, bulkLimit? }`, a vault key being a local key or `awsKms(…)`
 ([keys.md](keys.md)). The vault derives its signing key from a local vault key;
-`signingKey` is required only with a vault key a key service holds.
+`signingKey` is required only with a vault key a key service holds, and the
+ones it replaced stay in `previousSigningKeys`.
 Each is checked when the deployment starts, and a bad value (a 31-byte key,
 a public URL with a path, no Owner in `owners`) fails it with a message naming the
 setting.
@@ -1394,8 +1395,10 @@ Each limit is stated here once; the other documents link to it.
   `coffre verify log` walks the log from its first entry. After the
   rotation, nothing under its keys counts, so a vault key replaced because it
   leaked forges nothing new; what was forged with it before verifies like
-  the rest. The app key, `APP_KEY`, and with KMS the vault's
-  `signingKey`, cannot be changed at all.
+  the rest. The app key, `APP_KEY`, rotates the same way
+  ([deploy.md](deploy.md#rotating-the-app-key)), and so does, with a key
+  service, the vault's `signingKey`, the old one in `previousSigningKeys`
+  ([keys.md](keys.md#rotating-a-signing-key)).
 - **A MAC proves a row is genuine, not current.** Putting back a genuine old
   sign-in row can undo one sign-out until the session's own expiry; a
   member's removal still ends it, through the generation.
