@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { Database } from '@coffre/db';
 import { sql, type SQL } from 'drizzle-orm';
 
-import { entryMac } from '../src/log-entry.ts';
+import { entryMac, type LogMacKey, type UseRow } from '../src/log-entry.ts';
 import { ENGINE, rows, run } from './database.ts';
 
 /**
@@ -15,7 +15,7 @@ import { ENGINE, rows, run } from './database.ts';
  * after every number taken on SQLite. MAC'd over their tree and every
  * column but the number (log-entry.ts).
  */
-export function logWriter(owner: Database, macKey: Buffer) {
+export function logWriter(owner: Database, macKey: LogMacKey) {
   let sqliteNext = 1n;
   /** The entry `insert` makes, given its number's SQL: one transaction, a file's turn on SQLite, the fence on Postgres. */
   const append = async (insert: (number: SQL) => SQL): Promise<bigint> => {
@@ -59,9 +59,10 @@ export function logWriter(owner: Database, macKey: Buffer) {
       return append((number) => sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
         VALUES (${number}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${mac})`);
     },
-    async use(at = Date.now(), forged = false): Promise<bigint> {
+    /** `forged`: a random MAC, or the one `forged` makes of the row's columns (another key's, say). */
+    async use(at = Date.now(), forged: boolean | ((row: Omit<UseRow, 'number' | 'mac'>) => Buffer) = false): Promise<bigint> {
       const row = { at, requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-      const mac = forged ? randomBytes(16) : entryMac(macKey, { tree: 'uses', row });
+      const mac = typeof forged === 'function' ? forged(row) : forged ? randomBytes(16) : entryMac(macKey, { tree: 'uses', row });
       return append((number) => sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
         VALUES (${number}, ${row.at}, ${row.requestId}, ${row.credential}, ${row.secret}, ${row.purpose}, ${mac}, ${row.place})`);
     },

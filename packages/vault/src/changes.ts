@@ -5,7 +5,7 @@ import type { Queryable, Transaction } from '@coffre/db';
 
 import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
 import type { LoggedChange } from './log-replay.ts';
-import { entryMac } from './log-entry.ts';
+import { entryMac, type LogMacKey } from './log-entry.ts';
 import { connectionObject, credentialObject, environmentObject, secretObject } from './objects.ts';
 import { changeInputs, isStale, newestChange, newestSealedChanges, readObject, type ChangeCall, type ReadKind } from './store.ts';
 
@@ -97,7 +97,7 @@ export async function heldByLog(keys: SealKeys, db: Queryable, ref: Ref & { kind
 export class Moved extends Error {}
 
 /** The keys a change is made with: seals (inputs.ts) and entries' MACs (log-entry.ts). */
-export type ChangeKeys = { seals: SealKeys; mac: Buffer };
+export type ChangeKeys = { seals: SealKeys; mac: LogMacKey };
 
 type Step = { op: Op; actor: string };
 type Read = { logged: false } | { logged: true; seal: Buffer | null; now: Input | null; afters: (Input | null)[] };
