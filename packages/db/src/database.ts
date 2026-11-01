@@ -180,3 +180,4 @@ export function own<T extends Table>(db: Queryable, table: T): T {
 }
 
 export { prepared } from './prepared.ts';
+export { later } from './later.ts';

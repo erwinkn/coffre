@@ -324,7 +324,7 @@ test('a COPY reaching the client fails, and leaves the connection to the next st
   }
 });
 
-test('a BEGIN that fails runs none of its transaction outside it: not its first statement, sent with it, nor any after', { skip }, async () => {
+test('a BEGIN that fails runs none of its transaction outside it: not the statements sent with it, nor any after', { skip }, async () => {
   const sent: string[] = [];
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {}, debug: (_: number, text: string, values: unknown[]) => void sent.push([text, ...values].join(' ')) });
   try {
@@ -342,9 +342,10 @@ test('a BEGIN that fails runs none of its transaction outside it: not its first 
       after = await tx.unsafe('insert into kept values ($1)', [6]).catch((e: unknown) => e);
     }), refused);
     assert.equal((after as { code?: string }).code, 'TRANSACTION_NOT_BEGUN');
-    // Each first statement went with its BEGIN, and nothing else: not 4, behind it, nor 6, after it, nor a rollback.
+    // Each first statement went with its BEGIN, and 4, asked with 3, under the same Sync, which Postgres skipped whole;
+    // nothing else: not 6, asked after, nor a rollback.
     const begin = 'begin isolation level bogus';
-    assert.deepEqual(sent.slice(1), [begin, 'insert into kept values ($1) 1', begin, 'insert into kept values (2)', begin, 'insert into kept values ($1) 3', begin, 'insert into kept values ($1) 5']);
+    assert.deepEqual(sent.slice(1), [begin, 'insert into kept values ($1) 1', begin, 'insert into kept values (2)', begin, 'insert into kept values ($1) 3', 'insert into kept values ($1) 4', begin, 'insert into kept values ($1) 5']);
     // Nothing ran; the connection is the pool's again, and a transaction on it begins.
     assert.deepEqual([...await client.unsafe('select count(*)::int as n from kept')], [{ n: 0 }]);
     await client.begin((tx) => tx.unsafe('insert into kept values ($1)', [7]));
@@ -668,7 +669,7 @@ test('a transaction Postgres did not commit whole does not resolve: a savepoint\
   }
 });
 
-test('a connection cut as a transaction\'s BEGIN goes: nothing that waited behind it is sent, and the pool\'s next statement runs on the next connection', { skip, timeout: 30_000 }, async () => {
+test('a connection cut as a transaction\'s BEGIN goes: nothing of it runs, and the pool\'s next statement runs on the next connection', { skip, timeout: 30_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const { client, sent } = sending('coffre-tx-cut-begin');
   try {
@@ -679,8 +680,9 @@ test('a connection cut as a transaction\'s BEGIN goes: nothing that waited behin
     await cutWhileAsleep(owner, 'coffre-tx-cut-begin');
     await assert.rejects(cut, { code: 'CONNECTION_CLOSED' });
     await after;
+    // The insert asked with the sleep went under its Sync, behind it, and never ran: the connection went first.
     assert.deepEqual([...await owner.unsafe('select n from cutbegin')], [{ n: 2 }]);
-    assert.ok(!sent.includes('insert into cutbegin values ($1) 1'));
+    assert.ok(sent.includes('insert into cutbegin values ($1) 2'));
   } finally {
     await client.end();
     await owner.unsafe('drop table if exists cutbegin').catch(() => {});

@@ -9,6 +9,7 @@ import type { ConnectionOptions } from 'node:tls';
 import { sql, type SQL } from 'drizzle-orm';
 
 import { engineOfUrl, openDatabase, postgresClient, postgresOptions, writes } from '../src/connect.ts';
+import { later } from '../src/later.ts';
 import { migrateDatabase } from '../src/migrate.ts';
 
 test('MySQL URLs are refused before opening a connection or running migrations', async () => {
@@ -241,5 +242,31 @@ test("a URL's other parts are read as node-postgres reads them, and no query par
   // A parse error, a malformed escape included, never prints the URL's password.
   for (const url of ['not a url: password', 'postgres://u%zz:password@h/db', 'postgres://u:password@h/d%zzb', 'postgres://u:password@h%zz/db', 'postgres://u:password@h/db?port=abc', 'postgres://u:password@h/db?port=70000']) {
     assert.throws(() => postgresOptions(url), (error: Error) => error.message === 'invalid Postgres URL');
+  }
+});
+
+test("on SQLite, a write left to `later` runs in its turn, and the transaction's COMMIT waits for it: one that failed rolls the transaction back", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-sqlite-'));
+  const { db, close } = await openDatabase(`file:${join(dir, 'later.db')}`);
+  const lite = db as unknown as Lite;
+  try {
+    await lite.run(sql`CREATE TABLE t (id INTEGER PRIMARY KEY)`);
+    await db.transaction(async (tx) => {
+      later(tx, sql`INSERT INTO t VALUES (1)`);
+      later(tx, sql`INSERT INTO t VALUES (2)`);
+    });
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }]);
+    // The second a duplicate: the first, written, is rolled back with it, and the error is the duplicate's.
+    await assert.rejects(db.transaction(async (tx) => {
+      later(tx, sql`INSERT INTO t VALUES (3)`);
+      later(tx, sql`INSERT INTO t VALUES (1)`);
+    }), (error: unknown) => /UNIQUE/.test(String((error as { cause?: unknown }).cause ?? error)));
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }]);
+    // And the file's lock went with the rollback: the next transaction runs.
+    await db.transaction(async (tx) => later(tx, sql`INSERT INTO t VALUES (4)`));
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }, { id: 4 }]);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

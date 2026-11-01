@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import type { Client, InStatement, ResultSet, Transaction as LibsqlTransaction, TransactionMode } from '@libsql/client';
 import { createDatabase, type Database } from './database.ts';
 import type { Engine } from './dialect.ts';
+import { laterSettled } from './later.ts';
 import { asPostgresDatabase } from './portable.ts';
 import { postgresClient } from './postgres.ts';
 
@@ -152,6 +153,8 @@ function settling(tx: LibsqlTransaction, release: () => void): LibsqlTransaction
   tx.execute = async (...args) => numbers(await execute.apply(tx, args));
   tx.batch = async (...args) => (await batch.apply(tx, args)).map(numbers);
   tx.commit = async () => {
+    // What `later` asked of it first: one that failed fails the COMMIT, before it goes, and Drizzle rolls back, which ends the turn.
+    await laterSettled(tx);
     try {
       return await commit.call(tx);
     } finally {

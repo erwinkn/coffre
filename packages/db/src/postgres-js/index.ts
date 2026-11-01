@@ -1,5 +1,7 @@
 // postgres.js, coffre's own: the pool, its statements and transactions. See
 // README.md beside this file for where it comes from and how it differs.
+import * as platform from '#postgres/platform';
+
 import { createConnection, type Connection, type Reservation, type Reserved } from './connection.ts';
 import * as Errors from './errors.ts';
 import { PostgresError, type Notice } from './errors.ts';
@@ -7,7 +9,7 @@ import type { Socket, TlsOptions } from './platform.ts';
 import { Query } from './query.ts';
 import { Queue } from './queue.ts';
 import type { Column } from './result.ts';
-import { defaultTypes, type Parsers, type Serializers } from './types.ts';
+import { defaultTypes, inferType, type Parsers, type Serializers } from './types.ts';
 
 export { PostgresError, Query };
 export type { Column, Notice, Socket };
@@ -258,8 +260,20 @@ export default function postgres(given: Options): Sql {
      * or it has ended, and its connection is the pool's again (what its work left running may still ask).
      */
     let stopped: Error | null = null;
+    /**
+     * Coffre: the statements its work asked and none has sent yet: at the next task, they go together, under one Sync
+     * (`gather`), its COMMIT with the last of them.
+     */
+    let gathered: Query[] = [];
+    /** The task that sends them, while one is asked. */
+    let sending: unknown = null;
+    /** Its work returned: what it gathered waits a task for its COMMIT (`settleWithCommit`). */
+    let holding = false;
+    /** Its COMMIT went with its work's last statements, and Postgres answered it, or said why not. */
+    let committed: ResultMeta | null = null;
     const stop = (error: Error) => {
       stopped ??= error;
+      for (const q of gathered.splice(0)) q.reject(stopped);
       while (queries.length) queries.shift()!.reject(stopped);
     };
 
@@ -310,14 +324,14 @@ export default function postgres(given: Options): Sql {
           const x = fn(sql);
           Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(resolve as (value: unknown) => void, reject);
         });
-        if (!name) await settle();
+        if (!name) await settleWithCommit();
         if (uncaughtError) throw uncaughtError;
         if (!name && unfinished) throw unfinished;
       } catch (e) {
         if (!name) await settle();
         // A transaction that never began has nothing to roll back: none asked of it, or its BEGIN failed; nor one whose
-        // connection closed, which Postgres rolled back.
-        if (!stopped && (name || first?.began)) await (name ? own('rollback to ' + quote(name)) : last('rollback'));
+        // connection closed, which Postgres rolled back; nor one whose COMMIT Postgres ran, and refused, which ended it.
+        if (!stopped && (name || first?.began) && (name || committed === null)) await (name ? own('rollback to ' + quote(name)) : last('rollback'));
         // "Current transaction is aborted" says nothing of why: what failed first, unwaited, or in a savepoint, does.
         if (aborted(e)) throw (uncaughtError !== undefined && !aborted(uncaughtError) ? uncaughtError : failure) ?? e;
         throw e;
@@ -326,7 +340,7 @@ export default function postgres(given: Options): Sql {
       if (!name && first !== null) {
         // Coffre: Postgres answers the COMMIT of a transaction a statement of which failed, unwaited, in a savepoint
         // its work had left, with ROLLBACK, not an error: the transaction fails. Upstream resolved.
-        const committed = (await last('commit')) as unknown as ResultMeta;
+        committed ??= (await last('commit')) as unknown as ResultMeta;
         if (committed.command === 'ROLLBACK') {
           throw failure ?? Errors.generic('TRANSACTION_ROLLED_BACK', 'Postgres rolled the transaction back at its COMMIT');
         }
@@ -353,6 +367,44 @@ export default function postgres(given: Options): Sql {
         asked.add(q);
         send(q);
       }
+
+      /**
+       * Coffre: `settle`, for work that returned: a task later, so that what its last microtasks asked has been asked,
+       * its COMMIT goes with the statements it left unsent, under their Sync, a round trip less, if nothing awaits any
+       * of them (each `later`): work still running, which awaits one, must hear it answer first, and may then ask more,
+       * which is refused and rolls the transaction back, as `settle` has it. A statement among them
+       * that fails has Postgres skip the COMMIT, and the transaction rolls back (`gather`'s `skipped`); a COMMIT Postgres
+       * ran and refused ended the transaction, with nothing to roll back. With none left unsent, the COMMIT goes once
+       * every statement has answered, as `settle` has it.
+       */
+      async function settleWithCommit(): Promise<void> {
+        // Nothing asked, nothing to commit.
+        if (first === null && gathered.length === 0) return settle();
+        // What was gathered waits, and what the work's last microtasks ask joins it, until the next task.
+        if (sending !== null) platform.cancelTask(sending);
+        sending = null;
+        holding = true;
+        await new Promise<void>((resolve) => platform.nextTask(resolve));
+        holding = false;
+        if (gathered.length === 0 || !gathered.every((q) => q.later) || uncaughtError !== undefined || unfinished !== null || stopped !== null) {
+          flush();
+          return settle();
+        }
+        decided = true;
+        closing = true;
+        const commit = new Query('commit', [], () => {}, { simple: false }, Boolean(options.debug));
+        commit.executed = true;
+        gather(commit);
+        await Promise.allSettled(asked);
+        try {
+          committed = (await commit) as unknown as ResultMeta;
+        } catch (e) {
+          // Skipped, behind a statement that failed: that statement's error says why, and the transaction rolls back.
+          if (!isSkipped(e)) committed = { command: 'COMMIT', count: null, state: { pid: 0, secret: 0 }, columns: null };
+          uncaughtError ??= e;
+          if (!isSkipped(e) && e instanceof PostgresError) failure = e;
+        }
+      }
     }
 
     /**
@@ -366,14 +418,76 @@ export default function postgres(given: Options): Sql {
       await Promise.allSettled(asked);
     }
 
+    /**
+     * Coffre: a statement of the transaction's, gathered with the others asked in this task, which go together at the
+     * next under one Sync: on Hyperdrive, which sends a client's Syncs on one at a time, a round trip for them all
+     * (`together`). In the order asked, as they would have gone one by one; a statement that fails has Postgres skip
+     * those after it, as an aborted transaction refuses them anyway, and they fail with `skipped`, which says so. The
+     * transaction's own statements (a savepoint, a rollback to it) go alone, after what was gathered before them.
+     * `commit`, the last, sends the group now.
+     */
+    function gather(q: Query): void {
+      if (stopped) return q.reject(stopped);
+      if (q.text !== 'commit' && (OWN.test(q.text) || (q.options.simple && q.text.includes(';')))) {
+        flush();
+        return dispatch(q);
+      }
+      gathered.push(q);
+      if (q.text === 'commit' && q.executed && !q.options.simple) return flush();
+      if (!holding) sending ??= platform.nextTask(flush);
+    }
+
+    /** What was gathered, sent: one statement as it is, several together. */
+    function flush(): void {
+      if (sending !== null) platform.cancelTask(sending);
+      sending = null;
+      // In the order they were made: Drizzle sends a statement a few microtasks after it makes it, how many depending on
+      // how it was built, so the order they arrive in is not always the order the work asked them in.
+      const members = gathered.splice(0).sort((a, b) => a.made - b.made);
+      if (members.length === 0) return;
+      if (stopped) return void members.forEach((q) => q.reject(stopped));
+      // One alone, or one the client cannot send in a group (its value's type only the server can say, a value it
+      // cannot send): each goes alone, in order, as it would have.
+      if (members.length === 1 || members.some(alone)) return void members.forEach(dispatch);
+      dispatch(together(members));
+    }
+
+    /** `members` as one statement of the connection's, under one Sync, each answered with its own result. */
+    function together(members: Query[]): Query {
+      const group = new Query(members.map((q) => q.text).join(';\n'), [], () => {}, { simple: false }, Boolean(options.debug));
+      group.executed = true;
+      group.group = members.map((q) => ({ text: q.text, args: q.args, arrays: q.arrays, parameters: [], statement: null }));
+      Promise.prototype.then.call(
+        group,
+        (answers) => members.forEach((q, i) => q.resolve((answers as unknown[])[i])),
+        (error: unknown) => {
+          // Its BEGIN refused, or the connection lost: every statement fails with that. Otherwise those before the one
+          // that failed answered, and those after it Postgres skipped.
+          const begun = group.begin === null || group.began;
+          const failed = !begun || group.answered === null ? 0 : group.answered.length;
+          members.forEach((q, i) => {
+            if (i < failed) q.resolve(group.answered![i]);
+            else if (i === failed || !(error instanceof PostgresError) || !begun) q.reject(error);
+            else q.reject(skippedError());
+          });
+        },
+      );
+      return group;
+    }
+
     /** The transaction's COMMIT or ROLLBACK, past the door that settle closed. */
     function last(text: string): Query {
       closing = true;
       return new Query(text, [], send, { simple: true }, Boolean(options.debug));
     }
 
-    /** `q` on the transaction's connection: sent, or queued until the connection can take more. */
+    /** A statement of the transaction's: gathered with those asked beside it (`gather`). */
     function send(q: Query): void {
+      gather(q);
+    }
+
+    /** `q` on the transaction's connection: sent, or queued until the connection can take more. */
+    function dispatch(q: Query): void {
       if (stopped) return q.reject(stopped);
       if (first === null) {
         first = q;
@@ -478,8 +592,29 @@ export default function postgres(given: Options): Sql {
   }
 }
 
-/** Postgres's "current transaction is aborted": a statement after one that failed. */
-const aborted = (error: unknown) => error instanceof PostgresError && error.code === '25P02';
+/** A transaction's own statements, which go alone (`gather`): its savepoints, and a rollback to one. */
+const OWN = /^\s*(begin|commit|rollback|savepoint|release)\b/i;
+
+/** A statement that cannot go in a group: a value whose type only the server can say, or one the client cannot send. */
+function alone(q: Query): boolean {
+  return q.args.some((x) => x === undefined || (x !== null && typeof x === 'object' && inferType(x) === 0)) || q.args.length >= 65534;
+}
+
+/** Marks what a statement of a group Postgres skipped fails with (`skippedError`). */
+const SKIPPED = Symbol('skipped');
+
+/** What a statement of a group Postgres skipped fails with, behind the one that failed: its transaction is aborted. */
+function skippedError(): PostgresError {
+  return Object.assign(Errors.postgres({ severity: 'ERROR', code: '25P02', message: 'current transaction is aborted, commands ignored until end of transaction block' }), { [SKIPPED]: true });
+}
+
+const isSkipped = (error: unknown) => error instanceof PostgresError && (error as { [SKIPPED]?: boolean })[SKIPPED] === true;
+
+/** Postgres's "current transaction is aborted": a statement after one that failed; Drizzle's error around one too. */
+const aborted = (error: unknown): boolean => {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) if (cause instanceof PostgresError && cause.code === '25P02') return true;
+  return false;
+};
 
 /** `options`, each one not given at its default. */
 function settle(options: Options): Settings {

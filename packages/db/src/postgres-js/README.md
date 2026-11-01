@@ -37,7 +37,7 @@ wrote them with its tagged template.
 
 ## Changes from upstream
 
-Ten, each marked `Coffre:` in the code:
+Eleven, each marked `Coffre:` in the code:
 
 - **One round trip per statement** (`typedByServer`, in `connection.ts`).
   Upstream asks the server for an unnamed statement's parameter types (Parse,
@@ -53,10 +53,11 @@ Ten, each marked `Coffre:` in the code:
   `index.ts`; `toBuffer` and `CommandComplete`, in `connection.ts`), a round
   trip less for every transaction. Upstream sent BEGIN alone and waited for
   it. The two go under one Sync: as the extended protocol's Parse, Bind and
-  Execute ahead of the statement's, or, for a statement without parameters,
-  in one Query message (`begin;\n<statement>`). Either way, a BEGIN that
-  fails has Postgres skip the statement, which so never runs outside its
-  transaction; what waited behind it is not sent, nor anything the
+  Execute ahead of the statement's, or ahead of a group's when the work
+  asked several together (below), or, for a lone statement without
+  parameters, in one Query message (`begin;\n<statement>`). Either way, a
+  BEGIN that fails has Postgres skip what went under its Sync, which so
+  never runs outside its transaction; what waited behind it is not sent, nor anything the
   transaction asks after, which fails `TRANSACTION_NOT_BEGUN`, and nothing
   is rolled back. Nothing waits behind the BEGIN's statement for less: one
   the client failed to write (a value it cannot send) takes its BEGIN with
@@ -88,7 +89,8 @@ Ten, each marked `Coffre:` in the code:
   cache nothing (`docs/deploy.md`), so that statement is never answered
   from a cache. Both shapes reach the pooler: Parse, Bind and Execute under
   one Sync, and one Query message of two statements. Both were checked on
-  a real Hyperdrive for 0.15: `select pg_backend_pid()` as a transaction's
+  a real Hyperdrive for 0.15, and again for T179's groups with
+  `../../scripts/hyperdrive-pinning.ts` (below): `select pg_backend_pid()` as a transaction's
   first statement (with a parameter, and without, and after the vault's
   `SET LOCAL`) and again later in it, the same backend and transaction
   each time, over 11,000 transactions, 40 to 50 at once over 10 backends;
@@ -117,10 +119,36 @@ Ten, each marked `Coffre:` in the code:
   (`select …`, `GROUP_NOT_READ` otherwise: a write grouped with a statement
   that fails would be rolled back by an error not its own; a `select` that
   writes through a function is not seen, and says so ahead of itself, as
-  `/* writes */ select …`, which no group takes), and is the
-  pool's alone: a transaction's statements each go under its own Sync, so
-  BEGIN and COMMIT mean what they did. Upstream has no such thing; its
-  pipelined statements each carry a Sync.
+  `/* writes */ select …`, which no group takes). A transaction groups
+  its own statements (below). Upstream has no such thing; its pipelined
+  statements each carry a Sync.
+- **A transaction's statements asked together go under one Sync**
+  (`gather`, `flush`, `together` and `settleWithCommit` in `index.ts`;
+  `toBuffer` and `ReadyForQuery` in `connection.ts`). What its work asks
+  in one task waits for the next (`nextTask`: Node's `setImmediate`, a
+  timer of 0 on workerd), then goes as one group, in the order the
+  statements were made (`Query.made`; `prepared` in `../prepared.ts` runs
+  a statement once awaited, as a Drizzle builder does, so that this is the
+  order the work awaited them in), its BEGIN ahead of the first group.
+  A statement the client cannot send in a group (a value only the server
+  can type, one it cannot send) has each go alone, in order. If one fails,
+  Postgres skips the rest: those before it answer with their rows
+  (`Query.answered`), it fails with its error, and those after with
+  "current transaction is aborted" (25P02), as each would have failed
+  after it anyway, so the transaction fails as it did, rolled back, with
+  the first error. The transaction's own statements (a savepoint, a
+  rollback to one) go alone, after what was gathered before them. Its
+  COMMIT goes with its work's last group when nothing awaits any statement
+  of it (`Query.later`, which `later` in `../later.ts` sets): work still
+  running that awaits one must hear it answer first, and may then ask
+  more, which is refused and rolls the transaction back, as before. A
+  statement of that group that fails has Postgres skip the COMMIT, and the
+  transaction rolls back; a COMMIT Postgres runs and refuses (a deferred
+  constraint) has ended it, and no ROLLBACK follows. Through Hyperdrive,
+  which sends a client's Syncs on one at a time, a transaction that reads
+  what it needs together and leaves its writes to `later` is two round
+  trips, whatever it holds. Upstream sent each statement with a Sync of
+  its own, and its COMMIT alone.
 - **A connection closed while it opens fails its query** (`closed`, in
   `connection.ts`), as node-postgres's "Connection terminated
   unexpectedly" did. Upstream dialled again, at once and for ever (thousands
@@ -181,3 +209,31 @@ Ten, each marked `Coffre:` in the code:
   the connection goes on as after any answer. Upstream failed the statement
   already answering instead, and left this one waiting, its transaction and
   connection with it, for ever.
+
+## Checking on a real Hyperdrive
+
+Hyperdrive pools Postgres connections by transaction, telling where each
+starts and ends from ReadyForQuery, and local workerd runs none, so no
+suite holds the driver to it. A change to how a transaction reaches the
+wire (its BEGIN, its groups, its COMMIT) is checked on Cloudflare first,
+with `packages/db/scripts/hyperdrive-pinning.ts`:
+
+1. `pnpm build`, then `node packages/db/scripts/hyperdrive-pinning.ts bundle <dir>`:
+   the Worker of `hyperdrive-pinning.worker.ts`, the driver alone, minified (about 40 KiB).
+2. A throwaway Postgres 16 (Debian, TLS) that only Cloudflare reaches (a
+   Cloudflare Tunnel, behind an Access service token), a Hyperdrive
+   configuration to it with caching off, and the Worker deployed with it
+   bound as `HYPERDRIVE`.
+3. `node packages/db/scripts/hyperdrive-pinning.ts run <worker url> --transactions 10000 --concurrency 50`.
+4. Delete the Worker, the configuration, the tunnel, its DNS record, the
+   Access application and token, and the database.
+
+Each transaction is one of eight shapes, in turn: a first statement with a
+parameter, without one, and after `SET LOCAL`; BEGIN with a group of
+three; reads together, then writes left to `later` with the COMMIT; a group
+of which one statement fails; a write left to `later` that fails; and a
+rollback. Every statement records its backend (`pg_backend_pid()`) and its
+transaction (`txid_current()`), which must be one of each per transaction,
+the writes' rows included; what failed or rolled back must keep no row.
+T179 (PR 1): 10,000 transactions, 50 requests at once, on 59 backends, all held.
+

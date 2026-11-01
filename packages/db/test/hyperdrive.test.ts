@@ -11,6 +11,7 @@ import { sql } from 'drizzle-orm';
 import { openDatabase } from '../src/connect.ts';
 import { createDatabase, QueryOutsideTransaction, tablesOf } from '../src/database.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
+import { later } from '../src/later.ts';
 
 import { postgresClient } from '../src/postgres.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -212,6 +213,91 @@ test('a query asked while a transaction holds the connection waits for it, and i
   assert.deepEqual([...await db.execute(sql`select v from turns`)], [{ v: 'beside it' }]);
   assert.equal(proxy.opened, 1);
   await pool.end();
+});
+
+test("a transaction's statements asked together go under one Sync, its BEGIN with the first, and what it left to `later` with its COMMIT", { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url);
+  const db = createDatabase(pool);
+  await db.execute(sql`create temporary table gathered (n int)`);
+  const syncs = proxy.syncs;
+  const counted_ = await db.transaction(async (tx) => {
+    const [a, b, c] = await Promise.all([tx.execute(sql`select 1 as n`), tx.execute(sql`select ${2}::int as n`), tx.execute(sql`select count(*)::int as n from gathered`)]);
+    later(tx, sql`insert into gathered values (${n(a) + n(b)})`);
+    later(tx, sql`insert into gathered values (4)`);
+    return n(c);
+  });
+  assert.equal(counted_, 0);
+  assert.equal(proxy.syncs - syncs, 2, 'BEGIN and the reads, then the inserts and COMMIT');
+  assert.deepEqual([...await db.execute(sql`select n from gathered order by n`)], [{ n: 3 }, { n: 4 }]);
+  // One after another, each still its own; a savepoint goes alone, after what was gathered before it.
+  const before = proxy.syncs;
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`insert into gathered values (5)`);
+    await tx.transaction(async (inner) => inner.execute(sql`insert into gathered values (6)`));
+  });
+  // The insert with BEGIN; the savepoint; its insert; COMMIT.
+  assert.equal(proxy.syncs - before, 4);
+  assert.deepEqual([...await db.execute(sql`select n from gathered order by n`)].map((row) => row.n), [3, 4, 5, 6]);
+  await pool.end();
+});
+
+test('a statement of a group that fails: those before it answer, it fails with its error, those after as an aborted transaction, and the transaction rolls back with its error', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url);
+  const db = createDatabase(pool);
+  await db.execute(sql`create temporary table failing (n int)`);
+  let settled: PromiseSettledResult<unknown>[] = [];
+  const syncs = proxy.syncs;
+  await assert.rejects(db.transaction(async (tx) => {
+    settled = await Promise.allSettled([
+      tx.execute(sql`insert into failing values (1) returning n`),
+      tx.execute(sql`insert into failing values (${'two'}::int)`),
+      tx.execute(sql`select 3 as n`),
+    ]);
+  }), { code: '22P02' });
+  assert.equal(settled[0]!.status, 'fulfilled');
+  assert.deepEqual([...(settled[0] as PromiseFulfilledResult<Record<string, unknown>[]>).value], [{ n: 1 }]);
+  const causes = settled.slice(1).map((outcome) => ((outcome as PromiseRejectedResult).reason as { cause?: { code?: string } }).cause?.code);
+  assert.deepEqual(causes, ['22P02', '25P02']);
+  // The group, then its ROLLBACK; nothing kept, and the connection goes on.
+  assert.equal(proxy.syncs - syncs, 2);
+  assert.deepEqual([...await db.execute(sql`select count(*)::int as n from failing`)], [{ n: 0 }]);
+  await pool.end();
+});
+
+test('a write left to `later` that fails has Postgres skip the COMMIT: nothing is kept, and the transaction fails with its error', { skip }, async () => {
+  const proxy = await counted();
+  const pool = new HyperdrivePool(proxy.url);
+  const db = createDatabase(pool);
+  await db.execute(sql`create temporary table skipped (n int)`);
+  await assert.rejects(db.transaction(async (tx) => {
+    await tx.execute(sql`insert into skipped values (1)`);
+    later(tx, sql`insert into skipped values (2)`);
+    later(tx, sql`insert into skipped values (${'three'}::int)`);
+  }), { code: '22P02' });
+  assert.deepEqual([...await db.execute(sql`select count(*)::int as n from skipped`)], [{ n: 0 }]);
+  await pool.end();
+});
+
+test('a COMMIT that Postgres runs and refuses ends the transaction: it fails with why, and no ROLLBACK follows', { skip }, async () => {
+  const proxy = await counted();
+  const sent: string[] = [];
+  const client = postgresClient(proxy.url, { max: 1, debug: (_: number, text: string) => void sent.push(text) });
+  try {
+    const db = createDatabase(client);
+    await db.execute(sql`create temporary table deferred (n int unique deferrable initially deferred)`);
+    const syncs = proxy.syncs;
+    await assert.rejects(db.transaction(async (tx) => {
+      later(tx, sql`insert into deferred values (1)`);
+      later(tx, sql`insert into deferred values (1)`);
+    }), { code: '23505' });
+    assert.equal(proxy.syncs - syncs, 1, 'BEGIN, both inserts and the COMMIT, under one Sync');
+    assert.ok(!sent.includes('rollback'), `sent ${JSON.stringify(sent)}`);
+    assert.deepEqual([...await db.execute(sql`select count(*)::int as n from deferred`)], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
 });
 
 test('closing waits for what is under way; a connection lost or closed is opened again for the next query', { skip }, async () => {

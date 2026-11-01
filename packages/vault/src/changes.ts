@@ -161,9 +161,11 @@ export class Changes {
    * run, and apply its ops to it in turn.
    */
   async prepare(db: Queryable): Promise<void> {
-    for (const staged of this.#staged.values()) {
-      if (staged.read !== undefined) continue;
-      const read = await this.#read(db, staged.ref);
+    const unread = [...this.#staged.values()].filter((staged) => staged.read === undefined);
+    // Each object's reads asked together: one round trip for them all.
+    const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref)));
+    for (const [i, staged] of unread.entries()) {
+      const read = reads[i]!;
       if (read.logged) {
         for (const { op } of staged.steps) {
           const after = applyOp(read.now, staged.ref, op);
