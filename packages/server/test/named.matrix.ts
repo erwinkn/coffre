@@ -33,7 +33,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, hotDatabaseUrl, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { logFence } from './db/tables.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
@@ -285,13 +285,13 @@ before(async () => {
     // The app's own database through a relay too, at no delay: its statements counted as the hot path's are.
     app = await relay(TEST_RUNTIME_DATABASE_URL);
     appPool = postgresClient(app.url, { max: 10 });
-    deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow }) });
+    deps = testDeps(createDatabase(appPool), [ROOT], { vault: testVault([ROOT], { hotDatabase: hot.url }, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   } else {
     const session = (db.runtime as unknown as { session: { logger: unknown; options: { logger?: unknown } } }).session;
     const counting = { logQuery: () => { sqliteStatements += 1; } };
     session.logger = counting;
     session.options.logger = counting;
-    deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow }) });
+    deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   }
   // Each call the app makes of the vault, by name: its sequence says the route a request took (`routeOf`).
   for (const method of ['useNamed', 'use', 'access', 'unwrap'] as const) {

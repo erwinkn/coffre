@@ -1244,7 +1244,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-oumPAEmT.js
+//#region ../client/dist/src-Dwhw_Cc4.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1715,6 +1715,24 @@ set: (member, access) => call("PATCH /access/:member", { member }, access) },
 				if (error instanceof CoffreError && error.status === 404) return { kept: false };
 				throw error;
 			}),
+			/**
+			* The reads the audit pages list held to the uses 0.15's log sealed, a
+			* stretch a request, from the first to as far as the projector has
+			* listed: the first stretch that fails, or the last. `kept` false where
+			* the instance keeps 0.14's log alone, a server older than 0.15 (no
+			* such route) included.
+			*/
+			verifyReads: async (onStretch = () => {}) => {
+				for (let from = "start";;) {
+					const verdict = await call("GET /audit/reads", {}, { from }).catch((error) => {
+						if (error instanceof CoffreError && error.status === 404) return { kept: false };
+						throw error;
+					});
+					onStretch(verdict);
+					if (!verdict.kept || !verdict.ok || verdict.next === null) return verdict;
+					from = verdict.next;
+				}
+			},
 			/** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
 			keys: () => call("GET /audit/keys", {}),
 			/**
@@ -7324,7 +7342,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-BvUQrGIB.js
+//#region ../client/dist/workload-BsyIQcko.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -15539,6 +15557,10 @@ function getCalls({ places, secrets, members, services }) {
 		}],
 		"GET /audit/verification": [{ params: {} }],
 		"GET /audit/trees": [{ params: {} }],
+		"GET /audit/reads": [{
+			params: {},
+			input: { from: "start" }
+		}],
 		"GET /audit/keys": [{ params: {} }]
 	};
 }
@@ -15623,6 +15645,7 @@ const EVERY_ROUTE = {
 	"GET /audit": true,
 	"GET /audit/verification": true,
 	"GET /audit/trees": true,
+	"GET /audit/reads": true,
 	"GET /audit/keys": true,
 	"POST /audit/loss": true
 };
@@ -15890,26 +15913,76 @@ async function whoIsToken(origin, api, canary) {
 	expect(keys.some((key) => key.key === canary.key), `${place} holds no ${canary.key}`, keys.map((key) => key.key));
 	return {
 		detail: `${shownMember$1(member)}, reading ${place}`,
-		value: { member }
+		value: {
+			member,
+			credentialId: me.credentialId ?? null
+		}
 	};
 }
-/** Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's request. */
+/**
+* How long before a reveal 0.15's log may have logged the read it rides on:
+* a repeat of a use within a minute rides on the first one's entry (a
+* cover, R53), and the server's clock may stand a little off this one's.
+*/
+const COVERED_MS = 9e4;
+/** How long a read may wait to be listed in 0.15's log: sealed at the checkpointer's tick, then listed by the projector. */
+const LISTED_WITHIN_MS = 2e4;
+/**
+* Reveal the canary once, and find its `secret.read` in the audit log: by
+* the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
+* and names no operation (T166), the token's own read of the canary, on
+* its own page (0.15 lists reads by member, never by place: D160), by its
+* credential, for a reveal, of the version the token lists: the use
+* the reveal made, or the one within the minute before it that it rode on
+* (a cover is of the same credential, purpose and key), once listed, which
+* may take a few seconds (`LISTED_WITHIN_MS`).
+*/
 async function tokenReveal(api, canary, token) {
 	const path = `${canary.project}/${canary.environment}`;
+	const asked = Date.now();
 	const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
 	expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
-	let entries;
-	try {
-		({entries} = await api.audit.list({
-			path,
-			actor: token.member,
-			limit: 50
-		}));
-	} catch (error) {
-		if (error instanceof CoffreError && error.status === 403) throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
-		throw error;
-	}
+	const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
+	const list = async (query) => {
+		try {
+			return await api.audit.list({
+				...query,
+				actor: token.member,
+				limit: 50,
+				sealed: "1"
+			});
+		} catch (error) {
+			if (error instanceof CoffreError && error.status === 403) throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
+			throw error;
+		}
+	};
+	const first = await list({ path });
+	let { entries, reads } = first;
 	const read = entries.filter((entry) => entry.operationId === operationId);
+	if (read.length === 0 && (reads !== void 0 || first.readsOmitted !== void 0)) {
+		expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
+		const ownOf = (listed) => listed.filter((entry) => entry.log === "0.15" && entry.action === "secret.read" && entry.key === canary.key && entry.project === canary.project && entry.environment === canary.environment && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === "reveal" && entry.version === version && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+		const recent = async () => {
+			const all = [];
+			for (let before;;) {
+				const page = await list(before === void 0 ? {} : { before });
+				all.push(...page.entries);
+				reads = page.reads;
+				const oldest = page.entries.at(-1);
+				if (page.next === null || oldest === void 0 || Date.parse(oldest.occurredAt) < asked - COVERED_MS) return all;
+				before = page.next;
+			}
+		};
+		entries = await recent();
+		for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			entries = await recent();
+		}
+		const [used] = ownOf(entries);
+		expect(used !== void 0, `the reveal is logged 0 times, not once: no read of ${canary.key} by the token's credential since the minute before it, listed within ${LISTED_WITHIN_MS / 1e3} s (reads listed through ${reads?.through ?? "none"})`, entries.slice(0, 3));
+		expect(used.decision === "allow" && used.forged !== true && used.version === version, `the reveal's entry is not an allowed read of the canary's version ${String(version)} the vault vouches for`, used);
+		return `one secret.read of ${canary.key}, entry ${used.seq} of 0.15's log, by the token's credential`;
+	}
 	expect(read.length === 1, `the reveal is logged ${read.length} times, not once`, entries.slice(0, 5));
 	const [entry] = read;
 	expect(entry.action === "secret.read" && entry.decision === "allow" && entry.key === canary.key && entry.requestId !== null, "the reveal's entry is not an allowed read of the canary, under a request", entry);
@@ -18282,6 +18355,8 @@ async function offboard(args) {
 	report.exposed.forEach((entry, index) => {
 		process.stdout.write(`  ${names[index].padEnd(width)}  v${String(entry.version).padEnd(4)} ${entry.how} ${entry.at.slice(0, 10)}\n`);
 	});
+	if (report.reads?.forged === true) process.stdout.write("  reads: FORGED: the vault does not vouch for how far they are listed; reads missing here may add to these\n");
+	else if (report.reads?.behind === true) process.stdout.write(`  reads are listed through ${report.reads.through ?? "none yet"}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
 	if (report.apps.length > 0) {
 		process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);
 		const width = Math.max(...report.apps.map((app) => app.name.length));
@@ -18349,8 +18424,16 @@ async function audit(args) {
 		detail: values.detail ? "1" : void 0,
 		sealed: "1"
 	});
+	const notices = () => {
+		const reads = result.reads;
+		if (reads?.forged === true) process.stderr.write("Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n");
+		else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? "none yet"}; newer reads are not listed yet.\n`);
+		if (result.readsOmitted === "path") process.stderr.write("Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n");
+		else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n");
+	};
 	if (values.json) {
 		process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);
+		notices();
 		return;
 	}
 	for (const entry of result.entries.reverse()) {
@@ -18362,8 +18445,10 @@ async function audit(args) {
 		].filter((part) => part !== null).join("/") || "-") + read;
 		const run = entry.run == null ? "" : ` (${runLabel(entry.run)})`;
 		const actor = `${entry.actorType === "service" ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? "" : ` via "${entry.token.label}"`}${run}`;
-		process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
+		const forged = entry.forged === true ? "  FORGED: the vault does not vouch for it" : "";
+		process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}${forged}\n`);
 	}
+	notices();
 }
 /**
 * An Owner's acceptance that audit entries `<from>` to `<to>` are lost for
@@ -18424,12 +18509,32 @@ async function verifyLog() {
 			process.exit(3);
 		}
 		process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
+		await verifyReads(shown);
 		return;
 	}
 	const at = result.failedAtSeq === null ? "" : ` at entry ${result.failedAtSeq}`;
 	const through = result.through === null ? "nothing verified" : `verified through entry ${result.through}`;
 	process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
 	process.exit(2);
+}
+/**
+* The reads the audit pages list held to the uses 0.15's log sealed, from
+* the first to as far as the vault's projector has listed (T166), a stretch
+* a request: a read deleted from the listing, edited or planted, or one
+* missing at a place it was read, which no page's check sees. Nothing for
+* an instance that keeps 0.14's log alone.
+*/
+async function verifyReads(shown) {
+	const result = await client(target(), void 0, [404]).audit.verifyReads((stretch) => {
+		if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rreads verified through entry ${stretch.through}…`);
+	});
+	if (shown) process.stderr.write("\r\x1B[K");
+	if (!result.kept) return;
+	if (!result.ok) {
+		process.stderr.write(`reads BROKEN, found by the vault's check (verified through entry ${result.through}):\n${result.problems.map((problem) => `  ${problem}\n`).join("")}`);
+		process.exit(2);
+	}
+	process.stdout.write(`reads OK: every read sealed through entry ${result.listed} listed as the log sealed it\n`);
 }
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */
 function initProject(args) {

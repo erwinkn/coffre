@@ -1904,6 +1904,12 @@ async function offboard(args: string[]): Promise<void> {
       `  ${names[index]!.padEnd(width)}  v${String(entry.version).padEnd(4)} ${entry.how} ${entry.at.slice(0, 10)}\n`,
     );
   });
+  // 0.15's reads are named once listed: reads sealed since may add to these. An instance before 0.15 says nothing.
+  if (report.reads?.forged === true) {
+    process.stdout.write('  reads: FORGED: the vault does not vouch for how far they are listed; reads missing here may add to these\n');
+  } else if (report.reads?.behind === true) {
+    process.stdout.write(`  reads are listed through ${report.reads.through ?? 'none yet'}: newer ones wait to be listed and may add to these; ask again in a few seconds\n`);
+  }
 
   if (report.apps.length > 0) {
     process.stdout.write(`\nConnected apps, which removing them disconnects (${report.apps.length})\n`);
@@ -1971,12 +1977,24 @@ async function audit(args: string[]): Promise<void> {
     actor: values.actor === undefined ? undefined : apiMember(values.actor),
     decision: values.denied ? 'deny' : undefined,
     detail: values.detail ? '1' : undefined,
-    // Sign-ins through trust bindings and tokens' issues, revokes and sign-outs too, which 0.15's sealed log alone
-    // records; a server before 0.15 ignores it.
+    // Reads, sign-ins through trust bindings and tokens' issues, revokes and sign-outs too, which 0.15's sealed log
+    // alone records; a server before 0.15 ignores it.
     sealed: '1',
   });
+  // 0.15's reads are listed once the vault's projector has caught up with the log, apart from sealing: say when it lags,
+  // on stderr, after the entries, in either form (review r9: `--json` said nothing of reads missing). An instance before
+  // 0.15 sends no `reads`.
+  const notices = () => {
+    const reads = result.reads;
+    if (reads?.forged === true) process.stderr.write('Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n');
+    else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? 'none yet'}; newer reads are not listed yet.\n`);
+    // 0.15 lists reads on the whole log and by member, not by place (D160); a reader of some places sees their own alone.
+    if (result.readsOmitted === 'path') process.stderr.write('Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n');
+    else if (result.readsOmitted === 'scope') process.stderr.write('Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n');
+  };
   if (values.json) {
     process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);
+    notices();
     return;
   }
 
@@ -1989,8 +2007,11 @@ async function audit(args: string[]): Promise<void> {
     // A CI run's, by the run its issuer named when it signed in: `service:deploy (acme/api run 7001 at 3f2a9c1)`. An instance before 0.1.16 sends no `run`.
     const run = entry.run == null ? '' : ` (${runLabel(entry.run)})`;
     const actor = `${entry.actorType === 'service' ? `service:${entry.actorId}` : entry.actorId}${entry.token == null ? '' : ` via "${entry.token.label}"`}${run}`;
-    process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}\n`);
+    // An entry of 0.15's log the vault does not vouch for: written, or edited, around coffre. An instance before 0.15 sends no `forged`.
+    const forged = entry.forged === true ? '  FORGED: the vault does not vouch for it' : '';
+    process.stdout.write(`${entry.occurredAt}  ${entry.decision.padEnd(5)}  ${actor.padEnd(28)}  ${entry.action.padEnd(16)}  ${place}${forged}\n`);
   }
+  notices();
 }
 
 /**
@@ -2060,12 +2081,34 @@ async function verifyLog(): Promise<void> {
       process.exit(3);
     }
     process.stdout.write(`audit log OK: ${through}, ${result.entries} entries; members and grants replayed\n${signed}\n${pending}`);
+    await verifyReads(shown);
     return;
   }
   const at = result.failedAtSeq === null ? '' : ` at entry ${result.failedAtSeq}`;
   const through = result.through === null ? 'nothing verified' : `verified through entry ${result.through}`;
   process.stderr.write(`audit log BROKEN${at}, found by the ${result.author}'s check (${through}): ${result.reason}\n`);
   process.exit(2);
+}
+
+/**
+ * The reads the audit pages list held to the uses 0.15's log sealed, from
+ * the first to as far as the vault's projector has listed (T166), a stretch
+ * a request: a read deleted from the listing, edited or planted, or one
+ * missing at a place it was read, which no page's check sees. Nothing for
+ * an instance that keeps 0.14's log alone.
+ */
+async function verifyReads(shown: boolean): Promise<void> {
+  // A server older than 0.15 has no such route: its 404 is the client's to take for no reads to check.
+  const result = await client(target(), undefined, [404]).audit.verifyReads((stretch) => {
+    if (shown && stretch.kept && stretch.ok && stretch.next !== null) process.stderr.write(`\rreads verified through entry ${stretch.through}…`);
+  });
+  if (shown) process.stderr.write('\r\x1b[K');
+  if (!result.kept) return;
+  if (!result.ok) {
+    process.stderr.write(`reads BROKEN, found by the vault's check (verified through entry ${result.through}):\n${result.problems.map((problem) => `  ${problem}\n`).join('')}`);
+    process.exit(2);
+  }
+  process.stdout.write(`reads OK: every read sealed through entry ${result.listed} listed as the log sealed it\n`);
 }
 
 /** `coffre init --workers|--node [<dir>]`: a new deployment of coffre. */

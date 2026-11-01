@@ -39,7 +39,7 @@ await resetDatabase(db.owner);
 const [app, vaultSide] = await Promise.all([postgresProxy(TEST_RUNTIME_DATABASE_URL, { delayMs: RTT }), postgresProxy(TEST_VAULT_DATABASE_URL, { delayMs: RTT })]);
 const vaultPool = testPostgresPool(vaultSide.url);
 const setupPool = testPostgresPool(TEST_RUNTIME_DATABASE_URL);
-const vault = await localVault({ database: createDatabase(vaultPool), kek: { id: 'bench-kek', key: randomBytes(32).toString('base64') }, owners: [ROOT] });
+const vault = await localVault({ database: createDatabase(vaultPool), kek: { id: 'bench-kek', key: randomBytes(32).toString('base64') }, owners: [ROOT] }, { log: '0.14' });
 const base: FixtureDeps = { db: createDatabase(setupPool), vault: vault as unknown as FixtureDeps['vault'], chainKey: randomBytes(32), anchor: testAnchor() };
 const accesses = new Accesses();
 const setupSignin = new SigninService({ ...base, signin: signinConfig, accesses });

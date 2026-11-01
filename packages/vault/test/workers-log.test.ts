@@ -1,8 +1,9 @@
-// 0.15's log on Workers (T136): the vault's entrypoint configured with
-// `log: '0.15'`, its hot path's Hyperdrive and its checkpointer's Durable
-// Object (test/workers/log-worker.ts), as a deployment would before the
-// flip. It says it answers uses, and answers one, through the entrypoint;
-// its first call waits for the cutover's seal, which the object makes.
+// 0.15's log on Workers (T136): the vault's entrypoint configured with its
+// hot path's Hyperdrive and its checkpointer's Durable Object
+// (test/workers/log-worker.ts), as a deployment is. Its first call starts
+// the object; it says it answers uses, and answers one, through the
+// entrypoint; its first call waits for the cutover's seal, which the object
+// makes.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,7 +16,7 @@ import type { UseManyOutcome, UseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, HOT_URL, openTestDatabase, rows, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, HOT_URL, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { ask, emptyLog, KEK, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 import { newRequestId } from '../src/use.ts';
 
@@ -67,13 +68,15 @@ async function call<T>(method: string, ...args: unknown[]): Promise<T> {
   return body.result as T;
 }
 
-test("on Workers, `log: '0.15'` says it answers uses, and a use through the entrypoint opens its value, its entry the log's", { skip, timeout: 120_000 }, async () => {
+test("on Workers, the vault starts its checkpointer from its first call, says it answers uses, and a use through the entrypoint opens its value, its entry the log's", { skip, timeout: 120_000 }, async () => {
   const w = await world();
   const id = await w.key('postgres://prod');
-  await call('startCheckpointer');
+  assert.equal((await call<{ open: boolean }>('checkpointerStatus')).open, false, 'nothing started it yet');
   const about = await call<{ log?: string; uses?: boolean }>('about');
   assert.equal(about.log, '0.15');
   assert.equal(about.uses, true);
+  // Started, and open, before the first call answered: no call meets a log with no checkpoint.
+  assert.equal((await call<{ open: boolean }>('checkpointerStatus')).open, true);
   const outcome = await call<UseOutcome>('use', ask(w, id));
   assert.ok(outcome.ok, JSON.stringify(outcome));
   const { value } = outcome;
@@ -86,7 +89,6 @@ test("on Workers, `log: '0.15'` says it answers uses, and a use through the entr
 test('on Workers, the vault says it batches, and a request\'s several keys are one call through the entrypoint (T167)', { skip, timeout: 120_000 }, async () => {
   const w = await world();
   const ids = [await w.key('one'), await w.key('two')];
-  await call('startCheckpointer');
   // Read without the hot path, as every call but a use is: what it says of uses, it says of batches (cloudflare.ts).
   assert.equal((await call<{ batchUses?: boolean }>('about')).batchUses, true);
   const { secretId: _, place: __, requestId: ___, ...one } = ask(w, ids[0]!);
@@ -97,4 +99,102 @@ test('on Workers, the vault says it batches, and a request\'s several keys are o
     value.context, Buffer.from(value.key, 'base64'),
   ).toString());
   assert.deepEqual(opened, ['one', 'two']);
+});
+
+test('on Workers, a vault with no checkpointer bound is refused at its first call, by name', { skip, timeout: 120_000 }, async () => {
+  const bare = mkdtempSync(join(tmpdir(), 'coffre-log-worker-bare-'));
+  const name = 'coffre-log-workers-bare';
+  writeFileSync(join(bare, 'wrangler.json'), JSON.stringify({
+    name,
+    compatibility_date: '2026-08-06',
+    compatibility_flags: ['nodejs_compat'],
+    vars: { KEK: JSON.stringify(KEK), SIGNING_KEY: SIGNING_KEY.toString('base64') },
+    hyperdrive: [
+      { binding: 'VAULT_HYPERDRIVE', id: 'log-workers-test', localConnectionString: VAULT_URL },
+      { binding: 'HOT_HYPERDRIVE', id: 'log-workers-hot', localConnectionString: HOT_URL },
+    ],
+    services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
+  }));
+  const unbound = await unstable_dev(fileURLToPath(new URL('./workers/log-worker.ts', import.meta.url)), {
+    config: join(bare, 'wrangler.json'),
+    local: true, ip: '127.0.0.1', port: 0, inspectorPort: 0, persist: false, logLevel: 'none',
+    experimental: { disableExperimentalWarning: true, disableDevRegistry: true },
+  });
+  try {
+    const response = await unbound.fetch('/', { method: 'POST', body: JSON.stringify({ method: 'about', args: [] }), signal: AbortSignal.timeout(30_000) });
+    const body = (await response.json()) as { ok: boolean; error?: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error ?? '', /set checkpointer in vault\(…\), env\.CHECKPOINTER/);
+  } finally {
+    await unbound.stop();
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
+
+test("on Workers, an isolate's first calls each wait for the checkpointer's start, however slow: none meets a log with no checkpoint yet (review r1)", { skip, timeout: 120_000 }, async () => {
+  // An empty log no checkpointer has opened yet, as a new instance's.
+  await emptyLog();
+  for (const table of ['log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  const slowDir = mkdtempSync(join(tmpdir(), 'coffre-log-worker-slow-'));
+  const name = 'coffre-log-workers-slow';
+  writeFileSync(join(slowDir, 'wrangler.json'), JSON.stringify({
+    name,
+    compatibility_date: '2026-08-06',
+    compatibility_flags: ['nodejs_compat'],
+    vars: { KEK: JSON.stringify(KEK), SIGNING_KEY: SIGNING_KEY.toString('base64'), SLOW_CHECKPOINTER: '500' },
+    hyperdrive: [
+      { binding: 'VAULT_HYPERDRIVE', id: 'log-workers-test', localConnectionString: VAULT_URL },
+      { binding: 'HOT_HYPERDRIVE', id: 'log-workers-hot', localConnectionString: HOT_URL },
+    ],
+    durable_objects: { bindings: [{ name: 'CHECKPOINTER', class_name: 'CoffreCheckpointer' }] },
+    migrations: [{ tag: 'v1', new_sqlite_classes: ['CoffreCheckpointer'] }],
+    services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
+  }));
+  const slowWorker = await unstable_dev(fileURLToPath(new URL('./workers/log-worker.ts', import.meta.url)), {
+    config: join(slowDir, 'wrangler.json'),
+    local: true, ip: '127.0.0.1', port: 0, inspectorPort: 0, persist: false, logLevel: 'error',
+    experimental: { disableExperimentalWarning: true, disableDevRegistry: true },
+  });
+  try {
+    const ask = async (method: string) => {
+      const response = await slowWorker.fetch('/', { method: 'POST', body: JSON.stringify({ method, args: [] }), signal: AbortSignal.timeout(30_000) });
+      const body = (await response.json()) as { ok: boolean; result?: { kept: boolean; problems: string[] }; error?: string };
+      assert.ok(body.ok, body.error ?? 'the call failed');
+      return body.result!;
+    };
+    const checks = await Promise.all(Array.from({ length: 4 }, () => ask('verifyTrees')));
+    for (const check of checks) assert.deepEqual([check.kept, check.problems], [true, []], JSON.stringify(check));
+  } finally {
+    await slowWorker.stop();
+    rmSync(slowDir, { recursive: true, force: true });
+  }
+});
+
+test('on Workers, a vault whose hot Hyperdrive is not bound is refused at its first call, naming the binding', { skip, timeout: 120_000 }, async () => {
+  const bare = mkdtempSync(join(tmpdir(), 'coffre-log-worker-nohot-'));
+  const name = 'coffre-log-workers-nohot';
+  writeFileSync(join(bare, 'wrangler.json'), JSON.stringify({
+    name,
+    compatibility_date: '2026-08-06',
+    compatibility_flags: ['nodejs_compat'],
+    vars: { KEK: JSON.stringify(KEK), SIGNING_KEY: SIGNING_KEY.toString('base64') },
+    hyperdrive: [{ binding: 'VAULT_HYPERDRIVE', id: 'log-workers-test', localConnectionString: VAULT_URL }],
+    durable_objects: { bindings: [{ name: 'CHECKPOINTER', class_name: 'CoffreCheckpointer' }] },
+    migrations: [{ tag: 'v1', new_sqlite_classes: ['CoffreCheckpointer'] }],
+    services: [{ binding: 'VAULT', service: name, entrypoint: 'Vault' }],
+  }));
+  const unbound = await unstable_dev(fileURLToPath(new URL('./workers/log-worker.ts', import.meta.url)), {
+    config: join(bare, 'wrangler.json'),
+    local: true, ip: '127.0.0.1', port: 0, inspectorPort: 0, persist: false, logLevel: 'none',
+    experimental: { disableExperimentalWarning: true, disableDevRegistry: true },
+  });
+  try {
+    const response = await unbound.fetch('/', { method: 'POST', body: JSON.stringify({ method: 'about', args: [] }), signal: AbortSignal.timeout(30_000) });
+    const body = (await response.json()) as { ok: boolean; error?: string };
+    assert.equal(body.ok, false);
+    assert.match(body.error ?? '', /no Hyperdrive binding: .*HOT_HYPERDRIVE/);
+  } finally {
+    await unbound.stop();
+    rmSync(bare, { recursive: true, force: true });
+  }
 });

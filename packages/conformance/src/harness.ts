@@ -205,12 +205,19 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
     rmSync(scratch, { recursive: true, force: true });
   }
 
+  /**
+   * The door open: requests answered, not held. The first after a start cuts 0.15's log over from 0.14, and the
+   * others answer 503 meanwhile, with Retry-After, as a deployment's clients see; a check's requests come after.
+   */
+  const doorOpen = () => until(`${origin}/api/me answered, not held`, async () => (await fetch(`${origin}/api/me`)).status !== 503, 60, alive);
+
   try {
     const deployment =
       kind === 'workers'
         ? await startWorkers()
         : await startNode();
     await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`)).ok, 120, alive);
+    await doorOpen();
     return deployment;
   } catch (error) {
     const seen = logs();
@@ -276,6 +283,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         await halt(wrangler);
         wrangler = startWrangler();
         await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`)).ok, 120, alive);
+        await doorOpen();
       },
       serving: () => ({ wrangler: wrangler.child.pid! }),
       database: () => postgres(owner),
@@ -300,6 +308,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         DATABASE_URL: `file:${database}`,
         // SQLite has no logins: the hot path's database is the same file.
         HOT_DATABASE_URL: `file:${database}`,
+        // Kept across a restart, as a deployment keeps it: the checkpointer goes on from the pair it signed.
+        CHECKPOINTER_MEMORY: join(scratch, 'checkpointer-memory'),
         VAULT_KEY_ID: KEYS.VAULT_KEY_ID,
         VAULT_KEY: KEYS.VAULT_KEY,
         ...OWNER_VARS,
@@ -335,6 +345,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         await halt(server);
         server = startServer();
         await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
+        await doorOpen();
       },
       async restart() {
         await halt(server);
@@ -342,6 +353,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         vault = await startVault();
         server = startServer();
         await until('the restarted server', async () => (await fetch(`${origin}/livez`)).ok, 30, alive);
+        await doorOpen();
       },
       serving: () => ({ vault: vault.child.pid!, server: server.child.pid! }),
       database: async () => sqlite(database),

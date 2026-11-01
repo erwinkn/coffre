@@ -17,6 +17,9 @@ type Env = {
 
 export const Vault = vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE as never),
+  // No use here: the object reads the vault's own config alone.
+  hotDatabase: postgres(env.VAULT_HYPERDRIVE as never),
+  checkpointer: env.CHECKPOINTER,
   kek: { id: 'checkpointer-workers-test', key: env.VAULT_KEY },
   signingKey: env.SIGNING_KEY,
   owners: ['root@acme.example'],

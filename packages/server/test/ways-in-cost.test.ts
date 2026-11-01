@@ -26,7 +26,7 @@ import { bindingRoute, checkPlugins } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
@@ -74,7 +74,7 @@ before(async () => {
   await resetDatabase(db.owner);
   await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
-  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow }) });
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev');
@@ -91,7 +91,7 @@ before(async () => {
   hot = new RecordingPool(TEST_HOT_DATABASE_URL);
   vault = await localVault(
     { database: createDatabase(vaultPool.client), hotDatabase: createDatabase(hot.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
-    { log: '0.15', sealThrough: sealedNow },
+    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
   );
   const runtimeOf = (auth: ReturnType<typeof signin>) => {
     const config = resolveConfig({

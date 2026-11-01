@@ -6,7 +6,7 @@ import { POLICY_REVISION } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
-import { acceptAuditLoss, AUDIT_NEXT, auditKeys, listAudit, verifyAudit, verifyAuditTrees } from './audit.ts';
+import { acceptAuditLoss, AUDIT_NEXT, auditKeys, listAudit, verifyAudit, verifyAuditReads, verifyAuditTrees } from './audit.ts';
 import type { ApiContext } from './context.ts';
 import { approveSession, listEnrollments, mintEnrollment, mintInput, promoteEnrollment, promoteInput } from './enrollments.ts';
 import { badRequest, forbidden, notFound } from './errors.ts';
@@ -755,6 +755,11 @@ export const routes = {
   }),
   // 0.15's log: its newest checkpoint and every entry since, as the audit page checks it on every visit.
   ...route('GET /audit/trees', { run: (ctx) => verifyAuditTrees(ctx) }),
+  // The reads' listing held to 0.15's log, a stretch a request, from `start`, then each `next` (`coffre verify log`).
+  ...route('GET /audit/reads', {
+    input: z.object({ from: z.union([z.literal('start'), z.string().regex(/^[0-9]{1,19}$/)]) }),
+    run: (ctx, { input }) => verifyAuditReads(ctx, input),
+  }),
   // What `coffre verify keys` checks an escrowed key against, on the operator's machine.
   ...route('GET /audit/keys', { run: (ctx) => auditKeys(ctx) }),
   // An Owner accepts that a range of the log is lost for good: the audit watch's anchor goes on past it.

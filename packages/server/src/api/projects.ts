@@ -87,6 +87,12 @@ export type Me = {
    * Cloudflare Access, whose assertion is not coffre's, and through MCP.
    */
   credentialExpiresAt: string | null;
+  /**
+   * The credential this request came in on, by the id the audit log names it
+   * by (a use's `credentialId`): what `coffre verify instance` finds its own
+   * read by (T166). Null where `credentialExpiresAt` is.
+   */
+  credentialId: string | null;
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
@@ -174,6 +180,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
     features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
     personalToken: ctx.personalToken === null ? null : { ...ctx.personalToken, scope: scopeByPath(caller.credentialScope ?? [], known)! },
     credentialExpiresAt: ctx.credentialExpiresAt,
+    credentialId: ctx.credentialExpiresAt === null ? null : ctx.credentialId,
     environments: reachable,
   };
 }

@@ -15,7 +15,7 @@ import { asc, count, eq, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey } from '../src/inputs.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, withLogUnlocked, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -40,7 +40,7 @@ function configure(): ResolvedVaultConfig {
 
 /** A vault keeping 0.15's log; an Owner, an Admin who is no Owner, and a service account that views a project, which has an environment. */
 async function world() {
-  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed });
+  const vault = await openLocalVault(db.vault, configure(), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const environment = await newEnvironment(db.owner, project);

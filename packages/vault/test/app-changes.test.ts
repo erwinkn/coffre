@@ -28,7 +28,7 @@ import { credentialObject, environmentObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
 import type { VaultOptions } from '../src/vault.ts';
 import { sealThroughDouble } from './audit-tree.ts';
-import { emptyDatabase, locksHere, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, type TestDatabase } from './database.ts';
+import { emptyDatabase, locksHere, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, nothingHeld, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';
@@ -53,7 +53,7 @@ function configure(): ResolvedVaultConfig {
 /** A vault keeping 0.15's log, whatever the suite's setting, its changes sealed at once unless `options` says how. */
 async function world(options: VaultOptions = {}) {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, ...options });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, ...options });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   // The service account the tokens are of: a credential's principal is a member (its row's foreign key).
   assert.ok((await vault.admit({ actor: ROOT, principal: CI })).ok);

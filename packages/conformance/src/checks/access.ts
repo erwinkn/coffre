@@ -6,6 +6,7 @@ import { expect, refused } from '../report.ts';
 import { BULK, canary, DEV, PROD, PROJECT, signIn, valuesIn, type Canaries, type People } from './people.ts';
 import { connectedApp, discovers } from './mcp.ts';
 import { pollDevice, startDevice } from './signin.ts';
+import { listed } from './audit.ts';
 
 export async function membersOnly(deployment: Deployment, { stranger }: People): Promise<string> {
   const attempt = await signIn(deployment, stranger.browser, stranger.email);
@@ -92,8 +93,11 @@ export async function crossSite({ admin }: People, canaries: Canaries): Promise<
 export async function offboarding(deployment: Deployment, { admin, leaver, service }: People, canaries: Canaries) {
   const device = await startDevice(deployment);
   await leaver.api.deviceLogins.decide(device.user_code, true);
-  // What they saw is what to rotate once they are gone.
+  // What they saw is what to rotate once they are gone: with 0.15's log, once their reads are listed (T166).
   await leaver.cli.secrets.reveal(DEV);
+  const expected = Object.keys(valuesIn(canaries, DEV)).map((key) => `${DEV}/${key}`).sort();
+  const seen = (report: { exposed: { project: string; environment: string; key: string }[] }) => report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`).sort();
+  await listed(async () => same(seen(await admin.api.members.get(leaver.member)), expected));
   // An app they connected is listed to an owner, and removal disconnects it.
   const app = await connectedApp(deployment, leaver);
   const before = await admin.api.members.get(leaver.member);
@@ -102,9 +106,7 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   expect(report !== null, "an owner's removal does not answer with the leaver's report");
   expect(revoked.apps === 1 && report.live.apps === 0 && report.apps.length === 0, 'removal does not say it disconnected their app', { revoked, apps: report.apps });
   expect(!(await discovers(deployment, app)), "a removed member's app still reaches /mcp");
-  const exposed = report.exposed.map((entry) => `${entry.project}/${entry.environment}/${entry.key}`).sort();
-  const expected = Object.keys(valuesIn(canaries, DEV)).map((key) => `${DEV}/${key}`).sort();
-  expect(same(exposed, expected), 'the offboarding report does not name what they read', report.exposed);
+  expect(same(seen(report), expected), 'the offboarding report does not name what they read', report.exposed);
 
   expect((await leaver.browser.fetch('/api/me')).status === 401, "a removed member's browser session still works");
   await refused("a removed member's CLI session read secrets", leaver.cli.secrets.list(DEV));
@@ -125,7 +127,7 @@ export async function offboarding(deployment: Deployment, { admin, leaver, servi
   expect(fresh.ok, 'a fresh provider callback could not sign the re-admitted member in');
   await admin.api.members.remove(leaver.member);
   await admin.api.members.remove(service.member);
-  return `the report names ${exposed.length} values and their connected app, which removal disconnects; re-admission revives no old session, token or approval; a fresh provider callback works`;
+  return `the report names ${report.exposed.length} values and their connected app, which removal disconnects; re-admission revives no old session, token or approval; a fresh provider callback works`;
 }
 
 /**

@@ -30,7 +30,7 @@ export function UsersPage() {
         principals={users}
         hasRemoved={result.removed.some((principal) => principal.principalType === 'user')}
       />
-      <RemovedList principalType="user" removed={result.removed} />
+      <RemovedList principalType="user" removed={result.removed} reads={result.reads} />
     </>
   );
 }

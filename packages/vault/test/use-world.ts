@@ -18,7 +18,7 @@ import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId } from '../src/use.ts';
-import { ENGINE, rows, run, type TestDatabase } from './database.ts';
+import { emptyReads, ENGINE, rows, run, type TestDatabase } from './database.ts';
 
 export const SIGNING_KEY = randomBytes(32);
 /** The vault's key encryption key, as a configuration names it: a vault elsewhere (a Worker's) opens what this one wrapped. */
@@ -49,6 +49,7 @@ export async function useDatabases(opened: TestDatabase): Promise<Database> {
 /** The log as a new instance's: no change, no use, the floor a minute back, days of uses made around today. */
 export async function emptyLog(): Promise<void> {
   for (const table of ['log_uses', 'log_bulk', 'log_changes', 'log_config']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  await emptyReads(db.owner);
   await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}`);
   if (ENGINE === 'postgres') {
     // Numbers from the start again: a test may have moved them past 2^53.
@@ -69,6 +70,7 @@ export const LOG_015: VaultOptions = {
     if (number === cutoverNumber) return {} as Sealed;
     throw new Error('a use waited for a seal');
   },
+  heldOutside: async () => [],
 };
 
 /** The cutover's change this fixture stands in for, by its number (`cutOverStandIn`). */

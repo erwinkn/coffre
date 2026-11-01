@@ -4,6 +4,7 @@ import type { PrincipalReport, RemovedPrincipal } from '../shared/models';
 import { Card } from './page';
 import { EmptyState, Notice, Timestamp } from './ui';
 import { PrincipalLink } from './principal';
+import { ReadsLag } from './actions-log';
 import { referenceProblem } from './references';
 import { ChevronRight, Key, User } from './icons';
 import { serviceName } from '@coffre/client';
@@ -57,9 +58,12 @@ export function RemovedNotice({ report }: { report: PrincipalReport }) {
 export function RemovedList({
   principalType,
   removed,
+  reads,
 }: {
   principalType: RemovedPrincipal['principalType'];
   removed: RemovedPrincipal[];
+  /** How far reads are listed, which the counts to rotate are as of (0.15's log). */
+  reads?: Parameters<typeof ReadsLag>[0]['reads'];
 }) {
   const users = principalType === 'user';
   const rows = removed.filter((principal) => principal.principalType === principalType);
@@ -67,6 +71,7 @@ export function RemovedList({
   return (
     <>
       <h2 className="section-title">Removed</h2>
+      <ReadsLag reads={reads} />
       <section className="card" aria-label={users ? 'Removed users' : 'Removed service accounts'}>
         <div className="dt-wrap">
           <table className="dt directory stacks">
@@ -127,6 +132,8 @@ function ConsiderRotating({ report, person }: { report: PrincipalReport; person:
         )
       }
     >
+      {/* Reads sealed since may yet be listed, and named here. */}
+      <ReadsLag reads={report.reads} />
       {report.exposed.length === 0 ? (
         <EmptyState title="Nothing left to rotate">
           {report.rotated > 0

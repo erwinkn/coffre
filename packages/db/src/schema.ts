@@ -1096,6 +1096,66 @@ export const logUses = pgTable(
 );
 
 /**
+ * 0.15's reads as the audit pages list them (T166; formal/Reads.tla): a
+ * projection of each use a signed pair seals, written by the vault's
+ * projector apart from the checkpointer, from the sealed objects at the
+ * use's number: its account, its key's place, the fork it was read in,
+ * through a reference the source and its place, the version read; under the
+ * vault's MAC over all of it, the number included. Partitioned by the day of
+ * `at`, as the uses are (`make_reads_day`), and dropped with them.
+ */
+export const logReads = pgTable(
+  'log_reads',
+  {
+    number: bigint({ mode: 'bigint' }).notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    credential: uuid().notNull(),
+    purpose: smallint().notNull(),
+    principal: text().notNull(),
+    secret: uuid().notNull(),
+    environment: uuid().notNull(),
+    project: uuid().notNull(),
+    place: uuid(),
+    source: uuid(),
+    sourceEnvironment: uuid('source_environment'),
+    sourceProject: uuid('source_project'),
+    version: uuid(),
+    mac: bytea().notNull(),
+  },
+  (table) => [
+    check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
+    uniqueIndex('log_reads_number_idx').on(table.at, table.number),
+    index('log_reads_principal_idx').on(table.principal, table.at, table.number),
+  ],
+);
+
+/** The days each member's reads are in (`log_reads`), so that a page of theirs reads those days alone: the projector writes them with the reads. */
+export const logReadDays = pgTable(
+  'log_read_days',
+  { principal: text().notNull(), day: integer().notNull() },
+  (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
+);
+
+/** How far the projector has gone: the number every use at or below it is projected, and when. */
+export const logReadsCursor = pgTable(
+  'log_reads_cursor',
+  {
+    onlyRow: boolean('only_row').primaryKey().default(true),
+    through: bigint({ mode: 'bigint' }).notNull(),
+    // The signed pair at or below `through`, whose floor of `at` the next read of uses takes.
+    pair: bigint({ mode: 'bigint' }).notNull(),
+    at: bigint({ mode: 'number' }).notNull(),
+    // The vault's MAC over the three (formal/Reads.tla, CursorMac): a cursor moved ahead would have the pages list reads as
+    // whole that were never projected. Null at the start, before any read is projected.
+    mac: bytea(),
+  },
+  (table) => [
+    check('log_reads_cursor_only_row_check', sql`${table.onlyRow}`),
+    check('log_reads_cursor_mac_check', sql`${table.mac} IS NULL OR octet_length(${table.mac}) = 16`),
+  ],
+);
+
+/**
  * The bulk cap (R28, R52): each principal's last logged use of each key, as
  * the start of that use's refresh period, written only by a use that holds
  * the principal's lock (exclusive to enter a key, shared to move it on:

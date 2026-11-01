@@ -57,6 +57,7 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /audit': [{ params: {}, input: { limit: 500 } }, { params: {}, input: { limit: 500, detail: '1' } }],
     'GET /audit/verification': [{ params: {} }],
     'GET /audit/trees': [{ params: {} }],
+    'GET /audit/reads': [{ params: {}, input: { from: 'start' } }],
     'GET /audit/keys': [{ params: {} }],
   };
 }
@@ -142,6 +143,7 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'GET /audit': true,
   'GET /audit/verification': true,
   'GET /audit/trees': true,
+  'GET /audit/reads': true,
   'GET /audit/keys': true,
   'POST /audit/loss': true,
 };

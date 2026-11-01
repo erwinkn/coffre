@@ -8,19 +8,22 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
 import { deriveLogKey } from '@coffre/core/audit';
-import { defineSignin, github, google, hashToken } from '@coffre/core/identity';
+import { defineSignin, github, google, hashToken, signin } from '@coffre/core/identity';
 import { newUseRequestId, type NamedUseOutcome, type UseOutcome } from '@coffre/core/vault';
 import { appendEntries } from '@coffre/db/log';
 import { asc, eq, like, sql, type SQL } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { runScheduled } from '../src/app.ts';
+import { resolveConfig } from '../src/config.ts';
 import { CUTTING_OVER_NOW, cutoverReady, type CutoverKnown } from '../src/cutover.ts';
 import { finishRotation, rotateStep } from '../src/key-rotation.ts';
 import { resolvePath } from '../src/db/queries.ts';
+import { createRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, environments, identities, logChanges, logFence, projects, secrets, vaultGrants, vaultMembers } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const PUBLIC_URL = 'https://secrets.acme.example';
@@ -48,7 +51,7 @@ beforeEach(async () => {
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
   }
-  const vault = testVault([ROOT], {}, undefined, {}, {});
+  const vault = testVault([ROOT], {}, undefined, {}, { log: '0.14' });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
   old = { vault, deps, root: clientFor(deps, ROOT) };
@@ -58,7 +61,7 @@ beforeEach(async () => {
 /** The deploy: a vault of 0.15's log on the same keys, not cut over, and the app over it, whose door cuts it over. */
 function deploy(signin = SIGNIN, config: { bulkLimit?: { count: number; windowMinutes: number } } = {}) {
   const hotDatabase = TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
-  const vault = testVault([ROOT], { hotDatabase, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, cutover: 'app' });
+  const vault = testVault([ROOT], { hotDatabase, ...config }, { kek: old.vault.kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld, cutover: 'app' });
   // The same app, its key the same: a deploy changes neither.
   const deps = testDeps(db.runtime, [ROOT], { vault, chainKey: old.deps.chainKey });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: SIGNIN });
@@ -155,6 +158,32 @@ test("an instance kept by 0.14, cut over by the app's door: its token serves thr
  * roles' change, what a token's issue record does. The audit pages know an issue by how its payload starts too, so
  * the roles' change is neither listed nor counted as one (T164, review r1 of W261).
  */
+test("0.14's reads from before the cutover are listed beside 0.15's after it, on the whole log's page and each member's, newest first; a place's page keeps 0.14's and says where 0.15's are (T166, D160)", async () => {
+  await old.root.projects.create('market');
+  await old.root.environments.create('market/dev');
+  await old.root.secrets.set('market/dev', { A: 'one' });
+  await old.root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await old.root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  // A read 0.14's log keeps, as its entry; then the deploy, and a read 0.15's keeps, as its use, sealed and listed.
+  assert.equal((await old.root.secrets.reveal('market/dev/A')).values.A, 'one');
+  const now = deploy();
+  assert.equal(await now.cutover(), null);
+  assert.equal(codeOf(await use(now.vault, token.id, await keyIn(await environmentOf('market', 'dev'), 'A'))), 'ok');
+  await now.vault.listReads();
+  const readsOf = async (query: { path?: string; actor?: string }) => (await now.root.audit.list({ ...query, sealed: '1', limit: 100 })).entries
+    .filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.key === 'A').map((entry) => [entry.log, entry.version]);
+  assert.deepEqual(await readsOf({}), [['0.15', 1], ['0.14', 1]]);
+  for (const path of ['market', 'market/dev', 'market/dev/A']) {
+    assert.deepEqual(await readsOf({ path }), [['0.14', 1]], path);
+    assert.equal((await now.root.audit.list({ path, sealed: '1', limit: 1 })).readsOmitted, 'path', path);
+  }
+  assert.deepEqual(await readsOf({ actor: CI }), [['0.15', 1]]);
+  assert.deepEqual(await readsOf({ actor: `user:${ROOT}` }), [['0.14', 1]]);
+  // And a client older than 0.15, which pages 0.14's log alone: its history as it was.
+  const old14 = (await now.root.audit.list({ limit: 100 })).entries.filter((entry) => entry.action === 'secret.read' && entry.key === 'A');
+  assert.deepEqual(old14.map((entry) => entry.log), ['0.14']);
+});
+
 test("a custom role named `issue`, sealed by the cutover, is no token's issue on the audit pages: neither listed nor counted", async () => {
   await old.root.roles.set('issue', { name: 'Issue', description: '', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] });
   const now = deploy();
@@ -531,4 +560,16 @@ test("an access entry forged in the vault's name holds no use: its check writes 
   // The next decision about the account, the head free, reports it.
   await now.vault.access(CI);
   assert.equal(await reports(), 1);
+});
+
+test("the scheduled job, run before any request, as a Node server runs it at its start, cuts over first, then checkpoints", async () => {
+  await old.root.projects.create('market');
+  const now = deploy();
+  const config = resolveConfig({ publicUrl: PUBLIC_URL, vault: now.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: now.deps.chainKey.toString('base64') });
+  const runtime = createRuntime(config, now.deps.db, now.vault, { json: async () => assert.fail('the job fetches nothing') });
+  await runScheduled(runtime);
+  assert.equal(runtime.cutover?.done, true);
+  assert.ok((await db.owner.select({ number: logChanges.number }).from(logChanges)).length > 0, "0.15's log holds the cutover");
+  // And it runs as it did, once cut over.
+  await runScheduled(runtime);
 });

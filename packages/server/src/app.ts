@@ -389,6 +389,13 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
       held.kind === 'rotating' || held.kind === 'stalled' ? `${ROTATING}: the scheduled job runs once it has` : held.kind === 'refused' ? held.reason : "coffre's database cannot be reached",
     );
   }
+  // Under 0.15's log, cut over from 0.14 first, as a request's door and readiness have it: on Node, the job runs as the
+  // server starts, before any request, and the vault decides nothing until then.
+  const cut = await cutoverReady(runtime);
+  if (cut !== null) {
+    cutoverRefused(cut.why);
+    throw new Error(`the scheduled job runs once 0.15's log is cut over: ${cut.why}`);
+  }
   const watch = watchOf(runtime);
   if (watch === null) unwatched(runtime);
   const context = watch?.context();

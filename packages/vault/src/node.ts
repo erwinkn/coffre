@@ -1,10 +1,11 @@
 /**
  * The vault on Node, one of two ways, each over the database the server
- * uses, through the vault's own login:
+ * uses, through the vault's own login and its uses' (`hotDatabase`), with
+ * the checkpointer that seals its log in the same process (`checkpointer`):
  *
- * - in the server's own process: `vault: await localVault({ database, ...keys })`;
+ * - in the server's own process: `vault: await localVault({ database, hotDatabase, checkpointer, ...keys })`;
  * - as a process of its own, which the server reaches over a Unix socket:
- *   `serveVault({ socket, database, ...keys })` there, and
+ *   `serveVault({ socket, database, hotDatabase, checkpointer, ...keys })` there, and
  *   `vault: connectVault(socket)` in the server.
  *
  * The second keeps every key out of the process that faces the network. The
@@ -21,6 +22,7 @@ import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 
+import { keepCheckpointer } from './checkpointer-node.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { failureOf } from './failure.ts';
 import { METHODS, openLocalVault, type LocalVault } from './local.ts';
@@ -29,8 +31,8 @@ import type { VaultOptions } from './vault.ts';
 export type { Vault, VaultConfig };
 export * from './index.ts';
 export type { LocalVault, VaultOptions };
-/** 0.15's checkpointer on Node (docs/design/audit-tree.md): unused until 0.15's log is switched on (plan PR 10). */
-export { fileMemory, runCheckpointer, type RunningCheckpointer } from './checkpointer-node.ts';
+/** 0.15's checkpointer on Node (docs/design/audit-tree.md), which `localVault` runs in the vault's process. */
+export { fileMemory, keepCheckpointer, runCheckpointer, type KeptCheckpointer, type RunningCheckpointer } from './checkpointer-node.ts';
 /**
  * 0.15's log replayed as stored: what each use decides on the log, which every live answer must be (R53). For the
  * suites only: it reads the whole log into memory, every use ever made. Plan PR 8's verifier walks it a stretch at a time.
@@ -45,17 +47,37 @@ export type NodeVaultConfig = VaultConfig & {
    */
   database: string | Database;
   /**
-   * 0.15's hot path, behind its switch (docs/design/0.15-plan.md, PR 5):
-   * the same database as `coffre_vault_hot`, whose lock and statement
-   * timeouts bound a use, or one already open. Without it, the vault has
-   * no 0.15 uses.
+   * 0.15's uses (docs/design/0.15-plan.md, PR 5): the same database as
+   * `coffre_vault_hot`, whose lock and statement timeouts bound a use, or
+   * one already open; on SQLite, the same `file:` URL. Required.
    */
   hotDatabase?: string | Database;
+  /**
+   * 0.15's checkpointer, which this process runs: `memory`, the file it
+   * keeps the newest pair it signed in, where no database writer reaches,
+   * such as `/var/lib/coffre/checkpointer-memory`, writable by the vault's
+   * user alone (its alarms go beside it, in `<memory>.alarms`). Required,
+   * unless the caller seals through a checkpointer of its own
+   * (`VaultOptions.sealThrough` and `heldOutside`).
+   */
+  checkpointer?: { memory: string };
 };
 
-/** The vault in this process. */
+/**
+ * The vault in this process, and under 0.15's log, the default, its
+ * checkpointer, opened before the vault serves, so that no call meets a log
+ * with no checkpoint yet. A configuration without what 0.15 needs is refused.
+ */
 export async function localVault(config: NodeVaultConfig, options: VaultOptions = {}): Promise<LocalVault> {
   const resolved = resolveVaultConfig(config);
+  const log015 = (options.log ?? '0.15') === '0.15';
+  const own = log015 && options.sealThrough === undefined;
+  if (log015 && config.hotDatabase === undefined) {
+    throw new Error("the vault's uses run as a login of their own: set hotDatabase in the vault's configuration, the database as coffre_vault_hot (HOT_DATABASE_URL)");
+  }
+  if (own && config.checkpointer?.memory === undefined) {
+    throw new Error("the vault answers a change once its checkpointer has sealed it: set checkpointer: { memory } in the vault's configuration, the file its signer remembers in (CHECKPOINTER_MEMORY)");
+  }
   const opened: (() => Promise<void>)[] = [];
   const open = async (database: string | Database) => {
     if (typeof database !== 'string') return database;
@@ -63,15 +85,24 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
     opened.push(close);
     return db;
   };
+  let checkpointer: { stop(): Promise<void> } | null = null;
+  // The checkpointer stopped first, its tick in flight ended, then the databases closed.
   const close = async () => {
+    await checkpointer?.stop();
     await Promise.all(opened.map((done) => done()));
   };
   try {
     const db = await open(config.database);
-    const hot = config.hotDatabase === undefined ? undefined : await open(config.hotDatabase);
+    // The same URL is the same connection: on SQLite, where it is the same file, two would wait on each other's
+    // writes, a use's and the checkpointer's, past the busy timeout.
+    const hot = config.hotDatabase === undefined ? undefined : config.hotDatabase === config.database ? db : await open(config.hotDatabase);
     // A use holds one of the hot pool's connections from its call to its answer: at most that many in flight.
     const connections = (hot as { $client?: { options?: { max?: number } } } | undefined)?.$client?.options?.max;
     const uses = { ...(connections === undefined ? {} : { connections }), ...options.uses };
+    if (own) {
+      const kept = (checkpointer = await keepCheckpointer({ database: db, seed: resolved.signingKeys[0]!, memory: config.checkpointer!.memory }));
+      options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside };
+    }
     return await openLocalVault(db, resolved, { ...options, uses }, close, hot);
   } catch (error) {
     await close();

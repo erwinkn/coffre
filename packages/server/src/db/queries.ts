@@ -14,6 +14,7 @@ import { alias } from 'drizzle-orm/pg-core';
 import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getTableName, gt, gte, inArray, isNotNull, isNull, like, lt, lte, not, notInArray, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
 import { answerQuery, settingsQuery } from './answers.ts';
+import { readsBy } from './reads.ts';
 import { authMac, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
@@ -1157,8 +1158,14 @@ export async function members(
  * version, and whether it or its place is archived. Several reads, so the
  * caller runs them in one snapshot (`SNAPSHOT`): a restore committed between
  * two would show its version without the one it restored.
+ *
+ * With 0.15's log a read is a use (T166), whose version the vault's
+ * projection of it says (`readsBy`): each version of each key they read,
+ * through a reference its source's, as 0.14's entry named it. A caller that
+ * read them already, beside its other reads, passes them: one round trip
+ * fewer.
  */
-export async function memberActivity(db: Queryable, actorIds: string[]) {
+export async function memberActivity(db: Queryable, actorIds: string[], readAlready?: Awaited<ReturnType<typeof readsBy>>) {
   const { auditLog, secrets, environments, projects } = tablesOf(db);
   const allowed = eq(auditLog.decision, 'allow');
   const entries = (where: SQL | undefined) => db
@@ -1181,10 +1188,12 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     .where(where)
     .orderBy(asc(auditLog.seq));
   // Their reads and writes, and every restore, few, each someone's choice, for whichever secrets were seen: one statement.
-  const logged = await entries(and(allowed, or(
-    and(inArray(auditLog.actor, actorIds.flatMap((id) => [`user:${id}`, `token:${id}`])), inArray(auditLog.action, ['secret.read', 'secret.write'])),
-    eq(auditLog.action, 'secret.restore'),
-  )));
+  // Beside it, their uses, under 0.15's log.
+  const members = actorIds.flatMap((id) => [`user:${id}`, `token:${id}`]);
+  const [logged, used] = await Promise.all([
+    entries(and(allowed, or(and(inArray(auditLog.actor, members), inArray(auditLog.action, ['secret.read', 'secret.write'])), eq(auditLog.action, 'secret.restore')))),
+    readAlready ?? readsBy(db, members),
+  ]);
   const restores = logged.filter((row) => row.action === 'secret.restore');
   const seen = logged.filter((row) => row.action !== 'secret.restore');
   const listedOf = (row: (typeof seen)[number]) => {
@@ -1192,7 +1201,7 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
     return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
   };
   const ids = seen.flatMap((row) => (listedOf(row) ?? []).flatMap(({ secretId }) => (typeof secretId === 'string' ? [secretId] : [])));
-  const now = await secretPlaces(db, ids);
+  const [now, usedRows] = await Promise.all([secretPlaces(db, ids), readsOf(db, used)]);
   const rows = seen.flatMap((row) => {
     const listed = listedOf(row);
     if (listed === null) return [row];
@@ -1211,7 +1220,29 @@ export async function memberActivity(db: Queryable, actorIds: string[]) {
       }];
     });
   });
-  return [...rows, ...restores].map(shown);
+  return [...rows, ...usedRows, ...restores].map(shown);
+}
+
+/** Their reads under 0.15's log (`readsBy`), as `memberActivity` lists reads (above): each version they read. */
+async function readsOf(db: Queryable, seen: Awaited<ReturnType<typeof readsBy>>) {
+  if (seen.length === 0) return [];
+  const now = await secretPlaces(db, seen.map((one) => one.secret));
+  return seen.map(({ secret, ...one }) => ({ ...one, secretId: secret })).flatMap(({ actor, at, secretId, version }) => {
+    const found = now.get(secretId);
+    if (found === undefined) return [];
+    return [{
+      actor,
+      action: 'secret.read',
+      secretId,
+      metadata: JSON.stringify({ version }),
+      occurredAt: at,
+      key: found.key,
+      currentVersion: found.currentVersion,
+      archived: found.archivedAt !== null || found.environmentArchivedAt !== null || found.projectArchivedAt !== null,
+      project: found.project,
+      environment: found.environment,
+    }];
+  });
 }
 
 /** The person an account at a provider is bound to, if it is. */
@@ -1549,10 +1580,12 @@ export async function exchangeStill(
  * How a credential came to be, for the entries written on it: through a
  * trust binding, the sign-in, its place in its log and the run its issuer
  * asserted; or, a personal token, its label, as its issue recorded it.
+ * Each with the account it acts as, as that record names it: what a use
+ * through it is shown by when its row says nothing (T166).
  */
 export type CredentialOrigin =
-  | { kind: 'signIn'; seq: bigint; log: '0.14' | '0.15'; run: Record<string, unknown> }
-  | { kind: 'personal'; label: string };
+  | { kind: 'signIn'; seq: bigint; log: '0.14' | '0.15'; run: Record<string, unknown>; principal: string }
+  | { kind: 'personal'; label: string; principal: string | null };
 
 /**
  * How these credentials came to be, by credential ID (`CredentialOrigin`),
@@ -1571,29 +1604,32 @@ export async function originsOf(db: Queryable, credentialIds: readonly string[])
     ? sql<string>`((${auditLog.metadata})::jsonb ->> ${sql.raw(`'${field}'`)})`
     : sql<string>`json_extract(${auditLog.metadata}, ${sql.raw(`'$.${field}'`)})`;
   const entries = (action: 'token.exchange' | 'token.create', id: SQL<string>) => sql`
-    SELECT ${id} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log, ${sql.raw(`'${action}'`)} AS action FROM ${auditLog}
+    SELECT ${id} AS credential, ${auditLog.seq} AS seq, ${auditLog.metadata} AS record, '0.14' AS log, ${sql.raw(`'${action}'`)} AS action, ${auditLog.actor} AS actor FROM ${auditLog}
      WHERE ${and(eq(auditLog.author, 'app'), eq(auditLog.action, action), eq(auditLog.decision, 'allow'), inArray(id, [...credentialIds]))}`;
   const objects = new Map(credentialIds.map((id) => [logObject('credential', id), id]));
   // A plain read, `SELECT …`, which a page's other reads may go with (`groupReads`).
-  const rows = await dialect.rowsOf<{ credential: string; seq: string | number | bigint; record: string; log: '0.14' | '0.15'; action: string | null }>(db, sql`
+  const rows = await dialect.rowsOf<{ credential: string; seq: string | number | bigint; record: string; log: '0.14' | '0.15'; action: string | null; actor: string }>(db, sql`
     ${entries('token.exchange', metadata('credentialId'))}
     UNION ALL
     ${entries('token.create', metadata('targetCredentialId'))}
     UNION ALL
-    SELECT ${engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15', NULL FROM ${logChanges}
+    SELECT ${engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object}, ${logChanges.number}, ${logChanges.payload}, '0.15', NULL, ${logChanges.actor} FROM ${logChanges}
      WHERE ${logChanges.number} IN (${sql.join([...objects.keys()].map((object) => sql`(SELECT min(${logChanges.number}) FROM ${logChanges} WHERE ${logChanges.object} = ${object})`), sql`, `)})
        AND ${recorded(engine, logChanges.payload, 'signIn', 'issue')}`);
   return new Map(rows.flatMap((row): [string, CredentialOrigin][] => {
     const id = row.log === '0.14' ? row.credential : objects.get(row.credential);
     if (id === undefined) return [];
-    const record = JSON.parse(row.record) as { run?: unknown; kind?: unknown; label?: unknown; signIn?: { run?: unknown }; issue?: { kind?: unknown; label?: unknown } };
+    const record = JSON.parse(row.record) as { run?: unknown; kind?: unknown; label?: unknown; principal?: unknown; signIn?: { run?: unknown }; issue?: { kind?: unknown; label?: unknown } };
     const signIn = row.log === '0.14' ? (row.action === 'token.exchange' ? record : undefined) : record.signIn;
     if (signIn !== undefined) {
       const { run } = signIn;
-      return [[id, { kind: 'signIn', seq: BigInt(row.seq), log: row.log, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {} }]];
+      // A sign-in is its service's: 0.14's entry and 0.15's change both name it as their actor.
+      return [[id, { kind: 'signIn', seq: BigInt(row.seq), log: row.log, run: typeof run === 'object' && run !== null ? (run as Record<string, unknown>) : {}, principal: row.actor }]];
     }
     const { kind, label } = (row.log === '0.14' ? record : record.issue) ?? {};
-    return kind === 'personal' && typeof label === 'string' ? [[id, { kind: 'personal', label }]] : [];
+    // A personal token is its person's, who made it: 0.15's issue names the account, 0.14's entry its actor.
+    const principal = row.log === '0.15' ? (typeof record.principal === 'string' ? record.principal : null) : row.actor;
+    return kind === 'personal' && typeof label === 'string' ? [[id, { kind: 'personal', label, principal }]] : [];
   }));
 }
 
@@ -1610,6 +1646,11 @@ export type RecordedChange = {
   at: number;
   actor: string;
   payload: string;
+  /** The rest of what its MAC covers, for the vault to vouch for it (T166). */
+  requestId: string;
+  object: string;
+  seal: Buffer | null;
+  mac: Buffer;
 };
 
 /**
@@ -1668,13 +1709,18 @@ export async function sealedPage(
   if (filter.detail) reads.push(...recordActors(filter.actors, isMember).map((actor) => ({ records: HIDDEN, actor })));
   if (reads.length === 0) return { rows: [], more: false };
   const { logChanges } = tablesOf(db);
-  const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload"`;
-  const rows = await dialect.rowsOf<{ number: string | number | bigint; at: string | number; actor: string; payload: string }>(
+  const object = dialect.engineOf(db) === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
+  const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
+    ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
+  const rows = await dialect.rowsOf<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
     db,
     newest(db, reads, columns, filter.before, filter.limit + 1),
   );
   return {
-    rows: rows.slice(0, filter.limit).map((row) => ({ number: BigInt(row.number), at: Number(row.at), actor: row.actor, payload: row.payload })),
+    rows: rows.slice(0, filter.limit).map((row) => ({
+      number: BigInt(row.number), at: Number(row.at), actor: row.actor, payload: row.payload,
+      requestId: row.request_id, object: row.object, seal: row.seal === null ? null : Buffer.from(row.seal), mac: Buffer.from(row.mac),
+    })),
     more: rows.length > filter.limit,
   };
 }

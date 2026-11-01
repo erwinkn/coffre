@@ -48,11 +48,23 @@ const member = ({ principalType, principalId }) =>
 // Sign-in sessions, device logins, linked accounts and trust bindings refer
 // to the vault's members, so they go next; then the members and grants,
 // which go with the log that records them.
+//
+// 0.15's log goes too, its checkpoints with it: the stack's first request
+// after the seed cuts over again. Its reads' listing with it, and the
+// projector's cursor back where the migration left it: a cursor standing on
+// a checkpoint gone would stop the projector there, and no read after the
+// seed would be listed. So the seed runs before anything has asked
+// the vault (dev/start.sh starts its checkpointer's memory over for it):
+// a vault already serving keeps the log it found, and refuses this one.
 console.log('==> resetting local data');
 await pool.unsafe('DELETE FROM secret_references');
 await pool.unsafe('ALTER TABLE audit_log DISABLE TRIGGER USER');
 await pool.unsafe('DELETE FROM audit_log');
 await pool.unsafe('ALTER TABLE audit_log ENABLE TRIGGER USER');
+for (const table of ['log_uses', 'log_bulk', 'log_changes', 'log_config', 'log_checkpoints', 'log_tiles', 'log_reads', 'log_read_days']) {
+    await pool.unsafe(`DELETE FROM ${table}`);
+}
+await pool.unsafe('UPDATE log_reads_cursor SET through = 0, pair = 0, at = 0, mac = NULL');
 await pool.unsafe('DELETE FROM vault_releases');
 await pool.unsafe('DELETE FROM mcp_approvals');
 await pool.unsafe('DELETE FROM mcp_connections');

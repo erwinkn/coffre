@@ -222,7 +222,7 @@ try {
     await db.owner.execute(sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
     checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), seed: derivedSigningKey(kek), memory: join(memory, 'memory') });
   }
-  const log = checkpointer === null ? {} : { log: '0.15' as const, sealThrough: checkpointer.sealThrough };
+  const log = checkpointer === null ? { log: '0.14' as const } : { log: '0.15' as const, sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside };
   const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: BULK }, { kek }, {}, log) });
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'rs-1', alg: 'RS256', use: 'sig' };

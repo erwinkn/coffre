@@ -19,7 +19,7 @@ import { resolvePath } from '../src/db/queries.ts';
 import { auditLog, environments, logChanges, logFence, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE } from './db/engine.ts';
-import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, credentialsLogged, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const CI = 'token:ci';
@@ -39,7 +39,7 @@ after(async () => {
 /** 0.15's log on, and its use path, over the hot login (the same file on SQLite). */
 function vault015() {
   const hotDatabase = TEST_ENGINE === 'postgres' ? TEST_HOT_DATABASE_URL : process.env.COFFRE_TEST_DATABASE_URL!;
-  return testVault([ROOT], { hotDatabase }, undefined, {}, { log: '0.15', sealThrough: sealedNow });
+  return testVault([ROOT], { hotDatabase }, undefined, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
 }
 
 /** The instance, with `log`'s vault, and a sign-in, which issues tokens. */
@@ -673,7 +673,7 @@ test('a write refused by `prepare` (a key\'s row not the vault\'s) stores nothin
 });
 
 test('with 0.14\'s log, a deletion leaves its erased keys unarchived and a project\'s environments\' slugs as they were, and logs nothing of 0.15\'s', async () => {
-  await instance(testVault([ROOT], {}, undefined, {}, {}));
+  await instance(testVault([ROOT], {}, undefined, {}, { log: '0.14' }));
   await root.projects.create('market');
   await root.environments.create('market/dev');
   await root.secrets.set('market/dev', { A: 'one' });

@@ -610,6 +610,7 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'GET /audit': { commands: ['audit'] },
   'GET /audit/verification': { commands: ['verify log'] },
   'GET /audit/trees': { commands: ['verify instance'] },
+  'GET /audit/reads': { commands: ['verify log'] },
   'GET /audit/keys': { commands: ['verify keys'] },
   'POST /audit/loss': { commands: ['audit accept-loss'] },
 };

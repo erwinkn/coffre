@@ -3,9 +3,11 @@
 // local stack, as its Owner through the dev IdP:
 //
 //   prepare     before the backup: a canary, a grant, a removal whose
-//               session is kept, a token, and checkpoints. Prints what the
-//               checks after need, as JSON.
-//   check       after the restore, with the same keys: everything is back.
+//               session is kept, a token, and checkpoints, 0.15's sealed
+//               too. Prints what the checks after need, as JSON.
+//   check       after the restore, with the same keys and a checkpointer
+//               with no memory: everything is back, and 0.15's log verifies
+//               from its newest checkpoint and seals what comes after.
 //   wrong-kek   after the restore, with another KEK: nobody signs in, reads
 //               and writes answer 503, and readiness goes red.
 import assert from 'node:assert/strict';
@@ -37,6 +39,20 @@ async function verified(admin) {
     return verification;
 }
 
+/**
+ * 0.15's log, from its newest checkpoint: verified, and sealed past `upto`, which the checkpointer, ticking every
+ * half second, reaches within a few ticks of the last change.
+ */
+async function sealed(admin, upto = 0n) {
+    for (let tries = 0; ; tries += 1) {
+        const trees = await call(admin, 'GET', '/api/audit/trees');
+        assert.ok(trees.kept && trees.problems.length === 0, `0.15's log does not verify: ${JSON.stringify(trees)}`);
+        if (trees.ok && trees.checkpoint !== null && BigInt(trees.checkpoint.upto) > upto) return trees;
+        assert.ok(tries < 20, `0.15's log is not sealed past ${upto}: ${JSON.stringify(trees)}`);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+}
+
 async function reveal(session, path) {
     return (await call(session, 'POST', '/api/reveals', { path })).values;
 }
@@ -64,8 +80,9 @@ async function prepare() {
     await beat();
     const verification = await verified(admin);
     const members = await call(admin, 'GET', '/api/members');
-    say(`verified through ${verification.through}, checkpointed at ${verification.checkpoint.seq}`);
-    process.stdout.write(JSON.stringify({ canary, leaver, token, verification, members }));
+    const trees = await sealed(admin);
+    say(`verified through ${verification.through}, checkpointed at ${verification.checkpoint.seq}; 0.15's log sealed up to ${trees.checkpoint.upto}`);
+    process.stdout.write(JSON.stringify({ canary, leaver, token, verification, members, trees }));
 }
 
 async function check(before) {
@@ -74,8 +91,17 @@ async function check(before) {
     assert.ok(verification.through > before.verification.through, 'verification stopped short of the restored log');
     assert.deepEqual(verification.checkpoint, before.verification.checkpoint, 'the newest checkpoint is not the one backed up');
     say(`verified through ${verification.through}, the backup's checkpoint at ${verification.checkpoint.seq} still holding`);
+    // A checkpointer with no memory, as after its reset (docs/restore.md, "On 0.15's log"): it takes the restored log's newest pair.
+    const trees = await sealed(admin, BigInt(before.trees.checkpoint.upto) - 1n);
+    say(`0.15's log verifies from its newest checkpoint, up to ${trees.checkpoint.upto}`);
 
-    assert.deepEqual(await call(admin, 'GET', '/api/members'), before.members, 'members or grants differ from the backup');
+    // The directory as backed up; how far its reads are listed (T166) moves on with this sign-in's seal, so it is held
+    // apart: there as it was, and vouched for.
+    const { reads, ...directory } = await call(admin, 'GET', '/api/members');
+    const { reads: readsBefore, ...directoryBefore } = before.members;
+    assert.deepEqual(directory, directoryBefore, 'members or grants differ from the backup');
+    assert.equal(reads === undefined, readsBefore === undefined, 'the directory says how far reads are listed, or not, unlike the backup');
+    assert.equal(reads?.forged, undefined, 'the restored reads listing is not vouched for');
     say('members, owners, grants and the removed are as backed up');
 
     assert.equal((await reveal(admin, CANARY)).DRILL_CANARY, before.canary);
@@ -91,14 +117,17 @@ async function check(before) {
     await beat();
     const after = await verified(admin);
     assert.ok(after.checkpoint.seq > before.verification.checkpoint.seq);
-    say(`a new write reads back; the next beat checkpoints at ${after.checkpoint.seq}, and the log verifies through ${after.through}`);
+    const resealed = await sealed(admin, BigInt(trees.checkpoint.upto));
+    say(`a new write reads back; the next beat checkpoints at ${after.checkpoint.seq}, the log verifies through ${after.through}, and 0.15's seals it, up to ${resealed.checkpoint.upto}`);
 }
 
 async function wrongKek(before) {
-    // The vault seals every member's row under keys that come from its KEK: under another, it can check
-    // nobody's, the Owner's included, so every request it is asked about is an outage, never a verdict.
-    assert.equal(await trySignIn(ADMIN), null, 'signed in under the wrong KEK');
-    say(`${ADMIN} cannot sign in: the vault can say of nobody who they are`);
+    // The vault's keys come from its KEK: under another, its checkpointer refuses the log's checkpoints ("not a pair
+    // signed by this log"), so the app's door, which asks whether 0.15's log is cut over, holds every request at 503,
+    // sign-in's first step included, and the vault decides nothing: an outage, never a verdict.
+    const leave = await fetch(`${API}/auth/signin/github`, { redirect: 'manual' });
+    assert.equal(leave.status, 503, `sign-in under the wrong KEK answered ${leave.status}`);
+    say(`${ADMIN} cannot sign in: coffre answers ${leave.status} from the first step`);
     const asToken = (method, path, body) => fetch(`${API}${path}`, {
         method,
         headers: { authorization: `Bearer ${before.token}`, 'content-type': 'application/json' },
@@ -115,7 +144,8 @@ async function wrongKek(before) {
 
     await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
     const ready = await (await fetch(`${API}/readyz`)).json();
-    assert.equal(ready.checkpointed, false, 'the vault checkpointed under the wrong KEK');
+    assert.equal(ready.ok, false, 'ready under the wrong KEK');
+    assert.notEqual(ready.checkpointed, true, 'the vault checkpointed under the wrong KEK');
     say(`and /readyz turns red: ${JSON.stringify(ready)}`);
 }
 

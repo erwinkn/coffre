@@ -32,6 +32,7 @@ import {
   HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, sensitiveFrom, type ChangePoint,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
+import { readsByStanding, readsPage, readsStanding } from '../src/db/reads.ts';
 import { fetchApi, pageClient } from '../src/fetch-api.ts';
 import { sessionCookieName } from '../src/auth.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
@@ -101,13 +102,18 @@ class CountingPool {
    * The shared buffers `statement` touches, read or found in the cache, as
    * this login runs it again now, in a transaction rolled back: null for
    * a write of a row it made, which fails as a duplicate (23505); any other
-   * failure fails the test.
+   * failure fails the test. Run once before, and rolled back, so that a
+   * connection that has not yet planned what a function it calls runs (the
+   * audit pages' reads of 0.15's uses, T166) reads no catalog for it.
    */
   async work(statement: Statement): Promise<{ pages: number; plan: string } | null> {
     const rolledBack = new Error('rolled back');
     let work: { pages: number; plan: string } | null = null;
     await this.#pool.begin(async (tx) => {
       try {
+        await tx.unsafe('SAVEPOINT warm');
+        await tx.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.text}`, statement.values as never[]);
+        await tx.unsafe('ROLLBACK TO SAVEPOINT warm');
         const [row] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, statement.values as never[]);
         const [{ Plan: plan }] = (row as unknown as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
         work = { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
@@ -197,7 +203,7 @@ before(async () => {
     database: createDatabase(vaultPool.client),
     kek: { id: 'test-kek-1', key: randomBytes(32).toString('base64') },
     owners: [ROOT],
-  });
+  }, { log: '0.14' });
   // Every call the app makes of the vault: on Workers, each its own invocation and connection.
   const vault = new Proxy(opened as unknown as FixtureDeps['vault'], {
     get(target, key) {
@@ -632,11 +638,14 @@ const renders: Record<string, { request: () => Promise<unknown>; budget: PageCos
   "/projects/market/settings, viewer": { request: () => visit('viewer', '/projects/market/settings'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
   "/users, owner": { request: () => visit('owner', '/users'), budget: { app: 8, trips: 3, vault: 1, vaultCalls: 2 } },
   "/users, viewer": { request: () => visit('viewer', '/users'), budget: { app: 4, trips: 2, vault: 1, vaultCalls: 1 } },
-  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 16, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
+  // Its report reads what they read under 0.15's log, as the projection lists them, and how far it does (T166), beside
+  // its first reads: a statement, no trip.
+  "/users/reader@acme.example, owner": { request: () => visit('owner', '/users/reader@acme.example'), budget: { app: 17, trips: 6, vault: 1, vaultCalls: 2 }, history: () => visit('owner', '/users/reader@acme.example', { reports: false }) },
   "/users/reader@acme.example, viewer": { request: () => visit('viewer', '/users/reader@acme.example'), budget: { app: 5, trips: 3, vault: 1, vaultCalls: 1 } },
   "/service-accounts, owner": { request: () => visit('owner', '/service-accounts'), budget: { app: 11, trips: 4, vault: 2, vaultCalls: 3 } },
   "/service-accounts, viewer": { request: () => visit('viewer', '/service-accounts'), budget: { app: 14, trips: 5, vault: 4, vaultCalls: 5 } },
-  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 19, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
+  // Its report reads their reads too, and how far they are listed (T166), beside its first reads.
+  "/service-accounts/ci-web, owner": { request: () => visit('owner', '/service-accounts/ci-web'), budget: { app: 20, trips: 7, vault: 2, vaultCalls: 3 }, history: () => visit('owner', '/service-accounts/ci-web', { reports: false }) },
   "/service-accounts/ci-web, viewer": { request: () => visit('viewer', '/service-accounts/ci-web'), budget: { app: 10, trips: 5, vault: 4, vaultCalls: 4 } },
   "/settings, owner": { request: () => visit('owner', '/settings'), budget: { app: 11, trips: 3, vault: 3, vaultCalls: 4 } },
   "/settings, viewer": { request: () => visit('viewer', '/settings'), budget: { app: 6, trips: 3, vault: 1, vaultCalls: 1 } },
@@ -1351,8 +1360,136 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     );
     const origins = await originsOf(counted, [...credentials, ...tokens]);
     assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));
-    assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1' })));
+    assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
   } finally {
     await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+  }
+});
+
+test("the audit pages' reads, each a use of 0.15's log as the vault's projector lists it, read as many pages however many other reads the log holds (T166)", POSTGRES, async () => {
+  const counted = createDatabase(app.client);
+  const ADA = 'user:ada@acme.example';
+  const OTHER = 'user:other@acme.example';
+  const AHEAD = 100;
+  const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
+  // Ada's reads are of market's keys, of their current versions, as the offboarding report weighs them; everyone else's
+  // are of keys anywhere, in forks and through references whose source moves on (review r5): none is on her pages.
+  await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`READS_COST_${i}`, `value-${i}`])));
+  // A member, whose report the page reads.
+  await root.members.add(ADA).catch(() => {});
+  const [market] = await ids(sql`projects WHERE slug = 'market'`);
+  const [dev] = await ids(sql`environments WHERE slug = 'dev' AND project_id = ${market}`);
+  const keys = (await db.owner.execute<{ id: string; version: string }>(sql`
+    SELECT CAST(id AS text) AS id, CAST(current_version_id AS text) AS version FROM secrets WHERE environment_id = ${dev} AND key LIKE 'READS_COST_%' ORDER BY key`));
+  const now = Date.now();
+  const day = (at: number) => new Date(at).toISOString().slice(0, 10);
+  await db.owner.execute(sql`SELECT make_reads_day(${day(now - 86_400_000)}::date), make_reads_day(${day(now)}::date)`);
+  const array = (values: readonly string[]) => sql.raw(`ARRAY[${values.map((value) => `'${value}'`).join(',')}]::uuid[]`);
+  let next = 5_000_000;
+  /**
+   * `count` reads numbered on from the last, asked from `from` ms ago, one every `every` ms, by `principal`: of Ada's
+   * keys, at their versions, or of keys of nowhere in particular, each read in a fork of its own of `forks`, and
+   * through a reference to one of `sources`, whichever are given.
+   */
+  const plant = async (count: number, principal: string, from: number, every: number, options: { own?: boolean; forks?: number; sources?: number } = {}) => {
+    const first = next;
+    next += count;
+    const pick = (n: number | undefined) => (n === undefined ? sql`NULL::uuid` : sql`md5(${String(first)} || '-' || (g % ${n}))::uuid`);
+    await db.owner.execute(sql`
+      INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
+      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * CAST(${every} AS bigint), gen_random_uuid(), 1, ${principal},
+             ${options.own === true ? sql`(${array(keys.map((key) => key.id))})[1 + g % ${keys.length}]` : sql`gen_random_uuid()`},
+             ${options.own === true ? sql`${dev}::uuid` : sql`gen_random_uuid()`}, ${market}::uuid, ${pick(options.forks)},
+             ${pick(options.sources)}, ${options.sources === undefined ? sql`NULL::uuid` : sql`gen_random_uuid()`}, ${options.sources === undefined ? sql`NULL::uuid` : sql`${market}::uuid`},
+             ${options.own === true ? sql`(${array(keys.map((key) => key.version))})[1 + g % ${keys.length}]` : sql`NULL::uuid`}, decode(repeat('00', 16), 'hex')
+        FROM generate_series(1, ${count}) g`);
+    // And the days each member's reads are on, as the projector writes them beside the reads.
+    await db.owner.execute(sql`
+      INSERT INTO log_read_days (principal, day) SELECT DISTINCT principal, CAST(at / 86400000 AS integer) FROM log_reads
+       WHERE number > ${first} AND number <= ${first + count} ON CONFLICT DO NOTHING`);
+  };
+  const reads: Record<string, () => Promise<unknown>> = {
+    'every read': () => readsPage(counted, { limit: 100 }),
+    "a member's reads": () => readsPage(counted, { actors: [ADA], limit: 100 }),
+    "a member's older page": () => readsPage(counted, { actors: [ADA], before: { at: now - 2 * 3_600_000 }, limit: 100 }),
+    'how far the reads are listed': () => readsStanding(counted),
+    "an offboarding report's reads, and how far they are listed": () => readsByStanding(counted, [ADA]),
+    // Whole pages and the report through the API, every statement each makes, the vault's vouching aside.
+    'through the API, the whole log': () => root.audit.list({ sealed: '1', limit: 50 }),
+    "through the API, a member's page": () => root.audit.list({ actor: ADA, sealed: '1', limit: 50 }),
+    "through the API, a member's report": () => root.members.get(ADA),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const statements = [...app.recorded].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+      app.recorded = null;
+      read[name] = [];
+      for (const statement of statements) {
+        // A report's transaction's own statements read nothing to measure.
+        if (!/^\s*(select|with)\b/i.test(statement.text)) continue;
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  const flat = (small: Awaited<ReturnType<typeof pages>>, grown: Awaited<ReturnType<typeof pages>>, names: readonly string[]) => {
+    for (const name of names) {
+      const statements = small[name]!;
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with the log grown, ${before} before:\n${plan}`);
+      }
+    }
+  };
+  // Every table's statistics fresh before each measure, so that none flips a plan between two (autovacuum's analyze of
+  // audit_log, landing mid-test on CI's slower runner, tipped the directory's walk of it from 159 pages to 380).
+  const settle = async () => {
+    await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
+    await db.owner.execute(sql`ANALYZE`);
+  };
+  try {
+    // Today's: 20,000 reads by another member, a tenth in forks and a twentieth through references; and Ada's 2,000 of
+    // her keys through the day.
+    await plant(18_000, OTHER, 12 * 3_600_000, 2_000);
+    await plant(1_000, OTHER, 11 * 3_600_000, 20_000, { forks: 50 });
+    await plant(1_000, OTHER, 11 * 3_600_000, 20_000, { sources: 50 });
+    await plant(2_000, ADA, 10 * 3_600_000, 15_000, { own: true });
+    await settle();
+    const small = await pages();
+    // A hundred days of others' reads after all of Ada's, each of its own partition, alone first (reviews r6, r8: her
+    // page read a probe of each, then her report each whole, whichever plan the others' other reads tipped it to).
+    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
+    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000);
+    await settle();
+    flat(small, await pages(), Object.keys(reads));
+    // Then twenty times the others' since, all newer than what the pages show: reads anywhere, in 5,000 forks, and
+    // through references repointed to 20,000 sources between them.
+    await plant(300_000, OTHER, 6 * 3_600_000, 50);
+    await plant(50_000, OTHER, 5 * 3_600_000, 200, { forks: 5_000 });
+    await plant(50_000, OTHER, 5 * 3_600_000, 200, { sources: 20_000 });
+    await settle();
+    flat(small, await pages(), Object.keys(reads));
+    // And Ada's own, older than her page: her pages read as many, her report all of hers, as 0.14's did.
+    await plant(100_000, ADA, 20 * 3_600_000, 300, { own: true });
+    await settle();
+    flat(small, await pages(), ['every read', "a member's reads", 'how far the reads are listed', 'through the API, the whole log', "through the API, a member's page"]);
+    // And they read what was planted: full pages, Ada's hers alone, her report each of her keys once.
+    const page = (filter: Parameters<typeof readsPage>[1]) => readsPage(counted, filter).then(({ rows }) => rows);
+    assert.equal((await page({ limit: 100 })).length, 100);
+    const hers = await page({ actors: [ADA], limit: 100 });
+    assert.ok(hers.length === 100 && hers.every((read) => read.principal === ADA));
+    const report = await readsByStanding(counted, [ADA]);
+    assert.deepEqual(new Set(report.reads.map((read) => read.secret)), new Set(keys.map((key) => key.id)));
+  } finally {
+    await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 5000000`);
+    await db.owner.execute(sql`DELETE FROM log_read_days`);
+    // The days made ahead, but those the migration made the uses of, which `drop_reads_day` keeps while the log does.
+    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
   }
 });

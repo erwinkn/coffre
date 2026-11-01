@@ -743,7 +743,7 @@ const RUNTIME_URLS = {
     label: 'Hot path database URL',
     file: 'vault.env',
     variable: 'HOT_DATABASE_URL',
-    about: "The vault's login for 0.15's uses, unused until 0.15's log is the default. Goes in the vault: its second Hyperdrive config, HOT_HYPERDRIVE, or HOT_DATABASE_URL.",
+    about: "The vault's login for its uses. Goes in the vault: its second Hyperdrive config, HOT_HYPERDRIVE, or HOT_DATABASE_URL.",
   },
 } as const satisfies Record<Runtime, { label: string; file: string; variable: string; about: string }>;
 

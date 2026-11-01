@@ -37,7 +37,7 @@ export function ServiceAccountsPage() {
         principals={accounts}
         hasRemoved={result.removed.some((principal) => principal.principalType === 'service')}
       />
-      <RemovedList principalType="service" removed={result.removed} />
+      <RemovedList principalType="service" removed={result.removed} reads={result.reads} />
     </>
   );
 }

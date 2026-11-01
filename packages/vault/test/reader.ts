@@ -21,7 +21,7 @@ const vault = openVault(
     owners: ['root@acme.example'],
     signingKeys: [Buffer.from(signingKey, 'base64')],
     bulkLimit,
-  }),
+  }, { log: '0.14' }),
 );
 const outcomes = await Promise.all(inputs.map((input) => vault.unwrap(input)));
 process.stdout.write(JSON.stringify(outcomes.map((outcome) => (outcome.ok ? 'ok' : outcome.refusal.code))));

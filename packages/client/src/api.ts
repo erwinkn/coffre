@@ -54,6 +54,7 @@ export type Api = {
         };
       };
       credentialExpiresAt: string | null;
+      credentialId: string | null;
       environments: {
         project: string;
         environment: string;
@@ -493,6 +494,11 @@ export type Api = {
         principalId: string;
         toRotate: number;
       }[];
+      reads?: {
+        through: string | null;
+        behind: boolean;
+        forged?: true;
+      };
     };
   };
   "GET /members/:member": {
@@ -533,6 +539,11 @@ export type Api = {
         at: string;
       }[];
       rotated: number;
+      reads?: {
+        through: string | null;
+        behind: boolean;
+        forged?: true;
+      };
       issuedTokens: {
         id: string;
         service: string;
@@ -678,6 +689,11 @@ export type Api = {
           at: string;
         }[];
         rotated: number;
+        reads?: {
+          through: string | null;
+          behind: boolean;
+          forged?: true;
+        };
         issuedTokens: {
           id: string;
           service: string;
@@ -1132,6 +1148,7 @@ export type Api = {
       entries: {
         seq: number;
         log: "0.14" | "0.15";
+        forged?: true;
         author: "app" | "vault";
         occurredAt: string;
         actorType: "service" | "system" | "user";
@@ -1173,6 +1190,12 @@ export type Api = {
         action: string;
         count: number;
       }[];
+      reads?: {
+        through: string | null;
+        behind: boolean;
+        forged?: true;
+      };
+      readsOmitted?: "path" | "scope";
     };
   };
   "GET /audit/verification": {
@@ -1744,6 +1767,21 @@ export type Api = {
       capped: boolean;
     };
   };
+  "GET /audit/reads": {
+    input: {
+      from: string;
+    };
+    output: {
+      kept: false;
+    } | {
+      kept: true;
+      ok: boolean;
+      problems: string[];
+      through: string;
+      listed: string;
+      next: string | null;
+    };
+  };
 };
 
 export type AccessValue = string | null | {
@@ -1793,6 +1831,7 @@ export type ApprovalView = {
 export type AuditEntryView = {
   seq: number;
   log: "0.14" | "0.15";
+  forged?: true;
   author: "app" | "vault";
   occurredAt: string;
   actorType: "service" | "system" | "user";
@@ -2116,6 +2155,7 @@ export type Me = {
     };
   };
   credentialExpiresAt: string | null;
+  credentialId: string | null;
   environments: {
     project: string;
     environment: string;
@@ -2242,6 +2282,11 @@ export type OffboardingReport = {
     at: string;
   }[];
   rotated: number;
+  reads?: {
+    through: string | null;
+    behind: boolean;
+    forged?: true;
+  };
   issuedTokens: {
     id: string;
     service: string;
