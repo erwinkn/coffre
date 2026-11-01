@@ -73,7 +73,8 @@
   T175"). A reader of some places sees the reads at places they read,
   none at an environment their role leaves out; a read hidden from them
   is passed over, and a page may come back short with a `next` to go on
-  from. Migration 0050 (SQLite 0028) adds an index for each place column
+  from: `coffre audit` now prints it on stderr and takes it back as
+  `--before=<next>`. Migration 0050 (SQLite 0028) adds an index for each place column
   of `log_reads` (about 280 bytes a read) and `log_read_place_days`,
   written by triggers whoever writes the reads, 0.15.0's projector
   included, and places the reads 0.15.0 listed: additive, safe to run

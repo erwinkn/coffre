@@ -1953,6 +1953,9 @@ async function offboard(args: string[]): Promise<void> {
   }
 }
 
+/** A page's `next` as the server writes it (`AUDIT_NEXT` in @coffre/server's api/audit.ts): `<seq>:<at>.<number>`, each part `-` for a log with nothing older. */
+const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}(?:\.-?[0-9]{1,19})?|-)$/;
+
 async function audit(args: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
@@ -1963,16 +1966,22 @@ async function audit(args: string[]): Promise<void> {
       // Sign-ins, tokens and the vault's key operations, which are left out unless asked for.
       detail: { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
+      // Where the page before stopped, its `next`: the entries older than it.
+      before: { type: 'string' },
     },
     allowPositionals: true,
   });
 
   const limit = Number(values.limit);
   if (!Number.isInteger(limit) || limit < 1) fail(`--limit takes a positive number, not "${values.limit}"`);
-  if (positionals.length > 1) fail('usage: coffre audit [<project>[/<environment>[/<KEY>]]] [--limit N] [--actor <id>] [--denied] [--detail] [--json]');
+  if (positionals.length > 1) fail('usage: coffre audit [<project>[/<environment>[/<KEY>]]] [--limit N] [--actor <id>] [--denied] [--detail] [--before <next>] [--json]');
+  // A page's `next` (`<seq>:<at>.<number>`), or a seq of 0.14's log alone, as clients before 0.15 page.
+  const before = values.before;
+  if (before !== undefined && !AUDIT_NEXT.test(before) && !/^[1-9][0-9]{0,15}$/.test(before)) fail(`--before takes the "next" an earlier page printed, not "${before}"`);
   const result = await client().audit.list({
     path: positionals[0],
     limit,
+    ...(before === undefined ? {} : { before: /^[0-9]+$/.test(before) ? Number(before) : before }),
     // `service:deploy` as people write it, `token:deploy` as the log keeps it.
     actor: values.actor === undefined ? undefined : apiMember(values.actor),
     decision: values.denied ? 'deny' : undefined,
@@ -1985,6 +1994,9 @@ async function audit(args: string[]): Promise<void> {
   // on stderr, after the entries, in either form (review r9: `--json` said nothing of reads missing). An instance before
   // 0.15 sends no `reads`.
   const notices = () => {
+    // Older entries, from where this page stopped. A page may show fewer than --limit and still go on: one of a place
+    // passes over the reads its reader may not see, or not by the member asked for (T175), and stops where it read to.
+    if (result.next !== null && result.next !== undefined) process.stderr.write(`Older entries: the same command with --before=${result.next}\n`);
     const reads = result.reads;
     if (reads?.forged === true) process.stderr.write('Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n');
     else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? 'none yet'}; newer reads are not listed yet.\n`);
