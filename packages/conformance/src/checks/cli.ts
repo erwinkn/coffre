@@ -143,7 +143,7 @@ async function everythingElse(api: CoffreClient): Promise<string> {
 /** Signed in as a user, the run says so, and makes nothing; their session stays. Returns what it must leave as it was. */
 export async function verifyAsUser(cli: Cli, user: Person, admin: Person): Promise<{ detail: string; value: string }> {
   const before = await everythingElse(admin.api);
-  const run = await cli.run(['verify', 'instance']);
+  const run = await cli.run(['verify', 'instance', cli.origin, '--yes']);
   expect(run.code === 1, `coffre verify instance as a user exited ${run.code}, not 1`, run.output);
   expect(marks(run.output).owner === '✗', 'the run went on past a user', run.output);
   expect(/is not an admin or owner of all of \S+: nothing was made/.test(run.output), 'the run did not say plainly why it stopped', run.output);
@@ -160,7 +160,7 @@ export async function verifyAsUser(cli: Cli, user: Person, admin: Person): Promi
 /** One run as the admin, with their `coffre login` session: every check passes, none skipped, and the session stays. Returns its setup's line. */
 export async function verifyAsOwner(cli: Cli): Promise<{ detail: string; value: string }> {
   const session = cli.session();
-  const run = await cli.run(['verify', 'instance']);
+  const run = await cli.run(['verify', 'instance', cli.origin, '--yes']);
   const seen = marks(run.output);
   expect(run.code === 0, `coffre verify instance as the admin exited ${run.code}`, run.output);
   // Signed in, nothing is out of reach: a check skipped, such as the token's verification, would only be noise.
@@ -180,7 +180,7 @@ export async function verifyAsOwner(cli: Cli): Promise<{ detail: string; value: 
  */
 export async function verifyInterrupted(cli: Cli, admin: Person): Promise<string> {
   const session = cli.session();
-  const running = cli.start(['verify', 'instance']);
+  const running = cli.start(['verify', 'instance', cli.origin, '--yes']);
   try {
     await running.waitFor(/✓ token reveal/, 'its token checks');
     running.kill('SIGINT');

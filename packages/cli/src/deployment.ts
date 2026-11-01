@@ -3,10 +3,11 @@
 // read and edited in place, its comments kept.
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { applyEdits, type JSONPath, modify, parse, type ParseError, printParseErrorCode } from 'jsonc-parser';
 
+import { instanceOrigin } from './instance.ts';
 import { isEmpty, type Kind } from './init.ts';
 
 /** What a directory holds: a deployment of either kind, nothing yet (`isEmpty`), or something else. */
@@ -445,4 +446,27 @@ export function editWorker(dir: string, path: string, changes: readonly Change[]
   });
   writeFileSync(join(dir, path), text);
   return changed;
+}
+
+/** The instance a Workers deployment's own config names: its app Worker's PUBLIC_URL, and the file it is in. */
+export type Deployment = { origin: string; file: string };
+
+/**
+ * The deployment the command runs in, or below, `directory` a real path: walking up to the nearest directory that
+ * holds both Workers' wrangler.jsonc, the one its app names as PUBLIC_URL. Null when there is none, or its address is
+ * still the template's placeholder. A config that cannot be read names nothing: that is no reason to pick another
+ * instance, and nothing here picks one.
+ */
+export function deploymentFor(directory: string): Deployment | null {
+  for (let at = directory; ; at = dirname(at)) {
+    if (existsSync(join(at, 'app', 'wrangler.jsonc')) && existsSync(join(at, 'vault', 'wrangler.jsonc'))) {
+      try {
+        const url = readWorker(at, join('app', 'wrangler.jsonc')).vars.PUBLIC_URL;
+        return placeholder(url) ? null : { origin: instanceOrigin(url!), file: join(at, 'app', 'wrangler.jsonc') };
+      } catch {
+        return null;
+      }
+    }
+    if (dirname(at) === at) return null;
+  }
 }

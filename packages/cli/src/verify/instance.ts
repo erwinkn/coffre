@@ -11,13 +11,15 @@
 // What stays: the project, the environment and the service, which the next
 // run finds, the canary's versions, and the run's entries in the audit log.
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
-import { askedMode, credentialHeaders, instanceOrigin, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
-import { style, type Output } from '../tty.ts';
+import type { Deployment } from '../deployment.ts';
+import { askedMode, credentialHeaders, instanceOrigin, REPO_FILE, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
+import { Cancelled, openTerminal, release, style, yes, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
 import { Checks, expect, Failure, stop } from './checks.ts';
 import { parseCanary, tokenChecks, type Canary } from './token.ts';
@@ -32,10 +34,14 @@ export const PROBE = {
 } as const;
 
 export const INSTANCE_USAGE = `usage:
-  coffre verify instance [<url>]
-  coffre verify instance [<url>] --canary <project>/<environment>/<KEY>, signed in with a bearer token
+  coffre verify instance <url> [--yes]
+  coffre verify instance <url> --canary <project>/<environment>/<KEY>, signed in with a bearer token
 
-Checks an instance from outside, the current one unless <url> names another:
+Checks the instance <url> names from outside. It never takes the default
+session's instance for the one you mean: without <url> (or --url), it runs only
+where a \`coffre.json\`, a pin (\`coffre login\` in the directory) or a Workers
+deployment's app/wrangler.jsonc (its PUBLIC_URL) names the instance, and then
+only with that instance's own session.
 
   as no one        health, headers, every route refusing no one, changes from
                    another site refused, /api/auth, nothing like a value shown
@@ -52,6 +58,10 @@ Checks an instance from outside, the current one unless <url> names another:
   --canary         the canary the token reads; its value is asked for, or
                    piped in, so that it stays out of the shell's history
 
+Before it writes anything as an owner, it prints the instance and who is signed
+in, and asks you to confirm on a terminal. Without one it refuses, unless
+--yes says so. Nothing is sent to the instance before that.
+
 Each run adds a few entries to the instance's audit log, which is
 append-only, so they stay: the canary's read, and the reads it was refused.
 A run as an owner leaves its project, environment and service for the next,
@@ -60,11 +70,43 @@ and writes its canary and its grants. Exits 1 when a check fails.`;
 /** What the run issued, to revoke at its end. */
 type Issued = { member: string; id: string };
 
-export async function verifyInstance(args: string[], store: Store, session: SessionFlags, local: Local | null, out: Output = process.stdout): Promise<void> {
+/**
+ * The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, a pin, a
+ * deployment's wrangler.jsonc). Never the default session's: the run writes, so it is told where, or it stops.
+ */
+export function namedInstance(positional: string | undefined, session: SessionFlags, local: Local | null, deployment: Deployment | null, current: string | null): { requested: string; why: string } {
+  const explicit = positional ?? session.url;
+  if (explicit !== undefined) return { requested: explicit, why: 'named on the command line' };
+  const found: { requested: string; why: string }[] = [];
+  if (local !== null) found.push({ requested: local.origin, why: local.by === 'pin' ? `this directory is pinned at ${local.directory}` : `${join(local.directory, REPO_FILE)} names it` });
+  if (deployment !== null) found.push({ requested: deployment.origin, why: `${deployment.file} names it, as PUBLIC_URL` });
+  const [first, second] = found;
+  if (first === undefined) {
+    const unasked = current === null ? '' : ` The default session, ${current}, is not used unasked.`;
+    stop(
+      2,
+      'coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks, and walks its whole audit log, ' +
+        `so it never picks one for you: name it, \`coffre verify instance <url>\`, or run it where a ${REPO_FILE}, a pin or a Workers deployment's PUBLIC_URL names it.${unasked}`,
+    );
+  }
+  if (second !== undefined && instanceOrigin(first.requested) !== instanceOrigin(second.requested)) {
+    stop(2, `coffre: ${first.why} (${first.requested}), but ${second.why} (${second.requested}): name the one you mean, \`coffre verify instance <url>\``);
+  }
+  return first;
+}
+
+export async function verifyInstance(
+  args: string[],
+  store: Store,
+  session: SessionFlags,
+  local: Local | null,
+  deployment: Deployment | null = null,
+  out: Output = process.stdout,
+): Promise<void> {
   const { values, positionals } = parseArgs({
     args,
     allowPositionals: true,
-    options: { canary: { type: 'string' }, help: { type: 'boolean', short: 'h' } },
+    options: { canary: { type: 'string' }, yes: { type: 'boolean', short: 'y' }, help: { type: 'boolean', short: 'h' } },
   });
   if (values.help) stop(0, INSTANCE_USAGE);
   if (positionals.length > 1) stop(2, INSTANCE_USAGE);
@@ -79,8 +121,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
         '--service is for other commands',
     );
   }
-  const requested = positionals[0] ?? session.url ?? local?.origin ?? store.current;
-  if (!requested) stop(1, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first', askedMode(session.authMode))}`);
+  const { requested, why } = namedInstance(positionals[0], session, local, deployment, store.current);
   let origin: string;
   try {
     origin = instanceOrigin(requested);
@@ -116,8 +157,11 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
     stop(2, 'coffre: --canary goes with a bearer token, `coffre login <url> --token`; as an owner, the run writes a canary of its own');
   }
 
-  // The session `coffre login` made, and none other: no second sign-in.
-  if (store.instances[origin] === undefined) stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first`, askedMode(session.authMode))}`);
+  // The session `coffre login` made for this instance, and none other: no second sign-in, and never another instance's.
+  if (saved === undefined) {
+    const by = why === 'named on the command line' ? '' : ` (${why})`;
+    stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first${by}`, askedMode(session.authMode))}`);
+  }
   let api: CoffreClient;
   try {
     const to = resolveTarget({ ...session, url: origin }, store);
@@ -132,6 +176,7 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   } catch (error) {
     stop(1, `coffre: ${error instanceof Error ? error.message : String(error)}`);
   }
+  await confirm(out, { origin, why, principal: saved.principal?.id ?? null, yes: values.yes === true });
   out.write(`${s.bold(`Checking ${origin}`)}, as no one, then as you\n`);
   out.write(
     s.dim(
@@ -141,6 +186,41 @@ export async function verifyInstance(args: string[], store: Store, session: Sess
   await anonymousChecks(report, origin);
   await ownerChecks(report, origin, api);
   finish(out, report);
+}
+
+/**
+ * Before the run writes as an owner: the instance and who is signed in, said, and a yes, from a terminal, or `--yes`.
+ * Without either it stops, having sent nothing.
+ */
+async function confirm(out: Output, to: { origin: string; why: string; principal: string | null; yes: boolean }): Promise<void> {
+  const s = style(out);
+  out.write(`${s.bold('Writes to')} ${to.origin} ${s.dim(`(${to.why})`)}\n`);
+  out.write(`${s.bold('Signed in as')} ${to.principal ?? 'someone the saved session does not name'}, with this CLI's session\n`);
+  out.write(
+    s.dim(
+      `  It makes ${PROBE.project}/${PROBE.environment}, ${shownMember(PROBE.service)}, their grants and a canary there if they are missing, and walks the whole audit log.\n`,
+    ),
+  );
+  if (to.yes) {
+    out.write(s.dim('  --yes: going on.\n\n'));
+    return;
+  }
+  const terminal = openTerminal();
+  if (terminal === null) {
+    stop(2, `coffre: not on a terminal to ask: nothing was sent to ${to.origin}. Run it again with --yes to write there`);
+  }
+  terminal.out.write(`${s.accent('?')} ${s.bold(`Write to ${to.origin}?`)} ${s.dim('y/N')} `);
+  let confirmed: boolean;
+  try {
+    confirmed = await yes(terminal.keys);
+  } catch (error) {
+    if (error instanceof Cancelled) process.exit(130);
+    throw error;
+  } finally {
+    release(terminal.keys);
+  }
+  terminal.out.write(`${confirmed ? 'yes' : 'no'}\n\n`);
+  if (!confirmed) stop(1, `coffre: not confirmed: nothing was sent to ${to.origin}`);
 }
 
 /**

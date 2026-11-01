@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **`coffre verify instance` never picks the instance for you.** It
+  creates a project, an environment, a service account, grants and a secret
+  and walks the whole audit log, and until now it took this machine's
+  default session when nothing named an instance: run in a deployment's
+  directory, it wrote to the default instance, not the deployment's. It
+  now needs the instance named: `coffre verify instance <url>` (or
+  `--url`), or run where a `coffre.json`, a pin or a Workers deployment's
+  `app/wrangler.jsonc` `PUBLIC_URL` names it, and then only with that
+  instance's own session (two that disagree are refused). Before it sends
+  anything it prints the instance, why it is the one, and who is signed
+  in, and asks `y/N` on a terminal; without a terminal it refuses unless
+  `--yes` is given. A run with a bearer token (`--canary`) writes no probe
+  data and needs only the instance named. CI scripts that run it as an owner
+  add the URL and `--yes`.
+
 ## 0.15.0 (2026-11-01)
 
 - **0.15's log is the default: every deployment keeps it.** The switch

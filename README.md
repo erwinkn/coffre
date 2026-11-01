@@ -235,7 +235,7 @@ coffre audit market/prod/DATABASE_URL       # who read or changed it, a run of a
 coffre verify                               # asks which: instance, keys or log; admins and owners
 coffre verify log                           # walks the whole log from its first entry, as an auditor, admin or owner of all of it
 coffre verify keys                          # checks the keys you keep, on your machine (docs/keys.md)
-coffre verify instance                      # checks the instance from outside (docs/conformance.md)
+coffre verify instance <url>                # checks that instance from outside, asking first: it writes probe data (docs/conformance.md)
 ```
 
 `coffre help` lists every command, and `coffre <command> --help` each one.

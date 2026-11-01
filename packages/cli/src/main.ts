@@ -14,6 +14,7 @@ import { join, dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { init, KINDS, type Kind } from './init.ts';
+import type { Deployment } from './deployment.ts';
 import { keys } from './keys.ts';
 import { hiddenLine, style } from './tty.ts';
 import { githubEnvironment, githubMasks, runsCode } from './github-env.ts';
@@ -174,6 +175,13 @@ function realHome(): string {
 function localHere(): Local | null {
   if (sessionFlags.url !== undefined) return null;
   return attempt(() => localFor(readPins(), here('Name the instance with --url'), realHome(), readRepoFile));
+}
+
+/** The Workers deployment the command runs in, and the instance its config names: unless --url names the instance. */
+async function deploymentHere(): Promise<Deployment | null> {
+  if (sessionFlags.url !== undefined) return null;
+  // Its own chunk, as setup's: the JSONC parser loads only for it.
+  return (await import('./deployment.ts')).deploymentFor(here('Name the instance with --url'));
 }
 
 /** A `coffre.json`'s text, or null if there is none: one that is a link or no file is refused, not passed over. */
@@ -2037,7 +2045,7 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags, localHere());
+      return verifyInstance(more, readStore(), sessionFlags, localHere(), await deploymentHere());
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);

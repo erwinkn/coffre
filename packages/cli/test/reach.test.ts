@@ -60,7 +60,7 @@ test('logout says why it could not end the session, and that nothing changed', a
 });
 
 test('verify instance says why once, at health, and skips what would only say it again', async (t) => {
-  const { status, stdout } = await cli(t, ['verify', 'instance', ORIGIN]);
+  const { status, stdout } = await cli(t, ['verify', 'instance', ORIGIN, '--yes']);
   assert.equal(status, 1);
   const lines = stdout.split('\n').map((line) => line.trim().replace(/ {2,}/g, '  '));
   assert.ok(lines.includes(`✗ health  could not reach ${ORIGIN}: ${WHY}`), stdout);

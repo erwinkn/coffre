@@ -444,7 +444,7 @@ export const SECTIONS = [
     title: 'Verify',
     entries: [
       { command: 'verify', usage: ['verify'], about: ['asks which of these, on a terminal'] },
-      { command: 'verify instance', usage: ['verify instance [<url>]'], about: ['the instance from outside: as no one, then as you, an', 'admin or owner'] },
+      { command: 'verify instance', usage: ['verify instance <url> [--yes]'], about: ['the instance <url> names from outside: as no one, then as you, an', 'admin or owner. It writes probe data, so it asks first, or needs --yes'] },
       {
         command: 'verify keys',
         usage: ['verify keys [--vault-id <id>]'],
