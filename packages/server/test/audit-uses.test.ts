@@ -185,6 +185,16 @@ test("under 0.15's log, a reader of some places sees on a place's page the reads
   ] as const) {
     assert.deepEqual(reads(await every(bob, { path })), shown, path);
   }
+  // A place he does not read lists none of its reads, not even as where a page stopped: no `next` walks prod's reads,
+  // their times and numbers (Fable's review).
+  const outside = async (paths: readonly string[]) => {
+    for (const path of paths) {
+      const page = await bob.audit.list({ path, sealed: '1', limit: 1 });
+      // 0.14's log may go on (its entries about a place he reads too: the fork's making names prod), 0.15's not.
+      assert.deepEqual([reads(page.entries), page.next === null || page.next.endsWith(':-'), page.readsOmitted], [[], true, 'scope'], `${path}: ${page.next}`);
+    }
+  };
+  await outside(['market/prod', 'market/prod/OTHER', 'market/prod-eu']);
   await root.access.set(BOB, { market: 'auditor' });
   assert.deepEqual(reads(await every(bob, { path: 'market' })), [rootProd, rootProd, adaDev]);
   assert.deepEqual(reads(await every(bob, { path: 'market/prod/OTHER' })), [rootProd, rootProd]);
@@ -197,6 +207,9 @@ test("under 0.15's log, a reader of some places sees on a place's page the reads
     [{ path: 'market' }, [adaDev]], [{ path: 'market/prod' }, []], [{ path: 'market/prod/OTHER' }, []], [{ path: 'market/prod-eu' }, []],
     [{ path: 'market', actor: ADA }, [adaDev]], [{ path: 'market', actor: `user:${ROOT}` }, []],
   ] as const) assert.deepEqual(reads(await every(bob, query)), shown, JSON.stringify(query));
+  // Prod is left out of his role there, and with it its pages. The fork's are his, unprotected: its read of prod's key
+  // is passed over there, as a read hidden among those he sees.
+  await outside(['market/prod', 'market/prod/OTHER']);
   assert.deepEqual(reads(await every(root, { path: 'market/prod-eu' })), [rootProd], "the whole log's reader sees it");
   // A read through a reference at dev to prod is at prod too: dev's pages leave it out for him, as 0.14's left out an
   // entry about a place left out, as its main place or the one beside it. The whole log's reader sees it there.
@@ -398,6 +411,25 @@ test("a place's day of reads deleted takes them off its pages, and the whole log
   const verdict = await root.audit.verifyReads();
   assert.ok(verdict.kept);
   assert.deepEqual([verdict.ok, verdict.problems], [false, [`read ${listed!.number} is off a place's pages: the day of one of its places is not listed`]]);
+});
+
+test("a read planted ahead of the projector, at other places, is replaced by the projector's, which its own places' pages list: the upsert places it too (T175, Fable's review)", { skip: LOG !== '0.15' }, async () => {
+  await ada.secrets.reveal('market/dev/API_KEY');
+  // Sealed, not yet listed: whoever owns the database writes a row of their own at the use's number, elsewhere.
+  await signer!.checkpointer.tick();
+  const [use] = await db.owner.select({ number: logUses.number, at: logUses.at }).from(logUses);
+  const elsewhere = { secret: randomUUID(), environment: randomUUID(), project: randomUUID() };
+  await db.owner.insert(logReads).values({
+    number: use!.number, at: use!.at, credential: randomUUID(), purpose: 1, principal: BOB, ...elsewhere, mac: Buffer.alloc(16),
+  });
+  await signer!.projected();
+  const [row] = await db.owner.select().from(logReads);
+  assert.deepEqual([row!.number, row!.principal, row!.environment === elsewhere.environment], [use!.number, ADA, false]);
+  for (const path of ['market/dev/API_KEY', 'market/dev', 'market']) {
+    assert.deepEqual(reads(await every(root, { path })), [`ada@acme.example market/dev/API_KEY v1 reveal ${LOG}`], path);
+  }
+  const verdict = await root.audit.verifyReads();
+  assert.ok(verdict.kept && verdict.ok, JSON.stringify(verdict));
 });
 
 test("a use renumbered after its seal stops the projection, which lists nothing it would derive from it, and the whole log's check says why (WindowChecked)", { skip: LOG !== '0.15' }, async () => {

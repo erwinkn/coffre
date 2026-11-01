@@ -278,6 +278,8 @@ export async function listAudit(
     limit: query.limit,
   };
   const { caller } = ctx;
+  // The projects of which a reader of some places reads some environments only: a page of one is theirs to read in part.
+  const partly = new Set<string>();
   if (!readsWholeLog(caller)) {
     const projectIds: string[] = [];
     const environmentIds: string[] = [];
@@ -290,7 +292,11 @@ export async function listAudit(
         if (can(caller, 'audit.read', placeOf(project, null))) {
           projectIds.push(project.id);
           except.push(...unread);
-        } else environmentIds.push(...project.environments.filter((environment) => !unread.includes(environment.id)).map((environment) => environment.id));
+        } else {
+          const read = project.environments.filter((environment) => !unread.includes(environment.id)).map((environment) => environment.id);
+          environmentIds.push(...read);
+          if (read.length > 0) partly.add(project.id);
+        }
       }
     }
     if (projectIds.length === 0 && environmentIds.length === 0) {
@@ -341,8 +347,10 @@ export async function listAudit(
   const self = formatMember(caller.principal);
   const own = filter.actors?.includes(self) === true;
   const asked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
+  // At a place only where its caller reads it: one outside their scope lists none of its reads, as 0.14's page of it lists
+  // none of its own; were its reads read and each passed over, `next` would walk them, their times and numbers (Fable).
   const at = readPlace(filter);
-  const used = asked && (at !== null || filter.within === undefined || own);
+  const used = asked && (at !== null ? readsAt(filter, partly) : filter.within === undefined || own);
   const readers = filter.within === undefined ? filter.actors : [self];
   const readsFilter = at === null ? { actors: readers, before: start, limit: query.limit } : { at, before: start, limit: query.limit };
   // At a place, each read is read whoever's: it shows where its caller may see it, and is by a member asked for. One
@@ -618,6 +626,22 @@ function readPlace(filter: AuditFilter): ReadPlace | null {
   if (filter.environmentId !== undefined) return { kind: 'environment', id: filter.environmentId };
   if (filter.projectId !== undefined) return { kind: 'project', id: filter.projectId };
   return null;
+}
+
+/**
+ * Whether its caller reads the place a page is of (T175): whoever reads the
+ * whole log; a reader of some places, a key's or an environment's page where
+ * they read the environment, by a grant on it, or on its project but for an
+ * environment their role leaves out there; a project's where they read it,
+ * or some of its environments (`partly`).
+ */
+function readsAt(filter: AuditFilter, partly: ReadonlySet<string>): boolean {
+  const { within, projectId, environmentId } = filter;
+  if (within === undefined) return true;
+  if (environmentId !== undefined) {
+    return within.environmentIds.includes(environmentId) || (projectId !== undefined && within.projectIds.includes(projectId) && !(within.except ?? []).includes(environmentId));
+  }
+  return projectId !== undefined && (within.projectIds.includes(projectId) || partly.has(projectId));
 }
 
 /**
