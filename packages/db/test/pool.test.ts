@@ -826,3 +826,52 @@ test("an empty statement in a group answers in its place: each result and error 
     await client.end();
   }
 });
+
+test("a COMMIT folded with `later` writes is settled by Postgres's command: one the client failed to read with it (a notice's callback) still committed (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {
+    throw new Error('notice callback failed');
+  } });
+  try {
+    await client.unsafe('create temporary table noticed (n int)');
+    await client.unsafe("create function pg_temp.noticed() returns trigger language plpgsql as $$ begin raise notice 'checked'; return null; end $$");
+    await client.unsafe('create constraint trigger noticed after insert on noticed deferrable initially deferred for each row execute function pg_temp.noticed()');
+    // The notice comes at the COMMIT, which rides with the insert: Postgres committed, and the transaction says so.
+    await client.begin(async (tx) => {
+      await tx.unsafe('select 1');
+      laterOn(tx, 'insert into noticed values ($1)', [1]);
+    });
+    assert.deepEqual([...await client.unsafe('select n from noticed')], [{ n: 1 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a pool's group of reads fails whole when the client cannot read one of their answers, never answering part of it (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  const integers = client.options.parsers[23]!;
+  client.options.parsers[23] = (x: string) => {
+    if (x === '2') throw new Error('cannot decode 2');
+    return integers(x);
+  };
+  try {
+    await assert.rejects(client.group([{ query: 'select n from (values (1), (2), (3)) v(n)' }, { query: 'select 4 as n' }]), /cannot decode 2/);
+  } finally {
+    client.options.parsers[23] = integers;
+    await client.end();
+  }
+});
+
+test("a transaction's statements go in the order they were started, whatever order they were built in (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table started (n int)');
+    const [, [counted]] = await client.begin((tx) => {
+      const count = tx.unsafe('select count(*)::int as n from started');
+      const insert = tx.unsafe('insert into started values (1)');
+      return Promise.all([insert, count]);
+    });
+    assert.deepEqual(counted, { n: 1 });
+  } finally {
+    await client.end();
+  }
+});

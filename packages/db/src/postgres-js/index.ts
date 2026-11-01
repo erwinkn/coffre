@@ -6,7 +6,7 @@ import { createConnection, type Connection, type Reservation, type Reserved } fr
 import * as Errors from './errors.ts';
 import { PostgresError, type Notice } from './errors.ts';
 import type { Socket, TlsOptions } from './platform.ts';
-import { Query } from './query.ts';
+import { Query, started } from './query.ts';
 import { Queue } from './queue.ts';
 import type { Column } from './result.ts';
 import { defaultTypes, inferType, type Parsers, type Serializers } from './types.ts';
@@ -406,6 +406,7 @@ export default function postgres(given: Options): Sql {
         closing = true;
         const commit = new Query('commit', [], () => {}, { simple: false }, Boolean(options.debug));
         commit.executed = true;
+        commit.made = started();
         gather(commit);
         await Promise.allSettled(asked);
         try {
@@ -479,9 +480,14 @@ export default function postgres(given: Options): Sql {
       const group = new Query(members.map((q) => q.text).join(';\n'), [], () => {}, { simple: false }, Boolean(options.debug));
       group.executed = true;
       group.group = members.map((q) => ({ text: q.text, args: q.args, arrays: q.arrays, parameters: [], statement: null }));
+      // A transaction's: a statement whose answer the client could not read fails alone (`Query.unread`, connection.ts).
+      group.unread = new Map();
+      // What the client could not read of a statement's answer, which fails it; but for the COMMIT, which Postgres's
+      // command settles: committed is committed, whatever else the client failed to read with it (a notice's callback).
+      const unreadOf = (q: Query, i: number): unknown => (q.text === 'commit' && q.executed && !q.options.simple ? undefined : group.unread!.get(i));
       Promise.prototype.then.call(
         group,
-        (answers) => members.forEach((q, i) => (group.unread?.has(i) ? q.reject(group.unread.get(i)) : q.resolve((answers as unknown[])[i]))),
+        (answers) => members.forEach((q, i) => (unreadOf(q, i) === undefined ? q.resolve((answers as unknown[])[i]) : q.reject(unreadOf(q, i)))),
         (error: unknown) => {
           // Its BEGIN refused, or the connection lost: every statement fails with that. Otherwise those before the one
           // that failed answered, and those after it Postgres skipped.
@@ -489,8 +495,8 @@ export default function postgres(given: Options): Sql {
           const failed = !begun || group.answered === null ? 0 : group.answered.length;
           members.forEach((q, i) => {
             if (i < failed) {
-              if (group.unread?.has(i)) q.reject(group.unread.get(i));
-              else q.resolve(group.answered![i]);
+              if (unreadOf(q, i) === undefined) q.resolve(group.answered![i]);
+              else q.reject(unreadOf(q, i));
             }
             else if (i === failed || !(error instanceof PostgresError) || !begun) {
               // Postgres ran this one, and answered its error.

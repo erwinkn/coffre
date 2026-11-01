@@ -26,8 +26,13 @@ export interface Member {
   statement: Statement | null;
 }
 
-/** Statements made so far (`Query.made`). */
+/** Statements started so far (`Query.made`). */
 let made = 0;
+
+/** The next start's place (`Query.made`): a statement started now, or one the driver makes itself, a COMMIT. */
+export function started(): number {
+  return (made += 1);
+}
 
 /**
  * A statement, sent once awaited (`then`, `catch`, `finally`) or `execute`d,
@@ -76,8 +81,11 @@ export class Query<T = unknown> extends Promise<T> {
   /** Coffre: a group that failed: the results of its statements answered before the one that failed (`together`, index.ts). */
   answered: unknown[] | null = null;
 
-  /** Coffre: when it was made, among every statement of the process: a transaction's group goes in this order (`flush`, index.ts). */
-  readonly made = (made += 1);
+  /**
+   * Coffre: when it was started (awaited, `then`, `execute()`), among every statement of the process: a transaction's
+   * group goes in this order (`flush`, index.ts), whatever order the statements were built in.
+   */
+  made = 0;
 
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: unknown) => void;
@@ -138,6 +146,7 @@ export class Query<T = unknown> extends Promise<T> {
   async #handle(): Promise<void> {
     if (this.executed) return;
     this.executed = true;
+    this.made = started();
     await null;
     this.#handler(this);
   }

@@ -21,11 +21,9 @@ import { engineOf } from './dialect.ts';
  *
  * On Postgres the statement goes straight to the transaction's connection,
  * as Drizzle writes it (`sqlToQuery`), so that nothing between them can fail
- * where the transaction would not hear it. It is made when called, as a
- * statement started with `.then` or `execute()` is, where one awaited is
- * made a microtask later: a group goes in the order its statements were
- * made, so start, rather than await, what must go before it in the same
- * task (`lockLogHeadRead` starts the head's lock and read).
+ * where the transaction would not hear it. It is built when called, and
+ * started a microtask later, as Drizzle starts a statement it is asked
+ * for: a group goes in the order its statements were started.
  */
 export function later(tx: Transaction, statement: SQLWrapper): void {
   if (engineOf(tx) === 'sqlite') {
@@ -39,12 +37,17 @@ export function later(tx: Transaction, statement: SQLWrapper): void {
     return hold(tx, answer);
   }
   const { sql, params } = (tx as unknown as { dialect: PgDialect }).dialect.sqlToQuery(statement.getSQL());
-  // The transaction's own statement, made now: a value it cannot send throws here, to the work; what it fails with once
+  // The transaction's own statement, built now: a value it cannot send throws here, to the work; what it fails with once
   // sent, the transaction hears (`inTransaction`), and fails with.
   const query = (clientOf(tx) as { unsafe(text: string, values: unknown[]): { later: boolean; execute(): unknown } }).unsafe(sql, params);
   // Nothing awaits it: the COMMIT may go with it (`settleWithCommit`).
   query.later = true;
-  query.execute();
+  // Started a microtask later, as Drizzle starts a statement it awaits (`await client.unsafe(…)`): so the order it goes
+  // in among them (`Query.made`) is the order they were asked in, the head's lock `lockLogHeadRead` starts first included.
+  // Not returned from the callback: its failure is the transaction's to hear (`inTransaction`), not this promise's.
+  void Promise.resolve().then(() => {
+    query.execute();
+  });
 }
 
 /** postgres.js's transaction under Drizzle's. */

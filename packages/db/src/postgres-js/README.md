@@ -127,13 +127,15 @@ Eleven, each marked `Coffre:` in the code:
   `toBuffer` and `ReadyForQuery` in `connection.ts`). What its work asks
   in one task waits for the next (`nextTask`: Node's `setImmediate`, a
   timer of 0 on workerd), then goes as one group, in the order the
-  statements were made (`Query.made`), its BEGIN ahead of the first group.
-  A statement is made when it is started: once awaited, a microtask later
-  (a Drizzle builder, and `prepared` in `../prepared.ts`, which runs one
-  only then, as a builder does), or at once, by `.then`, `execute()` or
-  `later`. So what must go first in a group is started, not awaited:
-  `lockLogHeadRead` (`../log.ts`) starts the head's lock and its read, and
-  a work's first `later` write goes behind them.
+  statements were started (`Query.made`: awaited, `then` or `execute()`),
+  not built, its BEGIN ahead of the first group. Drizzle starts a
+  statement a microtask after it is asked for (it awaits the driver's), a
+  builder once awaited, a `.then` at once (`prepared` in `../prepared.ts`
+  runs one once awaited, as a builder does); `later` starts its own a
+  microtask after it is called, as Drizzle does. So what must go first in
+  a group is started first: `lockLogHeadRead` (`../log.ts`) starts the
+  head's lock and its read with `.then`, ahead of a work's first `later`
+  write.
   A statement the client cannot send in a group (a value only the server
   can type, one it cannot send) has each go alone, in order. If one fails,
   Postgres skips the rest: those before it answer with their rows

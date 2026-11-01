@@ -180,7 +180,7 @@ and a transaction holds it from BEGIN to COMMIT; the app's plain reads
 asked together take one turn, under one Sync, one round trip
 (`groupReads`), and fail together. A transaction's statements asked
 together go under one Sync too, BEGIN with the first, in the order they
-were started (awaited, or at once by `.then` or `later`), and the writes
+were started, and the writes
 it leaves to `later` (`@coffre/db`) with its
 COMMIT: a transaction that reads what it needs together (`Promise.all`)
 and leaves the writes whose answer it does not need to `later` is two
