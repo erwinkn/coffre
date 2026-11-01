@@ -941,6 +941,8 @@ export class Checkpointer {
     const cosigned = this.options.witnesses.map((w) => this.pump(w)).filter((p) => p.acked >= number && p.cosigned !== null).map((p) => p.cosigned!);
     const witnessed = this.options.witnesses.length === 0 ? null : failures.length === 0;
     if (witnessed === false) this.options.alert(`change ${number} answered unwitnessed: ${failures.join('; ')}`);
+    // Closed or stalled while the witnesses were waited for: no answer either (review r2).
+    if (this.closed) throw new Unsealed(number, this.stalled ?? 'this checkpointer was closed: another holds its memory');
     return { pair: head.pair, notes: head.notes, witnessed, failures, cosigned, proof };
   }
 

@@ -898,6 +898,22 @@ test('T171: a change committed before the running tick\'s barrier waits for that
   assert.equal(closes, 3, 'one tick more, its own');
 });
 
+test('T171, review r2: a checkpointer closed while a change it kept waits for its witness answers it unsealed', async () => {
+  const { k, store, open } = await setup();
+  const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
+  const honest = localWitness('honest', k.verifiers, self);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const slow: Witness = { name: 'slow', publish: async (notes, proofs, signal) => (await held, honest.publish(notes, proofs, signal)) };
+  const cp = await open({ witnesses: [slow] });
+  const change = store.append('changes', 'kept');
+  await cp.tick();
+  const sealing = cp.sealThrough(change, 2000);
+  await cp.close();
+  release();
+  await assert.rejects(sealing, (error: Error) => error instanceof Unsealed && /was closed/.test(error.message));
+});
+
 test('a change waits for the witness, then answers unwitnessed at the deadline, alerted; a refusal is retried within it', async () => {
   const { k, store, open, alerts } = await setup();
   const self = await noteSigner('witness.test', Buffer.alloc(32, 9));
