@@ -6,7 +6,6 @@
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import type { CredentialScope } from '@coffre/core/access';
 import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
-import { personalOf } from '@coffre/core/schemas';
 
 import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
@@ -543,8 +542,8 @@ function pluginContext(
     let place: { project: string; environment: string } | null = null;
     if (asked.path !== null) {
       const named = parsedPlace(asked.path);
-      // A personal config (`dev@me`) is read by its owner: as ever.
-      if (named?.environment === undefined || personalOf(named.environment) !== null) return null;
+      // A fork, and `dev@me`, its caller's personal config of dev or dev, by name too (T165).
+      if (named?.environment === undefined) return null;
       place = { project: named.project, environment: named.environment };
     }
     try {

@@ -326,9 +326,37 @@ export async function readableValues(
    * only, whose read is that one statement. A fork's layers are read together, in one snapshot.
    */
   ahead?: readonly SecretRow[],
+  /**
+   * A fork's, or a personal config's, one key the vault's call by name used already (T165): `key`, its row in `ahead`,
+   * and `held`, where it is held, null for the place itself. The vault resolved it through the place's layers and
+   * decided it there, in its one statement: its rows are the read's, and no layer is read again (R42).
+   */
+  decided?: { key: string; held: { environmentId: string; slug: string } | null },
 ): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
   if (place.environment!.parentId === null) return resolveValues(db, place, environment, key, ahead);
+  if (decided !== undefined && ahead !== undefined) return decidedValues(db, place, environment, decided, ahead);
   return db.transaction((tx) => resolveValues(tx, place, environment, key), SNAPSHOT);
+}
+
+/**
+ * `readableValues` of a place with a parent, its one key as the vault's named use resolved and decided it: the key's
+ * own layer alone, from the rows the use read, an inherited one read through the place, as `resolveValues` names it.
+ */
+async function decidedValues(
+  db: Queryable, place: ResolvedPath, environment: { projectId: string; environmentId: string },
+  decided: { key: string; held: { environmentId: string; slug: string } | null }, ahead: readonly SecretRow[],
+): Promise<{ items: Readable[]; unreadable: Unreadable[]; hollow: Hollow[] }> {
+  const { held } = decided;
+  const layer = held === null
+    ? { projectId: environment.projectId, environmentId: environment.environmentId, slug: place.environment!.slug }
+    : { projectId: environment.projectId, environmentId: held.environmentId, slug: held.slug };
+  const parent = held === null ? undefined : { environmentId: held.environmentId, slug: held.slug };
+  const own = await valuesIn(db, place.project.slug, layer, decided.key, ahead.filter((row) => row.key === decided.key));
+  return {
+    items: own.items.map((item) => (parent === undefined ? item : { ...item, through: environment.environmentId, parent })),
+    unreadable: own.unreadable.map((unread) => ({ ...unread, ...(parent === undefined ? {} : { parent }) })),
+    hollow: own.hollow.map((empty) => ({ key: empty, ...(parent === undefined ? {} : { parent }) })),
+  };
 }
 
 /** `readableValues` in a transaction of the caller's, as it is under that transaction: a fork's copy, under the log's head. */

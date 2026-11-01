@@ -15,6 +15,12 @@
 //
 // A map set as it should never be (another place's key, an id never made, another credential's) is the vault's own
 // state, which no request and no API of the app's reaches: use.matrix.ts sets it, in the vault (D150).
+//
+// The same at a fork and at `dev@me` (T165, B2): the key's states made in dev, which a fork of it (`feature`) inherits,
+// and their personal config of dev (made by a write of theirs to `dev@me`), each asked by its path; a fork's by the
+// proxy's environment URL too (a person's `dev@me` is the proxy's only where the deployment generates values for dev,
+// which this one does not: by the API alone). Their grant on the fork revoked, on dev (which the fork inherits from),
+// or kept. Every key there being dev's, a caller who reads dev may have the held ones, and nobody else any.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -69,22 +75,32 @@ const ADMISSIONS = ['as asked', 'past the floor'] as const;
 const WINDOWS = ['open', 'passed'] as const;
 /** Their grant revoked, or kept: then the keys they may not have are the ones to answer alike (D153); or their token and handle revoked, which every key answers 401. */
 const LOST = ['revoked', 'they stand', 'token revoked'] as const;
-type Row = { asked: (typeof ASKED)[number]; lost: (typeof LOST)[number]; place: (typeof PLACES)[number]; admission: (typeof ADMISSIONS)[number]; window: (typeof WINDOWS)[number] };
+/** Where the key is asked for (T165): the environment itself, a fork of it that inherits it, or `dev@me`, their personal config of it. */
+const WHERE = ['env', 'fork', 'mine'] as const;
+type Row = {
+  where: (typeof WHERE)[number]; asked: (typeof ASKED)[number]; lost: (typeof LOST)[number] | 'parent revoked'; place: (typeof PLACES)[number];
+  admission: (typeof ADMISSIONS)[number]; window: (typeof WINDOWS)[number];
+};
 type Key = (typeof KEYS)[number];
 /** A map out of date by its place's slug taken since, over each place and admission, the window passed (a use would lock). */
 const reused = (asked: Row['asked']) => asked === 'renamed, its slug reused' || asked === 'deleted, its slug reused';
-const labelOf = (row: Row) => `${row.asked} / ${row.lost} / ${row.place} / ${row.admission} / window ${row.window}`;
+const labelOf = (row: Row) => `${row.where === 'env' ? '' : `${row.where} / `}${row.asked} / ${row.lost} / ${row.place} / ${row.admission} / window ${row.window}`;
 /** Every row, generated, which CI runs in shards, a slice each (`shardOf`). */
 const ROWS: Row[] = shardOf(import.meta.url, [
   ...ASKED.flatMap((asked) => PLACES.filter((place) => place !== 'its seal replaced').flatMap((place) => ADMISSIONS.flatMap((admission) =>
-    (reused(asked) ? (['passed'] as const) : WINDOWS).map((window) => ({ asked, lost: 'revoked' as const, place, admission, window }))))),
+    (reused(asked) ? (['passed'] as const) : WINDOWS).map((window) => ({ where: 'env' as const, asked, lost: 'revoked' as const, place, admission, window }))))),
   // Standing, where a key's answer may differ, as asked at a live place: those they may not have, alike.
-  ...(['never', 'while standing', 'after'] as const).flatMap((asked) => WINDOWS.map((window) => ({ asked, lost: 'they stand' as const, place: 'live' as const, admission: 'as asked' as const, window }))),
+  ...(['never', 'while standing', 'after'] as const).flatMap((asked) => WINDOWS.map((window) => ({ where: 'env' as const, asked, lost: 'they stand' as const, place: 'live' as const, admission: 'as asked' as const, window }))),
   // A place whose seal a writer replaced: refused alike, and a token revoked 401 there as anywhere (review r1 of D153).
   ...(['never', 'while standing', 'after'] as const).flatMap((asked) => (['revoked', 'token revoked'] as const).flatMap((lost) => (['live', 'its seal replaced'] as const).map((place) =>
-    ({ asked, lost, place, admission: 'as asked' as const, window: 'passed' as const })))).filter((row) => row.lost === 'token revoked' || row.place === 'its seal replaced'),
+    ({ where: 'env' as const, asked, lost, place, admission: 'as asked' as const, window: 'passed' as const })))).filter((row) => row.lost === 'token revoked' || row.place === 'its seal replaced'),
+  // At a fork and at `dev@me` (T165), as asked at a live place: revoked where they ask, at dev, which the fork inherits
+  // from, or standing; and a token revoked, 401 whatever the key.
+  ...(['fork', 'mine'] as const).flatMap((where) => (['never', 'while standing', 'after'] as const).flatMap((asked) =>
+    (where === 'fork' ? (['revoked', 'parent revoked', 'they stand', 'token revoked'] as const) : (['revoked', 'they stand', 'token revoked'] as const)).flatMap((lost) =>
+      WINDOWS.map((window) => ({ where, asked, lost, place: 'live' as const, admission: 'as asked' as const, window }))))),
 ], labelOf);
-/** A key they may have: they stand, and it is held with its value. Its answer is theirs to know of. */
+/** A key they may have: they stand, and it is held with its value, dev's, which they read. Its answer is theirs to know of. */
 const usable = (row: Row, key: Key) => row.lost === 'they stand' && (key === 'held' || key === 'made since' || key === 'used before');
 
 /** As use.matrix.ts: 1.6 s a statement, a refusal being one whatever the vault's map holds (D153). */
@@ -110,8 +126,12 @@ async function relay(at: string): Promise<{
   const target = new URL(at);
   const server: Server = createServer((client) => {
     const upstream = connect(Number(target.port), target.hostname);
+    // A connection's startup and authentication pass at no delay, opened mid-row too (a pool's connection replaced after
+    // one a deadline cut off): only its statements, from its first Parse or simple Query on, are slowed, both ways. Else
+    // a call that opened one sent nothing within its deadline, its handshake's round trips each slowed (T165, W301).
+    let slowed = false;
     const pass = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => from.on('data', (chunk) => {
-      if (half === 0) to.write(chunk);
+      if (half === 0 || !slowed) to.write(chunk);
       else setTimeout(() => to.write(chunk), half);
     });
     // The client's messages, framed: its startup (and an SSL request before it) untyped, then each a type and a length.
@@ -133,6 +153,7 @@ async function relay(at: string): Promise<{
         if (pending.length < 5) return;
         const length = pending.readInt32BE(1);
         if (pending.length < 1 + length) return;
+        if (pending[0] === 0x50 || pending[0] === 0x51) slowed = true;
         if (pending[0] === 0x53 || pending[0] === 0x51) statements += 1;
         if (pending[0] === 0x51) unbound += 1;
         if (pending[0] === 0x50) {
@@ -361,40 +382,52 @@ async function cell(row: Row, key: Key) {
     if (key === 'a reference repointed around the log') await root.secrets.set(source, { OTHER_KEY: 'sk_t158_other' });
   }
   await root.members.add(`user:${person}`);
-  await root.access.set(`user:${person}`, { [place]: 'developer' });
+  // Where they ask (T165): dev itself, a fork of it that inherits its keys, or their personal config of it, made by a
+  // value of theirs written there.
+  const fork = `${project}/feature`;
+  if (row.where === 'fork') await root.environments.create(fork, { from: 'dev', inherit: true });
+  const grants = { [place]: 'developer' as const, ...(row.where === 'fork' ? { [fork]: 'developer' as const } : {}) };
+  await root.access.set(`user:${person}`, grants);
+  if (row.where === 'mine') await clientFor(deps, person).secrets.set(`${place}@me`, { MINE: 'sk_t165_mine' });
+  const asks = row.where === 'fork' ? fork : row.where === 'mine' ? `${place}@me` : place;
   const context = await contextFor(deps, person);
-  const issued = await runtime.signin!.issuePersonalToken(context, { label: 'script', expiresInMinutes: 60, scope: { [place]: 'developer' } });
-  const handled = await runtime.signin!.issueHandle({ ...context, personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: [place] });
+  const issued = await runtime.signin!.issuePersonalToken(context, { label: 'script', expiresInMinutes: 60, scope: grants });
+  const handled = await runtime.signin!.issueHandle({ ...context, personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: [row.where === 'fork' ? fork : place] });
   const [token, handle] = [issued.token, handled.token];
-  const path = `${place}/API_KEY`;
-  const url = `/use/${place}/api/v1/thing`;
+  const path = `${asks}/API_KEY`;
+  // The key itself, in dev, which a fork and their personal config inherit: what the root's writes name.
+  const held = `${place}/API_KEY`;
+  // A person's `dev@me` is the proxy's only where the deployment generates values for dev: by the API alone.
+  const url = row.where === 'mine' ? null : `/use/${row.where === 'fork' ? fork : place}/api/v1/thing`;
   // Used before: through another token of theirs, while they stood, whose use leaves the key fresh in their set.
   if (USED.has(key)) {
-    const other = (await runtime.signin!.issuePersonalToken(context, { label: 'other', expiresInMinutes: 60, scope: { [place]: 'developer' } })).token;
+    const other = (await runtime.signin!.issuePersonalToken(context, { label: 'other', expiresInMinutes: 60, scope: grants })).token;
     assert.equal((await reveal(other, path)).status, 200);
   }
   if (row.asked === 'while standing' || reused(row.asked)) {
     await reveal(token, path);
-    await proxied(url, handle);
+    if (url !== null) await proxied(url, handle);
   }
-  if (row.lost === 'revoked') await root.access.set(`user:${person}`, { [place]: null });
+  // Revoked where they ask: at the fork, or at dev (an environment's, or their personal config's, whose standing is dev's).
+  if (row.lost === 'revoked') await root.access.set(`user:${person}`, { [row.where === 'fork' ? fork : place]: null });
+  if (row.lost === 'parent revoked') await root.access.set(`user:${person}`, { [place]: null });
   if (row.lost === 'token revoked') {
     await runtime.signin!.revokeCredential(context, issued.id);
     await runtime.signin!.revokeCredential(context, handled.id);
   }
   if (row.asked === 'after') {
     await reveal(token, path);
-    await proxied(url, handle);
+    if (url !== null) await proxied(url, handle);
   }
   if (key === 'made since') await root.secrets.set(place, { API_KEY: 'sk_t158_made' });
   if (key === 'deleted') await root.secrets.set(place, { API_KEY: null });
-  if (key === 'a reference, broken since') await root.references.break(path);
+  if (key === 'a reference, broken since') await root.references.break(held);
   if (key === 'its row put back since') await root.secrets.set(place, { API_KEY: 'sk_t158_written' });
   if (key === "a reference, its source's key archived since" || key === "a reference, its source's environment archived since") {
-    await root.secrets.update(path, { archived: true });
+    await root.secrets.update(held, { archived: true });
     if (key === "a reference, its source's key archived since") await root.secrets.update(`${source}/SOURCE_KEY`, { archived: true });
     else await root.environments.update(source, { archived: true });
-    await root.secrets.update(path, { archived: false });
+    await root.secrets.update(held, { archived: false });
   }
   // Their place renamed, their grant there given back, and its slug taken by a new one, where they hold none; or deleted
   // for good, and its slug taken the same: the vault's map holds the old place, and the key's state there.
@@ -470,7 +503,7 @@ test(`through the app, a person is answered alike for every key they may not hav
                 return { answer, calls: vaultCalls.slice(calls), statements, app: appStatements() - own, sent };
               };
               const api = await measured(() => reveal(c.token, c.path));
-              const proxy = await measured(() => proxied(c.url, c.handle));
+              const proxy = await measured(() => (c.url === null ? Promise.resolve(null) : proxied(c.url, c.handle)));
               answers.push({
                 key: c.key, api: api.answer, proxy: proxy.answer, work: { api: [api.calls, api.statements, api.app], proxy: [proxy.calls, proxy.statements, proxy.app] },
                 sent: { api: api.sent, proxy: proxy.sent },
@@ -506,7 +539,9 @@ test(`through the app, a person is answered alike for every key they may not hav
             if (cached.length > 0) differing.push(`${label}: ${via}, the cached form for ${cached.map((a) => a.key).join(', ')}`);
             // Standing: the form alone here. The app runs no statement of its own on this path, and the vault's
             // matrix holds each refusal's buffers to the same request's from an isolate with no history.
-            if (row.lost === 'they stand') continue;
+            // Standing at the place (a fork's, its parent's grant gone, T165, included): a key's shape may show in its cost,
+            // a key they may know of (R6). Only a caller standing nowhere there is held to reading no key.
+            if (row.lost === 'they stand' || row.lost === 'parent revoked') continue;
             const read: { key: Key; buffers: number }[] = [];
             for (const a of refused) {
               const buffers = await bufferedBy(a.sent[via]);
@@ -518,7 +553,7 @@ test(`through the app, a person is answered alike for every key they may not hav
           }
         }
         // As asked, never a 503: no lock waited for, no statement more than the deadline holds.
-        if (row.admission === 'as asked' && refused.some((a) => (a.api as { status: number }).status === 503 || (a.proxy as { status: number }).status === 503)) {
+        if (row.admission === 'as asked' && refused.some((a) => (a.api as { status: number }).status === 503 || (a.proxy as { status: number } | null)?.status === 503)) {
           differing.push(`${label}: a 503, as asked`);
         }
       }
