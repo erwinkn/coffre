@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **0.15's log keeps working across a rotation of the vault's signing key.**
+  A new local vault key (the old one in `previousKeks`), or with a key
+  service a new `signingKey` (the old one in the new `previousSigningKeys`),
+  changes the key the log's checkpoints and entries are signed under. Until
+  now the checkpointer then refused its own memory ("the signer remembers a
+  pair it did not sign"), and with it reset the database's newest pair, so
+  every change failed at its seal. Now its first start under the new key
+  writes a rotation entry, past which the old key vouches for nothing,
+  carries its memory across and seals on under the new key, as 0.14 does
+  with `key.rotate`. Each entry's MAC names its key (its first 4 bytes, the
+  key's tag; 12 bytes of HMAC follow), so that a vault still under the old
+  key, for the moments a deploy takes, writes nothing past the rotation: its
+  uses are answered `superseded` (503, `Retry-After`) and its changes
+  refused (migration 0049: `log_fence.retired`, a trigger on `log_changes`,
+  `log_rotate`, and `use_credential` with its arguments unchanged). The
+  check takes a rotation under way, and refuses a pair or an entry under the
+  old key past it. A witness's settings take `previous`, the log's keys
+  under each replaced key. `runCheckpointer`'s and the checkpointer object's
+  `seed` is now `signingKeys`, all of the vault's. Modelled first
+  (`formal/Rotation.tla`), each protection shown necessary (T168).
+
 - **0.15's read of several keys is one vault call and one statement, behind its switch.**
   A reveal of an environment, `coffre export` and the Action's `keys:`
   opened each value by a vault call of its own, about 3.5 ms of Workers

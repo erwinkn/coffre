@@ -29,7 +29,7 @@ import type { RetentionStore } from './retention.ts';
  *   retention change, and a day's partition and the tiles below a cut
  *   dropped, each through its function, which holds the vault's login to
  *   what a sealed retention change cuts.
- * - A rotation of the vault's signing key (T168, migration 0048): the
+ * - A rotation of the vault's signing key (T168, migration 0049): the
  *   rotation entries, by their object's index, and the rotation written
  *   with `log_rotate`, under the barrier's locks.
  *

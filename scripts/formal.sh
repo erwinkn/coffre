@@ -434,8 +434,8 @@ EXPECTED=(
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
 # scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
 # slack and clock-skew scenarios), seal (Seal and Migration015),
-# seal-plugin (SealPlugin, SealCore and the key's Rotation scenarios) and
-# seal-retention (SealRetention and SealRetentionCrash). A scenario in no case
+# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention,
+# SealRetentionCrash and the key's Rotation scenarios). A scenario in no case
 # below is in `rest`.
 SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
 shard_of() {
@@ -446,8 +446,8 @@ shard_of() {
     HotPathOneBulk) echo hotpath-bulk ;;
     HotPathOneLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
-    SealPlugin|SealCore|Rotation*) echo seal-plugin ;;
-    SealRetention*) echo seal-retention ;;
+    SealPlugin|SealCore) echo seal-plugin ;;
+    SealRetention*|Rotation*) echo seal-retention ;;
     Seal|Migration015*) echo seal ;;
     *) echo rest ;;
   esac

@@ -243,7 +243,8 @@ allowed on objects that the change path has sealed.
 2. **The call.**
    - The isolate MACs the request as the checkpointer checks it: `entryMac`
      over the uses tree and the row's columns, under the log's one MAC key
-     (`logMacKey`, the change path's too), cut to 16 bytes. 5a had a key of
+     (`logMacKey`, the change path's too), cut to 16 bytes (since T168, the
+     key's 4-byte tag and 12 of HMAC: audit-tree.md, "A rotation"). 5a had a key of
      its own, `coffre.vault.uses.v1`, and a layout of its own, which no
      tick could check (T128): every real use would have stopped the
      checkpointer. The cost is the same: 5.0–5.4 µs a use either way, the

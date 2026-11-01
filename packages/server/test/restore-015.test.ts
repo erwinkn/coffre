@@ -21,8 +21,9 @@ import { defineSignin, github } from '@coffre/core/identity';
 import { derivedSigningKey } from '@coffre/core/kek';
 import type { UseOutcome } from '@coffre/core/vault';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
+import { logObject } from '@coffre/db/log';
 import { migrateDatabase } from '@coffre/db/migrate';
-import { KEY_OBJECT, localVault, replayStored, runCheckpointer, type LocalVault, type RunningCheckpointer } from '@coffre/vault/node';
+import { localVault, replayStored, runCheckpointer, type LocalVault, type RunningCheckpointer } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
@@ -42,6 +43,8 @@ const source = new URL(TEST_OWNER_DATABASE_URL).pathname.slice(1);
 const restored = `${source.slice(0, 60)}_r`;
 const checked = `${source.slice(0, 60)}_w`;
 const rotatedBack = `${source.slice(0, 60)}_k`;
+/** The log's own object for its rotations (log-entry.ts, KEY_OBJECT). */
+const KEY_OBJECT = logObject('log', 'key');
 /** The test's server, as `login`, over `database`. */
 const urlOf = (database: string, login = 'coffre_owner:local-dev-only') => {
   const url = new URL(TEST_OWNER_DATABASE_URL);
@@ -223,6 +226,7 @@ test('a backup taken before the vault key was rotated, restored under the new ke
   const signer = await checkpointerOver(await openVaultDatabase(), oldSeed, 'rotated-memory');
   const vault = testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, { kek: oldKek }, {}, { log: '0.15', sealThrough: signer.sealThrough });
   const deps = testDeps(db.runtime, [ROOT], { vault });
+  deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })] }) });
   const root = clientFor(deps, ROOT);
   await root.members.add(CI);
   await root.projects.create('market');
