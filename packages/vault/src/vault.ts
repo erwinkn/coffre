@@ -776,10 +776,13 @@ class VaultService implements Vault {
   async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline }: How): Promise<Outcome<T>> {
     try {
       const committed = await this.#db.transaction(async (tx) => {
-        await store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared);
-        const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals, shared);
-        // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
-        const reads = await this.#snapshot(tx, principals, asked, !late, shared);
+        // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
+        // (`snapshot` says why it holds): asked together, they go in that order under one Sync (postgres-js's `gather`).
+        const [, members, reads] = await Promise.all([
+          store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared),
+          principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
+          this.#snapshot(tx, principals, asked, !late, shared),
+        ]);
         const log015 = this.#prepared.log015;
         const d: Decision = {
           tx, members, at: this.#at(reads), reads, log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],

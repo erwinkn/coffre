@@ -5,6 +5,7 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, ty
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
+import { later } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
@@ -155,6 +156,26 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
 }
 
 /**
+ * Lock the log's head, and read under it what an append of `key`'s reads
+ * (`readUnderHead`), asked together: under one Sync on Hyperdrive, the
+ * lock first, then the read, a statement of its own that so waits for
+ * nothing and sees every append committed before the lock. What the
+ * transaction asks beside them, in the same task, goes with them, after
+ * (postgres-js's `gather`). Hand the result to the append (`locked`):
+ * nothing to read again.
+ */
+export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  // Both started now (`.then`), not awaited: made before anything the caller asks after, a work's first `later` write
+  // included, so they go first in their group (postgres-js's `flush`, by `made`).
+  const locking = lockedHead(tx).then(([head]) => {
+    if (head === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+    holding.add(tx);
+  });
+  const reading = readUnderHead(tx, key);
+  return Promise.all([locking, reading]).then(([, held]) => held);
+}
+
+/**
  * Take the issue lock exclusive (migration 0026's, `1668244070, 1`): every
  * issue in flight, a sign-in or a token's, ends first, and none starts
  * until this transaction does. A write that moves what an issue's policy
@@ -276,6 +297,12 @@ export async function appendEntries(
    * over, migration 0047's trigger refuses a write's entry without it.
    */
   log015 = false,
+  /**
+   * `final`: the append is its transaction's last statement, whose answer
+   * nothing awaits: without changes, on Postgres, it goes with the COMMIT,
+   * under its Sync (`later`), and what it fails with fails the transaction.
+   */
+  { final = false }: { final?: boolean } = {},
 ): Promise<Appended & { changes: (bigint | null)[] }> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
@@ -342,8 +369,10 @@ export async function appendEntries(
       moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row) `);
   } else if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
-    await tx.execute(sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
-      UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`);
+    const statement = sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
+      UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`;
+    if (final) later(tx, statement);
+    else await tx.execute(statement);
   } else {
     await tx.insert(auditLog).values(rows);
     await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
@@ -364,8 +393,12 @@ export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { se
  * after the append's `check`. The log's own last row says whether the log
  * has moved on from `key`.
  */
-async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
-  const [read] = await underHead(tx, { author: key.author, keyId: key.keyId });
+function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  // Started now, as `.then` starts a statement, not once awaited: `lockLogHeadRead` puts it ahead of what its caller asks next.
+  return underHead(tx, { author: key.author, keyId: key.keyId }).then(([read]) => heldOf(read, key));
+}
+
+function heldOf(read: Awaited<ReturnType<typeof underHead>>[number] | undefined, key: LogKey): HeldHead {
   if (read === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
   if (read.retired) throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
   return {
@@ -532,9 +565,9 @@ const entriesBefore = prepared((db) => vaultEntries(db, lt(tablesOf(db).auditLog
  * `action`, or null for none: whether one was appended since, and nothing
  * of what it says, so its MAC is not checked. One indexed read.
  */
-export async function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
-  const [row] = await newestSeq(db, { action });
-  return (row?.seq as bigint | undefined) ?? null;
+export function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
+  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
+  return newestSeq(db, { action }).then(([row]) => (row?.seq as bigint | undefined) ?? null);
 }
 
 const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));

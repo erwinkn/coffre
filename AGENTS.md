@@ -178,7 +178,14 @@ call has one Postgres client through Hyperdrive (`HyperdrivePool` in
 `@coffre/db`), connected on its first query. Its queries take turns on it,
 and a transaction holds it from BEGIN to COMMIT; the app's plain reads
 asked together take one turn, under one Sync, one round trip
-(`groupReads`), and fail together. So code inside a
+(`groupReads`), and fail together. A transaction's statements asked
+together go under one Sync too, BEGIN with the first, in the order they
+were started, and the writes
+it leaves to `later` (`@coffre/db`) with its
+COMMIT: a transaction that reads what it needs together (`Promise.all`)
+and leaves the writes whose answer it does not need to `later` is two
+round trips, which `packages/server/test/change-cost.test.ts` holds each
+change route to (T179). So code inside a
 transaction queries through its `tx`, never the database: a query on the
 database would wait for the transaction, which waits for it. `createDatabase`
 refuses one at once, on Node too, so the suites catch it: each transaction's

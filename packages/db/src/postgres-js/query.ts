@@ -26,6 +26,14 @@ export interface Member {
   statement: Statement | null;
 }
 
+/** Statements started so far (`Query.made`). */
+let made = 0;
+
+/** The next start's place (`Query.made`): a statement started now, or one the driver makes itself, a COMMIT. */
+export function started(): number {
+  return (made += 1);
+}
+
 /**
  * A statement, sent once awaited (`then`, `catch`, `finally`) or `execute`d,
  * a task later, through the pool or the transaction that made it: its
@@ -57,6 +65,27 @@ export class Query<T = unknown> extends Promise<T> {
    */
   group: Member[] | null = null;
   member = 0;
+  /**
+   * Coffre: a transaction's statement whose answer nothing awaits (`later`, @coffre/db): its COMMIT may go with it, under
+   * its Sync (`settleWithCommit`, index.ts). One that something awaits must answer first, so that what awaits it may
+   * still ask, or be refused and roll the transaction back.
+   */
+  later = false;
+  /**
+   * Coffre: a group's statements Postgres answered whose answers the client could not read (a row a parser refused, a
+   * COPY), by their place in it: each fails alone, as what Postgres ran stands (`together`, index.ts).
+   */
+  unread: Map<number, unknown> | null = null;
+  /** Coffre: a statement of a group that Postgres ran and answered with an error, not one skipped or never sent (`together`). */
+  refused = false;
+  /** Coffre: a group that failed: the results of its statements answered before the one that failed (`together`, index.ts). */
+  answered: unknown[] | null = null;
+
+  /**
+   * Coffre: when it was started (awaited, `then`, `execute()`), among every statement of the process: a transaction's
+   * group goes in this order (`flush`, index.ts), whatever order the statements were built in.
+   */
+  made = 0;
 
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: unknown) => void;
@@ -117,6 +146,7 @@ export class Query<T = unknown> extends Promise<T> {
   async #handle(): Promise<void> {
     if (this.executed) return;
     this.executed = true;
+    this.made = started();
     await null;
     this.#handler(this);
   }
