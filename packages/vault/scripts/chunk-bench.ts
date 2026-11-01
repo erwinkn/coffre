@@ -37,7 +37,7 @@ const macKey = logMacKey(seed);
 const proxy = await stallProxy(vaultUrl, { delayMs: rtt / 2 });
 const pool = new HyperdrivePool(proxy.url, { closeIdleMs: 60_000 });
 const store = logStore(createDatabase(pool));
-const cp = await openLogCheckpointer({ store, seed, memory: variableMemory() });
+const cp = await openLogCheckpointer({ store, signingKeys: [seed], memory: variableMemory() });
 await cp.tick();
 const floor = cp.pair.pair.floor;
 const base = Date.now() - 2500;

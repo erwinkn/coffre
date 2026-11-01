@@ -96,7 +96,7 @@ const commitChange = (w: Awaited<ReturnType<typeof world>>) =>
   change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } }, w.objects.principal, async () => {});
 
 async function opened(database: Database, memory: string): Promise<{ kept: KeptCheckpointer; vault: Awaited<ReturnType<typeof isolate>>['vault']; use: Awaited<ReturnType<typeof isolate>>['use'] }> {
-  const kept = await keepCheckpointer({ database, seed: SIGNING_KEY, memory, intervalMs: 20, retryMs: 50, tickBoundMs: 300 });
+  const kept = await keepCheckpointer({ database, signingKeys: [SIGNING_KEY], memory, intervalMs: 20, retryMs: 50, tickBoundMs: 300 });
   const { vault, use } = await isolate({ sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing });
   return { kept, vault, use };
 }
@@ -266,7 +266,7 @@ test('T169, review r1, Node, Postgres: stall after stall, each on a connection o
       const { db: session, cut } = await openDatabase(proxy.url, { max: 2 });
       return { db: session, cut };
     },
-    seed: SIGNING_KEY, memory: join(dir, 'memory-postgres-4'), intervalMs: 20, retryMs: 50, tickBoundMs: 200,
+    signingKeys: [SIGNING_KEY], memory: join(dir, 'memory-postgres-4'), intervalMs: 20, retryMs: 50, tickBoundMs: 200,
   });
   const { vault } = await isolate({ sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing });
   try {
@@ -305,7 +305,7 @@ test('T169, review r3, Node: a tick that stalls in its memory write: the keeper\
       },
     };
   };
-  const kept = await keepCheckpointer({ database: db.vault, seed: SIGNING_KEY, memory: path, intervalMs: 20, retryMs: 50, tickBoundMs: 200, memoryOf });
+  const kept = await keepCheckpointer({ database: db.vault, signingKeys: [SIGNING_KEY], memory: path, intervalMs: 20, retryMs: 50, tickBoundMs: 200, memoryOf });
   let stopping: Promise<unknown> | null = null;
   try {
     await until(() => kept.sealing().ok, 5000, 'sealing at first');
@@ -336,7 +336,7 @@ test('T169, review r5, Node: an upkeep past its bound retires its runner, as a s
   // Only the upkeep's pruning of the bulk cap's rows goes unanswered; the ticks are answered as ever.
   const stall = stallable(db.vault, (text) => /prune_bulk|DELETE FROM log_bulk/i.test(text));
   stall.hold();
-  const kept = await keepCheckpointer({ database: stall.db, seed: SIGNING_KEY, memory: join(dir, `memory-${ENGINE}-6`), intervalMs: 20, retryMs: 50, tickBoundMs: 300, upkeepBoundMs: 300 });
+  const kept = await keepCheckpointer({ database: stall.db, signingKeys: [SIGNING_KEY], memory: join(dir, `memory-${ENGINE}-6`), intervalMs: 20, retryMs: 50, tickBoundMs: 300, upkeepBoundMs: 300 });
   try {
     await until(async () => (await kept.alarms()).some((a) => /the log's upkeep did not end within 300 ms/.test(a.message)), 10_000, 'the upkeep given up on');
     stall.release();

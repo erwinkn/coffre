@@ -267,7 +267,7 @@ export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling:
       ORDER BY n${limitOf(limit)}`;
 }
 
-function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor'> {
+function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor'> & RotationStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
   const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
@@ -435,7 +435,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
   };
 }
 
-function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'readsCursor'> {
+function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'readsCursor'> & RotationStore {
   const CHANGE = sql.raw(`json_object('tree', 'changes', 'number', CAST(c.number AS TEXT), 'at', CAST(c.at AS TEXT), 'requestId', c.request_id,
     'object', c.object, 'actor', c.actor, 'payload', c.payload, 'seal', CASE WHEN c.seal IS NULL THEN NULL ELSE hex(c.seal) END, 'mac', hex(c.mac))`);
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),

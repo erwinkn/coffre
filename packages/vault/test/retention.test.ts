@@ -207,7 +207,7 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   // The reads' days beside the uses', as the store's upkeep makes them.
   if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
-  const keys = { verifiers, mac: macKey };
+  const keys = { current: { origin: 'coffre.test/audit', verifiers, mac: macKey }, previous: [] };
   const projectedAll = async () => {
     for (let run = 0; run < 100; run += 1) {
       const { through, sealed } = await projectReads(store, keys, { steps: 100 });
@@ -368,7 +368,7 @@ test("a reader holding a day's reads past drop_reads_day's lock timeout makes th
   await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
   await later(cp);
-  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, { verifiers, mac: macKey }, { steps: 100 }));
+  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, { current: { origin: 'coffre.test/audit', verifiers, mac: macKey }, previous: [] }, { steps: 100 }));
   const d10 = (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_reads WHERE at >= ${Date.parse(`${D10}T00:00:00Z`)} AND at < ${MIDNIGHT}`))[0]!.n;
   assert.equal(d10, 600);
   // A reader of D10's reads, a backup say, past the reads' drop's lock timeout: the uses' day detached, its reads kept.

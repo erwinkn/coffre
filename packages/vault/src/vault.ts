@@ -160,7 +160,7 @@ import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as seale
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
-import { checkReads, cursorHolds, readHolds, type ReadRow } from './reads.ts';
+import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -171,6 +171,7 @@ import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk
 import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, useMany, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
+import { alone, entryVouched, keyringOf, settledRing, type Keyring } from './keyring.ts';
 
 
 export type VaultOptions = {
@@ -288,7 +289,8 @@ export type PreparedVault = {
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
   /** The log's MAC key under each signing key, which `vouch` checks an entry with: made once a call first needs them. */
-  vouchKeys?: LogMacKey[];
+  /** The vault's keyring once settled (T168): every key it replaced bounded by its rotation. */
+  keyring?: Keyring;
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -3596,7 +3598,7 @@ class VaultService implements Vault {
     const store = logStore(this.#db);
     const newest = await store.newest();
     if (newest === null || newest.upto < number) return false;
-    const pair = await openPair(newest.notes, (await this.#verifierKeys()).verifiers);
+    const pair = await openPair(newest.notes, (await this.#verifierKeys()).current.verifiers);
     if (pair === null || pair.upto !== newest.upto) return false;
     const proof = await proveIn(store, number, { pair, notes: newest.notes }, { tree: 'changes' }).catch(() => null);
     return proof !== null;
@@ -3975,31 +3977,46 @@ class VaultService implements Vault {
 
   /**
    * The entries of 0.15's log, as an audit page read them, whose MAC holds
-   * under none of the vault's signing keys over the columns it shows (T166):
-   * forged, or edited, around coffre. A malformed one is named too. Pure
-   * CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
+   * under no key that vouches at their number over the columns it shows
+   * (T166): forged, or edited, around coffre. A malformed one is named too.
+   * The current key vouches for any; a key it replaced, only below its
+   * rotation (T168, keyring.ts, R41), whose bounds are read only when an
+   * entry fails the current key and the vault holds a replaced one, and
+   * kept once every bound is a rotation's. Otherwise pure CPU: about 3 µs an
+   * entry, `VOUCHED_AT_ONCE` at most.
    */
   async vouch(input: VouchInput): Promise<{ forged: string[] }> {
     const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
     if (!Array.isArray(entries) || entries.length > VOUCHED_AT_ONCE) throw new Error(`vouch takes up to ${VOUCHED_AT_ONCE} entries`);
-    const macs = (this.#prepared.vouchKeys ??= this.#config.signingKeys.map((seed) => logMacKey(seed)));
-    return {
-      forged: entries.flatMap((entry: VouchedEntry) => {
-        const named = typeof entry?.number === 'string' ? entry.number : '?';
-        if (entry?.tree === 'cursor') {
-          const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
-          const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
-          const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
-          return cursor !== null && macs.some((key) => cursorHolds(key, cursor)) ? [] : [named];
-        }
-        if (entry?.tree === 'reads') {
-          const read = vouchedRead(entry);
-          return read !== null && macs.some((key) => readHolds(key, read)) ? [] : [named];
-        }
-        const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
-        return logged !== null && macs.some((key) => authentic(key)(logged)) ? [] : [named];
-      }),
-    };
+    const keys = await this.#verifierKeys();
+    const asked = entries.map((entry: VouchedEntry): { named: string; holds: (ring: Keyring) => boolean } => {
+      const named = typeof entry?.number === 'string' ? entry.number : '?';
+      if (entry?.tree === 'cursor') {
+        const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
+        const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
+        const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
+        return { named, holds: (ring) => cursor !== null && cursorVouched(ring, cursor) };
+      }
+      if (entry?.tree === 'reads') {
+        const read = vouchedRead(entry);
+        return { named, holds: (ring) => read !== null && readVouched(ring, read) };
+      }
+      const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
+      return { named, holds: (ring) => logged !== null && entryVouched(ring, logged) === 'held' };
+    });
+    const failing = asked.filter((a) => !a.holds(alone(keys)));
+    if (failing.length === 0 || keys.previous.length === 0) return { forged: failing.map((a) => a.named) };
+    const ring = await this.#keyring(keys);
+    return { forged: failing.filter((a) => !a.holds(ring)).map((a) => a.named) };
+  }
+
+  /** The vault's keys held to the log's rotations (keyring.ts), kept once settled: no rotation under way, so none to come for these keys. */
+  async #keyring(keys: VerifierKeys): Promise<Keyring> {
+    const kept = this.#prepared.keyring;
+    if (kept !== undefined) return kept;
+    const ring = await keyringOf(keys, logStore(this.#db));
+    if (settledRing(ring)) this.#prepared.keyring = ring;
+    return ring;
   }
 
   /**

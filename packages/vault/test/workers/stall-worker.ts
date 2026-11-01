@@ -10,6 +10,6 @@ type Env = { VAULT_HYPERDRIVE: { connectionString: string }; KEK: string; SIGNIN
 
 export const CoffreCheckpointer = checkpointerObject((env: Env) => ({
   hyperdrive: env.VAULT_HYPERDRIVE,
-  seed: resolveVaultConfig({ kek: JSON.parse(env.KEK) as { id: string; key: string }, signingKey: env.SIGNING_KEY, owners: ['root@acme.example'] }).signingKeys[0]!,
+  signingKeys: resolveVaultConfig({ kek: JSON.parse(env.KEK) as { id: string; key: string }, signingKey: env.SIGNING_KEY, owners: ['root@acme.example'] }).signingKeys,
   tickBoundMs: Number(env.TICK_BOUND_MS),
 }));
