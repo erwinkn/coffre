@@ -11,6 +11,10 @@
   dialogs already did; each icon is one `<svg>` whose strokes are markup
   made once per glyph, drawn from `lucide`'s data, which replaces
   `lucide-react` among `@coffre/ui`'s dependencies.
+- A batch of uses (an export, a reveal of several keys) that missed its
+  deadline starts no further read of the vault's: the check of the next
+  key's 0.14 access entry, and the pages it reads back, are cut there too,
+  as its statements already were (T177).
 
 ## 0.15.0 (2026-11-01)
 

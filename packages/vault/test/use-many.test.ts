@@ -335,9 +335,9 @@ test('a batch that loses its race while one key\'s old-write check reads starts 
   // key a statement): each row names another, so each key's check is a read of its own (`oldWrite`).
   const grant = { actor: ROOT, action: 'access.grant', decision: 'allow' as const, subjectPrincipal: w.principal, metadata: '{}' };
   const [head] = await rows<{ next_seq: string; head_hash: Buffer }>(db.owner, sql`SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row`);
-  let appended = 0n;
+  const appended: bigint[] = [];
   const isolate = await counted({ before: async () => {
-    appended = (await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [grant], undefined, undefined, [], true))).seqStart;
+    appended.push((await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [grant], undefined, undefined, [], true))).seqStart);
   } });
   // The first check held until the race's timer, under the test's hand, has fired: the clock is seconds short of the
   // deadline, so only the race lost stops the second.
@@ -371,7 +371,8 @@ test('a batch that loses its race while one key\'s old-write check reads starts 
     assert.equal(path.cache.inFlight, 0);
     assert.ok(Date.now() < at + 3_000);
     assert.equal(isolate.statements() - before, 2, "both keys' statements, answered before the race was lost");
-    assert.deepEqual(checks, [appended - 1n], "the first key's check, and no other once the race is lost");
+    assert.equal(appended.length, 2);
+    assert.deepEqual(checks, [appended[0]], "the first key's check, and no other once the race is lost");
   } finally {
     await isolate.close();
     // 0.14's log as the test found it: an entry in the vault's name has the next isolate's start convert and declare.

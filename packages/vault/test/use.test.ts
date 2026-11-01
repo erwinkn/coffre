@@ -366,7 +366,6 @@ function held(connection: Awaited<ReturnType<TestDatabase['connect']>>, body: (t
   return { done, holding, ended: () => ended, release: () => (release(), holding) };
 }
 
-
 const within = (answer: Promise<unknown>, ms = 1000) => Promise.race([answer.then(() => 'answered'), sleep(ms).then(() => 'waiting')]);
 
 test('RefreshShared: uses moving one principal\'s keys on wait for none of one another; one entering a key waits for them all (T127)', postgresOnly('advisory locks'), async () => {
