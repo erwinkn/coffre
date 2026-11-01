@@ -26,12 +26,13 @@
   no key, and ends with what is left: commit the file, then deploy both
   Workers at once. Run again, it changes nothing. It refuses, before
   changing anything, a deployment that does not run yet (a Worker without
-  its key: choose Yes) or whose Workers its files do not record. So step 3
-  of 0.15.0's upgrade is now: `pnpm exec coffre setup`, as the database's
-  administrator, then "Hyperdrive only"; no `wrangler` command, no id to
-  copy. On a Workers deployment at 0.15 or later whose vault binds no hot
-  config, `coffre update` now ends by saying so, rather than "run coffre
-  migrate".
+  its key: choose Yes) or whose Workers its files do not record. So, from
+  0.14 straight to this release, step 3 of 0.15.0's upgrade is now: `pnpm
+  exec coffre setup`, as the database's administrator, then "Hyperdrive
+  only"; no `wrangler` command, no id to copy. On a Workers deployment pinned to 0.16 or later whose vault binds
+  no hot config, `coffre update` now ends by saying so, rather than "run
+  coffre migrate"; one left on 0.15.x, whose own setup has no such answer,
+  is told to migrate, as before.
 
   A hot config made by hand, as 0.15.0's notes had it made, is kept, with
   its password, its caching turned off and its limit capped, when

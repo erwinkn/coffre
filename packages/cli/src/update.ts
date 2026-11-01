@@ -164,17 +164,22 @@ export function migrationsAdded(from: string, to: string, before: readonly strin
   );
 }
 
-/** The release whose vault first needs the hot path's login and Hyperdrive config. */
-const HOT_PATH = '0.15.0';
+/**
+ * The release whose setup first does Hyperdrive alone. A deployment pinned
+ * to 0.15.x needs the hot path's config too, but its own CLI, which
+ * `pnpm exec` runs and whose migrations are its version's, has no such
+ * answer: its release notes say how instead.
+ */
+const HYPERDRIVE_ONLY = '0.16.0';
 
 /**
- * Whether a Workers deployment, as it is pinned now, needs the hot path's
- * login and Hyperdrive config, and its vault binds none yet: setup makes
- * both, and migrates too, before the deploy.
+ * Whether a Workers deployment, as it is pinned now, has a setup that does
+ * Hyperdrive alone, and its vault binds no hot path's config yet: that
+ * setup makes it, and migrates too, before the deploy.
  */
 export function hotless(dir: string): boolean {
   const pinned = Object.values(coffrePins(dir));
-  return pinned.length > 0 && pinned.every((version) => !later(HOT_PATH, version)) && hotUnbound(dir);
+  return pinned.length > 0 && pinned.every((version) => !later(HYPERDRIVE_ONLY, version)) && hotUnbound(dir);
 }
 
 /** What a deployment `hotless` says of does before its deploy. */

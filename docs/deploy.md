@@ -218,8 +218,8 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    their own, as 0.15.0's do, follows those instead. On Workers, one that
    adds a runtime login and its Hyperdrive config, as 0.15.0's hot path
    did, migrates with `pnpm exec coffre setup` instead, as the database's
-   administrator, answering "Hyperdrive only"
-   ([Setup does Cloudflare too](#setup-does-cloudflare-too)): it makes both
+   administrator, answering "Hyperdrive only" (setup has it from 0.16 on;
+   [Setup does Cloudflare too](#setup-does-cloudflare-too)): it makes both
    and binds the config, and `coffre update` ends by saying so when the
    vault binds no `HOT_HYPERDRIVE` yet. Commit and push: the
    [deploy workflow](#deploys-on-every-push), or

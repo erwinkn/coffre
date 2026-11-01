@@ -179,21 +179,25 @@ test('update ends with what the release asks of the database', () => {
   );
 });
 
-test("a Workers deployment on the hot path's release whose vault binds no hot config is told to run setup, Hyperdrive only, which migrates too", () => {
+test("a Workers deployment whose own setup does Hyperdrive alone, and whose vault binds no hot config, is told to run it: it migrates too", () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-update-hot-'));
   try {
     cpSync(templateDir('workers'), dir, { recursive: true, filter: (path) => !path.includes('node_modules') });
     // The template's placeholder id, as a vault copied from it has.
+    bumpPins(dir, '0.16.0');
     assert.equal(hotless(dir), true);
     // Bound, it has its config.
     editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 1, 'id'], value: 'hd-hot' }]);
     assert.equal(hotless(dir), false);
-    // No binding at all, as a file a release before the hot path wrote; still pinned to such a release, it needs none yet.
+    // No binding at all, as a file a release before the hot path wrote.
     editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['hyperdrive'], value: [{ binding: 'VAULT_HYPERDRIVE', id: 'hd-vault' }] }]);
     assert.equal(hotless(dir), true);
-    bumpPins(dir, '0.14.5');
-    assert.equal(hotless(dir), false);
-    bumpPins(dir, '0.16.0');
+    // Still on 0.15, as an update declined leaves it: its own setup has no such answer, which `pnpm exec` would run. Nor has 0.16's prerelease.
+    for (const version of ['0.15.0', '0.15.1', '0.16.0-rc.1', '0.14.5']) {
+      bumpPins(dir, version);
+      assert.equal(hotless(dir), false, version);
+    }
+    bumpPins(dir, '0.16.1');
     assert.equal(hotless(dir), true);
     assert.match(HOTLESS, /run `pnpm exec coffre setup` here, as the database's administrator, and choose Hyperdrive only\. It makes the hot path's login and its config, binds it in vault\/wrangler\.jsonc, and migrates/);
   } finally {
