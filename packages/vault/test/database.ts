@@ -312,6 +312,13 @@ async function endLeftOpen(owner: Database): Promise<void> {
   }
 }
 
+/** The reads' projection of 0.15's log (T166), gone with the log, its cursor back at the start: another log's, under another key, otherwise. */
+export async function emptyReads(owner: Database): Promise<void> {
+  await run(owner, sql`DELETE FROM log_reads`);
+  await run(owner, sql`DELETE FROM log_read_days`);
+  await run(owner, sql`INSERT INTO log_reads_cursor (only_row, through, pair, at, mac) VALUES (true, 0, 0, 0, NULL) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, mac = NULL`);
+}
+
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   if (ENGINE === 'postgres') await endLeftOpen(owner);
@@ -329,6 +336,7 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   // 0.15's log, which only the cutover and the change path write.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
+  await emptyReads(owner);
   await owner.delete(vaultGrants);
   // A session a test made, for a use to name; a binding a sign-in came through, and the tokens it spent (credentials.test.ts).
   await owner.delete(credentials);

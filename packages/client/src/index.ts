@@ -493,6 +493,24 @@ export function createClient(options: ClientOptions) {
           if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
           throw error;
         }),
+      /**
+       * The reads the audit pages list held to the uses 0.15's log sealed, a
+       * stretch a request, from the first to as far as the projector has
+       * listed: the first stretch that fails, or the last. `kept` false where
+       * the instance keeps 0.14's log alone, a server older than 0.15 (no
+       * such route) included.
+       */
+      verifyReads: async (onStretch: (verdict: RouteOutput<'GET /audit/reads'>) => void = () => {}): Promise<RouteOutput<'GET /audit/reads'>> => {
+        for (let from = 'start'; ;) {
+          const verdict: RouteOutput<'GET /audit/reads'> = await call('GET /audit/reads', {}, { from }).catch((error: unknown) => {
+            if (error instanceof CoffreError && error.status === 404) return { kept: false as const };
+            throw error;
+          });
+          onStretch(verdict);
+          if (!verdict.kept || !verdict.ok || verdict.next === null) return verdict;
+          from = verdict.next;
+        }
+      },
       /** What an escrowed key is checked against: public material, for admins and owners of the whole instance. */
       keys: () => call('GET /audit/keys', {}),
       /**

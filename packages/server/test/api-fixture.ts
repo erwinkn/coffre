@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import type { Through, UseInput, UseOutcome, Vault } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
+import { openDatabase } from '@coffre/db/connect';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
-import { localVault, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
+import { localVault, runCheckpointer, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
@@ -46,6 +50,13 @@ export type TestVault = SpeakingVault<Vault> & {
   /** Move the vault's clock, for expiry and the bulk limit. */
   advance(ms: number): void;
   reset(): Promise<void>;
+  /**
+   * 0.15's reads as the audit pages list them, once the log is sealed and the
+   * vault's projector has gone that far (T166): a checkpointer of its own,
+   * under the vault's signing key, ticks once, then the projector runs to its
+   * newest pair. Nothing under 0.14's log.
+   */
+  listReads(): Promise<void>;
 };
 
 /** A vault's input as a test writes it: its `caller` may be left out, for `speaking` to say. */
@@ -322,6 +333,8 @@ export function testVault(
     changeBindings: call('changeBindings'),
     cutover: call('cutover'),
     verifyTrees: call('verifyTrees'),
+    verifyReads: call('verifyReads'),
+    vouch: call('vouch'),
     // 0.15's use path, which the app opens values through with 0.15's log on (keys.ts, `openValues`).
     use: call('use'),
     // And its use by name (T145, PR B): a reveal's or a handle's one key, which the vault resolves and uses in one call.
@@ -332,6 +345,21 @@ export function testVault(
     async reset() {
       current = null;
       offset = 0;
+    },
+    async listReads() {
+      if (log.log !== '0.15') return;
+      const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
+      // On a connection of its own, closed after: on SQLite, a connection the vault reads on meanwhile is another.
+      const own = TEST_ENGINE === 'postgres' ? null : await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
+      const signer = await runCheckpointer({ database: own?.db ?? await openVaultDatabase(), seed: config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64'), memory: join(memory, 'memory'), intervalMs: 3_600_000 });
+      try {
+        await signer.checkpointer.tick();
+        await signer.projected();
+      } finally {
+        await signer.stop();
+        await own?.close();
+        rmSync(memory, { recursive: true, force: true });
+      }
     },
   } as TestVault;
   vaults.add(vault);
@@ -480,6 +508,9 @@ export async function resetDatabase(owner: Database): Promise<void> {
     logConfig,
     logUses,
     logBulk,
+    logReads,
+    logReadDays,
+    logReadsCursor,
   } = tablesOf(owner);
   await owner.delete(mcpApprovals);
   await owner.delete(mcpConnections);
@@ -500,6 +531,12 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // Its uses and their cap's rows: a test's reads count from none.
   await owner.delete(logUses);
   await owner.delete(logBulk);
+  // And their projection (T166), from the start again.
+  await owner.delete(logReads);
+  await owner.delete(logReadDays);
+  // Its one row put back if a test deleted it (review r6).
+  const start = { through: 0n, pair: 0n, at: 0, mac: null };
+  await owner.insert(logReadsCursor).values({ onlyRow: true, ...start }).onConflictDoUpdate({ target: logReadsCursor.onlyRow, set: start });
   await owner.delete(vaultGrants);
   await owner.delete(vaultMembers);
   await owner.delete(dismissedKeys);

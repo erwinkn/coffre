@@ -48,7 +48,8 @@ export async function tokenChecks(
 
 // --- with a token ---------------------------------------------------------------
 
-type Token = { member: string };
+/** The token's service, and its credential, as `GET /me` names it (null from a server before 0.15). */
+export type Token = { member: string; credentialId: string | null };
 
 /** The token is a service's, and reads the canary's environment. */
 async function whoIsToken(origin: string, api: CoffreClient, canary: Canary): Promise<{ detail: string; value: Token }> {
@@ -62,24 +63,81 @@ async function whoIsToken(origin: string, api: CoffreClient, canary: Canary): Pr
   expect(reads?.permissions.includes('secret.read'), `${shownMember(member)} cannot read ${place}`, me.environments);
   const { keys } = await api.secrets.list(place);
   expect(keys.some((key) => key.key === canary.key), `${place} holds no ${canary.key}`, keys.map((key) => key.key));
-  return { detail: `${shownMember(member)}, reading ${place}`, value: { member } };
+  return { detail: `${shownMember(member)}, reading ${place}`, value: { member, credentialId: me.credentialId ?? null } };
 }
 
-/** Reveal the canary once, and find its `secret.read` in the audit log, by the reveal's request. */
-async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Promise<string> {
+/**
+ * How long before a reveal 0.15's log may have logged the read it rides on:
+ * a repeat of a use within a minute rides on the first one's entry (a
+ * cover, R53), and the server's clock may stand a little off this one's.
+ */
+const COVERED_MS = 90_000;
+
+/** How long a read may wait to be listed in 0.15's log: sealed at the checkpointer's tick, then listed by the projector. */
+const LISTED_WITHIN_MS = 20_000;
+
+/**
+ * Reveal the canary once, and find its `secret.read` in the audit log: by
+ * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
+ * and names no operation (T166), the token's own read of the canary, on
+ * its own page (0.15 lists reads by member, never by place: D160), by its
+ * credential, for a reveal, of the version the token lists: the use
+ * the reveal made, or the one within the minute before it that it rode on
+ * (a cover is of the same credential, purpose and key), once listed, which
+ * may take a few seconds (`LISTED_WITHIN_MS`).
+ */
+export async function tokenReveal(api: CoffreClient, canary: Canary, token: Token): Promise<string> {
   const path = `${canary.project}/${canary.environment}`;
+  const asked = Date.now();
   const { operationId, values } = await api.secrets.reveal(`${path}/${canary.key}`);
   expect(values[canary.key] === canary.value, `${path}/${canary.key} is not the value given as the canary`);
-  let entries;
-  try {
-    ({ entries } = await api.audit.list({ path, actor: token.member, limit: 50 }));
-  } catch (error) {
-    if (error instanceof CoffreError && error.status === 403) {
-      throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
+  const version = (await api.secrets.list(path)).keys.find((key) => key.key === canary.key)?.version;
+  const list = async (query: { path?: string; before?: string }) => {
+    try {
+      return await api.audit.list({ ...query, actor: token.member, limit: 50, sealed: '1' });
+    } catch (error) {
+      if (error instanceof CoffreError && error.status === 403) {
+        throw new Skip(`the token holds no audit.read on ${canary.project}, so the reveal's entry cannot be looked for`);
+      }
+      throw error;
     }
-    throw error;
-  }
+  };
+  const first = await list({ path });
+  let { entries, reads } = first;
   const read = entries.filter((entry) => entry.operationId === operationId);
+  // A server that keeps 0.15's log lists its reads on the whole log and by member, never by place (D160), and says so:
+  // the token's own page lists its own, whatever it audits.
+  if (read.length === 0 && (reads !== undefined || first.readsOmitted !== undefined)) {
+    expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
+    // Of the version revealed: an earlier version's read of the minute before stops no wait for this one (review r11).
+    const ownOf = (listed: typeof entries) => listed.filter((entry) => entry.log === '0.15' && entry.action === 'secret.read' && entry.key === canary.key
+      && entry.project === canary.project && entry.environment === canary.environment
+      && entry.metadata.credentialId === token.credentialId && entry.metadata.purpose === 'reveal' && entry.version === version
+      && Date.parse(entry.occurredAt) >= asked - COVERED_MS);
+    // Page back as far as the cover's minute: newer entries of the token's may fill the first page (review r6).
+    const recent = async () => {
+      const all: typeof entries = [];
+      for (let before: string | undefined; ;) {
+        const page = await list(before === undefined ? {} : { before });
+        all.push(...page.entries);
+        reads = page.reads;
+        const oldest = page.entries.at(-1);
+        if (page.next === null || oldest === undefined || Date.parse(oldest.occurredAt) < asked - COVERED_MS) return all;
+        before = page.next;
+      }
+    };
+    entries = await recent();
+    for (const deadline = Date.now() + LISTED_WITHIN_MS; ownOf(entries).length === 0 && Date.now() < deadline;) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      entries = await recent();
+    }
+    const own = ownOf(entries);
+    const [used] = own;
+    expect(used !== undefined, `the reveal is logged 0 times, not once: no read of ${canary.key} by the token's credential since the minute before it, listed within ${LISTED_WITHIN_MS / 1000} s (reads listed through ${reads?.through ?? 'none'})`, entries.slice(0, 3));
+    expect(used.decision === 'allow' && used.forged !== true && used.version === version,
+      `the reveal's entry is not an allowed read of the canary's version ${String(version)} the vault vouches for`, used);
+    return `one secret.read of ${canary.key}, entry ${used.seq} of 0.15's log, by the token's credential`;
+  }
   expect(read.length === 1, `the reveal is logged ${read.length} times, not once`, entries.slice(0, 5));
   const [entry] = read as [(typeof read)[number]];
   expect(

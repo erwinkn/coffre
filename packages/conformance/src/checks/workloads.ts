@@ -10,12 +10,15 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { AuditEntryView } from '@coffre/client';
+
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { GITHUB_RUN } from '../idp/index.ts';
 import { expect, Skip } from '../report.ts';
 import { Cli } from './cli.ts';
 import { DEV, type Canaries, type Person } from './people.ts';
+import { listed } from './audit.ts';
 
 /** The service the runs sign in as: a viewer on dev. */
 export const RUNNER = 'token:conformance-run';
@@ -89,9 +92,12 @@ export async function runSignsIn(deployment: Deployment, admin: Person, canaries
   const { values } = await bearer(deployment.origin, token).secrets.reveal(`${DEV}/API_KEY`);
   expect(values.API_KEY === canaries[`${DEV}/API_KEY`], 'the credential did not read the value as the service');
 
-  const { entries } = await admin.api.audit.list({ actor: RUNNER, detail: '1', sealed: '1' });
+  // The read listed once sealed and projected, a tick or two on (T166).
+  let entries: AuditEntryView[] = [];
+  const readIn = () => entries.find((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.key === 'API_KEY');
+  await listed(async () => ((entries = (await admin.api.audit.list({ actor: RUNNER, detail: '1', sealed: '1' })).entries), readIn() !== undefined));
   const exchanged = entries.find((entry) => entry.action === 'token.exchange');
-  const read = entries.find((entry) => entry.author === 'vault' && entry.action === 'secret.read' && entry.key === 'API_KEY');
+  const read = readIn();
   expect(exchanged !== undefined && read !== undefined, 'the exchange or the read is not in the log', entries.map((entry) => entry.action));
   const credentialId = exchanged.metadata.credentialId;
   expect(typeof credentialId === 'string', 'the exchange did not log its credential', exchanged.metadata);

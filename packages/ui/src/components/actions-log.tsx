@@ -9,6 +9,48 @@ import { Activity, Clock, ShieldCheck, SlashCircle } from './icons';
 const PAGE_SIZE = 50;
 
 /**
+ * How far a page's reads are listed, when that says something: 0.15's log
+ * lists a read once the vault's projector has caught up with it, which runs
+ * apart from sealing, so that a projector behind or stopped shows rather
+ * than leaves reads missing unsaid. An instance before 0.15 says nothing.
+ */
+export function ReadsLag({ reads, omitted }: { reads: { through: string | null; behind: boolean; forged?: true } | undefined; omitted?: 'path' | 'scope' | undefined }) {
+  // 0.15 lists reads on the whole log and by member, to whoever reads the whole log, and each person's own (D160).
+  if (omitted !== undefined) {
+    return (
+      <div style={{ marginBottom: '1.25rem' }}>
+        <Notice>
+          {omitted === 'path'
+            ? 'Reads are listed on the whole audit log and on each member’s page, not here.'
+            : 'Reads are listed to those who read the whole audit log; your own are on your page.'}
+        </Notice>
+      </div>
+    );
+  }
+  if (reads?.behind !== true && reads?.forged !== true) return null;
+  return (
+    <div style={{ marginBottom: '1.25rem' }}>
+      {reads.forged === true ? (
+        <Notice tone="bad">
+          The vault does not vouch for how far reads are listed: something with direct access to the database moved
+          it. Newer reads may be missing.
+        </Notice>
+      ) : (
+        <Notice tone="warn">
+          {reads.through === null ? (
+            'No read is listed yet: the reads sealed so far wait to be listed.'
+          ) : (
+            <>
+              Reads sealed through <Timestamp iso={reads.through} precise />; newer reads wait to be listed.
+            </>
+          )}
+        </Notice>
+      )}
+    </div>
+  );
+}
+
+/**
  * Everything one member did, newest first, from the audit log: the same
  * entries `coffre audit --actor` lists, said as the audit page says them.
  * Older pages come on request.
@@ -36,9 +78,11 @@ export function ActionsLog({ member }: { member: string }) {
   if (failed !== undefined && !failed.ok) return <Notice tone="bad">{failed.error}</Notice>;
   const entries = (log.data?.pages ?? []).flatMap((page) => (page.ok ? page.entries : []));
   const shown = lines(entries);
+  const first = log.data?.pages[0];
 
   return (
     <>
+      <ReadsLag reads={first?.ok === true ? first.reads : undefined} omitted={first?.ok === true ? first.readsOmitted : undefined} />
       <section className="card" aria-label="Actions log">
         {shown.length === 0 ? (
           <EmptyState title="Nothing yet" />
@@ -86,7 +130,13 @@ export function ActionsLog({ member }: { member: string }) {
                         )}
                       </td>
                       <td className="nowrap" data-label="Outcome">
-                        {sentence.refused ? (
+                        {lead.forged === true ? (
+                          // An entry of the sealed log the vault does not vouch for: written, or edited, around coffre.
+                          <span className="decided decided-refused" title="The vault does not vouch for this entry">
+                            <SlashCircle size={13} />
+                            Forged
+                          </span>
+                        ) : sentence.refused ? (
                           <span className="decided decided-refused">
                             <SlashCircle size={13} />
                             Refused

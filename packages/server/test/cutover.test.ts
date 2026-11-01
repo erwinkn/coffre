@@ -158,6 +158,32 @@ test("an instance kept by 0.14, cut over by the app's door: its token serves thr
  * roles' change, what a token's issue record does. The audit pages know an issue by how its payload starts too, so
  * the roles' change is neither listed nor counted as one (T164, review r1 of W261).
  */
+test("0.14's reads from before the cutover are listed beside 0.15's after it, on the whole log's page and each member's, newest first; a place's page keeps 0.14's and says where 0.15's are (T166, D160)", async () => {
+  await old.root.projects.create('market');
+  await old.root.environments.create('market/dev');
+  await old.root.secrets.set('market/dev', { A: 'one' });
+  await old.root.access.set(CI, { 'market/dev': 'viewer' });
+  const token = await old.root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 });
+  // A read 0.14's log keeps, as its entry; then the deploy, and a read 0.15's keeps, as its use, sealed and listed.
+  assert.equal((await old.root.secrets.reveal('market/dev/A')).values.A, 'one');
+  const now = deploy();
+  assert.equal(await now.cutover(), null);
+  assert.equal(codeOf(await use(now.vault, token.id, await keyIn(await environmentOf('market', 'dev'), 'A'))), 'ok');
+  await now.vault.listReads();
+  const readsOf = async (query: { path?: string; actor?: string }) => (await now.root.audit.list({ ...query, sealed: '1', limit: 100 })).entries
+    .filter((entry) => entry.action === 'secret.read' && entry.decision === 'allow' && entry.key === 'A').map((entry) => [entry.log, entry.version]);
+  assert.deepEqual(await readsOf({}), [['0.15', 1], ['0.14', 1]]);
+  for (const path of ['market', 'market/dev', 'market/dev/A']) {
+    assert.deepEqual(await readsOf({ path }), [['0.14', 1]], path);
+    assert.equal((await now.root.audit.list({ path, sealed: '1', limit: 1 })).readsOmitted, 'path', path);
+  }
+  assert.deepEqual(await readsOf({ actor: CI }), [['0.15', 1]]);
+  assert.deepEqual(await readsOf({ actor: `user:${ROOT}` }), [['0.14', 1]]);
+  // And a client older than 0.15, which pages 0.14's log alone: its history as it was.
+  const old14 = (await now.root.audit.list({ limit: 100 })).entries.filter((entry) => entry.action === 'secret.read' && entry.key === 'A');
+  assert.deepEqual(old14.map((entry) => entry.log), ['0.14']);
+});
+
 test("a custom role named `issue`, sealed by the cutover, is no token's issue on the audit pages: neither listed nor counted", async () => {
   await old.root.roles.set('issue', { name: 'Issue', description: '', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] });
   const now = deploy();

@@ -387,6 +387,25 @@ REMOVALS=(
   "WaysInRemove AccountReadInUse RemovalOrdersUses"
   "WaysInRemove RemovalTakesFence RemovalOrdersUses"
   "WaysInForge SealChecked AllowedOnSealed"
+  # The projection of the uses for the audit pages (Reads.tla, T166): each row the replay's, from sealed changes, at a
+  # number the MAC covers; the cursor only past rows written, the vault's, and the signer never waiting for it.
+  "Reads DeriveFromSealed+InputsInUseMac ProjectionMatchesReplay"
+  "Reads InputsInUseMac ProjectionMatchesReplay"
+  "Reads ProjectSealedOnly LagShown"
+  "ReadsLive ProjectSealedOnly EveryUseProjected"
+  "Reads WindowChecked ProjectionMatchesReplay"
+  "Reads NumberInMac ProjectionMatchesReplay"
+  "Reads ReplaceOnConflict LagShown"
+  "Reads CursorAfterRows LagShown"
+  "Reads CursorMac LagShown"
+  "Reads CountChecked DeletionDetected"
+  "ReadsRace IdempotentByNumber NoDuplicate"
+  "ReadsRetain FromChecked RetiredStayGone"
+  "ReadsProbe DeriveFromSealed ProjectionMatchesReplayOrFlagged"
+  "ReadsSeal ProjectorApart SealNeverWaitsOnProjection"
+  "ReadsSeal ProjectorApart ChangeAnswered"
+  "ReadsLive CursorAfterRows EveryUseProjected"
+  "ReadsLive DeriveFromSealed EveryUseProjected"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -404,6 +423,11 @@ EXPECTED=(
   # The vault asks no issuer for keys: a binding of keys its issuer publishes takes the app's word for its
   # tokens, so a compromised app signs a run in through it with a token nobody signed (Lifecycle.tla's Fetched).
   "LifecycleFetched EverySignInOnValidToken"
+  # The page does not see a projection row deleted below its cursor: the full verify does (Reads.tla).
+  "Reads ListedComplete"
+  # A use's MAC that covers only its own columns: the projector's probe of the changes finds a sealed change, not
+  # provably the newest, and a writer who deletes the newest is seen by Seal's verifier alone (Reads.tla).
+  "ReadsProbe ProjectionMatchesReplay"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

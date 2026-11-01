@@ -19,6 +19,7 @@ import { logObject } from '../src/inputs.ts';
 import { DAYS_AHEAD, upkeep } from '../src/log-checkpointer.ts';
 import { authentic, logMacKey, RETENTION_OBJECT, retentionCut } from '../src/log-entry.ts';
 import { logStore, type LogStore } from '../src/log-store.ts';
+import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
 import { variableMemory } from './audit-tree.ts';
 import { logWriter } from './log-entries.ts';
@@ -86,9 +87,16 @@ beforeEach(async () => {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function open() {
+/**
+ * A store whose reads' projection is past every cut, as these tests have no projector: retention waits on it otherwise
+ * (T166). The T166 test below opens the store as it is (`projected` false).
+ */
+const projected = (store: LogStore): LogStore => ({ ...store, readsCursor: async () => ({ through: 2n ** 62n, pair: 0n, at: 0, mac: cursorMac(macKey, { through: 2n ** 62n, pair: 0n, at: 0 }) }) });
+
+async function open(options: { projected?: boolean } = {}) {
   const alerts: string[] = [];
-  const store = logStore(db.vault, { tileRange: RANGE });
+  const raw = logStore(db.vault, { tileRange: RANGE });
+  const store = options.projected === false ? raw : projected(raw);
   const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   return { cp, store, alerts };
 }
@@ -192,6 +200,56 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.ok((await cp.tick()).signed);
   assert.ok((await verify(store)).ok);
   assert.deepEqual(alerts, []);
+});
+
+test("the reads' projection goes on across retention's cuts, and the whole log's check of it starts at the cut: nothing found, and no use dropped looked for (T166, review r3)", async () => {
+  const { cp, store } = await open({ projected: false });
+  // The reads' days beside the uses', as the store's upkeep makes them.
+  if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
+  await midnight(cp);
+  const keys = { verifiers, mac: macKey };
+  const projectedAll = async () => {
+    for (let run = 0; run < 100; run += 1) {
+      const { through, sealed } = await projectReads(store, keys, { steps: 100 });
+      if (through >= sealed) return;
+    }
+    assert.fail("the projection did not catch up");
+  };
+  const checked = async () => {
+    const problems: string[] = [];
+    for (let from: bigint | null = 0n; from !== null;) {
+      const stretch = await checkReads(store, keys, from);
+      problems.push(...stretch.problems);
+      from = stretch.next;
+    }
+    return problems;
+  };
+  // D10 due, but none of its reads listed yet: retention waits on the projector, which no day it has yet to read leaves
+  // (review r4: a projector stopped through retention once skipped D9's stragglers below the cut, unsaid).
+  await later(cp);
+  const waiting = await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual(waiting.dropped, []);
+  assert.match(waiting.waiting?.reason ?? '', /the reads' projection \(through 0\) has not reached the cut/);
+  // Nor once a database writer moves the cursor past the cut around the projector: by its MAC, not its number (review r7).
+  const owner = ENGINE === 'sqlite' ? db.vault : db.owner;
+  await run(owner, sql`UPDATE log_reads_cursor SET through = 1000000000`);
+  const moved = await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual(moved.dropped, []);
+  assert.match(moved.waiting?.reason ?? '', /the reads' cursor, at 1000000000, is not the vault's/);
+  await run(owner, sql`UPDATE log_reads_cursor SET through = 0`);
+  await projectedAll();
+  assert.deepEqual(await checked(), []);
+  // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  await projectedAll();
+  assert.deepEqual(await checked(), []);
+  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, macKey, now });
+  for (let i = 0; i < 30; i += 1) await log.use();
+  assert.ok((await cp.tick()).signed);
+  await projectedAll();
+  assert.deepEqual(await checked(), []);
 });
 
 test('a dropped use put back is never sealed again', async () => {
@@ -305,6 +363,34 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   assert.deepEqual((await retain(cp, store, { keepDays: 1, macKey, now })).detached, [D9]);
 });
 
+test("a reader holding a day's reads past drop_reads_day's lock timeout makes the run wait; the next drops them before the uses' partition, so the day is never forgotten with its reads listed (T166, review r10)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
+  const { cp, store } = await open({ projected: false });
+  await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
+  await midnight(cp);
+  await later(cp);
+  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, { verifiers, mac: macKey }, { steps: 100 }));
+  const d10 = (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_reads WHERE at >= ${Date.parse(`${D10}T00:00:00Z`)} AND at < ${MIDNIGHT}`))[0]!.n;
+  assert.equal(d10, 600);
+  // A reader of D10's reads, a backup say, past the reads' drop's lock timeout: the uses' day detached, its reads kept.
+  const reader = postgresSession(VAULT_URL);
+  await reader.unsafe('BEGIN');
+  await reader.unsafe(`SELECT count(*) FROM log_reads WHERE at < ${MIDNIGHT}`);
+  try {
+    const held = await retain(cp, store, { keepDays: 9, macKey, now });
+    assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
+    assert.equal(await exists(`log_reads_${D10.replaceAll('-', '')}`), true);
+  } finally {
+    await reader.unsafe('ROLLBACK');
+    await reader.end();
+  }
+  // Found again by its uses' partition, still there detached: its reads go, then the uses'.
+  assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual([await exists(`log_reads_${D10.replaceAll('-', '')}`), await exists(`log_uses_${D10.replaceAll('-', '')}`)], [false, false]);
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${Date.parse(`${D10}T00:00:00Z`) / DAY_MS}`))[0]!.n, 0);
+});
+
 /**
  * The store with the first barriers' floors given, as days past would have left them: the signer signs them as it
  * signs any floor, and reads each window from them. After the last, the database's own floor again.
@@ -324,7 +410,7 @@ function pastFloors(store: LogStore, floors: number[]): LogStore {
 
 test('review r2: two days due at once, each cut its own: a catch-up drops both, though the tiles below the newer cut went first', async () => {
   const alerts: string[] = [];
-  const store = pastFloors(logStore(db.vault, { tileRange: RANGE }), [MIDNIGHT - 3_600_000, MIDNIGHT + 10_000, MIDNIGHT + DAY_MS - 3_600_000]);
+  const store = pastFloors(projected(logStore(db.vault, { tileRange: RANGE })), [MIDNIGHT - 3_600_000, MIDNIGHT + 10_000, MIDNIGHT + DAY_MS - 3_600_000]);
   const cp = await Checkpointer.open(store, signers, { memory: variableMemory(), authentic: authentic(macKey), alert: (m) => alerts.push(m), freshMs: FRESH, now });
   // D10 sealed below a floor before its end; D9 in two pairs, the first of them past D10's end; then today, past D9's.
   for (let i = 0; i < 300; i += 1) await log.use(MIDNIGHT - 3_000_000 + i * 1000);

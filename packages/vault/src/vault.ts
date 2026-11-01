@@ -43,7 +43,7 @@ import {
   readScope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import type { PairNotes } from '@coffre/core/merkle';
+import type { LogEntry, PairNotes } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -133,10 +133,14 @@ import {
   type Wrapped,
   type Vault,
   type Via,
+  type ReadsVerification,
   type TreeVerification,
   type VerifyLogInput,
+  type VouchedEntry,
+  type VouchInput,
   type WrapInput,
   type WrappedKey,
+  VOUCHED_AT_ONCE,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
@@ -153,7 +157,9 @@ import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRef
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
-import { logMacKey } from './log-entry.ts';
+import { authentic, changeEntry, logMacKey, useEntry as usedEntry } from './log-entry.ts';
+import { logStore } from './log-store.ts';
+import { checkReads, cursorHolds, readHolds, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -274,6 +280,8 @@ export type PreparedVault = {
   converted: boolean;
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
+  /** The log's MAC key under each signing key, which `vouch` checks an entry with: made once a call first needs them. */
+  vouchKeys?: Buffer[];
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -3923,6 +3931,58 @@ class VaultService implements Vault {
     return verdict;
   }
 
+  /**
+   * The entries of 0.15's log, as an audit page read them, whose MAC holds
+   * under none of the vault's signing keys over the columns it shows (T166):
+   * forged, or edited, around coffre. A malformed one is named too. Pure
+   * CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
+   */
+  async vouch(input: VouchInput): Promise<{ forged: string[] }> {
+    const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
+    if (!Array.isArray(entries) || entries.length > VOUCHED_AT_ONCE) throw new Error(`vouch takes up to ${VOUCHED_AT_ONCE} entries`);
+    const macs = (this.#prepared.vouchKeys ??= this.#config.signingKeys.map((seed) => logMacKey(seed)));
+    return {
+      forged: entries.flatMap((entry: VouchedEntry) => {
+        const named = typeof entry?.number === 'string' ? entry.number : '?';
+        if (entry?.tree === 'cursor') {
+          const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
+          const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
+          const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
+          return cursor !== null && macs.some((key) => cursorHolds(key, cursor)) ? [] : [named];
+        }
+        if (entry?.tree === 'reads') {
+          const read = vouchedRead(entry);
+          return read !== null && macs.some((key) => readHolds(key, read)) ? [] : [named];
+        }
+        const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
+        return logged !== null && macs.some((key) => authentic(key)(logged)) ? [] : [named];
+      }),
+    };
+  }
+
+  /**
+   * A stretch of the reads' check (reads.ts, `checkReads`): from `start`, or
+   * a stretch's `next` (a pair's number), in a snapshot of its own. Flat:
+   * a checkpoint's range, whatever the log's length.
+   */
+  async verifyReads(input: { from: string }): Promise<ReadsVerification> {
+    await this.#settled();
+    if (this.#prepared.log015 === null) return { kept: false };
+    const from = (input as { from?: unknown } | undefined)?.from;
+    const at = typeof from === 'string' ? /^(?:start|([0-9]{1,19}))$/.exec(from) : null;
+    if (at === null) throw new Error('verifyReads starts at start, or at a stretch\'s next');
+    const keys = await this.#verifierKeys();
+    const checked = await this.#db.transaction((tx) => checkReads(logStore(tx as unknown as Database), keys, at[1] === undefined ? 0n : BigInt(at[1])), SNAPSHOT);
+    return {
+      kept: true,
+      ok: checked.problems.length === 0,
+      problems: checked.problems,
+      through: String(checked.through),
+      listed: String(checked.listed),
+      next: checked.next === null ? null : String(checked.next),
+    };
+  }
+
   async #verifierKeys(): Promise<VerifierKeys> {
     return (this.#prepared.verifier ??= await verifierKeys(this.#config.signingKeys));
   }
@@ -4613,4 +4673,33 @@ function serialisable(wrapped: { kekProvider: string; kekId: string; kekVersion:
  */
 function base64(bytes: Uint8Array): string {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64');
+}
+
+/** An entry as `vouch` was given it, as the trees take it; null for one of no shape a row has. */
+function vouchedEntry(entry: Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>): LogEntry | null {
+  const hex = (value: unknown) => (typeof value === 'string' && /^(?:[0-9a-f]{2})*$/.test(value) ? Buffer.from(value, 'hex') : null);
+  const text = (value: unknown) => typeof value === 'string';
+  if (typeof entry !== 'object' || entry === null || !text(entry.number) || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !text(entry.requestId)) return null;
+  const mac = hex(entry.mac);
+  if (mac === null) return null;
+  const number = BigInt(entry.number);
+  if (entry.tree === 'changes') {
+    const seal = entry.seal === null ? null : hex(entry.seal);
+    if (!text(entry.object) || !text(entry.actor) || !text(entry.payload) || (entry.seal !== null && seal === null)) return null;
+    return changeEntry({ number, at: entry.at, requestId: entry.requestId, object: entry.object, actor: entry.actor, payload: entry.payload, seal, mac });
+  }
+  if (entry.tree !== 'uses' || !/^[0-9]{1,19}$/.test(entry.requestId) || !text(entry.credential) || !text(entry.secret) || !Number.isSafeInteger(entry.purpose)
+    || (entry.place !== null && !text(entry.place))) return null;
+  return usedEntry({ number, at: entry.at, requestId: BigInt(entry.requestId), credential: entry.credential, secret: entry.secret, purpose: entry.purpose, place: entry.place, mac });
+}
+
+/** A read as `vouch` was given it (`log_reads`, T166); null for one of no shape the projector writes. */
+function vouchedRead(entry: Extract<VouchedEntry, { tree: 'reads' }>): ReadRow | null {
+  const id = (value: unknown) => typeof value === 'string' && value.length > 0;
+  const maybe = (value: unknown): value is string | null => value === null || id(value);
+  const mac = typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : null;
+  if (mac === null || typeof entry.number !== 'string' || !/^[0-9]{1,19}$/.test(entry.number) || !Number.isSafeInteger(entry.at) || !Number.isSafeInteger(entry.purpose)
+    || !id(entry.credential) || !id(entry.principal) || !id(entry.secret) || !id(entry.environment) || !id(entry.project)
+    || !maybe(entry.place) || !maybe(entry.source) || !maybe(entry.sourceEnvironment) || !maybe(entry.sourceProject) || !maybe(entry.version)) return null;
+  return { ...entry, number: BigInt(entry.number), mac };
 }

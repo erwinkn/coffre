@@ -3,7 +3,7 @@ import { useState, type ReactNode } from 'react';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { useCoffre } from '../lib/coffre';
-import { chainUnknown, queries, shownChain, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
+import { chainUnknown, queries, shownChain, wholeTrees, withTrees, type AuditSearch, type ChainResult } from '../lib/queries';
 import {
   decidedBy,
   describe,
@@ -15,6 +15,7 @@ import {
 } from '../lib/audit-sentences';
 import { absolute, EmptyState, Notice, Spinner, Timestamp, Toggletip } from '../components/ui';
 import { memberName, Sentence } from '../components/audit-sentence';
+import { ReadsLag } from '../components/actions-log';
 import { ClosedDoor, PageHeader } from '../components/page';
 import {
   Activity,
@@ -55,7 +56,8 @@ export function AuditPage() {
     try {
       // 0.15's log, where the instance keeps it, checked again as on a visit, from its newest checkpoint, beside the walk
       // (R42). Nothing walks it whole on a request: its cost is the database's to shape.
-      const trees = Promise.allSettled([client.audit.verifyTrees()]);
+      // And the reads the pages list, held to the uses the log sealed (T166): the whole log's check alone reads them.
+      const trees = Promise.allSettled([wholeTrees(client)]);
       const chain = await client.audit.verifyWhole((stretch) => setWalked({ through: stretch.through }));
       verdict = withTrees(chain, true, (await trees)[0]);
     } catch (error) {
@@ -158,6 +160,8 @@ export function AuditPage() {
           </Link>
         )}
       </div>
+
+      <ReadsLag reads={result.reads} omitted={result.readsOmitted} />
 
       <section className="card card-wide" aria-label="Audit entries">
         {shown.length === 0 ? (
@@ -338,13 +342,13 @@ function Row({
     (breaks || marked) && 'is-break',
     child && 'is-child',
     entry.detail && 'is-detail',
-    entry.action === 'vault.tampered' && 'is-tampered',
+    (entry.action === 'vault.tampered' || entry.forged === true) && 'is-tampered',
   ].filter(Boolean);
   return (
     <tr className={classes.length === 0 ? undefined : classes.join(' ')}>
-      <td className="n" data-label="Sequence" title={entry.log === '0.15' ? `Change ${entry.seq} of the sealed log, which numbers its own` : undefined}>
+      <td className="n" data-label="Sequence" title={entry.log === '0.15' ? `Entry ${entry.seq} of the sealed log, which numbers its own` : undefined}>
         {seq}
-        {/* 0.15's sealed log numbers its changes apart from 0.14's chain: a sign-in is recorded there alone. */}
+        {/* 0.15's sealed log numbers its changes and uses apart from 0.14's chain: a read, a sign-in, is recorded there alone. */}
         {entry.log === '0.15' && <small className="n-log">sealed</small>}
       </td>
       <td className="nowrap cell-mono" data-label="When (UTC)">
@@ -380,10 +384,14 @@ function Row({
       <td className="cell-sentence" data-label="What they did">
         <span className="sentence">
           {toggle}
-          {entry.action === 'vault.tampered' && <AlertTriangle size={13} />}
+          {(entry.action === 'vault.tampered' || entry.forged === true) && <AlertTriangle size={13} />}
           <Sentence parts={parts} />
           {breaks && <BreakMark />}
         </span>
+        {entry.forged === true && (
+          // An entry of the sealed log the vault does not vouch for: written, or edited, around coffre.
+          <small className="actor-run">Forged: the vault does not vouch for this entry</small>
+        )}
       </td>
       <td className="nowrap" data-label="Decided by">
         <span className={refused ? 'decided decided-refused' : 'decided'}>

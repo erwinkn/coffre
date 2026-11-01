@@ -47,10 +47,15 @@ BEGIN
 END
 $$;
 
--- The app reads none of it, and nobody but the vault runs the functions.
+-- The app reads none of it but the projection of reads (T166), through its read functions, which it may not write;
+-- nobody but the vault runs the writing functions.
 DO $$
 BEGIN
-    IF has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
+    IF NOT has_table_privilege('coffre_app', 'log_reads', 'SELECT') OR has_table_privilege('coffre_app', 'log_reads', 'INSERT')
+       OR NOT has_function_privilege('coffre_app', 'log_reads_by(text, bigint, bigint, integer)', 'EXECUTE')
+       OR has_function_privilege('coffre_app', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
+       OR has_function_privilege('coffre_backup', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
+       OR has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
        OR has_function_privilege('coffre_app', 'close_one()', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';

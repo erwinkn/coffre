@@ -352,7 +352,41 @@ export interface Vault {
    * 0.14's log alone, `kept` false; a vault older than 0.15 has none.
    */
   verifyTrees?(): Promise<TreeVerification>;
+  /**
+   * The reads' listing held to 0.15's log, a stretch a call (T166): from
+   * `start`, then each `next`, the uses the log sealed derived again and
+   * held to the reads the pages list, each read and each place it was read
+   * at. For whoever checks the whole log (`coffre verify log`), never a
+   * page. `kept` false with 0.14's log alone.
+   */
+  verifyReads?(input: { from: string }): Promise<ReadsVerification>;
+  /**
+   * Which of these entries of 0.15's log, as a page of the audit log read
+   * them, the vault does not vouch for: its MAC, under any of the vault's
+   * signing keys, as its seals are checked, does not hold over the columns
+   * shown (T166). The audit pages list 0.15's changes and uses only with
+   * this check, and mark one it names as forged: written or edited around
+   * coffre. Pure CPU, no read; at most `VOUCHED_AT_ONCE` entries a call.
+   */
+  vouch?(input: VouchInput): Promise<{ forged: string[] }>;
 }
+
+/** The most entries one `vouch` call checks: a page of the audit log lists a few hundred at most. */
+export const VOUCHED_AT_ONCE = 2000;
+
+/** Entries of 0.15's log to vouch for, each with every column its MAC covers, bytes in hex, its number as text. */
+export type VouchInput = { entries: VouchedEntry[] };
+
+export type VouchedEntry =
+  | { tree: 'changes'; number: string; at: number; requestId: string; object: string; actor: string; payload: string; seal: string | null; mac: string }
+  | { tree: 'uses'; number: string; at: number; requestId: string; credential: string; secret: string; purpose: number; place: string | null; mac: string }
+  /** A read as the projector wrote it (`log_reads`, T166): its MAC covers its number too. */
+  | {
+    tree: 'reads'; number: string; at: number; credential: string; purpose: number; principal: string; secret: string; environment: string; project: string;
+    place: string | null; source: string | null; sourceEnvironment: string | null; sourceProject: string | null; version: string | null; mac: string;
+  }
+  /** The projection's cursor (`log_reads_cursor`, T166), named `cursor` in the answer: whether the pages may say reads are whole up to it. */
+  | { tree: 'cursor'; number: 'cursor'; through: string; pair: string; at: number; mac: string | null };
 
 /**
  * 0.15's log as its check found it. `problems` names what does not hold,
@@ -360,6 +394,20 @@ export interface Vault {
  * one held outside; an entry whose MAC fails, or under another's request.
  * Numbers are decimal text: the log's are 64-bit.
  */
+export type ReadsVerification =
+  | { kept: false }
+  | {
+      kept: true;
+      /** Nothing wrong found in the stretch. */
+      ok: boolean;
+      problems: string[];
+      /** The entry the stretch checked through, and how far the projector has listed. */
+      through: string;
+      listed: string;
+      /** Where the next stretch starts; null at the projector's cursor, or on a problem that stops the check. */
+      next: string | null;
+    };
+
 export type TreeVerification =
   | { kept: false }
   | {
@@ -979,6 +1027,37 @@ export type KeyChecks = { current: { kekProvider: string; kekId: string }; check
  * gives a person's app as it is (`coffre run`'s plan).
  */
 export type Purpose = 'reveal' | 'run' | 'compare' | 'copy' | 'use' | 'expose';
+
+/**
+ * A use's purpose, keepsSensitive and way in as 0.15's log stores them, in
+ * one smallint (`log_uses.purpose`, schema 0022, 0046): the purpose's code,
+ * plus 256 when a copy keeps values sensitive, plus 512 times its way in's
+ * (`USE_WAYS`; T147). The vault writes them; the audit pages read them back
+ * (T166).
+ */
+export const USE_PURPOSES = ['reveal', 'run', 'compare', 'copy', 'use', 'expose'] as const satisfies readonly Purpose[];
+
+/** Each way in by its code: a credential's, 0, as every use before T147; then `UseWay`'s. */
+export const USE_WAYS = ['credential', 'connection', 'binding', 'access'] as const satisfies readonly ('credential' | UseWay)[];
+
+// Every purpose and every way in has a code: one missing here fails to compile.
+const everyPurpose: [Exclude<Purpose, (typeof USE_PURPOSES)[number]>] extends [never] ? true : never = true;
+const everyWay: [Exclude<UseWay, (typeof USE_WAYS)[number]>] extends [never] ? true : never = true;
+void everyPurpose;
+void everyWay;
+
+/** A use's code (`USE_PURPOSES`). */
+export function useCode(use: { purpose: Purpose; keepsSensitive?: boolean; way?: 'credential' | UseWay }): number {
+  return USE_PURPOSES.indexOf(use.purpose) + (use.keepsSensitive === true ? 256 : 0) + 512 * USE_WAYS.indexOf(use.way ?? 'credential');
+}
+
+/** The purpose, keepsSensitive and way in a use's code stores; null for a code no release writes. */
+export function useOfCode(code: number): { purpose: Purpose; keepsSensitive: boolean; way?: UseWay } | null {
+  const purpose = USE_PURPOSES[code % 256];
+  const way = USE_WAYS[Math.floor(code / 512)];
+  if (!Number.isInteger(code) || code < 0 || purpose === undefined || way === undefined) return null;
+  return { purpose, keepsSensitive: code % 512 >= 256, ...(way === 'credential' ? {} : { way }) };
+}
 
 /**
  * Whether a read hands values back to whoever asked, which a person never

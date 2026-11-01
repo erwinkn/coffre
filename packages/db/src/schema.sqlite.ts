@@ -950,6 +950,55 @@ export const logUses = sqliteTable(
   ],
 );
 
+/** 0.15's reads as the audit pages list them (schema.ts). */
+export const logReads = sqliteTable(
+  'log_reads',
+  {
+    number: int64('number').notNull(),
+    at: integer({ mode: 'number' }).notNull(),
+    credential: text().notNull(),
+    purpose: integer().notNull(),
+    principal: text().notNull(),
+    secret: text().notNull(),
+    environment: text().notNull(),
+    project: text().notNull(),
+    place: text(),
+    source: text(),
+    sourceEnvironment: text('source_environment'),
+    sourceProject: text('source_project'),
+    version: text(),
+    mac: bytes('mac').notNull(),
+  },
+  (table) => [
+    check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
+    uniqueIndex('log_reads_number_idx').on(table.at, table.number),
+    index('log_reads_principal_idx').on(table.principal, table.at, table.number),
+  ],
+);
+
+/** The days each member's reads are in (`log_reads`), so that a page of theirs reads those days alone: the projector writes them with the reads. */
+export const logReadDays = sqliteTable(
+  'log_read_days',
+  { principal: text().notNull(), day: integer({ mode: 'number' }).notNull() },
+  (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
+);
+
+/** How far the projector has gone (schema.ts). */
+export const logReadsCursor = sqliteTable(
+  'log_reads_cursor',
+  {
+    onlyRow: flag('only_row').primaryKey().default(true),
+    through: int64('through').notNull(),
+    pair: int64('pair').notNull(),
+    at: integer({ mode: 'number' }).notNull(),
+    mac: bytes('mac'),
+  },
+  (table) => [
+    check('log_reads_cursor_only_row_check', sql`${table.onlyRow}`),
+    check('log_reads_cursor_mac_check', sql`${table.mac} IS NULL OR octet_length(${table.mac}) = 16`),
+  ],
+);
+
 export const logBulk = sqliteTable(
   'log_bulk',
   {
