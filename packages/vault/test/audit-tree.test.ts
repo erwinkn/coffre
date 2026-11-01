@@ -752,6 +752,9 @@ test('6b review r3: a closed checkpointer ends its tick in flight, then refuses 
   const { store, open } = await setup();
   const cp = await open();
   await traffic(store, cp, 1);
+  // A change it sealed, whose proof it keeps (T171).
+  const cached = store.append('changes', 'cached');
+  await cp.sealThrough(cached);
   store.append('uses', 'x');
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
@@ -777,6 +780,8 @@ test('6b review r3: a closed checkpointer ends its tick in flight, then refuses 
   await closing;
   await assert.rejects(cp.tick(), /was closed/);
   await assert.rejects(cp.sealThrough(store.append('changes', 'c')), /was closed/);
+  // Nor one it sealed and kept the proof of (T171, review r1): a checkpointer closed answers no change.
+  await assert.rejects(cp.sealThrough(cached), (error: Error) => error instanceof Unsealed && /was closed/.test(error.message));
 });
 
 // R51: a change answers once sealed and, with a witness, witnessed, or unwitnessed after 2 s.
@@ -821,6 +826,36 @@ test('T171: a change sealed by a tick is proved from the tiles that tick wrote, 
   const again = await (await open()).sealThrough(number);
   assert.equal(located, 1, 'reopened, it proves from the database');
   assert.ok(verifyInclusion(leafHash(again.proof.leaf), again.proof.index, again.proof.size, again.proof.proof, again.pair.changes.root));
+});
+
+test('T171, review r1: what the checkpointer keeps to prove changes is bounded in bytes: a window past it is proved from the database, the oldest go first', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  let located = 0;
+  const locate = store.locate.bind(store);
+  store.locate = async (...args) => {
+    located += 1;
+    return locate(...args);
+  };
+  const big = (i: number) => JSON.stringify({ action: 'secret.write', pad: 'x'.repeat(2 ** 20 + i) });
+  // One window of 5 MiB of changes: past the 4 MiB kept, not kept at all.
+  const huge = Array.from({ length: 5 }, (_, i) => store.append('changes', `huge-${i}`, big(i)));
+  await cp.tick();
+  await cp.sealThrough(huge[0]!);
+  assert.equal(located, 1, 'proved from the database');
+  // Windows of 1.5 MiB: the newest two kept, the oldest gone.
+  const windows: bigint[] = [];
+  for (let w = 0; w < 3; w += 1) {
+    const n = store.append('changes', `w-${w}`, JSON.stringify({ action: 'secret.write', pad: 'x'.repeat(1.5 * 2 ** 20) }));
+    await cp.tick();
+    windows.push(n);
+  }
+  located = 0;
+  await cp.sealThrough(windows[2]!);
+  await cp.sealThrough(windows[1]!);
+  assert.equal(located, 0, 'the newest kept');
+  await cp.sealThrough(windows[0]!);
+  assert.equal(located, 1, 'the oldest gone');
 });
 
 test('T171: a change committed before the running tick\'s barrier waits for that tick alone; one after it, for the next', async () => {
@@ -964,6 +999,8 @@ test('T169: a tick whose barrier never answers stalls within its bound; a change
   const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 100, sealWaitMs: 300 });
   const cp = await open();
   await traffic(store, cp, 2);
+  const cached = store.append('changes', 'cached');
+  await cp.sealThrough(cached);
   // The next barrier does not answer until let go: a connection gone dead, a lock never let go.
   let release!: () => void;
   let gate: Promise<void> | null = new Promise<void>((resolve) => (release = resolve));
@@ -982,6 +1019,8 @@ test('T169: a tick whose barrier never answers stalls within its bound; a change
   t0 = performance.now();
   await assert.rejects(cp.sealThrough(change), (error: Error) => error instanceof Unsealed && isUnsealed(error));
   assert.ok(performance.now() - t0 < 100);
+  // Nor a change it sealed before, whose proof it kept (T171, review r1).
+  await assert.rejects(cp.sealThrough(cached), (error: Error) => error instanceof Unsealed && /ran past/.test(error.message));
   // Another opens over the same memory while the stalled tick still waits, and seals the change.
   const next = await open();
   assert.equal((await next.sealThrough(change)).proof.number, change);

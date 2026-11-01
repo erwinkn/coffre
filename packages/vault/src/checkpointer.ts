@@ -8,6 +8,7 @@ import {
   entryLeaf,
   inclusionProof,
   leafData,
+  leafHash,
   loadEdges,
   nodesFrom,
   openPair,
@@ -438,17 +439,21 @@ type Pump = {
 
 type Pending = { next: { pair: Pair; notes: PairNotes }; edges: Record<TreeName, Edge>; tiles: Record<TreeName, Tile[]>; changes: Map<bigint, Placed> };
 
-/** A change a tick sealed, and its leaf's index in the changes tree. */
-type Placed = { entry: LogEntry; index: number };
+/** A change a tick sealed: its leaf's data, the whole entry, and its index in the changes tree. */
+type Placed = { leaf: Buffer; index: number };
 
 /**
  * A pair a tick signed and wrote, kept with the changes tree's tiles that tick wrote and the changes it sealed (T171):
  * a change's proof in it is computed from them, rather than read again from the database.
  */
-type Signed = { head: { pair: Pair; notes: PairNotes }; tiles: Tile[]; changes: Map<bigint, Placed> };
+type Signed = { head: { pair: Pair; notes: PairNotes }; tiles: Tile[]; changes: Map<bigint, Placed>; bytes: number };
 
-/** How many of its last pairs the checkpointer keeps to prove a change in (T171): those a change still waiting asks about. */
-const KEPT_SIGNED = 16;
+/**
+ * How much of its last pairs the checkpointer keeps to prove a change in (T171): those a change still waiting asks
+ * about, the newest first, their leaves and tiles 4 MiB at most (review r1: a window is up to `WINDOW_MAX` entries,
+ * each its whole payload). A pair past it alone is not kept: its changes are proved from the database.
+ */
+const KEPT_BYTES = 4 * 2 ** 20;
 
 /** The tick running now, and the barrier it took, once known (T171). */
 type Flight = { run: Promise<Tick>; barrier: bigint | null };
@@ -807,7 +812,7 @@ export class Checkpointer {
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
     // Each change's leaf index, as appendWindow places it: after the tree's leaves, in number order.
     const changes = new Map<bigint, Placed>();
-    for (const e of entries) if (e.tree === 'changes') changes.set(e.number, { entry: e, index: edges.changes.size + changes.size });
+    for (const e of entries) if (e.tree === 'changes') changes.set(e.number, { leaf: leafData('changes', e.number, e.columns), index: edges.changes.size + changes.size });
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
     // The pair carries the floor this barrier left, which the signer reads from once the pair is written, and the floor
@@ -863,8 +868,14 @@ export class Checkpointer {
     this.pending = null;
     if (p.changes.size > 0) {
       // The tiles the tick wrote, and its edge, which hold every node a proof of a leaf it appended reads (`edgeTiles`).
-      this.signed.push({ head: p.next, tiles: [...p.tiles.changes, ...p.edges.changes.edgeTiles()], changes: p.changes });
-      if (this.signed.length > KEPT_SIGNED) this.signed.shift();
+      const tiles = [...p.tiles.changes, ...p.edges.changes.edgeTiles()];
+      let bytes = tiles.reduce((n, t) => n + t.hashes.length, 0);
+      for (const { leaf } of p.changes.values()) bytes += leaf.length;
+      if (bytes <= KEPT_BYTES) {
+        this.signed.push({ head: p.next, tiles, changes: p.changes, bytes });
+        let kept = this.signed.reduce((n, k) => n + k.bytes, 0);
+        while (kept > KEPT_BYTES) kept -= this.signed.shift()!.bytes;
+      }
     }
     this.publish();
   }
@@ -908,6 +919,8 @@ export class Checkpointer {
     // From the changes tree (KindInMac): the MAC does not cover the number, so a writer could delete the change and
     // renumber a use into its place before the tick; that use is sealed, and provable, but in the uses tree.
     // A proof the database answers wrongly for (an entry changed since its tick, `locate`'s refusal) is the same alarm.
+    // A checkpointer closed or stalled answers no change, from what it kept or from the database (T169; review r1).
+    if (this.closed) throw new Unsealed(number, this.stalled ?? 'this checkpointer was closed: another holds its memory');
     const kept = this.proveKept(number);
     const head = kept?.head ?? this.head;
     let proof: InclusionProof | null;
@@ -940,12 +953,12 @@ export class Checkpointer {
       const { head, tiles, changes } = this.signed[i]!;
       const placed = changes.get(number);
       if (placed === undefined) continue;
-      const { index, entry } = placed;
+      const { index, leaf } = placed;
       const size = head.pair.changes.size;
       try {
         const proof = inclusionProof(nodesFrom(tileMap(tiles)), index, size);
-        if (!verifyInclusion(entryLeaf('changes', number, entry.columns), index, size, proof, head.pair.changes.root)) return null;
-        return { head, proof: { number, tree: 'changes', index, size, leaf: leafData('changes', number, entry.columns), proof, notes: head.notes } };
+        if (!verifyInclusion(leafHash(leaf), index, size, proof, head.pair.changes.root)) return null;
+        return { head, proof: { number, tree: 'changes', index, size, leaf, proof, notes: head.notes } };
       } catch {
         return null;
       }
