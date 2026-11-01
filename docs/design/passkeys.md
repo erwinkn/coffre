@@ -914,16 +914,34 @@ what it issues, handles, personal tokens and service tokens alike. Its
 statement and its model change with it (R45), the model holding that
 interleaving.
 
-The previous release's vault issues too (`vaultIssuesTokens`), without the
-lock or `passkey_id`, and Workers Builds may deploy the app first. So the
-new contract is a capability of its own, which the vault says it has
-(`issuesWithPasskeys`, beside `issues`): while passkeys are not `off`, the
-app hands an issue to the vault only when it says so, and otherwise takes
-the app's own audited path, which already exists as the fallback, under
-the factor lock, writing `passkey_id` itself. Conformance runs the new app
-against the previous release's vault and issues a handle, a personal token
-and a service token. A handle is then either ended by a change or made after it,
-from a credential the change left alive.
+The previous release's vault issues too (`issueToken`), without the lock
+or `passkey_id`, and a rollout runs both releases at once: Workers Builds
+may deploy the app first, and a gradual deployment sends each call to
+either version of the vault, so an app that asked `about()` a moment ago
+and heard "new" may reach the old one with its next call. So the new
+contract is a method of its own, `issueTokenUnderFactor`, and the answer
+comes from the call itself, never from a capability read earlier:
+
+- While passkeys are not `off`, the app calls `issueTokenUnderFactor`, on
+  every issue, with nothing cached about the vault's version.
+- A vault of the previous release has no such method, and refuses the call
+  before it runs anything: on Workers, the RPC stub rejects it ("does not
+  implement the method"); on Node, `serveVault` answers `404 not a vault
+  call`. Nothing was issued, so the app takes its own audited path, the
+  fallback that already exists, under the factor lock, writing
+  `passkey_id` itself. Only that refusal falls back: any other failure is
+  an error, as today, since the vault may have committed.
+- The new vault answers the old name, `issueToken`, with the same statement,
+  lock and `passkey_id` included, so the previous app's issues during the
+  rollout are swept like any other.
+
+A rollout costs one refused call per issue until the old vault is gone, on
+a path R58 lets take hundreds of milliseconds; after it, nothing.
+Conformance runs the new app against the previous release's vault, cold
+and after the same isolate has issued through a new one, and issues a
+handle, a personal token and a service token each time. A handle is then
+either ended by a change or made after it, from a credential the change
+left alive.
 
 What escapes: a handle made while the policy was `off` lives out its
 lifetime, 12 hours unless asked and a week at most, unless a removal or a
@@ -1360,9 +1378,9 @@ running `passkeys: 'required'`:
     `off`, does not start.
 34. An MCP-approved service token issues, with its approval's touch, and
     the browser session the touch replaced is `401` after.
-35. With the previous release's vault, a handle, a personal token and a
-    service token issue through the app's path and carry their
-    `passkey_id`.
+35. With the previous release's vault, cold and after the same isolate
+    issued through a new vault, a handle, a personal token and a service
+    token issue through the app's path and carry their `passkey_id`.
 
 ## 14. Build plan (phase 2, after 0.15)
 
@@ -1371,9 +1389,10 @@ running `passkeys: 'required'`:
    property tests. No wiring.
 2. **Storage**: the migrations, the schema, the MAC kinds, `pnpm
    test:schema` and the backup grant.
-3. **The vault's issue contract**: personal tokens, handles and service
-   tokens issued under the person's factor lock (section 6.1), their
-   `passkey_id` copied from `via`, its statement and model (R45), with the
+3. **The vault's issue contract**: `issueTokenUnderFactor`, and
+   `issueToken` answered by the same statement: personal tokens, handles
+   and service tokens issued under the person's factor lock (section 6.1),
+   their `passkey_id` copied from `via`, its statement and model (R45), with the
    sweep-against-issue interleaving of review r12 in the model. Lands
    against 0.15's issue path while it is fresh, independent of the sign-in
    work.
