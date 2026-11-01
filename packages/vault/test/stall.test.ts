@@ -190,6 +190,47 @@ test('T169, Node, Postgres: a barrier that waits in the database past its bound 
   }
 });
 
+test("T169, review r8 of #437, Node, Postgres: a reads' projection hung in the database holds back no runner opened after a stall: let the barrier go and it seals again, the projection still waiting", { skip: ENGINE === 'postgres' ? false : 'Postgres only: a lock the projection waits for', timeout: 60_000 }, async () => {
+  const w = await world();
+  const { kept, vault } = await opened(db.vault, join(dir, 'memory-postgres-projection'));
+  const releases: (() => void)[] = [];
+  const holdings: Promise<unknown>[] = [];
+  /** A lock held in another session until let go: `statement` taken, then waiting. */
+  const hold = async (statement: ReturnType<typeof sql>) => {
+    let locked = () => {};
+    const taken = new Promise<void>((resolve) => (locked = resolve));
+    const held = new Promise<void>((resolve) => releases.push(resolve));
+    holdings.push(db.owner.transaction(async (tx) => {
+      await run(tx, statement);
+      locked();
+      await held;
+    }));
+    await taken;
+    return releases.length - 1;
+  };
+  // A projection waiting on its cursor, in this database: pg_locks lists the whole cluster's.
+  const projecting = async () => (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks WHERE relation = 'log_reads_cursor'::regclass AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND NOT granted`))[0]!.n > 0;
+  try {
+    await until(() => kept.sealing().ok, 5000, 'sealing at first');
+    // The projection's cursor locked: the projector's next run waits on it in the database, holding its connection.
+    await hold(sql`LOCK TABLE log_reads_cursor IN ACCESS EXCLUSIVE MODE`);
+    await until(projecting, 5000, 'a projection waiting on its cursor');
+    // Then the barrier's lock: the tick stalls past its bound, and the runner is retired.
+    const barrier = await hold(sql`SELECT pg_advisory_xact_lock(1668244070, 1)`);
+    await until(async () => !(await vault.sealing()).ok, 3000, 'red');
+    const number = await commitChange(w);
+    // The barrier let go, the projection not: the runner opened meanwhile seals, the change too.
+    releases[barrier]!();
+    await until(() => kept.sealing().ok, 10_000, 'sealing again, the projection still waiting');
+    assert.ok((await vault.waitSealed!({ number: String(number) })).ok);
+    assert.ok(await projecting(), 'the projection still waits on its cursor');
+  } finally {
+    for (const release of releases) release();
+    await Promise.all(holdings.map((h) => h.catch(() => {})));
+    await kept.stop();
+  }
+});
+
 test('T169, review r1, Postgres: a cutover change a writer moved into a gap a signed pair covers is no shortcut: a fresh isolate asks for its seal, which proves it', { skip: ENGINE === 'postgres' ? false : 'Postgres only: a gap in the sequence', timeout: 60_000 }, async () => {
   const w = await world();
   const id = await w.key('postgres://prod');

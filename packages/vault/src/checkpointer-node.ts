@@ -242,7 +242,12 @@ export async function runCheckpointer(options: {
       // A stalled one's session cut first, so that what its tick awaits fails now (T169).
       if (stalled) await session?.cut().catch(() => {});
       await ticking;
-      await projector.stop();
+      // The reads' projection runs no more. One that stalled leaves the run going, unawaited: it keeps none of the
+      // signer's memory, and writes nothing once another projector has overtaken it (FromChecked), so a projection
+      // hung in the database never holds back the runner that replaces this one (review r8). Otherwise its run ends
+      // first, within its bound.
+      const projecting = projector.stop();
+      if (!stalled) await within(projecting, options.tickBoundMs ?? OPEN_BOUND_MS, "the reads' projection").catch(() => {});
       // Closed, so that a handle kept after stop() never ticks beside a runner started over the same memory.
       await checkpointer.close();
       await session?.cut().catch(() => {});
