@@ -454,17 +454,18 @@ export type Deployment = { origin: string; file: string };
 /**
  * The deployment the command runs in, or below, `directory` a real path: walking up to the nearest directory that
  * holds both Workers' wrangler.jsonc, the one its app names as PUBLIC_URL. Null when there is none, or its address is
- * still the template's placeholder. A config that cannot be read names nothing: that is no reason to pick another
- * instance, and nothing here picks one.
+ * still the template's placeholder. A config that cannot be read or used is an error, never a reason to go on
+ * with another instance's name (a `coffre.json`'s, say).
  */
 export function deploymentFor(directory: string): Deployment | null {
   for (let at = directory; ; at = dirname(at)) {
     if (existsSync(join(at, 'app', 'wrangler.jsonc')) && existsSync(join(at, 'vault', 'wrangler.jsonc'))) {
+      const file = join(at, 'app', 'wrangler.jsonc');
       try {
         const url = readWorker(at, join('app', 'wrangler.jsonc')).vars.PUBLIC_URL;
-        return placeholder(url) ? null : { origin: instanceOrigin(url!), file: join(at, 'app', 'wrangler.jsonc') };
-      } catch {
-        return null;
+        return placeholder(url) ? null : { origin: instanceOrigin(url!), file };
+      } catch (error) {
+        throw new Error(`cannot use ${file}: ${(error as Error).message}`);
       }
     }
     if (dirname(at) === at) return null;

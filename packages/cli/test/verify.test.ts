@@ -305,6 +305,21 @@ test("a deployment's PUBLIC_URL and a coffre.json that disagree are refused, not
   assert.equal(instance.seen.length, 0);
 });
 
+test("a deployment's config that cannot be read is an error, not a reason to go on with a coffre.json's instance", async (t) => {
+  const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home } = signedInHome(t, instance.origin);
+  const dir = deployment(t, 'https://coffre.deployed.test', instance.origin);
+  const file = join(dir, 'app', 'wrangler.jsonc');
+  for (const broken of ['{ "name": "app", "vars": { "PUBLIC_URL": ', '{ "name": "app", "vars": { "PUBLIC_URL": "https://coffre.deployed.test/path" } }']) {
+    writeFileSync(file, broken);
+    const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+    assert.equal(run.code, 1);
+    assert.equal(run.stdout, '');
+    assert.ok(run.stderr.startsWith(`coffre: cannot use ${file}: `), run.stderr);
+    assert.equal(instance.seen.length, 0);
+  }
+});
+
 test("coffre verify instance in a deployment's directory goes to the deployment's instance, with its session, once confirmed with --yes", async (t) => {
   const deployed = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
   const other = await fakeInstance(t, () => undefined);

@@ -181,7 +181,8 @@ function localHere(): Local | null {
 async function deploymentHere(): Promise<Deployment | null> {
   if (sessionFlags.url !== undefined) return null;
   // Its own chunk, as setup's: the JSONC parser loads only for it.
-  return (await import('./deployment.ts')).deploymentFor(here('Name the instance with --url'));
+  const { deploymentFor } = await import('./deployment.ts');
+  return attempt(() => deploymentFor(here('Name the instance with --url')));
 }
 
 /** A `coffre.json`'s text, or null if there is none: one that is a link or no file is refused, not passed over. */
