@@ -35,7 +35,7 @@ import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
-import { holding, keyBlocksOf, namedWorld, principalLock, slowed, weighed, weighingSession, type HotCall, type Weighed } from './named-world.ts';
+import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, weighed, weighingSession, type HotCall, type Weighed } from './named-world.ts';
 import { change, emptyLog, seal, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
@@ -215,6 +215,7 @@ async function cell(row: Row, key: Key) {
   if (row.place === 'its seal replaced') await w.forge(named);
   return {
     key,
+    principal: w.principal,
     /** The request, its principal's lock held and every statement slow: its answer, its calls, what it wrote. */
     measure: async () => {
       setMap(row, { w, cache: measured.cache, name, elsewhere, elsewhereKey, gone, otherCredential });
@@ -227,7 +228,8 @@ async function cell(row: Row, key: Key) {
       const at = Date.now();
       const request = ask(purpose, row.admission === 'past its deadline' ? { at: at - 4000, deadline: at - 1000 } : { at, deadline: at + 3000 });
       const work = () => measured.vault.useNamed!(request);
-      const answer = ENGINE === 'postgres' ? await holding(db, principalLock(w.principal), work) : await work();
+      // Its principal's lock is held by another connection meanwhile, the batch's every one on one (`principalLocks`).
+      const answer = await work();
       measured.slow(0);
       // Its own last call, if it made one: one answered before any (busy at its deadline) weighs nothing.
       const last = measured.statements() > before ? measured.last() : null;
@@ -439,7 +441,8 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   const phases = [ROWS.filter((row) => !floor(row)), ROWS.filter(floor)];
   for (const phase of phases) {
     const inTurn = ENGINE !== 'postgres';
-    // Three rows at a time: each cell holds connections of its own, and nine of them a row stay within Postgres's 100.
+    // Three rows at a time: each cell holds a connection of its own (its hot path's), and the batch one more, its
+    // principals' locks, within Postgres's 100 beside the other matrices' processes.
     for (let i = 0; i < phase.length; i += 3) {
       const batch = phase.slice(i, i + 3);
       /** The floor of `at` past the requests `row` makes from now, while `work` runs: a batch's rows share their admission but in turn. */
@@ -460,7 +463,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
             await inPeriod(15_000);
             const made = await cell(row, key);
             results.push({ key, ...(await past(row, async () => {
-              const result = await made.measure();
+              const result = ENGINE === 'postgres' ? await holding(db, principalLocks([made.principal]), () => made.measure()) : await made.measure();
               await weigh([result]);
               return result;
             })) });
@@ -473,7 +476,10 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       await inPeriod(30_000);
       const cells = await each(batch, async (row) => ({ row, cells: await each(KEYS, (key) => cell(row, key)) }));
       const measured = await past(batch[0]!, async () => {
-        const answered = await each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, ...(await c.measure()) })) }));
+        // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a
+        // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (#453, 53300 in CI).
+        const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, ...(await c.measure()) })) }));
+        const answered = ENGINE === 'postgres' ? await holding(db, principalLocks(cells.flatMap(({ cells: keys }) => keys.map((c) => c.principal))), askAll) : await askAll();
         await weigh(answered.flatMap(({ results }) => results));
         return answered;
       });

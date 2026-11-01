@@ -315,7 +315,7 @@ CodeStands(p) == IF Where = "mine" /\ ~GateWeighsParent THEN TRUE ELSE Stands(p)
 Decides(key, p) ==
     /\ key \in Valued
     /\ Stands(p)
-    /\ IF layer = "parent" /\ ~ParentInDecision THEN layer /= "removed" ELSE HolderStands(p)
+    /\ IF layer = "parent" /\ ~ParentInDecision THEN TRUE ELSE HolderStands(p)
     \* A cut chain, before the place refuses it whole: a key the fork holds itself reads no archived place.
     /\ (~cut \/ (~CutByPlace /\ layer = "own"))
 \* Her credential refused by the app on the deployment's config, which the vault cannot see: a session whose provider

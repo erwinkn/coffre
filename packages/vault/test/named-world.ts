@@ -357,3 +357,7 @@ class RolledBack extends Error {
 
 /** The principal's lock (0022: 1668244066, hashtext(principal)), which a key entering the cap's set takes. */
 export const principalLock = (principal: string) => sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(${principal}))`;
+
+/** `holding`, of several principals' locks at once, on one connection of the vault's: a row's cells, each its own principal. */
+export const principalLocks = (principals: readonly string[]) =>
+  sql`SELECT pg_advisory_xact_lock(1668244066, hashtext(p)) FROM unnest(${sql.param([...principals])}::text[]) p`;

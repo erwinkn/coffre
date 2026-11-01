@@ -1430,5 +1430,9 @@ Each limit is stated here once; the other documents link to it.
   database writer can make a fork resolve a name to another layer's key,
   which the vault then decides where it is held, on sealed rows, so the
   caller gets nothing they could not read there; only which layer answered
-  shows, to someone who can write the database (D154).
+  shows, to someone who can write the database (D154). Likewise the
+  caller's standing at the fork itself, for a key it inherits: the gate
+  decides it on the rows as read, and only the holder's decision is on
+  sealed ones, so a grant on the fork written around the log reaches no
+  value its caller could not read where it is held.
   Any other difference by key in a refusal is a bug.

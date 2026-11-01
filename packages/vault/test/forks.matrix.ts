@@ -27,12 +27,14 @@ import { sql } from 'drizzle-orm';
 import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { refreshMs } from '../src/bulk.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
-import { holding, namedWorld, principalLock, slowed, weighed, weighingSession, type HotCall } from './named-world.ts';
+import { holding, namedWorld, principalLocks, slowed, weighed, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
-  db = await openTestDatabase();
+  // Pools of 4: this file runs beside use.matrix.ts and named.matrix.ts, a process each, on a Postgres of 100
+  // connections, and its row's 8 cells need no more (CI, #453: 10 each, and a holder a cell, took use.matrix.ts's).
+  db = await openTestDatabase({ connections: 4 });
   await useDatabases(db);
   await emptyLog();
   if (ENGINE === 'postgres') {
@@ -142,6 +144,8 @@ async function cell(row: Row, key: Key) {
   if (key === 'inherited, its row put back since') await w.putBack(id!);
   return {
     key,
+    principal: w.principal,
+    /** Its request, measured; the row holds every cell's principal's lock meanwhile, on one connection (`principalLocks`). */
     measure: async () => {
       // The map set as it should never be: the place named, with dev's key as its own, or an id no key has.
       if (row.map === "dev's key, mapped as the place's own" || row.map === 'a key never made') {
@@ -156,7 +160,7 @@ async function cell(row: Row, key: Key) {
       const before = measured.statements();
       const now = Date.now();
       const work = () => measured.vault.useNamed!(ask(purpose, { at: now, deadline: now + 3000 }));
-      const answer = ENGINE === 'postgres' ? await holding(db, principalLock(w.principal), work) : await work();
+      const answer = await work();
       measured.slow(0);
       const last = measured.statements() > before ? measured.last() : null;
       const result = {
@@ -191,7 +195,10 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
   for (const row of ROWS) {
     await inPeriod(20_000);
     const made = await each(KEYS, (key) => cell(row, key));
-    const results = await each(made, async (c) => ({ key: c.key, ...(await c.measure()) }));
+    // Each cell's principal's lock held by another connection, all of the row's on one (a connection each would take as
+    // many of Postgres's as the row has cells), while its cells are asked.
+    const measureAll = () => each(made, async (c) => ({ key: c.key, ...(await c.measure()) }));
+    const results = ENGINE === 'postgres' ? await holding(db, principalLocks(made.map((c) => c.principal)), measureAll) : await measureAll();
     const label = labelOf(row);
     // The keys they may not have: each answered alike (D153).
     const refused = results.filter((r) => !usable(row, r.key));

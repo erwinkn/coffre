@@ -1804,7 +1804,9 @@ export async function reveal(
       metadata: path.key === undefined ? {} : { key: path.key },
     });
     // Decided by the vault's one call by name, a fork's or a personal config's one key: its rows, no layer read again (T165).
-    const usedByName = decided !== undefined && one !== null && ahead?.held !== undefined && ahead.secrets !== undefined ? { key: one, held: ahead.held } : undefined;
+    // Its path's key, the proxy's one, or a list of one (`only`, whose key the environment may not hold: left out then).
+    const single = one ?? (only?.length === 1 ? only[0]! : null);
+    const usedByName = decided !== undefined && single !== null && ahead?.held !== undefined && ahead.secrets !== undefined ? { key: single, held: ahead.held } : undefined;
     const read = await readableValues(ctx.db, place, environment, path.key, ahead?.secrets, usedByName);
     const named = { id: environment.environmentId, path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
