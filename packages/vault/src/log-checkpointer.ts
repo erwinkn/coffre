@@ -50,6 +50,8 @@ export type HostOptions = {
   /** What closes it for good, when its host bounds the open (T169); `TICK_BOUND_MS` otherwise, for the tests. */
   fence?: Fence;
   tickBoundMs?: number;
+  /** The most entries a tick seals in one pair (`WINDOW_MAX` otherwise): a backlog is sealed a part at a time, for the tests. */
+  windowMax?: number;
 };
 
 export async function openLogCheckpointer(options: HostOptions): Promise<Checkpointer> {
@@ -67,13 +69,18 @@ export async function openLogCheckpointer(options: HostOptions): Promise<Checkpo
       async write(from) {
         const retired = previous.find((key) => key.origin === from);
         if (retired === undefined) throw new Error(`the log is under ${from}, a key the vault does not hold`);
-        const row = { at: now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(from, current.origin), seal: null };
-        return store.rotate({ ...row, mac: entryMac(current.mac, { tree: 'changes', row }) }, retired.mac.tag);
+        const [at, requestId] = [now(), randomUUID()];
+        return store.rotate((number) => {
+          // Its payload names its number, under its MAC (NumberInRotation).
+          const row = { at, requestId, object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(from, current.origin, number), seal: null };
+          return { ...row, mac: entryMac(current.mac, { tree: 'changes', row }) };
+        }, retired.mac.tag);
       },
     },
     now,
     ...(options.fence === undefined ? {} : { fence: options.fence }),
     ...(options.tickBoundMs === undefined ? {} : { tickBoundMs: options.tickBoundMs }),
+    ...(options.windowMax === undefined ? {} : { windowMax: options.windowMax }),
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
       void Promise.resolve(options.record?.({ at: now(), message })).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));

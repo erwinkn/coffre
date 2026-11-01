@@ -1,4 +1,4 @@
--- 0.15's log across a rotation of the vault's signing key (T168, W277; docs/design/audit-tree.md, "A rotation"; the spec: formal/Rotation.tla). Every entry's MAC names its key in its first four bytes, the key's tag (log-entry.ts). When the checkpointer first starts under a new key, it writes the rotation entry (`log_rotate`), past which the key it replaced vouches for nothing, and adds that key's tag to the fence's `retired`. An isolate still under the replaced key, as for the moments a deploy takes, then writes nothing (RetiredRefused): its use is `superseded`, its change refused by the trigger. Each reads `retired` in the statement that takes its number, under the lock the rotation takes exclusive (RefusedUnderLock, RotateUnderLock). Only 0.15's code writes the log: it only adds, a column, a trigger and a function, and replaces `use_credential` with the same arguments.
+-- 0.15's log across a rotation of the vault's signing key (T168, W277; docs/design/audit-tree.md, "A rotation"; the spec: formal/Rotation.tla). Every entry's MAC names its key in its first four bytes, the key's tag (log-entry.ts). When the checkpointer first starts under a new key, it writes the rotation entry (`log_rotate_number`, then `log_rotate`, at the number its payload names), past which the key it replaced vouches for nothing, and adds that key's tag to the fence's `retired`. An isolate still under the replaced key, as for the moments a deploy takes, then writes nothing (RetiredRefused): its use is `superseded`, its change refused by the trigger. Each reads `retired` in the statement that takes its number, under the lock the rotation takes exclusive (RefusedUnderLock, RotateUnderLock). Only 0.15's code writes the log: it only adds, a column, a trigger and a function, and replaces `use_credential` with the same arguments.
 ALTER TABLE "log_fence" ADD COLUMN "retired" "bytea"[] DEFAULT '{}' NOT NULL;
 --> statement-breakpoint
 -- A change under a key the log moved on from: refused, whoever writes it (every change path, the app's and the vault's, and retention's). It holds the fence exclusive, or the issue lock, before its number, so the rotation's entry is ordered against it: one numbered past the rotation reads the fence the rotation left.
@@ -17,29 +17,45 @@ REVOKE ALL ON FUNCTION log_refuse_retired() FROM PUBLIC;
 --> statement-breakpoint
 CREATE TRIGGER log_changes_refuse_retired BEFORE INSERT ON log_changes FOR EACH ROW EXECUTE FUNCTION log_refuse_retired();
 --> statement-breakpoint
--- The rotation (Rotation.tla's Rotate): under the barrier's locks, in its order (close_one), so that every number taken before it has ended and none is taken until it commits; the log's key read again there, as the fence's `retired` (a start that rotated first: null). Its entry is the changes tree's, its object log_object('log', 'key'), its payload {"ref":{"kind":"log","id":"key"},"op":"rotate","from":"coffre.log/<hex>","to":"coffre.log/<hex>"}, its MAC the new key's; `p_from` is the replaced key's tag.
-CREATE FUNCTION log_rotate(p_request text, p_at bigint, p_payload text, p_mac bytea, p_from bytea) RETURNS bigint
+-- The rotation (Rotation.tla's Rotate), in one transaction of two calls: `log_rotate_number` takes the barrier's locks, in its order (close_one), so that every number taken before it has ended and none is taken until the transaction ends, reads the log's key again there, as the fence's `retired` (a start that rotated first, or a rotation's row gone: null), and takes the rotation's number; then the vault MACs the entry, its payload naming that number (NumberInRotation: an entry's MAC covers every column but its number, which a writer could change, so a rotation counts only at the number it names), and `log_rotate` writes it at that number, still under the locks, and retires `p_from`, the replaced key's tag. Its entry is the changes tree's, its object log_object('log', 'key'), its payload {"ref":{"kind":"log","id":"key"},"op":"rotate","from":"coffre.log/<hex>","to":"coffre.log/<hex>","at":"<its number>"}, its MAC the new key's.
+CREATE FUNCTION log_rotate_number(p_from bytea) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
-DECLARE
-    n bigint;
 BEGIN
-    IF p_payload::jsonb ->> 'op' IS DISTINCT FROM 'rotate' OR octet_length(p_from) <> 4 OR octet_length(p_mac) <> 16 OR substring(p_mac FROM 1 FOR 4) = p_from THEN
-        RAISE EXCEPTION 'not a rotation: %', p_payload USING ERRCODE = 'invalid_parameter_value';
-    END IF;
+    IF octet_length(p_from) <> 4 THEN RAISE EXCEPTION 'a key''s tag is 4 bytes' USING ERRCODE = 'invalid_parameter_value'; END IF;
     PERFORM pg_advisory_xact_lock(1668244070, 1);
     PERFORM pg_advisory_xact_lock(1668244070, 0);
     IF EXISTS (SELECT 1 FROM public.log_fence f WHERE f.only_row AND p_from = ANY(f.retired)) THEN RETURN NULL; END IF;
-    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    VALUES (nextval('public.log_number'), p_at, p_request, public.log_object('log', 'key'), 'system:vault', p_payload, NULL, p_mac)
-    RETURNING number INTO n;
-    UPDATE public.log_fence SET retired = array_append(retired, p_from) WHERE only_row;
-    RETURN n;
+    RETURN nextval('public.log_number');
 END
 $$;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION log_rotate(text, bigint, text, bytea, bytea) FROM PUBLIC;
+REVOKE ALL ON FUNCTION log_rotate_number(bytea) FROM PUBLIC;
 --> statement-breakpoint
-GRANT EXECUTE ON FUNCTION log_rotate(text, bigint, text, bytea, bytea) TO coffre_vault;
+GRANT EXECUTE ON FUNCTION log_rotate_number(bytea) TO coffre_vault;
+--> statement-breakpoint
+CREATE FUNCTION log_rotate(p_number bigint, p_request text, p_at bigint, p_payload text, p_mac bytea, p_from bytea) RETURNS bigint
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET jit = off AS $$
+BEGIN
+    IF p_payload::jsonb ->> 'op' IS DISTINCT FROM 'rotate' OR p_payload::jsonb ->> 'at' IS DISTINCT FROM p_number::text
+       OR octet_length(p_from) <> 4 OR octet_length(p_mac) <> 16 OR substring(p_mac FROM 1 FOR 4) = p_from THEN
+        RAISE EXCEPTION 'not a rotation: %', p_payload USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The number this transaction's log_rotate_number took, its locks still held (taking them again is a no-op).
+    PERFORM pg_advisory_xact_lock(1668244070, 1);
+    PERFORM pg_advisory_xact_lock(1668244070, 0);
+    IF p_number IS DISTINCT FROM currval('public.log_number') OR EXISTS (SELECT 1 FROM public.log_fence f WHERE f.only_row AND p_from = ANY(f.retired)) THEN
+        RAISE EXCEPTION 'not the rotation this transaction numbered' USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    VALUES (p_number, p_at, p_request, public.log_object('log', 'key'), 'system:vault', p_payload, NULL, p_mac);
+    UPDATE public.log_fence SET retired = array_append(retired, p_from) WHERE only_row;
+    RETURN p_number;
+END
+$$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION log_rotate(bigint, text, bigint, text, bytea, bytea) FROM PUBLIC;
+--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION log_rotate(bigint, text, bigint, text, bytea, bytea) TO coffre_vault;
 --> statement-breakpoint
 -- `use_credential` as 0046 made it (its comments, and those it names, say how), but for the fence's `retired`, read with its floor in each form: a use whose MAC names a retired key is `superseded`, before anything else, and writes and locks nothing. Its warm-up's mark moves on (`coffre.use_planned`).
 CREATE OR REPLACE FUNCTION use_credential(

@@ -482,12 +482,17 @@ R41's: a replaced key vouches only for what came before the rotation.
   checkpointer finds the log under another (the `to` of the newest
   rotation entry, else the key of its head) and writes the rotation: a
   change of the log's own object `log_object('log', 'key')`, its payload
-  naming both keys by origin, its MAC the new key's. `log_rotate` writes
-  it under the barrier's locks (the issue lock, then the fence, both
-  exclusive), and in the same transaction adds the old key's tag to
-  `log_fence.retired` (migration 0050). It reads `retired` again under
-  them: a start that rotated first leaves nothing to do. Then it ticks, so
-  that the rotation is sealed under the new key within a tick.
+  naming both keys by origin and its own number, its MAC the new key's.
+  One transaction: `log_rotate_number` takes the barrier's locks (the
+  issue lock, then the fence, both exclusive), reads `retired` again under
+  them (a start that rotated first leaves nothing to do) and takes the
+  number; the vault MACs the entry naming it; `log_rotate` writes it at
+  that number and adds the old key's tag to `log_fence.retired`
+  (migration 0050). An entry's MAC covers every column but its number,
+  which a database writer can change: a rotation counts only at the
+  number it names (`rotationOf`), so one moved up extends nothing. Then
+  the checkpointer ticks, so that the rotation is sealed under the new key
+  within a tick.
 - **Old isolates write nothing past it.** A use whose MAC names a retired
   key is `superseded` (the app answers 503, `Retry-After`; a newer isolate
   answers the retry), in `use_credential`'s own statement, on the fence row
@@ -508,19 +513,24 @@ R41's: a replaced key vouches only for what came before the rotation.
   the old key, alarmed as any lost memory is, and rotates as above.
 - **The verifier** takes a newest pair under a replaced key while the log
   moves on from it: below its rotation, and not above the pair held outside
-  under the current key; above it, that key's entries count below its
-  rotation, or while there is none yet. Above a pair under the current
-  key, the current key's alone. It reads the rotation entries only when
-  the newest pair is under a replaced key.
+  under the current key. Above the newest pair, a replaced key's entries
+  count below its own rotation, whatever key that pair is under (a backlog
+  sealed in parts leaves a pair under the new key below the rotation), or,
+  with no rotation yet, while the newest pair is under it. The key a pair
+  is under is the one its signatures hold under, never a name its notes
+  carry. It reads the rotations, in its own snapshot, whenever the vault
+  holds a replaced key.
 - **The other readers** hold to the same rule, through one keyring
   (`keyring.ts`): the reads' projector, `coffre verify log`'s check of the
   reads, and the vault's `vouch`, which the audit pages ask of the rows
   they show. A replaced key vouches for a pair, an entry, a read or the
   cursor numbered below its rotation; one no rotation retired yet, while
-  the newest pair is under it; otherwise for nothing. The projector lists
-  every read and moves its cursor under the current key; what it listed
-  before keeps the old key's MAC, which holds below the rotation, so no
-  row is MAC'd again.
+  the newest pair is under it; otherwise for nothing. Each reads the
+  rotations and the newest pair in one statement, and keeps no bound
+  between calls (a restore brings the rotation back at another number).
+  The projector lists every read and moves its cursor under the current
+  key; what it listed before keeps the old key's MAC, which holds below
+  the rotation, so no row is MAC'd again.
 - **A replaced key never comes back.** A checkpointer whose own key a
   rotation retired refuses to open, and the trigger refuses its entries.
 - **Witnesses.** The witness's object takes `previous`, the log's keys

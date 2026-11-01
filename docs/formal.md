@@ -1968,9 +1968,18 @@ tag), so the database can tell them apart.
   a pair remembered and not written included (the rotation mid-tick).
 - **The verifier** checks the newest pair, the pair held outside (the
   signer's memory) and the entries above, with the vault's keys.
+- **A reader** (`Reader`, `RotationReader`): the vault's `vouch` and the
+  reads' projector, which bound A from the rotations and the newest pair
+  (`keyringOf`, `packages/vault/src/keyring.ts`) for one call, keeping
+  nothing.
 - **Eve** holds A (it leaked: why one rotates) and writes the database past
   every lock and trigger: entries under A at numbers she takes, pairs
-  under A at any place over entries she chooses, rows and entries deleted.
+  under A at any place over entries she chooses, rows and entries deleted;
+  in `RotationMove` she renumbers a sealed rotation's row (an entry's MAC
+  covers every column but its number), in `RotationClaim` her pairs carry
+  the name of a key they are not signed under. `RotationChunked` seals a
+  backlog a part at a time (`WINDOW_MAX`), so a pair under B can lie below
+  the rotation.
 - **A restore** puts back a backup taken at any moment, the signer's memory
   reset by hand ([restore.md](restore.md)); **a rollback** starts the
   signer under A again, B previous.
@@ -1987,6 +1996,10 @@ tag), so the database can tell them apart.
 | ... and never above a pair under the current key held outside (AnchorKeyHeld) | `VerifiedSound`: the rotation's row deleted once sealed, Eve's pair under A above the memory's passed |
 | the verifier takes the rotation under way: the newest pair under A while no rotation from A is at or below it (PendingAccepted) | `NoFalseAlarm`: every check alarms between the deploy and the rotation's first seal |
 | a signer whose key the log moved on from signs nothing, and the trigger refuses its rotation (KeyNeverBack + RetiredRefused, each covering the other) | `NoOldPairOverRotation`: a config rolled back to A, A signs pairs over its own rotation |
+| a rotation counts only at the number its payload names, under its MAC (NumberInRotation: `rotationOf`; the number taken first, `log_rotate_number`, then MAC'd) | `SealedBelowBoundary`, `VerifiedSound` (`RotationMove`): the sealed rotation moved up, the signer started again counts from there and seals Eve's entry under A between; the check passes it (Sol's review r1 of #444) |
+| a pair is taken under the key its signatures hold under, never a name its notes carry (SignerVerified: `signedUnder`) | `VerifiedSound` (`RotationClaim`): Eve's pair under A over the rotation, naming B, takes the current key's rule and passes (r1) |
+| a replaced key's entries are bounded by its own rotation, whatever key the newest pair is under (KeyringBound: no fast path for a newest pair under the current key) | `NoFalseAlarm` (`RotationChunked`): a pair under B below the rotation, A's honest entries above it refused by every check (r1) |
+| a reader reads the rotations and the newest pair in one statement (SnapshotRead: `keyringRows`) | `ReaderNoFalseAlarm`, `ReaderSound` (`RotationReader`): the rotations read before the deploy's rotation, the newest pair after its first seal, A's history refused; or the pair read before the rotation sealed, A trusted past it (r1) |
 
 Liveness (`LogWorks`, `RotationDeploy`; weak fairness on the signer's steps
 and a writer holding the lock): every entry an honest writer commits is
@@ -2009,17 +2022,16 @@ and time, the same for every key (Seal.tla's); a rotation through a third key
 (the code's rule is the same for each); seals, which a use checks under every
 key the vault holds (see audit-tree.md, "A rotation").
 
-**The other readers, not modelled apart.** The reads' projector (Reads.tla's,
-which models one key), `coffre verify log`'s check of the reads and the
-vault's `vouch` take a key's word for pairs, entries, reads and the cursor.
-Each holds to BoundaryChecked and PendingAccepted, as above, through one
-function, `keyringOf` in `packages/vault/src/keyring.ts`, which the
-verifier's own rule calls too: a replaced key vouches below its rotation's
-number only; one no rotation retired yet, while the newest pair is under it;
-otherwise for nothing. A reader is one more checker of the same rule, which
-this model's `VerifiedSound` already holds the verifier to; what each reads
-it with is tested (`packages/vault/test/reads-rotation.test.ts`), not
-modelled.
+**The readers.** The reads' projector (Reads.tla's, which models one key),
+`coffre verify log`'s check of the reads and the vault's `vouch` take a key's
+word for pairs, entries, reads and the cursor, through the same function the
+verifier's rule calls, `ringOf` (`keyringOf` reads it in one statement): a
+replaced key vouches below its rotation's number only; one no rotation
+retired yet, while the newest pair is under it; otherwise for nothing. The
+model's reader is that function read across the deploy (SnapshotRead). A
+reader keeps no bound between calls: across a restore, the rotation comes
+back at another number. What each holds a read or the cursor to besides is
+Reads.tla's, and tested (`packages/vault/test/reads-rotation.test.ts`).
 
 ## TLC
 
@@ -2101,7 +2113,7 @@ every pull request that is not a version-only bump:
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
     - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
-      four, 2.6 minutes of it here);
+      eight, about 3.5 minutes of it here);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints

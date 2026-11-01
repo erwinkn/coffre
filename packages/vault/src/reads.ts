@@ -63,8 +63,8 @@ export type Sealed = LogEntry | null;
 /** What the projector needs of the database (log-store.ts, on both engines). */
 export type ReadsStore = Pick<LogReader, 'tiles'> & {
   readsCursor(): Promise<ReadsCursor>;
-  /** The log's rotations of the vault's signing key (T168), which bound each key it replaced (keyring.ts). */
-  rotations(): Promise<LogEntry[]>;
+  /** The log's rotations of the vault's signing key (T168) and its newest pair, in one statement: each key it replaced bounded by them (keyring.ts). */
+  keyringRows(): Promise<{ rotations: LogEntry[]; newest: StoredPair | null }>;
   /** The newest retention change and its leaf index in the changes tree (plan PR 7), for `sealedCut`. */
   retention(): Promise<{ entry: LogEntry; index: number } | null>;
   pair(upto: bigint): Promise<{ upto: bigint; notes: { changes: string; uses: string } } | null>;

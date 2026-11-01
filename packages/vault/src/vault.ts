@@ -171,7 +171,7 @@ import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk
 import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, useMany, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
-import { alone, entryVouched, keyringOf, settledRing, type Keyring } from './keyring.ts';
+import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
 
 
 export type VaultOptions = {
@@ -289,8 +289,6 @@ export type PreparedVault = {
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
   /** The log's MAC key under each signing key, which `vouch` checks an entry with: made once a call first needs them. */
-  /** The vault's keyring once settled (T168): every key it replaced bounded by its rotation. */
-  keyring?: Keyring;
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -3980,10 +3978,10 @@ class VaultService implements Vault {
    * under no key that vouches at their number over the columns it shows
    * (T166): forged, or edited, around coffre. A malformed one is named too.
    * The current key vouches for any; a key it replaced, only below its
-   * rotation (T168, keyring.ts, R41), whose bounds are read only when an
-   * entry fails the current key and the vault holds a replaced one, and
-   * kept once every bound is a rotation's. Otherwise pure CPU: about 3 µs an
-   * entry, `VOUCHED_AT_ONCE` at most.
+   * rotation (T168, keyring.ts, R41), whose bounds are read, in one
+   * statement, only when an entry fails the current key and the vault holds
+   * a replaced one, and kept by no isolate (a restore moves them).
+   * Otherwise pure CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
    */
   async vouch(input: VouchInput): Promise<{ forged: string[] }> {
     const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
@@ -4006,17 +4004,8 @@ class VaultService implements Vault {
     });
     const failing = asked.filter((a) => !a.holds(alone(keys)));
     if (failing.length === 0 || keys.previous.length === 0) return { forged: failing.map((a) => a.named) };
-    const ring = await this.#keyring(keys);
-    return { forged: failing.filter((a) => !a.holds(ring)).map((a) => a.named) };
-  }
-
-  /** The vault's keys held to the log's rotations (keyring.ts), kept once settled: no rotation under way, so none to come for these keys. */
-  async #keyring(keys: VerifierKeys): Promise<Keyring> {
-    const kept = this.#prepared.keyring;
-    if (kept !== undefined) return kept;
     const ring = await keyringOf(keys, logStore(this.#db));
-    if (settledRing(ring)) this.#prepared.keyring = ring;
-    return ring;
+    return { forged: failing.filter((a) => !a.holds(ring)).map((a) => a.named) };
   }
 
   /**

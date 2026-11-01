@@ -16,7 +16,7 @@
 (* holds the fence's `retired` set, the keys the log moved on from: a      *)
 (* writer under one is refused (RetiredRefused), in the statement that     *)
 (* takes its number, under the lock (RefusedUnderLock): `use_credential`'s *)
-(* `superseded`, and the trigger on log_changes (migration 0049).          *)
+(* `superseded`, and the trigger on log_changes (migration 0050).          *)
 (*                                                                         *)
 (* The signer (the checkpointer) holds a pair, remembers the newest pair   *)
 (* it signed outside the database, and opens as Checkpointer.open does: it *)
@@ -30,12 +30,18 @@
 (* before the database has it (RememberFirst), so a crash can fall between *)
 (* the two, as it can between the rotation and the first pair under B.     *)
 (*                                                                         *)
-(* Which key vouches for what (BoundaryChecked, `macKeys` in log-entry.ts):*)
-(* an entry under the signer's key always; under a previous key only below *)
-(* that key's rotation entry, never above it. A previous key's pair is     *)
-(* taken (at open, and by the verifier) only below its own rotation        *)
-(* (RotationProbed) and never over a pair under the current key held       *)
-(* outside (AnchorKeyHeld).                                                *)
+(* Which key vouches for what (BoundaryChecked, keyring.ts): an entry     *)
+(* under the signer's key always; under a previous key only below that    *)
+(* key's rotation entry, never above it, whatever key the pair under it   *)
+(* is (KeyringBound: a tick may seal its window a part at a time, so a    *)
+(* pair under the new key can lie below the rotation). A rotation names   *)
+(* its own number in what its MAC covers, and counts only where it says   *)
+(* (NumberInRotation): an entry's MAC covers every column but the number, *)
+(* which a database writer can change. A previous key's pair is taken (at *)
+(* open, and by the verifier) only below its own rotation (RotationProbed)*)
+(* and never over a pair under the current key held outside               *)
+(* (AnchorKeyHeld), the key a pair is under being the one its signature   *)
+(* holds under, never a name it carries (SignerVerified).                 *)
 (*                                                                         *)
 (* The verifier (verifier.ts) checks the database's newest pair, the pair  *)
 (* held outside (the signer's memory) and every entry above the newest     *)
@@ -53,7 +59,10 @@
 (*   Restore    a backup taken at any moment is restored, the signer's     *)
 (*              memory reset by hand (docs/restore.md);                    *)
 (*   Rollback   after the deploy the signer is started again under A, B    *)
-(*              previous: a deployment's config rolled back.               *)
+(*              previous: a deployment's config rolled back;               *)
+(*   Reader     the vault's `vouch` and the reads' projector, which read   *)
+(*              the rotations and the newest pair to bound A (keyring.ts), *)
+(*              and keep nothing between calls.                            *)
 (*                                                                         *)
 (* The protections, each a constant (scripts/formal.sh shows each          *)
 (* necessary):                                                             *)
@@ -73,14 +82,23 @@
 (*   PendingAccepted     the verifier takes a rotation under way;          *)
 (*   KeyNeverBack        a signer whose key the log moved on from signs    *)
 (*                       nothing (a replaced key, once retired, cannot     *)
-(*                       come back).                                       *)
+(*                       come back);                                       *)
+(*   NumberInRotation    a rotation counts only at the number its payload  *)
+(*                       names, under its MAC;                             *)
+(*   SignerVerified      a pair's policy is chosen by the key its          *)
+(*                       signature holds under, never by a name it carries;*)
+(*   KeyringBound        a previous key's entries are bounded by its own   *)
+(*                       rotation, whatever key the newest pair is under;  *)
+(*   SnapshotRead        a reader reads the rotations and the newest pair  *)
+(*                       in one statement.                                 *)
 (*                                                                         *)
 (* Not modelled: two signers at once, which the hosts rule out (one Durable*)
 (* Object; one runner per memory), though the rotation's transaction reads *)
 (* the log's key again under its locks; the kinds of entries and the two   *)
 (* trees, retention, witnesses and time (Seal.tla's), the same here for    *)
 (* every key; a rotation through a third key (the code's rule is the same  *)
-(* for each).                                                              *)
+(* for each); a reader's other checks (a read's columns, the cursor's       *)
+(* place), which Reads.tla's are.                                          *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -94,16 +112,24 @@ CONSTANTS
     EveDeletes,   \* what Eve deletes besides rows: "none", "sealed" (entries the signer's memory seals) or "any"
     Restore,      \* BOOLEAN: a backup, restored with the signer's memory reset
     Rollback,     \* BOOLEAN: the signer started again under A after the deploy
+    Chunked,      \* BOOLEAN: a tick seals its window a part at a time (WINDOW_MAX)
+    EveMoves,     \* BOOLEAN: Eve renumbers a rotation entry, whose MAC does not cover its number
+    EveClaims,    \* BOOLEAN: Eve's pairs carry the name of a key they are not signed under
+    Reader,       \* BOOLEAN: a reader bounds A from the rotations and the newest pair (vouch, the projector)
     BoundaryChecked, RetiredRefused, RefusedUnderLock, RotateUnderLock, MemoryUnderPrevious, RowUnderPrevious,
-    RotationProbed, AnchorKeyHeld, PendingAccepted, KeyNeverBack
+    RotationProbed, AnchorKeyHeld, PendingAccepted, KeyNeverBack,
+    NumberInRotation, SignerVerified, KeyringBound, SnapshotRead
 
 Keys == {"A", "B"}
 None == "none"
-\* An entry: its number, the key its MAC is under, the key a rotation entry moves the log from (None for any other),
-\* and whether an honest writer made it (a ghost: no reader sees it).
-Entry(n, k, from, honest) == [n |-> n, key |-> k, from |-> from, honest |-> honest]
-\* A pair: its place, the key that signed it, the entries it seals (a tree, abstracted to its leaves).
-Pair(u, k, s) == [upto |-> u, key |-> k, sealed |-> s]
+\* An entry: its number, the number its payload names under its MAC (a rotation's; the same for any other), the key its
+\* MAC is under, the key a rotation entry moves the log from (None for any other), and whether an honest writer made it
+\* (a ghost: no reader sees it).
+Entry(n, k, from, honest) == [n |-> n, at |-> n, key |-> k, from |-> from, honest |-> honest]
+\* A pair: its place, the key that signed it, the key its notes name (`claim`: the signer's own, or what Eve wrote), the
+\* entries it seals (a tree, abstracted to its leaves).
+PairNamed(u, k, c, s) == [upto |-> u, key |-> k, claim |-> c, sealed |-> s]
+Pair(u, k, s) == PairNamed(u, k, k, s)
 Genesis == Pair(0, "A", {})
 NoPair == Pair(0, None, {})
 NoBackup == [seq |-> 0, entries |-> {}, rows |-> {}, retired |-> {}]
@@ -124,35 +150,47 @@ VARIABLES
     badSeal,  \* ghost: the signer signed a pair sealing an entry under a key above that key's rotation
     oldPair,  \* ghost: the signer signed a pair under a key sealing that key's own rotation
     rotations,\* ghost: every rotation entry committed since the last restore
-    gone      \* ghost: the entries Eve deleted, which she can still name (a row's leaves are in its tiles)
+    gone,     \* ghost: the entries Eve deleted, which she can still name (a row's leaves are in its tiles)
+    rd        \* the reader: pc ("idle", "read", "done"), the bound it read from the rotations (0: none; numbers start at 1), the bound it took
 
-vars == <<seq, entries, rows, retired, w, cfg, s, memory, crashes, eve, deployed, rolled, backup, restored, badSeal, oldPair, rotations, gone>>
+vars == <<seq, entries, rows, retired, w, cfg, s, memory, crashes, eve, deployed, rolled, backup, restored, badSeal, oldPair, rotations, gone, rd>>
 
 Newest == CHOOSE r \in rows : \A x \in rows : x.upto <= r.upto
-RotationsFrom(S, k) == {e \in S : e.from = k}
+\* The rotation entries a reader takes: each at the number its payload names, with NumberInRotation.
+Rotations(S) == {e \in S : e.from # None /\ (NumberInRotation => e.at = e.n)}
+RotationsFrom(S, k) == {e \in Rotations(S) : e.from = k}
 \* The number of k's rotation entry in S; past every number when there is none.
 RetiredAt(S, k) == IF RotationsFrom(S, k) = {} THEN Never ELSE Min({e.n : e \in RotationsFrom(S, k)})
 \* The key the log is under, as the signer reads it at its open: the newest rotation's, else its head's.
-LogKey(h) == IF {e \in entries : e.from # None} = {} THEN h.key
-             ELSE (CHOOSE e \in entries : e.from # None /\ \A x \in entries : x.from # None => x.n <= e.n).key
+LogKey(h) == IF Rotations(entries) = {} THEN h.key
+             ELSE (CHOOSE e \in Rotations(entries) : \A x \in Rotations(entries) : x.n <= e.n).key
 Configured(k) == k = cfg.cur \/ k \in cfg.prev
 \* Whether the entries of a pair sealing up to u extend those of p: p's place and leaves are its prefix.
 Extends(sealed, u, p) == p.upto <= u /\ p.sealed = {e \in sealed : e.n <= p.upto}
 
-\* An entry a key vouches for (BoundaryChecked), given the key k of the pair it lies above and the number of k's
-\* rotation: the current key's always; k's below its rotation, when k is a previous key (the rotation under way); no
-\* other's. Above a pair under the current key, the current key's alone: every rotation to it is sealed at or below that
-\* pair, whether or not the database still holds the rotation's row. The signer counts from the rotation it wrote or
-\* read at its open (`bound`); the verifier, which keeps nothing, from the database's.
-VouchedBy(e, k, bound) ==
+\* An entry a key vouches for (BoundaryChecked): the current key's always; a previous key's below `bound`, its rotation's
+\* number. The signer counts from the rotation it wrote or read at its open (`bound`), never from the database again.
+VouchedBy(e, bound) ==
     \/ e.key = cfg.cur
     \/ /\ e.key \in cfg.prev
-       /\ BoundaryChecked => (e.key = k /\ e.n < bound)
+       /\ BoundaryChecked => e.n < bound
+
+\* The key a pair is taken to be under, for which rule holds: the one its signature holds under (SignerVerified), or the
+\* name its notes carry (the verifier's signature check then takes any key the vault holds).
+Under(r) == IF SignerVerified THEN r.key ELSE r.claim
+
+\* A previous key a's bound for a reader that keeps nothing (keyring.ts), the newest pair taken under k: its rotation's
+\* number; with none, past every number while the newest pair is under a (the rotation under way), else 0 (a rotation's
+\* row gone: a fails closed). Without KeyringBound, the rule the verifier had: a counts only above a pair under a.
+KeyBound(a, k) ==
+    IF KeyringBound
+    THEN IF RotationsFrom(entries, a) # {} THEN RetiredAt(entries, a) ELSE IF k = a THEN Never ELSE 0
+    ELSE IF k = a THEN RetiredAt(entries, a) ELSE 0
 
 \* A pair under a previous key, taken as the newest: below its own rotation (RotationProbed), and never above a pair
 \* under the current key held outside (AnchorKeyHeld).
 PreviousTaken(r, held) ==
-    /\ RotationProbed => r.upto < RetiredAt(entries, r.key)
+    /\ RotationProbed => r.upto < RetiredAt(entries, Under(r))
     /\ AnchorKeyHeld => ~(held.key = cfg.cur /\ held.upto < r.upto)
 
 Down == [pc |-> "down", head |-> NoPair, next |-> NoPair, bound |-> Never]
@@ -171,10 +209,11 @@ Init ==
     /\ badSeal = FALSE /\ oldPair = FALSE
     /\ rotations = {}
     /\ gone = {}
+    /\ rd = [pc |-> "idle", rot |-> 0, bound |-> 0, sound |-> TRUE, fine |-> TRUE]
 
 Signer == <<cfg, s, memory, crashes, deployed, rolled>>
 Db == <<seq, entries, rows, retired>>
-Ghosts == <<badSeal, oldPair, rotations, gone>>
+Ghosts == <<badSeal, oldPair, rotations, gone, rd>>
 
 -----------------------------------------------------------------------------
 (* A writer: the fence's lock taken shared, then its number, then its commit, the lock held throughout (Seal.tla's
@@ -239,8 +278,12 @@ Open ==
           THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<rows, memory>>
           ELSE /\ rows' = rows \cup {head}
                /\ memory' = head
+               \* A previous key's bound: its rotation's number; with none, the rotation is the signer's to write (it then
+               \* counts from that one), or gone (its key vouches for nothing).
                /\ s' = [pc |-> IF LogKey(head) # cfg.cur THEN "rotate" ELSE "tick", head |-> head, next |-> NoPair,
-                        bound |-> RetiredAt(entries, head.key)]
+                        bound |-> IF \E k \in cfg.prev : RotationsFrom(entries, k) # {}
+                                  THEN RetiredAt(entries, CHOOSE k \in cfg.prev : RotationsFrom(entries, k) # {})
+                                  ELSE 0]
     /\ UNCHANGED <<seq, entries, retired, w, cfg, crashes, deployed, rolled, eve, backup, restored, Ghosts>>
 
 \* The rotation entry, under the signer's key, from the log's, and that key retired, in one transaction: under the
@@ -253,35 +296,44 @@ Rotate ==
        THEN s' = [s EXCEPT !.pc = "tick"] /\ UNCHANGED <<seq, entries, retired, rotations>>
        ELSE IF RetiredRefused /\ cfg.cur \in retired
        THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
+       \* `log_rotate` reads the fence again under its locks: the log moved on from that key already, its rotation's row
+       \* gone or moved (no number to count from), and it writes no second boundary: refused, an alarm.
+       ELSE IF LogKey(s.head) \in retired
+       THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
        ELSE LET e == Entry(seq + 1, cfg.cur, LogKey(s.head), TRUE) IN
             /\ seq' = seq + 1
             /\ entries' = entries \cup {e}
             /\ retired' = retired \cup {LogKey(s.head)}
             /\ rotations' = rotations \cup {e}
             /\ s' = [s EXCEPT !.pc = "tick", !.bound = e.n]
-    /\ UNCHANGED <<rows, w, cfg, memory, crashes, deployed, rolled, eve, backup, restored, badSeal, oldPair, gone>>
+    /\ UNCHANGED <<rows, w, cfg, memory, crashes, deployed, rolled, eve, backup, restored, badSeal, oldPair, gone, rd>>
 
 \* A tick: the barrier (no number in flight), the window, each entry vouched for, the pair signed and remembered. A
 \* database whose newest row is not its head, or an entry no key vouches for, is refused (an alarm).
+\* With Chunked, the window may be sealed a part at a time, each part a pair (`WINDOW_MAX`): a pair under the new key
+\* can then lie below the rotation, the old key's entries above it.
 Tick ==
     /\ s.pc = "tick"
     /\ ~InFlight
     /\ seq > s.head.upto
-    /\ LET window == {e \in entries : s.head.upto < e.n /\ e.n <= seq}
-           next == Pair(seq, cfg.cur, s.head.sealed \cup window) IN
-       IF Newest # s.head \/ \E e \in window : ~VouchedBy(e, s.head.key, s.bound)
-       THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<memory, badSeal, oldPair>>
-       ELSE /\ s' = [s EXCEPT !.pc = "write", !.next = next]
-            /\ memory' = next
-            /\ badSeal' = (badSeal \/ \E e, r \in next.sealed : r.from # None /\ e.key = r.from /\ e.n > r.n)
-            /\ oldPair' = (oldPair \/ \E r \in next.sealed : r.from = next.key)
-    /\ UNCHANGED <<Db, w, cfg, crashes, deployed, rolled, eve, backup, restored, rotations, gone>>
+    /\ \E u \in (s.head.upto + 1)..seq :
+       /\ Chunked \/ u = seq
+       /\ LET window == {e \in entries : s.head.upto < e.n /\ e.n <= u}
+              next == Pair(u, cfg.cur, s.head.sealed \cup window) IN
+          IF Newest # s.head \/ \E e \in window : ~VouchedBy(e, s.bound)
+          THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<memory, badSeal, oldPair>>
+          ELSE /\ s' = [s EXCEPT !.pc = "write", !.next = next]
+               /\ memory' = next
+               \* Against every rotation committed, at the number it was committed at (the ghost), whatever its row says now.
+               /\ badSeal' = (badSeal \/ \E e \in next.sealed, r \in rotations : e.key = r.from /\ e.from = None /\ e.n > r.n)
+               /\ oldPair' = (oldPair \/ \E r \in next.sealed : r.from = next.key)
+    /\ UNCHANGED <<Db, w, cfg, crashes, deployed, rolled, eve, backup, restored, rotations, gone, rd>>
 
 \* The pair written, over the head the database still holds.
 Write ==
     /\ s.pc = "write"
     /\ IF Newest = s.head
-       THEN rows' = rows \cup {s.next} /\ s' = [pc |-> "tick", head |-> s.next, next |-> NoPair, bound |-> Never]
+       THEN rows' = rows \cup {s.next} /\ s' = [s EXCEPT !.pc = "tick", !.head = s.next, !.next = NoPair]
        ELSE s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED rows
     /\ UNCHANGED <<seq, entries, retired, w, cfg, memory, crashes, deployed, rolled, eve, backup, restored, Ghosts>>
 
@@ -324,7 +376,7 @@ RestoreBackup ==
     /\ s' = Down
     /\ rotations' = {e \in backup.entries : e.from # None}
     /\ gone' = {}
-    /\ UNCHANGED <<w, cfg, crashes, deployed, rolled, eve, backup, badSeal, oldPair>>
+    /\ UNCHANGED <<w, cfg, crashes, deployed, rolled, eve, backup, badSeal, oldPair, rd>>
 
 -----------------------------------------------------------------------------
 (* Eve, who holds A and writes the database, past every lock and trigger. *)
@@ -341,7 +393,8 @@ ForgeEntry ==
 ForgePair ==
     /\ Eve /\ eve < EveBudget
     /\ \E u \in (Newest.upto + 1)..seq : \E keep \in SUBSET {e \in entries \cup gone : Newest.upto < e.n /\ e.n <= u} :
-        rows' = rows \cup {Pair(u, "A", Newest.sealed \cup keep)}
+       \E claim \in IF EveClaims THEN Keys ELSE {"A"} :
+        rows' = rows \cup {PairNamed(u, "A", claim, Newest.sealed \cup keep)}
     /\ eve' = eve + 1
     /\ UNCHANGED <<seq, entries, retired, w, Signer, backup, restored, Ghosts>>
 
@@ -359,7 +412,43 @@ DeleteEntry ==
         /\ entries' = entries \ {e}
         /\ gone' = gone \cup {e}
     /\ eve' = eve + 1
-    /\ UNCHANGED <<seq, rows, retired, w, Signer, backup, restored, badSeal, oldPair, rotations>>
+    /\ UNCHANGED <<seq, rows, retired, w, Signer, backup, restored, badSeal, oldPair, rotations, rd>>
+
+\* A rotation's row renumbered higher (its MAC does not cover its number), to a number no row holds: one a pair under
+\* the new key seals. One not sealed so yet, moved, is one deleted: the rotation's window (RotationWindow).
+MoveRotation ==
+    /\ Eve /\ EveMoves /\ eve < EveBudget
+    /\ \E e \in entries, m \in 1..MaxN :
+        /\ e.from # None /\ m > e.n /\ \A x \in entries : x.n # m
+        /\ \E r \in rows : r.key = cfg.cur /\ e \in r.sealed
+        /\ entries' = (entries \ {e}) \cup {[e EXCEPT !.n = m]}
+    /\ eve' = eve + 1
+    /\ UNCHANGED <<seq, rows, retired, w, Signer, backup, restored, Ghosts>>
+
+-----------------------------------------------------------------------------
+(* The reader: the vault's `vouch` and the reads' projector, each call bounding A from the rotations and the newest
+   pair (keyring.ts), keeping nothing after it. With SnapshotRead both are one statement; without, the rotations are
+   read, then the newest pair, and the log may move between the two. *)
+
+\* A read's answer, as the log stands when it is answered (ghosts): whether it trusts A past no rotation committed
+\* (`sound`), and whether, with nobody but the vault at work, it takes every entry an honest writer committed under A
+\* (`fine`: all are below A's rotation, OldWritesBelowBoundary).
+Answered(rot, bound) ==
+    [pc |-> "done", rot |-> rot, bound |-> bound,
+     sound |-> \A x \in rotations : x.from = "A" => bound <= x.n,
+     fine |-> eve > 0 \/ \A e \in entries : (e.honest /\ e.from = None /\ e.key = "A") => e.n < bound]
+Bounded(rot) == IF rot # 0 THEN rot ELSE IF Under(Newest) = "A" THEN Never ELSE 0
+
+ReadRotations ==
+    /\ Reader /\ deployed /\ ~rolled /\ rd.pc \in {"idle", "done"}
+    /\ LET rot == IF RotationsFrom(entries, "A") # {} THEN RetiredAt(entries, "A") ELSE 0 IN
+       rd' = IF SnapshotRead THEN Answered(rot, Bounded(rot)) ELSE [rd EXCEPT !.pc = "read", !.rot = rot]
+    /\ UNCHANGED <<Db, w, Signer, eve, backup, restored, badSeal, oldPair, rotations, gone>>
+
+ReadNewest ==
+    /\ rd.pc = "read"
+    /\ rd' = Answered(rd.rot, Bounded(rd.rot))
+    /\ UNCHANGED <<Db, w, Signer, eve, backup, restored, badSeal, oldPair, rotations, gone>>
 
 -----------------------------------------------------------------------------
 
@@ -367,7 +456,8 @@ Next ==
     \/ \E x \in Writers : Check(x) \/ Lock(x) \/ Number(x) \/ Finish(x)
     \/ Open \/ Rotate \/ Tick \/ Write \/ Crash \/ Deploy \/ RollBack
     \/ TakeBackup \/ RestoreBackup
-    \/ ForgeEntry \/ ForgePair \/ DeleteRow \/ DeleteEntry
+    \/ ForgeEntry \/ ForgePair \/ DeleteRow \/ DeleteEntry \/ MoveRotation
+    \/ ReadRotations \/ ReadNewest
 
 \* The signer and a writer holding the lock are fair: a running signer opens, rotates, ticks and writes; a writer with
 \* the lock takes its number and commits or aborts. Nothing makes a writer start, Eve act or the operator deploy.
@@ -383,12 +473,16 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 Above(r) == {e \in entries : e.n > r.upto}
 Verified ==
-    LET r == Newest IN
-    /\ \/ r.key = cfg.cur
-       \/ PendingAccepted /\ r.key \in cfg.prev /\ PreviousTaken(r, memory)
+    LET r == Newest
+        k == Under(r) IN
+    \* Its signatures hold under a key the vault holds (verifyLog, with every key), and the key it is taken to be under
+    \* is the current one, or a previous one while the log moves on from it.
+    /\ Configured(r.key)
+    /\ \/ k = cfg.cur
+       \/ PendingAccepted /\ k \in cfg.prev /\ PreviousTaken(r, memory)
     \* The pair held outside: one it opens, a prefix of the newest, and that very pair at its place (verifyLog).
     /\ memory = NoPair \/ (Configured(memory.key) /\ Extends(r.sealed, r.upto, memory) /\ (memory.upto = r.upto => memory = r))
-    /\ \A e \in Above(r) : VouchedBy(e, r.key, RetiredAt(entries, r.key))
+    /\ \A e \in Above(r) : e.key = cfg.cur \/ (e.key \in cfg.prev /\ (BoundaryChecked => e.n < KeyBound(e.key, k)))
 
 -----------------------------------------------------------------------------
 (* Invariants. *)
@@ -423,6 +517,12 @@ VerifiedSound ==
 \* With nobody but the vault at work, the verifier never alarms, the rotation under way included: but while the
 \* database is a moment behind the memory (a pair remembered and not yet written, which a caller asks again about).
 NoFalseAlarm == (eve = 0 /\ memory.upto <= Newest.upto) => Verified
+
+\* No read takes A's word past its rotation (R41), at the number it was committed at, when it answers.
+ReaderSound == rd.pc = "done" => rd.sound
+
+\* With nobody but the vault at work, no read refuses an entry an honest writer committed under A.
+ReaderNoFalseAlarm == rd.pc = "done" => rd.fine
 
 \* Liveness: the log keeps working. Every entry an honest writer commits is sealed in time: the signer is never left
 \* refusing (a memory or a row it cannot open; an entry no key vouches for, which would hold every tick from then on).

@@ -97,15 +97,22 @@ export const CUTOVER_ACTOR = 'system:vault';
  * The log's own object for its rotations (T168; docs/design/audit-tree.md,
  * "A rotation"): one change each time the log moves on from a signing key,
  * the boundary past which that key vouches for nothing. Its MAC is the new
- * key's; its payload names both keys by their logs' origins.
+ * key's; its payload names both keys by their logs' origins, and its own
+ * number (NumberInRotation): an entry's MAC covers every column but the
+ * number, which a database writer can change, so a rotation counts only at
+ * the number it names.
  */
 export const KEY_OBJECT = logObject('log', 'key');
 
-export function rotationPayload(from: string, to: string): string {
-  return JSON.stringify({ ref: { kind: 'log', id: 'key' }, op: 'rotate', from, to });
+export function rotationPayload(from: string, to: string, at: bigint): string {
+  return JSON.stringify({ ref: { kind: 'log', id: 'key' }, op: 'rotate', from, to, at: String(at) });
 }
 
-/** The keys a rotation moves the log between, by origin, from its entry; null for any other entry, or a payload not a rotation's. */
+/**
+ * The keys a rotation moves the log between, by origin, from its entry;
+ * null for any other entry, a payload not a rotation's, or one at another
+ * number than its payload names (moved: Rotation.tla's NumberInRotation).
+ */
 export function rotationOf(entry: LogEntry): { from: string; to: string } | null {
   if (entry.tree !== 'changes' || entry.columns[2] !== KEY_OBJECT || typeof entry.columns[4] !== 'string') return null;
   let payload: unknown;
@@ -114,9 +121,10 @@ export function rotationOf(entry: LogEntry): { from: string; to: string } | null
   } catch {
     return null;
   }
-  const p = payload as { op?: unknown; from?: unknown; to?: unknown } | null;
+  const p = payload as { op?: unknown; from?: unknown; to?: unknown; at?: unknown } | null;
   const origin = (o: unknown): o is string => typeof o === 'string' && /^coffre\.log\/[0-9a-f]{16}$/.test(o);
-  return p?.op === 'rotate' && origin(p.from) && origin(p.to) && p.from !== p.to ? { from: p.from, to: p.to } : null;
+  const here = typeof p?.at === 'string' && /^[1-9][0-9]{0,18}$/.test(p.at) && BigInt(p.at) === entry.number;
+  return p?.op === 'rotate' && here && origin(p.from) && origin(p.to) && p.from !== p.to ? { from: p.from, to: p.to } : null;
 }
 
 export function retentionPayload(day: string, cut: Cut): string {

@@ -1,4 +1,4 @@
-import { openPair, splitNote, type LogEntry, type Pair, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
+import { openPair, type LogEntry, type Pair, type PairNotes, type PairVerifiers } from '@coffre/core/merkle';
 
 import { logKeys } from './log-checkpointer.ts';
 import { authentic, rotationOf, type LogMacKey } from './log-entry.ts';
@@ -17,6 +17,15 @@ import { authentic, rotationOf, type LogMacKey } from './log-entry.ts';
  * rotation under way: the checkpointer writes it at its first start under
  * the new key), and for nothing once it is not: a rotation's row deleted
  * leaves its key vouching for nothing, never for everything (fail closed).
+ * Each is Rotation.tla's: a rotation counts at the number its payload names
+ * (NumberInRotation, `rotationOf`); the newest pair is under the key its
+ * signatures hold under, never a name it carries (SignerVerified); a
+ * replaced key's bound is its own rotation's, whatever key the newest pair
+ * is under (KeyringBound: a tick seals its window in parts, so a pair under
+ * the new key can lie below the rotation); and the rotations and the newest
+ * pair are read in one statement (SnapshotRead). A keyring is read for one
+ * call and kept by none: a bound kept would go stale across a restore,
+ * whose rotation comes back at another number.
  */
 
 /** One key's part of a check: its log's origin, its trees' public keys, its entries' MAC key. */
@@ -35,10 +44,9 @@ export async function verifierKeys(seeds: readonly Uint8Array[]): Promise<Verifi
 /** Each key with the number below which it vouches: none for the current key, which vouches for anything. */
 export type Keyring = { current: KeyCheck; previous: readonly { key: KeyCheck; until: bigint }[] };
 
-/** What a keyring is read from: the log's rotations and its newest pair. */
+/** What a keyring is read from: the log's rotations and its newest pair, in one statement (`logStore`'s). */
 export type KeyringStore = {
-  rotations(): Promise<LogEntry[]>;
-  newest(): Promise<{ upto: bigint; notes: PairNotes } | null>;
+  keyringRows(): Promise<{ rotations: LogEntry[]; newest: { upto: bigint; notes: PairNotes } | null }>;
 };
 
 /** Past every number: a key the rotation under way has yet to retire. */
@@ -54,23 +62,30 @@ export const alone = (keys: VerifierKeys): Keyring => ({ current: keys.current, 
  */
 export async function keyringOf(keys: VerifierKeys, store: KeyringStore): Promise<Keyring> {
   if (keys.previous.length === 0) return alone(keys);
+  const { rotations, newest } = await store.keyringRows();
+  return ringOf(keys, rotations, newest === null ? null : await signedUnder(newest.notes, [keys.current, ...keys.previous]));
+}
+
+/** The keyring the rotations give, `under` the key the newest pair's signatures hold under (null: none, or no pair). */
+export function ringOf(keys: VerifierKeys, rotations: readonly LogEntry[], under: KeyCheck | null): Keyring {
   const all = [keys.current, ...keys.previous];
   const until = new Map<string, bigint>();
-  for (const entry of [...(await store.rotations())].sort((a, b) => (a.number < b.number ? -1 : 1))) {
+  for (const entry of [...rotations].sort((a, b) => (a.number < b.number ? -1 : 1))) {
     const r = rotationOf(entry);
     const to = r === null ? undefined : all.find((key) => key.origin === r.to);
     if (r !== null && to !== undefined && authentic(to.mac)(entry) && !until.has(r.from)) until.set(r.from, entry.number);
   }
-  const newest = keys.previous.some((key) => !until.has(key.origin)) ? await store.newest() : null;
-  const under = newest === null ? null : signerOf(newest.notes, all);
   return {
     current: keys.current,
     previous: keys.previous.map((key) => ({ key, until: until.get(key.origin) ?? (under === key ? UNBOUNDED : -1n) })),
   };
 }
 
-/** Whether every replaced key's bound comes from its rotation: the ring stays as it is, whatever is written next. */
-export const settledRing = (ring: Keyring) => ring.previous.every((p) => p.until !== UNBOUNDED);
+/** The key a pair's signatures hold under, the current one first: never a name its notes carry (SignerVerified). */
+export async function signedUnder(notes: PairNotes, keys: readonly KeyCheck[]): Promise<KeyCheck | null> {
+  for (const key of keys) if ((await openPair(notes, key.verifiers)) !== null) return key;
+  return null;
+}
 
 /** The keys that vouch at `number`: the current one first. */
 export function keysAt(ring: Keyring, number: bigint): KeyCheck[] {
@@ -94,15 +109,4 @@ export function entryVouched(ring: Keyring, entry: LogEntry): 'held' | 'past' | 
   if (authentic(ring.current.mac)(entry)) return 'held';
   const under = ring.previous.find((p) => authentic(p.key.mac)(entry));
   return under === undefined ? 'none' : entry.number < under.until ? 'held' : 'past';
-}
-
-/** The key that signed a pair, by the name its changes note is signed under (each key's own, `<origin>/changes`): not verified, which opening it does. */
-export function signerOf(notes: PairNotes, keys: readonly KeyCheck[]): KeyCheck | null {
-  let names: string[];
-  try {
-    names = splitNote(notes.changes).signatures.map((s) => s.name);
-  } catch {
-    return null;
-  }
-  return keys.find((key) => names.includes(key.verifiers.changes.name)) ?? null;
 }

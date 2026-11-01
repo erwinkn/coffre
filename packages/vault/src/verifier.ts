@@ -4,7 +4,7 @@ import type { Database } from '@coffre/db';
 import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { loggedChange } from './changes.ts';
-import { entryVouched, keyringOf, signerOf, type VerifierKeys } from './keyring.ts';
+import { entryVouched, ringOf, signedUnder, type VerifierKeys } from './keyring.ts';
 import { authentic, retentionCut, rotationOf } from './log-entry.ts';
 import { purposeOf } from './log-replay.ts';
 import { logStore } from './log-store.ts';
@@ -34,11 +34,11 @@ import { requestsUnique } from './store.ts';
  * Across a rotation of the vault's signing key (T168, formal/Rotation.tla):
  * the newest pair may be under a key the vault replaced while the log moves
  * on from it, never at or past that key's rotation (RotationProbed), nor
- * past a pair held outside under the current key (AnchorKeyHeld); above it,
- * an entry under that key counts below its rotation, or while there is none
- * yet (PendingAccepted). Above a pair under the current key, the current
- * key's entries alone (BoundaryChecked): every rotation to it is sealed at
- * or below, whether the database still holds its row or not.
+ * past a pair held outside under the current key (AnchorKeyHeld); above
+ * the newest pair, a replaced key's entry counts below its rotation, or
+ * while there is none yet and the newest pair is under it (PendingAccepted,
+ * BoundaryChecked, KeyringBound: keyring.ts), whichever key the newest
+ * pair's signatures hold under (SignerVerified).
  */
 
 export { verifierKeys, type KeyCheck, type VerifierKeys } from './keyring.ts';
@@ -109,11 +109,15 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
 }
 
 /**
- * The key the newest pair is under, held to the rotations (T168): a key the
- * vault replaced is taken only below its own rotation, and never above a
- * pair held outside under the current key; and which keys vouch for an
- * entry above it. The rotations are read only when the newest pair is under
- * a replaced key: a statement more on the rare check that meets one.
+ * The key the newest pair is under, held to the rotations (T168; keyring.ts,
+ * the rule every reader holds to): a key the vault replaced is taken only
+ * below its own rotation (RotationProbed), and never above a pair held
+ * outside under the current key (AnchorKeyHeld); and which keys vouch for an
+ * entry above it, each previous one below its own rotation whatever key the
+ * newest pair is under (KeyringBound: a tick seals its window in parts). The
+ * newest pair's key is the one its signatures hold under (SignerVerified).
+ * The rotations are read in the check's own snapshot, and only when the
+ * vault holds a replaced key: a statement more for a deployment that rotated.
  */
 async function underKeys(
   store: ReturnType<typeof logStore>,
@@ -122,23 +126,19 @@ async function underKeys(
   anchors: readonly PairNotes[],
 ): Promise<{ problems: string[]; vouch: (entry: LogEntry) => string | null }> {
   const problems: string[] = [];
-  const current = authentic(keys.current.mac);
-  const under = newest === null ? keys.current : (signerOf(newest.notes, [keys.current, ...keys.previous]) ?? keys.current);
-  if (under === keys.current) {
-    // Above a pair under the current key, every rotation to it is sealed at or below: a replaced key's entry is past it.
-    const replaced = keys.previous.map((key) => authentic(key.mac));
-    return { problems, vouch: (entry) => (current(entry) ? null : replaced.some((holds) => holds(entry)) ? 'under a key the log moved on from, past its rotation' : 'its MAC does not hold') };
+  if (keys.previous.length === 0) {
+    const current = authentic(keys.current.mac);
+    return { problems, vouch: (entry) => (current(entry) ? null : 'its MAC does not hold') };
   }
-  // The rotations, each authentic under the key it moves the log to: where each key it moves from stops counting
-  // (keyring.ts, the rule every reader holds to).
-  const ring = await keyringOf(keys, { rotations: () => store.rotations(), newest: async () => newest });
-  const retired = ring.previous.find((p) => p.key === under)?.until;
-  if (retired !== undefined && newest!.upto >= retired) {
-    problems.push(`checkpoint ${newest!.upto}: under ${under.origin}, at or past the rotation that retired it (${retired})`);
-  }
-  for (const notes of anchors) {
-    const at = signerOf(notes, [keys.current]) === null ? null : uptoOf(notes);
-    if (at !== null && at < newest!.upto) problems.push(`checkpoint ${newest!.upto}: under ${under.origin}, a replaced key, past the pair held outside under the current key (up to ${at})`);
+  const under = newest === null ? null : await signedUnder(newest.notes, [keys.current, ...keys.previous]);
+  const ring = ringOf(keys, await store.rotations(), under);
+  if (newest !== null && under !== null && under !== keys.current) {
+    const retired = ring.previous.find((p) => p.key === under)!.until;
+    if (newest.upto >= retired) problems.push(`checkpoint ${newest.upto}: under ${under.origin}, at or past the rotation that retired it (${retired})`);
+    for (const notes of anchors) {
+      const at = (await signedUnder(notes, [keys.current])) === null ? null : uptoOf(notes);
+      if (at !== null && at < newest.upto) problems.push(`checkpoint ${newest.upto}: under ${under.origin}, a replaced key, past the pair held outside under the current key (up to ${at})`);
+    }
   }
   return {
     problems,

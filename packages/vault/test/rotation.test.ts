@@ -19,7 +19,9 @@ import { Checkpointer, type Memory, type SealThrough } from '../src/checkpointer
 import { resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
+import { keyringOf } from '../src/keyring.ts';
 import { openLogCheckpointer, logKey } from '../src/log-checkpointer.ts';
+import { verifierKeys } from '../src/verifier.ts';
 import { authentic, entryMac, KEY_OBJECT, logMacKey } from '../src/log-entry.ts';
 import { logStore } from '../src/log-store.ts';
 import { credentialObject, environmentObject, secretObject } from '../src/objects.ts';
@@ -160,7 +162,7 @@ function clean(checked: Checked): void {
 }
 
 const rotations = async () => (await rows<{ number: string | number; payload: string }>(db.owner, sql`SELECT number, payload FROM log_changes WHERE object = ${KEY_OBJECT} ORDER BY number`))
-  .map((r) => ({ number: BigInt(r.number), payload: JSON.parse(r.payload) as { op: string; from: string; to: string } }));
+  .map((r) => ({ number: BigInt(r.number), payload: JSON.parse(r.payload) as { op: string; from: string; to: string; at: string } }));
 
 /** The fence's retired tags, hex. */
 async function retired(): Promise<string[]> {
@@ -182,7 +184,7 @@ for (const rotation of ROTATIONS) {
     const alarms: string[] = [];
     const now = await vaultUnder(rotation.after, w.memory, alarms);
     const [moved] = await rotations();
-    assert.deepEqual(moved?.payload, { ref: { kind: 'log', id: 'key' }, op: 'rotate', from: oldKey.origin, to: newKey.origin });
+    assert.deepEqual(moved?.payload, { ref: { kind: 'log', id: 'key' }, op: 'rotate', from: oldKey.origin, to: newKey.origin, at: String(moved!.number) });
     assert.deepEqual(await retired(), [oldKey.mac.tag.toString('hex')]);
     assert.ok(alarms.some((a) => a.includes(`moves on from ${oldKey.origin}`)), alarms.join('\n'));
     // Its first tick seals the rotation under the new key, and remembers that pair.
@@ -305,6 +307,17 @@ test('the signer\'s memory lost at the rotation: it takes the database\'s pair u
   clean(await verify(now.vault));
 });
 
+/** A use under `key`, written straight to `log_uses`, numbered next: past the fence, as a database writer puts it. Its number. */
+async function plantUse(key: ChangeKeys['mac']): Promise<bigint> {
+  const at = Date.now();
+  const row = { at, requestId: BigInt(newRequestId()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
+  const mac = entryMac(key, { tree: 'uses', row });
+  const [planted] = await rows<{ number: string | number }>(db.owner, ENGINE === 'postgres'
+    ? sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES (nextval('log_number'), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`
+    : sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ((SELECT max(n) + 1 FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`);
+  return BigInt(planted!.number);
+}
+
 test('an entry under the old key past the rotation is refused by the tick and named by the check (BoundaryChecked)', async () => {
   const rotation = ROTATIONS[0]!;
   const w = await underOldKey(rotation.before);
@@ -312,17 +325,81 @@ test('an entry under the old key past the rotation is refused by the tick and na
   const now = await vaultUnder(rotation.after, w.memory);
   // A use under the old key, numbered past the rotation, as someone who holds it writes it: past the fence, which no
   // trigger guards on log_uses (use_credential refuses it, which a writer goes around).
-  const at = Date.now();
-  const row = { at, requestId: BigInt(newRequestId()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-  const mac = entryMac(w.old.keys.mac, { tree: 'uses', row });
-  const [forged] = await rows<{ number: string | number }>(db.owner, ENGINE === 'postgres'
-    ? sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES (nextval('log_number'), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`
-    : sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ((SELECT max(n) + 1 FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)), ${at}, ${row.requestId}, ${row.credential}, ${row.secret}, 1, ${mac}, NULL) RETURNING number`);
+  const forged = await plantUse(w.old.keys.mac);
   const check = await verify(now.vault);
-  assert.deepEqual(check.problems, [`${forged!.number}: under a key the log moved on from, past its rotation`]);
+  assert.deepEqual(check.problems, [`${forged}: under a key the log moved on from, past its rotation`]);
   const tick = await now.cp.tick();
-  assert.deepEqual(tick.failures, [`${forged!.number}: under a key the log moved on from, past its rotation`]);
+  assert.deepEqual(tick.failures, [`${forged}: under a key the log moved on from, past its rotation`]);
   assert.ok(!tick.signed);
+});
+
+test('a rotation renumbered higher counts for nothing: the old key\'s entry where it no longer is, refused by the next start, the check and the keyring (NumberInRotation, review r1)', async () => {
+  const rotation = ROTATIONS[0]!;
+  const w = await underOldKey(rotation.before);
+  await w.old.cp.close();
+  const now = await vaultUnder(rotation.after, w.memory);
+  assert.ok((await now.cp.tick()).signed);
+  await now.cp.close();
+  // Someone who writes the database moves the sealed rotation's row far up, its MAC whole (it covers no number), and
+  // writes a use under the old key between the two places.
+  const [moved] = await rotations();
+  const planted = await plantUse(w.old.keys.mac);
+  const far = planted + 1_000n;
+  await run(db.owner, sql`UPDATE log_changes SET number = ${far} WHERE number = ${moved!.number}`);
+  assert.ok(planted > moved!.number && planted < far);
+  // Its payload names the number it was written at: moved, it is no rotation to any reader, and the old key, the newest
+  // pair under the new one, vouches for nothing.
+  const keys = await verifierKeys(resolveVaultConfig(rotation.after).signingKeys);
+  const ring = await keyringOf(keys, logStore(db.vault));
+  assert.deepEqual(ring.previous.map((p) => p.until), [-1n]);
+  const again = await vaultUnder(rotation.after, w.memory);
+  const tick = await again.cp.tick();
+  assert.ok(!tick.signed && tick.failures.some((f) => f.startsWith(`${planted}: `)), tick.failures.join('; '));
+  assert.ok((await verify(again.vault)).problems.some((p) => p.startsWith(`${planted}: `)));
+});
+
+test('a pair the old key signs over its rotation, carrying the new key\'s name, is taken under the key it is signed with: refused by the check (SignerVerified, review r1)', async () => {
+  const rotation = ROTATIONS[0]!;
+  const w = await underOldKey(rotation.before);
+  await w.old.cp.close();
+  const now = await vaultUnder(rotation.after, w.memory);
+  clean(await verify(now.vault));
+  await now.cp.close();
+  // A pair under the old key over the rotation, its notes given a signature line naming the new key's trees, which
+  // does not verify: the old check took the name for the key, and its fast path for the current key.
+  const [current, previous] = resolveVaultConfig(rotation.after).signingKeys;
+  const [oldKey, newKey] = [await logKey(previous!), await logKey(current!)];
+  const forger = await Checkpointer.open(logStore(db.vault), oldKey.signers, { memory: variableMemory(), authentic: () => true });
+  assert.ok((await forger.tick()).signed);
+  const named = (note: string, tree: 'changes' | 'uses') => `${note}— ${newKey.signers[tree].name} ${Buffer.concat([newKey.signers[tree].id, randomBytes(64)]).toString('base64')}\n`;
+  const upto = forger.pair.pair.upto;
+  await run(db.owner, sql`UPDATE log_checkpoints SET changes_note = ${named(forger.pair.notes.changes, 'changes')}, uses_note = ${named(forger.pair.notes.uses, 'uses')} WHERE upto = ${upto}`);
+  const [moved] = await rotations();
+  const problems = (await verify(now.vault)).problems;
+  assert.ok(problems.includes(`checkpoint ${upto}: under ${oldKey.origin}, at or past the rotation that retired it (${moved!.number})`), problems.join('\n'));
+});
+
+test('a backlog sealed a part at a time across the rotation: a pair under the new key below it, the old key\'s entries above that pair counted, and nothing alarmed (KeyringBound, review r1)', async () => {
+  const rotation = ROTATIONS[0]!;
+  const w = await underOldKey(rotation.before);
+  // A backlog under the old key, its checkpointer gone before sealing it: uses its isolates wrote, MAC'd under it.
+  for (let i = 0; i < 6; i += 1) await plantUse(w.old.keys.mac);
+  await w.old.cp.close();
+  // The deploy, its checkpointer sealing two entries a pair.
+  const resolved: ResolvedVaultConfig = { ...resolveVaultConfig(rotation.after), keks };
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: resolved.signingKeys, memory: w.memory, windowMax: 2 });
+  const [moved] = await rotations();
+  const vault = speaking(await openLocalVault(db.vault, resolved, {
+    log: '0.15', sealThrough: (number, deadline) => cp.sealThrough(number, deadline), heldOutside: async () => (w.memory.record === null ? [] : [decodePair(w.memory.record)!]),
+  }, async () => {}, hot));
+  const first = await cp.tick();
+  assert.deepEqual(first.failures, []);
+  assert.ok(cp.pair.pair.upto < moved!.number, 'a pair under the new key below the rotation');
+  assert.equal(signer(cp.pair.notes), (await logKey(resolved.signingKeys[0]!)).origin);
+  clean(await verify(vault));
+  for (let i = 0; i < 20 && cp.pair.pair.upto < moved!.number; i += 1) assert.deepEqual((await cp.tick()).failures, []);
+  assert.ok(cp.pair.pair.upto >= moved!.number);
+  clean(await verify(vault));
 });
 
 test('a pair the old key signs over its own rotation is refused, by the next start and by the check (RotationProbed)', async () => {

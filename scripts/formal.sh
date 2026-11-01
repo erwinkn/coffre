@@ -432,6 +432,14 @@ REMOVALS=(
   "RotationLeak AnchorKeyHeld VerifiedSound"
   # A config rolled back to the old key: its signer signs nothing, refused by itself or by the trigger.
   "RotationRollback KeyNeverBack+RetiredRefused NoOldPairOverRotation"
+  # Sol's review r1 of #444: a tick sealing its window in parts leaves a pair under the new key below the rotation; a
+  # rotation's row renumbered; a pair naming a key it is not signed under; a reader whose two reads straddle the deploy.
+  "RotationChunked KeyringBound NoFalseAlarm"
+  "RotationMove NumberInRotation SealedBelowBoundary"
+  "RotationMove NumberInRotation VerifiedSound"
+  "RotationClaim SignerVerified VerifiedSound"
+  "RotationReader SnapshotRead ReaderNoFalseAlarm"
+  "RotationReader SnapshotRead ReaderSound"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
