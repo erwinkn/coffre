@@ -1098,7 +1098,8 @@ fixed, each with a regression case. What is still open:
   - The hard 3 s use deadline is what the signer's freshness bound assumes
     (stamp to number well under 10 minutes).
   - The 16-byte MAC only shortens leaves. A 128-bit MAC still makes a leaf
-    hash unguessable from its content.
+    hash unguessable from its content (since D162, 96 bits: its first 4
+    bytes are the key's public tag).
   - Per-isolate covers that skip repeat uses are the dedup option analysed
     below: a repeat has no leaf, and a receipt for it would name the first
     entry.

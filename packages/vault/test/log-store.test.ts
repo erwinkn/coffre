@@ -5,14 +5,14 @@
 // use paths (plans PR 4 and 5), which write the entries, and a database
 // writer where a case says so.
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
-import { leafHash, pairSigners, pairVerifiers, parseCheckpoint, splitNote, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import { leafHash, macData, pairSigners, pairVerifiers, parseCheckpoint, splitNote, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
 import { sql } from 'drizzle-orm';
 
 import { Checkpointer } from '../src/checkpointer.ts';
-import { authentic, logMacKey } from '../src/log-entry.ts';
+import { authentic, entryMac, logMacKey, type LogMacKey, type UseRow } from '../src/log-entry.ts';
 import { logWriter } from './log-entries.ts';
 import { logStore, postgresWindow, tileKeys } from '../src/log-store.ts';
 import { variableMemory } from './audit-tree.ts';
@@ -21,9 +21,9 @@ import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './databa
 let db: TestDatabase;
 let signers: PairSigners;
 let verifiers: PairVerifiers;
-let macKey: Buffer;
+let macKey: LogMacKey;
 let log: ReturnType<typeof logWriter>;
-const use = (at?: number, forged?: boolean) => log.use(at, forged);
+const use = (...args: Parameters<typeof log.use>) => log.use(...args);
 const change = () => log.change();
 
 before(async () => {
@@ -136,6 +136,47 @@ test('a forged entry, a floor lowered by a writer, and a tile changed under the 
     assert.equal(Number(count!.n), 2, 'no pair written over the tiles that disagree');
   }
 });
+
+test('T168a: a MAC is its key\'s tag then its HMAC; another key\'s tag, another key\'s HMAC under this tag, or no tag at all fails closed, and a restart seals on', async () => {
+  const memory = variableMemory();
+  const { cp } = await open(memory);
+  await use();
+  await change();
+  assert.ok((await cp.tick()).signed);
+  const other = logMacKey(randomBytes(32));
+  // The whole HMAC, as 0.15 wrote it before the tag: its first 16 bytes were the MAC.
+  const hmac = (key: LogMacKey, row: Omit<UseRow, 'number' | 'mac'>) =>
+    createHmac('sha256', key.key).update(macData('uses', [BigInt(row.at), row.requestId, row.credential, row.secret, row.purpose, row.place])).digest();
+  const forgeries: [string, Parameters<typeof log.use>[1]][] = [
+    ['another key\'s MAC', (row) => entryMac(other, { tree: 'uses', row })],
+    ['another key\'s tag over this key\'s HMAC', (row) => Buffer.concat([other.tag, entryMac(macKey, { tree: 'uses', row }).subarray(4)])],
+    ['this key\'s tag over another key\'s HMAC', (row) => Buffer.concat([macKey.tag, entryMac(other, { tree: 'uses', row }).subarray(4)])],
+    ['16 bytes of this key\'s HMAC, no tag', (row) => hmac(macKey, row).subarray(0, 16)],
+  ];
+  for (const [what, forged] of forgeries) {
+    const number = await use(Date.now(), forged);
+    const t = await cp.tick();
+    assert.ok(!t.signed, what);
+    assert.deepEqual(t.failures, [`${number}: its MAC does not hold`], what);
+    await run(db.owner, sql`DELETE FROM log_uses WHERE number = ${number}`);
+  }
+  // Every MAC the writers make is the key's tag, then 12 bytes of its HMAC.
+  const [stored] = await rows<{ mac: Uint8Array | ArrayBuffer }>(db.owner, sql`SELECT mac FROM log_uses ORDER BY number LIMIT 1`);
+  const mac = Buffer.from(stored!.mac as Uint8Array);
+  assert.equal(mac.length, 16);
+  assert.ok(mac.subarray(0, 4).equals(macKey.tag));
+  // A restart over the same memory: its pairs open, the entries it sealed check under the key, and it seals on.
+  await cp.close();
+  const again = await open(memory);
+  assert.ok(samePairs(again.cp.pair.notes, cp.pair.notes));
+  await use();
+  await change();
+  assert.ok((await again.cp.tick()).signed);
+  const v = await verifyLog(again.store, { verifiers, anchors: [JSON.parse(memory.record!)], check: (e) => (authentic(macKey)(e) ? null : 'mac') });
+  assert.ok(v.ok && v.sealed === 4, v.problems.join('\n'));
+});
+
+const samePairs = (a: PairNotes, b: PairNotes) => a.changes === b.changes && a.uses === b.uses;
 
 test('reads are bounded by their windows: locate finds a use in an old window by its floor, not by scanning', async () => {
   const { cp, store } = await open();

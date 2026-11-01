@@ -5,7 +5,7 @@ import { SNAPSHOT } from '@coffre/db/dialect';
 
 import { loggedChange } from './changes.ts';
 import { logOrigin } from './checkpointer.ts';
-import { authentic, logMacKey, retentionCut } from './log-entry.ts';
+import { authentic, logMacKey, retentionCut, type LogMacKey } from './log-entry.ts';
 import { purposeOf } from './log-replay.ts';
 import { logStore } from './log-store.ts';
 import { requestsUnique } from './store.ts';
@@ -33,7 +33,7 @@ import { requestsUnique } from './store.ts';
  */
 
 /** The keys a check needs: the trees' public keys, and the entries' MAC key. */
-export type VerifierKeys = { verifiers: PairVerifiers; mac: Buffer };
+export type VerifierKeys = { verifiers: PairVerifiers; mac: LogMacKey };
 
 /** The verifier's keys from the vault's first signing seed, as the checkpointer has them (log-checkpointer.ts). */
 export async function verifierKeys(seeds: readonly Uint8Array[]): Promise<VerifierKeys> {

@@ -11,7 +11,7 @@ import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { openVault, prepareVault } from '../src/vault.ts';
-import { entryMac } from '../src/log-entry.ts';
+import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { newRequestId } from '../src/use.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { ask, CONFIG, emptyLog, LOG_015, useDatabases, world } from './use-world.ts';
@@ -100,7 +100,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       const [newest] = await rows<{ number: string; mac: Buffer }>(db.owner, sql`SELECT number, mac FROM log_changes ORDER BY number DESC LIMIT 1`);
       const at = Date.now();
       const requestId = newRequestId();
-      const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+      const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
       // Named, as the app asks: its config accepting the credential (0045's `p_signin`), so that the call reads its names.
       const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, NULL, NULL, NULL, $7, $8, $9, $10, $11, $12, $13, $14, p_signin => $15)';
       const argsOf = (request: string, macOf: Buffer) => [w.credentialId, id, request, String(at), macOf, String(at + 3000), cached ? newest!.number : null, cached ? newest!.mac : null,
@@ -110,7 +110,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
       if (named && i === 0) {
         // A request of its own, beside the one measured: each use's entry is its request's.
         const checked = newRequestId();
-        const checkedMac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+        const checkedMac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
         const [row] = await client.unsafe(`SELECT ${call}::text AS use`, argsOf(checked, checkedMac)) as unknown as { use: string }[];
         const answered = JSON.parse(row!.use) as { state: string | null; n_secret: string | null };
         assert.ok(answered.state !== 'unknown' && answered.n_secret === id, `the names read: ${row!.use.slice(0, 200)}`);
@@ -159,7 +159,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
     for (let i = 0; i < 6; i += 1) {
       const at = Date.now();
       const requestId = newRequestId();
-      const mac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+      const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
       const argsOf = (request: string, macOf: Buffer) =>
         [mapped ? w.credentialId : null, mapped ? id : null, request, String(at), macOf, String(at + 3000), names!.token_hash, names!.project, 'dev', names!.key] as never[];
       const args = argsOf(requestId, mac);
@@ -168,7 +168,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
       // A request of its own, beside the one measured: each use's entry is its request's.
       if (i === 0) {
         const checked = newRequestId();
-        const checkedMac = entryMac(randomBytes(32), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+        const checkedMac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(checked), credential: w.credentialId, secret: id, purpose: 4, place: null } });
         const [row] = await client.unsafe(`SELECT ${call}::text AS use`, argsOf(checked, checkedMac)) as unknown as { use: string }[];
         const answered = JSON.parse(row!.use) as { state: string | null; n_secret: string | null };
         assert.ok(answered.state !== 'unknown' && answered.n_secret === id, `the names read: ${row!.use.slice(0, 200)}`);

@@ -1023,7 +1023,7 @@ export const logConfig = pgTable(
  * A change: any write to a decision input, or to configuration, kept for
  * good. `object` is the input it changes (`log_object(kind, id)`), `seal`
  * that object's seal after it, `payload` what it does. The MAC is the
- * vault's, HMAC-SHA256 cut to 16 bytes, over everything but the number,
+ * vault's, 16 bytes, its key's tag then HMAC-SHA256 cut to 12 (D162), over everything but the number,
  * which the vault does not know when it asks. The vault login reads them,
  * and the app's reads the changes too, for the audit pages: a sign-in
  * through a trust binding, and the vault's token issues, revokes and

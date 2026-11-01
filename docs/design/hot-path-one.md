@@ -254,7 +254,8 @@ allowed on objects that the change path has sealed.
 2. **The call.**
    - The isolate MACs the request as the checkpointer checks it: `entryMac`
      over the uses tree and the row's columns, under the log's one MAC key
-     (`logMacKey`, the change path's too), cut to 16 bytes. 5a had a key of
+     (`logMacKey`, the change path's too), 16 bytes: the key's 4-byte tag,
+     then 12 of HMAC (D162; audit-tree.md, "The entries"). 5a had a key of
      its own, `coffre.vault.uses.v1`, and a layout of its own, which no
      tick could check (T128): every real use would have stopped the
      checkpointer. The cost is the same: 5.0–5.4 µs a use either way, the
@@ -1326,7 +1327,7 @@ open to him.
 | 7 | **Generic plans for the vault's login** (`plan_cache_mode`) | Postgres's auto mode | auto made 411 plans of the statement in 15 s at 1,000/s, 26 ms each under load; generic: 44 | a plan that is not tuned per call (the statement is all index probes, so nothing is lost) |
 | 8 | **Per-isolate covers** (Erwin, R53), invalidated by a change to any of the four inputs, and only while the key's bulk row is fresh | a shared, MAC'd cover table; a counter row per tick (rejected: R44) | 0.22 entries per use locally at 80% repeats; 0.51 on Workers | the log keeps the first read in a window, not each one |
 | 9 | **The bulk cap counts requests**, a key from its last logged use, refreshed at most every `refresh`, counted over `window + refresh` (others over `+ deadline` too); new and refreshed keys serialise on the principal's lock (amended by W228, migration 0028: refreshes take it shared and write their period; others count 60 s longer) | count releases (0.14's meaning: needs a second statement after the decision); count from the log (scans history, R48); refresh on every use (a hot row per key) | count 10 over a day: the 11th key refused, 6 at once with room for 2 admit 2, replay agrees; locally 14,890 `bulk` refusals all replayed equal | a key stays counted up to `refresh` (a minute) longer than its window; a token probing keys it cannot read uses up its budget; refusals by the cap take the lock |
-| 10 | **The slim row with a 16-byte MAC** (Erwin, R53) | 32-byte MAC; the prototype's text row | 140.8 B per use at 1M rows (341 before); 248 B of WAL per use (442) | 128 bits against forgery, as HMAC truncation guidance allows |
+| 10 | **The slim row with a 16-byte MAC** (Erwin, R53) | 32-byte MAC; the prototype's text row | 140.8 B per use at 1M rows (341 before); 248 B of WAL per use (442) | 128 bits against forgery, as HMAC truncation guidance allows; since D162, 96: the first 4 of the 16 bytes are the key's public tag, which vouches for nothing |
 | 11 | **A hard deadline ≤ 3 s, held in Postgres too** (Erwin, R53, R54): refused at the lock, and rolled back at the end of the call if passed | the Worker's race alone | a use held 500 ms past its 300 ms deadline by its principal's lock wrote nothing (fence-one) | a use that waits too long fails instead of finishing late |
 | 12 | **`at` days** (Erwin, R54) | days by number (W209) | retention: DETACH 3 ms, DROP 26–52 ms at 10M (W208) | a replay must land in its day: (at, request id) is the replay's key |
 | 13 | **Admission: a per-isolate cap from the pool size**, with the login's lock 1 s / statement 2 s timeouts (Erwin, R53) | a shared counter in a Durable Object | per-isolate caps did not refuse fast across ~150 isolates (W208) | measured in T112, not here |

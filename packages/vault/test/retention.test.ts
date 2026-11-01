@@ -17,7 +17,7 @@ import { sql } from 'drizzle-orm';
 import { Checkpointer, FenceClosed } from '../src/checkpointer.ts';
 import { logObject } from '../src/inputs.ts';
 import { DAYS_AHEAD, upkeep } from '../src/log-checkpointer.ts';
-import { authentic, logMacKey, RETENTION_OBJECT, retentionCut } from '../src/log-entry.ts';
+import { authentic, logMacKey, RETENTION_OBJECT, retentionCut, type LogMacKey } from '../src/log-entry.ts';
 import { logStore, type LogStore } from '../src/log-store.ts';
 import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
@@ -29,7 +29,7 @@ let db: TestDatabase;
 let seed: Buffer;
 let signers: PairSigners;
 let verifiers: PairVerifiers;
-let macKey: Buffer;
+let macKey: LogMacKey;
 let log: ReturnType<typeof logWriter>;
 
 /**

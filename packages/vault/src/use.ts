@@ -9,7 +9,7 @@ import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
 import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
 import { noEdits, objectKey, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
-import { entryMac } from './log-entry.ts';
+import { entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { callBatch as batchPostgres, callUse as callPostgres } from './use.postgres.ts';
@@ -292,7 +292,7 @@ const SLOTS = ['e1', 'e2', 'e3', 'e4'] as const;
 export type UsePath = {
   db: Queryable;
   sealKeys: SealKeys;
-  macKey: Buffer;
+  macKey: LogMacKey;
   keks: KekRegistry;
   cache: UseCache;
   /**
@@ -540,9 +540,10 @@ function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | 
   const call: UseCall = {
     credential: input.credential, secretId: input.secretId, requestId: input.requestId, at: input.at, purpose, place: input.place,
     way: WAYS.indexOf(way), principal: input.principal ?? null,
-    // No ids, no use: a call that only reads by names writes nothing, whatever its MAC (0045, `v_right`).
+    // No ids, no use: a call that only reads by names writes nothing, whatever its MAC (0045, `v_right`). Its key's tag
+    // all the same, so that every MAC the statement takes names the key the isolate holds (D162; T168 refuses by it).
     mac: input.credential === null
-      ? Buffer.alloc(16)
+      ? Buffer.concat([path.macKey.tag, Buffer.alloc(MAC_BYTES - TAG_BYTES)])
       : entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId ?? '', purpose, place: input.place } }),
     deadline: input.deadline,
     ...(cover === undefined ? {} : { cover }),

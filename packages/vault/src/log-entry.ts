@@ -8,11 +8,15 @@ import { logObject } from './inputs.ts';
  * 0.15's entries as the trees seal them (docs/design/audit-tree.md, "A
  * leaf"): a row of `log_changes` or `log_uses` (migration 0022), every
  * column in the table's order but its number, which the leaf holds apart,
- * and its MAC, which comes last. The MAC is the vault's, over the tree and
- * every column but the number and itself (`macData`), cut to 16 bytes
- * (R53): the writer of an entry (the change path, PR 4; the use path,
- * PR 5) computes it with `entryMac`, and the checkpointer checks it with
- * `authentic` before it seals anything.
+ * and its MAC, which comes last. The MAC is the vault's, 16 bytes (R53):
+ * the tag of the key that made it, four bytes, then HMAC-SHA256 over the
+ * tree and every column but the number and itself (`macData`), cut to
+ * twelve (D162). The writer of an entry (the change path, PR 4; the use
+ * path, PR 5) computes it with `entryMac`, and the checkpointer checks it
+ * with `authentic` before it seals anything. The tag is public and names
+ * the key, so that once the vault's signing key rotates (T168), the
+ * database can refuse an entry under a key the log moved on from, and a
+ * reader knows which key to check it under.
  */
 
 /** A change as `log_changes` holds it, `object` a uuid in lower case. */
@@ -26,19 +30,29 @@ export type UseRow = {
 };
 
 export const MAC_BYTES = 16;
+/** The key's tag, the first bytes of every MAC: public, one per key. */
+export const TAG_BYTES = 4;
 
-/** The key that MACs log entries, from the vault's signing seed. */
-export function logMacKey(seed: Uint8Array): Buffer {
-  return Buffer.from(hkdfSync('sha256', seed, new Uint8Array(0), 'coffre.log.mac.v1', 32));
+/** The key that MACs log entries, and its tag: both from the vault's signing seed, each under a label of its own. */
+export type LogMacKey = { tag: Buffer; key: Buffer };
+
+export function logMacKey(seed: Uint8Array): LogMacKey {
+  return {
+    tag: Buffer.from(hkdfSync('sha256', seed, new Uint8Array(0), 'coffre.log.tag.v1', TAG_BYTES)),
+    key: Buffer.from(hkdfSync('sha256', seed, new Uint8Array(0), 'coffre.log.mac.v1', 32)),
+  };
 }
+
+/** The MAC of a tree's columns: the key's tag, then the HMAC cut to what is left of 16 bytes. */
+const mac = (key: LogMacKey, tree: LogEntry['tree'], columns: readonly LeafValue[]) =>
+  Buffer.concat([key.tag, createHmac('sha256', key.key).update(macData(tree, columns)).digest().subarray(0, MAC_BYTES - TAG_BYTES)]);
 
 const changeColumns = (r: Omit<ChangeRow, 'number' | 'mac'>): LeafValue[] => [BigInt(r.at), r.requestId, r.object, r.actor, r.payload, r.seal];
 const useColumns = (r: Omit<UseRow, 'number' | 'mac'>): LeafValue[] => [BigInt(r.at), r.requestId, r.credential, r.secret, r.purpose, r.place];
 
 /** An entry's MAC, as its writer stores it. */
-export function entryMac(key: Buffer, entry: { tree: 'changes'; row: Omit<ChangeRow, 'number' | 'mac'> } | { tree: 'uses'; row: Omit<UseRow, 'number' | 'mac'> }): Buffer {
-  const columns = entry.tree === 'changes' ? changeColumns(entry.row) : useColumns(entry.row);
-  return createHmac('sha256', key).update(macData(entry.tree, columns)).digest().subarray(0, MAC_BYTES);
+export function entryMac(key: LogMacKey, entry: { tree: 'changes'; row: Omit<ChangeRow, 'number' | 'mac'> } | { tree: 'uses'; row: Omit<UseRow, 'number' | 'mac'> }): Buffer {
+  return mac(key, entry.tree, entry.tree === 'changes' ? changeColumns(entry.row) : useColumns(entry.row));
 }
 
 /** A change's row as the trees take it: every column in the table's order, the MAC last (`log_changes`'s own order puts it there too). */
@@ -51,13 +65,12 @@ export function useEntry(r: UseRow): LogEntry {
   return { tree: 'uses', number: r.number, at: r.at, columns: [...useColumns(r), r.mac] };
 }
 
-/** Whether an entry's MAC holds under `key`: the checkpointer's `authentic`. */
-export function authentic(key: Buffer): (entry: LogEntry) => boolean {
+/** Whether an entry's MAC holds under `key`, its tag included: the checkpointer's `authentic`. */
+export function authentic(key: LogMacKey): (entry: LogEntry) => boolean {
   return (entry) => {
-    const mac = entry.columns.at(-1);
-    if (!(mac instanceof Uint8Array) || mac.length !== MAC_BYTES) return false;
-    const expected = createHmac('sha256', key).update(macData(entry.tree, entry.columns.slice(0, -1))).digest().subarray(0, MAC_BYTES);
-    return timingSafeEqual(expected, mac);
+    const stored = entry.columns.at(-1);
+    if (!(stored instanceof Uint8Array) || stored.length !== MAC_BYTES) return false;
+    return timingSafeEqual(mac(key, entry.tree, entry.columns.slice(0, -1)), stored);
   };
 }
 

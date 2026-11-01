@@ -394,7 +394,7 @@ Postgres 16 of this worker's own (2 vCPU, 2 GB), with W211's slim use row:
 | a 500 ms tick; a change waits for its seal and at most 2 s for witnesses | sealed within ~530 ms p99 (W209) | R51, R54 |
 | the window read as rows, the newest pair read with the barrier | 6.0 → 3.6 ms p50 a tick; three statements a tick | 6b, measured |
 | leaf tiles in ranges of 2^24 leaves, made ahead by the write | ~5 ranges a day at 1,000/s; a range is 512 MB | 6b |
-| the entry MAC covers the tree and every column but the number (KindInMac) | 16 B (R53) | 6b, after Seal.tla |
+| the entry MAC covers the tree and every column but the number (KindInMac) | 16 B (R53): the key's 4-byte tag, then 12 B of HMAC | 6b, after Seal.tla; the tag D162 |
 | the log's origin from the signing key; no deployment option | — | 6b |
 | witnesses are vault config, opted into, fed by the checkpointer | the plugin's capability where the pairs are signed (R40) | 6b |
 | a refusal that stands is alerted once; alarms kept where the plugin reads them | — | 6b |
@@ -456,9 +456,14 @@ functions.
 
 **The entries.** `packages/vault/src/log-entry.ts` turns a row of either
 table into its leaf: every column in the table's order but the number,
-with the MAC last. The MAC (`entryMac`) is HMAC-SHA256 under a key derived
-from the vault's signing seed, cut to 16 bytes (R53). It covers the tree
-and every column but the number and itself (`macData`, KindInMac). The
+with the MAC last. The MAC (`entryMac`) is 16 bytes (R53): the tag of the
+key that made it, four bytes, then HMAC-SHA256 under a key derived from
+the vault's signing seed, cut to twelve (D162). The tag is public, one per
+key (HKDF of the seed under a label of its own, `coffre.log.tag.v1`), and
+names the key, so that once the signing key rotates (T168) the database
+can refuse a replaced key's entries and a reader knows which key to check
+one under; it vouches for nothing by itself. The HMAC covers the tree and
+every column but the number and the MAC (`macData`, KindInMac). The
 change path (PR 4) and the use path (PR 5) compute it when they write an
 entry; the checkpointer checks it before it seals anything.
 

@@ -158,7 +158,7 @@ import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRef
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
-import { authentic, changeEntry, logMacKey, useEntry as usedEntry } from './log-entry.ts';
+import { authentic, changeEntry, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
 import { checkReads, cursorHolds, readHolds, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
@@ -288,7 +288,7 @@ export type PreparedVault = {
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
   /** The log's MAC key under each signing key, which `vouch` checks an entry with: made once a call first needs them. */
-  vouchKeys?: Buffer[];
+  vouchKeys?: LogMacKey[];
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };

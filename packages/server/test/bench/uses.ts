@@ -37,10 +37,12 @@ export type UsePhase = {
 };
 
 const load = workerData as UseLoad;
-// Each entry MACed as the checkpointer checks it, which seals nothing past one that fails (packages/vault/src/log-entry.ts).
+// Each entry MACed as the checkpointer checks it, which seals nothing past one that fails (packages/vault/src/log-entry.ts,
+// `entryMac`, which this package cannot import): the key's 4-byte tag, then 12 bytes of HMAC.
+const macTag = Buffer.from(hkdfSync('sha256', load.seed, new Uint8Array(0), 'coffre.log.tag.v1', 4));
 const macKey = Buffer.from(hkdfSync('sha256', load.seed, new Uint8Array(0), 'coffre.log.mac.v1', 32));
 const mac = (row: { at: number; requestId: bigint; credential: string; secret: string; purpose: number }) =>
-  createHmac('sha256', macKey).update(macData('uses', [BigInt(row.at), row.requestId, row.credential, row.secret, row.purpose, null])).digest().subarray(0, 16);
+  Buffer.concat([macTag, createHmac('sha256', macKey).update(macData('uses', [BigInt(row.at), row.requestId, row.credential, row.secret, row.purpose, null])).digest().subarray(0, 12)]);
 const far = await farPostgres(load.url, load.rtt);
 // Kept open, as Hyperdrive keeps its own.
 const pool = postgresClient(far.url, { max: load.pool });

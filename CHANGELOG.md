@@ -25,6 +25,11 @@
     signed where whoever writes the database cannot reach (its object's
     storage; `CHECKPOINTER_MEMORY`, a file, on Node), and every check of the
     log holds to it.
+  - Each entry's MAC names the key that made it: its first 4 bytes are
+    that key's public tag, 12 bytes of HMAC-SHA256 follow, 16 in all as
+    before (D162). The tag is what will let a rotation of the vault's
+    signing key (0.15.1, T168) refuse an entry under the key it replaced;
+    the HMAC is 96 bits.
   - A checkpointer whose database stops answering under a tick cannot hang
     anything (T169): the tick gives up within 10 s and another checkpointer
     opens; a change committed meanwhile answers 503 with Retry-After within
