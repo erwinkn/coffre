@@ -11,7 +11,7 @@ import { postgresClient } from '@coffre/db/connect';
 import { KNOWN_MIGRATIONS } from '@coffre/db/schema-version';
 
 import { cappedLimit, hyperdriveLimit, limitReason, tooFewConnections } from '../src/connections.ts';
-import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, summary, type SetupResult } from '../src/setup.ts';
+import { asJson, hyperdriveCommand, loginFor, loginUrl, scramVerifier, setupScreen, setupValues, summary, workerNames, type SetupResult } from '../src/setup.ts';
 import { templateDir } from '../src/init.ts';
 import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, SMALL_CLUSTER } from './cluster.ts';
 import { fakeOpener, fakeWrangler } from './fakes.ts';
@@ -23,15 +23,17 @@ type Run = { status: number | null; stdout: string; stderr: string };
 
 /**
  * `coffre setup` as an operator runs it, in an empty directory with no home,
- * or in a Workers deployment's, as its two wrangler.jsonc files make it: the
- * URL piped in.
+ * or in a Workers deployment's, as its two wrangler.jsonc files make it, each
+ * naming the template's Worker (`vault`, the vault's file as given): the URL
+ * piped in.
  */
-function setup(args: string[], how: { stdin?: string; workers?: boolean }): Run {
+function setup(args: string[], how: { stdin?: string; workers?: boolean; vault?: string }): Run {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-setup-'));
   const files = how.workers === true ? ['app', 'vault'] : [];
   for (const component of files) {
     mkdirSync(join(dir, component));
-    writeFileSync(join(dir, component, 'wrangler.jsonc'), '{}\n');
+    const named = `{ "name": "${component === 'app' ? 'coffre' : 'coffre-vault'}" }\n`;
+    writeFileSync(join(dir, component, 'wrangler.jsonc'), component === 'vault' ? (how.vault ?? named) : named);
   }
   try {
     const result = spawnSync(process.execPath, ['--conditions=coffre:source', main, 'setup', ...args], {
@@ -178,6 +180,42 @@ test("only the backup login new, as when a deployment set up before it reruns se
   assert.match(text, /✓ The backup database URL was shown once\.\n\s+It isn't stored anywhere\./);
   assert.match(text, /Backups\s+the backup database URL in your backup job's secrets, for coffre backup: docs\/restore\.md\./);
   assert.doesNotMatch(text, /Workers|Node/, 'the app and the vault go on as they were');
+});
+
+test("the configs the screen makes are named after the deployment's Workers: an account holds a name once", () => {
+  // A second deployment on the account, its Workers renamed in its files: the template's names are the first's.
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-names-'));
+  try {
+    cpSync(templateDir('workers'), dir, { recursive: true });
+    for (const [path, from, to] of [
+      ['app/wrangler.jsonc', '"name": "coffre"', '"name": "coffre-staging"'],
+      ['vault/wrangler.jsonc', '"name": "coffre-vault"', '"name": "coffre-staging-vault"'],
+    ] as const) {
+      const text = readFileSync(join(dir, path), 'utf8');
+      assert.ok(text.includes(from), `${path} names its Worker as the template does`);
+      writeFileSync(join(dir, path), text.replace(from, to));
+    }
+    const names = workerNames(dir);
+    assert.deepEqual(names, { app: 'coffre-staging', vault: 'coffre-staging-vault' });
+    const commands = setupScreen(made, names).guide.flatMap(({ lines }) => lines.flatMap((line) => (typeof line === 'string' ? [] : [line.command])));
+    assert.deepEqual(commands.slice(0, 3), [
+      hyperdriveCommand('create coffre-staging --caching-disabled', 6),
+      hyperdriveCommand('create coffre-staging-vault --caching-disabled', 6),
+      hyperdriveCommand('create coffre-staging-vault-hot --caching-disabled', 6),
+    ]);
+    // A file setup cannot read stops it, saying which: the template's names in its place could be another deployment's.
+    writeFileSync(join(dir, 'vault/wrangler.jsonc'), readFileSync(join(dir, 'vault/wrangler.jsonc'), 'utf8').replace(/\}\s*$/, ''));
+    assert.throws(() => workerNames(dir), /^Error: vault\/wrangler\.jsonc is not valid: /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Workers file setup cannot read stops it before it asks for anything", () => {
+  const run = setup(['--json'], { stdin: 'postgresql://admin:secret@db.example:5432/coffre\n', workers: true, vault: '{ "name": "coffre-vault"\n' });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /vault\/wrangler\.jsonc is not valid: /);
+  assert.doesNotMatch(run.stderr, /Connect|db\.example/, 'it reads no URL and connects to nothing');
 });
 
 test('where the values go: new Hyperdrive configs, or after a reset, the ones to update, never with a password in the command', () => {

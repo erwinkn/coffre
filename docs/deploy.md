@@ -214,7 +214,8 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    them. With `--yes` it waits: it never lets a package through unasked.
    Whenever the install fails, it puts `package.json`, `pnpm-workspace.yaml`
    and `pnpm-lock.yaml` back as they were, and says so.
-2. **Migrate, then deploy.** Commit and push: the
+2. **Migrate, then deploy.** A release whose notes give upgrade steps of
+   their own, as 0.15.0's do, follows those instead. Commit and push: the
    [deploy workflow](#deploys-on-every-push), or
    [Workers Builds](#workers-builds), does both. By hand, or in any other
    pipeline, in the deployment's directory:
@@ -593,7 +594,11 @@ read -rs COFFRE_DB_URL && pnpm exec wrangler hyperdrive create coffre-vault-hot 
 ```
 
 The first takes the app's database URL, the second the vault's, the third
-the vault's hot path's, which every use takes. They drop
+the vault's hot path's, which every use takes. Each config is named after
+its Worker, `<app Worker>`, `<vault Worker>` and `<vault Worker>-hot`, as
+setup's commands name them from your `wrangler.jsonc` files: an account
+holds a Hyperdrive config's name once, so a second coffre deployment on it
+has names of its own. They drop
 the URL's TLS parameters: Hyperdrive always connects over TLS, and checks
 the certificate against public CAs. The Cloudflare dashboard's Hyperdrive
 page makes the same configs, without a shell.
@@ -669,7 +674,8 @@ it cannot derive its signing key from it, and needs a third key,
 ### 4. Deploy
 
 `pnpm run deploy` builds the app with Vite, then deploys the vault and the
-app, back to back, so that an upgrade's vault and app go live seconds apart.
+app, back to back, so that an upgrade's vault and app go live as close
+together as two uploads allow: about 15 s, the app's upload, apart.
 `pnpm build` builds both without deploying them. Route the app to `PUBLIC_URL`, sign in as the
 Owner, the first time, then try the CLI:
 
