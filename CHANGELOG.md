@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.15.0 (2026-11-01)
+
 - **0.15's log is the default: every deployment keeps it.** The switch
   the entries below say they were behind is gone from the deployments:
   `vault(…)` on Workers and `localVault`/`serveVault` on Node keep 0.15's
