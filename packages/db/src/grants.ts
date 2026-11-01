@@ -307,9 +307,15 @@ export async function reportStands(db: Queryable, principal: string, check: Auth
   return report === 'unreached' || typeof report !== 'string';
 }
 
-/** The newest access entry about `principal` that `check` finds the vault's own; at or below `through`, if given. */
-export function newestAccess(db: Queryable, principal: string, check: Authenticity, through?: bigint): Promise<Newest> {
-  return newestAuthentic((limit, before) => accessEntriesAbout(db, principal, limit, before ?? (through === undefined ? undefined : through + 1n)), check);
+/**
+ * The newest access entry about `principal` that `check` finds the vault's own; at or below `through`, if given.
+ * `starts`, if given, before each page it reads, which it may refuse by throwing (a use that lost its race).
+ */
+export function newestAccess(db: Queryable, principal: string, check: Authenticity, through?: bigint, starts?: () => void): Promise<Newest> {
+  return newestAuthentic((limit, before) => {
+    starts?.();
+    return accessEntriesAbout(db, principal, limit, before ?? (through === undefined ? undefined : through + 1n));
+  }, check);
 }
 
 /** Up to `limit` of the vault's allowed access entries about `principal` before `before` (the newest when undefined), newest first. */

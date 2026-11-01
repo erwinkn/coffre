@@ -28,7 +28,7 @@ import { logStore } from '../src/log-store.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, MAC, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 /** The hot path's login, as an isolate's uses run on it. */
@@ -366,11 +366,6 @@ function held(connection: Awaited<ReturnType<TestDatabase['connect']>>, body: (t
   return { done, holding, ended: () => ended, release: () => (release(), holding) };
 }
 
-/** A time all of a test's uses share, so that they fall in one refresh period (a minute): now, or the next minute's start when it is under 10 s away. */
-function onePeriod(): number {
-  const now = Date.now();
-  return now % 60_000 > 50_000 ? now - (now % 60_000) + 60_000 : now;
-}
 
 const within = (answer: Promise<unknown>, ms = 1000) => Promise.race([answer.then(() => 'answered'), sleep(ms).then(() => 'waiting')]);
 
@@ -590,6 +585,22 @@ test("the probe's MAC check reads no further than the entry the use's statement 
   const newest = (through?: bigint) => newestAccess(db.vault, w.principal, check, through).then((entry) => (typeof entry === 'string' ? entry : entry.seq));
   assert.equal(await newest(), since.seqStart);
   assert.equal(await newest(found.seqStart), found.seqStart);
+});
+
+test("the probe's MAC check asks before each page it reads back: a use that lost its race reads no further (T177)", async () => {
+  const w = await world();
+  const grant = { actor: ROOT, action: 'access.grant', decision: 'allow' as const, subjectPrincipal: w.principal, metadata: '{}' };
+  // Two entries in the vault's name, each forged to the check: the newest alone first, then a page back, refused.
+  await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [grant, grant], undefined, undefined, [], true));
+  const check = { authentic: () => false, forged: () => {} };
+  let pages = 0;
+  const starts = () => {
+    pages += 1;
+    if (pages > 1) throw new Error('the race lost');
+  };
+  await assert.rejects(newestAccess(db.vault, w.principal, check, undefined, starts), /the race lost/);
+  assert.equal(pages, 2);
+  assert.equal(await newestAccess(db.vault, w.principal, check), 'forged', 'read back to the end otherwise');
 });
 
 test("the probe's MAC check runs within the use's admission and deadline: held up, it keeps the isolate's place, and past the deadline the use is late (review r2 of PR 9b)", async () => {
