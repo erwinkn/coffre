@@ -366,9 +366,11 @@ test('review r1: a change whose entry was deleted before its tick is refused, no
 
 test('PR 8 review r4: a change whose proof the database answers wrongly for is refused and alarmed, as one lost before its seal', async () => {
   const { store, open, alerts } = await setup();
-  const cp = await open();
-  await traffic(store, cp, 1);
+  await traffic(store, await open(), 1);
   const number = store.append('changes', 'revoke');
+  await (await open()).tick();
+  // Sealed before this checkpointer opened: proved from the database (T171).
+  const cp = await open();
   // As `locate` refuses a use changed since its tick that holds the change's number.
   store.locate = async () => {
     throw new Refused("use 9 is in none of its window's leaves: the database changed it since its tick");
@@ -789,6 +791,76 @@ test('a change answers once sealed: witnessed null without a witness, and its pr
   const p = s.proof;
   assert.ok(verifyInclusion(leafHash(p.leaf), p.index, p.size, p.proof, s.pair.changes.root));
   assert.equal(p.number, number);
+});
+
+test('T171: a change sealed by a tick is proved from the tiles that tick wrote, never read again; one sealed before the open, from the database', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 300);
+  const number = store.append('changes', 'revoke-1');
+  for (let i = 0; i < 40; i += 1) store.append('uses', `u-after-${i}`);
+  let located = 0;
+  const locate = store.locate.bind(store);
+  store.locate = async (...args) => {
+    located += 1;
+    return locate(...args);
+  };
+  const s = await cp.sealThrough(number);
+  assert.equal(located, 0, 'no read of the database for the proof');
+  assert.ok(verifyInclusion(leafHash(s.proof.leaf), s.proof.index, s.proof.size, s.proof.proof, s.pair.changes.root));
+  assert.deepEqual(s.proof, await cp.prove(number, { tree: 'changes' }), 'the proof the database gives');
+  located = 0;
+  // Every change of a window, at every place in the tree, against the pair that sealed it.
+  const many = Array.from({ length: 5 }, (_, i) => store.append('changes', `revoke-${i + 2}`));
+  await cp.tick();
+  for (const n of many) {
+    const t = await cp.sealThrough(n);
+    assert.ok(verifyInclusion(leafHash(t.proof.leaf), t.proof.index, t.proof.size, t.proof.proof, t.pair.changes.root));
+  }
+  assert.equal(located, 0);
+  const again = await (await open()).sealThrough(number);
+  assert.equal(located, 1, 'reopened, it proves from the database');
+  assert.ok(verifyInclusion(leafHash(again.proof.leaf), again.proof.index, again.proof.size, again.proof.proof, again.pair.changes.root));
+});
+
+test('T171: a change committed before the running tick\'s barrier waits for that tick alone; one after it, for the next', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 1);
+  // The running tick's barrier held until released, so that a change can commit on either side of it.
+  const close = store.close.bind(store);
+  let release!: () => void;
+  let barrierAsked!: () => void;
+  const asked = new Promise<void>((resolve) => (barrierAsked = resolve));
+  let closes = 0;
+  store.close = async (...args) => {
+    closes += 1;
+    if (closes === 1) {
+      barrierAsked();
+      await new Promise<void>((resolve) => (release = resolve));
+    }
+    return close(...args);
+  };
+  const before = store.append('changes', 'before-the-barrier');
+  const running = cp.tick();
+  await asked;
+  const sealed = cp.sealThrough(before);
+  release();
+  await running;
+  await sealed;
+  assert.equal(closes, 1, 'sealed by the tick that was running');
+  // A change committed once the running tick's barrier answered, below it: the next tick, its own, seals it.
+  let after: Promise<unknown> | null = null;
+  store.close = async (...args) => {
+    closes += 1;
+    const answer = await close(...args);
+    if (closes === 2) after = cp.sealThrough(store.append('changes', 'after-the-barrier'));
+    return answer;
+  };
+  store.append('uses', 'u-1');
+  await cp.tick();
+  await after;
+  assert.equal(closes, 3, 'one tick more, its own');
 });
 
 test('a change waits for the witness, then answers unwitnessed at the deadline, alerted; a refusal is retried within it', async () => {

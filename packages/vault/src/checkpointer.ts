@@ -436,7 +436,22 @@ type Pump = {
   waiters: { upto: bigint; done: () => void }[];
 };
 
-type Pending = { next: { pair: Pair; notes: PairNotes }; edges: Record<TreeName, Edge>; tiles: Record<TreeName, Tile[]> };
+type Pending = { next: { pair: Pair; notes: PairNotes }; edges: Record<TreeName, Edge>; tiles: Record<TreeName, Tile[]>; changes: Map<bigint, Placed> };
+
+/** A change a tick sealed, and its leaf's index in the changes tree. */
+type Placed = { entry: LogEntry; index: number };
+
+/**
+ * A pair a tick signed and wrote, kept with the changes tree's tiles that tick wrote and the changes it sealed (T171):
+ * a change's proof in it is computed from them, rather than read again from the database.
+ */
+type Signed = { head: { pair: Pair; notes: PairNotes }; tiles: Tile[]; changes: Map<bigint, Placed> };
+
+/** How many of its last pairs the checkpointer keeps to prove a change in (T171): those a change still waiting asks about. */
+const KEPT_SIGNED = 16;
+
+/** The tick running now, and the barrier it took, once known (T171). */
+type Flight = { run: Promise<Tick>; barrier: bigint | null };
 
 type Options = {
   memory: Memory;
@@ -479,6 +494,10 @@ export class Checkpointer {
    * pair for its place.
    */
   private pending: Pending | null = null;
+  /** The last pairs it wrote, newest last, each with what proves a change it sealed (T171). */
+  private signed: Signed[] = [];
+  /** The tick running now (T171): a change committed before its barrier is sealed by it, and waits for no other. */
+  private flight: Flight | null = null;
   /**
    * The floor of `at` signed into the newest pair: windows are read from it.
    * It moves only when a pair carrying a new floor is written.
@@ -671,8 +690,10 @@ export class Checkpointer {
    */
   tick(): Promise<Tick> {
     if (this.queued !== null) return this.queued;
+    const flight: Flight = { run: undefined as unknown as Promise<Tick>, barrier: null };
     const run = this.running.then(() => {
       this.queued = null;
+      this.flight = flight;
       // Bounded (T169): past it the checkpointer stalls, its fence closed, whatever the tick still awaits. Its window,
       // once the barrier has said how far, adds to the bound (`WINDOW_ENTRY_MS`).
       const t0 = performance.now();
@@ -690,6 +711,11 @@ export class Checkpointer {
         throw thrown;
       });
     });
+    flight.run = run;
+    const landed = () => {
+      if (this.flight === flight) this.flight = null;
+    };
+    void run.then(landed, landed);
     this.queued = run;
     this.running = run.catch(() => {});
     return run;
@@ -711,6 +737,7 @@ export class Checkpointer {
     this.phase = 'barrier';
     const { upto, newest, entries, floor, more = null } = await this.store.close(pair.upto, this.floor, this.options.windowMax, (upto) => {
       if (upto > pair.upto) this.until += Number(upto - pair.upto) * WINDOW_ENTRY_MS;
+      if (this.flight !== null) this.flight.barrier = upto;
     });
     const closeMs = performance.now() - t0;
     const failures: string[] = [];
@@ -778,6 +805,9 @@ export class Checkpointer {
     // The edges move on a copy, kept once the pair is written. Until then the pair is pending: a failure leaves it to
     // be finished by the next tick, and the signer at the pair the database holds meanwhile.
     const edges = { changes: this.edges.changes.clone(), uses: this.edges.uses.clone() };
+    // Each change's leaf index, as appendWindow places it: after the tree's leaves, in number order.
+    const changes = new Map<bigint, Placed>();
+    for (const e of entries) if (e.tree === 'changes') changes.set(e.number, { entry: e, index: edges.changes.size + changes.size });
     const tiles = appendWindow(edges, entries);
     const heads: Heads = { changes: { size: edges.changes.size, root: edges.changes.root() }, uses: { size: edges.uses.size, root: edges.uses.root() } };
     // The pair carries the floor this barrier left, which the signer reads from once the pair is written, and the floor
@@ -791,7 +821,7 @@ export class Checkpointer {
     const signedFloor = more === null ? floor.set : Math.max(this.floor, Math.min(floor.set, more.above ?? floor.set));
     this.phase = 'sign';
     const next = await signPair(this.signers, place, at, heads, signedFloor, pair.floor);
-    this.pending = { next, edges, tiles };
+    this.pending = { next, edges, tiles, changes };
     // Remembered outside the database before the database has it (RememberFirst): a crash between the two and a
     // rollback can then never get a second pair signed for the same place.
     this.phase = 'remember';
@@ -831,6 +861,11 @@ export class Checkpointer {
     this.head = p.next;
     this.floor = p.next.pair.floor;
     this.pending = null;
+    if (p.changes.size > 0) {
+      // The tiles the tick wrote, and its edge, which hold every node a proof of a leaf it appended reads (`edgeTiles`).
+      this.signed.push({ head: p.next, tiles: [...p.tiles.changes, ...p.edges.changes.edgeTiles()], changes: p.changes });
+      if (this.signed.length > KEPT_SIGNED) this.signed.shift();
+    }
     this.publish();
   }
 
@@ -858,17 +893,26 @@ export class Checkpointer {
         throw error;
       });
     while (this.head.pair.upto < number) {
+      // The tick running now seals it if its barrier comes after the change committed, which was before it asked: one
+      // whose barrier is not known yet, or is known to pass it (T171). Otherwise the next tick, which is the change's own.
+      const flight = this.flight;
+      const own = flight === null || (flight.barrier !== null && flight.barrier < number) ? this.tick() : null;
       const before = this.head.pair.upto;
-      const t = await bounded(this.tick(), 'its seal');
+      const t = await bounded(own ?? flight!.run, 'its seal');
+      if (this.head.pair.upto >= number || own === null) continue;
       if (this.head.pair.upto === before) throw new Error(`cannot seal ${number}: ${t.failures.join('; ') || 'the barrier has not passed it'}`);
     }
-    const head = this.head;
+    // Proved in the pair whose tick sealed it, from the tiles that tick wrote, as the signer holds them (T171): the
+    // signer's own head holds the change (Seal.tla's WaitForSeal), and the proof checks against its root. A change
+    // sealed before the checkpointer kept it is proved from the database, against the newest pair.
     // From the changes tree (KindInMac): the MAC does not cover the number, so a writer could delete the change and
     // renumber a use into its place before the tick; that use is sealed, and provable, but in the uses tree.
     // A proof the database answers wrongly for (an entry changed since its tick, `locate`'s refusal) is the same alarm.
+    const kept = this.proveKept(number);
+    const head = kept?.head ?? this.head;
     let proof: InclusionProof | null;
     try {
-      proof = await bounded(this.proveAt(number, head, { tree: 'changes' }), 'the proof of its seal');
+      proof = kept?.proof ?? await bounded(this.proveAt(number, head, { tree: 'changes' }), 'the proof of its seal');
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
       const message = `change ${number} cannot be proved in the signed changes tree: ${error.message}`;
@@ -885,6 +929,28 @@ export class Checkpointer {
     const witnessed = this.options.witnesses.length === 0 ? null : failures.length === 0;
     if (witnessed === false) this.options.alert(`change ${number} answered unwitnessed: ${failures.join('; ')}`);
     return { pair: head.pair, notes: head.notes, witnessed, failures, cosigned, proof };
+  }
+
+  /**
+   * Change `number`'s inclusion proof in a pair this checkpointer signed and wrote, from the tiles its tick wrote, and
+   * checked against that pair's root; null if it kept none holding it (T171).
+   */
+  private proveKept(number: bigint): { head: { pair: Pair; notes: PairNotes }; proof: InclusionProof } | null {
+    for (let i = this.signed.length - 1; i >= 0; i -= 1) {
+      const { head, tiles, changes } = this.signed[i]!;
+      const placed = changes.get(number);
+      if (placed === undefined) continue;
+      const { index, entry } = placed;
+      const size = head.pair.changes.size;
+      try {
+        const proof = inclusionProof(nodesFrom(tileMap(tiles)), index, size);
+        if (!verifyInclusion(entryLeaf('changes', number, entry.columns), index, size, proof, head.pair.changes.root)) return null;
+        return { head, proof: { number, tree: 'changes', index, size, leaf: leafData('changes', number, entry.columns), proof, notes: head.notes } };
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   /**
