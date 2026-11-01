@@ -456,6 +456,8 @@ EXPECTED=(
   # Values decided before an edit serve out their window (cacheSeconds, or the use's deadline), as a revoked handle's
   # do: a request may still go to the upstream an edit replaced, W at most after it (Routing.tla).
   "Routing StrictlyCurrent"
+  # Not a gap but a witness: code shadows a UI version in RoutingCode's protected runs, so NoRevival holds for a reason.
+  "RoutingCode NeverShadowed"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

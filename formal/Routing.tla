@@ -35,8 +35,12 @@
 (*                                                                         *)
 (* Code definitions: the live deployment's code may define `r` (code),     *)
 (* and then code wins: no use goes through the UI definition, which the    *)
-(* page shows locked (it was `shadowed`, a ghost: seen locked by someone,  *)
-(* or skipped by a use). A deploy flips `code` and starts new isolates.    *)
+(* page shows locked (it was `shadowed`, a ghost: the UI version newest    *)
+(* when that code went live, seen locked by someone or skipped by a use,   *)
+(* whether or not it was deleted since). A code name is taken in every     *)
+(* environment, whatever the code item's scope (proxy-ui.md, section 6),  *)
+(* so only a deploy changes whether code defines `r`, never a rename. A    *)
+(* deploy flips `code` and starts new isolates.                            *)
 (* At its first proxy request each isolate holds the log's code set to its *)
 (* own (LogCode): when they differ it writes a `proxy.code` change, which  *)
 (* deletes a UI definition its code now shadows, the whole definition in   *)
@@ -92,13 +96,14 @@ VARIABLES
     code,       \* the live deployment's code defines `r`
     logged,     \* its code set is the log's (a `proxy.code` change landed, or nothing to change)
     shadowed,   \* ghost: UI versions a deployment defining `r` showed locked
+    hidden,     \* ghost: the newest UI version when the live code began to define `r`, or 0
     cached,     \* the app's copy of the definition: the version it read, or 0
     snap,       \* without FencedRead: what the use read before the fence
     kept,       \* the value cache: the version decided, the host the app sends to, when, ghosts
     sent,       \* ghost: every request that went out with K
     edits, tampers, marks, deploys, left
 
-vars == <<now, defs, row, nature, code, logged, shadowed, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
+vars == <<now, defs, row, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
 
 Newest == Len(defs)
 
@@ -110,6 +115,7 @@ Init ==
     /\ code = FALSE
     /\ logged = TRUE
     /\ shadowed = {}
+    /\ hidden = 0
     /\ cached = 0
     /\ snap = NoSnap
     /\ kept = NoKept
@@ -126,25 +132,26 @@ Edit(h, c) ==
     /\ defs' = Append(defs, [host |-> h, clearance |-> c])
     /\ row' = Newest + 1
     /\ edits' = edits + 1
-    /\ UNCHANGED <<now, nature, code, logged, shadowed, cached, snap, kept, sent, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<now, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, tampers, marks, deploys, left>>
 
 \* K made sensitive (`coffre mark`), a change of its own.
 Mark ==
     /\ marks < MaxMarks /\ nature = "secret"
     /\ nature' = "sensitive" /\ marks' = marks + 1
-    /\ UNCHANGED <<now, defs, row, code, logged, shadowed, cached, snap, kept, sent, edits, tampers, deploys, left>>
+    /\ UNCHANGED <<now, defs, row, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, tampers, deploys, left>>
 
 \* A database writer puts back a row the vault once sealed.
 Tamper(v) ==
     /\ tampers < MaxTampers /\ v \in 1..Newest /\ v # row
     /\ row' = v /\ tampers' = tampers + 1
-    /\ UNCHANGED <<now, defs, nature, code, logged, shadowed, cached, snap, kept, sent, edits, marks, deploys, left>>
+    /\ UNCHANGED <<now, defs, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, marks, deploys, left>>
 
 \* A deployment whose code defines `r`, or no longer does. New isolates:
 \* no cache, and the code set not yet held to the log's.
 Deploy ==
     /\ deploys < MaxDeploys
     /\ code' = ~code /\ logged' = FALSE
+    /\ hidden' = IF ~code /\ defs[Newest].host # "none" THEN Newest ELSE 0
     /\ cached' = 0 /\ snap' = NoSnap /\ kept' = NoKept
     /\ deploys' = deploys + 1
     /\ UNCHANGED <<now, defs, row, nature, shadowed, sent, edits, tampers, marks, left>>
@@ -159,7 +166,7 @@ LogCode ==
          THEN /\ defs' = Append(defs, None)
               /\ row' = Newest + 1
          ELSE UNCHANGED <<defs, row>>
-    /\ UNCHANGED <<now, nature, code, shadowed, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<now, nature, code, shadowed, hidden, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
 
 \* A proxy request resolves `r`, or the page shows it: code first, the UI
 \* definition shown locked; else the app's copy of the UI definition, read
@@ -168,17 +175,17 @@ Resolve ==
     /\ left > 0 /\ (CodeGate => logged)
     /\ left' = left - 1
     /\ IF code
-         THEN /\ shadowed' = IF defs[Newest].host # "none" THEN shadowed \cup {Newest} ELSE shadowed
+         THEN /\ shadowed' = IF hidden # 0 THEN shadowed \cup {hidden} ELSE shadowed
               /\ UNCHANGED cached
          ELSE /\ cached' = row
               /\ UNCHANGED shadowed
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, snap, kept, sent, edits, tampers, marks, deploys>>
+    /\ UNCHANGED <<now, defs, row, nature, code, logged, hidden, snap, kept, sent, edits, tampers, marks, deploys>>
 
 \* Without FencedRead: the use's reads take their snapshot before the fence.
 Read ==
     /\ ~FencedRead /\ ~code /\ cached # 0 /\ snap = NoSnap
     /\ snap' = [ver |-> row, newest |-> Newest]
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, cached, kept, sent, edits, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, hidden, cached, kept, sent, edits, tampers, marks, deploys, left>>
 
 \* The vault's one call decides, on the row it read, against the newest
 \* change (in its own snapshot, or the early one without FencedRead), and
@@ -201,7 +208,7 @@ Decide ==
           /\ cached' = IF SentAsDecided THEN v ELSE cached
     /\ snap' = NoSnap
     /\ left' = left - 1
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, sent, edits, tampers, marks, deploys>>
+    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, hidden, sent, edits, tampers, marks, deploys>>
 
 \* A request goes out with the kept values: to the kept definition's
 \* upstream, or, not bound to it, wherever the app's copy says now.
@@ -214,12 +221,12 @@ Send ==
           /\ sent' = sent \cup {[host |-> h, ver |-> kept.ver, at |-> kept.at, sentAt |-> now,
                                  newest |-> kept.newest, nat |-> kept.nat, stillNewest |-> kept.ver = Newest,
                                  revived |-> kept.ver \in shadowed]}
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, cached, snap, kept, edits, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, hidden, cached, snap, kept, edits, tampers, marks, deploys, left>>
 
 Tick ==
     /\ now < MaxTime
     /\ now' = now + 1
-    /\ UNCHANGED <<defs, row, nature, code, logged, shadowed, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<defs, row, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
 
 Done == now = MaxTime /\ left = 0 /\ UNCHANGED vars
 
@@ -264,5 +271,9 @@ NoRevival == \A s \in sent : ~s.revived
 (* out their W, as a revoked handle's do.                                  *)
 (***************************************************************************)
 StrictlyCurrent == \A s \in sent : s.stillNewest
+
+\* A witness, not a gap (EXPECTED in RoutingCode): code does shadow a UI
+\* version in the protected runs, so NoRevival is not held vacuously.
+NeverShadowed == shadowed = {}
 
 =============================================================================

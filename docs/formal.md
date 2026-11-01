@@ -1985,7 +1985,13 @@ shadows).
   version the vault decided on, the newest when it decided, and cleared for
   the key's nature then.
 - `WithinWindow`: within W of that decision.
-- `NoRevival`: never under a UI version a code deployment shadowed.
+- `NoRevival`: never under a UI version a code deployment shadowed: the
+  newest UI version when that code went live, seen locked by a request,
+  deleted since or not. `NeverShadowed`, `EXPECTED` broken in
+  `RoutingCode`, is the witness that the protected runs do shadow one, so
+  `NoRevival` does not hold for want of a case. A code name is taken in
+  every environment whatever its scope, so only a deploy changes what code
+  shadows, never a rename (proxy-ui.md, section 6).
 - `StrictlyCurrent`, `EXPECTED` broken with every protection on: no request
   under a version an edit has replaced. Values decided before an edit serve
   out their W, as a revoked handle's do; the design documents that window
@@ -1994,7 +2000,7 @@ shadows).
 | Scenario | What | Distinct states |
 |---|---|---|
 | `Routing` | two edits (any host, either clearance), a key marked sensitive, a row put back, while uses resolve, decide and send | 3,528,620 |
-| `RoutingCode` | one edit, a row put back, and two deployments: code defines the name, then drops it | 660,031 |
+| `RoutingCode` | one edit, a row put back, and two deployments: code defines the name, then drops it | 815,403 |
 
 **What it does not cover.** The fence itself (HotPathOne). One isolate,
 one live deployment at a time: two app versions serving at once during a

@@ -33,9 +33,11 @@ key by whoever controls the upstream.
    editor. An editor who cannot read a value can never route it. A sensitive
    value is routed only by a definition an Owner covering the place saved
    (R66), the same people R30 already lets loosen it to a secret.
-4. **Cost.** No round trip is added to `/use`. The definition rides in the
-   vault's one call (the seal cache skips its probe), and comes back in the
-   answer only when the isolate's copy is stale.
+4. **Cost.** No round trip is added to a `/use` whose route names the same
+   keys as before. The definition rides in the vault's call as one more row
+   and one more probe, and comes back in the answer only when the isolate's
+   copy is stale. An edit that adds a key costs each isolate one extra call
+   once, the map miss any new key costs today.
 5. **Code wins.** A UI definition whose name code also defines is ignored
    and shown locked (R66). The first proxy request under a new code config
    deletes such a row, audited, so that it never comes back to life when
@@ -177,7 +179,7 @@ it, the answer once sealed):
 | Op | Who | Payload, in the entry (R53: the request, not the outcome) |
 |---|---|---|
 | `proxy.save` | a person holding `proxy.edit` on the environment | the environment, the seal the page loaded, and each item added, changed or removed, whole |
-| `proxy.code` | the deployment (actor `deployment`), section 6 | the code config's names and scopes (digest and list), and each UI item it deletes, whole |
+| `proxy.code` | the deployment (actor `deployment`), section 6 | the code config's names (digest and list), and each UI item it deletes, whole |
 
 The audit page shows a `proxy.save` as a diff: `openai: upstream
 api.openai.com → eu.api.openai.com`, with the keys each changed item sends.
@@ -233,20 +235,21 @@ values serve out the window. Question 4 offers the strict alternative.
 ### The protocol
 
 ```
-use (one call, as 0.15's named use)
+use (a named use, as 0.15's: one call on a map hit, section 4)
   app      find the handle in the request by its shape (it does not need the definition for that)
-  call     use_credential(token, place, route 'openai', seal of the isolate's copy of the env's definitions)
+  call     use_credential(token, place, route 'openai', the ids the map holds, the seal of the isolate's copy)
              fence shared
              one statement, one snapshot:
                the caller's rows, as today
-               the proxy row(s) of the environment (and a fork's parent), and the seal of their newest change
-               the route's keys, resolved by name in the definition read, and their rows
+               the proxy row(s) of the place (and a fork's parent), and the seal of their newest change
+               the route's keys as the definition read names them, held to the map's ids (else `moved`), and their rows
+             the entry: the request, the route's name included, under its MAC
            commit
   vault    seals checked (proxy object included), then decided twice:
              for the caller (purpose use, as today)
              for the definition's frozen editor (section 8)
            answers: the values, and the definition decided on (omitted when the isolate's copy has that seal)
-  app      checks the handle sat where the definition puts it, and the method and path against its allow list
+  app      checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the cache key includes its seal)
            sends, before the use's deadline, to that definition's upstream
 
@@ -278,35 +281,68 @@ any input. Here an edit is one step. One route, one key, two hosts, one
 isolate, one live deployment at a time. The frozen holdings are reduced to
 one clearance per version ("sensitive" for an Owner, "secret" otherwise).
 The matching rules of section 7 are pure functions, which property tests
-hold, not TLC.
+hold, not TLC. That a map hit's ids are held to the route's names is
+Naming.tla's `HeldToNames`, unchanged. Renames are not modelled, because
+they cannot change what code shadows (section 6).
 
 ## 4. What `/use` costs, in round trips
 
+A use through the proxy is a **named use** (`useNamed` in
+`packages/vault/src/use.ts`): the request names its token, its place and its
+keys, and the isolate keeps a map from those names to ids. On a map hit it
+is one call. On a miss, the first call reads the ids and the second makes the
+use by them, because the use's entry MAC binds the key's id, which the
+isolate cannot compute before it has read it. A named call always probes
+every input's seal, never the seal cache, so that its work is the same
+whatever the key and whatever the isolate kept (D153). A route use keeps all
+of that and adds the route's name to what the request names.
+
 | Case | Today (0.15) | With UI definitions |
 |---|---|---|
-| Steady state, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement. On a warm seal cache its probe is skipped like the others'. Its body is not sent: the isolate's copy has the seal the row has |
-| Isolate cold for that environment | 2 calls (a named use's map miss: read, then use) | **2 calls.** The first answers with the definitions, a few hundred bytes to a few KB |
-| Right after an edit | 1 call | **1 call.** The statement sees the row's seal differ from the isolate's and returns the new body in the same answer. Nothing is refused or retried |
+| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement: one more row and one more probe of its newest change, inside the same call. Its body is not sent, because the isolate's copy has the row's seal |
+| Map miss: an isolate cold for that environment, or a key it has not used | 2 calls | **2 calls.** The first resolves the route in the definition read, its keys by name, and answers with the ids and the definition (a few hundred bytes to a few KB). The second makes the use |
+| Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the row's seal differ from the copy's and returns the new body in the same answer. Nothing is refused or retried |
+| Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
 | Cache hit | 0 calls | **0 calls** |
 | A code route | as today | as today. The app names the keys, and no `proxy` row is read |
 
-**Invalidation is free in round trips.** Postgres compares the isolate's
-seal with the row's inside the use's own snapshot, under the fence. It
-cannot be wrong, because no change commits between the comparison and the
-decision. It is the same mechanism as the 0.15 seal cache, which names the
-log's newest change exactly, by number and MAC, not by "nothing newer"
-(the reseed lesson in [hot-path-one.md](hot-path-one.md), "The seal
-cache"). A kept value cache entry is invalidated by time only: the window of
-section 3.
+**What the entry records** (R53: the request, so that the replay decides
+it as live did). A route use's entry carries the route's name in a new
+nullable column, under the entry's MAC; reveals and code routes leave it
+null. Which definition it was decided on needs no column: it is the newest
+`proxy.save` or `proxy.code` change of the place's object numbered below the
+entry, as for every other input (R50: the number orders everything). So two
+routes that name the same key with different editors' holdings replay
+apart. The route's two decisions use the place the use resolved (the
+handle's environment, or the one the URL names), and the route as that
+place's object holds it, or its fork parent's, by name (question 6).
+
+**A map hit holds the ids to the definition.** The second call of a miss, and
+every hit, carries the ids the map holds. The statement checks that the
+definition it reads still names those keys for that route, and otherwise
+answers `moved`, writing nothing, and the isolate reads again. That is
+Naming.tla's `HeldToNames`, applied to the route's names. An edit between
+the two calls of a miss therefore cannot have a key used that the route no
+longer names.
+
+**Invalidation costs no round trip.** The definition's body is the only
+thing the isolate caches, and only to save bytes. Postgres compares the
+copy's seal with the row's inside the use's own snapshot, under the fence:
+no change commits between that comparison and the decision, so it cannot
+be wrong. The seals are probed on every call anyway, as above. A kept value
+cache entry is invalidated by time only: the window of section 3.
 
 **Bytes and CPU.** The definition body crosses the wire only when stale. The
 second decision (the frozen editor's) is CPU in the Worker over rows the
 statement already read: the key rows are the same, and the holdings come
-with the definition. A fork reads one more row, its parent's proxy object;
-that row is in the `whole` shape, which already reads the parent. PR C
-measures both against the 30-buffer budget and holds the statement flat as
-the log grows (`request-cost.test.ts`, R48), and the `/use` bench must show
-no regression (R44).
+with the definition. The cost the statement does add is one row and one
+probe per use, two through a fork, whose parent's object it reads too; the
+`whole` shape already reads the parent environment. The new entry column
+costs bytes on every route use: PR C measures them as PR 3 measured the
+place column (sealed-inputs.md, "A use"). PR C also measures the probes
+against the 30-buffer budget, holds the statement flat as the log grows
+(`request-cost.test.ts`, R48), and must show no regression in the `/use`
+bench (R44).
 
 ## 5. The vault makes no outbound call
 
@@ -335,6 +371,18 @@ name in code first, then in the environment's UI definitions. The page shows
 the code item once, locked, with code's values and no banner. A UI item of
 that name is neither shown nor served.
 
+**A code name is taken in every environment, whatever its scope.** Code's
+`environments` (below) decides where a code item *serves*; its name is
+reserved for UI items everywhere. With code `replica` scoped to
+`market/prod`, `market/dev` has no `replica` at all, and its tab says
+"`replica` is defined in code (market/prod only)" instead of offering the
+name. The reason is renames. If shadowing followed the scope, a UI
+`replica` in `market/dev` would be hidden by renaming dev to prod, and
+would come back, unseen since, when it was renamed back. No code change or
+deploy would be involved, so nothing would clear it. With the name taken
+everywhere, whether code shadows a UI item depends on the code config alone,
+never on what environments are called.
+
 **Which URL names what.** Today `/use/<a>/<b>/…` names an environment when
 `<a>/<b>` is one the handle was made for, and is otherwise the stable URL of
 credential `<a>`; where `<a>` names no credential, it is an environment's
@@ -352,8 +400,9 @@ item, by full path, because the config is instance-wide and a bare `prod`
 would match every project's prod. With none, a code item applies to every
 environment, as today. The path is matched against the request's environment
 by its current name. An environment renamed away from `market/prod` leaves
-that scope, and the app's startup check warns about a scope that names no
-existing environment. A `*/prod` glob can come later if someone asks.
+that scope (which only moves where the code item serves, never what a UI
+item may be called), and the app's startup check warns about a scope that
+names no existing environment. A `*/prod` glob can come later if someone asks.
 
 **Names unique across kinds** (W260's pushback 4, question 3). Routes and
 tunnels share `/use/<name>`, signers and verifiers are named in the same
@@ -368,13 +417,14 @@ hidden by code's `maps` comes back to life the day code drops `maps`, with an
 upstream nobody has looked at since. So:
 
 - Each isolate, at its first proxy request (a use, or the Proxy tab),
-  compares a digest of its code config's names and scopes with the newest
+  compares a digest of its code config's names (scopes play no part: see
+  above) with the newest
   `proxy.code` change in the log. This is one indexed read, no lock, as the
   vault does for `bulk.limit` at its start (`#limit`). Most isolates find
   it equal and go on.
 - If they differ, it writes a `proxy.code` change. In the same change, the
-  vault deletes every UI item that code now shadows, each whole in the
-  entry. The actor is the deployment.
+  vault deletes every UI item, in every environment, whose name code now
+  defines, each whole in the entry. The actor is the deployment.
 - The isolate serves no proxy request until that change has landed, or it
   found the log already equal (`CodeGate`). So a deployment that ever served
   `maps` from code has logged it, and the UI `maps` is gone before any later
@@ -392,33 +442,41 @@ upstream nobody has looked at since. So:
 
 ### The path
 
-The request's path below the route, `/use/<name>/<rest>`, is checked
-segment by segment, then matched:
+The request's path below the route, `/use/<name>/<rest>`, goes through
+today's refusals unchanged, and only then is matched:
 
-1. Split `<rest>` on `/`. Refuse a raw backslash, an empty segment other than
-   a trailing one (`//`), and a segment with a control character.
-2. Percent-decode each segment once (UTF-8; an invalid sequence is refused).
-3. Refuse any decoded segment that is `.` or `..`. A dot segment with path
-   parameters (`..;x`), which Tomcat and Spring read as `..`, is refused too.
-4. Refuse any decoded segment that still holds `/`, `\`, or a `%2e`, `%2f`
-   or `%5c` sequence: an encoded slash, or double encoding that a server
-   behind another would decode again.
-5. Match the decoded segments against the allow list. Send the path on as the
-   app encoded it, byte for byte. After steps 3 and 4, the upstream's own
-   decoding reads the same segments the match did.
+1. **Today's check, kept whole** (`aim`'s `climbs` in `credential-proxy.ts`).
+   Each raw segment is decoded as often as decoding changes it, because a
+   server behind another decodes twice. Every form along the way is refused
+   if it holds a slash, a backslash, a control byte (which a server may cut a
+   segment at: `..%00`) or an overlong UTF-8 lead byte (`%c0%ae`, a dot to an
+   old decoder), or if it is a dot segment: `.` or `..`, with trailing blanks
+   (`..%20`) and with its `;` parameters dropped, as Tomcat and Spring drop
+   them (`..;x`).
+2. **New:** an empty segment other than a trailing one (`//`) is refused,
+   since a glob counts segments.
+3. **New:** each segment is percent-decoded once (UTF-8; an invalid sequence
+   is refused), and the decoded segments are matched against the allow list.
+4. The path goes on as the app encoded it, byte for byte. After step 1, the
+   upstream's own decoding, however often it runs, reads the segments the
+   match read.
 
-| Request | Decoded | Result |
+| Request | Matched as | Result |
 |---|---|---|
-| `/companies/42/documents/a%20b.pdf` | `companies`, `42`, `documents`, `a b.pdf` | matched as such |
-| `/kyc/%2e%2e/admin` | `kyc`, `..`, `admin` | 400: a dot segment |
-| `/kyc/..%2fadmin` | `kyc`, `../admin` | 400: an encoded slash |
-| `/kyc/%252e%252e/admin` | `kyc`, `%2e%2e`, `admin` | 400: double encoding |
-| `/kyc/..;/admin` | `kyc`, `..;`, `admin` | 400: a dot segment with parameters |
-| `/companies//x` | | 400: an empty segment |
+| `/companies/42/documents/a%20b.pdf` | `companies`, `42`, `documents`, `a b.pdf` | matched |
+| `/companies/42/docu%6Dents` | `companies`, `42`, `documents` | matched as `documents`, not missed |
+| `/kyc/%2e%2e/admin` | | 400: a dot segment (today too) |
+| `/kyc/..%2fadmin` | | 400: a slash once decoded (today too) |
+| `/kyc/%25252e%25252e/admin` | | 400: a dot segment three decodings down (today too) |
+| `/kyc/..%20/admin`, `/kyc/..%00/admin` | | 400: a dot segment with a blank; a control byte (today too) |
+| `/kyc/..;/admin` | | 400: a dot segment with parameters (today too) |
+| `/companies//x` | | 400: an empty segment (new) |
 
-Today's proxy refuses the same forms but resolves nothing; it matches
-`paths` on the encoded path. Decoding matters once globs exist: `*` must see
-`a b.pdf`, and a literal `documents` must not miss `docu%6Dents`.
+What is new is only the matching: today `paths` is compared with the encoded
+path. Globs need the decoded one: `*` must see `a b.pdf`, and a literal
+`documents` must not miss `docu%6Dents`. PR B's property tests run every
+row above, and random encodings of paths outside a pattern, through the
+old check and the new matcher together.
 
 ### The allow list
 
@@ -461,14 +519,17 @@ as the earlier rules left it, and adds the headers they set to
 `SignedHeaders`. So the signature covers the request exactly as sent, and
 an earlier header cannot be swapped on the way.
 
-**Where the handle is.** The plan gives the app the handle in place of each
-non-plain key, so every slot that carries one carries the same handle. The
-proxy finds it by its shape (`coffre_use_` and 43 characters):
-`x-coffre-handle` first, else the slots. Two different handles in one request
-are a 400. After the vault answers, the app checks that the handle sat in a
-slot the decided definition names, and refuses otherwise, before anything
-is sent. As today, a handle left anywhere after filling is refused, never
-sent.
+**Where the handle is.** Two sources, as today. `x-coffre-handle`, which the
+SDK's `credential(name).fetch()` sends and which fills no slot of the rule,
+is accepted on its own, whatever the definition's slots. Without it, the
+plan gave the app the handle in place of each non-plain key, so every slot
+that carries one carries the same handle. The proxy finds it by its shape
+(`coffre_use_` and 43 characters), before the vault call, without the
+definition. After the vault answers, a handle taken from a slot must have sat
+in one the decided definition names (a form or JSON rule's field read as
+today, from the parsed body), else 400 before anything is sent. Two different
+handles in one request are a 400. As today, a handle left anywhere after
+filling is refused, never sent.
 
 ### Redaction
 
@@ -545,10 +606,20 @@ holdings now, as R15 does for tokens, is question 5.
 ### Copying from another environment
 
 "Copy from environment" fills the target's pending edits with every field
-of the source items, egress included (R66). Saving them is an ordinary save
-in the target, by the person saving, with their holdings frozen there.
-Nothing is cleared because it came from elsewhere. Question 2 is whether to
-show a note.
+of the source items, upstream and egress included (R66). Saving them is an
+ordinary save in the target, by the person saving, with their holdings
+frozen there. Nothing is cleared because it came from elsewhere.
+
+That copy can send the target's keys to the source's servers. Copy
+`schuman` from `market/dev` to `market/prod`, where dev's route says
+`upstream: https://sandbox.schuman.example, egress: 'schuman-dev'`, and save
+it unchanged: prod's `{SCHUMAN_API_KEY}` now goes to the sandbox host. The
+sandbox's certificate is valid for its own name, and the egress's host check
+passes, so nothing fails. The key reaches Schuman's sandbox, a server of the
+same provider, but not the one prod's key is for. Nobody without
+`proxy.edit` in prod can cause it, and the save is audited, so this is a
+review problem, not an access problem. Question 2 is what the review step
+shows.
 
 ## 9. Threats, in one table
 
@@ -559,11 +630,13 @@ show a note.
 | A Developer with `proxy.edit` | routes a value they cannot read, or one made sensitive later | refused at use: the frozen holdings decide (`ClearanceAtUse`) |
 | An Owner covering the place | routes a sensitive key to a host they control | allowed and audited: the same power as R30's loosening (question 1) |
 | An editor who later leaves | keeps a route to their host, and the value rotates | under question 5's option (a) it keeps sending, their holdings frozen; option (b) stops it |
+| An Owner | copies a dev route into prod and saves it unchanged | prod's key goes to dev's upstream, audited; the review step names that destination (question 2) |
 | An Owner, racing an app | edits mid-traffic | old values go to the old host for at most W, never to the new host undecided (section 3) |
 | Someone with a stale page | saves over a newer change | 409: CAS on the seal |
 | A compromised app (the `coffre` Worker) | anything | out of scope, as today: it holds the values it opens. The vault makes that loud (every decision logged), not impossible |
 | An Owner | points an upstream at `169.254.169.254` | refused at save; on Node also at connect time |
 | A code change | drops a name UI also had | the UI row was deleted when code first shadowed it, audited (`NoRevival`) |
+| Anyone with `environment.manage` | renames an environment into or out of a code item's scope | nothing a UI item may be called changes: code names are taken in every environment (section 6) |
 
 ## 10. The implementation, in four PRs
 
@@ -647,18 +720,23 @@ Owners read the value, by loosening it or through a service account, so
 (a) adds no power to anyone. (c) adds a workflow for a case that is
 already covered.
 
-**2. A copied route that keeps a named egress.** (W260's pushback 2.)
-Copying `schuman` from dev to prod keeps `egress: 'schuman-dev'`, whose
-binding reaches dev's upstream. No key leaks (dev's egress reaches dev's
-host, and TLS fails against prod's), but the 502 shows up only at the first
-request.
+**2. What a copy shows before it is saved.** (W260's pushback 2.) Copying
+keeps every field (R66), so a copied route sends the target's keys to the
+source's upstream through the source's egress until someone edits it.
+Section 8 has the example: prod's Schuman key sent to dev's sandbox host,
+with no error anywhere. W260 assumed TLS would fail; it doesn't, because the
+upstream moves with the egress.
 - (a) Keep it silently.
-- (b) Keep it, and the review step notes each copied item that names an
-  egress or an upstream host differing from the target's other items.
-- (c) Clear the egress on copy.
+- (b) Keep it, and the review step names, for each copied item, where it will
+  send which of the target's keys: "`schuman` will send market/prod's
+  SCHUMAN_API_KEY to sandbox.schuman.example (copied from market/dev)".
+  Non-blocking: saving still saves.
+- (c) Clear the upstream and egress on copy, so the copy cannot be saved
+  until someone fills them in.
 
-*Recommendation: (b).* It keeps Erwin's "copy keeps the egress" and costs a
-line of copy.
+*Recommendation: (b).* It keeps "copy keeps everything" (R66) and puts the one
+fact that matters, the destination of prod's keys, in front of the Owner
+who saves. (c) would contradict R66.
 
 **3. Names unique across kinds?** (W260's pushback 4.)
 - (a) For UI items: unique across the four kinds in the environment, and
