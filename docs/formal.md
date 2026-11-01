@@ -1552,7 +1552,10 @@ attacker step.
   stamped at its barrier's instant or after) can be deleted unseen once the
   cut is announced, until its own day goes. Once the tiles below the cut are
   gone, it is not provable either. The plan accepts this: about half
-  a tick of uses at each midnight (W209 measured 275 at 1,000/s).
+  a tick of uses at each midnight (W209 measured 275 at 1,000/s). The
+  reads listing inherits it (D161): the reads' check starts above the cut
+  too, so a straggler's `log_reads` row deleted is not seen either
+  (`docs/design/0.15-plan.md`, "Known limit: the midnight stragglers").
 - `ReplayAcrossCutSeen`: the same straggler copied above the cut, before the
   drop, and its original deleted. The copy reads as a use made once, at
   another place. It keeps its stamp, so once the signer's pair is `Fresh`

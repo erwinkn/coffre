@@ -245,7 +245,10 @@
   projection is behind, the pages and the offboarding report say how far reads are listed (`reads`); retention drops no day the projector has yet to read.
   `coffre verify log`, the audit page's whole-log check and conformance
   hold the listing to the sealed uses (`GET /api/audit/reads`), a
-  checkpoint's range a request. A run of several keys is an entry a key,
+  checkpoint's range a request, above retention's cut: a few seconds of
+  the next day's reads, sealed by each midnight's first checkpoint, sit
+  below it, so a listing row of one of those deleted from the database
+  goes unseen until its day is dropped (a known limit, D161). A run of several keys is an entry a key,
   and the app's request and operation, which the use does not keep, are
   not shown. A use is the request: one the vault refused after logging it
   (the bulk cap's) shows as a read too. `GET /api/me` names the request's

@@ -257,8 +257,11 @@ const PROBLEMS_NAMED = 20;
  * and a range that does not hold, which stops the projector there.
  * A read planted under a number, or at a time, no use of the range may
  * have, it reads no further for: every page shows that one forged, by its
- * MAC. Below retention's cut no use is left to hold a read to: the check
- * starts at the cut. Flat: a stretch reads one range however long the log.
+ * MAC. The check starts at retention's cut. Below it only the next day's
+ * stragglers are left, a few seconds of uses at each midnight, and their
+ * listing rows go unchecked until their day goes (a known limit, D161;
+ * docs/design/0.15-plan.md). Flat: a stretch reads one range however long
+ * the log.
  */
 export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, from: bigint): Promise<{ problems: string[]; through: bigint; listed: bigint; next: bigint | null }> {
   let cursor: ReadsCursor;
