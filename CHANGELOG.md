@@ -8,9 +8,8 @@
   default session when nothing named an instance: run in a deployment's
   directory, it wrote to the default instance, not the deployment's. It
   now needs the instance named: `coffre verify instance <url>` (or
-  `--url`), or run where a `coffre.json`, a pin or a Workers deployment's
-  `app/wrangler.jsonc` `PUBLIC_URL` names it, and then only with that
-  instance's own session (two that disagree are refused). Before it sends
+  `--url`), or run where a `coffre.json` or a pin (`coffre login <url>` in the
+  directory) names it, and then only with that instance's own session. Before it sends
   anything it prints the instance, why it is the one, and who is signed
   in, and asks `y/N` on a terminal; without a terminal it refuses unless
   `--yes` is given. A run with a bearer token (`--canary`) writes no probe

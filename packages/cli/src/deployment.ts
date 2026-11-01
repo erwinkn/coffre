@@ -2,12 +2,11 @@
 // kind the directory holds, and on Workers, each Worker's wrangler.jsonc,
 // read and edited in place, its comments kept.
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import { applyEdits, type JSONPath, modify, parse, type ParseError, printParseErrorCode } from 'jsonc-parser';
 
-import { instanceOrigin } from './instance.ts';
 import { isEmpty, type Kind } from './init.ts';
 
 /** What a directory holds: a deployment of either kind, nothing yet (`isEmpty`), or something else. */
@@ -446,57 +445,4 @@ export function editWorker(dir: string, path: string, changes: readonly Change[]
   });
   writeFileSync(join(dir, path), text);
   return changed;
-}
-
-/** The instance a Workers deployment's own config names: its app Worker's PUBLIC_URL, and the file it is in. */
-export type Deployment = { origin: string; file: string };
-
-/** Whether `path` is a file there: false only when it is not there, any other failure thrown, never read as absence. */
-function present(path: string): boolean {
-  try {
-    statSync(path);
-    return true;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
-    throw error;
-  }
-}
-
-/** The address the examples ship for the operator's own: `https://secrets.example.com`, the reserved example.com, or a `replace-with-…`. */
-function templateAddress(value: string): boolean {
-  if (value === '' || value.startsWith('replace-with-')) return true;
-  try {
-    const host = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`).hostname;
-    return host === 'example.com' || host.endsWith('.example.com');
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The deployment the command runs in, or below, `directory` a real path: walking up to the nearest directory that
- * holds both Workers' wrangler.jsonc, the one its app names as PUBLIC_URL. Null when there is none, or its app names
- * no address, or the template's. A config that cannot be read, parsed or used (a PUBLIC_URL that is no string, or no
- * address; a directory that cannot be searched) is an error, never a reason to go on with another instance's name
- * (a `coffre.json`'s, say).
- */
-export function deploymentFor(directory: string): Deployment | null {
-  for (let at = directory; ; at = dirname(at)) {
-    const file = join(at, 'app', 'wrangler.jsonc');
-    try {
-      if (present(file) && present(join(at, 'vault', 'wrangler.jsonc'))) {
-        const errors: ParseError[] = [];
-        const config = parse(readFileSync(file, 'utf8'), errors, { allowTrailingComma: true }) as { vars?: { PUBLIC_URL?: unknown } } | undefined;
-        if (errors.length > 0) throw new Error(`it is not valid: ${printParseErrorCode(errors[0]!.error)} at offset ${errors[0]!.offset}`);
-        const url = typeof config === 'object' && config !== null ? config.vars?.PUBLIC_URL : undefined;
-        if (url === undefined) return null;
-        if (typeof url !== 'string') throw new Error('its PUBLIC_URL is not a string');
-        return templateAddress(url) ? null : { origin: instanceOrigin(url), file };
-      }
-    } catch (error) {
-      throw new Error(`cannot use ${file}: ${(error as Error).message}`);
-    }
-    if (dirname(at) === at) return null;
-  }
 }

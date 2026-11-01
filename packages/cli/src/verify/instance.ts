@@ -17,7 +17,6 @@ import { parseArgs } from 'node:util';
 import { CoffreError, createClient, shownMember, type CoffreClient } from '@coffre/client';
 
 import { readSecret } from '../secret.ts';
-import type { Deployment } from '../deployment.ts';
 import { askedMode, credentialHeaders, instanceOrigin, REPO_FILE, resolveTarget, SIGN_IN_HINT, signInError, type Local, type SessionFlags, type Store } from '../instance.ts';
 import { Cancelled, openTerminal, release, style, yes, type Output } from '../tty.ts';
 import { anonymousChecks } from './anonymous.ts';
@@ -39,9 +38,8 @@ export const INSTANCE_USAGE = `usage:
 
 Checks the instance <url> names from outside. It never takes the default
 session's instance for the one you mean: without <url> (or --url), it runs only
-where a \`coffre.json\`, a pin (\`coffre login\` in the directory) or a Workers
-deployment's app/wrangler.jsonc (its PUBLIC_URL) names the instance, and then
-only with that instance's own session.
+where a \`coffre.json\` or a pin (\`coffre login <url>\` in the directory makes
+one) names the instance, and then only with that instance's own session.
 
   as no one        health, headers, every route refusing no one, changes from
                    another site refused, /api/auth, nothing like a value shown
@@ -71,31 +69,23 @@ and writes its canary and its grants. Exits 1 when a check fails.`;
 type Issued = { member: string; id: string };
 
 /**
- * The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, a pin, a
- * deployment's wrangler.jsonc). Never the default session's: the run writes, so it is told where, or it stops.
+ * The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, or a pin,
+ * which `coffre login <url>` in a directory makes). Never the default session's: the run writes, so it is told where, or it stops.
  */
-export function namedInstance(positional: string | undefined, session: SessionFlags, local: () => Local | null, deployment: () => Deployment | null, current: string | null): { requested: string; why: string } {
+export function namedInstance(positional: string | undefined, session: SessionFlags, local: () => Local | null, current: string | null): { requested: string; why: string } {
   const explicit = positional ?? session.url;
   if (explicit !== undefined) return { requested: explicit, why: 'named on the command line' };
   // What names it where the command runs is read only now: a broken file there is no matter to one that names its instance.
   const here = local();
-  const built = deployment();
-  const found: { requested: string; why: string }[] = [];
-  if (here !== null) found.push({ requested: here.origin, why: here.by === 'pin' ? `this directory is pinned at ${here.directory}` : `${join(here.directory, REPO_FILE)} names it` });
-  if (built !== null) found.push({ requested: built.origin, why: `${built.file} names it, as PUBLIC_URL` });
-  const [first, second] = found;
-  if (first === undefined) {
+  if (here === null) {
     const unasked = current === null ? '' : ` The default session, ${current}, is not used unasked.`;
     stop(
       2,
       'coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks, and walks its whole audit log, ' +
-        `so it never picks one for you: name it, \`coffre verify instance <url>\`, or run it where a ${REPO_FILE}, a pin or a Workers deployment's PUBLIC_URL names it.${unasked}`,
+        `so it never picks one for you: name it, \`coffre verify instance <url>\`, or run it where a ${REPO_FILE} or a pin (\`coffre login <url>\` here) names it.${unasked}`,
     );
   }
-  if (second !== undefined && instanceOrigin(first.requested) !== instanceOrigin(second.requested)) {
-    stop(2, `coffre: ${first.why} (${first.requested}), but ${second.why} (${second.requested}): name the one you mean, \`coffre verify instance <url>\``);
-  }
-  return first;
+  return { requested: here.origin, why: here.by === 'pin' ? `this directory is pinned at ${here.directory}` : `${join(here.directory, REPO_FILE)} names it` };
 }
 
 export async function verifyInstance(
@@ -103,7 +93,6 @@ export async function verifyInstance(
   store: Store,
   session: SessionFlags,
   local: () => Local | null,
-  deployment: () => Deployment | null = () => null,
   out: Output = process.stdout,
 ): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -124,7 +113,7 @@ export async function verifyInstance(
         '--service is for other commands',
     );
   }
-  const { requested, why } = namedInstance(positionals[0], session, local, deployment, store.current);
+  const { requested, why } = namedInstance(positionals[0], session, local, store.current);
   let origin: string;
   try {
     origin = instanceOrigin(requested);

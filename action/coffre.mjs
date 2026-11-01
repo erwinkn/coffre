@@ -16116,9 +16116,8 @@ const INSTANCE_USAGE = `usage:
 
 Checks the instance <url> names from outside. It never takes the default
 session's instance for the one you mean: without <url> (or --url), it runs only
-where a \`coffre.json\`, a pin (\`coffre login\` in the directory) or a Workers
-deployment's app/wrangler.jsonc (its PUBLIC_URL) names the instance, and then
-only with that instance's own session.
+where a \`coffre.json\` or a pin (\`coffre login <url>\` in the directory makes
+one) names the instance, and then only with that instance's own session.
 
   as no one        health, headers, every route refusing no one, changes from
                    another site refused, /api/auth, nothing like a value shown
@@ -16144,35 +16143,26 @@ append-only, so they stay: the canary's read, and the reads it was refused.
 A run as an owner leaves its project, environment and service for the next,
 and writes its canary and its grants. Exits 1 when a check fails.`;
 /**
-* The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, a pin, a
-* deployment's wrangler.jsonc). Never the default session's: the run writes, so it is told where, or it stops.
+* The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, or a pin,
+* which `coffre login <url>` in a directory makes). Never the default session's: the run writes, so it is told where, or it stops.
 */
-function namedInstance(positional, session, local, deployment, current) {
+function namedInstance(positional, session, local, current) {
 	const explicit = positional ?? session.url;
 	if (explicit !== void 0) return {
 		requested: explicit,
 		why: "named on the command line"
 	};
 	const here = local();
-	const built = deployment();
-	const found = [];
-	if (here !== null) found.push({
+	if (here === null) {
+		const unasked = current === null ? "" : ` The default session, ${current}, is not used unasked.`;
+		stop(2, `coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks, and walks its whole audit log, so it never picks one for you: name it, \`coffre verify instance <url>\`, or run it where a ${REPO_FILE} or a pin (\`coffre login <url>\` here) names it.${unasked}`);
+	}
+	return {
 		requested: here.origin,
 		why: here.by === "pin" ? `this directory is pinned at ${here.directory}` : `${join(here.directory, REPO_FILE)} names it`
-	});
-	if (built !== null) found.push({
-		requested: built.origin,
-		why: `${built.file} names it, as PUBLIC_URL`
-	});
-	const [first, second] = found;
-	if (first === void 0) {
-		const unasked = current === null ? "" : ` The default session, ${current}, is not used unasked.`;
-		stop(2, `coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks, and walks its whole audit log, so it never picks one for you: name it, \`coffre verify instance <url>\`, or run it where a ${REPO_FILE}, a pin or a Workers deployment's PUBLIC_URL names it.${unasked}`);
-	}
-	if (second !== void 0 && instanceOrigin(first.requested) !== instanceOrigin(second.requested)) stop(2, `coffre: ${first.why} (${first.requested}), but ${second.why} (${second.requested}): name the one you mean, \`coffre verify instance <url>\``);
-	return first;
+	};
 }
-async function verifyInstance(args, store, session, local, deployment = () => null, out = process.stdout) {
+async function verifyInstance(args, store, session, local, out = process.stdout) {
 	const { values, positionals } = parseArgs({
 		args,
 		allowPositionals: true,
@@ -16192,7 +16182,7 @@ async function verifyInstance(args, store, session, local, deployment = () => nu
 	if (positionals.length > 1) stop(2, INSTANCE_USAGE);
 	if (positionals[0] !== void 0 && session.url !== void 0) stop(2, "coffre: name the instance once: coffre verify instance <url>, or coffre --url <url> verify instance");
 	if (session.service !== void 0) stop(2, "coffre: verify instance checks as no one, then with a bearer token `coffre login --token` saved, or as you with the session `coffre login` saved: --service is for other commands");
-	const { requested, why } = namedInstance(positionals[0], session, local, deployment, store.current);
+	const { requested, why } = namedInstance(positionals[0], session, local, store.current);
 	let origin;
 	try {
 		origin = instanceOrigin(requested);
@@ -16862,14 +16852,6 @@ function realHome() {
 function localHere() {
 	if (sessionFlags.url !== void 0) return null;
 	return attempt(() => localFor(readPins(), here("Name the instance with --url"), realHome(), readRepoFile));
-}
-/**
-* The Workers deployment the command runs in, and the instance its config names, as a call that reads it only when asked:
-* not with --url, nor when the command names its instance. Its own chunk, as setup's: the JSONC parser loads only for it.
-*/
-async function deploymentHere() {
-	const { deploymentFor } = await import("./deployment.ts");
-	return () => sessionFlags.url !== void 0 ? null : attempt(() => deploymentFor(here("Name the instance with --url")));
 }
 /** A `coffre.json`'s text, or null if there is none: one that is a link or no file is refused, not passed over. */
 function readRepoFile(path) {
@@ -18571,7 +18553,7 @@ async function verify(args) {
 	}
 	const check = named ?? await pickCheck();
 	switch (check) {
-		case "instance": return verifyInstance(more, readStore(), sessionFlags, localHere, await deploymentHere());
+		case "instance": return verifyInstance(more, readStore(), sessionFlags, localHere);
 		case "keys": {
 			const to = target();
 			return verifyKeys(more, client(to), to.origin);

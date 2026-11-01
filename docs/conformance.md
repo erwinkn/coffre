@@ -205,10 +205,10 @@ skipped, and the run ends with the processes' output.
 
 `coffre verify instance` checks an instance someone runs, from the outside:
 the one its argument names. It never takes your default session's instance
-for the one you mean: without a URL it runs only where a `coffre.json`, a
-pin (`coffre login` in the directory) or a Workers deployment's
-`app/wrangler.jsonc` (`PUBLIC_URL`) names the instance, and then only with
-that instance's own session; two that disagree are refused. As no one, it
+for the one you mean: without a URL it runs only where a `coffre.json` or a pin
+(`coffre login <url>` in the directory makes one) names the instance, and
+then only with that instance's own session. A deployment's directory names
+nothing by itself: `coffre login <its url>` there, or pass the URL. As no one, it
 writes nothing. With a token, as in CI, it writes nothing either, with one
 exception: each run adds a few entries to the instance's audit log, which is
 append-only, so they stay for good. It says so when it starts. They are the

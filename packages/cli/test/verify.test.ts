@@ -241,13 +241,13 @@ function homeWithSessions(t: test.TestContext, origins: string[]): { home: strin
   return { home, store };
 }
 
-/** A Workers deployment's directory, whose app names `url` as PUBLIC_URL; a `coffre.json` too when `file` is given. */
+/** A deployment's directory as a clone has it: its Workers' configs name an address of their own, and a `coffre.json` names `file`, when given. */
 function deployment(t: test.TestContext, url: string, file?: string): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'coffre-deployment-')));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const worker of ['app', 'vault']) {
-    mkdirSync(join(dir, worker, 'src'), { recursive: true });
-    writeFileSync(join(dir, worker, 'wrangler.jsonc'), `{ // the deployment's own\n  "name": "${worker}", "vars": { "PUBLIC_URL": ${JSON.stringify(url)} }\n}\n`);
+    mkdirSync(join(dir, worker), { recursive: true });
+    writeFileSync(join(dir, worker, 'wrangler.jsonc'), `{ "name": "${worker}", "vars": { "PUBLIC_URL": ${JSON.stringify(url)} } }\n`);
   }
   if (file !== undefined) writeFileSync(join(dir, 'coffre.json'), JSON.stringify({ url: file }));
   return dir;
@@ -255,27 +255,65 @@ function deployment(t: test.TestContext, url: string, file?: string): string {
 
 const OWNER = { principal: { type: 'user', id: 'root@acme.example' }, registered: true, tampered: false, instanceRole: 'member', runsInstance: false, canReadAudit: true, environments: [] };
 
-test("coffre verify instance in a deployment's directory never takes the default session's instance for the deployment's own", async (t) => {
+test("coffre verify instance in a deployment's directory never takes the default session's instance, however the deployment's own config reads", async (t) => {
   const other = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
-  // The default session is for `other`; the deployment names another instance, that this home has no session for.
+  // The default session is for `other`; the directory is a deployment of another instance, and nothing there names it to coffre.
   const { home, store } = signedInHome(t, other.origin);
   const before = store();
   const dir = deployment(t, 'https://coffre.deployed.test');
-  for (const args of [['verify', 'instance'], ['verify', 'instance', '--yes'], ['verify', 'instance']]) {
+  for (const args of [['verify', 'instance'], ['verify', 'instance', '--yes'], ['--auth-mode', 'signin', 'verify', 'instance', '--yes']]) {
     const run = await coffre(args, home, '', {}, dir);
-    assert.equal(run.code, 1);
+    assert.equal(run.code, 2);
     assert.equal(run.stdout, '');
-    assert.match(run.stderr, /^coffre: not signed in: run `coffre login https:\/\/coffre\.deployed\.test` first \(.*app\/wrangler\.jsonc names it, as PUBLIC_URL\)/);
+    assert.match(run.stderr, /^coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks/);
+    assert.ok(run.stderr.includes(`The default session, ${other.origin}, is not used unasked.`), run.stderr);
     assert.equal(other.seen.length, 0, 'a request went to the default instance');
   }
-  // A token login that fails just before it does not change that: no fallback to the saved session.
+  // A token login that fails just before it changes nothing: still no fallback to the saved session.
   const failed = await coffre(['login', other.origin, '--token'], home, 'coffre_pat_wrong\n', {}, dir);
   assert.notEqual(failed.code, 0);
   other.seen.length = 0;
   const after = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
-  assert.equal(after.code, 1);
+  assert.equal(after.code, 2);
   assert.equal(other.seen.length, 0);
   assert.equal(store(), before);
+});
+
+test("a directory's coffre.json names the instance, which needs a session of its own: the default one is never taken in its place", async (t) => {
+  const other = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home } = signedInHome(t, other.origin);
+  const dir = deployment(t, other.origin, 'https://coffre.named.test');
+  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+  assert.equal(run.code, 1);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^coffre: not signed in: run `coffre login https:\/\/coffre\.named\.test` first \(.*coffre\.json names it\)/);
+  assert.equal(other.seen.length, 0);
+});
+
+test("a directory's coffre.json, with the session of the instance it names, is the target, once confirmed with --yes", async (t) => {
+  const named = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const other = await fakeInstance(t, () => undefined);
+  const { home } = homeWithSessions(t, [other.origin, named.origin]);
+  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, deployment(t, 'https://coffre.deployed.test', named.origin));
+  assert.match(run.stdout, new RegExp(`^Writes to ${named.origin.replace(/[.]/g, '\\.')} \\(.*coffre\\.json names it\\)\nSigned in as root@acme\\.example`));
+  assert.match(run.stdout, /--yes: going on\./);
+  assert.ok(named.seen.length > 0);
+  assert.equal(other.seen.length, 0, 'a request went to the default instance');
+});
+
+test("naming the instance on the command line, in either spelling, is no matter to a coffre.json that cannot be used", async (t) => {
+  const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home } = signedInHome(t, instance.origin);
+  const dir = deployment(t, 'https://coffre.deployed.test');
+  writeFileSync(join(dir, 'coffre.json'), '{ not json');
+  const unnamed = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+  assert.equal(unnamed.code, 1);
+  assert.match(unnamed.stderr, /^coffre: cannot use .*coffre\.json: it is not JSON/);
+  assert.equal(instance.seen.length, 0);
+  for (const args of [['verify', 'instance', instance.origin, '--yes'], ['--url', instance.origin, 'verify', 'instance', '--yes']]) {
+    const run = await coffre(args, home, '', {}, dir);
+    assert.match(run.stdout, /--yes: going on\./, run.stderr);
+  }
 });
 
 test('coffre verify instance with nothing naming an instance refuses, however many sessions are saved, and sends nothing', async (t) => {
@@ -293,82 +331,6 @@ test('coffre verify instance with nothing naming an instance refuses, however ma
   }
   assert.equal(instance.seen.length, 0);
   assert.equal(store(), before);
-});
-
-test("a deployment's PUBLIC_URL and a coffre.json that disagree are refused, not picked between", async (t) => {
-  const instance = await fakeInstance(t, () => undefined);
-  const { home } = signedInHome(t, instance.origin);
-  const dir = deployment(t, instance.origin, 'https://coffre.elsewhere.test');
-  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
-  assert.equal(run.code, 2);
-  assert.match(run.stderr, /names it \(https:\/\/coffre\.elsewhere\.test\), but .*app\/wrangler\.jsonc names it, as PUBLIC_URL \(http:\/\/127\.0\.0\.1:\d+\): name the one you mean/);
-  assert.equal(instance.seen.length, 0);
-});
-
-test("a deployment's config that cannot be read or used is an error, not a reason to go on with a coffre.json's instance", async (t) => {
-  const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
-  const { home } = signedInHome(t, instance.origin);
-  const dir = deployment(t, 'https://coffre.deployed.test', instance.origin);
-  const file = join(dir, 'app', 'wrangler.jsonc');
-  const broken = [
-    '{ "name": "app", "vars": { "PUBLIC_URL": ',
-    '{ "name": "app", "vars": { "PUBLIC_URL": "https://coffre.deployed.test/path" } }',
-    '{ "name": "app", "vars": { "PUBLIC_URL": 123 } }',
-  ];
-  for (const text of broken) {
-    writeFileSync(file, text);
-    const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
-    assert.equal(run.code, 1, text);
-    assert.equal(run.stdout, '');
-    assert.ok(run.stderr.startsWith(`coffre: cannot use ${file}: `), run.stderr);
-    assert.equal(instance.seen.length, 0);
-  }
-  // Naming the instance on the command line, in either spelling, is no matter to a config it need not read.
-  for (const args of [['verify', 'instance', instance.origin, '--yes'], ['--url', instance.origin, 'verify', 'instance', '--yes']]) {
-    const run = await coffre(args, home, '', {}, dir);
-    assert.match(run.stdout, /--yes: going on\./, run.stderr);
-  }
-  // A directory that cannot be searched hides a config as much as a file that cannot be read does.
-  if (process.getuid?.() !== 0) {
-    writeFileSync(file, '{}');
-    chmodSync(join(dir, 'app'), 0);
-    instance.seen.length = 0;
-    let run;
-    try {
-      run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
-    } finally {
-      chmodSync(join(dir, 'app'), 0o755);
-    }
-    assert.equal(run.code, 1);
-    assert.match(run.stderr, /^coffre: cannot use .*app\/wrangler\.jsonc: EACCES/);
-    assert.equal(instance.seen.length, 0);
-  }
-});
-
-test("only the template's address is no address: a PUBLIC_URL that merely contains example.com names its instance", async (t) => {
-  const instance = await fakeInstance(t, () => undefined);
-  const { home } = signedInHome(t, instance.origin);
-  // A different instance than coffre.json's: refused as a conflict, not passed over for the file's.
-  const dir = deployment(t, 'https://coffre.counterexample.com', instance.origin);
-  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
-  assert.equal(run.code, 2);
-  assert.match(run.stderr, /counterexample\.com\): name the one you mean|names it, as PUBLIC_URL \(https:\/\/coffre\.counterexample\.com\)/);
-  // The template's own address names nothing.
-  const template = deployment(t, 'https://secrets.example.com', instance.origin);
-  const fallback = await coffre(['verify', 'instance', '--yes'], home, '', {}, template);
-  assert.match(fallback.stdout, /--yes: going on\./, fallback.stderr);
-  assert.equal(instance.seen.every(({ url }) => !url.includes('example.com')), true);
-});
-
-test("coffre verify instance in a deployment's directory goes to the deployment's instance, with its session, once confirmed with --yes", async (t) => {
-  const deployed = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
-  const other = await fakeInstance(t, () => undefined);
-  const { home } = homeWithSessions(t, [other.origin, deployed.origin]);
-  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, deployment(t, deployed.origin));
-  assert.match(run.stdout, new RegExp(`^Writes to ${deployed.origin.replace(/[.]/g, '\\.')} \\(.*app/wrangler\\.jsonc names it, as PUBLIC_URL\\)\nSigned in as root@acme\\.example`));
-  assert.match(run.stdout, /--yes: going on\./);
-  assert.ok(deployed.seen.length > 0);
-  assert.equal(other.seen.length, 0, 'a request went to the default instance');
 });
 
 test('coffre verify instance <url> without a terminal or --yes says who and where, then refuses, having sent nothing', async (t) => {
