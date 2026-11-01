@@ -40,6 +40,7 @@ import { after as later, applyChanges, CLEAN_BREAK, type Move, pageMove, shownCh
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
+import { hotUnbound } from './workers.ts';
 
 const PACKAGE = '@coffre/cli';
 
@@ -162,6 +163,24 @@ export function migrationsAdded(from: string, to: string, before: readonly strin
     `(${listed(added, 'and')}): run \`pnpm exec coffre migrate\` here first, then deploy.`
   );
 }
+
+/** The release whose vault first needs the hot path's login and Hyperdrive config. */
+const HOT_PATH = '0.15.0';
+
+/**
+ * Whether a Workers deployment, as it is pinned now, needs the hot path's
+ * login and Hyperdrive config, and its vault binds none yet: setup makes
+ * both, and migrates too, before the deploy.
+ */
+export function hotless(dir: string): boolean {
+  const pinned = Object.values(coffrePins(dir));
+  return pinned.length > 0 && pinned.every((version) => !later(HOT_PATH, version)) && hotUnbound(dir);
+}
+
+/** What a deployment `hotless` says of does before its deploy. */
+export const HOTLESS =
+  "Its vault binds no hot path's Hyperdrive config yet (HOT_HYPERDRIVE): before you deploy, run `pnpm exec coffre setup` here, as the database's administrator, " +
+  'and choose Hyperdrive only. It makes the hot path\'s login and its config, binds it in vault/wrangler.jsonc, and migrates; then deploy, as the release notes say.';
 
 /**
  * What updates a global CLI to `version`. A moved npm prefix is named: npm's own
@@ -667,7 +686,9 @@ export async function update(args: string[]): Promise<void> {
   }
 
   out.write('\n');
-  if (after !== null) {
+  if (deployment !== null && kind === 'workers' && hotless(deployment)) {
+    out.write(`  ${HOTLESS}\n\n`);
+  } else if (after !== null) {
     out.write(`  ${migrationsAdded(from, latest, before, after)}\n`);
     if (deployment !== null) {
       const deploy =

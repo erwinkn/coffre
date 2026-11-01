@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   bumpPins,
   coffrePins,
+  editWorker,
   excludeUntil,
   generateRouteTree,
   heldBack,
@@ -28,7 +29,7 @@ import { templateDir, templateFiles } from '../src/init.ts';
 import { applyChanges, CLEAN_BREAK, pageMove, ROUTE_FILES } from '../src/layout.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
-import { deploymentMigrations, globalCli, installOf, migrationsAdded, movedLines, notUpdated, npmPrefixOf, parsePlan, updateCommand, type Plan } from '../src/update.ts';
+import { deploymentMigrations, globalCli, HOTLESS, hotless, installOf, migrationsAdded, movedLines, notUpdated, npmPrefixOf, parsePlan, updateCommand, type Plan } from '../src/update.ts';
 import { cliVersion } from '../src/version.ts';
 
 const examples = fileURLToPath(new URL('../../../examples/', import.meta.url));
@@ -176,6 +177,28 @@ test('update ends with what the release asks of the database', () => {
     migrationsAdded('0.4.0', '0.4.1', ['0000_baseline'], ['0000_baseline']),
     "coffre 0.4.1 adds no migration to 0.4.0's: just deploy it.",
   );
+});
+
+test("a Workers deployment on the hot path's release whose vault binds no hot config is told to run setup, Hyperdrive only, which migrates too", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-update-hot-'));
+  try {
+    cpSync(templateDir('workers'), dir, { recursive: true, filter: (path) => !path.includes('node_modules') });
+    // The template's placeholder id, as a vault copied from it has.
+    assert.equal(hotless(dir), true);
+    // Bound, it has its config.
+    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 1, 'id'], value: 'hd-hot' }]);
+    assert.equal(hotless(dir), false);
+    // No binding at all, as a file a release before the hot path wrote; still pinned to such a release, it needs none yet.
+    editWorker(dir, 'vault/wrangler.jsonc', [{ path: ['hyperdrive'], value: [{ binding: 'VAULT_HYPERDRIVE', id: 'hd-vault' }] }]);
+    assert.equal(hotless(dir), true);
+    bumpPins(dir, '0.14.5');
+    assert.equal(hotless(dir), false);
+    bumpPins(dir, '0.16.0');
+    assert.equal(hotless(dir), true);
+    assert.match(HOTLESS, /run `pnpm exec coffre setup` here, as the database's administrator, and choose Hyperdrive only\. It makes the hot path's login and its config, binds it in vault\/wrangler\.jsonc, and migrates/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a deployment's migrations are its installed server's, through that server's @coffre/db", () => {

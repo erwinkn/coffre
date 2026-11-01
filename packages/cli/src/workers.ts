@@ -16,10 +16,17 @@
 // every push to main (deploy-on-push.ts): a Cloudflare token for the deploys,
 // and the repository's secrets, which .github/workflows/deploy.yml reads.
 //
+// For an upgrade of a deployment that runs, setup does Hyperdrive alone:
+// it makes, updates or keeps the three configs, binds them, and deploys
+// nothing, which the upgrade does once its code is ready.
+//
 // An account may hold other deployments of coffre. A Worker or a Hyperdrive
 // config is this deployment's only when this directory says so, and setup
 // never touches another's: when one already has this deployment's names,
 // it asks for new ones.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   type Account,
   type Binding,
@@ -47,6 +54,8 @@ import { hiddenLine, type Keyboard, listed, type Output, paragraph, row, select,
 
 export type Component = 'app' | 'vault';
 const COMPONENTS = ['app', 'vault'] as const;
+/** Each Worker's key, a secret of its own. */
+const KEYS = { app: 'APP_KEY', vault: 'VAULT_KEY' } as const satisfies Record<Component, string>;
 
 /**
  * The Hyperdrive configs, one per runtime login: the app's, the vault's,
@@ -74,6 +83,19 @@ function bindingOf(config: Config, worker: WorkerConfig): string {
   const { binding } = BOUND[config];
   if (binding in worker.hyperdrive || config === 'hot') return binding;
   return Object.keys(worker.hyperdrive).find((name) => name !== BOUND.hot.binding) ?? binding;
+}
+
+/**
+ * Whether a Workers deployment's vault binds no hot path's config yet, as
+ * one a release before 0.15 wrote, or the template's placeholder: setup's
+ * Hyperdrive alone makes it and binds it. False for a file it cannot read.
+ */
+export function hotUnbound(dir: string): boolean {
+  try {
+    return placeholder(readWorker(dir, 'vault/wrangler.jsonc').hyperdrive[BOUND.hot.binding]);
+  } catch {
+    return false;
+  }
 }
 
 /** A config's name, from its Worker's. */
@@ -247,7 +269,10 @@ async function othersUnder(
  * exists gets one, when it is also the login of another deployment's
  * Hyperdrive config, on the same server: a login is the server's, not a
  * database's, and that deployment would be cut off. On PlanetScale, a
- * login names its branch, and never is.
+ * login names its branch, and never is. A config made by hand under
+ * another name, which this directory does not record, is such a config:
+ * setup cannot tell it from another deployment's, and stops, saying how
+ * to record it.
  */
 export function newPasswords(configs: readonly HyperdriveConfig[], workers: Record<Component, WorkerConfig>, database: Database, all: boolean): Record<Config, boolean> {
   const { administrator } = database;
@@ -263,10 +288,13 @@ export function newPasswords(configs: readonly HyperdriveConfig[], workers: Reco
     if (!resets[config] || !exists) continue;
     const other = configs.find((each) => !ours.has(each) && sameServer(each.origin, administrator) && each.origin.user === login);
     if (other === undefined) continue;
+    // One made by hand, as 0.15.0's upgrade made the hot path's, is this deployment's once its file records it.
+    const { worker, binding } = BOUND[config];
     throw new Error(
       `${login} is also the login of the Hyperdrive config ${other.name}, another deployment's, on this database server: ` +
         `a new password for ${OWNED[config]} config would cut that deployment off. Two deployments can't share a server's logins: ` +
-        'give this one a server of its own. No login was changed.',
+        `give this one a server of its own. If ${other.name} is this deployment's, made by hand, put its id under ${binding} in ${workers[worker].path}, ` +
+        'and run setup again, which keeps it. No login was changed.',
     );
   }
   return resets;
@@ -279,11 +307,11 @@ export function newPasswords(configs: readonly HyperdriveConfig[], workers: Reco
  * anything.
  */
 function missingKeys(workers: Record<Component, WorkerConfig>, secrets: Record<Component, Set<string>>, used: boolean): Record<Component, boolean> {
-  const missing = { app: !secrets.app.has('APP_KEY'), vault: !secrets.vault.has('VAULT_KEY') };
+  const missing = { app: !secrets.app.has(KEYS.app), vault: !secrets.vault.has(KEYS.vault) };
   for (const component of COMPONENTS) {
     if (!used || !missing[component]) continue;
     const { name, path } = workers[component];
-    const key = component === 'app' ? 'APP_KEY' : 'VAULT_KEY';
+    const key = KEYS[component];
     throw new Error(
       `The ${component} Worker ${name} has no ${key}, but the database already holds data, which needs the key it was set up with. ` +
         `Put that key back, with pnpm exec wrangler secret put ${key} -c ${path}, then run setup again. Setup never makes a new key for a database in use.`,
@@ -299,6 +327,9 @@ function checked(found: Found, workers: Record<Component, WorkerConfig>, databas
 
 type Checked = { missing: Record<Component, boolean>; newPasswords: Record<Config, boolean> };
 
+/** What setup asks of a run that deploys: coffre's address, its Owners, how it is reached, and a token wrangler's login was refused for. */
+type Answers = { address: string; owners: { name: OwnersVar; value: string }; serving: Serving; token: string | null };
+
 export class Cloudflare {
   readonly #dir: string;
   readonly #wrangler: Wrangler;
@@ -310,10 +341,8 @@ export class Cloudflare {
   /** Each secret this run handles, to take out of any error shown. */
   readonly #secrets: string[];
   readonly workers: Record<Component, WorkerConfig>;
-  readonly address: string;
-  /** The vault's var that names them, and its value: `OWNERS`, or `ROOT_ADMINS` in a deployment 0.5 or earlier wrote. */
-  readonly owners: { name: OwnersVar; value: string };
-  readonly serving: Serving;
+  /** What setup asked, for a run that deploys; none for one that does Hyperdrive alone. */
+  readonly #answers: Answers | null;
   /** The keys this run makes, for the Workers without theirs. */
   readonly keys: Keys | null;
   readonly #missing: Record<Component, boolean>;
@@ -338,7 +367,7 @@ export class Cloudflare {
     workers: Record<Component, WorkerConfig>,
     found: Found,
     database: Database,
-    answers: { address: string; owners: { name: OwnersVar; value: string }; serving: Serving; token: string | null },
+    answers: Answers | null,
     checked: Checked,
     resetPasswords: boolean,
     secrets: string[],
@@ -349,11 +378,9 @@ export class Cloudflare {
     this.#found = found;
     this.#administrator = database.administrator;
     this.#logins = Object.fromEntries(CONFIGS.map((config) => [config, database.logins[config].login])) as Record<Config, string>;
-    this.address = answers.address;
-    this.owners = answers.owners;
-    this.serving = answers.serving;
+    this.#answers = answers;
     this.#secrets = secrets;
-    this.#token = answers.token;
+    this.#token = answers?.token ?? null;
     this.#missing = checked.missing;
     this.newPasswords = checked.newPasswords;
     this.#resetPasswords = resetPasswords;
@@ -365,12 +392,46 @@ export class Cloudflare {
     this.repository = remote === null ? null : repositoryOf(remote, this.#github);
   }
 
+  /** Whether the deployment has the workflow that deploys it on every push. */
+  get workflow(): boolean {
+    return existsSync(join(this.#dir, WORKFLOW));
+  }
+
+  /** Whether this run deploys, as setup's Cloudflare path does; or does Hyperdrive alone, for an upgrade. */
+  get deploys(): boolean {
+    return this.#answers !== null;
+  }
+
+  #answered(): Answers {
+    if (this.#answers === null) throw new Error('setup does Hyperdrive alone here, and asked nothing a deploy needs');
+    return this.#answers;
+  }
+
+  /** coffre's address, without its scheme. */
+  get address(): string {
+    return this.#answered().address;
+  }
+
+  /** The vault's var that names them, and its value: `OWNERS`, or `ROOT_ADMINS` in a deployment 0.5 or earlier wrote. */
+  get owners(): { name: OwnersVar; value: string } {
+    return this.#answered().owners;
+  }
+
+  get serving(): Serving {
+    return this.#answered().serving;
+  }
+
   /**
    * Sign in to Cloudflare, choose the account, read what is there, and ask
    * what setup cannot know: coffre's address, its first Owner, and, when
    * another deployment has its names, a name of its own. Every refusal
    * comes before its first change, a domain added or a custom hostname
    * made: a run refused leaves nothing behind.
+   *
+   * Without `deploys`, setup does Hyperdrive alone, for an upgrade of a
+   * deployment that runs: it asks nothing more, keeps the names its files
+   * give, and refuses unless both Workers are this deployment's, with
+   * their keys. Setup then makes no key, and the upgrade deploys.
    */
   static async connect(
     dir: string,
@@ -379,7 +440,7 @@ export class Cloudflare {
     describe: (error: unknown) => string,
     secrets: string[],
     database: Database,
-    options: { resetPasswords: boolean },
+    options: { resetPasswords: boolean; deploys: boolean },
   ): Promise<Cloudflare> {
     const s = style(out);
     const { administrator } = database;
@@ -409,6 +470,28 @@ export class Cloudflare {
       steps.end();
     }
 
+    if (!options.deploys) {
+      // Hyperdrive alone: under the names the files give, which a running deployment's Workers have.
+      if (found.others.length > 0) {
+        const one = found.others.length === 1;
+        throw new Error(
+          `On this account, ${listed(found.others, 'and')} ${one ? 'is' : 'are'} another deployment's, by what app/ and vault/wrangler.jsonc record, and setup leaves ${one ? 'it' : 'them'} be. ` +
+            'Hyperdrive alone keeps the names those files give: if this deployment is the one deployed under them, put back the Hyperdrive ids its Workers bind, then run setup again. ' +
+            'Nothing was changed.',
+        );
+      }
+      for (const component of COMPONENTS) {
+        found.secrets[component] = new Set((await found.api.secretNames(found.account.id, workers[component].name)) ?? []);
+      }
+      const keyless = COMPONENTS.filter((component) => !found.secrets[component].has(KEYS[component]));
+      if (keyless.length > 0) {
+        throw new Error(
+          `Hyperdrive alone is for a deployment that runs, and ${listed(keyless.map((component) => `the ${component} Worker ${workers[component].name} has no ${KEYS[component]}`), 'and')}. ` +
+            'For a deployment not deployed yet, run setup again and choose Yes, which deploys it. Nothing was changed.',
+        );
+      }
+      return new Cloudflare(dir, wrangler, workers, found, database, null, checked(found, workers, database, options.resetPasswords), options.resetPasswords, secrets);
+    }
     const { api, account } = found;
     // A domain serves coffre once Cloudflare serves its DNS: one still waiting for its nameservers does not, yet.
     const active = found.zones.filter(({ status }) => status === undefined || status === 'active');
@@ -503,8 +586,10 @@ export class Cloudflare {
     return ourConfig(this.#found.configs, configName(config, namesOf(this.workers)), recordsOf(this.workers).hyperdrive[config], this.#administrator, this.#logins[config]);
   }
 
-  /** What each Cloudflare step does while it runs. */
-  static readonly TITLES = ['Point Hyperdrive at the database', "Make coffre's GitHub App", 'Fill in app/ and vault/wrangler.jsonc'];
+  /** What each Cloudflare step does while it runs: Hyperdrive, GitHub's app for a run that deploys, and the files. */
+  get titles(): string[] {
+    return ['Point Hyperdrive at the database', ...(this.deploys ? ["Make coffre's GitHub App"] : []), 'Fill in app/ and vault/wrangler.jsonc'];
+  }
 
   /**
    * Make `changes`, each named in a few words, to a Worker's wrangler.jsonc,
@@ -535,8 +620,8 @@ export class Cloudflare {
   async hyperdrive(logins: Record<Config, Login>, limit: number): Promise<{ text: string; details: string[]; low: { name: string; id: string; limit: number }[] }> {
     const { api, account } = this.#found;
     const names = Object.fromEntries(CONFIGS.map((each) => [each, configName(each, namesOf(this.workers))])) as Record<Config, string>;
-    const width = Math.max(...CONFIGS.map((each) => names[each].length)) + 2;
-    const details: string[] = [];
+    /** What happened to each config, in a few words. */
+    const what = {} as Record<Config, string>;
     /** Each config's connection limit, as this run leaves it; and its id. */
     const limits = {} as Record<Config, number>;
     const ids = {} as Record<Config, string>;
@@ -544,16 +629,16 @@ export class Cloudflare {
       const name = names[each];
       const login = logins[each];
       let config = this.#config(each);
-      let what: string;
       if (login.url !== null) {
         const origin = originOf(login.url);
         // A PUT replaces the whole config: the limit it has goes back in, lowered to `limit` when above it.
         const kept = cappedLimit(config?.origin_connection_limit, limit) ?? config?.origin_connection_limit ?? limit;
         if (config !== undefined && (await api.updateHyperdrive(account.id, config.id, name, origin, kept))) {
-          what = `given ${login.login}'s new password`;
+          what[each] = `given ${login.login}'s new password`;
+          config = { ...config, name };
           limits[each] = kept;
         } else {
-          what = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
+          what[each] = config === undefined ? `made, for ${login.login}` : `made again: the config ${config.name} was deleted during this run`;
           config = { id: await api.createHyperdrive(account.id, name, origin, limit), name, origin };
           limits[each] = limit;
         }
@@ -576,13 +661,16 @@ export class Cloudflare {
         }
         limits[each] = lower ? limit : config.origin_connection_limit!;
         const changed = [...(cache ? ['its caching turned off'] : []), ...(lower ? [`its connections capped at ${limit}`] : [])];
-        what = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
+        what[each] = changed.length === 0 ? 'kept' : `kept, ${changed.join(' and ')}`;
       }
-      if (limits[each] < limit) what += `, ${limits[each]} of ${limit}`;
-      details.push(`${name.padEnd(width)}${what}`);
+      if (limits[each] < limit) what[each] += `, ${limits[each]} of ${limit}`;
+      // A config kept is said by its own name: one made by hand, and recorded, may have another.
+      names[each] = config.name;
       this.#bind(each, config.id);
       ids[each] = config.id;
     }
+    const width = Math.max(...CONFIGS.map((each) => names[each].length)) + 2;
+    const details = CONFIGS.map((each) => `${names[each].padEnd(width)}${what[each]}`);
     // A limit someone set lower is kept: each config's own, then. It may be theirs, for a database that serves more than
     // coffre, or setup's own, made for a smaller one: the caller says how to raise it.
     const low = CONFIGS.filter((each) => limits[each] < limit).map((each) => ({ name: names[each], id: ids[each], limit: limits[each] }));
@@ -651,8 +739,25 @@ export class Cloudflare {
     return { text: `Made coffre's GitHub App, ${app.slug}`, details: app.url === '' ? [] : [app.url] };
   }
 
-  /** The rest of each wrangler.jsonc: the address and its route, the Owners, and the vault ID of a new vault key. */
+  /**
+   * The rest of each wrangler.jsonc: the address and its route, the Owners,
+   * and the vault ID of a new vault key; and what this run changed in each,
+   * its Hyperdrive bindings included. Hyperdrive alone changes no more.
+   */
   write(): Outcome {
+    if (this.deploys) this.#fill();
+    const changed = this.files();
+    return changed.length === 0
+      ? 'app/ and vault/wrangler.jsonc, as they were'
+      : { text: `Filled in ${listed(changed.map((component) => this.workers[component].path), 'and')}`, details: changed.map((component) => `${component.padEnd(7)}${listed([...this.#wrote[component]], 'and')}`) };
+  }
+
+  /** The Workers whose wrangler.jsonc this run changed. */
+  files(): Component[] {
+    return COMPONENTS.filter((component) => this.#wrote[component].size > 0);
+  }
+
+  #fill(): void {
     const url = `https://${this.address}`;
     const app = this.workers.app;
     const serving = this.serving;
@@ -677,11 +782,6 @@ export class Cloudflare {
       { path: ['vars', this.owners.name], value: this.owners.value, what: 'the first Owner' },
       ...(this.keys !== null && this.#missing.vault ? [{ path: ['vars', 'VAULT_KEY_ID'], value: this.keys.VAULT_KEY_ID, what: 'the vault ID' }] : []),
     ]);
-    const changed = COMPONENTS.filter((component) => this.#wrote[component].size > 0);
-    const files = listed(changed.map((component) => this.workers[component].path), 'and');
-    return changed.length === 0
-      ? 'app/ and vault/wrangler.jsonc, as they were'
-      : { text: `Filled in ${files}`, details: changed.map((component) => `${component.padEnd(7)}${listed([...this.#wrote[component]], 'and')}`) };
   }
 
   /**
@@ -981,6 +1081,27 @@ function deploys(cloudflare: Cloudflare): string {
     `This directory has no GitHub remote. To deploy on every push, push it to a GitHub repository, with ${WORKFLOW}, and run coffre setup again: ` +
     `it sets ${secrets}. Or set them yourself, or connect Workers Builds (docs/deploy.md).`
   );
+}
+
+/**
+ * After Hyperdrive alone: what is left, the deploy, which setup leaves to
+ * the upgrade, with no secret in it.
+ */
+export function boundSummary(cloudflare: Cloudflare, out: Output, backup: boolean): string {
+  const s = style(out);
+  const files = cloudflare.files().map((component) => cloudflare.workers[component].path);
+  const how = cloudflare.workflow ? `a push to main, with ${WORKFLOW}, or pnpm run deploy` : 'pnpm run deploy';
+  return [
+    '',
+    `  ${s.green('✓')} ${s.bold('Hyperdrive points at the database. Nothing was deployed.')}`,
+    ...(backup ? [s.dim(paragraph(out, 'The backup database URL shown is only in your password manager now: coffre setup --reset-passwords gives the backup login another.', 4))] : []),
+    '',
+    `    ${s.bold('Next')}`,
+    row(out, s, 'Deploy', `${files.length === 0 ? 'Deploy' : `Commit ${listed(files, 'and')}, then deploy`} both Workers at once, at a quiet moment: ${how}. The database is migrated already.`),
+    ...(backup ? [row(out, s, 'Backups', "the backup database URL in your backup job's secrets, for coffre backup: docs/restore.md.")] : []),
+    '',
+    '',
+  ].join('\n');
 }
 
 /** After the deploy: where coffre is, and what is left, with no secret in it. */

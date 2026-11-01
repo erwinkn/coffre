@@ -215,7 +215,13 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    Whenever the install fails, it puts `package.json`, `pnpm-workspace.yaml`
    and `pnpm-lock.yaml` back as they were, and says so.
 2. **Migrate, then deploy.** A release whose notes give upgrade steps of
-   their own, as 0.15.0's do, follows those instead. Commit and push: the
+   their own, as 0.15.0's do, follows those instead. On Workers, one that
+   adds a runtime login and its Hyperdrive config, as 0.15.0's hot path
+   did, migrates with `pnpm exec coffre setup` instead, as the database's
+   administrator, answering "Hyperdrive only"
+   ([Setup does Cloudflare too](#setup-does-cloudflare-too)): it makes both
+   and binds the config, and `coffre update` ends by saying so when the
+   vault binds no `HOT_HYPERDRIVE` yet. Commit and push: the
    [deploy workflow](#deploys-on-every-push), or
    [Workers Builds](#workers-builds), does both. By hand, or in any other
    pipeline, in the deployment's directory:
@@ -438,6 +444,18 @@ The database URLs are never shown: Hyperdrive has them, and nothing else
 does. Nothing is written but the two `wrangler.jsonc`, and the deploy
 workflow, for a deployment that has none.
 
+**Hyperdrive only, for an upgrade.** Setup's second answer, "Hyperdrive
+only, with no deploy", does steps 1 and 3 and the Hyperdrive bindings of
+step 5, and stops there: it asks nothing of the address, the Owners or
+GitHub, makes no key and deploys nothing. It is for a deployment that
+runs, whose release adds a login or a config, as 0.15's hot path did:
+setup makes the login, migrates, makes the config, binds it, and leaves
+the deploy to the upgrade, once its code is ready. It keeps the names the
+two `wrangler.jsonc` give, and refuses, before changing anything, when a
+Worker under them is not this deployment's by those files, or has no key
+(a deployment not deployed yet: answer Yes). It ends with what is left:
+commit the files it changed, then deploy both Workers at once.
+
 **On a machine your browser is not on**, such as a server over SSH, each
 browser step ends at a localhost address the browser cannot reach. Paste
 that address at setup's prompt, and setup finishes the step itself, on its
@@ -472,6 +490,16 @@ one deleted while it runs is made again in that run when its login is
 getting a new password anyway; otherwise that run stops, and says to run
 setup again. Keys shown by a run whose deploy failed never reached
 Cloudflare: the next run makes new ones, and its screen says they replace them.
+
+**A config made by hand**, with the commands [below](#2-three-hyperdrive-configs),
+is this deployment's when its `wrangler.jsonc` records its id, under any
+name, or when it has setup's name for it and points at this run's
+database as its login: setup keeps it, and its password, and only turns
+its caching off and caps its limit. One under another name that the files
+do not record is refused when its login needs a new password: setup
+cannot tell it from another deployment's on the same server, which the
+new password would cut off. Put its id under its binding (`HYPERDRIVE`,
+`VAULT_HYPERDRIVE` or `HOT_HYPERDRIVE`), and run setup again.
 
 ### A domain whose DNS is elsewhere
 
@@ -581,8 +609,10 @@ For Cloudflare Access instead, replace `signin(…)` with `cloudflareAccess(…)
 
 ### 2. Three Hyperdrive configs
 
-One config per runtime login, all three pointing to the same database. Each
-command reads its login's database URL at a silent prompt, so that the
+One config per runtime login, all three pointing to the same database.
+Setup makes them itself when it does Cloudflare too, or Hyperdrive alone
+([above](#setup-does-cloudflare-too)); these commands are for a deployment
+that doesn't let it. Each command reads its login's database URL at a silent prompt, so that the
 password stays out of your shell's history: run it, paste the URL from
 `coffre setup`'s screen, then press Enter. `coffre setup` shows the three
 commands, ready to copy.
