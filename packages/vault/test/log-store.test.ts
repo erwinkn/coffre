@@ -273,7 +273,8 @@ test('PR 8 review r1 (W240): a read of the entries above a pair takes the first 
 });
 
 test('PR 8 review r2 (W240): a use renumbered into a change\'s place is refused before its window is read, and a window the rows make too wide is never scanned', async () => {
-  const { cp, store } = await open();
+  const memory = variableMemory();
+  const { cp, store } = await open(memory);
   await use();
   assert.ok((await cp.tick()).signed);
   const lost = await change();
@@ -286,7 +287,10 @@ test('PR 8 review r2 (W240): a use renumbered into a change\'s place is refused 
   await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${lost}`);
   await run(db.owner, sql`UPDATE log_uses SET number = ${lost} WHERE number = ${moved}`);
   await assert.rejects(store.locate(lost, { tree: 'changes' }), /entry \d+ is in the uses tree, not the changes: a use holds its number/);
-  await assert.rejects(cp.sealThrough(lost), /cannot be proved in the signed changes tree: entry \d+ is in the uses tree/);
+  // A checkpointer that did not seal it proves it from the database, and refuses (T171: the one whose tick sealed it
+  // proves it from what it kept, sealed before the writer came; the verifier's walk reports the loss).
+  const reopened = (await open(memory)).cp;
+  await assert.rejects(reopened.sealThrough(lost), /cannot be proved in the signed changes tree: entry \d+ is in the uses tree/);
 });
 
 test('PR 8 review r3 (W240): a bounded read stops at its limit in the database too: 100,000 changes above, a few pages read', { skip: ENGINE === 'postgres' ? false : 'Postgres only: its plan' }, async () => {

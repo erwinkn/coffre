@@ -188,10 +188,26 @@ loss. A database at neither pair is refused until the checkpointer is
 reopened. #365's "broken until reopened" state is gone.
 
 **A change** waits for its seal (R51). `sealThrough` ticks at once unless a
-pair already covers it. A pair covering the number is not enough: an entry
+pair already covers it, or the tick running now will: one whose barrier
+came after the change committed (it is not known yet, or passes the
+change's number) seals it, and the change waits for that tick alone, not
+for one more after it (T171). A pair covering the number is not enough: an entry
 deleted before its tick leaves a gap the pair calls final. So the change is
 proved in the pair, and its answer carries that proof; if the entry is not
-there, the change is refused and alerted. Then it waits for every witness
+there, the change is refused and alerted. The proof comes from the tick
+that sealed it (T171): the checkpointer keeps its last pairs that sealed a
+change, 4 MiB of them at most, newest first, each with the changes it placed and the changes tree's tiles that
+tick wrote and its edge, which hold every node a proof of a leaf it appended
+reads. The proof is checked against that pair's root before it is handed
+out. This is Seal.tla's WaitForSeal as written: the signer's own head holds
+the change. Only a change sealed before the checkpointer kept it (sealed
+by a checkpointer since replaced, or in a window past 4 MiB) is proved
+from the database (`locate`, then its tiles), two round trips more. A
+checkpointer closed or stalled answers no change, kept or not, and one
+whose last tick was refused none while the refusal stands (Seal.tla's
+`Answer`: the signer neither down nor refused). A kept proof that does
+not check against its pair is a bug, alerted, and proved from the
+database instead. Then it waits for every witness
 to hold a pair that covers it, for at most 2 s. Each witness has a pump that always sends the
 newest pair, one at a time, each try bounded by 2 s, so a witness that
 never answers fails its try instead of stopping its pump. A witness that

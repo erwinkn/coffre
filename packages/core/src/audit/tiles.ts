@@ -160,9 +160,16 @@ export class Edge {
 
   /** The tree head now. */
   root(): Hash {
-    const tiles = new Map<string, Buffer>();
-    for (const { level, index } of edgeOf(this.size)) tiles.set(tileKey(level, index), Buffer.concat(this.tiles[level] ?? []));
-    return treeHash(nodesFrom(tiles), this.size);
+    return treeHash(nodesFrom(tileMap(this.edgeTiles())), this.size);
+  }
+
+  /**
+   * The tile at the right edge of each level, as it stands. With the tiles an append filled, they hold every node a
+   * proof of a leaf that append added reads: the tile of the leaf's ancestor at each level is one of them, and so is
+   * every tile to its right.
+   */
+  edgeTiles(): Tile[] {
+    return edgeOf(this.size).map(({ level, index }) => ({ level, index, hashes: Buffer.concat(this.tiles[level] ?? []) }));
   }
 }
 
