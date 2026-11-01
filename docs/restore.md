@@ -314,8 +314,8 @@ Before reopening traffic:
    names.
 6. `coffre verify keys` with the keys you deployed it with, from the
    escrow: both must be the instance's, the vault key the current one.
-7. Optionally, `coffre verify instance` from outside: as no one, then as
-   you, with a token of its own ([conformance.md](conformance.md#against-a-running-instance)).
+7. Optionally, `coffre verify instance <url>` from outside: as no one, then as
+   you (it asks first; `--yes` in a script), with a token of its own ([conformance.md](conformance.md#against-a-running-instance)).
 
 Verification proves the restored history is the one coffre wrote, up to the
 backup's moment. It cannot show what was written after it: a complete older

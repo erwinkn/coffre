@@ -2037,7 +2037,7 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags, localHere());
+      return verifyInstance(more, readStore(), sessionFlags, localHere);
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);

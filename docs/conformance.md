@@ -204,8 +204,12 @@ skipped, and the run ends with the processes' output.
 ## Against a running instance
 
 `coffre verify instance` checks an instance someone runs, from the outside:
-the current one, or the one its argument names. As no one, it writes
-nothing. With a token, as in CI, it writes nothing either, with one
+the one its argument names. It never takes your default session's instance
+for the one you mean: without a URL it runs only where a `coffre.json` or a pin
+(`coffre login <url>` in the directory makes one) names the instance, and
+then only with that instance's own session. A deployment's directory names
+nothing by itself: `coffre login <its url>` there, or pass the URL. As no one, it
+writes nothing. With a token, as in CI, it writes nothing either, with one
 exception: each run adds a few entries to the instance's audit log, which is
 append-only, so they stay for good. It says so when it starts. They are the
 canary's read, and a refused read for each place it tries and must not
@@ -247,11 +251,16 @@ verifies the audit log as you.
 
 ```sh
 coffre login https://secrets.example.com     # once, as an admin or owner of the whole instance
-coffre verify instance
+coffre verify instance https://secrets.example.com
 ```
 
-uses the session `coffre login` made: no second sign-in, and it stays
-signed in after. Without one, it says to run `coffre login` first. Then:
+uses the session `coffre login` made for that instance: no second sign-in,
+and it stays signed in after. Without one, it says to run `coffre login`
+first. It writes to the instance, so before anything is sent it prints the
+instance, why it is the one, and who is signed in, and asks `y/N` on a
+terminal. Without a terminal it refuses, sending nothing, unless you pass
+`--yes`: a script says so on purpose. (A run with a bearer token, below,
+reads only, and neither asks nor needs `--yes`.) Then:
 
 1. It finds `conformance`, `conformance/live` and `token:conformance-probe`,
    and makes whichever is missing, nothing else: on a first run, all three.

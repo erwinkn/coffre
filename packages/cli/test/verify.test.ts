@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -143,9 +143,9 @@ function signedInHome(t: test.TestContext, origin: string): { home: string; stor
 }
 
 /** `coffre <args>` off a terminal, `input` on its stdin. */
-async function coffre(args: string[], home: string, input = '', env: NodeJS.ProcessEnv = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+async function coffre(args: string[], home: string, input = '', env: NodeJS.ProcessEnv = {}, cwd?: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const clean = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('COFFRE_')));
-  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...args], { env: { ...clean, HOME: home, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['--conditions=coffre:source', main, ...args], { cwd, env: { ...clean, HOME: home, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
@@ -207,7 +207,7 @@ for (const role of ['user', 'owner'] as const) {
     );
     const { home, store } = signedInHome(t, instance.origin);
     const before = store();
-    const run = await coffre(['verify', 'instance'], home);
+    const run = await coffre(['verify', 'instance', instance.origin, '--yes'], home);
     // A stand-in for an instance fails the anonymous checks; what matters here is what is done with the session.
     assert.equal(run.code, 1);
     if (role === 'user') {
@@ -229,12 +229,150 @@ for (const role of ['user', 'owner'] as const) {
   });
 }
 
+// --- which instance verify instance writes to (T181) ---------------------------------
+
+/** A home with a session on each of `origins`, the first the default. */
+function homeWithSessions(t: test.TestContext, origins: string[]): { home: string; store: () => string } {
+  const { home, store } = signedInHome(t, origins[0]!);
+  const file = join(home, '.coffre', 'credentials.json');
+  const kept = JSON.parse(readFileSync(file, 'utf8')) as { instances: Record<string, unknown> };
+  for (const origin of origins) kept.instances[origin] = kept.instances[origins[0]!];
+  writeFileSync(file, JSON.stringify({ version: 2, current: origins[0], instances: kept.instances }));
+  return { home, store };
+}
+
+/** A deployment's directory as a clone has it: its Workers' configs name an address of their own, and a `coffre.json` names `file`, when given. */
+function deployment(t: test.TestContext, url: string, file?: string): string {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'coffre-deployment-')));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const worker of ['app', 'vault']) {
+    mkdirSync(join(dir, worker), { recursive: true });
+    writeFileSync(join(dir, worker, 'wrangler.jsonc'), `{ "name": "${worker}", "vars": { "PUBLIC_URL": ${JSON.stringify(url)} } }\n`);
+  }
+  if (file !== undefined) writeFileSync(join(dir, 'coffre.json'), JSON.stringify({ url: file }));
+  return dir;
+}
+
+const OWNER = { principal: { type: 'user', id: 'root@acme.example' }, registered: true, tampered: false, instanceRole: 'member', runsInstance: false, canReadAudit: true, environments: [] };
+
+test("coffre verify instance in a deployment's directory never takes the default session's instance, however the deployment's own config reads", async (t) => {
+  const other = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  // The default session is for `other`; the directory is a deployment of another instance, and nothing there names it to coffre.
+  const { home, store } = signedInHome(t, other.origin);
+  const before = store();
+  const dir = deployment(t, 'https://coffre.deployed.test');
+  for (const args of [['verify', 'instance'], ['verify', 'instance', '--yes'], ['--auth-mode', 'signin', 'verify', 'instance', '--yes']]) {
+    const run = await coffre(args, home, '', {}, dir);
+    assert.equal(run.code, 2);
+    assert.equal(run.stdout, '');
+    assert.match(run.stderr, /^coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks/);
+    assert.ok(run.stderr.includes(`The default session, ${other.origin}, is not used unasked.`), run.stderr);
+    assert.equal(other.seen.length, 0, 'a request went to the default instance');
+  }
+  // A token login that fails just before it changes nothing: still no fallback to the saved session.
+  const failed = await coffre(['login', other.origin, '--token'], home, 'coffre_pat_wrong\n', {}, dir);
+  assert.notEqual(failed.code, 0);
+  other.seen.length = 0;
+  const after = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+  assert.equal(after.code, 2);
+  assert.equal(other.seen.length, 0);
+  assert.equal(store(), before);
+});
+
+test("a directory's coffre.json names the instance, which needs a session of its own: the default one is never taken in its place", async (t) => {
+  const other = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home } = signedInHome(t, other.origin);
+  const dir = deployment(t, other.origin, 'https://coffre.named.test');
+  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+  assert.equal(run.code, 1);
+  assert.equal(run.stdout, '');
+  assert.match(run.stderr, /^coffre: not signed in: run `coffre login https:\/\/coffre\.named\.test` first \(.*coffre\.json names it\)/);
+  assert.equal(other.seen.length, 0);
+});
+
+test("a directory's coffre.json, with the session of the instance it names, is the target, once confirmed with --yes", async (t) => {
+  const named = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const other = await fakeInstance(t, () => undefined);
+  const { home } = homeWithSessions(t, [other.origin, named.origin]);
+  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, deployment(t, 'https://coffre.deployed.test', named.origin));
+  assert.match(run.stdout, new RegExp(`^Writes to ${named.origin.replace(/[.]/g, '\\.')} \\(.*coffre\\.json names it\\)\nSigned in as root@acme\\.example`));
+  assert.match(run.stdout, /--yes: going on\./);
+  assert.ok(named.seen.length > 0);
+  assert.equal(other.seen.length, 0, 'a request went to the default instance');
+});
+
+test("naming the instance on the command line, in either spelling, is no matter to a coffre.json that cannot be used", async (t) => {
+  const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home } = signedInHome(t, instance.origin);
+  const dir = deployment(t, 'https://coffre.deployed.test');
+  writeFileSync(join(dir, 'coffre.json'), '{ not json');
+  const unnamed = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+  assert.equal(unnamed.code, 1);
+  assert.match(unnamed.stderr, /^coffre: cannot use .*coffre\.json: it is not JSON/);
+  assert.equal(instance.seen.length, 0);
+  for (const args of [['verify', 'instance', instance.origin, '--yes'], ['--url', instance.origin, 'verify', 'instance', '--yes']]) {
+    const run = await coffre(args, home, '', {}, dir);
+    assert.match(run.stdout, /--yes: going on\./, run.stderr);
+  }
+});
+
+test('coffre verify instance with nothing naming an instance refuses, however many sessions are saved, and sends nothing', async (t) => {
+  const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home, store } = signedInHome(t, instance.origin);
+  const before = store();
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-nowhere-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const args of [['verify', 'instance'], ['verify', 'instance', '--yes']]) {
+    const run = await coffre(args, home, '', {}, dir);
+    assert.equal(run.code, 2);
+    assert.equal(run.stdout, '');
+    assert.match(run.stderr, /^coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks/);
+    assert.ok(run.stderr.includes(`The default session, ${instance.origin}, is not used unasked.`), run.stderr);
+  }
+  assert.equal(instance.seen.length, 0);
+  assert.equal(store(), before);
+});
+
+test('coffre verify instance <url> without a terminal or --yes says who and where, then refuses, having sent nothing', async (t) => {
+  const instance = await fakeInstance(t, () => undefined);
+  const { home, store } = signedInHome(t, instance.origin);
+  const before = store();
+  for (const args of [['verify', 'instance', instance.origin], ['--url', instance.origin, 'verify', 'instance']]) {
+    const run = await coffre(args, home);
+    assert.equal(run.code, 2);
+    assert.match(run.stdout, new RegExp(`^Writes to ${instance.origin.replace(/[.]/g, '\\.')} \\(named on the command line\\)\nSigned in as root@acme\\.example, with this CLI's session\n`));
+    assert.match(run.stderr, /^coffre: not on a terminal to ask: nothing was sent to http:\/\/127\.0\.0\.1:\d+\. Run it again with --yes to write there\n$/);
+    assert.equal(instance.seen.length, 0);
+  }
+  assert.equal(store(), before);
+});
+
+test('coffre verify instance, on a terminal, asks before it writes: no, or Enter, sends nothing; y goes on', { skip: ptySkip }, async (t) => {
+  const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
+  const { home } = signedInHome(t, instance.origin);
+  for (const key of ['n', '\r']) {
+    const { output, code } = await inTerminal(['verify', 'instance', instance.origin], { ...cleanEnv(), HOME: home }, async (terminal) => {
+      await terminal.waitFor('y/N');
+      terminal.send(key);
+      await terminal.waitFor('not confirmed');
+    });
+    assert.equal(code, 1);
+    assert.match(visible(output), /Write to http:\/\/127\.0\.0\.1:\d+\? y\/N/);
+    assert.equal(instance.seen.length, 0);
+  }
+  const { output, code } = await inTerminal(['verify', 'instance', instance.origin], { ...cleanEnv(), HOME: home }, async (terminal) => {
+    await terminal.waitFor('y/N');
+    terminal.send('y');
+    await terminal.waitFor('is not an admin or owner');
+  });
+  assert.equal(code, 1);
+  assert.match(visible(output), /Checking http:\/\/127\.0\.0\.1:\d+, as no one, then as you/);
+  assert.ok(instance.seen.length > 0);
+});
+
 test('coffre verify instance without a session says to sign in first, and checks nothing', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'coffre-verify-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const nowhere = await coffre(['verify', 'instance'], home);
-  assert.equal(nowhere.code, 1);
-  assert.equal(nowhere.stderr, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first')}\n`);
   const elsewhere = await coffre(['verify', 'instance', 'https://coffre.acme.example'], home);
   assert.equal(elsewhere.code, 1);
   assert.equal(elsewhere.stderr, `coffre: ${signInError('not signed in: run `coffre login https://coffre.acme.example` first')}\n`);
@@ -243,9 +381,11 @@ test('coffre verify instance without a session says to sign in first, and checks
   assert.equal(named.stderr, `coffre: ${signInError('not signed in: run `coffre login https://coffre.acme.example` first', 'signin')}\n`);
   const access = await coffre(['--auth-mode', 'cloudflare', 'verify', 'instance', 'https://coffre.acme.example'], home);
   assert.equal(access.stderr, 'coffre: not signed in: run `coffre login https://coffre.acme.example` first\n', 'Access signs in with cloudflared: no code to explain');
+  // Without a name, nothing is chosen for it, signed in anywhere or not.
   const noUrl = await coffre(['--auth-mode', 'signin', 'verify', 'instance'], home);
-  assert.equal(noUrl.stderr, `coffre: ${signInError('not signed in anywhere yet: run `coffre login <url>` first', 'signin')}\n`);
-  assert.equal(nowhere.stdout + elsewhere.stdout + named.stdout + access.stdout + noUrl.stdout, '');
+  assert.equal(noUrl.code, 2);
+  assert.match(noUrl.stderr, /^coffre: verify instance creates a project/);
+  assert.equal(elsewhere.stdout + named.stdout + access.stdout + noUrl.stdout, '');
 });
 
 test("coffre verify log holds the reads listed to the uses sealed, a stretch a request, after the chain: OK, or BROKEN with each problem (T166)", async (t) => {

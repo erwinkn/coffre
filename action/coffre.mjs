@@ -461,6 +461,18 @@ async function hiddenLine(keys, out, s, question, hint, exact = false) {
 	if (cancelled) throw new Cancelled();
 	return exact ? typed : typed.trim();
 }
+/** One key: y for yes, anything else for no. Ctrl-C cancels. */
+async function yes(keys) {
+	let answer = false;
+	let cancelled = false;
+	await readKeys$1(keys, (key) => {
+		if (key.ctrl && key.name === "c") cancelled = true;
+		answer = key.name === "y";
+		return true;
+	});
+	if (cancelled) throw new Cancelled();
+	return answer;
+}
 //#endregion
 //#region src/secrets.ts
 function initialState() {
@@ -14669,8 +14681,8 @@ const SECTIONS = [
 			},
 			{
 				command: "verify instance",
-				usage: ["verify instance [<url>]"],
-				about: ["the instance from outside: as no one, then as you, an", "admin or owner"]
+				usage: ["verify instance <url> [--yes]"],
+				about: ["the instance <url> names from outside: as no one, then as you, an", "admin or owner. It writes probe data, so it asks first, or needs --yes"]
 			},
 			{
 				command: "verify keys",
@@ -16099,10 +16111,13 @@ const PROBE = {
 	key: "SIGN_IN_CANARY"
 };
 const INSTANCE_USAGE = `usage:
-  coffre verify instance [<url>]
-  coffre verify instance [<url>] --canary <project>/<environment>/<KEY>, signed in with a bearer token
+  coffre verify instance <url> [--yes]
+  coffre verify instance <url> --canary <project>/<environment>/<KEY>, signed in with a bearer token
 
-Checks an instance from outside, the current one unless <url> names another:
+Checks the instance <url> names from outside. It never takes the default
+session's instance for the one you mean: without <url> (or --url), it runs only
+where a \`coffre.json\` or a pin (\`coffre login <url>\` in the directory makes
+one) names the instance, and then only with that instance's own session.
 
   as no one        health, headers, every route refusing no one, changes from
                    another site refused, /api/auth, nothing like a value shown
@@ -16119,16 +16134,44 @@ Checks an instance from outside, the current one unless <url> names another:
   --canary         the canary the token reads; its value is asked for, or
                    piped in, so that it stays out of the shell's history
 
+Before it writes anything as an owner, it prints the instance and who is signed
+in, and asks you to confirm on a terminal. Without one it refuses, unless
+--yes says so. Nothing is sent to the instance before that.
+
 Each run adds a few entries to the instance's audit log, which is
 append-only, so they stay: the canary's read, and the reads it was refused.
 A run as an owner leaves its project, environment and service for the next,
 and writes its canary and its grants. Exits 1 when a check fails.`;
+/**
+* The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, or a pin,
+* which `coffre login <url>` in a directory makes). Never the default session's: the run writes, so it is told where, or it stops.
+*/
+function namedInstance(positional, session, local, current) {
+	const explicit = positional ?? session.url;
+	if (explicit !== void 0) return {
+		requested: explicit,
+		why: "named on the command line"
+	};
+	const here = local();
+	if (here === null) {
+		const unasked = current === null ? "" : ` The default session, ${current}, is not used unasked.`;
+		stop(2, `coffre: verify instance creates a project, an environment, a service account, grants and a secret on the instance it checks, and walks its whole audit log, so it never picks one for you: name it, \`coffre verify instance <url>\`, or run it where a ${REPO_FILE} or a pin (\`coffre login <url>\` here) names it.${unasked}`);
+	}
+	return {
+		requested: here.origin,
+		why: here.by === "pin" ? `this directory is pinned at ${here.directory}` : `${join(here.directory, REPO_FILE)} names it`
+	};
+}
 async function verifyInstance(args, store, session, local, out = process.stdout) {
 	const { values, positionals } = parseArgs({
 		args,
 		allowPositionals: true,
 		options: {
 			canary: { type: "string" },
+			yes: {
+				type: "boolean",
+				short: "y"
+			},
 			help: {
 				type: "boolean",
 				short: "h"
@@ -16139,8 +16182,7 @@ async function verifyInstance(args, store, session, local, out = process.stdout)
 	if (positionals.length > 1) stop(2, INSTANCE_USAGE);
 	if (positionals[0] !== void 0 && session.url !== void 0) stop(2, "coffre: name the instance once: coffre verify instance <url>, or coffre --url <url> verify instance");
 	if (session.service !== void 0) stop(2, "coffre: verify instance checks as no one, then with a bearer token `coffre login --token` saved, or as you with the session `coffre login` saved: --service is for other commands");
-	const requested = positionals[0] ?? session.url ?? local?.origin ?? store.current;
-	if (!requested) stop(1, `coffre: ${signInError("not signed in anywhere yet: run `coffre login <url>` first", askedMode(session.authMode))}`);
+	const { requested, why } = namedInstance(positionals[0], session, local, store.current);
 	let origin;
 	try {
 		origin = instanceOrigin(requested);
@@ -16175,7 +16217,10 @@ async function verifyInstance(args, store, session, local, out = process.stdout)
 		return finish(out, report);
 	}
 	if (values.canary !== void 0) stop(2, "coffre: --canary goes with a bearer token, `coffre login <url> --token`; as an owner, the run writes a canary of its own");
-	if (store.instances[origin] === void 0) stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first`, askedMode(session.authMode))}`);
+	if (saved === void 0) {
+		const by = why === "named on the command line" ? "" : ` (${why})`;
+		stop(1, `coffre: ${signInError(`not signed in: run \`coffre login ${origin}\` first${by}`, askedMode(session.authMode))}`);
+	}
 	let api;
 	try {
 		const to = resolveTarget({
@@ -16190,11 +16235,45 @@ async function verifyInstance(args, store, session, local, out = process.stdout)
 	} catch (error) {
 		stop(1, `coffre: ${error instanceof Error ? error.message : String(error)}`);
 	}
+	await confirm(out, {
+		origin,
+		why,
+		principal: saved.principal?.id ?? null,
+		yes: values.yes === true
+	});
 	out.write(`${s.bold(`Checking ${origin}`)}, as no one, then as you\n`);
 	out.write(s.dim(`  It keeps ${PROBE.project}/${PROBE.environment} and ${shownMember$1(PROBE.service)} for the next run, and its reads stay in the audit log, for good.\n\n`));
 	await anonymousChecks(report, origin);
 	await ownerChecks(report, origin, api);
 	finish(out, report);
+}
+/**
+* Before the run writes as an owner: the instance and who is signed in, said, and a yes, from a terminal, or `--yes`.
+* Without either it stops, having sent nothing.
+*/
+async function confirm(out, to) {
+	const s = style(out);
+	out.write(`${s.bold("Writes to")} ${to.origin} ${s.dim(`(${to.why})`)}\n`);
+	out.write(`${s.bold("Signed in as")} ${to.principal ?? "someone the saved session does not name"}, with this CLI's session\n`);
+	out.write(s.dim(`  It makes ${PROBE.project}/${PROBE.environment}, ${shownMember$1(PROBE.service)}, their grants and a canary there if they are missing, and walks the whole audit log.\n`));
+	if (to.yes) {
+		out.write(s.dim("  --yes: going on.\n\n"));
+		return;
+	}
+	const terminal = openTerminal();
+	if (terminal === null) stop(2, `coffre: not on a terminal to ask: nothing was sent to ${to.origin}. Run it again with --yes to write there`);
+	terminal.out.write(`${s.accent("?")} ${s.bold(`Write to ${to.origin}?`)} ${s.dim("y/N")} `);
+	let confirmed;
+	try {
+		confirmed = await yes(terminal.keys);
+	} catch (error) {
+		if (error instanceof Cancelled) process.exit(130);
+		throw error;
+	} finally {
+		release(terminal.keys);
+	}
+	terminal.out.write(`${confirmed ? "yes" : "no"}\n\n`);
+	if (!confirmed) stop(1, `coffre: not confirmed: nothing was sent to ${to.origin}`);
 }
 /**
 * As the signed-in owner: who they are, set up, the token's checks,
@@ -18474,7 +18553,7 @@ async function verify(args) {
 	}
 	const check = named ?? await pickCheck();
 	switch (check) {
-		case "instance": return verifyInstance(more, readStore(), sessionFlags, localHere());
+		case "instance": return verifyInstance(more, readStore(), sessionFlags, localHere);
 		case "keys": {
 			const to = target();
 			return verifyKeys(more, client(to), to.origin);
