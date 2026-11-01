@@ -152,7 +152,12 @@ Eleven, each marked `Coffre:` in the code:
   that fails has Postgres skip the COMMIT, and a group the client could
   not write never sent it: either way the transaction rolls back. Only a
   COMMIT Postgres ran and refused (a deferred constraint, `Query.refused`)
-  has ended it, and no ROLLBACK follows. Through Hyperdrive,
+  has ended it, and no ROLLBACK follows. A statement of a group whose
+  answer the client cannot read once Postgres ran it (a row a parser
+  refuses, a COPY it does not take, `Query.unread`) fails alone, and the
+  group reads on: with the COMMIT behind it, the transaction resolves, as
+  Postgres committed it, and the statement's failure is that of an answer
+  nothing awaited; awaited, it fails the transaction, which rolls back. Through Hyperdrive,
   which sends a client's Syncs on one at a time, a transaction that reads
   what it needs together and leaves its writes to `later` is two round
   trips, whatever it holds. Upstream sent each statement with a Sync of

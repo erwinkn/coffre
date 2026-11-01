@@ -66,6 +66,11 @@ export class Query<T = unknown> extends Promise<T> {
    * still ask, or be refused and roll the transaction back.
    */
   later = false;
+  /**
+   * Coffre: a group's statements Postgres answered whose answers the client could not read (a row a parser refused, a
+   * COPY), by their place in it: each fails alone, as what Postgres ran stands (`together`, index.ts).
+   */
+  unread: Map<number, unknown> | null = null;
   /** Coffre: a statement of a group that Postgres ran and answered with an error, not one skipped or never sent (`together`). */
   refused = false;
   /** Coffre: a group that failed: the results of its statements answered before the one that failed (`together`, index.ts). */

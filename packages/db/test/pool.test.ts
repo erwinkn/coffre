@@ -779,15 +779,34 @@ test("no COMMIT goes with the writes left to `later` while a statement something
   }
 });
 
-test("a COPY left to `later` goes alone, so no COMMIT rides behind what the client refuses: the transaction keeps nothing (review r5 of #452)", { skip, timeout: 15_000 }, async () => {
+test("a statement left to `later` whose answer the client cannot read, once Postgres ran it, fails alone: the COMMIT behind it stands, and the transaction says it committed (reviews r5, r6 of #452)", { skip, timeout: 15_000 }, async () => {
   const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
   try {
-    await client.unsafe('create temporary table copied (n int)');
+    await client.unsafe('create temporary table unread (n int)');
+    const kept = async () => [...await client.unsafe('select n from unread order by n')].map((row) => row.n);
+    // A COPY, which the client refuses once Postgres has run it, however it is written.
+    await client.begin(async (tx) => {
+      await tx.unsafe('insert into unread values ($1)', [1]);
+      laterOn(tx, 'copy (insert into unread values (2) returning n) to stdout');
+      laterOn(tx, '-- a comment\rcopy (insert into unread values (3) returning n) to stdout');
+    });
+    assert.deepEqual(await kept(), [1, 2, 3]);
+    // A row a parser refuses: the same, the statement alone failing.
+    const integers = client.options.parsers[23];
+    client.options.parsers[23] = () => {
+      throw new Error('cannot decode integer');
+    };
+    await client.begin(async (tx) => {
+      await tx.unsafe('insert into unread values (4)');
+      laterOn(tx, 'insert into unread values (5) returning n');
+    });
+    // Awaited, the same refusal fails the transaction, which keeps nothing: something awaited the answer.
     await assert.rejects(client.begin(async (tx) => {
-      await tx.unsafe('insert into copied values ($1)', [1]);
-      laterOn(tx, 'copy (insert into copied values (2) returning n) to stdout');
-    }), { code: 'COPY_NOT_SUPPORTED' });
-    assert.deepEqual([...await client.unsafe('select count(*)::int as n from copied')], [{ n: 0 }]);
+      await tx.unsafe('insert into unread values (6)');
+      await tx.unsafe('insert into unread values (7) returning n');
+    }), /cannot decode integer/);
+    client.options.parsers[23] = integers!;
+    assert.deepEqual(await kept(), [1, 2, 3, 4, 5]);
   } finally {
     await client.end();
   }

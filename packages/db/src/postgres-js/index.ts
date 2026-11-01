@@ -410,6 +410,12 @@ export default function postgres(given: Options): Sql {
         await Promise.allSettled(asked);
         try {
           committed = (await commit) as unknown as ResultMeta;
+          // Postgres committed: the transaction did, whatever the client could not read of a statement's answer before it
+          // (`unread`), which fails that statement alone. Any other failure would have had Postgres skip the COMMIT.
+          if (committed.command === 'COMMIT') {
+            uncaughtError = undefined;
+            failure = undefined;
+          }
         } catch (e) {
           // Postgres ran the COMMIT and refused it (a deferred constraint): the transaction has ended, with nothing to roll
           // back. Otherwise it never ran: skipped behind a statement that failed, whose error says why, or the group never
@@ -475,14 +481,17 @@ export default function postgres(given: Options): Sql {
       group.group = members.map((q) => ({ text: q.text, args: q.args, arrays: q.arrays, parameters: [], statement: null }));
       Promise.prototype.then.call(
         group,
-        (answers) => members.forEach((q, i) => q.resolve((answers as unknown[])[i])),
+        (answers) => members.forEach((q, i) => (group.unread?.has(i) ? q.reject(group.unread.get(i)) : q.resolve((answers as unknown[])[i]))),
         (error: unknown) => {
           // Its BEGIN refused, or the connection lost: every statement fails with that. Otherwise those before the one
           // that failed answered, and those after it Postgres skipped.
           const begun = group.begin === null || group.began;
           const failed = !begun || group.answered === null ? 0 : group.answered.length;
           members.forEach((q, i) => {
-            if (i < failed) q.resolve(group.answered![i]);
+            if (i < failed) {
+              if (group.unread?.has(i)) q.reject(group.unread.get(i));
+              else q.resolve(group.answered![i]);
+            }
             else if (i === failed || !(error instanceof PostgresError) || !begun) {
               // Postgres ran this one, and answered its error.
               q.refused = i === failed && error instanceof PostgresError && begun && group.answered !== null;
@@ -615,16 +624,10 @@ export default function postgres(given: Options): Sql {
 /** A transaction's own statements, which go alone (`gather`): its savepoints, and a rollback to one. */
 const OWN = /^\s*(begin|commit|rollback|savepoint|release)\b/i;
 
-/** A statement that cannot go in a group: a value whose type only the server can say, one the client cannot send, a COPY. */
+/** A statement that cannot go in a group: a value whose type only the server can say, or one the client cannot send. */
 function alone(q: Query): boolean {
-  return q.args.some((x) => x === undefined || (x !== null && typeof x === 'object' && inferType(x) === 0)) || q.args.length >= 65534 || COPY.test(q.text);
+  return q.args.some((x) => x === undefined || (x !== null && typeof x === 'object' && inferType(x) === 0)) || q.args.length >= 65534;
 }
-
-/**
- * A COPY, which the client refuses once Postgres has run it (connection.ts): it goes alone, never in a group whose
- * COMMIT would go behind it and keep what the client then refused.
- */
-const COPY = /^(\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*copy\b/i;
 
 /** What a statement of a group Postgres skipped fails with, behind the one that failed: its transaction is aborted. */
 function skippedError(): PostgresError {

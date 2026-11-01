@@ -329,7 +329,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
         handle(incoming.subarray(0, length + 1));
       } catch (e) {
         if (query?.describeFirst) write(Sync);
-        errored(e);
+        // Coffre: in a group, an answer of Postgres's the client could not read (a row a parser refused): that statement
+        // fails alone, and the group reads on, as Postgres runs on, its COMMIT included (`together`, index.ts).
+        if (query !== null && query.group !== null) (query.unread ??= new Map()).set(query.member, e);
+        else errored(e);
       }
       incoming = incoming.subarray(length + 1);
       remaining = 0;
@@ -791,7 +794,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function CopyOutResponse(): void {
-    errorResponse ??= Errors.generic('COPY_NOT_SUPPORTED', 'COPY is not supported by this client');
+    const refused = Errors.generic('COPY_NOT_SUPPORTED', 'COPY is not supported by this client');
+    // Coffre: in a group, the COPY fails alone, which Postgres ran (`unread`, above).
+    if (query !== null && query.group !== null) (query.unread ??= new Map()).set(query.member, refused);
+    else errorResponse ??= refused;
   }
 
   function NoticeResponse(x: Buffer): void {
