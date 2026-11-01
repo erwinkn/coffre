@@ -1,6 +1,6 @@
 import { pairSigners } from '@coffre/core/merkle';
 
-import { Checkpointer, logOrigin, type Alarm, type CheckpointStore, type Memory, type Witness } from './checkpointer.ts';
+import { Checkpointer, FenceClosed, logOrigin, type Alarm, type CheckpointStore, type Fence, type Memory, type Witness } from './checkpointer.ts';
 import { authentic, logMacKey } from './log-entry.ts';
 import type { LogStore } from './log-store.ts';
 import { DAY_MS, dayOf, retain } from './retention.ts';
@@ -22,6 +22,9 @@ export type HostOptions = {
   /** Where each alarm is kept; it is also logged. */
   record?: (alarm: Alarm) => void | Promise<void>;
   now?: () => number;
+  /** What closes it for good, when its host bounds the open (T169); `TICK_BOUND_MS` otherwise, for the tests. */
+  fence?: Fence;
+  tickBoundMs?: number;
 };
 
 export async function openLogCheckpointer(options: HostOptions): Promise<Checkpointer> {
@@ -32,6 +35,8 @@ export async function openLogCheckpointer(options: HostOptions): Promise<Checkpo
     witnesses: options.witnesses,
     authentic: authentic(logMacKey(options.seed)),
     now,
+    ...(options.fence === undefined ? {} : { fence: options.fence }),
+    ...(options.tickBoundMs === undefined ? {} : { tickBoundMs: options.tickBoundMs }),
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
       void Promise.resolve(options.record?.({ at: now(), message })).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
@@ -100,6 +105,9 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       }
       failed = null;
     } catch (error) {
+      // Its checkpointer closed under it, given up on or replaced: the next one's upkeep does the work, and this is no
+      // alarm (review by Fable).
+      if (error instanceof FenceClosed || (error as { cause?: unknown })?.cause instanceof FenceClosed) return;
       const message = `the log's upkeep failed: ${reasonOf(error)}`;
       if (message !== failed) options.alert(message);
       failed = message;

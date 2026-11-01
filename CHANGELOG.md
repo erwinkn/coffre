@@ -25,6 +25,14 @@
     signed where whoever writes the database cannot reach (its object's
     storage; `CHECKPOINTER_MEMORY`, a file, on Node), and every check of the
     log holds to it.
+  - A checkpointer whose database stops answering under a tick cannot hang
+    anything (T169): the tick gives up within 10 s and another checkpointer
+    opens; a change committed meanwhile answers 503 with Retry-After within
+    about 7 s, in force and sealed once the checkpointer ticks again; uses
+    wait on no checkpointer; and `/readyz` turns red within seconds,
+    `sealing: false`, and green again by itself. A backlog after a stall is
+    sealed 10,000 entries a tick, the next at once: 240,000 uses in about
+    7 s at Hyperdrive's round trip.
   - A vault missing what 0.15 needs refuses to start, saying which: on
     Workers, `hotDatabase` and `checkpointer` in `vault(…)`; on Node,
     `hotDatabase` and `checkpointer: { memory }`. Nothing falls back to

@@ -53,17 +53,27 @@ export class MemoryStore implements CheckpointStore {
   /** The floor of `at`, as the fence's row holds it: raised by each barrier, lowered only by a writer. */
   floor = 0;
 
+  /** The database's clock, which each barrier reads. */
+  now: () => number = Date.now;
+
   /** The floors the signer asked windows to be read from, each tick's in turn. */
   froms: number[] = [];
 
-  async close(after: bigint, from: number) {
+  async close(after: bigint, from: number, limit?: number, barrier?: (upto: bigint) => void) {
     this.froms.push(from);
     const upto = this.next - 1n;
+    barrier?.(upto);
     const found = this.floor;
-    this.floor = Math.max(this.floor, Date.now() - 3000);
+    const ceiling = this.now() - 3000;
+    this.floor = Math.max(this.floor, ceiling);
     // Changes by number; uses by `at` from the floor the signer holds, as 6b's store reads them through their index.
-    const entries = this.between(after, upto).filter((e) => e.tree === 'changes' || e.at >= from);
-    return { upto, newest: await this.newest(), entries, floor: { found, set: this.floor } };
+    const all = this.between(after, upto).filter((e) => e.tree === 'changes' || e.at >= from);
+    // The first `limit` by number (T169), and the lowest `at` of the uses left above them.
+    // As the stores cap it: an entry past the cut that holds the last one's number is kept, for the tick to refuse.
+    const entries = limit === undefined || all.length <= limit ? all : all[limit]!.number === all[limit - 1]!.number ? all.slice(0, limit + 1) : all.slice(0, limit);
+    const left = all.slice(entries.length).filter((e) => e.tree === 'uses').map((e) => e.at);
+    const more = entries === all ? null : { above: left.length === 0 ? null : left.reduce((a, b) => Math.min(a, b)) };
+    return { upto, newest: await this.newest(), entries, floor: { found, set: this.floor, ceiling }, more };
   }
 
   async newest(): Promise<StoredPair | null> {

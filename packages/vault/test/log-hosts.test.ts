@@ -14,13 +14,15 @@ import { decodePair, encodePair, leafHash, openPair, pairSigners, pairVerifiers,
 
 import { Checkpointer, logOrigin, type Witness } from '../src/checkpointer.ts';
 import { keepCheckpointer, runCheckpointer } from '../src/checkpointer-node.ts';
-import { checkpointerAlarms, checkpointerObject, durableSealThrough, startCheckpointer, type ObjectNamespace, type ObjectState } from '../src/checkpointer-workers.ts';
+import { checkpointerAlarms, checkpointerObject, checkpointerStatus, durableSealing, durableSealThrough, startCheckpointer, type ObjectNamespace, type ObjectState } from '../src/checkpointer-workers.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { durableWitness, r2Archive, witnessObject } from '../src/witness-workers.ts';
 import { authentic, keys, MemoryStore, sealThroughDouble, variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { sql } from 'drizzle-orm';
 import { logWriter } from './log-entries.ts';
+import { stallProxy } from './stall-proxy.ts';
+import { isUnsealed } from '@coffre/core/vault';
 
 let db: TestDatabase;
 let seed: Buffer;
@@ -323,10 +325,11 @@ test('T119, item 3: a reset over a seal in flight: the seal fails rather than si
   await log.use();
   const change = await log.change();
   // The alarm's tick fails and resets the object while the seal waits on a tick of the same checkpointer: whichever runs
-  // first, the seal fails (its write refused, or its checkpointer closed under it), and none signs after the reset.
+  // first, the seal fails (its write refused, or its checkpointer closed under it, its connection cut: not sealed in
+  // time, T169), and none signs after the reset.
   const alarming = object.alarm();
   const sealing = durableSealThrough(namespace)(change);
-  await assert.rejects(sealing, /the checkpointer failed: (Failed query: SELECT write_checkpoint|this checkpointer was closed)/);
+  await assert.rejects(sealing, /the checkpointer failed: (Failed query: SELECT write_checkpoint|this checkpointer was closed|change \d+ was committed, but not sealed in time)/);
   await alarming;
   const [rowsBefore] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_checkpoints`);
   // The tile put back: the next seal opens a checkpointer, which finishes the pair the old one remembered, and seals.
@@ -349,4 +352,69 @@ test('review r3: with the database unreachable, the object keeps one alarm for e
   assert.equal(alarms.filter((a) => /cannot open/.test(a.message)).length, 1, JSON.stringify(alarms));
   assert.equal(alarms.filter((a) => /the next days of uses were not made/.test(a.message)).length, 1, JSON.stringify(alarms));
   assert.equal(alarms.length, 2, JSON.stringify(alarms));
+});
+
+test('T169, Workers: the object\'s connection stops answering under a tick: its alarm ends within its bound, the checkpointer replaced, a change answers unsealed, readiness red; answered again, its next alarm seals', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive', timeout: 60_000 }, async () => {
+  const proxy = await stallProxy(VAULT_URL);
+  const state = objectState();
+  const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: proxy.url }, seed, closeIdleMs: 60_000, tickBoundMs: 300 }));
+  const object = new Checkpointer_(state, {});
+  const namespace = namespaceOf(object);
+  try {
+    await startCheckpointer(namespace);
+    await log.use();
+    await object.alarm();
+    assert.deepEqual(await durableSealing(namespace)(), { ok: true });
+    // Its one connection goes dead: nothing answers, nothing is closed, and a connect gets no answer either.
+    proxy.hold();
+    const change = await log.change();
+    let t0 = Date.now();
+    await object.alarm();
+    assert.ok(Date.now() - t0 < 2000, `the alarm ended after ${Date.now() - t0} ms`);
+    assert.ok(state.alarm !== null, 'the next alarm set');
+    assert.equal((await checkpointerStatus(namespace)).open, false, 'the stalled checkpointer was replaced');
+    const sealing = await durableSealing(namespace)();
+    assert.ok(!sealing.ok && /stalled/.test(sealing.reason), JSON.stringify(sealing));
+    // A change's seal: the object tries to open another, which gets no answer either: unsealed, the app's 503.
+    t0 = Date.now();
+    await assert.rejects(durableSealThrough(namespace)(change), (error: Error) => isUnsealed(error));
+    assert.ok(Date.now() - t0 < 2000, `unsealed after ${Date.now() - t0} ms`);
+    // Answered again: the next alarm opens another over a connection of its own and seals the change.
+    proxy.release();
+    await object.alarm();
+    await object.alarm();
+    assert.deepEqual(await durableSealing(namespace)(), { ok: true });
+    const sealed = await durableSealThrough(namespace)(change);
+    assert.equal(sealed.proof.number, change);
+    assert.equal(state.data.get('pair'), encodePair(sealed.notes), 'one signer: its memory the pair that sealed the change');
+    const alarms = await checkpointerAlarms(namespace);
+    assert.ok(alarms.some((a) => /a checkpoint failed: .*stalled/.test(a.message)), JSON.stringify(alarms));
+    assert.deepEqual(alarms.filter((a) => /floor/.test(a.message)), []);
+  } finally {
+    proxy.release();
+    await proxy.close();
+  }
+});
+
+test('T169, review r5, Workers: a seal\'s tick that stalls between alarms turns readiness red at once, whatever the last alarm\'s tick said', { skip: ENGINE === 'postgres' ? false : 'Postgres only: Hyperdrive', timeout: 60_000 }, async () => {
+  const proxy = await stallProxy(VAULT_URL);
+  const state = objectState();
+  const Checkpointer_ = checkpointerObject(() => ({ hyperdrive: { connectionString: proxy.url }, seed, closeIdleMs: 60_000, tickBoundMs: 300 }));
+  const object = new Checkpointer_(state, {});
+  const namespace = namespaceOf(object);
+  try {
+    await startCheckpointer(namespace);
+    await log.use();
+    await object.alarm();
+    assert.deepEqual(await durableSealing(namespace)(), { ok: true });
+    // No alarm meanwhile: a change's seal ticks the checkpointer itself, on a connection that stops answering.
+    proxy.hold();
+    const change = await log.change();
+    await assert.rejects(durableSealThrough(namespace)(change), (error: Error) => isUnsealed(error));
+    const sealing = await durableSealing(namespace)();
+    assert.ok(!sealing.ok && /stalled/.test(sealing.reason), JSON.stringify(sealing));
+  } finally {
+    proxy.release();
+    await proxy.close();
+  }
 });

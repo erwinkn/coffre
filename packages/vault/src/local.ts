@@ -36,6 +36,7 @@ export const METHODS = [
   'verifyTrees',
   'verifyReads',
   'vouch',
+  'sealing',
 ] as const satisfies readonly (keyof Vault)[];
 
 export type LocalVault = Vault & { use: NonNullable<Vault['use']>; close(): Promise<void> };

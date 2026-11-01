@@ -28,7 +28,7 @@ import { logged } from './logged.ts';
 import { mcpEndpoint } from './mcp/endpoint.ts';
 import { authorizationServer, oauthRegister, oauthRevoke, oauthToken, protectedResource } from './mcp/http.ts';
 import { pluginRoute } from './plugins.ts';
-import { ObjectMoved } from './api/changes.ts';
+import { ObjectMoved, vaultSaysSealing } from './api/changes.ts';
 import { watchOf, type CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
@@ -369,10 +369,41 @@ async function ready(runtime: CoffreRuntime): Promise<{ ok: boolean } & Record<s
     cutoverRefused(cut.why);
     return { ok: false, cutover: false };
   }
+  // Under 0.15's log a change answers once sealed (R51): whether the checkpointer seals, red within seconds of a stall
+  // and green again once it ticks (T169).
+  const unsealed = await unsealing(runtime);
+  if (unsealed !== null) return { ok: false, sealing: false };
   if (watch === null) return { ok: true, watched: false };
   const said = await watch.hooks.readiness(watch.context());
   return { ...said, ok: said.ok };
 }
+
+/** How long readiness waits on the vault's word on its checkpointer: past it, the checkpointer does not seal. */
+const SEALING_ASKED_MS = 3000;
+
+/** Why 0.15's checkpointer does not seal, said in the server's log once while it stands; null when it does (T169). */
+async function unsealing(runtime: CoffreRuntime): Promise<string | null> {
+  const { vault } = runtime;
+  if (vault.sealing === undefined) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // The vault's word on what it has, its `about`, inside the same bound (review r1): a vault that does not answer is red.
+  // Called on the vault itself, never a method of it taken apart: a Worker's stub answers `bind` as a call of its own.
+  const said = await Promise.race([
+    (async () => ((await vaultSaysSealing(vault)) ? await vault.sealing!() : ({ ok: true } as const)))()
+      .catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : String(error) })),
+    new Promise<{ ok: false; reason: string }>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, reason: `the vault did not say within ${SEALING_ASKED_MS} ms` }), SEALING_ASKED_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  const why = said.ok ? null : said.reason;
+  if (why !== null && sealingSaid.get(runtime.vault) !== why) console.error('the audit checkpointer does not seal: changes answer 503 until it does', why);
+  if (why === null) sealingSaid.delete(runtime.vault);
+  else sealingSaid.set(runtime.vault, why);
+  return why;
+}
+
+/** What readiness last said of the checkpointer, per vault: said again only once it changes. */
+const sealingSaid = new WeakMap<object, string>();
 
 /**
  * The scheduled run: the audit watch's beat, if the deployment added one;

@@ -157,8 +157,9 @@ CONSTANTS
     MaxTicks,     \* checkpointer ticks in a behaviour
     MaxAttacks,   \* attacker steps in a behaviour
     MaxCrashes,   \* checkpointer crashes (losing what it held in memory, its memory outside kept)
+    MaxStalls,    \* checkpointer stalls (T169): a tick that outlives its bound, given up on, its statement still in flight
     NumberUnderLock, CloseLocks, SignerMemory, RowChecked, PairChecked, PairVerified, Witness, RememberFirst,
-    PairRemembered, PairWrittenTogether, MacChecked, KindInMac, RequestIdChecked, WaitForSeal,
+    PairRemembered, PairWrittenTogether, MacChecked, KindInMac, RequestIdChecked, WaitForSeal, Fenced,
     Retention,    \* whether a retention run is in the behaviours; without it, the clock stands at 0
     RetAppend,    \* the retention change, one of Changes when Retention is on
     MaxTime,      \* clock steps in a behaviour (each at a barrier)
@@ -179,6 +180,7 @@ Genesis == [t \in Kinds |-> GenesisNote]      \* a pair: a note per tree
 Row(h, t) == [t |-> t, upto |-> h[t].upto, leaves |-> h[t].leaves, at |-> h[t].at, prev |-> h[t].prev]
 GenesisRows == {Row(Genesis, t) : t \in Kinds}
 Forged == "forged"                           \* the request ID of an entry the attacker made up
+NoZombie == [pc |-> "none", upto |-> 0, at |-> 0, head |-> Genesis, next |-> Genesis, todo |-> <<>>]
 
 VARIABLES
     seq,       \* the sequence's last value
@@ -209,10 +211,13 @@ VARIABLES
                \* upto of the first pair the signer signed past the day's end
     tilesGone, \* the tiles at the cut were dropped with the rest below it
     dropped,   \* ghost: the entries retention dropped
-    resealed   \* ghost: a pair was signed over an entry with the request ID of one retention dropped
+    resealed,  \* ghost: a pair was signed over an entry with the request ID of one retention dropped
+    stalls,    \* stalls so far
+    zombie     \* the signer given up on at a stall, as cp: what of its tick may still land ("none": nothing)
 
 vars == <<seq, shared, a, db, cps, cp, memory, queued, witness, ticks, attacks, crashes, refused, macAlarm, witnessRefused, rowAlarm,
-          staleAlarm, signed, shown, committed, answered, forgerySealed, late, settling, now, rt, tilesGone, dropped, resealed>>
+          staleAlarm, signed, shown, committed, answered, forgerySealed, late, settling, now, rt, tilesGone, dropped, resealed,
+          stalls, zombie>>
 
 Max(x, y) == IF x >= y THEN x ELSE y
 Min(x, y) == IF x <= y THEN x ELSE y
@@ -242,10 +247,12 @@ Init ==
     /\ signed = {Genesis} /\ shown = GenesisRows
     /\ committed = {} /\ answered = {} /\ forgerySealed = FALSE /\ late = FALSE /\ settling = FALSE
     /\ now = 0 /\ rt = [pc |-> "idle", end |-> 0, cut |-> Genesis, first |-> 0] /\ tilesGone = FALSE /\ dropped = {} /\ resealed = FALSE
+    /\ stalls = 0 /\ zombie = NoZombie
 
 Outside == <<memory, queued, witness, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
 Ghosts == <<signed, shown, committed, answered, forgerySealed, late, settling>>
 Retained == <<now, rt, tilesGone, dropped, resealed>>
+Stalled == <<stalls, zombie>>
 
 -----------------------------------------------------------------------------
 (* An append. With NumberUnderLock: lock, number, commit. Without: number, lock, commit. *)
@@ -257,6 +264,7 @@ Lock(x) ==
     /\ shared' = shared \cup {x}
     /\ a' = [a EXCEPT ![x].pc = IF NumberUnderLock THEN "locked" ELSE "ready"]
     /\ UNCHANGED <<seq, db, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside /\ UNCHANGED Ghosts /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 Number(x) ==
     /\ a[x].pc = IF NumberUnderLock THEN "locked" ELSE "idle"
@@ -264,6 +272,7 @@ Number(x) ==
     /\ seq' = seq + 1
     /\ a' = [a EXCEPT ![x] = [pc |-> IF NumberUnderLock THEN "ready" ELSE "numbered", n |-> seq + 1]]
     /\ UNCHANGED <<shared, db, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside /\ UNCHANGED Ghosts /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 \* Commits, or aborts (a gap). No key makes the number unique: it commits whatever the attacker put there. Stamped at
 \* the commit; the retention change names its run's cut.
@@ -282,6 +291,7 @@ Finish(x) ==
     /\ shared' = shared \ {x}
     /\ UNCHANGED <<seq, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside
     /\ UNCHANGED <<signed, shown, answered, forgerySealed, settling>> /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 \* A change answers its admin: at once, or (WaitForSeal) once the running signer has written a pair whose changes note
 \* holds it (its inclusion proof, in the changes tree) and, with a witness, the witness's changes note holds it. (The
@@ -295,6 +305,7 @@ Answer(x) ==
     /\ answered' = answered \cup {x}
     /\ UNCHANGED <<seq, shared, db, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside
     /\ UNCHANGED <<signed, shown, committed, forgerySealed, late, settling>> /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 -----------------------------------------------------------------------------
 (* The signer. *)
@@ -322,6 +333,7 @@ TickRead ==
            ELSE cp' = [cp EXCEPT !.pc = "read", !.upto = seq, !.at = t] /\ UNCHANGED rowAlarm
     /\ UNCHANGED <<seq, shared, a, db, cps, attacks, crashes, memory, queued, witness, refused, macAlarm, witnessRefused, staleAlarm>>
     /\ UNCHANGED <<signed, shown, committed, answered, forgerySealed, late>> /\ UNCHANGED <<rt, tilesGone, dropped, resealed>>
+    /\ UNCHANGED Stalled
 
 \* What a tick does once it has signed a pair: remember it and write it, in this order with RememberFirst; each as one
 \* step for the pair, or a step per tree, the changes tree first.
@@ -375,6 +387,7 @@ TickSign ==
                /\ UNCHANGED <<macAlarm, staleAlarm>>
     /\ UNCHANGED <<seq, shared, a, db, queued, witness, ticks, attacks, crashes, refused, witnessRefused, rowAlarm, committed, answered, late>>
     /\ UNCHANGED <<now, rt, tilesGone, dropped>>
+    /\ UNCHANGED Stalled
 
 \* The plan's next step; after its last, the pair in memory moves on, and is queued for the witness.
 TickStep ==
@@ -387,6 +400,7 @@ TickStep ==
             /\ UNCHANGED queued
     /\ UNCHANGED <<seq, shared, a, db, witness, ticks, attacks, crashes, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
     /\ UNCHANGED <<signed, committed, answered, forgerySealed, late>> /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 \* The witness takes each queued note that extends its own (a witness per origin).
 Publish ==
@@ -398,6 +412,7 @@ Publish ==
     /\ settling' = FALSE
     /\ UNCHANGED <<seq, shared, a, db, cps, cp, memory, ticks, attacks, crashes, refused, macAlarm, rowAlarm, staleAlarm>>
     /\ UNCHANGED <<signed, shown, committed, answered, forgerySealed, late>> /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 \* The signer dies and loses what it held in memory (its pair, what it was sealing, the witness's queue); its memory
 \* outside the database stays.
@@ -409,6 +424,74 @@ Crash ==
     /\ queued' = [queued EXCEPT !.on = FALSE]
     /\ UNCHANGED <<seq, shared, a, db, cps, memory, witness, ticks, attacks, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
     /\ UNCHANGED Ghosts /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
+
+\* A tick that outlives its bound (T169): the host gives up on it and opens another signer (`Open`), as after a crash,
+\* while what it had sent may still land. Its memory write in flight, the host waits for (an object's storage, a synced
+\* file) before it opens again: it lands at the stall. Its database write may land any time later, or never
+\* (`ZombieStep`), refused if a row holds its place (the primary key; `write_checkpoint`'s one statement). With Fenced,
+\* that is all: the signer given up on starts nothing after the stall, each step checked against its fence first.
+\* Without, its tick goes on from where it was, as if nothing happened (`ZombieSign`, `ZombieStep`).
+Stall ==
+    /\ cp.pc \in {"read", "sealing"}
+    /\ stalls < MaxStalls
+    /\ stalls' = stalls + 1
+    /\ cp' = [pc |-> "down", upto |-> 0, at |-> 0, head |-> Genesis, next |-> Genesis, todo |-> <<>>]
+    /\ queued' = [queued EXCEPT !.on = FALSE]
+    /\ LET s == IF cp.pc = "sealing" THEN Head(cp.todo) ELSE "none"
+           remembering == s \in {"m", "mc", "mu"}
+       IN IF ~Fenced
+          THEN /\ zombie' = cp
+               /\ UNCHANGED <<memory, cps, shown, settling>>
+          ELSE IF remembering
+          THEN /\ Do(s, cp.next)
+               /\ zombie' = NoZombie
+          ELSE /\ zombie' = IF cp.pc = "sealing" THEN [cp EXCEPT !.todo = <<s>>] ELSE NoZombie
+               /\ UNCHANGED <<memory, cps, shown, settling>>
+    /\ UNCHANGED <<seq, shared, a, db, witness, ticks, attacks, crashes, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
+    /\ UNCHANGED <<signed, committed, answered, forgerySealed, late>> /\ UNCHANGED Retained
+
+\* A step of the signer given up on, landing late: its rows refused if any row holds their place.
+Late(s, h) ==
+    LET wanted == CASE s = "w"  -> {Row(h, "c"), Row(h, "u")}
+                    [] s = "wc" -> {Row(h, "c")}
+                    [] s = "wu" -> {Row(h, "u")}
+                    [] OTHER    -> {}
+        rows == IF \E w \in wanted, r \in cps : r.t = w.t /\ r.upto = w.upto THEN {} ELSE wanted
+    IN /\ memory' = IF ~SignerMemory THEN memory
+                    ELSE CASE s = "m"  -> h
+                           [] s = "mc" -> [memory EXCEPT !.c = h.c]
+                           [] s = "mu" -> [memory EXCEPT !.u = h.u]
+                           [] OTHER    -> memory
+       /\ cps' = cps \cup rows
+       /\ shown' = shown \cup rows
+       /\ settling' = IF rows = {} THEN settling ELSE FALSE
+
+\* Unfenced, its window read: it signs as TickSign does, and takes its plan's first step; a window it would refuse, or
+\* one with nothing new, ends it.
+ZombieSign ==
+    /\ zombie.pc = "read"
+    /\ LET w == Window("c", zombie.head.c.upto, zombie.upto) \cup Window("u", zombie.head.u.upto, zombie.upto)
+           h == Sealed(zombie.head, zombie.upto, zombie.at)
+       IN IF (MacChecked /\ \E e \in w : ~e.ok) \/ (FreshChecked /\ \E e \in w : e.at + Fresh < zombie.head.c.at)
+             \/ zombie.upto <= Min(zombie.head.c.upto, zombie.head.u.upto)
+          THEN /\ zombie' = NoZombie
+               /\ UNCHANGED <<memory, cps, shown, settling, signed, forgerySealed, resealed>>
+          ELSE /\ signed' = signed \cup {h}
+               /\ forgerySealed' = (forgerySealed \/ \E e \in w : ~e.ok)
+               /\ resealed' = (resealed \/ \E e \in w : e.rid \in DroppedRids)
+               /\ Late(Head(Plan), h)
+               /\ zombie' = [zombie EXCEPT !.pc = "sealing", !.next = h, !.todo = Tail(Plan)]
+    /\ UNCHANGED <<seq, shared, a, db, cp, queued, witness, ticks, attacks, crashes, stalls, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
+    /\ UNCHANGED <<committed, answered, late>> /\ UNCHANGED <<now, rt, tilesGone, dropped>>
+
+\* Its next step: fenced, the database write it had sent; unfenced, each step of its plan.
+ZombieStep ==
+    /\ zombie.pc = "sealing"
+    /\ Late(Head(zombie.todo), zombie.next)
+    /\ zombie' = IF Len(zombie.todo) = 1 THEN NoZombie ELSE [zombie EXCEPT !.todo = Tail(zombie.todo)]
+    /\ UNCHANGED <<seq, shared, a, db, cp, queued, witness, ticks, attacks, crashes, stalls, refused, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
+    /\ UNCHANGED <<signed, committed, answered, forgerySealed, late>> /\ UNCHANGED Retained
 
 \* Checkpointer.open, for one tree: whether it accepts the database, the note it runs from, the row it writes.
 Refuse == [ok |-> FALSE, note |-> GenesisNote, rows |-> {}]
@@ -447,6 +530,7 @@ Open ==
                /\ UNCHANGED <<cps, shown>>
     /\ UNCHANGED <<seq, shared, a, db, memory, queued, witness, ticks, attacks, crashes, macAlarm, witnessRefused, rowAlarm, staleAlarm>>
     /\ UNCHANGED <<signed, committed, answered, forgerySealed, late>> /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 -----------------------------------------------------------------------------
 (* The attacker: write access to the database, no key. Each step changes `db` or `cps` only. *)
@@ -459,6 +543,7 @@ Attack(dbNext, cpsNext) ==
     /\ settling' = TRUE
     /\ UNCHANGED <<seq, shared, a, cp, ticks, crashes>> /\ UNCHANGED Outside
     /\ UNCHANGED <<signed, shown, committed, answered, forgerySealed, late>> /\ UNCHANGED Retained
+    /\ UNCHANGED Stalled
 
 Delete == \E e \in db : Attack(db \ {e}, cps)
 
@@ -510,6 +595,7 @@ RetainChoose ==
         /\ rt' = [pc |-> "entry", end |-> end, cut |-> h, first |-> FirstPast(end)]
     /\ UNCHANGED <<seq, shared, a, db, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside /\ UNCHANGED Ghosts
     /\ UNCHANGED <<now, tilesGone, dropped, resealed>>
+    /\ UNCHANGED Stalled
 
 \* Once the retention change is sealed in the signer's pair (DropAfterSeal; without, once committed), and (FreshBeforeDrop)
 \* that pair is Fresh past the cut: the day's partition goes, every use stamped before its end whatever its number (or,
@@ -527,12 +613,13 @@ RetainDrop ==
     /\ rt' = [rt EXCEPT !.pc = "done"]
     /\ UNCHANGED <<seq, shared, a, cps, cp, ticks, attacks, crashes>> /\ UNCHANGED Outside /\ UNCHANGED Ghosts
     /\ UNCHANGED <<now, resealed>>
+    /\ UNCHANGED Stalled
 
 -----------------------------------------------------------------------------
 
 Next ==
     \/ \E x \in Appends : Lock(x) \/ Number(x) \/ Finish(x) \/ Answer(x)
-    \/ TickRead \/ TickSign \/ TickStep \/ Publish \/ Crash \/ Open
+    \/ TickRead \/ TickSign \/ TickStep \/ Publish \/ Crash \/ Open \/ Stall \/ ZombieSign \/ ZombieStep
     \/ Delete \/ DeleteCheckpoint \/ Forge \/ Replay \/ Swap \/ Move
     \/ RetainChoose \/ RetainDrop \/ ForgeCut \/ Resurrect
 

@@ -1404,6 +1404,9 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | a value leaves only after its entry commits, durably | `DurableBeforeRelease`, `NothingAllowedAfterAnswer` |
 | the barrier under the fence exclusive; the floor of `at` | `CheckpointsHold` |
 | the barrier checks the floor is the one it last wrote (BarrierChecksFloor), against a writer who lowers it. The model shows the barrier signing nothing past a lowered floor; the alarm PR 6 raises is not modelled | `CheckpointsHold` |
+| ... or above it, no higher than its own clock less D: a late barrier's, of a checkpointer given up on (BarrierAcceptsLate; `HotPathOneStallLive`, T169) | `CheckpointsGoOn`: one late barrier stops every checkpoint after it |
+| a checkpoint sealing only a prefix of its barrier's window signs the lowest `at` of the uses left above it, if below the barrier's floor (ChunkFloor; `HotPathOneChunks`, T169) | `CheckpointsHold`: signed the barrier's floor, the next window misses the rest of a backlog stamped before it |
+| a use whose `at` is more than MaxSkew past Postgres's clock writes nothing (AheadChecked, `ahead`); with the deadline, its number is taken within [at − MaxSkew, at + D] | `CeilingHolds`: a checkpoint's use stamped past its floor + D + MaxSkew, where the verifier's, locate's and retention's reads stop |
 | each input sealed (`Unsealed={"credential"}` …) | `ReplaySound`: allowed live, refused by the replay |
 | seals checked before what the rows say (StaleFirst) | `TamperVisible` |
 | the seal cache valid only while the newest change is the one it was read at (CacheChecked, CacheSameChange) | `ReplaySound`, `RepeatsAreTheirCover`, after a restore |
@@ -1421,6 +1424,30 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | the barrier waits for the issues in flight on the issue lock, exclusive (BarrierWaitsIssues); an issue's number taken under that lock (IssueNumberUnderLock) | `CheckpointsHold`: a checkpoint closed over an issue that commits after it |
 | a credential named by a use only once its issue has committed (NamedAfterIssue: its token is handed out after) | `ReplayAgrees`: a use numbered after the issue that did not see it, refused live and allowed by the replay |
 | a use asks for the principal's lock only on its caller's standing decided (DecideBeforeLock, T158): its second call, once the Worker decided the first's rows; the first call locks and writes nothing, and no standing is kept for a later use (D153). The ghost `standing` is the log's truth about the caller when the use asked; a revoke after that may still find it waiting, who stood when it asked (formal/Probing.tla says what a lock taken first would tell) | `NoLockWithoutStanding` (HotPathOneStaleBulk) |
+
+**A late barrier (T169; `HotPathOneStall`, `HotPathOneStallLive`).** A
+barrier a checkpointer given up on had sent may run as late as it likes,
+raising the floor as any barrier does, its window never read. The next
+barrier accepts what it leaves (BarrierAcceptsLate), so checkpoints go on.
+`EXPECTED`: with a writer who lowers the floor, a late barrier can put it
+back before the next barrier reads it, and the uses let in below it go
+unsealed (`CheckpointsHold`), as a writer who put it back itself would
+have. BarrierChecksFloor sees a floor left lowered, not one lowered and
+restored.
+
+**Chunks (T169; `HotPathOneChunks`, `HotPathOneChunksClock`).** A tick
+seals at most `WINDOW_MAX` entries of its barrier's window: a checkpoint
+may seal a prefix, and the next barrier closes the rest. Its floor is the
+lowest `at` of the uses left above it if that is below the barrier's
+floor (ChunkFloor), which makes the next window exact by construction, on
+any clock. What rests on clocks is the ceiling (`CeilingHolds`): each use a
+checkpoint seals is stamped within D + MaxSkew of its floor, since every
+use is numbered within [at − MaxSkew, at + D] by Postgres's clock, which
+reads both ends (AheadChecked, DeadlineChecked). `EXPECTED`: with that
+clock stepping back, a use may sit past its checkpoint's ceiling
+(`HotPathOneChunksClock`). Every use is still sealed; a read bounded by
+that ceiling (a proof, retention's) finds nothing there and hands out no
+proof: it fails closed.
 
 **HotPathOneStaleBulk** checks the two halves together: a use refused
 `stale` still moves the cap's row exactly as the replay does, and a repeat
@@ -1506,6 +1533,7 @@ one `upto` by each tick, as one pair.
 | both notes remembered in one record (PairRemembered) | `PairConsistent` |
 | each tree's newest row checked, at each tick or by the verifier (PairChecked + PairVerified) | `SealedDeletionDetected` |
 | the kind under the entry's MAC (KindInMac) | `KindKept`: a moved change is sealed into the uses tree |
+| a checkpointer given up on starts nothing after its stall (Fenced; `SealStall`, T169) | `NoFalseAlarm`: its tick goes on, signs and writes a pair the signer opened in its place does not hold |
 
 `EXPECTED`:
 - **The window R51 accepts.** Deleting or reordering an entry before it is
@@ -1518,6 +1546,12 @@ one `upto` by each tick, as one pair.
   recorded and alerted. An answered change can then be deleted before it is
   published, and stay undetected: the same window as SealPlugin's.
   `AnsweredChangeKept` does not cover it.
+
+**A stall (T169; `SealStall`).** A tick that outlives its bound is given
+up on and another signer opens, as after a crash, while what the first had
+sent may still land: its memory write before the open (the host waits for
+it), its database write any time later or never, refused where a row holds
+its place. With `Fenced` that is all it does; without, its tick goes on.
 
 **Retention (plan PR 7, W229; `SealRetention`, `SealRetentionCrash`).** A
 day of uses is dropped below a cut that a sealed retention change names; the
@@ -1981,11 +2015,11 @@ every pull request that is not a version-only bump:
   - Overtaking, Walking, Sharing, Rows and Mixed together;
   - 0.15's models in seven:
     - `hotpath`;
-    - `hotpath-policy` (the policy, liveness and stale-bulk scenarios);
+    - `hotpath-policy` (the policy, liveness, stall liveness and stale-bulk scenarios);
     - `hotpath-bulk` (the bulk cap's main scenario);
     - `hotpath-skew` (its slack and clock-skew scenarios);
     - `seal` (Seal and Migration015);
-    - `seal-plugin` (SealPlugin and SealCore);
+    - `seal-plugin` (SealPlugin, SealCore and SealStall);
     - `seal-retention` (SealRetention and SealRetentionCrash);
   - the rest.
 

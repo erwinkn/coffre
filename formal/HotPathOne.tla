@@ -198,6 +198,20 @@
 (*                         its last lock wait, in the statement that       *)
 (*                         decides (now() is the transaction's start,      *)
 (*                         before any lock wait, and passes a late use);   *)
+(*   AheadChecked          a use whose `at` is more than MaxSkew past      *)
+(*                         Postgres's clock writes nothing (`ahead`, 60 s  *)
+(*                         in the code): with DeadlineChecked, a use takes *)
+(*                         its number within [at - MaxSkew, at + D] by     *)
+(*                         Postgres's clock, which reads both, so a later  *)
+(*                         number's `at` is never more than D + MaxSkew    *)
+(*                         below an earlier one's (CeilingHolds);          *)
+(*   ChunkFloor            a checkpoint that seals only a prefix of its    *)
+(*                         barrier's window (T169: a tick's window is      *)
+(*                         capped) signs as its floor the lowest `at` of   *)
+(*                         the uses the window holds above it, if below    *)
+(*                         the barrier's, never the barrier's: the next    *)
+(*                         window is read from it, and the rest of the     *)
+(*                         backlog may be stamped long before the barrier; *)
 (*   FloorChecked          a use whose `at` is below the floor writes      *)
 (*                         nothing;                                        *)
 (*   BarrierChecksFloor    the floor is an unsigned row: the barrier       *)
@@ -206,6 +220,12 @@
 (*                         nothing (a floor a writer lowered would let a   *)
 (*                         use in below it, which the next checkpoint's    *)
 (*                         `at` scan misses);                              *)
+(*   BarrierAcceptsLate    ... or above it, but no higher than this        *)
+(*                         barrier's own clock less D: what a barrier of a *)
+(*                         signer given up on (T169) leaves when it lands  *)
+(*                         late, which the next barrier raises past anyway *)
+(*                         (LateBarrier); without, one such barrier stops  *)
+(*                         every checkpoint after it (CheckpointsGoOn);    *)
 (*   WorkerHonoursDeadline the Worker answers 503 at the deadline, and a   *)
 (*                         value whose call returns later never leaves;    *)
 (*   PrincipalLocks        a key that enters the cap's set takes the       *)
@@ -290,6 +310,9 @@ CONSTANTS
     MaxRestores,     \* restores from a backup in a behaviour
     Holds,           \* Hyperdrive may hold a call and never run it
     FloorTampers,    \* the writer's tampering (MaxTampers) may lower the floor of `at` instead of a row
+    LateBarriers,    \* a barrier of a checkpointer given up on may land late, any number of times (T169)
+    Chunks,          \* a checkpoint may seal a prefix of its barrier's window (T169: the window is capped)
+    Ahead,           \* how much further than MaxSkew a Worker's clock may run ahead (`ahead` refuses its uses)
     Failures,        \* a call may fail before its commit, or its Worker die after it
     Keys,            \* the keys one principal asks for; {}: no bulk cap
     MaxTime,         \* Postgres's clock runs 0..MaxTime
@@ -301,7 +324,7 @@ CONSTANTS
     UseLocks, StatementSnapshot, UseNumberUnderLock, ChangeLocks, ChangeNumberUnderLock,
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
-    ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
+    ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, BarrierAcceptsLate, ChunkFloor, AheadChecked, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
     PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, Slack, DeadlineSlack,
     AheadSlack, CapFromPolicy, CapSealed,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
@@ -347,6 +370,7 @@ vars == <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, las
           cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, iholder, ishared, bar>>
 
 Max(a, b) == IF a > b THEN a ELSE b
+Min(a, b) == IF a < b THEN a ELSE b
 
 NoPlock == [ex |-> None, sh |-> {}]
 \* The principal's lock without use x: what its commit, or its end, leaves.
@@ -492,7 +516,7 @@ Init ==
     /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, value |-> FALSE]]
     /\ answered = 0
     /\ released = {}
-    /\ cp = [open |-> FALSE, from |-> 0, upto |-> 0, readFloor |-> 0, floor |-> 0]
+    /\ cp = [open |-> FALSE, from |-> 0, upto |-> 0, readFloor |-> 0, floor |-> 0 - D]
     /\ lastUpto = 0
     /\ lastFloor = 0 - D
     /\ signed = {}
@@ -542,7 +566,7 @@ ClockBack ==
 UseStart(x) ==
     /\ u[x].pc = "idle"
     /\ pnow <= MaxStart
-    /\ \E k \in KeysOr, s \in -MaxSkew..MaxSkew,
+    /\ \E k \in KeysOr, s \in -MaxSkew..(MaxSkew + Ahead),
           f \in {None} \cup {i \in Issuers : NamedAfterIssue => iss[i].pc = "answered"} :
           u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "started", !.key = k, !.at = pnow + s, !.deadline = pnow + s + D,
                                           !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest,
@@ -572,7 +596,8 @@ UseResume(x) ==
 UseLock(x) ==
     /\ u[x].pc = "started"
     /\ UseLocks => holder = None
-    /\ LET late == FloorChecked /\ u[x].at < floor
+    /\ LET late == \/ FloorChecked /\ u[x].at < floor
+                   \/ AheadChecked /\ u[x].at > pnow + MaxSkew
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF late THEN "done" ELSE IF Keys = {} THEN "read" ELSE "locked",
                                              !.replied = @ \/ late]]
           /\ shared' = IF UseLocks /\ ~late THEN shared \cup {x} ELSE shared
@@ -951,7 +976,8 @@ CheckpointClose ==
     /\ Cardinality(signed) < MaxCheckpoints
     /\ bar + 1 >= Len(BarrierLocks)
     /\ Len(BarrierLocks) > 0 => LockOpen(BarrierLocks[Len(BarrierLocks)])
-    /\ BarrierChecksFloor => floor = lastFloor
+    /\ BarrierChecksFloor => \/ floor = cp.floor
+                             \/ BarrierAcceptsLate /\ cp.floor < floor /\ floor <= pnow - D
     /\ floor' = Max(floor, pnow - D)
     /\ cp' = [open |-> TRUE, from |-> lastUpto, upto |-> nextSeq - 1, readFloor |-> lastFloor, floor |-> Max(floor, pnow - D)]
     /\ holder' = IF holder = "barrier" THEN None ELSE holder
@@ -960,15 +986,33 @@ CheckpointClose ==
     /\ UNCHANGED <<log, nextSeq, shared, plock, u, c, answered, released, lastUpto, lastFloor, signed, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, iss, ishared>>
 
+\* A barrier of a checkpointer given up on (T169): its statement was in flight when the host stopped waiting for it, and
+\* runs when its locks are free, as late as it likes, raising the floor as any barrier does. Nothing reads its window
+\* or signs it. As many times as it likes: the floor only follows the clock.
+LateBarrier ==
+    /\ LateBarriers
+    /\ LockFree /\ iholder = None /\ ishared = {}
+    /\ floor' = Max(floor, pnow - D)
+    /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, crashes,
+                   cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
+
 \* Later, outside any lock: it reads the window (the changes by number, the uses through the `at`
 \* index from the previous barrier's floor) and signs their numbers.
+\* With Chunks, only a prefix of it, up to k (T169): the next barrier closes the rest, read from the
+\* floor this one signs (ChunkFloor), the lowest `at` of the uses left above it if below the
+\* barrier's; or, without, the barrier's.
+Above(k) == {d.at : d \in {e \in UsesIn(log) : k < e.seq /\ e.seq <= cp.upto /\ e.at >= cp.readFloor}}
+ChunkFloorOf(k) ==
+    IF k = cp.upto \/ ~ChunkFloor THEN cp.floor
+    ELSE Max(cp.readFloor, IF Above(k) = {} THEN cp.floor ELSE Min(cp.floor, CHOOSE a \in Above(k) : \A b \in Above(k) : a <= b))
 CheckpointSign ==
     /\ cp.open
-    /\ signed' = signed \cup {[from |-> cp.from, upto |-> cp.upto,
-                               seqs |-> {e.seq : e \in {d \in log : cp.from < d.seq /\ d.seq <= cp.upto
-                                                                    /\ (d.kind = "change" \/ d.at >= cp.readFloor)}}]}
-    /\ lastUpto' = cp.upto
-    /\ lastFloor' = cp.floor
+    /\ \E k \in {cp.upto} \cup (IF Chunks THEN (cp.from + 1)..(cp.upto - 1) ELSE {}) :
+        /\ signed' = signed \cup {[from |-> cp.from, upto |-> k, floor |-> ChunkFloorOf(k),
+                                   seqs |-> {e.seq : e \in {d \in log : cp.from < d.seq /\ d.seq <= k
+                                                                        /\ (d.kind = "change" \/ d.at >= cp.readFloor)}}]}
+        /\ lastUpto' = k
+        /\ lastFloor' = ChunkFloorOf(k)
     /\ cp' = [cp EXCEPT !.open = FALSE]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
@@ -1063,7 +1107,7 @@ Next ==
     \/ \E x \in Uses : UseStart(x) \/ UseHold(x) \/ UseResume(x) \/ UseStep(x) \/ UseFail(x) \/ UseCrash(x)
     \/ \E h \in Changers : ChangeStep(h) \/ ChangeAbort(h)
     \/ \E i \in Issuers : IssueStep(i) \/ IssueFail(i)
-    \/ BarrierLock \/ CheckpointClose \/ CheckpointSign
+    \/ BarrierLock \/ CheckpointClose \/ CheckpointSign \/ LateBarrier
     \/ Flush \/ Crash \/ Tamper \/ TamperFloor \/ Restore
 
 Spec == Init /\ [][Next]_vars
@@ -1125,6 +1169,13 @@ RepeatsAreTheirCover ==
 \* none missed by its `at`.
 CheckpointsHold ==
     \A k \in signed : {e.seq : e \in {d \in log : k.from < d.seq /\ d.seq <= k.upto}} = k.seqs
+
+\* The ceiling the verifier, locate and retention read a checkpoint's uses up to (T169): no use it
+\* seals is stamped more than D + MaxSkew past its floor (63 s in the code). Both ends of a use's
+\* numbering read Postgres's clock (AheadChecked, DeadlineChecked); a clock that steps back breaks it
+\* (HotPathOneChunksClock, EXPECTED), and the verifier's bounded read then misses the use and alarms.
+CeilingHolds ==
+    \A k \in signed : \A d \in UsesIn(log) : k.from < d.seq /\ d.seq <= k.upto => d.at <= k.floor + D + MaxSkew
 
 NumbersUnique ==
     \A d, e \in log : d.seq = e.seq => d = e
@@ -1194,5 +1245,11 @@ UseAnswered ==
 \* Every change that starts is answered.
 ChangeAnswered ==
     \A h \in Changers : \A n \in 0..(MaxChanges - 1) : (c[h].pc = "started" /\ c[h].n = n) ~> c[h].n > n
+
+MaxSeq == Cardinality(Uses) + Cardinality(Changers) * MaxChanges + Cardinality(Issuers)
+
+\* Every number handed out is closed by a checkpoint, while the scenario has checkpoints left to sign.
+CheckpointsGoOn ==
+    \A n \in 1..MaxSeq : nextSeq > n ~> (lastUpto >= n \/ Cardinality(signed) >= MaxCheckpoints)
 
 =============================================================================
