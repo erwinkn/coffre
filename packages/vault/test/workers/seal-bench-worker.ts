@@ -1,5 +1,5 @@
 // The checkpointer's Durable Object alone, no witness, for the seal bench (bench/seal.ts): what a change waits for.
-// Deployed for a run on Cloudflare, `TOKEN` guards it; `rtt` times plain statements through the Hyperdrive.
+// `TOKEN` guards it, deployed for a run on Cloudflare or not; `rtt` times plain statements through the Hyperdrive.
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { sql } from 'drizzle-orm';
@@ -7,7 +7,7 @@ import { sql } from 'drizzle-orm';
 import { checkpointer, checkpointerStatus, durableSealThrough, postgres, startCheckpointer, vault } from '../../src/cloudflare.ts';
 
 type Namespace = Parameters<typeof startCheckpointer>[0];
-type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; SIGNING_KEY: string; CHECKPOINTER: Namespace; TOKEN?: string };
+type Env = { VAULT_HYPERDRIVE: { connectionString: string }; VAULT_KEY: string; SIGNING_KEY: string; CHECKPOINTER: Namespace; TOKEN: string };
 
 export const Vault = vault((env: Env) => ({
   database: postgres(env.VAULT_HYPERDRIVE as never),
@@ -21,7 +21,8 @@ export const CoffreCheckpointer = checkpointer();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    if (env.TOKEN !== undefined && request.headers.get('x-token') !== env.TOKEN) return new Response('no', { status: 403 });
+    // It answers its token alone, locally too (bench/seal.ts sets one), so that deployed it is never open.
+    if (typeof env.TOKEN !== 'string' || env.TOKEN.length < 16 || request.headers.get('x-token') !== env.TOKEN) return new Response('no', { status: 403 });
     const { op, number } = (await request.json()) as { op: string; number?: string };
     try {
       if (op === 'start') {

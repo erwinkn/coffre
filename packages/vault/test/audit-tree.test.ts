@@ -914,6 +914,22 @@ test('T171, review r2: a checkpointer closed while a change it kept waits for it
   await assert.rejects(sealing, (error: Error) => error instanceof Unsealed && /was closed/.test(error.message));
 });
 
+test('T171, Fable review: a change kept is not answered while the checkpointer\'s refusal stands, and is once a tick holds again', async () => {
+  const { store, open } = await setup();
+  const cp = await open();
+  await traffic(store, cp, 2);
+  const kept = store.append('changes', 'kept');
+  await cp.tick();
+  const row = store.rows.get(cp.pair.pair.upto)!;
+  store.rows.delete(cp.pair.pair.upto);
+  assert.ok(!(await cp.tick()).signed);
+  await assert.rejects(cp.sealThrough(kept), /last tick was refused: the database's newest checkpoint is/);
+  store.rows.set(cp.pair.pair.upto, row);
+  store.append('uses', 'u');
+  assert.ok((await cp.tick()).signed);
+  assert.equal((await cp.sealThrough(kept)).proof.number, kept);
+});
+
 test('a change waits for the witness, then answers unwitnessed at the deadline, alerted; a refusal is retried within it', async () => {
   const { k, store, open, alerts } = await setup();
   const self = await noteSigner('witness.test', Buffer.alloc(32, 9));

@@ -695,10 +695,9 @@ export class Checkpointer {
    */
   tick(): Promise<Tick> {
     if (this.queued !== null) return this.queued;
-    const flight: Flight = { run: undefined as unknown as Promise<Tick>, barrier: null };
-    const run = this.running.then(() => {
+    const run: Promise<Tick> = this.running.then(() => {
       this.queued = null;
-      this.flight = flight;
+      this.flight = { run, barrier: null };
       // Bounded (T169): past it the checkpointer stalls, its fence closed, whatever the tick still awaits. Its window,
       // once the barrier has said how far, adds to the bound (`WINDOW_ENTRY_MS`).
       const t0 = performance.now();
@@ -716,9 +715,8 @@ export class Checkpointer {
         throw thrown;
       });
     });
-    flight.run = run;
     const landed = () => {
-      if (this.flight === flight) this.flight = null;
+      if (this.flight?.run === run) this.flight = null;
     };
     void run.then(landed, landed);
     this.queued = run;
@@ -919,8 +917,10 @@ export class Checkpointer {
     // From the changes tree (KindInMac): the MAC does not cover the number, so a writer could delete the change and
     // renumber a use into its place before the tick; that use is sealed, and provable, but in the uses tree.
     // A proof the database answers wrongly for (an entry changed since its tick, `locate`'s refusal) is the same alarm.
-    // A checkpointer closed or stalled answers no change, from what it kept or from the database (T169; review r1).
+    // A checkpointer closed or stalled answers no change, from what it kept or from the database (T169; review r1); nor
+    // one whose last tick was refused, while that stands (Seal.tla's Answer: the signer neither down nor refused).
     if (this.closed) throw new Unsealed(number, this.stalled ?? 'this checkpointer was closed: another holds its memory');
+    if (this.refused !== null) throw new Error(`cannot answer change ${number}: the checkpointer's last tick was refused: ${this.refused}`);
     const kept = this.proveKept(number);
     const head = kept?.head ?? this.head;
     let proof: InclusionProof | null;
@@ -959,11 +959,14 @@ export class Checkpointer {
       const size = head.pair.changes.size;
       try {
         const proof = inclusionProof(nodesFrom(tileMap(tiles)), index, size);
-        if (!verifyInclusion(leafHash(leaf), index, size, proof, head.pair.changes.root)) return null;
-        return { head, proof: { number, tree: 'changes', index, size, leaf, proof, notes: head.notes } };
-      } catch {
-        return null;
+        if (verifyInclusion(leafHash(leaf), index, size, proof, head.pair.changes.root)) return { head, proof: { number, tree: 'changes', index, size, leaf, proof, notes: head.notes } };
+        this.options.alert(`change ${number}: the proof its tick kept does not check against its pair; proved from the database instead`);
+      } catch (error) {
+        // The tick made the tiles and the root from one edge: this is a bug, not a writer's doing. Said, and proved from
+        // the database, so that it costs two round trips, never an answer.
+        this.options.alert(`change ${number}: its tick's tiles do not prove it (${(error as Error).message}); proved from the database instead`);
       }
+      return null;
     }
     return null;
   }

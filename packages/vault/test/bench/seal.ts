@@ -34,6 +34,7 @@ let worker: Unstable_DevWorker;
 let proxy: Awaited<ReturnType<typeof postgresProxy>>;
 let dir: string;
 const seed = randomBytes(32);
+const token = randomBytes(16).toString('hex');
 
 before(async () => {
   db = await openTestDatabase();
@@ -43,7 +44,7 @@ before(async () => {
     name: 'coffre-seal-bench',
     compatibility_date: '2026-08-06',
     compatibility_flags: ['nodejs_compat'],
-    vars: { VAULT_KEY: randomBytes(32).toString('base64'), SIGNING_KEY: seed.toString('base64') },
+    vars: { VAULT_KEY: randomBytes(32).toString('base64'), SIGNING_KEY: seed.toString('base64'), TOKEN: token },
     hyperdrive: [{ binding: 'VAULT_HYPERDRIVE', id: 'seal-bench', localConnectionString: proxy.url }],
     durable_objects: { bindings: [{ name: 'CHECKPOINTER', class_name: 'CoffreCheckpointer' }] },
     migrations: [{ tag: 'v1', new_sqlite_classes: ['CoffreCheckpointer'] }],
@@ -63,7 +64,7 @@ after(async () => {
 });
 
 const ask = async <T>(op: string, number?: bigint): Promise<T> => {
-  const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ op, number: number === undefined ? undefined : String(number) }), signal: AbortSignal.timeout(20_000) });
+  const response = await worker.fetch('/', { method: 'POST', headers: { 'x-token': token }, body: JSON.stringify({ op, number: number === undefined ? undefined : String(number) }), signal: AbortSignal.timeout(20_000) });
   const body = (await response.json()) as T & { error?: string };
   if (!response.ok) throw new Error(body.error ?? String(response.status));
   return body;

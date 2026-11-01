@@ -203,7 +203,11 @@ out. This is Seal.tla's WaitForSeal as written: the signer's own head holds
 the change. Only a change sealed before the checkpointer kept it (sealed
 by a checkpointer since replaced, or in a window past 4 MiB) is proved
 from the database (`locate`, then its tiles), two round trips more. A
-checkpointer closed or stalled answers no change, kept or not. Then it waits for every witness
+checkpointer closed or stalled answers no change, kept or not, and one
+whose last tick was refused none while the refusal stands (Seal.tla's
+`Answer`: the signer neither down nor refused). A kept proof that does
+not check against its pair is a bug, alerted, and proved from the
+database instead. Then it waits for every witness
 to hold a pair that covers it, for at most 2 s. Each witness has a pump that always sends the
 newest pair, one at a time, each try bounded by 2 s, so a witness that
 never answers fails its try instead of stopping its pump. A witness that
