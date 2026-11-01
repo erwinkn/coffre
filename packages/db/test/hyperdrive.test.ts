@@ -10,6 +10,8 @@ import { sql } from 'drizzle-orm';
 
 import { openDatabase } from '../src/connect.ts';
 import { createDatabase, QueryOutsideTransaction, tablesOf } from '../src/database.ts';
+import { forUpdate } from '../src/dialect.ts';
+import { prepared } from '../src/prepared.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 import { later } from '../src/later.ts';
 
@@ -240,6 +242,28 @@ test("a transaction's statements asked together go under one Sync, its BEGIN wit
   assert.equal(proxy.syncs - before, 4);
   assert.deepEqual([...await db.execute(sql`select n from gathered order by n`)].map((row) => row.n), [3, 4, 5, 6]);
   await pool.end();
+});
+
+test("a write left to `later` as a work's first statement goes behind what was asked before it: the head's lock first (Fable's review of #452)", { skip }, async () => {
+  const sent: string[] = [];
+  const client = postgresClient(DATABASE, { max: 1, debug: (_: number, text: string) => void sent.push(text) });
+  try {
+    const db = createDatabase(client);
+    await db.execute(sql`create temporary table ordered (n int)`);
+    // As `audited` asks it: the head's lock, a lazy prepared select, then the work, whose first statement is a `later`.
+    const lock = prepared((on) => forUpdate(on, on.select({ next: tablesOf(on).auditChainHead.nextSeq }).from(tablesOf(on).auditChainHead)));
+    await db.transaction(async (tx) => {
+      // Awaited at once inside an async function, as `lockLogHead` awaits it, not yet answered when the work starts.
+      const locking = (async () => await lock(tx))();
+      later(tx, sql`insert into ordered values (1)`);
+      await locking;
+    });
+    const at = (part: string) => sent.findIndex((text) => text.includes(part));
+    assert.ok(at('audit_chain_head') >= 0 && at('audit_chain_head') < at('insert into ordered'), `sent ${JSON.stringify(sent)}`);
+    assert.deepEqual([...await db.execute(sql`select n from ordered`)], [{ n: 1 }]);
+  } finally {
+    await client.end();
+  }
 });
 
 test('a statement of a group that fails: those before it answer, it fails with its error, those after as an aborted transaction, and the transaction rolls back with its error', { skip }, async () => {

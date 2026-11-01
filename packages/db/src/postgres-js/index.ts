@@ -354,7 +354,9 @@ export default function postgres(given: Options): Sql {
       function inTransaction(q: Query): void {
         // Coffre: refused once the end is decided; before the COMMIT goes, the transaction's work is not all done, and it
         // rolls back rather than commit part of it.
-        if (decided) {
+        // Coffre: and, once its work has returned, a statement something may await, asked while the COMMIT waits a task
+        // for what the work left to `later` (`settleWithCommit`): work still running, refused as `settle` refuses it.
+        if (decided || (holding && !q.later)) {
           const refused = stopped ?? Errors.generic('TRANSACTION_ENDED', 'The transaction has ended, so the statement was not sent');
           if (!closing) unfinished ??= Errors.generic('TRANSACTION_UNFINISHED', 'The transaction\'s work asked a statement once it had settled, so the transaction rolled back');
           q.catch(() => {});
@@ -618,15 +620,10 @@ function alone(q: Query): boolean {
   return q.args.some((x) => x === undefined || (x !== null && typeof x === 'object' && inferType(x) === 0)) || q.args.length >= 65534;
 }
 
-/** Marks what a statement of a group Postgres skipped fails with (`skippedError`). */
-const SKIPPED = Symbol('skipped');
-
 /** What a statement of a group Postgres skipped fails with, behind the one that failed: its transaction is aborted. */
 function skippedError(): PostgresError {
-  return Object.assign(Errors.postgres({ severity: 'ERROR', code: '25P02', message: 'current transaction is aborted, commands ignored until end of transaction block' }), { [SKIPPED]: true });
+  return Errors.postgres({ severity: 'ERROR', code: '25P02', message: 'current transaction is aborted, commands ignored until end of transaction block' });
 }
-
-const isSkipped = (error: unknown) => error instanceof PostgresError && (error as { [SKIPPED]?: boolean })[SKIPPED] === true;
 
 /** Postgres's "current transaction is aborted": a statement after one that failed; Drizzle's error around one too. */
 const aborted = (error: unknown): boolean => {

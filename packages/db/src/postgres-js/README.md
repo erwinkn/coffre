@@ -232,9 +232,10 @@ with `packages/db/scripts/hyperdrive-pinning.ts`:
 4. Delete the Worker, the configuration, the tunnel, its DNS record, the
    Access application and token, and the database.
 
-Each transaction is one of eight shapes, in turn: a first statement with a
+Each transaction is one of nine shapes, in turn: a first statement with a
 parameter, without one, and after `SET LOCAL`; BEGIN with a group of
-three; reads together, then writes left to `later` with the COMMIT; a group
+three, and with the vault's opening group (`SET LOCAL`, a row locked, a
+read); reads together, then writes left to `later` with the COMMIT; a group
 of which one statement fails; a write left to `later` that fails; and a
 rollback. Every statement records its backend (`pg_backend_pid()`) and its
 transaction (`txid_current()`), which must be one of each per transaction,

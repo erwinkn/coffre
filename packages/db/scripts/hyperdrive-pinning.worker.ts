@@ -71,6 +71,15 @@ const SHAPES: Record<string, (pool: HyperdrivePool, tag: string) => Promise<Outc
     ...(await Promise.all([here(tx, 4), here(tx), here(tx, 5)])),
     await here(tx),
   ])),
+  // T179's, the vault's decision as it opens: SET LOCAL, a row locked, a read, in one group behind BEGIN.
+  'SET LOCAL in a group': async (pool) => alike('SET LOCAL in a group', await begin(pool, async (tx) => {
+    const [, [locked], read] = await Promise.all([
+      tx.unsafe('SET LOCAL lock_timeout = 5000'),
+      tx.unsafe(`${HERE} FROM coffre_pinning_lock WHERE id = $1 FOR SHARE`, [1]),
+      here(tx, 7),
+    ]);
+    return [{ pid: Number(locked!.pid), xid: String(locked!.xid) }, read, await here(tx)];
+  })),
   // T179's: reads together, then writes nothing awaits, which go with the COMMIT under one Sync: kept, each on the
   // reads' backend and in their transaction.
   'writes with the COMMIT': async (pool, tag) => {
@@ -109,6 +118,8 @@ export default {
       if (url.pathname === '/setup') {
         await pool.unsafe('CREATE TABLE IF NOT EXISTS coffre_pinning (tag text NOT NULL, n int NOT NULL, pid int NOT NULL, xid text NOT NULL)');
         await pool.unsafe('TRUNCATE coffre_pinning');
+        await pool.unsafe('CREATE TABLE IF NOT EXISTS coffre_pinning_lock (id int PRIMARY KEY)');
+        await pool.unsafe('INSERT INTO coffre_pinning_lock VALUES (1) ON CONFLICT DO NOTHING');
         return Response.json({ ok: true });
       }
       if (url.pathname !== '/run') return new Response('not found', { status: 404 });

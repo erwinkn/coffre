@@ -32,11 +32,16 @@ export function later(tx: Transaction, statement: SQLWrapper): void {
     return hold((tx as unknown as { session: { tx: object } }).session.tx, answer);
   }
   const { sql, params } = (tx as unknown as { dialect: PgDialect }).dialect.sqlToQuery(statement.getSQL());
-  // The transaction's own statement: what it fails with, the transaction hears (`inTransaction`), and fails with.
-  const query = (clientOf(tx) as { unsafe(text: string, values: unknown[]): { later: boolean; execute(): unknown } }).unsafe(sql, params);
-  // Nothing awaits it: the COMMIT may go with it (`settleWithCommit`).
-  query.later = true;
-  query.execute();
+  const client = clientOf(tx) as { unsafe(text: string, values: unknown[]): { later: boolean; execute(): unknown } };
+  // Made a microtask later, as Drizzle makes a statement once it is awaited: so it goes behind what was asked before it,
+  // the head's lock `audited` asks ahead of a work whose first statement this is (postgres-js's `flush`, by `made`).
+  queueMicrotask(() => {
+    // The transaction's own statement: what it fails with, the transaction hears (`inTransaction`), and fails with.
+    const query = client.unsafe(sql, params);
+    // Nothing awaits it: the COMMIT may go with it (`settleWithCommit`).
+    query.later = true;
+    query.execute();
+  });
 }
 
 /** postgres.js's transaction under Drizzle's. */
