@@ -267,6 +267,8 @@ export default function postgres(given: Options): Sql {
     let gathered: Query[] = [];
     /** The task that sends them, while one is asked. */
     let sending: unknown = null;
+    /** Its statements something may await that have not answered yet, sent or gathered: each but those `later` asked. */
+    const unanswered = new Set<Query>();
     /** Its work returned: what it gathered waits a task for its COMMIT (`settleWithCommit`). */
     let holding = false;
     /** Its COMMIT went with its work's last statements, and Postgres answered it, or said why not. */
@@ -365,6 +367,12 @@ export default function postgres(given: Options): Sql {
           else failure ??= e;
         });
         asked.add(q);
+        // Something may await it, and ask more once it answers: no COMMIT goes before it has (`settleWithCommit`).
+        if (!q.later) {
+          unanswered.add(q);
+          const answered = () => void unanswered.delete(q);
+          Promise.prototype.then.call(q, answered, answered);
+        }
         send(q);
       }
 
@@ -386,7 +394,9 @@ export default function postgres(given: Options): Sql {
         holding = true;
         await new Promise<void>((resolve) => platform.nextTask(resolve));
         holding = false;
-        if (gathered.length === 0 || !gathered.every((q) => q.later) || uncaughtError !== undefined || unfinished !== null || stopped !== null) {
+        // Folded only if nothing awaits any statement still unanswered, sent or gathered (each `later`), and each can go in
+        // the group: one that goes alone fails, if it does, where Postgres never hears of it, and would not stop the COMMIT.
+        if (gathered.length === 0 || unanswered.size > 0 || gathered.some(alone) || uncaughtError !== undefined || unfinished !== null || stopped !== null) {
           flush();
           return settle();
         }
@@ -399,10 +409,14 @@ export default function postgres(given: Options): Sql {
         try {
           committed = (await commit) as unknown as ResultMeta;
         } catch (e) {
-          // Skipped, behind a statement that failed: that statement's error says why, and the transaction rolls back.
-          if (!isSkipped(e)) committed = { command: 'COMMIT', count: null, state: { pid: 0, secret: 0 }, columns: null };
+          // Postgres ran the COMMIT and refused it (a deferred constraint): the transaction has ended, with nothing to roll
+          // back. Otherwise it never ran: skipped behind a statement that failed, whose error says why, or the group never
+          // sent (a value the client could not write), and the transaction rolls back.
+          if (commit.refused) {
+            committed = { command: 'COMMIT', count: null, state: { pid: 0, secret: 0 }, columns: null };
+            failure = e;
+          }
           uncaughtError ??= e;
-          if (!isSkipped(e) && e instanceof PostgresError) failure = e;
         }
       }
     }
@@ -467,7 +481,11 @@ export default function postgres(given: Options): Sql {
           const failed = !begun || group.answered === null ? 0 : group.answered.length;
           members.forEach((q, i) => {
             if (i < failed) q.resolve(group.answered![i]);
-            else if (i === failed || !(error instanceof PostgresError) || !begun) q.reject(error);
+            else if (i === failed || !(error instanceof PostgresError) || !begun) {
+              // Postgres ran this one, and answered its error.
+              q.refused = i === failed && error instanceof PostgresError && begun && group.answered !== null;
+              q.reject(error);
+            }
             else q.reject(skippedError());
           });
         },

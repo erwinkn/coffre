@@ -139,12 +139,16 @@ Eleven, each marked `Coffre:` in the code:
   the first error. The transaction's own statements (a savepoint, a
   rollback to one) go alone, after what was gathered before them. Its
   COMMIT goes with its work's last group when nothing awaits any statement
-  of it (`Query.later`, which `later` in `../later.ts` sets): work still
-  running that awaits one must hear it answer first, and may then ask
-  more, which is refused and rolls the transaction back, as before. A
-  statement of that group that fails has Postgres skip the COMMIT, and the
-  transaction rolls back; a COMMIT Postgres runs and refuses (a deferred
-  constraint) has ended it, and no ROLLBACK follows. Through Hyperdrive,
+  of it (`Query.later`, which `later` in `../later.ts` sets), nothing sent
+  before it that something awaits is still unanswered, and each can go in
+  the group: work still running that awaits one must hear it answer
+  first, and may then ask more, which is refused and rolls the
+  transaction back, as before; and a statement that goes alone fails, if
+  it does, where Postgres never hears of it. A statement of that group
+  that fails has Postgres skip the COMMIT, and a group the client could
+  not write never sent it: either way the transaction rolls back. Only a
+  COMMIT Postgres ran and refused (a deferred constraint, `Query.refused`)
+  has ended it, and no ROLLBACK follows. Through Hyperdrive,
   which sends a client's Syncs on one at a time, a transaction that reads
   what it needs together and leaves its writes to `later` is two round
   trips, whatever it holds. Upstream sent each statement with a Sync of

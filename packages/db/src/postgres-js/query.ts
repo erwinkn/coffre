@@ -66,6 +66,8 @@ export class Query<T = unknown> extends Promise<T> {
    * still ask, or be refused and roll the transaction back.
    */
   later = false;
+  /** Coffre: a statement of a group that Postgres ran and answered with an error, not one skipped or never sent (`together`). */
+  refused = false;
   /** Coffre: a group that failed: the results of its statements answered before the one that failed (`together`, index.ts). */
   answered: unknown[] | null = null;
 

@@ -217,8 +217,9 @@ export async function audited<T>(
       const held = lockLogHeadRead(tx, appLogKey(ctx.chainKey));
       const fenced = ctx.caller === undefined ? null : policyStill({ caller: ctx.caller }, tx);
       const working = work(tx, log);
-      // Settled before either is awaited: a refusal of the work's, while the head or the policy is read, is the
-      // transaction's to throw, after theirs.
+      // Each heard at once, though awaited in turn: the head's refusal first, then the policy's, then the work's; one
+      // left unawaited behind an earlier refusal fails no one.
+      fenced?.catch(() => {});
       working.catch(() => {});
       const locked = await held;
       await fenced;

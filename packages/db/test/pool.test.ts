@@ -711,3 +711,70 @@ test('a transaction\'s error says what failed: a first statement\'s syntax, the 
     await client.end();
   }
 });
+
+/** A write nothing awaits, as `later` (@coffre/db) asks one of a transaction: its COMMIT may go with it. */
+function laterOn(tx: TransactionSql, text: string, values: unknown[] = []): void {
+  const query = tx.unsafe(text, values) as unknown as { later: boolean; execute(): unknown };
+  query.later = true;
+  query.execute();
+}
+
+test("a COMMIT goes with the writes left to `later` only if each can go in their group: one the client cannot send fails the transaction, which keeps nothing (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table alone (n int)');
+    // A statement with more parameters than the protocol takes: it goes alone, and fails before Postgres hears of it.
+    const many = Array.from({ length: 65_534 }, (_, i) => i);
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into alone values ($1)', [1]);
+      laterOn(tx, 'insert into alone values ($1)', [2]);
+      laterOn(tx, `select ${many.map((i) => `$${i + 1}::int`).join(', ')}`, many);
+    }), { code: 'MAX_PARAMETERS_EXCEEDED' });
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from alone')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a group the client cannot write, its COMMIT in it, rolls the transaction back: the connection goes back to the pool idle (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  const other = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await other.unsafe('drop table if exists unwritten');
+    await other.unsafe('create table unwritten (n int, at timestamptz)');
+    // An invalid date: its serializer throws as the group is written, so none of it, the COMMIT included, is sent.
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into unwritten values ($1, now())', [1]);
+      laterOn(tx, 'insert into unwritten values ($1, $2)', [2, new Date('not a date')]);
+      laterOn(tx, 'insert into unwritten values ($1, now())', [3]);
+    }), RangeError);
+    // Rolled back, not left open: the next statement on the connection is in no transaction, and nothing was kept.
+    assert.deepEqual([...await client.unsafe("select now() = statement_timestamp() as idle")], [{ idle: true }]);
+    assert.deepEqual([...await other.unsafe('select count(*)::int as n from unwritten')], [{ n: 0 }]);
+  } finally {
+    await other.unsafe('drop table if exists unwritten').catch(() => {});
+    await Promise.all([client.end(), other.end()]);
+  }
+});
+
+test("no COMMIT goes with the writes left to `later` while a statement something awaits is unanswered: what it asks after is refused, and the transaction rolls back (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table pending (n int)');
+    let after: unknown;
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into pending values ($1)', [1]);
+      // Left running: once the sleep answers, it asks another statement.
+      void tx.unsafe('select pg_sleep(0.2)').then(async () => {
+        after = await tx.unsafe('insert into pending values ($1)', [2]).catch((e: unknown) => e);
+      });
+      // The sleep sent on its own, unanswered, when the work leaves a write to `later` and returns.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      laterOn(tx, 'insert into pending values ($1)', [3]);
+    }), { code: 'TRANSACTION_UNFINISHED' });
+    assert.ok(after instanceof Error);
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from pending')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
