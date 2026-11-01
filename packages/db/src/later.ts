@@ -29,11 +29,14 @@ import { engineOf } from './dialect.ts';
  */
 export function later(tx: Transaction, statement: SQLWrapper): void {
   if (engineOf(tx) === 'sqlite') {
-    // A query builder runs itself; a statement of `sql`, through libsql's Drizzle's `run`.
+    // A query builder runs itself; a statement of `sql`, through libsql's Drizzle's `run`, started now by its `then`, as
+    // `execute()` starts a builder: so each goes in the order `later` was called (Drizzle's `run` runs again each time
+    // it is awaited, so once, here).
     const builder = statement as unknown as { execute?: () => Promise<unknown> };
-    // Once: Drizzle's `run` answers a statement that runs again each time it is awaited.
-    const answer = Promise.resolve(typeof builder.execute === 'function' ? builder.execute() : (tx as unknown as { run(query: SQLWrapper): PromiseLike<unknown> }).run(statement));
-    return hold((tx as unknown as { session: { tx: object } }).session.tx, answer);
+    const answer = typeof builder.execute === 'function'
+      ? builder.execute()
+      : ((tx as unknown as { run(query: SQLWrapper): PromiseLike<unknown> }).run(statement).then((result) => result) as Promise<unknown>);
+    return hold(tx, answer);
   }
   const { sql, params } = (tx as unknown as { dialect: PgDialect }).dialect.sqlToQuery(statement.getSQL());
   // The transaction's own statement, made now: a value it cannot send throws here, to the work; what it fails with once
@@ -49,21 +52,33 @@ function clientOf(tx: Transaction): object {
   return (tx as unknown as { session: { client: object } }).session.client;
 }
 
-/** On SQLite, by its libsql transaction: the writes asked of it with `later`, which its COMMIT waits for. */
+/**
+ * On SQLite, by Drizzle's transaction or savepoint: the writes asked of it with `later`, which its work answers for
+ * once it returns (`laterSettled`, called by `trackCommits`), before its COMMIT or its savepoint's release.
+ */
 const held = new WeakMap<object, Promise<unknown>[]>();
 
-function hold(client: object, answer: Promise<unknown>): void {
-  // Handled here, and failed again at the COMMIT: never an unhandled rejection meanwhile.
+function hold(tx: object, answer: Promise<unknown>): void {
+  // Handled here, and failed again as the work returns: never an unhandled rejection meanwhile.
   answer.catch(() => {});
-  const list = held.get(client);
-  if (list === undefined) held.set(client, [answer]);
+  const list = held.get(tx);
+  if (list === undefined) held.set(tx, [answer]);
   else list.push(answer);
 }
 
-/** Before a SQLite transaction commits: every write `later` asked of it has answered, or the first that failed throws. */
-export async function laterSettled(client: object): Promise<void> {
-  const list = held.get(client);
+/**
+ * A transaction's or savepoint's work returned: every write `later` asked of it has answered, or the first that failed
+ * throws, which rolls it back. One whose work failed drops them (`laterDropped`): rolled back with it, a failure among
+ * them is the rollback's, not the transaction around it. Nothing on Postgres, whose COMMIT rides with them.
+ */
+export async function laterSettled(tx: object): Promise<void> {
+  const list = held.get(tx);
   if (list === undefined) return;
-  held.delete(client);
+  held.delete(tx);
   for (const outcome of await Promise.allSettled(list)) if (outcome.status === 'rejected') throw outcome.reason;
+}
+
+/** A transaction's or savepoint's work failed: what `later` asked of it goes with its rollback. */
+export function laterDropped(tx: object): void {
+  held.delete(tx);
 }

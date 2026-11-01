@@ -10,6 +10,7 @@
  * The log's append uses it to remember the head it wrote only once that
  * head is in the database (log.ts).
  */
+import { laterDropped, laterSettled } from './later.ts';
 
 type Pending = (() => void)[];
 
@@ -34,9 +35,17 @@ export function trackCommits<T extends Transactional>(db: T, outer: Pending | nu
   const run = db.transaction.bind(db) as (work: (tx: Transactional) => Promise<unknown>, ...rest: unknown[]) => Promise<unknown>;
   const transaction = async (work: (tx: Transactional) => Promise<unknown>, ...rest: unknown[]) => {
     const list: Pending = [];
-    const result = await run((tx) => {
+    const result = await run(async (tx) => {
       pending.set(tx, list);
-      return work(trackCommits(tx, list));
+      try {
+        const answer = await work(trackCommits(tx, list));
+        // On SQLite, the writes its work left to `later`, answered before its COMMIT or its savepoint's release.
+        await laterSettled(tx);
+        return answer;
+      } catch (error) {
+        laterDropped(tx);
+        throw error;
+      }
     }, ...rest);
     if (outer !== null) outer.push(...list);
     else for (const then of list) then();
