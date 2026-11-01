@@ -225,6 +225,11 @@ test("a hot path's login setup unlocks gets a new password whatever its config h
     // Its config recorded and pointing at its login: kept, and the other deployment's left logging in.
     assert.equal(newPasswords([ours, theirs], workers, database(false), false).hot, false);
     assert.throws(() => newPasswords([ours, theirs], workers, database(true), false), /coffre_vault_hot is also the login of the Hyperdrive config theirs-vault-hot, another deployment's/);
+    // Setup can't tell one made by hand, unrecorded, from another deployment's: it says how to record it, under the config's own binding.
+    assert.throws(
+      () => newPasswords([ours, theirs], workers, database(true), false),
+      /If theirs-vault-hot is this deployment's, made by hand, put its id under HOT_HYPERDRIVE in vault\/wrangler\.jsonc, and run setup again, which keeps it\./,
+    );
     assert.equal(newPasswords([ours], workers, database(true), false).hot, true, 'unlocked: Hyperdrive gets its new password');
   } finally {
     rmSync(dir, { recursive: true, force: true });

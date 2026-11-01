@@ -24,6 +24,8 @@ import { asSuperuser, CLUSTER, connects, database, emptyCluster, needsCluster, O
 import { fakeCloudflare, fakeGh, fakeGitHub, fakeOpener, fakeVite, fakeWrangler, realWrangler, submitManifest } from './fakes.ts';
 import { answering, ENTER_ALT, inTerminal, ptySkip, screens, type Session, typingUrl, visible } from './pty.ts';
 
+const DOWN = '\x1b[B';
+
 const skip = needsCluster.skip || ptySkip;
 const TOKEN = `cf-oauth-${'t'.repeat(40)}`;
 /** gh's token, for the stand-in GitHub, which alone this run's gh knows. */
@@ -403,6 +405,163 @@ test("a deployment set up before the hot path's config: its role made a login, i
   );
   assert.match(dryRun('coffre-vault'), new RegExp(`env\\.HOT_HYPERDRIVE \\(${hot.id}\\)`));
   assertKept(output, calls());
+});
+
+/** Hyperdrive only, setup's second answer: for an upgrade, nothing else asked, and nothing deployed. */
+async function hyperdriveOnly(terminal: Session): Promise<void> {
+  await terminal.waitFor('Set Cloudflare up too?');
+  terminal.send(`${DOWN}\r`);
+}
+
+/** Both wrangler.jsonc, as they are. */
+const files = () => ['app', 'vault'].map((component) => readFileSync(join(deployment(), component, 'wrangler.jsonc'), 'utf8'));
+
+/** What the cluster keeps for each of coffre's logins' passwords. */
+const verifiers = () => asSuperuser('postgres', async (client) => [...await client.unsafe("SELECT rolname, rolpassword FROM pg_authid WHERE rolname LIKE 'coffre\\_%' ORDER BY rolname")]);
+
+test("an upgrade, Hyperdrive only: the hot path's role made a login, its config made and bound; nothing asked of the address, the Owners or GitHub, and nothing deployed", { skip }, async () => {
+  // As a release before the hot path left it: no HOT_HYPERDRIVE, no config for it, and 0022's role, unable to log in.
+  editWorker(deployment(), 'vault/wrangler.jsonc', [{ path: ['hyperdrive'], value: [{ binding: 'VAULT_HYPERDRIVE', id: readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive.VAULT_HYPERDRIVE }] }]);
+  const all = cloudflare.state.configs.get('acc-acme')!;
+  all.splice(all.findIndex(({ name }) => name === 'coffre-vault-hot'), 1);
+  await asSuperuser('postgres', (client) => client.unsafe('ALTER ROLE coffre_vault_hot NOLOGIN PASSWORD NULL'));
+  const before = all.map(({ origin }) => origin.password);
+  const app = files()[0];
+  const { output, code } = await setup(hyperdriveOnly);
+  const text = mainText(output);
+  assert.equal(code, 0, text);
+  assert.doesNotMatch(text, /coffre's address|First Owner|GitHub App|Deploy the|answers at/, 'nothing a deploy needs');
+  assert.match(text, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_backup_login, with their passwords; created coffre_vault_hot\n/);
+  assert.match(text, /✓ Hyperdrive configs coffre, coffre-vault and coffre-vault-hot, caching off, a connection limit of 20 each\n\s+coffre\s+kept\n\s+coffre-vault\s+kept\n\s+coffre-vault-hot\s+made, for coffre_vault_hot\n/);
+  assert.match(text, /✓ Filled in vault\/wrangler\.jsonc\n\s+vault\s+Hyperdrive\n/);
+  assert.match(text, /✓ Hyperdrive points at the database\. Nothing was deployed\./);
+  assert.ok(
+    text.replace(/\s+/g, ' ').includes('Deploy Commit vault/wrangler.jsonc, then deploy both Workers at once, at a quiet moment: a push to main, with .github/workflows/deploy.yml, or pnpm run deploy. The database is migrated already.'),
+    text,
+  );
+  assert.ok(!output.includes(ENTER_ALT), 'no screen: its password went to Hyperdrive alone');
+  const configs = cloudflare.state.configs.get('acc-acme')!;
+  assert.deepEqual(configs.slice(0, 2).map(({ origin }) => origin.password), before, "the app's and the vault's configs, as they were");
+  const hot = configs.at(-1)!;
+  secrets.add(hot.origin.password);
+  assert.deepEqual([hot.name, hot.origin.user, hot.caching.disabled, hot.origin_connection_limit], ['coffre-vault-hot', 'coffre_vault_hot', true, 20]);
+  assert.deepEqual(await firstConnects(), [true, true, true]);
+  assert.deepEqual(readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive.HOT_HYPERDRIVE, hot.id);
+  assert.equal(files()[0], app, "the app's file, as it was");
+  const wrangler = calls();
+  assert.deepEqual(wrangler.filter(({ args }) => args[0] === 'deploy'), [], 'nothing deployed');
+  assertKept(output, wrangler);
+});
+
+test('Hyperdrive only, run again: everything kept, nothing changed, no screen', { skip }, async () => {
+  const [held, configs, written] = [await verifiers(), JSON.stringify(cloudflare.state.configs.get('acc-acme')), files()];
+  const { output, code } = await setup(hyperdriveOnly);
+  const text = mainText(output);
+  assert.equal(code, 0, text);
+  assert.match(text, /✓ Kept coffre_runtime, coffre_vault_runtime, coffre_vault_hot and coffre_backup_login, with their passwords\n/);
+  assert.match(text, /coffre\s+kept\n\s+coffre-vault\s+kept\n\s+coffre-vault-hot\s+kept\n/);
+  assert.match(text, /✓ app\/ and vault\/wrangler\.jsonc, as they were/);
+  assert.match(text, /Deploy\s+Deploy both Workers at once/);
+  assert.ok(!output.includes(ENTER_ALT));
+  assert.deepEqual([await verifiers(), JSON.stringify(cloudflare.state.configs.get('acc-acme')), files()], [held, configs, written]);
+  assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+});
+
+test("the hot path's config made by hand, as 0.15.0's upgrade did, and recorded under HOT_HYPERDRIVE: Hyperdrive only keeps it, and its password, its caching turned off and its connections capped", { skip }, async () => {
+  const all = cloudflare.state.configs.get('acc-acme')!;
+  const made = all.splice(all.findIndex(({ name }) => name === 'coffre-vault-hot'), 1)[0]!;
+  // With `wrangler hyperdrive create`, under a name of its own, its caching left on, at Cloudflare's default limit.
+  const password = 'by-hand-hot-p4ssword';
+  secrets.add(password);
+  await asSuperuser('postgres', (client) => client.unsafe(`ALTER ROLE coffre_vault_hot PASSWORD '${password}'`));
+  const byHand = { id: 'hd-byhand', name: 'acme-hot', origin: { ...made.origin, password }, caching: { disabled: false }, origin_connection_limit: 60 };
+  all.push(byHand);
+  editWorker(deployment(), 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 1, 'id'], value: byHand.id }]);
+  const [held, written] = [await verifiers(), files()];
+  const { output, code } = await setup(hyperdriveOnly);
+  const text = mainText(output);
+  assert.equal(code, 0, text);
+  assert.match(text, /✓ Kept coffre_runtime, coffre_vault_runtime, coffre_vault_hot and coffre_backup_login, with their passwords\n/);
+  assert.match(text, /✓ Hyperdrive configs coffre, coffre-vault and acme-hot, caching off, a connection limit of 20 each\n[\s\S]*\n\s+acme-hot\s+kept, its caching turned off and its connections capped at 20\n/);
+  assert.match(text, /✓ app\/ and vault\/wrangler\.jsonc, as they were/);
+  assert.deepEqual([byHand.name, byHand.origin.password, byHand.caching.disabled, byHand.origin_connection_limit], ['acme-hot', password, true, 20]);
+  assert.ok(await connects(`postgresql://coffre_vault_hot:${password}@${byHand.origin.host}:${byHand.origin.port}/${byHand.origin.database}`));
+  assert.deepEqual([await verifiers(), files()], [held, written]);
+  assert.equal(cloudflare.state.configs.get('acc-acme')!.length, 3, 'none made beside it');
+  assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+});
+
+test("the hot path's config made by hand under a name of its own, which vault/wrangler.jsonc does not record: setup stops, saying how to record it, and nothing changes", { skip }, async () => {
+  // Setup can't tell it from another deployment's on this server, whose login a new password would cut off.
+  editWorker(deployment(), 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 1, 'id'], value: 'replace-with-your-hot-hyperdrive-id' }]);
+  const [held, configs, written] = [await verifiers(), JSON.stringify(cloudflare.state.configs.get('acc-acme')), files()];
+  const { output, code } = await setup(hyperdriveOnly);
+  const text = mainText(output);
+  assert.equal(code, 1, text);
+  assert.match(
+    text.replace(/\s+/g, ' '),
+    /✗ coffre_vault_hot is also the login of the Hyperdrive config acme-hot, another deployment's, on this database server: .* If acme-hot is this deployment's, made by hand, put its id under HOT_HYPERDRIVE in vault\/wrangler\.jsonc, and run setup again, which keeps it\. No login was changed\./,
+  );
+  assert.doesNotMatch(text, /Make the four logins/, 'refused before the database steps');
+  assert.deepEqual([await verifiers(), JSON.stringify(cloudflare.state.configs.get('acc-acme')), files()], [held, configs, written]);
+  assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
+});
+
+test("the hot path's config deleted during a Hyperdrive only run, its password kept: setup stops; the run after makes it again, with a new password", { skip }, async () => {
+  editWorker(deployment(), 'vault/wrangler.jsonc', [{ path: ['hyperdrive', 1, 'id'], value: 'hd-byhand' }]);
+  cloudflare.state.vanishing.add('acme-hot');
+  const written = files();
+  const first = await setup(hyperdriveOnly);
+  const text = mainText(first.output);
+  assert.equal(first.code, 1, text);
+  assert.match(text, /✗ Point Hyperdrive at the database\n\s+The Hyperdrive config acme-hot was deleted during this run\. coffre_vault_hot kept its password/);
+  assert.deepEqual(files(), written);
+  assert.deepEqual(cloudflare.state.configs.get('acc-acme')!.map(({ name }) => name), ['coffre', 'coffre-vault']);
+
+  // Recorded, and gone: its login gets a new password, and a config of setup's own name, bound in its place.
+  const { output, code } = await setup(hyperdriveOnly);
+  const again = mainText(output);
+  assert.equal(code, 0, again);
+  assert.match(again, /✓ Kept coffre_runtime, coffre_vault_runtime and coffre_backup_login, with their passwords; set a new password for coffre_vault_hot\n/);
+  assert.match(again, /coffre-vault-hot\s+made, for coffre_vault_hot\n/);
+  assert.match(again, /✓ Filled in vault\/wrangler\.jsonc\n\s+vault\s+Hyperdrive\n/);
+  assert.ok(!output.includes(ENTER_ALT));
+  const hot = cloudflare.state.configs.get('acc-acme')!.at(-1)!;
+  secrets.add(hot.origin.password);
+  assert.deepEqual([hot.name, hot.caching.disabled, hot.origin_connection_limit], ['coffre-vault-hot', true, 20]);
+  assert.equal(readWorker(deployment(), 'vault/wrangler.jsonc').hyperdrive.HOT_HYPERDRIVE, hot.id);
+  assert.deepEqual(await firstConnects(), [true, true, true]);
+  const wrangler = calls();
+  assert.deepEqual(wrangler.filter(({ args }) => args[0] === 'deploy'), []);
+  assertKept(output, wrangler);
+});
+
+test("Hyperdrive only for a deployment that doesn't run: its Workers another's, or without their keys, setup stops before changing anything, and says why", { skip }, async () => {
+  const [held, configs] = [await verifiers(), JSON.stringify(cloudflare.state.configs.get('acc-acme'))];
+  // The template's files, beside the first, on its database: its Workers' names are the first deployment's, which bind no id these files
+  // record. Its configs, found by name on this database as its logins, would be this one's.
+  const copy = another('copy');
+  const copied = await setup((terminal) => answering(terminal, { 'Set Cloudflare up too?': `${DOWN}\r`, 'Which Cloudflare account?': '\r' }, ['Nothing was changed']), copy);
+  const text = mainText(copied.output);
+  assert.equal(copied.code, 1, text);
+  assert.match(
+    text.replace(/\s+/g, ' '),
+    /✗ On this account, the Worker coffre and the Worker coffre-vault are another deployment's, by what app\/ and vault\/wrangler\.jsonc record, and setup leaves them be\. .* put back the Hyperdrive ids its Workers bind, then run setup again\. Nothing was changed\./,
+  );
+  // Under names of its own: no Worker deployed, so neither has its key.
+  const fresh = another('fresh');
+  editWorker(fresh, 'app/wrangler.jsonc', [{ path: ['name'], value: 'coffre-fresh' }]);
+  editWorker(fresh, 'vault/wrangler.jsonc', [{ path: ['name'], value: 'coffre-fresh-vault' }]);
+  const keyless = await setup((terminal) => answering(terminal, { 'Set Cloudflare up too?': `${DOWN}\r`, 'Which Cloudflare account?': '\r' }, ['Nothing was changed']), fresh);
+  const said = mainText(keyless.output);
+  assert.equal(keyless.code, 1, said);
+  assert.match(
+    said.replace(/\s+/g, ' '),
+    /✗ Hyperdrive alone is for a deployment that runs, and the app Worker coffre-fresh has no APP_KEY and the vault Worker coffre-fresh-vault has no VAULT_KEY\. For a deployment not deployed yet, run setup again and choose Yes, which deploys it\. Nothing was changed\./,
+  );
+  for (const run of [text, said]) assert.doesNotMatch(run, /Make the four logins/, 'refused before the database steps');
+  assert.deepEqual([await verifiers(), JSON.stringify(cloudflare.state.configs.get('acc-acme'))], [held, configs]);
+  assert.deepEqual(calls().filter(({ args }) => args[0] === 'deploy'), []);
 });
 
 test('a deployment that is a GitHub repository: a token made on the form, checked, and the three secrets set through gh\'s login', { skip }, async () => {

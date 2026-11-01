@@ -11,7 +11,9 @@
 // deployment, on a terminal, it offers to do Cloudflare too (workers.ts):
 // then the database URLs go straight to Hyperdrive, and the keys, once
 // shown, to the Workers it deploys; a GitHub repository then deploys on
-// every push (deploy-on-push.ts).
+// every push (deploy-on-push.ts). Or Hyperdrive alone, for an upgrade of a
+// deployment that runs: its configs made or updated, and bound, and nothing
+// deployed.
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,7 +31,7 @@ import { type GuideBlock, type Screen, showSecrets, type Value } from './secrets
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, type Keyboard, listed, openTerminal, type Output, paragraph, release, row, select, style, type Style } from './tty.ts';
 import { cliVersion } from './version.ts';
-import { Cloudflare, configName, type Database, deployedSummary, Later, OWNED } from './workers.ts';
+import { boundSummary, Cloudflare, configName, type Database, deployedSummary, Later, OWNED } from './workers.ts';
 
 /**
  * The three runtime roles, as the migrations name them, each with a
@@ -173,13 +175,15 @@ export async function setup(args: string[]): Promise<void> {
     if (offers && kind === 'workers') {
       const choice = await select(terminal.keys, out, s, 'Set Cloudflare up too?', [
         'Yes: Hyperdrive, GitHub sign-in, the keys as secrets, and the deploy',
+        'Hyperdrive only, with no deploy: for an upgrade of a deployment that runs',
         "No, I'll do Cloudflare myself",
       ]);
-      if (choice === 0) {
+      if (choice !== 2) {
         // Cloudflare goes through the deployment's own wrangler, which a fresh clone has yet to install.
         await installFirst(dir, out, clean);
         cloudflare = await Cloudflare.connect(dir, out, terminal.keys, clean, secrets, asRead(administrator, database.used, database.existing), {
           resetPasswords: options.resetPasswords,
+          deploys: choice === 0,
         });
       }
     }
@@ -188,8 +192,12 @@ export async function setup(args: string[]): Promise<void> {
       if (cloudflare.keys !== null || result.backup.url !== null) await showSecrets(terminal!, cloudflare.screen(result.backup.url === null ? null : { values: backupValues(result.backup), guide: BACKUP_GUIDE }));
       // Saved now: only then does the backup login take the password shown (`run`).
       if (result.backup.url !== null) await activate(administrator, result.backup, out, clean);
-      await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
-      out.write(deployedSummary(cloudflare, out, result.backup.url !== null));
+      if (cloudflare.deploys) {
+        await cloudflare.deploy(out, clean, terminal!.keys, { rotateDeployToken: options.rotateDeployToken });
+        out.write(deployedSummary(cloudflare, out, result.backup.url !== null));
+      } else {
+        out.write(boundSummary(cloudflare, out, result.backup.url !== null));
+      }
     } else if (options.json) {
       jsonWarning(process.stderr, listed(shownNames(result), 'and'));
       process.stdout.write(`${JSON.stringify(asJson(result))}\n`);
@@ -359,7 +367,7 @@ async function run(
       'Make the four logins',
       'Migrate the database',
       "Check each login's rights",
-      ...(cloudflare === null ? [] : Cloudflare.TITLES),
+      ...(cloudflare === null ? [] : cloudflare.titles),
     ],
     questions,
     clean,
@@ -448,8 +456,8 @@ async function run(
         );
         for (const { id } of low) steps.print(`  pnpm exec wrangler hyperdrive update ${id} --origin-connection-limit=${limit}`);
       }
-      await step(4, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
-      await step(5, async () => cloudflare.write());
+      if (cloudflare.deploys) await step(4, (progress) => cloudflare.github(progress, { aside: (text) => steps.aside(text), link: (label, address) => steps.link(label, address) }));
+      await step(cloudflare.deploys ? 5 : 4, async () => cloudflare.write());
       // The backup login's new password, to show: it takes it once saved (`activate`). A run that stops before leaves it as it was, or unable to log in, and the next run gives it one (`provision`).
       if (logins.backup.password !== 'kept') {
         const password = newPassword();

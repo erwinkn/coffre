@@ -40,6 +40,7 @@ import { after as later, applyChanges, CLEAN_BREAK, type Move, pageMove, shownCh
 import { StepFailed, Steps } from './steps.ts';
 import { Cancelled, listed, openTerminal, type Output, release, style } from './tty.ts';
 import { cliVersion } from './version.ts';
+import { hotUnbound } from './workers.ts';
 
 const PACKAGE = '@coffre/cli';
 
@@ -162,6 +163,36 @@ export function migrationsAdded(from: string, to: string, before: readonly strin
     `(${listed(added, 'and')}): run \`pnpm exec coffre migrate\` here first, then deploy.`
   );
 }
+
+/**
+ * The release whose setup first does Hyperdrive alone. A deployment pinned
+ * to 0.15.x needs the hot path's config too, but its own CLI, which
+ * `pnpm exec` runs and whose migrations are its version's, has no such
+ * answer: its release notes say how instead.
+ */
+const HYPERDRIVE_ONLY = '0.16.0';
+
+/**
+ * Whether a Workers deployment, as it is pinned now, has a setup that does
+ * Hyperdrive alone, and its vault binds no hot path's config yet: that
+ * setup makes it, and migrates too, before the deploy.
+ */
+export function hotless(dir: string): boolean {
+  const pinned = Object.values(coffrePins(dir));
+  return pinned.length > 0 && pinned.every((version) => !later(HYPERDRIVE_ONLY, version)) && hotUnbound(dir);
+}
+
+/** What update says when it cannot read the vault's file to check its hot path's binding. */
+export function unchecked(reason: string): string {
+  return `Could not check that the vault binds its hot path's Hyperdrive config (${reason}). Fix vault/wrangler.jsonc before you deploy; if it binds no HOT_HYPERDRIVE, ${HOTLESS_FIX}`;
+}
+
+/** What setup's Hyperdrive alone does for a deployment `hotless` says of. */
+const HOTLESS_FIX =
+  "run `pnpm exec coffre setup` here, as the database's administrator, and choose Hyperdrive only. It makes the hot path's login and its config, binds it in vault/wrangler.jsonc, and migrates; then deploy, as the release notes say.";
+
+/** What a deployment `hotless` says of does before its deploy. */
+export const HOTLESS = `Its vault binds no hot path's Hyperdrive config yet (HOT_HYPERDRIVE): before you deploy, ${HOTLESS_FIX}`;
 
 /**
  * What updates a global CLI to `version`. A moved npm prefix is named: npm's own
@@ -667,7 +698,19 @@ export async function update(args: string[]): Promise<void> {
   }
 
   out.write('\n');
-  if (after !== null) {
+  // A vault file it cannot read leaves the hot path's binding unchecked: said, with why, beside the usual steps.
+  let hot: boolean | { unread: string } = false;
+  if (deployment !== null && kind === 'workers') {
+    try {
+      hot = hotless(deployment);
+    } catch (error) {
+      hot = { unread: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  if (typeof hot === 'object') out.write(`  ${unchecked(hot.unread)}\n\n`);
+  if (hot === true) {
+    out.write(`  ${HOTLESS}\n\n`);
+  } else if (after !== null) {
     out.write(`  ${migrationsAdded(from, latest, before, after)}\n`);
     if (deployment !== null) {
       const deploy =

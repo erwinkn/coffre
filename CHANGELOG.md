@@ -12,6 +12,38 @@
   made once per glyph, drawn from `lucide`'s data, which replaces
   `lucide-react` among `@coffre/ui`'s dependencies.
 
+- **`coffre setup` makes the hot path's Hyperdrive config for an upgrade,
+  and deploys nothing.** Setup's Cloudflare path made and bound the three
+  configs already, but it ends with a deploy, which an upgrade must not
+  do before its own step: 0.15.0's notes had you answer "No" and run
+  `wrangler hyperdrive create <vault Worker>-hot` by hand. "Set Cloudflare
+  up too?" now has a third answer, "Hyperdrive only, with no deploy". It
+  signs in, keeps the names `app/` and `vault/wrangler.jsonc` give, makes
+  the hot path's login and its config (`<vault Worker>-hot`, caching off,
+  its share of the database's connections), keeps or updates the other
+  two as setup always has, binds `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
+  and migrates; it asks nothing of the address, the Owners or GitHub, makes
+  no key, and ends with what is left: commit the file, then deploy both
+  Workers at once. Run again, it changes nothing. It refuses, before
+  changing anything, a deployment that does not run yet (a Worker without
+  its key: choose Yes) or whose Workers its files do not record. So, from
+  0.14 straight to this release, step 3 of 0.15.0's upgrade is now: `pnpm
+  exec coffre setup`, as the database's administrator, then "Hyperdrive
+  only"; no `wrangler` command, no id to copy. On a Workers deployment pinned to 0.16 or later whose vault binds
+  no hot config, `coffre update` now ends by saying so, rather than "run
+  coffre migrate"; one left on 0.15.x, whose own setup has no such answer,
+  is told to migrate, as before.
+
+  A hot config made by hand, as 0.15.0's notes had it made, is kept, with
+  its password, its caching turned off and its limit capped, when
+  `vault/wrangler.jsonc` records its id under `HOT_HYPERDRIVE`, or when it
+  carries setup's name for it and points at this database as
+  `coffre_vault_hot`. One under another name that the file does not record
+  is refused, as before: setup cannot tell it from another deployment's
+  on the same server, whose login a new password would cut off. The
+  refusal now says to record its id, which makes it this deployment's.
+  Setup's Hyperdrive step names each config kept by its own name.
+
 ## 0.15.0 (2026-11-01)
 
 - **0.15's log is the default: every deployment keeps it.** The switch
