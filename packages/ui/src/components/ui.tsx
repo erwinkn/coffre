@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactElement, type ReactNode } from 'react';
+import { cloneElement, useEffect, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ReactElement, type ReactNode } from 'react';
 import { AlertDialog } from '@base-ui/react/alert-dialog';
 import { Dialog } from '@base-ui/react/dialog';
 import { Menu } from '@base-ui/react/menu';
@@ -7,6 +7,24 @@ import { Tooltip } from '@base-ui/react/tooltip';
 import { AlertCircle, AlertTriangle, Check, Copy, Info, Loader, X } from './icons';
 import { createCopier, type Copier } from '../lib/copy-attempts';
 import { usePreferences } from '../lib/preferences';
+
+const hydrated = () => true;
+const serverRender = () => false;
+const unchanging = () => () => {};
+
+/**
+ * Whether the page is the browser's: false on the server and while
+ * hydrating, which draws what the server drew, then true.
+ *
+ * What draws nothing while closed (a dialog, a menu's popup, a tooltip)
+ * mounts only then, so the server skips its Root: a few in each row of an
+ * environment's table, each costing more to render than the row. A dialog,
+ * whose trigger is elsewhere, mounts with nothing else; a tooltip or a menu
+ * draws its trigger anew, the same button, as it mounts.
+ */
+function useHydrated(): boolean {
+  return useSyncExternalStore(unchanging, hydrated, serverRender);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Tooltip                                                                     */
@@ -23,7 +41,29 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * A tooltip on `children`, an element that takes a ref, as a button does.
+ *
+ * On the server and while hydrating it draws `children` alone: a closed
+ * tooltip adds nothing to the page, and its Root and Trigger cost more to
+ * render than the button they wrap, four times in each row of an
+ * environment's table. Once the page is the browser's, the tooltip mounts
+ * around it (`useHydrated`), its trigger drawn anew.
+ */
 export function Tip({
+  label,
+  side,
+  children,
+}: {
+  label: ReactNode;
+  side?: 'top' | 'right' | 'bottom' | 'left';
+  children: ReactElement;
+}) {
+  if (!useHydrated()) return children;
+  return <TipRoot label={label} side={side}>{children}</TipRoot>;
+}
+
+function TipRoot({
   label,
   side,
   children,
@@ -142,6 +182,35 @@ export function MenuPopup({
         </Menu.Popup>
       </Menu.Positioner>
     </Menu.Portal>
+  );
+}
+
+/**
+ * A button that opens a menu: `trigger`, the button as drawn closed, and
+ * `children`, the menu's items.
+ *
+ * On the server and while hydrating it draws the button alone, as a closed
+ * menu's trigger reads to assistive technology, and mounts the menu once
+ * the page is the browser's (`useHydrated`): a table draws one in each row,
+ * and a menu's Root costs more to render than the row around it.
+ */
+export function MenuButton({
+  trigger,
+  disabled,
+  align,
+  children,
+}: {
+  trigger: ReactElement<ButtonHTMLAttributes<HTMLButtonElement>>;
+  disabled?: boolean;
+  align: 'start' | 'end';
+  children: ReactNode;
+}) {
+  if (!useHydrated()) return cloneElement(trigger, { 'aria-haspopup': 'menu', 'aria-expanded': false, disabled });
+  return (
+    <Menu.Root>
+      <Menu.Trigger render={trigger} disabled={disabled} />
+      <MenuPopup align={align}>{children}</MenuPopup>
+    </Menu.Root>
   );
 }
 
@@ -276,7 +345,7 @@ export function CopyButton({
         type="button"
         className={variant === 'act' ? 'act act-icon' : 'btn btn-quiet btn-sm btn-icon'}
         aria-label={label}
-        aria-busy={state === 'pending'}
+        aria-busy={state === 'pending' || undefined}
         onClick={copy}
       >
         {state === 'pending' ? (
@@ -356,22 +425,6 @@ export function ConfirmButton({
   );
 }
 
-const hydrated = () => true;
-const serverRender = () => false;
-const unchanging = () => () => {};
-
-/**
- * Whether a dialog's root is drawn: always once the page is the browser's,
- * which closes it with its animation; on the server and while hydrating,
- * only when it is open. Closed, a dialog draws nothing, so the page's HTML
- * is the same either way, and the server skips a root per dialog: four in
- * each row of an environment's table. Its trigger is elsewhere, so mounting
- * it after hydration remounts nothing else.
- */
-function useHydrated(open: boolean): boolean {
-  return useSyncExternalStore(unchanging, hydrated, serverRender) || open;
-}
-
 /**
  * The same confirmation, opened from something that is not a trigger.
  *
@@ -384,7 +437,8 @@ export function ConfirmDialog({
   onOpenChange,
   ...confirm
 }: ConfirmProps & { open: boolean; onOpenChange: (open: boolean) => void }) {
-  if (!useHydrated(open)) return null;
+  // Drawn while hydrating only if open; after, always, so that it closes with its animation.
+  if (!useHydrated() && !open) return null;
   return (
     <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
       <ConfirmContent {...confirm} />
@@ -414,7 +468,7 @@ export function Modal({
   children: ReactNode;
 }) {
   const { portal } = usePreferences();
-  if (!useHydrated(open)) return null;
+  if (!useHydrated() && !open) return null;
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal container={portal}>

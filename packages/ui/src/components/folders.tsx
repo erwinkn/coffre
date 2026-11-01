@@ -3,7 +3,7 @@ import { Menu } from '@base-ui/react/menu';
 
 import { folderProblem } from '../lib/validation';
 import { Folder, MoreHorizontal, Pencil, X } from './icons';
-import { ConfirmDialog, MenuPopup, Modal } from './ui';
+import { ConfirmDialog, MenuButton, Modal } from './ui';
 
 /**
  * A folder's heading row inside a table: the rows after it, up to the next
@@ -63,21 +63,23 @@ export function FolderMenu({
 
   return (
     <>
-      <Menu.Root>
-        <Menu.Trigger className="act act-icon act-quiet folder-row-menu" aria-label={`Actions for the folder ${folder}`}>
-          <MoreHorizontal size={16} />
-        </Menu.Trigger>
-        <MenuPopup align="end">
-          <Menu.Item className="menu-item" onClick={() => setRenaming(true)}>
-            <Pencil size={14} />
-            Rename folder…
-          </Menu.Item>
-          <Menu.Item className="menu-item menu-item-danger" onClick={() => setRemoving(true)}>
-            <X size={14} />
-            Remove folder…
-          </Menu.Item>
-        </MenuPopup>
-      </Menu.Root>
+      <MenuButton
+        align="end"
+        trigger={
+          <button type="button" className="act act-icon act-quiet folder-row-menu" aria-label={`Actions for the folder ${folder}`}>
+            <MoreHorizontal size={16} />
+          </button>
+        }
+      >
+        <Menu.Item className="menu-item" onClick={() => setRenaming(true)}>
+          <Pencil size={14} />
+          Rename folder…
+        </Menu.Item>
+        <Menu.Item className="menu-item menu-item-danger" onClick={() => setRemoving(true)}>
+          <X size={14} />
+          Remove folder…
+        </Menu.Item>
+      </MenuButton>
 
       <Modal
         open={renaming}
