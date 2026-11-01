@@ -229,6 +229,11 @@ test('pages tile the reads with every other entry: each once, newest first, what
   }
   const whole = await every(root, { detail: '1' });
   assert.ok(whole.filter((entry) => entry.action === 'secret.read').length >= 2);
+  // The vault vouches for 0.15's changes (here the tokens' issues) as for the reads: a cast or a MAC that drifts marks
+  // every one forged.
+  const changes = whole.filter((entry) => entry.log === '0.15' && entry.action !== 'secret.read');
+  assert.ok(changes.some((entry) => entry.action === 'token.create'), JSON.stringify(changes));
+  assert.ok(changes.every((entry) => entry.forged === undefined), JSON.stringify(changes.filter((entry) => entry.forged)));
   const key = (entry: AuditEntryView) => `${entry.log}:${entry.seq}`;
   for (const limit of [1, 2, 3, 7]) {
     for (const query of [{ detail: '1' }, {}, { actor: ADA }, { path: 'market/dev' }]) {

@@ -223,7 +223,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           const s = await settings(this.#env);
           const pool = new HyperdrivePool(s.hyperdrive.connectionString, { closeIdleMs: s.closeIdleMs ?? 10_000 });
           const store = logStore(createDatabase(pool));
-          this.#projector = new Projector(async () => ({ store, close: async () => {} }), await verifierKeys([s.seed]), (message) => {
+          this.#projector = new Projector(store, await verifierKeys([s.seed]), (message) => {
             console.warn(`coffre audit: ${message}`);
             void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
           });

@@ -109,7 +109,7 @@ export async function runCheckpointer(options: {
   // The reads' projection (T166), kicked after each tick and never waited on: a projection behind lags the audit pages,
   // never a seal (reads.ts).
   const keys = await verifierKeys([options.seed]);
-  const projector = new Projector(async () => ({ store, close: async () => {} }), keys, (message) => {
+  const projector = new Projector(store, keys, (message) => {
     console.warn(`coffre audit: ${message}`);
     void record({ at: Date.now(), message });
   });

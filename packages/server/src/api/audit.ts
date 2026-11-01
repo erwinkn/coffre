@@ -354,7 +354,9 @@ export async function listAudit(
     counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
   const reads = listedReads ?? { rows: [], more: false };
-  const standing = listedReads?.standing ?? null;
+  // Where the log has no pair (0.14's log alone, or none sealed yet) nothing is listed and no cursor is shown
+  // (`readsListed`), so the vault is asked nothing for it: an app deployed before its vault serves 0.14's pages.
+  const standing = listedReads?.standing.sealed == null ? null : listedReads.standing;
   const oldRead = old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` }));
   const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row), below: { at: row.at, number: row.number } }));
   const readsRead = reads.rows.map((row) => ({ at: row.at, entry: readView(row), below: { at: row.at, number: row.number } }));

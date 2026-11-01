@@ -443,20 +443,19 @@ export const NOWHERE = '00000000-0000-0000-0000-000000000000';
  * once (checkpointer-node.ts); on Workers, an object of its own runs it on
  * its own alarm (checkpointer-workers.ts). Either way no tick, seal, change
  * or use ever waits on it (formal/Reads.tla, SealNeverWaitsOnProjection).
- * Each run opens the store it reads and writes, goes some steps, and lets
- * go. A failure is an alarm, said once while it stands; the pages show the
+ * Each run goes some steps over the host's store. A failure is an alarm, said once while it stands; the pages show the
  * lag meanwhile.
  */
 export class Projector {
-  readonly #open: () => Promise<{ store: ReadsStore; close(): Promise<void> }>;
+  readonly #store: ReadsStore;
   readonly #keys: { verifiers: PairVerifiers; mac: Buffer };
   readonly #alert: (message: string) => void;
   #running: Promise<boolean> | null = null;
   #failed: string | null = null;
   #stopped = false;
 
-  constructor(open: () => Promise<{ store: ReadsStore; close(): Promise<void> }>, keys: { verifiers: PairVerifiers; mac: Buffer }, alert: (message: string) => void) {
-    this.#open = open;
+  constructor(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, alert: (message: string) => void) {
+    this.#store = store;
     this.#keys = keys;
     this.#alert = alert;
   }
@@ -486,10 +485,8 @@ export class Projector {
   }
 
   async #run(): Promise<boolean> {
-    let opened: { store: ReadsStore; close(): Promise<void> } | null = null;
     try {
-      opened = await this.#open();
-      const { through, sealed } = await projectReads(opened.store, this.#keys);
+      const { through, sealed } = await projectReads(this.#store, this.#keys);
       this.#failed = null;
       return through < sealed;
     } catch (error) {
@@ -497,8 +494,6 @@ export class Projector {
       if (message !== this.#failed) this.#alert(message);
       this.#failed = message;
       return false;
-    } finally {
-      await opened?.close().catch(() => {});
     }
   }
 }
