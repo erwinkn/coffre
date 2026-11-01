@@ -1935,7 +1935,8 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   it (core's `verifyLog`), before anything is derived from it. A range
   that does not hold stops the projector.
 - CountChecked is `checkReads`, behind `GET /api/audit/reads` (`coffre
-  verify log`). CursorMac is `cursorMac`, ReplaceOnConflict and
+  verify log`), which also holds each listed read to its member's day and
+  its places' (T175), which the pages of each read. CursorMac is `cursorMac`, ReplaceOnConflict and
   IdempotentByNumber `project_reads`' upsert, CursorAfterRows its single
   transaction, FromChecked its `p_from` (SQLite's write the same, in its
   transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an

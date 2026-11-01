@@ -82,9 +82,10 @@ export type ReadsStore = Pick<LogReader, 'tiles'> & {
   writeReads(reads: readonly ReadRow[], from: bigint, cursor: ReadsCursor): Promise<boolean>;
   /**
    * What the listing holds of a stretch (`checkReads`): its reads numbered in `(after, upto]` at times in `[from, to]`,
-   * each with whether its member's day of it is in `log_read_days` (`dayed`), which their pages read.
+   * each with whether its member's day of it is in `log_read_days` (`dayed`), which their pages read, and each of its
+   * places' in `log_read_place_days` (`placed`), which the pages of those places read (T175).
    */
-  listing(stretch: { after: bigint; upto: bigint; from: number; to: number }): Promise<(ReadRow & { dayed: boolean })[]>;
+  listing(stretch: { after: bigint; upto: bigint; from: number; to: number }): Promise<(ReadRow & { dayed: boolean; placed: boolean })[]>;
 };
 
 /** How many entries one step of the projector reads: a tick's worth at R44's 1,000 uses a second, and more. */
@@ -323,7 +324,7 @@ async function listedAsSealed(store: ReadsStore, mac: LogMacKey, uses: readonly 
   let [from, to] = [range.floor, range.signedAt];
   for (const read of reads) [from, to] = [Math.min(from, read.at), Math.max(to, read.at)];
   const listing = await store.listing({ after: range.after, upto: range.upto, from, to });
-  const listed = new Map<bigint, ReadRow & { dayed: boolean }>();
+  const listed = new Map<bigint, ReadRow & { dayed: boolean; placed: boolean }>();
   for (const read of listing) {
     if (listed.has(read.number)) problems.push(`read ${read.number} is listed twice`);
     listed.set(read.number, read);
@@ -335,6 +336,8 @@ async function listedAsSealed(store: ReadsStore, mac: LogMacKey, uses: readonly 
     else if (!readHolds(mac, row) || !row.mac.equals(read.mac)) problems.push(`read ${read.number} is listed otherwise than the log sealed it`);
     // Its member's day of it gone, their page and offboarding report would leave it out unseen (review r6).
     else if (!row.dayed) problems.push(`read ${read.number} is off its member's pages: their day of it is not listed`);
+    // Or a day of one of its places, that place's pages would (T175).
+    else if (!row.placed) problems.push(`read ${read.number} is off a place's pages: the day of one of its places is not listed`);
   }
   for (const number of listed.keys()) problems.push(`read ${number} is listed, but the log seals no such use`);
   return problems;

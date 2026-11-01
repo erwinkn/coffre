@@ -62,6 +62,24 @@
   refusal now says to record its id, which makes it this deployment's.
   Setup's Hyperdrive step names each config kept by its own name.
 
+- **Reads on the pages of a key, an environment and a project.** 0.15.0
+  listed 0.15's reads on the whole log and each member's page only
+  (`readsOmitted: 'path'` elsewhere). `GET /api/audit?path=`, `coffre
+  audit <path>` and MCP's `read_audit_log` now list each read at its key,
+  the key's environment and project, the fork it was read in, and through
+  a reference at its source's. Each page reads a fixed few indexes no
+  further than a page, however many forks, references or sources the
+  place has had (R48; measured in `docs/design/0.15-plan.md`, "As built:
+  T175"). A reader of some places sees the reads at places they read,
+  none at an environment their role leaves out; a read hidden from them
+  is passed over, and a page may come back short with a `next` to go on
+  from. Migration 0050 (SQLite 0028) adds an index for each place column
+  of `log_reads` (about 280 bytes a read) and `log_read_place_days`,
+  written by triggers whoever writes the reads, 0.15.0's projector
+  included, and places the reads 0.15.0 listed: additive, safe to run
+  before the deploy. `coffre verify log` names a read missing from a
+  place's pages.
+
 ## 0.15.0 (2026-11-01)
 
 - **0.15's log is the default: every deployment keeps it.** The switch

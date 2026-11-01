@@ -1395,14 +1395,15 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     const first = next;
     next += count;
     const pick = (n: number | undefined) => (n === undefined ? sql`NULL::uuid` : sql`md5(${String(first)} || '-' || (g % ${n}))::uuid`);
-    await db.owner.execute(sql`
+    // 50,000 a statement: each places its reads too (migration 0050's trigger), under the owner's statement timeout.
+    for (let low = 1; low <= count; low += 50_000) await db.owner.execute(sql`
       INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
       SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * CAST(${every} AS bigint), gen_random_uuid(), 1, ${principal},
              ${options.own === true ? sql`(${array(keys.map((key) => key.id))})[1 + g % ${keys.length}]` : sql`gen_random_uuid()`},
              ${options.own === true ? sql`${dev}::uuid` : sql`gen_random_uuid()`}, ${market}::uuid, ${pick(options.forks)},
              ${pick(options.sources)}, ${options.sources === undefined ? sql`NULL::uuid` : sql`gen_random_uuid()`}, ${options.sources === undefined ? sql`NULL::uuid` : sql`${market}::uuid`},
              ${options.own === true ? sql`(${array(keys.map((key) => key.version))})[1 + g % ${keys.length}]` : sql`NULL::uuid`}, decode(repeat('00', 16), 'hex')
-        FROM generate_series(1, ${count}) g`);
+        FROM generate_series(CAST(${low} AS integer), CAST(${Math.min(count, low + 49_999)} AS integer)) g`);
     // And the days each member's reads are on, as the projector writes them beside the reads.
     await db.owner.execute(sql`
       INSERT INTO log_read_days (principal, day) SELECT DISTINCT principal, CAST(at / 86400000 AS integer) FROM log_reads
@@ -1491,5 +1492,152 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await db.owner.execute(sql`DELETE FROM log_read_days`);
     // The days made ahead, but those the migration made the uses of, which `drop_reads_day` keeps while the log does.
     await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
+  }
+});
+
+test("a place's page of reads, a key's, an environment's or a project's, reads as many pages however large the place's history grows: its forks, references repointed into it and out of it, others' reads anywhere (T175, R48)", POSTGRES, async () => {
+  const counted = createDatabase(app.client);
+  const ADA = 'user:ada@acme.example';
+  const OTHER = 'user:other@acme.example';
+  const AHEAD = 100;
+  const PAST = 30;
+  const ids = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT CAST(id AS text) AS id FROM ${where}`)).map((row) => row.id);
+  // A place of its own: market/reads, twenty keys read, one read once a day, one never.
+  await root.environments.create('market/reads', { name: 'reads' });
+  await root.secrets.set('market/reads', { ...Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`PLACE_COST_${i}`, `value-${i}`])), PLACE_COST_SPARSE: 's', PLACE_COST_EMPTY: 'e' });
+  const [market] = await ids(sql`projects WHERE slug = 'market'`);
+  const [place] = await ids(sql`environments WHERE slug = 'reads' AND project_id = ${market}`);
+  const keyId = async (key: string) => (await ids(sql`secrets WHERE environment_id = ${place} AND key = ${key}`))[0]!;
+  const keys = await Promise.all(Array.from({ length: 20 }, (_, i) => keyId(`PLACE_COST_${i}`)));
+  const [sparse, empty] = [await keyId('PLACE_COST_SPARSE'), await keyId('PLACE_COST_EMPTY')];
+  const fork = randomUUID();
+  const now = Date.now();
+  const day = (at: number) => new Date(at).toISOString().slice(0, 10);
+  await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(CAST(${-PAST - 1} AS integer), 0) d`);
+  const array = (values: readonly string[]) => sql.raw(`ARRAY[${values.map((value) => `'${value}'`).join(',')}]::uuid[]`);
+  const id = (value: string) => sql`CAST(${value} AS uuid)`;
+  /** One of `values`, by the read's place in its run. */
+  const cycle = (values: readonly string[]) => sql`(${array(values)})[1 + g % ${values.length}]`;
+  /** One of `n` ids of nowhere in particular, the same `n` for the same `salt`. */
+  const among = (n: number, salt: string) => sql`CAST(md5(${salt} || '-' || (g % ${n})) AS uuid)`;
+  const anywhere = sql`gen_random_uuid()`;
+  let next = 20_000_000;
+  type Columns = { secret: SQL; environment: SQL; project: SQL; place?: SQL; source?: SQL; sourceEnvironment?: SQL; sourceProject?: SQL };
+  /** `count` reads numbered on from the last, from `from` ms ago, one every `every` ms, by `principal`, at the places `at` names: the trigger places them. */
+  const plant = async (count: number, principal: string, from: number, every: number, at: Columns) => {
+    const first = next;
+    next += count;
+    const none = sql`CAST(NULL AS uuid)`;
+    // 50,000 a statement: each places its reads too (the trigger), under the owner's statement timeout.
+    for (let low = 1; low <= count; low += 50_000) await db.owner.execute(sql`
+      INSERT INTO log_reads (number, at, credential, purpose, principal, secret, environment, project, place, source, source_environment, source_project, version, mac)
+      SELECT CAST(${first} AS bigint) + g, CAST(${now - from} AS bigint) + g * CAST(${every} AS bigint), gen_random_uuid(), 1, ${principal},
+             ${at.secret}, ${at.environment}, ${at.project}, ${at.place ?? none}, ${at.source ?? none}, ${at.sourceEnvironment ?? none}, ${at.sourceProject ?? none},
+             NULL, decode(repeat('00', 16), 'hex')
+        FROM generate_series(CAST(${low} AS integer), CAST(${Math.min(count, low + 49_999)} AS integer)) g`);
+  };
+  const elsewhere: Columns = { secret: anywhere, environment: anywhere, project: anywhere };
+  const pages: Record<string, () => Promise<unknown>> = {
+    "a key's reads": () => readsPage(counted, { at: { kind: 'secret', id: keys[0]! }, limit: 100 }),
+    'a key no one read': () => readsPage(counted, { at: { kind: 'secret', id: empty }, limit: 100 }),
+    'a key read once a day': () => readsPage(counted, { at: { kind: 'secret', id: sparse }, limit: 100 }),
+    "an environment's reads": () => readsPage(counted, { at: { kind: 'environment', id: place }, limit: 100 }),
+    "an environment's older page": () => readsPage(counted, { at: { kind: 'environment', id: place }, before: { at: now - 2 * 3_600_000 }, limit: 100 }),
+    "a fork's reads": () => readsPage(counted, { at: { kind: 'environment', id: fork }, limit: 100 }),
+    "a project's reads": () => readsPage(counted, { at: { kind: 'project', id: market }, limit: 100 }),
+    // Whole pages through the API, every statement each makes, 0.14's log's included, the vault's vouching aside.
+    "through the API, a key's page": () => root.audit.list({ path: 'market/reads/PLACE_COST_0', sealed: '1', limit: 50 }),
+    "through the API, an environment's page": () => root.audit.list({ path: 'market/reads', sealed: '1', limit: 50 }),
+    "through the API, a project's page": () => root.audit.list({ path: 'market', sealed: '1', limit: 50 }),
+  };
+  const measure = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(pages)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const statements = [...app.recorded].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+      app.recorded = null;
+      read[name] = [];
+      for (const statement of statements) {
+        if (!/^\s*(select|with)\b/i.test(statement.text)) continue;
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  const flat = (small: Awaited<ReturnType<typeof measure>>, grown: Awaited<ReturnType<typeof measure>>, step: string) => {
+    for (const name of Object.keys(pages)) {
+      const statements = small[name]!;
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${step}: ${name} ran other statements`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${step}: ${name}: ${text} read ${after} pages with the history grown, ${before} before:\n${plan}`);
+      }
+    }
+  };
+  const settle = async () => {
+    await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
+    await db.owner.execute(sql`ANALYZE`);
+  };
+  // Each page's buffers, every statement of it summed, at each step: the numbers docs/design/0.15-plan.md quotes.
+  const steps: Record<string, Record<string, number>> = {};
+  const record = (step: string, read: Awaited<ReturnType<typeof measure>>) => {
+    steps[step] = Object.fromEntries(Object.entries(read).map(([name, statements]) => [name, statements.reduce((sum, { pages }) => sum + (pages ?? 0), 0)]));
+    return read;
+  };
+  const shown = async (at: { kind: 'secret' | 'environment' | 'project'; id: string }, limit = 100) => (await readsPage(counted, { at, limit })).rows;
+  try {
+    // Today's: 18,000 reads of others anywhere; Ada's 2,000 of the place's keys over ten hours, a quarter in the fork and
+    // a quarter through references held anywhere in market; and its one key, read once a day for a month.
+    await plant(18_000, OTHER, 12 * 3_600_000, 2_000, elsewhere);
+    await plant(1_000, ADA, 10 * 3_600_000, 36_000, { secret: cycle(keys), environment: id(place), project: id(market) });
+    await plant(500, ADA, 10 * 3_600_000 - 7, 72_000, { secret: cycle(keys), environment: id(place), project: id(market), place: id(fork) });
+    await plant(500, ADA, 10 * 3_600_000 - 13, 72_000, {
+      secret: anywhere, environment: anywhere, project: id(market), source: cycle(keys), sourceEnvironment: id(place), sourceProject: id(market),
+    });
+    await plant(PAST, ADA, PAST * 86_400_000, 86_400_000, { secret: id(sparse), environment: id(place), project: id(market) });
+    await settle();
+    const small = record('small', await measure());
+    // A hundred days of others' reads after all of these, each of its own partition: a place's page reads its own days.
+    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
+    await plant(20_000, OTHER, -86_400_000, (AHEAD * 86_400_000) / 20_000, elsewhere);
+    await settle();
+    flat(small, record('a hundred newer days', await measure()), 'a hundred newer days');
+    // The place's own history, older than its pages: 50,000 reads in 5,000 forks of it; 50,000 through references held
+    // in 20,000 places, repointed between its keys; 50,000 through its keys, references repointed to 20,000 sources
+    // elsewhere; and others' 300,000 anywhere, newer than all of it.
+    const older = (count: number) => [40 * 3_600_000, Math.floor((20 * 3_600_000) / count)] as const;
+    await plant(50_000, ADA, ...older(50_000), { secret: cycle(keys.slice(1)), environment: id(place), project: id(market), place: among(5_000, 'fork') });
+    await plant(50_000, OTHER, ...older(50_000), {
+      secret: among(20_000, 'holder'), environment: among(20_000, 'holder-place'), project: id(market), source: cycle(keys.slice(1)), sourceEnvironment: id(place), sourceProject: id(market),
+    });
+    await plant(50_000, OTHER, ...older(50_000), {
+      secret: cycle(keys.slice(1)), environment: id(place), project: id(market), source: among(20_000, 'source'), sourceEnvironment: among(20_000, 'source-place'), sourceProject: anywhere,
+    });
+    await plant(300_000, OTHER, 6 * 3_600_000, 50, elsewhere);
+    await settle();
+    flat(small, record("the place's own history", await measure()), "the place's own history");
+    // And its first key's own, older than its page: 100,000 reads of it.
+    await plant(100_000, ADA, 20 * 3_600_000, 300, { secret: id(keys[0]!), environment: id(place), project: id(market) });
+    await settle();
+    flat(small, record("a key's own history", await measure()), "a key's own history");
+    console.log(JSON.stringify(steps));
+    // And they read what was planted: each page its place's reads alone, full where it has a page of them.
+    const first = await shown({ kind: 'secret', id: keys[0]! });
+    assert.ok(first.length === 100 && first.every((read) => read.secret === keys[0] || read.source === keys[0]));
+    assert.deepEqual(await shown({ kind: 'secret', id: empty }), []);
+    assert.deepEqual((await shown({ kind: 'secret', id: sparse })).length, PAST);
+    const environment = await shown({ kind: 'environment', id: place });
+    assert.ok(environment.length === 100 && environment.every((read) => [read.environment, read.place, read.sourceEnvironment].includes(place)));
+    const forked = await shown({ kind: 'environment', id: fork });
+    assert.ok(forked.length === 100 && forked.every((read) => read.place === fork));
+    const project = await shown({ kind: 'project', id: market });
+    assert.ok(project.length === 100 && project.every((read) => read.project === market || read.sourceProject === market));
+  } finally {
+    await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 20000000`);
+    await db.owner.execute(sql`DELETE FROM log_read_place_days`);
+    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(CAST(${-PAST - 1} AS integer), CAST(${AHEAD + 1} AS integer)) d`);
   }
 });

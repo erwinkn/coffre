@@ -80,7 +80,7 @@ const LISTED_WITHIN_MS = 20_000;
  * Reveal the canary once, and find its `secret.read` in the audit log: by
  * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
  * and names no operation (T166), the token's own read of the canary, on
- * its own page (0.15 lists reads by member, never by place: D160), by its
+ * its own page (0.15.0 lists reads by member, never by place: D160), by its
  * credential, for a reveal, of the version the token lists: the use
  * the reveal made, or the one within the minute before it that it rode on
  * (a cover is of the same credential, purpose and key), once listed, which
@@ -105,8 +105,8 @@ export async function tokenReveal(api: CoffreClient, canary: Canary, token: Toke
   const first = await list({ path });
   let { entries, reads } = first;
   const read = entries.filter((entry) => entry.operationId === operationId);
-  // A server that keeps 0.15's log lists its reads on the whole log and by member, never by place (D160), and says so:
-  // the token's own page lists its own, whatever it audits.
+  // A server that keeps 0.15's log lists its reads on the whole log and by member, and since 0.15.x by place (T175); 0.15.0
+  // never by place (D160), and says so: the token's own page lists its own, whatever it audits.
   if (read.length === 0 && (reads !== undefined || first.readsOmitted !== undefined)) {
     expect(token.credentialId !== null, "the server names no credential of the token's, so its read in 0.15's log cannot be told from another's");
     // Of the version revealed: an earlier version's read of the minute before stops no wait for this one (review r11).

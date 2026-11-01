@@ -106,13 +106,16 @@ async function usesAudited(
     expect(entry.version === held.find((found) => found.key === key)?.version, `the entry for ${key} names another version`, entry);
     return entry;
   });
-  // On the reader's own page, whole: the read may ride on a cover from the minute before. Not on the key's: 0.15 lists
-  // reads on the whole log and by member, never by place (D160), and the key's page says so.
+  // On the reader's own page, whole: the read may ride on a cover from the minute before. And on its key's and its
+  // environment's (T175): listed once, on every page that lists it.
   const theirs = await everyAuditEntry(admin.api, { actor: reader.member });
+  const environment = await everyAuditEntry(admin.api, { path: DEV });
   for (const entry of read) {
-    expect(theirs.some((found) => found.log === '0.15' && found.seq === entry.seq), `the read of ${String(entry.key)} is not on ${reader.email}'s page`, { read: entry, newest: theirs.slice(0, 5) });
-    const page = await admin.api.audit.list({ path: `${DEV}/${String(entry.key)}`, sealed: '1', limit: 1 });
-    expect(page.readsOmitted === 'path', `${String(entry.key)}'s page does not say where its reads are listed`, page.readsOmitted);
+    const on = (page: AuditEntryView[]) => page.some((found) => found.log === '0.15' && found.seq === entry.seq);
+    expect(on(theirs), `the read of ${String(entry.key)} is not on ${reader.email}'s page`, { read: entry, newest: theirs.slice(0, 5) });
+    const key = await everyAuditEntry(admin.api, { path: `${DEV}/${String(entry.key)}` });
+    expect(on(key), `the read of ${String(entry.key)} is not on its key's page`, { read: entry, newest: key.slice(0, 5) });
+    expect(on(environment), `the read of ${String(entry.key)} is not on ${DEV}'s page`, { read: entry, newest: environment.slice(0, 5) });
   }
   await using(deployment.database(), async (sql) => {
     for (const entry of read) {
@@ -371,7 +374,7 @@ export async function deletedTail(deployment: Deployment, { admin }: People): Pr
 }
 
 /** The whole log, detail included, newest first: 0.14's entries, and the sign-ins 0.15's records. */
-export async function everyAuditEntry(api: CoffreClient, query: { actor?: string } = {}): Promise<AuditEntryView[]> {
+export async function everyAuditEntry(api: CoffreClient, query: { actor?: string; path?: string } = {}): Promise<AuditEntryView[]> {
   const all: AuditEntryView[] = [];
   for (let before: string | undefined; ; ) {
     const { entries, next } = await api.audit.list({ before, limit: 500, detail: '1', sealed: '1', ...query });

@@ -26,7 +26,7 @@ import {
   type RecordedChange,
   type Signed,
 } from '../db/queries.ts';
-import { readsPageStanding, type ListedRead, type ReadsStanding } from '../db/reads.ts';
+import { readsPageStanding, type ListedRead, type ReadPlace, type ReadsStanding } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
 import { traceFields, type ApiContext } from './context.ts';
@@ -331,18 +331,23 @@ export async function listAudit(
   const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
 
   // The reads 0.15's log records, each a use, as the vault's projector lists them (T166), and how far they are listed:
-  // on the whole log and by member, as its other records, to whoever reads the whole log; and to a reader of some places
-  // (`audit.read` somewhere, as above: one with none reads no audit page, as under 0.14), their own.
-  // Not at a place: in 0.15 no page of a project, environment or key lists them (D160), and a reader of some places
-  // sees no one's but their own. Never a refusal (one the vault refuses before it writes a use is the app's entry), nor
-  // below its log's end.
+  // on the whole log and by member, as its other records, to whoever reads the whole log; on the page of a place, a
+  // key's, an environment's or a project's (T175), each read at it that its caller may see (`seen`), by the members
+  // asked for; and to a reader of some places (`audit.read` somewhere, as above: one with none reads no audit page, as
+  // under 0.14), their own, on a page of no place. Never a refusal (one the vault refuses before it writes a use is the
+  // app's entry), nor below its log's end.
   // Their own however they name themselves (`ada@acme.example` asks for `user:ada@acme.example` among others), and then
   // only their own (review r6).
   const self = formatMember(caller.principal);
   const own = filter.actors?.includes(self) === true;
   const asked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
-  const used = asked && query.path === undefined && (filter.within === undefined || own);
+  const at = readPlace(filter);
+  const used = asked && (at !== null || filter.within === undefined || own);
   const readers = filter.within === undefined ? filter.actors : [self];
+  const readsFilter = at === null ? { actors: readers, before: start, limit: query.limit } : { at, before: start, limit: query.limit };
+  // At a place, each read is read whoever's: it shows where its caller may see it, and is by a member asked for. One
+  // that does not is passed over, and the page goes on past it, short (A1).
+  const seen = at === null ? () => true : seenBy(filter);
 
   // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
   const counting = recorded && counted;
@@ -350,7 +355,7 @@ export async function listAudit(
   const [old, sealed, listedReads, reach] = await Promise.all([
     before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
     recorded ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit }) : { rows: [], more: false },
-    used ? readsPageStanding(ctx.db, { actors: readers, before: start, limit: query.limit }) : null,
+    used ? readsPageStanding(ctx.db, readsFilter) : null,
     counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
   const reads = listedReads ?? { rows: [], more: false };
@@ -359,11 +364,11 @@ export async function listAudit(
   const standing = listedReads?.standing.sealed == null ? null : listedReads.standing;
   const oldRead = old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` }));
   const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row), below: { at: row.at, number: row.number } }));
-  const readsRead = reads.rows.map((row) => ({ at: row.at, entry: readView(row), below: { at: row.at, number: row.number } }));
-  // Beside each other: whether the vault vouches for each entry of 0.15's log the page read, and for how far the reads
+  const readsRead = reads.rows.map((row) => ({ at: row.at, entry: seen(row) ? readView(row) : null, below: { at: row.at, number: row.number } }));
+  // Beside each other: whether the vault vouches for each entry of 0.15's log the page shows, and for how far the reads
   // are listed; and how the entries' credentials came to be.
   const [vouches, origins] = await Promise.all([
-    vouched(ctx, sealed.rows, reads.rows, standing),
+    vouched(ctx, sealed.rows, reads.rows.filter(seen), standing),
     originsOf(ctx.db, credentialsNamed([...oldRead, ...changesRead, ...readsRead].map((read) => read.entry))),
   ]);
   for (const read of [...changesRead, ...readsRead]) {
@@ -383,8 +388,9 @@ export async function listAudit(
   const next = page.oldStop === null && change === null ? null : `${page.oldStop ?? '-'}:${change === null ? '-' : pointText(change)}`;
   const entries = withOrigins(page.entries, origins);
   const shown = standing === null ? null : readsListed(standing, vouches.cursorForged);
-  // A page that would have listed reads under 0.14's log says where they are under 0.15's: `readsOmitted`.
-  const omitted = asked && !used && (await keeps015(ctx.vault)) ? { readsOmitted: query.path !== undefined ? 'path' as const : 'scope' as const } : {};
+  // A page that would have listed reads under 0.14's log says where they are under 0.15's: `readsOmitted`, a scoped
+  // reader's page of no place.
+  const omitted = asked && !used && (await keeps015(ctx.vault)) ? { readsOmitted: 'scope' as const } : {};
   const listed = { ...(shown === null ? {} : { reads: shown }), ...omitted };
   if (!counted) return { entries, more: next !== null, next, ...listed };
   // The page's stretch of each log, from where it stopped there to where it started; to the first entry when nothing
@@ -580,10 +586,11 @@ export type ReadsListed = {
 
 /**
  * Why a page lists no reads of 0.15's log (T166, D160), where 0.14's would
- * have listed its reads' entries: `path`, it is a project's, environment's
- * or key's, whose reads the whole log and each member's page list in 0.15;
- * `scope`, its reader reads some places only, and sees their own reads
- * alone, on their own page.
+ * have listed its reads' entries: `scope`, its reader reads some places
+ * only, and on a page of no place sees their own reads alone; the page of
+ * each place they read lists its reads (T175). `path`, a project's,
+ * environment's or key's page, is 0.15.0's answer, which listed reads by
+ * place nowhere; no server since gives it.
  */
 export type ReadsOmitted = 'path' | 'scope';
 
@@ -603,6 +610,36 @@ export function readsListed(standing: ReadsStanding, unvouched: boolean, options
   const waiting = standing.through < standing.sealed;
   const late = options.strict === true || standing.sealedAt - standing.at > READS_BEHIND_MS || Date.now() - standing.sealedAt > READS_BEHIND_MS;
   return { through: standing.at === 0 ? null : new Date(standing.at).toISOString(), behind: (waiting && late) || forged, ...(forged ? { forged: true as const } : {}) };
+}
+
+/** The place a page's reads are listed at (T175): the most precise its path names, a key, an environment or a project; null for a page of no place. */
+function readPlace(filter: AuditFilter): ReadPlace | null {
+  if (filter.secretId !== undefined) return { kind: 'secret', id: filter.secretId };
+  if (filter.environmentId !== undefined) return { kind: 'environment', id: filter.environmentId };
+  if (filter.projectId !== undefined) return { kind: 'project', id: filter.projectId };
+  return null;
+}
+
+/**
+ * Whether a read a place's page read shows (T175): it is by a member asked
+ * for, and its caller may see it, as 0.14's entries are held to the same
+ * places (`auditWhere`): one of the places it is at is among those they read,
+ * and none is an environment their role leaves out there. Decided from the
+ * row's own columns, which its MAC covers: one a writer moved to another
+ * place shows forged, wherever it shows (R64).
+ */
+function seenBy(filter: AuditFilter): (row: ListedRead) => boolean {
+  const actors = filter.actors === undefined ? null : new Set(filter.actors);
+  const within = filter.within === undefined
+    ? null
+    : { projects: new Set(filter.within.projectIds), environments: new Set(filter.within.environmentIds), except: new Set(filter.within.except ?? []) };
+  return (row) => {
+    if (actors !== null && !actors.has(row.principal)) return false;
+    if (within === null) return true;
+    const environments = [row.environment, row.place, row.sourceEnvironment].filter((id) => id !== null);
+    if (environments.some((id) => within.except.has(id))) return false;
+    return [row.project, row.sourceProject].some((id) => id !== null && within.projects.has(id)) || environments.some((id) => within.environments.has(id));
+  };
 }
 
 /**

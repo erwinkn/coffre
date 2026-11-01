@@ -659,17 +659,24 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       const found = await rowsOf<{
         number: string | number; at: string | number; credential: string; purpose: string | number; principal: string; secret: string; environment: string; project: string;
         place: string | null; source: string | null; source_environment: string | null; source_project: string | null; version: string | null; mac: Uint8Array;
-        dayed: boolean | number;
+        dayed: boolean | number; placed: string | number;
       }>(db, sql`SELECT r.number, r.at, ${text('r.credential')} AS credential, r.purpose, r.principal, ${text('r.secret')} AS secret, ${text('r.environment')} AS environment,
           ${text('r.project')} AS project, ${text('r.place')} AS place, ${text('r.source')} AS source, ${text('r.source_environment')} AS source_environment,
           ${text('r.source_project')} AS source_project, ${text('r.version')} AS version, r.mac,
-          EXISTS (SELECT 1 FROM log_read_days d WHERE d.principal = r.principal AND d.day = CAST(r.at / 86400000 AS integer)) AS dayed
+          EXISTS (SELECT 1 FROM log_read_days d WHERE d.principal = r.principal AND d.day = CAST(r.at / 86400000 AS integer)) AS dayed,
+          (SELECT count(*) FROM log_read_place_days d WHERE d.day = CAST(r.at / 86400000 AS integer)
+            AND d.place IN (r.secret, r.environment, r.project, r.place, r.source, r.source_environment, r.source_project)) AS placed
         FROM log_reads r WHERE r.at >= ${big(from)} AND r.at <= ${big(to)} AND r.number > ${big(after)} AND r.number <= ${big(upto)}`);
-      return found.map((row): ReadRow & { dayed: boolean } => ({
-        number: BigInt(row.number), at: Number(row.at), credential: row.credential, purpose: Number(row.purpose), principal: row.principal, secret: row.secret,
-        environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
-        sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac), dayed: row.dayed === true || row.dayed === 1,
-      }));
+      return found.map((row): ReadRow & { dayed: boolean; placed: boolean } => {
+        // Each place it is at, once, has its day (`log_read_place_days`, which the pages of each place read).
+        const places = new Set([row.secret, row.environment, row.project, row.place, row.source, row.source_environment, row.source_project].filter((id) => id !== null));
+        return {
+          number: BigInt(row.number), at: Number(row.at), credential: row.credential, purpose: Number(row.purpose), principal: row.principal, secret: row.secret,
+          environment: row.environment, project: row.project, place: row.place, source: row.source, sourceEnvironment: row.source_environment,
+          sourceProject: row.source_project, version: row.version, mac: Buffer.from(row.mac), dayed: row.dayed === true || row.dayed === 1,
+          placed: Number(row.placed) === places.size,
+        };
+      });
     },
     async makeDays(days) {
       if (!postgres) return;
@@ -688,6 +695,7 @@ function readsStore(db: Database): Pick<ReadsStore, 'readsCursor' | 'objects' | 
       const from = Date.parse(`${day}T00:00:00Z`);
       await rowsOf(db, sql`DELETE FROM log_reads WHERE at >= ${from} AND at < ${from + 86_400_000}`);
       await rowsOf(db, sql`DELETE FROM log_read_days WHERE day = ${from / 86_400_000}`);
+      await rowsOf(db, sql`DELETE FROM log_read_place_days WHERE day = ${from / 86_400_000}`);
     },
   };
 }
