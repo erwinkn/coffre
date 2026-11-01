@@ -6,7 +6,7 @@ import { GATE_ROLES } from './decide.ts';
 import type { UseCall, UseRow } from './use.ts';
 
 /**
- * A use on Postgres: one call of `use_credential` (0024's, as 0046 has it), one
+ * A use on Postgres: one call of `use_credential` (0024's, as 0050 has it), one
  * statement and one round trip, its own transaction. It answers its row as
  * one JSON value (0024 says why), read back here as `UseRow`.
  */
@@ -25,7 +25,8 @@ export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
     ${call.names?.accepts.signin ?? null}::boolean,
     ${call.names === undefined ? null : sql.param([...call.names.accepts.issuers])}::text[],
     ${call.names === undefined ? null : GATE_ROLES}::jsonb,
-    ${call.way}::smallint, ${call.principal}::text
+    ${call.way}::smallint, ${call.principal}::text,
+    ${call.names?.forks === true}::boolean
   )::text AS use`);
   return rowOf(row!.use);
 }

@@ -102,6 +102,15 @@ REMOVALS=(
   # D150 (fallback D), W268: her standing decided from rows no key decides, before any of the key's is read.
   "Probing StandingFirst NoKeyBeforeStanding"
   "ProbingFloor StandingFirst NoKeyBeforeStanding"
+  # T165 (B2): a fork's request and `dev@me`'s, by name in the vault's one call, the chain resolved in it.
+  "ProbingFork ForksByName NoIsFixed"
+  "ProbingMine ForksByName NoIsFixed"
+  "ProbingFallback ForksByName NoIsFixed"
+  "ProbingFork ParentInDecision NoIsFixed"
+  "ProbingFork CutByPlace NoIsFixed"
+  "ProbingFork StandingFirst NoKeyBeforeStanding"
+  "ProbingMine StandingFirst NoKeyBeforeStanding"
+  "ProbingMine GateWeighsParent NoKeyBeforeStanding"
   # B2 (Batching.tla, T167): a request's several keys, one vault call and one statement, two rounds as a use by ids.
   "Batching StrongestFirst NoWaitCycle"
   "Batching CountsOwnBatch CapHolds"

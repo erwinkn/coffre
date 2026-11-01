@@ -24,7 +24,14 @@ import { resolvedPlace, secretRowOf, type CredentialRead, type ResolvedPath, typ
  *   readAhead(db, { tokenHash, path: { project: 'market', environment: 'dev' }, keys: ['API_KEY'] })
  *   → { credential: { credential, identity, now, policySeq }, place: { project, environment: dev, secret: null }, secrets: [API_KEY's row] }
  */
-export type ReadAhead = { credential?: CredentialRead | null; place?: ResolvedPath | null; secrets?: SecretRow[] };
+export type ReadAhead = {
+  credential?: CredentialRead | null; place?: ResolvedPath | null; secrets?: SecretRow[];
+  /**
+   * Of a named use's rows (`namedAhead`, T165): where the key the vault used is held, when the place inherits it (a
+   * fork's parent, a personal config's dev), by id and slug; null for a key the place holds itself, or none.
+   */
+  held?: { environmentId: string; slug: string } | null;
+};
 
 export type ReadAsked = { tokenHash?: Buffer; path?: { project: string; environment: string }; keys?: readonly string[] | null };
 
@@ -44,17 +51,31 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
 /**
  * The rows the vault's named use answers (T145, PR B; `Vault.useNamed`, migration 0044's `app`): what `app_read`
  * answers, for the request's credential, place and key, read in the use's own statement, so that the app reads nothing
- * itself. Null for SQLite's vault, which answers none: the app reads its own rows there, as ever.
+ * itself. Null for SQLite's vault, which answers none: the app reads its own rows there, as ever. `personal`: the
+ * request named `dev@me` (T165), and the place is its caller's personal config of dev, or dev while they have none, as
+ * `resolveRead` resolves it.
  */
-export function namedAhead(db: Queryable, app: string | null): ReadAhead | null {
+export function namedAhead(db: Queryable, app: string | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
   if (app === null) return null;
   const read = JSON.parse(app) as Answer & { now: string };
   const ahead = readAheadOf(db, read, read.now, { tokenHash: true, path: true });
-  // The key it used, as `resolvePath` answers a path's key: what a reveal of `market/dev/API_KEY` says of one it finds no value of.
+  const environment = ahead.place?.environment ?? null;
+  // Where the key is held, a key the place inherits: the vault's own rows say, as it resolved the names (0050).
+  ahead.held = read.held == null ? null : { environmentId: read.held.id, slug: read.held.slug };
+  if (ahead.place != null && environment !== null && personal) {
+    ahead.place = {
+      ...ahead.place,
+      personal: environment.owner === null
+        ? { of: { id: environment.id, slug: environment.slug, archivedAt: environment.archivedAt }, fallback: true }
+        : { of: { id: environment.parentId!, slug: environment.parentSlug!, archivedAt: null } },
+    };
+  }
+  // The key it used, as `resolvePath` answers a path's key: what a reveal of `market/dev/API_KEY` says of one it finds no
+  // value of. Only the place's own: a key a fork inherits is its parent's, which the path's own key is not (T165).
   const [used] = read.secrets ?? [];
   if (ahead.place != null && used !== undefined) {
-    const { id, key, archivedAt, currentVersionId, currentVersion } = rowOf(tablesOf(db).secrets, used.secret);
-    ahead.place = { ...ahead.place, secret: { id, key, archivedAt, currentVersionId, currentVersion } };
+    const { id, key, archivedAt, currentVersionId, currentVersion, environmentId } = rowOf(tablesOf(db).secrets, used.secret);
+    if (environmentId === environment?.id) ahead.place = { ...ahead.place, secret: { id, key, archivedAt, currentVersionId, currentVersion } };
   }
   return ahead;
 }
@@ -106,6 +127,8 @@ type Answer = {
   environment: Json | null;
   /** The environment's parent's slug, for a fork. */
   parent: string | null;
+  /** A named use's key the place inherits: where it is held (0050). */
+  held?: { id: string; slug: string } | null;
   secrets: { secret: Json; version: Json | null }[] | null;
 };
 

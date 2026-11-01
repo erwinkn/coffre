@@ -10,10 +10,12 @@ import { createDatabase } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
+import { GATE_ROLES } from '../src/decide.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { newRequestId } from '../src/use.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { namedWorld } from './named-world.ts';
 import { ask, CONFIG, emptyLog, LOG_015, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -194,5 +196,74 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
   // past it, none until some hundred thousand.
   for (const form of ['mapped', 'cold'] as const) {
     assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 100 places, ${large[form]} at 10k`);
+  }
+});
+
+test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and its dismissals by index: its buffers the same at 1k forks and at 10k", { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+  const w = await namedWorld(db, { caller: 'person' });
+  const fork = await w.fork('feature');
+  await w.grantAt(fork, 'viewer');
+  await w.personal();
+  // Inherited, in each: dev's key, which neither the fork nor the config holds; and a name each removed, at the fork.
+  const id = await w.key();
+  const [names] = await rows<{ token_hash: Buffer; project: string; key: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project, s.key
+    FROM credentials c, secrets s JOIN projects p ON p.id = s.project_id WHERE c.id = ${w.credentialId} AND s.id = ${id}`);
+  await w.dismiss(fork, 'REMOVED');
+  /** `count` projects more, each with its dev, a fork and a personal config of it, a key of that name and a dismissal of it in each. */
+  let made = 0;
+  const grow = async (count: number) => {
+    await run(db.owner, sql`INSERT INTO projects (id, slug, name) SELECT gen_random_uuid(), 'forked-' || (${made} + g), 'Grown' FROM generate_series(1, ${count}) g`);
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name, protected)
+      SELECT gen_random_uuid(), p.id, 'dev', 'Development', false FROM projects p WHERE p.slug LIKE 'forked-%' AND NOT EXISTS (SELECT 1 FROM environments e WHERE e.project_id = p.id)`);
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name, protected, parent_id)
+      SELECT gen_random_uuid(), e.project_id, 'feature', 'Feature', false, e.id FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'forked-%' AND e.slug = 'dev' AND NOT EXISTS (SELECT 1 FROM environments f WHERE f.parent_id = e.id)`);
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner)
+      SELECT gen_random_uuid(), e.project_id, 'dev-p-' || substr(md5(e.id::text), 1, 8), 'Mine', false, e.id, ${w.principal} FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'forked-%' AND e.slug = 'dev' AND NOT EXISTS (SELECT 1 FROM environments f WHERE f.parent_id = e.id AND f.owner IS NOT NULL)`);
+    await run(db.owner, sql`INSERT INTO secrets (id, project_id, environment_id, key)
+      SELECT gen_random_uuid(), e.project_id, e.id, ${names!.key} FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'forked-%' AND NOT EXISTS (SELECT 1 FROM secrets s WHERE s.environment_id = e.id)`);
+    await run(db.owner, sql`INSERT INTO dismissed_keys (environment_id, key, dismissed_by)
+      SELECT e.id, 'REMOVED', 'grown' FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'forked-%' AND e.parent_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dismissed_keys d WHERE d.environment_id = e.id)`);
+    made += count;
+    await run(db.owner, sql`VACUUM ANALYZE`);
+  };
+  const client = postgresClient(HOT_URL, { max: 1 });
+  /** The least of several runs' buffers, a named call by no ids (a cold isolate's), of `key` at `environment`. */
+  const buffers = async (environment: string, key: string): Promise<number> => {
+    let least = Infinity;
+    for (let i = 0; i < 6; i += 1) {
+      const at = Date.now();
+      const requestId = newRequestId();
+      const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: id, purpose: 4, place: null } });
+      const args = [requestId, String(at), mac, String(at + 3000), names!.token_hash, names!.project, environment, key] as never[];
+      const call = `use_credential(NULL, NULL, $1, $2, 4::smallint, NULL, $3, $4, NULL, NULL, NULL, NULL, NULL, NULL, NULL, $5, $6, $7, $8,
+        p_signin => true, p_roles => '${GATE_ROLES.replaceAll("'", "''")}'::jsonb, p_forks => true)`;
+      if (i === 0) {
+        const [row] = await client.unsafe(`SELECT ${call}::text AS use`, args) as unknown as { use: string }[];
+        const answered = JSON.parse(row!.use) as { state: string | null; n_standing: boolean | null };
+        assert.equal(answered.n_standing, true, `the names read, and standing: ${row!.use.slice(0, 200)}`);
+      }
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+    }
+    return least;
+  };
+  const at = async (places: number) => ({
+    places, inherited: await buffers('feature', names!.key), removed: await buffers('feature', 'REMOVED'), mine: await buffers('dev@me', names!.key),
+  });
+  await grow(100);
+  const few = await at(100);
+  await grow(900);
+  const small = await at(1_000);
+  await grow(9_000);
+  const large = await at(10_000);
+  await client.end();
+  console.log(JSON.stringify({ few, small, large }));
+  for (const form of ['inherited', 'removed', 'mine'] as const) {
+    assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 1k forks, ${large[form]} at 10k`);
   }
 });

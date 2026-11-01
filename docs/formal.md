@@ -576,6 +576,23 @@ move to Cloudflare Access (`BehindAccess`); `ProbingProvider` and
 `ProbingAccess` take each alone. Any request's credential may expire
 while it is under way (`Expiries`).
 
+Where she asks (`Where`, T165): an environment of its own; a fork of it,
+whose key may be its own, its parent's (inherited, which takes her standing
+at the parent too, R8), or its parent's that the fork removed, and whose
+chain someone may cut by archiving the parent (`Cut`), after which the fork
+reads nothing; her personal config of dev, `dev@me`, whose own values are
+hers while she reads or uses dev, whatever she asks, and whose other keys
+are dev's, for what she asks (R20); or `dev@me` with no config of hers,
+read as dev. Her standing at the parent is its own variable
+(`grantedParent`, `RevokeParent`), and the fork may remove a key or bring it
+back (`Dismiss`). Each is the vault's one call by name, the chain resolved
+in it (`ForksByName`); before T165 the vault served none of them by name,
+and the app's own path answered (`AppPath`): `access`, its reads, then a
+use by ids, whose calls hang on the key. `ProbingFork`, `ProbingMine` and
+`ProbingFallback` check them; the first two leave the credential's own
+dimensions (provider, Access, expiry) and the place archived to `Probing`,
+which nothing of a fork changes, to keep TLC to minutes.
+
 One step is one request, whole. `CallerFromUse` is the code's shape, not a
 protection: before PR B, an answer about Ada kept from an earlier request
 (`Accesses`), which a refusal confirms first (`Recalled.confirm`); with
@@ -600,6 +617,10 @@ is, sealed (`useByName`, `Vault.useNamed`).
 | One clock: the app's own check of the credential, after the vault's call, judges its expiry at the use's `at`, the instant the vault judged its end at (`authenticateRequest`, `verify`'s `at`; review r8 of D153) | her token expiring between the request's start and the app's check: a 401 after the vault's two calls and her principal's lock for a key her grant covers, a 401 after one call for a key never made (`NoIsFixed`, `Probing`) |
 | A named call decides her standing at the place, for what she asks, from rows no key decides, before it reads anything of the key's; without standing she is answered on the place alone, as for a key it does not hold, by the same statement, no cover or seals of the isolate's weighed (`use_credential` and `use_stands`, migration 0045, `v_stands`; SQLite's `standsAt`; `namedStanding`, which `use-stands.test.ts` holds the gate to; W268) | a refusal's call reads the key by its name, a reference and its source, before deciding: its work inside hangs on the key's shape (`NoKeyBeforeStanding`, `Probing`, `ProbingFloor`); and with it, a plain value goes back on its own read again (`NoIsFixed`, `Probing`, with `PlainByStanding` off too: the gate refuses her before any plain value is reached) |
 | Before PR B, a busy refusal on a kept answer confirms it first (`Recalled.confirm`) | the same 503 against 403 (`SameAnswer`, `ProbingKept`) |
+| A fork's request, and `dev@me`'s, is the vault's one call by name: the statement finds the place (the fork; her personal config of dev, or dev while she has none) and resolves the key through what it inherits, its own first, then each parent's unless a nearer layer removed it (`use_credential`, migration 0050, `p_forks`, `v_layers`; SQLite's twin; `NamedUseInput.forks`, which the app sets; T165) | before T165, the app's own path, `access` and a use by ids: a reference repointed around the log costs 2 calls beside 1 for a key never made (`NoIsFixed`, `ProbingFork`, `ProbingMine`, `ProbingFallback`) |
+| A key a fork inherits is decided on her standing where it is held, the parent, too (`decideChecked` at the key's own environment, the fork the place it is read through; R8) | on the fork's standing alone: she is handed a value of a parent she does not read, where a key never made is refused (`NoIsFixed`, `ProbingFork`) |
+| A fork whose chain is cut (a parent archived, deleted, not there, or a chain that loops or runs past 3) reads nothing: the statement refuses it on the place, before any key (`n_cut`, answered `archived`; the app's read refuses such a fork whole) | on 0.15.0's rules, which weigh the key's own place and its value's archived: the fork's own key handed back, where a key never made is refused (`NoIsFixed`, `ProbingFork`) |
+| The gate at her personal config weighs dev, as the vault's rule does: hers while she reads or uses dev, whatever she asks (`use_stands_personal`, migration 0050; `namedStanding` with its parent; `personalRefusal`) | on her owning it alone: revoked at dev, her call reads the key's name before the rule refuses her (`NoKeyBeforeStanding`, `ProbingMine`); and without the gate at all, at a fork or her config alike (`StandingFirst`, `ProbingFork`, `ProbingMine`) |
 
 `refusedHere`, which reviews d2 and d4 of #416 needed (a map out of date
 decided on its caller's standing, at the place the request names now:
@@ -620,8 +641,14 @@ Postgres with the principal's lock held and every statement slowed; for
 every key they may not have, the same answer, the same number of the
 vault's calls, no row of the cap's, and its request's entry only where its
 key's row of the cap's is fresh) and `packages/server/test/named.matrix.ts`
-(the same through the app, by the API and the proxy, byte for byte); both
-run as CI's `Use matrices` job (`pnpm test:matrices`). What it abstracts:
+(the same through the app, by the API and the proxy, byte for byte); and,
+at a fork and at `dev@me`, `packages/vault/test/forks.matrix.ts` (both
+engines: the place, a fork, a fork of a fork, her personal config or dev
+read for `dev@me`, by how she lost her standing, at the place or at the
+parent, the map and the window, over eight key states, its own, inherited,
+made since, removed, deleted, never made, a reference ended, a row put
+back; without standing, the same blocks of the key's relations read for
+every key); all run as CI's `Use matrices` job (`pnpm test:matrices`). What it abstracts:
 the load itself (busy is a choice of TLC's, the same in both runs, as
 admission reads nothing a request names; so is a lock held on Ada's
 principal), the calls' own costs (each call, one statement, costs the same
@@ -713,6 +740,9 @@ the cap, a batch refused on its first call's rows, a key the rules refuse.
 | `ProbingKept` | The same before PR B: decided on an answer about Ada kept from before the revoke, which a refusal confirms first (#406 r2) | 114 thousand |
 | `ProbingProvider` | `Probing` with her browser session's sign-in provider removed from the deployment's config and nothing else of the deployment's changing, three requests: every `no` alike (review r6 of D153) | 62 thousand |
 | `ProbingAccess` | `Probing` with the deployment moving its sign-in to Cloudflare Access, three requests: the same (review r7 of D153) | 84 thousand |
+| `ProbingFork` | `Probing` at a fork: its own key, its parent's inherited (her standing there revoked or kept) or removed, the chain cut, three requests, her credential's own dimensions and the place archived left to `Probing` (T165) | 340 thousand |
+| `ProbingMine` | `Probing` at her personal config of dev, `dev@me`: her own value, dev's inherited or removed, the gate weighing dev, three requests, as `ProbingFork` (T165) | 66 thousand |
+| `ProbingFallback` | `Probing` at `dev@me` with no config of hers, read as dev, four requests (T165) | 183 thousand |
 | `Naming` | One request's key name mapped to its id once, while the key is renamed and another named so (T145, PR B) | 31 |
 | `Batching` | Two requests of one principal's, each two keys of three as one batch, at most two keys in the cap's set, every start of their rows, while the caller's standing is revoked or restored once and time ages a row once (T167, B2) | 76 thousand |
 | `BatchingRefused` | The same, the second request naming a key the rules refuse whatever the standing | 26 thousand |

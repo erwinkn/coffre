@@ -215,7 +215,7 @@ unsupported diff select full validation.
   for tests and local development; deployed app databases use Postgres.
 - `pnpm test:matrices` runs the generated matrices of 0.15's use by name
   (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
-  `packages/server/test/named.matrix.ts`): every key a caller may not have
+  `packages/vault/test/forks.matrix.ts`, `packages/server/test/named.matrix.ts`): every key a caller may not have
   answered alike, whatever the vault's map holds, each statement slowed. They
   take about three quarters of an hour, so `pnpm test` leaves them out;
   `pnpm test:matrices:sqlite` runs them on SQLite. Needs Postgres. CI runs

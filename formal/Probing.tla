@@ -43,6 +43,16 @@
 (* API_KEY's in `here` now, one no key has, or the key of that name in    *)
 (* `there`. So the map is a dimension of every comparison: what a `no`     *)
 (* costs may hang on neither the key nor the map.                          *)
+(*                                                                         *)
+(* Where she asks (T165, B2; `Where`): an environment of its own, as       *)
+(* above; a fork of it, `market/dev-ada`, whose key may be its own, its    *)
+(* parent's (inherited, which takes her standing at the parent too, R8),   *)
+(* or its parent's that the fork removed, and whose chain someone may cut  *)
+(* (a parent archived: then the fork reads nothing); her personal config   *)
+(* of dev, `market/dev@me`, whose own values are hers while she reads or   *)
+(* uses dev, and whose other keys are dev's (R20); or `dev@me` with no     *)
+(* personal config of hers, read as dev. Each is one call of the vault's   *)
+(* by name, as an environment's request is: the chain resolved in it.      *)
 (***************************************************************************)
 EXTENDS Naturals, TLC
 
@@ -52,7 +62,9 @@ CONSTANTS
     Archives,       \* someone may archive the place
     Providers,      \* the deployment may stop configuring the sign-in provider of her browser session
     Modes,          \* the deployment may move its sign-in to Cloudflare Access
-    Expiries        \* her credential may expire while a request of hers is under way
+    Expiries,       \* her credential may expire while a request of hers is under way
+    Where,          \* where she asks: "env", "fork", "mine" (her personal config of dev), "fallback" (`dev@me`, none of hers)
+    Cuts            \* someone may archive the fork's parent, which cuts its chain
 
 (***************************************************************************)
 (* Where the answer about Ada comes from (not a protection: the code's     *)
@@ -177,6 +189,32 @@ CONSTANTS
     \* which the gate weighs as the vault does; the model's `Lapse` stands for
     \* it (no change of the log's), `expiring` only for an end after `at`.
     StandingFirst,
+    \* T165 (B2): a fork's request, and `dev@me`'s, is the vault's one call
+    \* by name, as an environment's is: the statement finds the place (the
+    \* fork, her personal config, or dev when she has none) and resolves the
+    \* key through the chain itself, its own first, then the parent's unless
+    \* the place removed it. Off, as 0.15.0: the vault serves none of them by
+    \* name (`nowhere`), and the app's own path answers, `access` and its own
+    \* reads, then a use by ids: a key whose rows are not as sealed costs a
+    \* call more than a key never made.
+    ForksByName,
+    \* T165: the gate at her personal config weighs dev, as the vault's rule
+    \* does (`personalRefusal`): hers while she reads or uses dev. Off, it
+    \* stands her on owning it alone, and a call of hers, revoked at dev,
+    \* reads the key before the rule refuses her.
+    GateWeighsParent,
+    \* T165: a key a fork inherits is decided on her standing where it is
+    \* held, the parent, too (`decideChecked` at the key's environment; R8).
+    \* Off, on the fork's alone: she is handed a value of a parent she does
+    \* not read.
+    ParentInDecision,
+    \* T165: a fork whose chain is cut (a parent archived, deleted, or a
+    \* chain that loops) reads nothing, as the app's read refuses it whole:
+    \* the statement refuses it on the place alone, before any key (`n_cut`).
+    \* Off, on 0.15.0's rules: the archived places a use reads are the
+    \* key's own and its value's, so a key the fork holds itself is handed
+    \* back, where the app's read refuses every key.
+    CutByPlace,
     \* Before PR B: a refusal on a kept answer the vault has not vouched for,
     \* a busy one (503) included, first asks the vault for its answer now, and
     \* starts over on the fresh one when it differs (`Recalled.confirm`,
@@ -200,12 +238,17 @@ Valued == {"sealed", "plain"}
 
 VARIABLES
     granted,        \* what Ada's grant lets her do at the place: both, `use` alone (a Contributor's), or nothing
+                    \* (at dev, for "mine": her personal config has no grants of its own)
+    grantedParent,  \* "fork": what it lets her do at the fork's parent
     grantedThere,   \* what it lets her do at the other place, which no step changes
     made,           \* run A: API_KEY as the place holds it ("none", "sealed", "plain", "gone": held, its value gone,
                     \* "around": a reference whose source a writer rewrote around the log, its rows not as sealed, or
                     \* "away": a reference whose source's environment is archived)
     unseen,         \* run A: no change of the log's since that rewrite, so an isolate's seals of its rows may be older
     madeThere,      \* run A: whether the other place holds a key of that name (run B's never does)
+    layer,          \* run A: where the key is, for a fork or her personal config: "own" (the place holds it), "parent"
+                    \* (its parent does, and the place inherits it), "removed" (its parent does, and the place removed it)
+    cut,            \* "fork": its parent archived, in both runs: the fork reads nothing
     fresh,          \* run A: the cap's row of API_KEY for Ada is fresh
     stood,          \* each run's `stood`, by purpose: kept, and still of the log's newest change and the rows
     cover,          \* run A: the isolate's cover of API_KEY for Ada, by purpose: an allowed use's entry, no change since
@@ -217,7 +260,7 @@ VARIABLES
     left,           \* requests still to make
     last            \* the last request's answers, checked in the state they are given in (`Last`): before any, alike
 
-vars == <<granted, grantedThere, made, unseen, madeThere, fresh, stood, cover, archived, kept, browser, unconfigured, behindAccess, left, last>>
+vars == <<granted, grantedParent, grantedThere, made, unseen, madeThere, layer, cut, fresh, stood, cover, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 None == [p \in Purposes |-> FALSE]
 \* Run A's answer and run B's, whether she may use the key in each, whether she stands where she asks for what she
@@ -233,10 +276,13 @@ Seen(answer) == [status |-> answer.status, calls |-> answer.calls, waited |-> an
 
 Init ==
     /\ granted \in {Purposes, {"use"}}
+    /\ grantedParent \in IF Where = "fork" THEN {{}, {"use"}, Purposes} ELSE {{}}
     /\ grantedThere \in {{}, Purposes}
     /\ made = "none"
     /\ unseen = FALSE
     /\ madeThere = FALSE
+    /\ layer = "own"
+    /\ cut = FALSE
     /\ fresh = FALSE
     /\ stood = [r \in Runs |-> None]
     /\ cover = None
@@ -248,8 +294,30 @@ Init ==
     /\ left = Budget
     /\ last = [a |-> On(A("busy", 0, FALSE), "busy"), b |-> On(A("busy", 0, FALSE), "busy"), noA |-> TRUE, noB |-> TRUE, stands |-> TRUE, right |-> On(A("busy", 0, FALSE), "busy")]
 
+\* Where the key may be, as the place named reads it: a fork's or her personal config's own, its parent's, or its
+\* parent's that it removed; an environment of its own, or dev read for `dev@me`, holds its own alone.
+Layers == IF Where \in {"fork", "mine"} THEN {"own", "parent", "removed"} ELSE {"own"}
+
+\* Whether she stands at the place named for `p`, which decides on rows no key decides (the gate): her grant there; at
+\* her personal config, her reading or using dev, whatever she asks (`personalRefusal`, R8).
+Stands(p) == IF Where = "mine" THEN granted /= {} ELSE p \in granted
+\* Whether she may act where the key is held, for `p`: the place's own, as the gate; a fork's parent, her grant there; dev,
+\* for her personal config, her grant there for `p` (a value of dev's is dev's).
+HolderStands(p) == CASE layer = "own"     -> Stands(p)
+                     [] layer = "parent"  -> IF Where = "fork" THEN p \in grantedParent ELSE p \in granted
+                     [] layer = "removed" -> FALSE
+
 \* Whether she may be given API_KEY, as `key`, for `p`: the vault's whole decision, key and all, but the cap's.
-Usable(key, p) == p \in granted /\ key \in Valued
+Usable(key, p) == key \in Valued /\ Stands(p) /\ HolderStands(p) /\ ~cut
+
+\* What the code decides of it (the protections on, `Usable`): the gate's standing, then the key's, where it is held.
+CodeStands(p) == IF Where = "mine" /\ ~GateWeighsParent THEN TRUE ELSE Stands(p)
+Decides(key, p) ==
+    /\ key \in Valued
+    /\ Stands(p)
+    /\ IF layer = "parent" /\ ~ParentInDecision THEN layer /= "removed" ELSE HolderStands(p)
+    \* A cut chain, before the place refuses it whole: a key the fork holds itself reads no archived place.
+    /\ (~cut \/ (~CutByPlace /\ layer = "own"))
 \* Her credential refused by the app on the deployment's config, which the vault cannot see: a session whose provider
 \* it no longer configures, or any coffre token once it signs in through Cloudflare Access.
 Gone == (browser /\ unconfigured) \/ behindAccess
@@ -261,10 +329,10 @@ Allowed(key, p) == Usable(key, p) /\ ~Gone
 \* the vault's calls now, `contended` whether the principal's lock, once asked for, is held past the use's deadline,
 \* `p` what the request needs. The answer, and whether the use wrote the key's row of the cap's.
 AnswerFresh(key, isFresh, isStood, isCovered, busy, contended, p) ==
-    LET usable == Usable(key, p)
+    LET usable == Decides(key, p)
         \* Its refusal, as she is told it: one, or the vault's reason.
         refusal == IF OneNo THEN "no"
-                   ELSE IF p \notin granted THEN "forbidden" ELSE IF key \in {"gone", "around", "away"} THEN "ended" ELSE "missing"
+                   ELSE IF ~Stands(p) THEN "forbidden" ELSE IF key \in {"gone", "around", "away"} THEN "ended" ELSE "missing"
         decided == IF usable THEN "value" ELSE refusal
         \* One call, decided on what it read, no lock: a missing key, a plain value, a sealed key fresh in the set.
         once == IF StandingSharesAdmission /\ busy THEN [answer |-> On(A("busy", 0, FALSE), "busy"), wrote |-> FALSE]
@@ -343,7 +411,7 @@ Named(key, there, map, isFresh, isStood, isCovered, busy, contended, p, pastFloo
         With(r, n, h) == [answer |-> [r.answer EXCEPT !.calls = IF @ = 0 THEN 0 ELSE @ + n], wrote |-> r.wrote, here |-> h]
         Use(s) == AnswerFresh(key, isFresh, s, isCovered, busy, contended, p)
         refusal == IF OneNo THEN "no"
-                   ELSE IF p \notin granted THEN "forbidden" ELSE IF key \in {"gone", "around", "away"} THEN "ended" ELSE "missing"
+                   ELSE IF ~Stands(p) THEN "forbidden" ELSE IF key \in {"gone", "around", "away"} THEN "ended" ELSE "missing"
         \* The place the ids the map holds name: a key's own, while it is held; the place mapped, for a key mapped as
         \* none; none for an id no key has.
         ids == IF map = Unread THEN "none"
@@ -369,7 +437,9 @@ Named(key, there, map, isFresh, isStood, isCovered, busy, contended, p, pastFloo
             ELSE IF AdmissionBeforeKey /\ archived THEN R("notfound", 1)
             \* No standing at the place for what she asks: refused on rows no key decides, before any of the key's is
             \* read, whatever the map holds (StandingFirst).
-            ELSE IF StandingFirst /\ p \notin granted THEN R(refusal, 1)
+            ELSE IF StandingFirst /\ ~CodeStands(p) THEN R(refusal, 1)
+            \* A fork's chain cut: refused on the place alone, before any key (CutByPlace).
+            ELSE IF cut /\ CutByPlace THEN R(refusal, 1)
             ELSE IF ~ArchivedByName /\ key = "away" /\ p \in granted /\ ~pastFloor /\ ~archived THEN Unnamed
             \* The ids are the names': the use as by ids, in this call. A standing kept for another place is none here.
             ELSE IF right THEN IF pastFloor THEN RK("busy", 1) ELSE IF archived THEN RK("notfound", 1)
@@ -379,7 +449,7 @@ Named(key, there, map, isFresh, isStood, isCovered, busy, contended, p, pastFloo
                                ELSE With(Use(isStood /\ map[2] = "here"), 0, map[2] = "here")
             \* The call wrote and locked nothing; the vault decides on the rows its names read: `no` at once, or the
             \* use made in a second call, by the ids read.
-            ELSE IF ~Usable(key, p) THEN RK(refusal, 1)
+            ELSE IF ~Decides(key, p) THEN RK(refusal, 1)
             ELSE IF pastFloor THEN RK("busy", 1)
             ELSE IF archived THEN RK("notfound", 1)
             ELSE With(Use(isStood), 1, TRUE)
@@ -389,6 +459,18 @@ Named(key, there, map, isFresh, isStood, isCovered, busy, contended, p, pastFloo
        ELSE IF archived THEN RK("notfound", 1)
        ELSE IF ~right THEN Read(1)
        ELSE With(Use(isStood /\ map[2] = "here"), 0, map[2] = "here")
+
+\* 0.15.0's own path for a fork or `dev@me`, which the vault serves not by name (`nowhere`, ForksByName off): `access`, a
+\* call, then the app's own reads (`need` at the place first, then the fork's layers), and a key it finds and lets her
+\* have, a use by ids. A key whose rows are not as sealed is one it finds: the use by ids refuses it (`ById`), a call
+\* more than a key never made, which the app refuses on its own reads.
+AppPath(key, isFresh, busy, contended, p) ==
+    LET no == IF OneNo THEN "no" ELSE "forbidden"
+    IN IF busy THEN [answer |-> On(A("busy", 0, FALSE), "busy"), wrote |-> FALSE, here |-> FALSE]
+       ELSE IF ~Stands(p) THEN [answer |-> On(A(no, 1, FALSE), "app"), wrote |-> FALSE, here |-> FALSE]
+       ELSE IF key = "around" /\ HolderStands(p) /\ ~cut THEN ById(0, isFresh, contended, key)
+       ELSE IF Usable(key, p) THEN [answer |-> Keyed(On(A("value", 2, ~isFresh), "app"), key), wrote |-> key = "sealed" /\ ~isFresh, here |-> FALSE]
+       ELSE [answer |-> Keyed(On(A(no, 1, FALSE), "app"), key), wrote |-> FALSE, here |-> FALSE]
 
 \* The credential's own check refuses her (401) before anything is asked of the vault.
 Unauthenticated == [answer |-> On(A("unauth", 0, FALSE), "app"), wrote |-> FALSE, here |-> FALSE]
@@ -406,6 +488,7 @@ Answer(key, there, map, isFresh, isStood, isCovered, busy, contended, p, pastFlo
     LET \* What the app refuses of her credential that the vault, deciding at `at`, did not: its own later clock's.
         appRefuses == Gone \/ (expiring /\ ~OneClock)
     IN IF ~CallerFromUse THEN IF appRefuses THEN Unauthenticated ELSE AnswerKept(key, isFresh, busy, contended, p)
+       ELSE IF Where /= "env" /\ ~ForksByName THEN IF appRefuses THEN Unauthenticated ELSE AppPath(key, isFresh, busy, contended, p)
        ELSE IF Gone /\ AcceptedFirst THEN AsUnknown(busy)
        ELSE LET r == Named(key, there, map, isFresh, isStood, isCovered, busy, contended, p, pastFloor, stale)
             IN IF appRefuses THEN Refused(r) ELSE r
@@ -421,7 +504,14 @@ Revoke ==
     /\ granted /= {}
     /\ granted' = {}
     /\ Changed(TRUE, TRUE)
-    /\ UNCHANGED <<grantedThere, made, madeThere, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<grantedParent, grantedThere, made, madeThere, layer, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+
+\* "fork": her grant at the fork's parent is revoked, in both runs.
+RevokeParent ==
+    /\ grantedParent /= {}
+    /\ grantedParent' = {}
+    /\ Changed(TRUE, TRUE)
+    /\ UNCHANGED <<granted, grantedThere, made, madeThere, layer, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Ada loses her standing with no change of the log's: her grant's end
 \* passes ("ends"), or the 0.14 code revokes her grant or her credential,
@@ -430,21 +520,40 @@ Lapse ==
     /\ granted /= {}
     /\ granted' = {}
     \* No change of the log's: a decision kept stays, its digest blind to it (DecideEachLock off).
-    /\ UNCHANGED <<grantedThere, made, unseen, madeThere, fresh, stood, cover, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<grantedParent, grantedThere, made, unseen, madeThere, layer, cut, fresh, stood, cover, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Run A only: someone makes API_KEY, before the revoke or after, or makes it again once deleted.
 Make ==
     /\ made = "none"
     /\ \E nature \in Valued : made' = nature
+    \* In a fork or her personal config: its own, or its parent's, inherited or removed there.
+    /\ layer' \in Layers
     /\ Changed(TRUE, FALSE)
-    /\ UNCHANGED <<granted, grantedThere, madeThere, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, madeThere, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+
+\* Run A only: the fork (or her personal config) removes the key its parent holds, or brings it back: a change.
+Dismiss ==
+    /\ made /= "none"
+    /\ layer \in {"parent", "removed"}
+    /\ layer' = IF layer = "parent" THEN "removed" ELSE "parent"
+    /\ Changed(TRUE, FALSE)
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, madeThere, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+
+\* "fork": someone archives its parent, in both runs: a change. The fork then reads nothing, whatever the key.
+Cut ==
+    /\ Where = "fork"
+    /\ Cuts
+    /\ ~cut
+    /\ cut' = TRUE
+    /\ Changed(TRUE, TRUE)
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, madeThere, layer, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Run A only: its value goes, the key still held: the source of a reference deleted, or the reference ended.
 End ==
     /\ made = "sealed"
     /\ made' = "gone"
     /\ Changed(TRUE, FALSE)
-    /\ UNCHANGED <<granted, grantedThere, madeThere, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, madeThere, layer, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Run A only: a writer around the log (0.14's code mid-upgrade, or someone who owns the database) points the
 \* reference API_KEY is at another source: no change of the log's, its rows no longer as sealed (review r2 of D153).
@@ -452,7 +561,7 @@ Repoint ==
     /\ made = "sealed"
     /\ made' = "around"
     /\ unseen' = TRUE
-    /\ UNCHANGED <<granted, grantedThere, madeThere, fresh, stood, cover, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, madeThere, layer, cut, fresh, stood, cover, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Run A only: someone archives the environment of the source API_KEY reads through (its holder archived first, then
 \* restored), or brings it back: a change each.
@@ -460,20 +569,20 @@ Park ==
     /\ made \in {"sealed", "away"}
     /\ made' = IF made = "sealed" THEN "away" ELSE "sealed"
     /\ Changed(TRUE, FALSE)
-    /\ UNCHANGED <<granted, grantedThere, madeThere, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, madeThere, layer, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Run A only: someone deletes it. Its row of the cap's for Ada stays, to age out.
 Delete ==
     /\ made /= "none"
     /\ made' = "none"
     /\ Changed(TRUE, FALSE)
-    /\ UNCHANGED <<granted, grantedThere, madeThere, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, madeThere, layer, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* Run A only: someone makes a key of that name in the other place, or deletes it.
 MakeThere ==
     /\ madeThere' = ~madeThere
     /\ Changed(TRUE, FALSE)
-    /\ UNCHANGED <<granted, grantedThere, made, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, layer, cut, fresh, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* The deployment stops configuring the sign-in provider her browser session came through: no change of the log's,
 \* the same in both runs. Her rows, and all the vault sees, stay as they were.
@@ -482,7 +591,7 @@ Unconfigure ==
     /\ browser
     /\ ~unconfigured
     /\ unconfigured' = TRUE
-    /\ UNCHANGED <<granted, grantedThere, made, unseen, madeThere, fresh, stood, cover, archived, kept, browser, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, unseen, madeThere, layer, cut, fresh, stood, cover, archived, kept, browser, behindAccess, left, last>>
 
 \* The deployment moves its sign-in to Cloudflare Access: no change of the log's, the same in both runs. Her tokens'
 \* rows stay as they were, sealed, and the vault sees nothing of it.
@@ -490,7 +599,7 @@ BehindAccess ==
     /\ Modes
     /\ ~behindAccess
     /\ behindAccess' = TRUE
-    /\ UNCHANGED <<granted, grantedThere, made, unseen, madeThere, fresh, stood, cover, archived, kept, browser, unconfigured, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, unseen, madeThere, layer, cut, fresh, stood, cover, archived, kept, browser, unconfigured, left, last>>
 
 \* Someone archives the place, or its project: a change, in both runs. Every request then ends as the app answers it.
 Archive ==
@@ -498,14 +607,14 @@ Archive ==
     /\ ~archived
     /\ archived' = TRUE
     /\ Changed(TRUE, TRUE)
-    /\ UNCHANGED <<granted, grantedThere, made, madeThere, fresh, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, madeThere, layer, cut, fresh, kept, browser, unconfigured, behindAccess, left, last>>
 
 \* The window moves on: the key's row of the cap's for Ada is no longer fresh, and no cover rides it (CoverFresh).
 Age ==
     /\ fresh
     /\ fresh' = FALSE
     /\ cover' = None
-    /\ UNCHANGED <<granted, grantedThere, made, unseen, madeThere, stood, archived, kept, browser, unconfigured, behindAccess, left, last>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, unseen, madeThere, layer, cut, stood, archived, kept, browser, unconfigured, behindAccess, left, last>>
 
 Request ==
     /\ left > 0
@@ -533,30 +642,33 @@ Request ==
              allowed(r) == CallerFromUse /\ r.here /\ r.answer.status = "value"
              keep(r, w) == IF allowed(w) THEN [stood[r] EXCEPT ![p] = TRUE] ELSE stood[r]
          IN \E a \in answersA, b \in answersB :
-            /\ last' = [a |-> a.answer, b |-> b.answer, noA |-> ~Allowed(made, p) \/ late, noB |-> ~Allowed("none", p) \/ late, stands |-> p \in granted /\ ~Gone /\ ~late, right |-> right.answer]
+            /\ last' = [a |-> a.answer, b |-> b.answer, noA |-> ~Allowed(made, p) \/ late, noB |-> ~Allowed("none", p) \/ late, stands |-> Stands(p) /\ ~Gone /\ ~late, right |-> right.answer]
             \* An answer the vault gave now is kept for the next request, as `accessFor` keeps it;
             \* the answer kept from before the revoke goes once a request asks the vault.
-            /\ kept' = IF CallerFromUse THEN FALSE ELSE kept /\ p \in granted
+            /\ kept' = IF CallerFromUse THEN FALSE ELSE kept /\ Stands(p)
             /\ fresh' = (fresh \/ a.wrote)
             /\ stood' = [r \in Runs |-> keep(r, IF r = 1 THEN a ELSE b)]
             \* An allowed use of the sealed key, fresh in the set by its end, is its isolate's cover for p;
             \* a refusal ends it.
             /\ cover' = [cover EXCEPT ![p] = CallerFromUse /\ made = "sealed" /\ a.answer.status = "value" /\ (fresh \/ a.wrote)]
     /\ left' = left - 1
-    /\ UNCHANGED <<granted, grantedThere, made, unseen, madeThere, archived, browser, unconfigured, behindAccess>>
+    /\ UNCHANGED <<granted, grantedParent, grantedThere, made, unseen, madeThere, layer, cut, archived, browser, unconfigured, behindAccess>>
 
 Done == left = 0 /\ UNCHANGED vars
 
-Next == Revoke \/ Lapse \/ Make \/ End \/ Repoint \/ Park \/ Delete \/ MakeThere \/ Unconfigure \/ BehindAccess \/ Archive \/ Age \/ Request \/ Done
+Next == Revoke \/ RevokeParent \/ Lapse \/ Make \/ Dismiss \/ Cut \/ End \/ Repoint \/ Park \/ Delete \/ MakeThere \/ Unconfigure \/ BehindAccess \/ Archive \/ Age \/ Request \/ Done
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ granted \subseteq Purposes
+    /\ grantedParent \subseteq Purposes
     /\ grantedThere \subseteq Purposes
     /\ made \in {"none", "gone", "around", "away"} \cup Valued
     /\ unseen \in BOOLEAN
     /\ madeThere \in BOOLEAN
+    /\ layer \in Layers
+    /\ cut \in BOOLEAN
     /\ fresh \in BOOLEAN
     /\ stood \in [Runs -> [Purposes -> BOOLEAN]]
     /\ cover \in [Purposes -> BOOLEAN]

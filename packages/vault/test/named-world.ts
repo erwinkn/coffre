@@ -10,7 +10,7 @@ import { postgresClient } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
-import type { Input } from '../src/inputs.ts';
+import type { Input, Op } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
@@ -78,17 +78,42 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
         await seal('vault_members', 'principal', w.principal)(tx, value);
       });
   };
+  /**
+   * Their grant on `environment` gone, the others kept: a change to their object, as `access.revoke` makes it; or, with
+   * `endsAt`, the grant there ending then, which no change will record.
+   */
+  const revokeAt = async (environment: string, endsAt?: number) => {
+    const held = await grantsNow();
+    const grants = endsAt === undefined ? held.filter((g) => g.environmentId !== environment) : held.map((g) => (g.environmentId === environment ? { ...g, expiresAt: endsAt } : g));
+    const op: Op = endsAt === undefined
+      ? { op: 'access.revoke', place: { projectId: w.project, environmentId: environment, environmentSlug: null } }
+      : { op: 'access.grant', grant: grants.find((g) => g.environmentId === environment)! };
+    await change({ kind: 'principal', id: w.principal }, op, { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants }, async (tx, value) => {
+      if (endsAt === undefined) await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal} AND environment_id = ${environment}`);
+      else await run(tx, sql`UPDATE vault_grants SET expires_at = ${endsAt} WHERE principal = ${w.principal} AND environment_id = ${environment}`);
+      await seal('vault_members', 'principal', w.principal)(tx, value);
+    });
+  };
   type Environment = Extract<Input, { kind: 'environment' }>;
   const environments = new Map<string, Environment>([[w.dev, w.objects.environment as Environment]]);
-  /** Another environment of the project, `slug`, archived or not: made as the app makes one, sealed. */
-  const environment = async (slug: string, archived = false) => {
+  /**
+   * Another environment of the project, `slug`, archived or not: made as the app makes one, sealed. `parentId`, a fork of
+   * that one; with `owner` too, its owner's personal config of it (T165).
+   */
+  const environment = async (slug: string, archived = false, { parentId = null, owner = null }: { parentId?: string | null; owner?: string | null } = {}) => {
     const id = randomUUID();
-    const object: Environment = { kind: 'environment', id, projectId: w.project, slug, owner: null, parentId: null, protected: false, deleted: false, archived, projectArchived: false };
-    await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, ...(archived ? { archivedAt: new Date() } : {}) });
+    const object: Environment = { kind: 'environment', id, projectId: w.project, slug, owner, parentId, protected: false, deleted: false, archived, projectArchived: false };
+    await db.owner.insert(tablesOf(db.owner).environments).values({ id, projectId: w.project, slug, name: slug, protected: false, parentId, owner, ...(archived ? { archivedAt: new Date() } : {}) });
     await genesis({ kind: 'environment', id }, object);
     environments.set(id, object);
     return id;
   };
+  /** A fork of `parent` (`dev` by default), as the app makes one: sealed, its slug `slug`. */
+  const fork = (slug: string, parent = w.dev) => environment(slug, false, { parentId: parent });
+  /** The caller's personal config of `of` (`dev` by default), as the app makes one (`makePersonal`): sealed, its slug generated. */
+  const personal = (of = w.dev) => environment(`dev-p-${randomBytes(4).toString('hex')}`, false, { parentId: of, owner: w.principal });
+  /** `key` removed in `environment`, a fork's (a dismissal, which no seal covers): what it inherits of that name, gone there. */
+  const dismiss = (environment: string, key: string) => db.owner.insert(tablesOf(db.owner).dismissedKeys).values({ environmentId: environment, key, dismissedBy: ROOT });
   /** An environment renamed `slug`, as the app renames one: a change to its object. */
   const rename = async (id: string, slug: string) => {
     const object = { ...environments.get(id)!, slug };
@@ -165,7 +190,10 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
     });
   /** An environment's seal replaced around the log, by a writer: its row no longer the vault's (`tampered`). */
   const forge = (id: string) => run(db.owner, sql`UPDATE environments SET seal = ${randomBytes(16)} WHERE id = ${id}`);
-  return { ...w, tokenHash, project: w.project, slug: project!.slug, nameOf, ask, plain, revoke, revokeToken, forge, grantAt, environment, rename, archive, credential, reference, remove, end, putBack };
+  return {
+    ...w, tokenHash, project: w.project, slug: project!.slug, nameOf, ask, plain, revoke, revokeAt, revokeToken, forge, grantAt, environment, fork, personal, dismiss, rename, archive,
+    credential, reference, remove, end, putBack,
+  };
 }
 
 /** Hold `lock` on a connection of its own (the vault's, or with `owner` the database owner's) while `work` runs, then let it go. */

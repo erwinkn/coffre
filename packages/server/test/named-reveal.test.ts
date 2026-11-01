@@ -601,3 +601,89 @@ test("a service's bearer token on a strict instance (useOnly) is refused by its 
   assert.equal(named, 0, 'the vault asked nothing');
   assert.deepEqual([(await db.owner.select().from(logUses)).length, (await db.owner.select().from(logBulk)).length], [uses, bulk], 'no use, no row of the cap');
 });
+
+// T165 (B2): a fork's key and `dev@me`'s are the vault's one call by name too (migration 0050): the vault finds the place
+// (the fork; the caller's personal config of dev, or dev while they have none) and resolves the key through what it
+// inherits. Answered as before, every refusal of a key one answer, in one call (formal/Probing.tla, Where).
+const FORKER = 'forker@acme.example';
+let forked = false;
+async function fork(): Promise<void> {
+  if (forked) return;
+  forked = true;
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/feature', { from: 'dev', inherit: true });
+  await root.secrets.set('market/feature', { OWN: 'feature-own' });
+  await root.access.set(`user:${DEV}`, { 'market/dev': 'developer', 'market/feature': 'developer' });
+  await root.members.add(`user:${FORKER}`);
+  await root.access.set(`user:${FORKER}`, { 'market/feature': 'developer' });
+  await clientFor(deps, DEV).secrets.set('market/dev@me', { MINE: 'mine-value' });
+}
+
+test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a list of one, are the vault's one call by name, answered as before (T165)", async () => {
+  await fork();
+  const token = await personalToken(DEV, { 'market/dev': 'developer', 'market/feature': 'developer' });
+  const reads = [
+    [{ path: 'market/feature/OWN' }, { OWN: 'feature-own' }],
+    [{ path: 'market/feature/API_KEY' }, { API_KEY: DEV_KEY }],
+    [{ path: 'market/feature', keys: ['API_KEY'] }, { API_KEY: DEV_KEY }],
+    [{ path: 'market/dev@me/MINE' }, { MINE: 'mine-value' }],
+    [{ path: 'market/dev@me/API_KEY' }, { API_KEY: DEV_KEY }],
+    [{ path: 'market/dev@me', keys: ['MINE'] }, { MINE: 'mine-value' }],
+  ] as const;
+  // Warm: the isolate's map holds the names.
+  for (const [body] of reads) await reveal(token, body);
+  for (const [body, values] of reads) {
+    const [before, now] = await both((at) => reveal(token, body, at));
+    assert.equal(now!.answer.status, 200, JSON.stringify([body, now]));
+    assert.deepEqual(now!.answer.body.values, values, JSON.stringify(body));
+    const { operationId: _now, ...answered } = now!.answer.body;
+    const { operationId: _before, ...was } = before!.answer.body;
+    assert.deepEqual(answered, was, `${JSON.stringify(body)}: answered as before`);
+    calls.length = 0;
+    await reveal(token, body);
+    assert.deepEqual(calls, ['useNamed'], `${JSON.stringify(body)}: the vault's one call, by name`);
+  }
+  // Another person's `dev@me`, who has no personal config: dev, read as dev, by name.
+  const root = clientFor(deps, ROOT);
+  await root.members.add('user:fallback@acme.example');
+  await root.access.set('user:fallback@acme.example', { 'market/dev': 'developer' });
+  const other = await personalToken('fallback@acme.example');
+  calls.length = 0;
+  const fallback = await reveal(other, { path: 'market/dev@me/API_KEY' });
+  assert.deepEqual([fallback.status, fallback.body.values], [200, { API_KEY: DEV_KEY }]);
+  assert.deepEqual(calls, ['useNamed']);
+});
+
+test("at a fork, every refusal of a key is one answer in one vault call: one inherited from a parent its caller does not read, one never made; revoked, their own too (T165; D153)", async () => {
+  await fork();
+  const token = await personalToken(FORKER, { 'market/feature': 'developer' });
+  const answer = async (path: string) => {
+    calls.length = 0;
+    const read = await reveal(token, { path });
+    return { status: read.status, body: read.body, calls: [...calls] };
+  };
+  // Theirs: the fork's own.
+  assert.equal((await answer('market/feature/OWN')).status, 200);
+  const no = { status: 404, body: { error: 'not_available', message: 'not available: no such key, or no access to it' }, calls: ['useNamed'] };
+  // dev's, which they do not read, and a key never made: alike, one call each (before: the app's path, `parent_unreadable`).
+  for (const path of ['market/feature/API_KEY', 'market/feature/NEVER_MADE']) assert.deepEqual(await answer(path), no, path);
+  const [before] = await both((at) => reveal(token, { path: 'market/feature/API_KEY' }, at));
+  assert.equal(before!.answer.status, 404, 'as the app\'s own path answers it');
+  await clientFor(deps, ROOT).access.set(`user:${FORKER}`, { 'market/feature': null });
+  for (const path of ['market/feature/OWN', 'market/feature/API_KEY', 'market/feature/NEVER_MADE']) assert.deepEqual(await answer(path), no, `revoked: ${path}`);
+  await clientFor(deps, ROOT).access.set(`user:${FORKER}`, { 'market/feature': 'developer' });
+});
+
+test("the proxy's use of a key a fork inherits, on the fork's URL and at a handle's stable URL, is the vault's one call by name (T165)", async () => {
+  await fork();
+  const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: ['market/feature'] })).token;
+  for (const url of ['/use/market/feature/api/v1/thing', '/use/api/v1/thing']) {
+    await proxied(url, handle);
+    sent.length = 0;
+    calls.length = 0;
+    const used = await proxied(url, handle);
+    assert.equal(used.status, 204, `${url}: ${used.body}`);
+    assert.deepEqual(sent, [DEV_KEY], `${url}: dev's key, inherited`);
+    assert.deepEqual(calls, ['useNamed'], `${url}: one call`);
+  }
+});

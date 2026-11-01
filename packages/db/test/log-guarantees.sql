@@ -153,9 +153,11 @@ BEGIN
        OR has_database_privilege('coffre_vault_hot', current_database(), 'CREATE') OR has_database_privilege('coffre_vault_hot', current_database(), 'TEMPORARY') THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;
-    -- W268's gate and its helper run inside use_credential, as its owner: no login calls them itself.
+    -- W268's gate and its helpers run inside use_credential, as its owner: no login calls them itself (a personal
+    -- config's, 0050's, too).
     IF EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN (VALUES ('coffre_app'), ('coffre_vault'), ('coffre_vault_hot'), ('coffre_backup')) AS login (name)
-                WHERE p.proname IN ('use_stands', 'use_admits') AND p.pronamespace = 'public'::regnamespace AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
+                WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds') AND p.pronamespace = 'public'::regnamespace
+                  AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
         RAISE EXCEPTION 'FAIL: a login may call the named use''s gate itself';
     END IF;
     RAISE NOTICE 'PASS: coffre_vault_hot is the vault''s, with lock_timeout 1s, statement_timeout 2s and generic plans';
