@@ -177,6 +177,15 @@ REMOVALS=(
   "AppKeyRotation WalkCutoff NothingForgedAccepted"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
+  # Proxy definitions edited in the UI (Routing.tla, T186): where a key may go when its route is a row an Owner edits.
+  "Routing FencedRead EverySendAllowed"
+  "Routing SealChecked EverySendAllowed"
+  "Routing SentAsDecided EverySendAllowed"
+  "Routing BoundToDefinition EverySendAllowed"
+  "Routing ClearanceAtUse EverySendAllowed"
+  "Routing KeptExpires WithinWindow"
+  "RoutingCode ClearSuperseded NoRevival"
+  "RoutingCode CodeGate NoRevival"
   # 0.15's hot path (HotPathOne.tla; W208, W211; the plan's PRs 3 to 5): one call per use, every input sealed.
   "HotPathOne UseLocks TotalOrder"
   "HotPathOne UseLocks NothingAllowedAfterAnswer"
@@ -444,6 +453,11 @@ EXPECTED=(
   # Postgres's clock stepping back: a use may sit past its checkpoint's ceiling, which the verifier's bounded read
   # misses, and alarms on: fail closed (HotPathOne.tla's CeilingHolds).
   "HotPathOneChunksClock CeilingHolds"
+  # Values decided before an edit serve out their window (cacheSeconds, or the use's deadline), as a revoked handle's
+  # do: a request may still go to the upstream an edit replaced, W at most after it (Routing.tla).
+  "Routing StrictlyCurrent"
+  # Not a gap but a witness: code shadows a UI version in RoutingCode's protected runs, so NoRevival holds for a reason.
+  "RoutingCode NeverShadowed"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
