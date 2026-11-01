@@ -19,7 +19,12 @@
   `log_rotate`, and `use_credential` with its arguments unchanged). The
   check takes a rotation under way, and refuses a pair or an entry under the
   old key past it. A witness's settings take `previous`, the log's keys
-  under each replaced key. `runCheckpointer`'s and the checkpointer object's
+  under each replaced key. The audit pages' reads go on too: the projector
+  lists the old key's sealed uses after the rotation and moves on under
+  the new key, `coffre verify log` holds reads listed before it under the
+  old key, and no reader takes the old key's word for anything at or past
+  the rotation (the projector, the check, the pages' `vouch`).
+  `runCheckpointer`'s, `keepCheckpointer`'s and the checkpointer object's
   `seed` is now `signingKeys`, all of the vault's. Modelled first
   (`formal/Rotation.tla`), each protection shown necessary (T168).
 - **0.15's log is the default: every deployment keeps it.** The switch

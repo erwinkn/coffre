@@ -485,7 +485,7 @@ R41's: a replaced key vouches only for what came before the rotation.
   naming both keys by origin, its MAC the new key's. `log_rotate` writes
   it under the barrier's locks (the issue lock, then the fence, both
   exclusive), and in the same transaction adds the old key's tag to
-  `log_fence.retired` (migration 0049). It reads `retired` again under
+  `log_fence.retired` (migration 0050). It reads `retired` again under
   them: a start that rotated first leaves nothing to do. Then it ticks, so
   that the rotation is sealed under the new key within a tick.
 - **Old isolates write nothing past it.** A use whose MAC names a retired
@@ -512,6 +512,15 @@ R41's: a replaced key vouches only for what came before the rotation.
   rotation, or while there is none yet. Above a pair under the current
   key, the current key's alone. It reads the rotation entries only when
   the newest pair is under a replaced key.
+- **The other readers** hold to the same rule, through one keyring
+  (`keyring.ts`): the reads' projector, `coffre verify log`'s check of the
+  reads, and the vault's `vouch`, which the audit pages ask of the rows
+  they show. A replaced key vouches for a pair, an entry, a read or the
+  cursor numbered below its rotation; one no rotation retired yet, while
+  the newest pair is under it; otherwise for nothing. The projector lists
+  every read and moves its cursor under the current key; what it listed
+  before keeps the old key's MAC, which holds below the rotation, so no
+  row is MAC'd again.
 - **A replaced key never comes back.** A checkpointer whose own key a
   rotation retired refuses to open, and the trigger refuses its entries.
 - **Witnesses.** The witness's object takes `previous`, the log's keys

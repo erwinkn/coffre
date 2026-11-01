@@ -224,7 +224,7 @@ test('a backup taken before the vault key was rotated, restored under the new ke
   const [oldKek, newKek] = [randomBytes(32), randomBytes(32)];
   const [oldSeed, newSeed] = [derivedSigningKey(oldKek), derivedSigningKey(newKek)];
   const signer = await checkpointerOver(await openVaultDatabase(), oldSeed, 'rotated-memory');
-  const vault = testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, { kek: oldKek }, {}, { log: '0.15', sealThrough: signer.sealThrough });
+  const vault = testVault([ROOT], { hotDatabase: TEST_HOT_DATABASE_URL }, { kek: oldKek }, {}, { log: '0.15', sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   deps.signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github({ clientId: 'a', clientSecret: 'b' })] }) });
   const root = clientFor(deps, ROOT);
@@ -247,7 +247,7 @@ test('a backup taken before the vault key was rotated, restored under the new ke
   await signer.stop();
   const keys = { kek: { id: 'test-kek-2', key: newKek.toString('base64') }, previousKeks: [{ id: 'test-kek-1', key: oldKek.toString('base64') }] };
   const rotated = await checkpointerOver(await openVaultDatabase(), [newSeed, oldSeed], 'rotated-memory');
-  const under = await localVault({ database: await openVaultDatabase(), ...keys, owners: [ROOT], hotDatabase: TEST_HOT_DATABASE_URL }, { log: '0.15', sealThrough: rotated.sealThrough });
+  const under = await localVault({ database: await openVaultDatabase(), ...keys, owners: [ROOT], hotDatabase: TEST_HOT_DATABASE_URL }, { log: '0.15', sealThrough: rotated.sealThrough, heldOutside: rotated.heldOutside });
   assert.ok((await under.setAccess({ actor: `user:${ROOT}`, caller: 'person', principal: CI, changes: [{ projectId, environmentId, role: 'developer', expiresAt: null }] })).ok);
   assert.equal((await db.owner.select().from(logChanges).where(eq(logChanges.object, KEY_OBJECT))).length, 1);
 
@@ -271,7 +271,7 @@ test('a backup taken before the vault key was rotated, restored under the new ke
     assert.equal(moved.length, 1);
     const again = await localVault(
       { database: restoredVault.db, ...keys, owners: [ROOT], hotDatabase: urlOf(rotatedBack, 'coffre_vault_hot:local-hot-only') },
-      { log: '0.15', sealThrough: fresh.sealThrough },
+      { log: '0.15', sealThrough: fresh.sealThrough, heldOutside: fresh.heldOutside },
     );
     assert.equal(opened(await use(again, token.id, key!.id), key!.id, environmentId, projectId), 'one');
     assert.ok((await again.setAccess({ actor: `user:${ROOT}`, caller: 'person', principal: CI, changes: [{ projectId, environmentId, role: 'developer', expiresAt: null }] })).ok);

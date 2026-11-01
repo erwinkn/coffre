@@ -330,6 +330,8 @@ test('a pair the old key signs over its own rotation is refused, by the next sta
   const w = await underOldKey(rotation.before);
   await w.old.cp.close();
   const now = await vaultUnder(rotation.after, w.memory);
+  // Its first call made (the cutover's seal, through its checkpointer) before that one closes (T169: closed for good).
+  clean(await verify(now.vault));
   await now.cp.close();
   // Someone who holds the old key signs a pair over the window, the rotation in it, its MACs taken on faith.
   const [, previous] = resolveVaultConfig(rotation.after).signingKeys;

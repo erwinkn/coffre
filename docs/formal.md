@@ -1977,7 +1977,7 @@ tag), so the database can tell them apart.
 
 | protection, in the code | turned off, TLC finds |
 |---|---|
-| a writer under a retired key is refused (RetiredRefused: `use_credential`'s `superseded`, the trigger on `log_changes`, migration 0049) | `OldWritesBelowBoundary`: an isolate under A commits past the rotation; and `LogWorks`: no tick can seal past its entry, every change fails at its seal |
+| a writer under a retired key is refused (RetiredRefused: `use_credential`'s `superseded`, the trigger on `log_changes`, migration 0050) | `OldWritesBelowBoundary`: an isolate under A commits past the rotation; and `LogWorks`: no tick can seal past its entry, every change fails at its seal |
 | ... in the statement that takes its number, under the lock (RefusedUnderLock) | `OldWritesBelowBoundary`: a writer that checked before the rotation took its number after it |
 | the rotation written under the barrier's locks, exclusive (RotateUnderLock: `log_rotate`) | `OldWritesBelowBoundary`: a writer under the lock, its check passed, numbered past the rotation |
 | the signer opens its memory under a previous key (MemoryUnderPrevious) | `LogWorks`: "the signer remembers a pair it did not sign", the bug T168 found |
@@ -2008,6 +2008,18 @@ under its locks; the kinds of entries and the two trees, retention, witnesses
 and time, the same for every key (Seal.tla's); a rotation through a third key
 (the code's rule is the same for each); seals, which a use checks under every
 key the vault holds (see audit-tree.md, "A rotation").
+
+**The other readers, not modelled apart.** The reads' projector (Reads.tla's,
+which models one key), `coffre verify log`'s check of the reads and the
+vault's `vouch` take a key's word for pairs, entries, reads and the cursor.
+Each holds to BoundaryChecked and PendingAccepted, as above, through one
+function, `keyringOf` in `packages/vault/src/keyring.ts`, which the
+verifier's own rule calls too: a replaced key vouches below its rotation's
+number only; one no rotation retired yet, while the newest pair is under it;
+otherwise for nothing. A reader is one more checker of the same rule, which
+this model's `VerifiedSound` already holds the verifier to; what each reads
+it with is tested (`packages/vault/test/reads-rotation.test.ts`), not
+modelled.
 
 ## TLC
 
