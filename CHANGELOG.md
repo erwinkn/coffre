@@ -94,7 +94,7 @@
      is fixed, and only restoring this backup brings 0.14 writes back,
      losing what was written since. To roll back on Workers, put the pins
      and `vault/src/worker.ts` back as 0.14.5 had them, but keep
-     `vault/wrangler.jsonc` as step 2 leaves it, and add to the worker an
+     `vault/wrangler.jsonc` as steps 2 and 3 leave it, and add to the worker an
      idle class of the checkpointer's name:
 
      ```ts

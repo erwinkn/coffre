@@ -23,10 +23,10 @@ type Run = { status: number | null; stdout: string; stderr: string };
 
 /**
  * `coffre setup` as an operator runs it, in an empty directory with no home,
- * or in a Workers deployment's, as its two wrangler.jsonc files make it: the
- * URL piped in.
+ * or in a Workers deployment's, as its two wrangler.jsonc files make it, each
+ * naming the template's Worker (`vault`, the vault's file as given): the URL
+ * piped in.
  */
-/** `coffre setup`, in a directory of its own: with `workers`, a Workers deployment's two files, the template's Workers named, or `vault` its file as given. */
 function setup(args: string[], how: { stdin?: string; workers?: boolean; vault?: string }): Run {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-setup-'));
   const files = how.workers === true ? ['app', 'vault'] : [];
