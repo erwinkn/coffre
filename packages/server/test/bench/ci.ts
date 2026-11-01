@@ -24,6 +24,8 @@
 // handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--proxy-cache <s>` is the proxy's
 // `cacheSeconds` (0, the default here: every request opens its key); `--proxy-stable` sends each to the stable URL;
 // `--proxy-names <n>` caps 0.15's vault's map of names at n a thread, its handles picked at random (0: every request cold).
+// `--proxy-fork` makes every handle for ci/feature, a fork of ci/dev that inherits its `API_KEY` (T165): what a fork's
+// `/use` costs, by the vault's one call by name or, before T165, by the app's own path.
 // `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
 // the uses sent), and the same by login: the app's (`runtime`), the vault's, the hot path's (`vault_hot`), the server's own.
 // `--principals` spreads the uses over that many services (1: one hot principal, T127), `--keys` gives ci/dev that many
@@ -39,7 +41,7 @@
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
-//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0]
+//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork]
 //     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -92,6 +94,7 @@ const { values } = parseArgs({
     threads: { type: 'string', default: '4' },
     'proxy-cache': { type: 'string', default: '0' },
     'proxy-stable': { type: 'boolean', default: false },
+    'proxy-fork': { type: 'boolean', default: false },
     'proxy-names': { type: 'string' },
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
@@ -393,20 +396,22 @@ try {
   // so that no one principal's bulk row serializes them, as with `--uses`.
   if (PROXY > 0) {
     const handles: string[] = [];
+    const place = values['proxy-fork'] ? 'ci/feature' : 'ci/dev';
+    if (values['proxy-fork']) await root.environments.create('ci/feature', { from: 'dev', inherit: true });
     for (let n = 0; n < 100; n += 1) {
       const email = `person-${n}@acme.example`;
       await root.members.add(`user:${email}`);
-      await root.access.set(`user:${email}`, { 'ci/dev': 'developer' });
+      await root.access.set(`user:${email}`, { 'ci/dev': 'developer', ...(values['proxy-fork'] ? { 'ci/feature': 'developer' as const } : {}) });
       const started = await setup.signin!.startDevice({ clientLabel: 'laptop', sourceIp: null });
       await setup.signin!.decideDevice(await contextFor(deps, email), started.userCode, true);
       const polled = await setup.signin!.pollDevice(started.deviceCode, { requestId: crypto.randomUUID(), sourceIp: null });
       if (polled.status !== 'approved') throw new Error('not approved');
-      const made = await answer(new Request(`${ORIGIN}/api/handles`, { method: 'POST', headers: { authorization: `Bearer ${polled.credential.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: ['ci/dev'] }) }), setup, ui, null);
+      const made = await answer(new Request(`${ORIGIN}/api/handles`, { method: 'POST', headers: { authorization: `Bearer ${polled.credential.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ label: 'run', paths: [place] }) }), setup, ui, null);
       handles.push(((await made.json()) as { token: string }).token);
     }
     const load: ProxyLoad = {
       log: values.log === '0.15' ? '0.15' : '0.14', urls: { app: TEST_RUNTIME_DATABASE_URL, vault: TEST_VAULT_DATABASE_URL, hot: TEST_HOT_DATABASE_URL }, rtt: RTT, rate: PROXY,
-      pools: { app: Number(values['use-pool']), vault: 8, hot: 16 }, handles, path: 'ci/dev', value: `${SEVEN[0]!.toLowerCase()}-value`, kek: kek.toString('base64'), owner: ROOT, chainKey: deps.chainKey.toString('base64'), origin: ORIGIN,
+      pools: { app: Number(values['use-pool']), vault: 8, hot: 16 }, handles, path: place, value: `${SEVEN[0]!.toLowerCase()}-value`, kek: kek.toString('base64'), owner: ROOT, chainKey: deps.chainKey.toString('base64'), origin: ORIGIN,
       cacheSeconds: Number(values['proxy-cache']),
       stable: values['proxy-stable'],
       ...(values['proxy-names'] === undefined ? {} : { names: Number(values['proxy-names']) }),

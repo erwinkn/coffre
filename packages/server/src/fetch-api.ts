@@ -1,6 +1,5 @@
 import { createClient, type CoffreClient } from '@coffre/client';
 import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type SigninBrand, type TokenKind } from '@coffre/core/identity';
-import { personalOf } from '@coffre/core/schemas';
 import type { Purpose } from '@coffre/core/vault';
 
 import { AccessChanged } from './accesses.ts';
@@ -118,7 +117,8 @@ function namedReveal(body: Uint8Array): { place: { project: string; environment:
     return null;
   }
   const key = keys === undefined ? path.key : path.key === undefined && keys.length === 1 ? keys[0] : undefined;
-  if (key === undefined || path.environment === undefined || personalOf(path.environment) !== null) return null;
+  // `dev@me` too (T165): the vault finds its caller's personal config of dev, or dev while they have none.
+  if (key === undefined || path.environment === undefined) return null;
   return { place: { project: path.project, environment: path.environment }, key, purpose: path.key === undefined ? 'run' : 'reveal' };
 }
 

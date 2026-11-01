@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **A fork's key and `dev@me`'s are the vault's one call by name, as an
+  environment's.** A reveal of `market/feature/API_KEY` (a fork of dev), of
+  `market/dev@me/API_KEY`, or of either as a list of one, and the proxy's
+  `/use` on a fork's URL or a handle's stable URL made for a fork, now take
+  one call of the vault's, which finds the place (the fork; your personal
+  config of dev, or dev while you have none), decides your standing there
+  before it reads anything of the key, and resolves the key through what
+  the place inherits, its own first, then each parent's unless a nearer one
+  removed it. Before, the vault served neither by name, and the app's own
+  path read them, whose work hung on the key: a refusal there cost one call
+  or two by the key's shape (D153). Every refusal of a key there is now the
+  one `not_available` answer, in one call. A fork whose parent is archived
+  reads nothing, as before, now refused by the vault on the place alone.
+  An app of 0.15.0 asks for none of it, and an app of this release asks a
+  vault of 0.15.0 in vain: each reads them as before, mid-deploy
+  (migration 0050, additive).
+
 - **`coffre verify instance` never picks the instance for you.** It
   creates a project, an environment, a service account, grants and a secret
   and walks the whole audit log, and until now it took this machine's

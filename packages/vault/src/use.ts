@@ -134,7 +134,7 @@ export class UseCache {
    * Each key's id by its environment and name, whoever asks (`keyed`, `key`), or null for a name the environment held
    * no key of when read: bounded on its own, so that names asked and dropped leave none behind (review r3 of #412).
    */
-  readonly keyIds = new Map<string, string | null>();
+  readonly keyIds = new Map<string, KeyId | null>();
   readonly limits: UseLimits;
   readonly max: number;
 
@@ -179,12 +179,12 @@ export class UseCache {
   }
 
   /** The id of the key named `key` in `environment`, or null for none, if mapped, made the most recently used. */
-  keyed(environment: string, key: string): string | null | undefined {
+  keyed(environment: string, key: string): KeyId | null | undefined {
     return recall(this.keyIds, `${environment}\n${key}`);
   }
 
   /** Maps a key's name in `environment` to its id, or null for none, the least recently used dropped past the cap. */
-  key(environment: string, key: string, id: string | null): void {
+  key(environment: string, key: string, id: KeyId | null): void {
     remember(this.keyIds, `${environment}\n${key}`, id, this.limits.names);
   }
 
@@ -241,6 +241,8 @@ export type Names = {
   tokenHash: Buffer; project: string | null; environment: string | null; key: string | null; handle: boolean; unless: readonly string[];
   /** What the app's config accepts of a credential (`NamedUseInput.accepts`), which the call holds the token's to first. */
   accepts: CredentialAcceptance;
+  /** Whether the app reads a fork's and `dev@me`'s answer by name (`NamedUseInput.forks`, T165): else the call serves neither. */
+  forks: boolean;
 };
 
 /**
@@ -249,6 +251,12 @@ export type Names = {
  * recently used dropped past `UseLimits.names`: about 200 and 120 bytes an entry, some 3 MB with both full at 10,000.
  */
 export type Resolved = { credential: string; environment: string; slugs: { project: string; environment: string } };
+
+/**
+ * A key's id as its place's name reads it (`UseCache.keyIds`): held there, or, `through`, one a fork or a personal
+ * config inherits, which a use reads through the place (T165).
+ */
+export type KeyId = { id: string; through: boolean };
 
 /** What `use_credential` answers (schema 0024's `use_row`), as node-postgres reads it; the SQLite twin answers the same. */
 export type UseRow = {
@@ -273,6 +281,11 @@ export type UseRow = {
    * W268): false, it read no key and answered on the place alone, as for a key the place does not hold.
    */
   n_standing: boolean | null;
+  /**
+   * Whether a named call found its place's chain cut (a parent archived, deleted or not there, or a chain that loops or
+   * runs past 3; 0050, T165): the place reads nothing, and the call read no key, answered on the place alone.
+   */
+  n_cut: boolean | null;
   /** A Cloudflare binding's row, which a use through it read whole, its object (T147): as `to_json` writes it. */
   w_row: Record<string, unknown> | null;
 } & Slot<'e1'> & Slot<'e2'> & Slot<'e3'> & Slot<'e4'>;
@@ -582,7 +595,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
     // the names' rows.
     const ids: Ids = names === undefined
       ? { credential: input.credential!, secretId: input.secretId, place: input.place, way, principal: input.principal ?? null }
-      : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null ? row.n_place : null, way, principal: null };
+      : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null || inherited(row) ? row.n_place : null, way, principal: null };
     const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
     const view = viewOf(row, named, row.probed ? undefined : known);
     if (view.changed) cache.seals.delete(key);
@@ -651,7 +664,15 @@ async function opening(path: UsePath, { allowed: { view, number, covered }, row,
  */
 function decidedOn(checked: CheckedView, request: UseRequest, row: UseRow): UseCode | null {
   if (request.plain === true && row.n_standing === false && standingRefusal(checked, request) === null) return 'stale';
+  // A place whose chain is cut reads nothing, as the app's read refuses it whole (0050, T165; Probing.tla, CutByPlace):
+  // the call read no key, and the caller, standing there, is refused on the place, `archived`, as for every key.
+  if (request.plain === true && row.n_cut === true) return standingRefusal(checked, request) ?? 'archived';
   return decideChecked(checked, request);
+}
+
+/** Whether a named call's key is one its place inherits (a fork's or a personal config's, T165): used through the place. */
+function inherited(row: UseRow): boolean {
+  return row.n_secret !== null && row.s_environment !== null && row.s_environment !== row.n_place;
 }
 
 /** Whether a call read its key through an archived place: the place, the key's own, or a reference's source's (0045). */
@@ -691,12 +712,13 @@ export async function useNamed(path: UsePath, input: NamedUseInput): Promise<Nam
   const keyed = found === undefined || input.key === null ? undefined : cache.keyed(found.environment, input.key);
   // The ids the map holds, if it holds them all; else none, and the first call only reads.
   const held: Ids | null = found === undefined || (input.key !== null && keyed === undefined) ? null
-    : { credential: found.credential, secretId: keyed ?? null, place: keyed == null ? found.environment : null };
+    : { credential: found.credential, secretId: keyed?.id ?? null, place: keyed == null || keyed.through ? found.environment : null };
   const names: Names = {
     tokenHash, project: input.place?.project ?? null, environment: input.place?.environment ?? null, key: input.key, handle: input.place === null,
     // The places a stable URL does not mean, judged by the call against the slugs it reads, never the map's.
     unless: input.place !== null ? [] : (input.unless ?? []).map((other) => `${other.project}/${other.environment}`),
     accepts: { signin: accepts.signin, issuers: [...accepts.issuers] },
+    forks: input.forks === true,
   };
   const asked = { purpose: input.purpose, keepsSensitive: input.keepsSensitive, requestId: input.requestId, at: input.at, deadline: input.deadline };
   let used = await useOnce(path, { ...asked, ...(held ?? { credential: null, secretId: null, place: null }) }, names);
@@ -745,12 +767,17 @@ function keep(cache: UseCache, at: string, key: string | null, row: UseRow): voi
   const read = mapped(row);
   if (read === null) return;
   cache.name(at, read);
-  if (key !== null && row.n_standing !== false) cache.key(read.environment, key, row.n_secret);
+  if (key !== null && row.n_standing !== false && row.n_cut !== true) cache.key(read.environment, key, row.n_secret === null ? null : { id: row.n_secret, through: inherited(row) });
 }
 
-/** The place a named call read its names at, by the ids of its row as the call read it: none for a row its seals do not bear out (T159). */
+/**
+ * Where a named call's refusal is logged, by the ids of its row as the call read it: the key's own place when it read a
+ * key (a key a fork or a personal config inherits, where it is held: as a use by ids logs it, review r5 of D153; T165),
+ * else the place its names named. None for a row its seals do not bear out (T159).
+ */
 function placeOf(checked: CheckedView, row: UseRow): { projectId: string; environmentId: string } | null {
-  const read = row.n_place === null ? undefined : checked.environments.get(row.n_place);
+  const id = inherited(row) ? row.s_environment : row.n_place;
+  const read = id === null ? undefined : checked.environments.get(id);
   const place = read !== undefined && read.valid && read.current ? read.row : null;
   return place === null ? null : { projectId: place.projectId, environmentId: place.id };
 }

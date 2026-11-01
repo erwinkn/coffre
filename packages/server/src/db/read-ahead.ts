@@ -44,17 +44,29 @@ export async function readAhead(db: Queryable, asked: ReadAsked): Promise<ReadAh
 /**
  * The rows the vault's named use answers (T145, PR B; `Vault.useNamed`, migration 0044's `app`): what `app_read`
  * answers, for the request's credential, place and key, read in the use's own statement, so that the app reads nothing
- * itself. Null for SQLite's vault, which answers none: the app reads its own rows there, as ever.
+ * itself. Null for SQLite's vault, which answers none: the app reads its own rows there, as ever. `personal`: the
+ * request named `dev@me` (T165), and the place is its caller's personal config of dev, or dev while they have none, as
+ * `resolveRead` resolves it.
  */
-export function namedAhead(db: Queryable, app: string | null): ReadAhead | null {
+export function namedAhead(db: Queryable, app: string | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
   if (app === null) return null;
   const read = JSON.parse(app) as Answer & { now: string };
   const ahead = readAheadOf(db, read, read.now, { tokenHash: true, path: true });
-  // The key it used, as `resolvePath` answers a path's key: what a reveal of `market/dev/API_KEY` says of one it finds no value of.
+  const environment = ahead.place?.environment ?? null;
+  if (ahead.place != null && environment !== null && personal) {
+    ahead.place = {
+      ...ahead.place,
+      personal: environment.owner === null
+        ? { of: { id: environment.id, slug: environment.slug, archivedAt: environment.archivedAt }, fallback: true }
+        : { of: { id: environment.parentId!, slug: environment.parentSlug!, archivedAt: null } },
+    };
+  }
+  // The key it used, as `resolvePath` answers a path's key: what a reveal of `market/dev/API_KEY` says of one it finds no
+  // value of. Only the place's own: a key a fork inherits is its parent's, which the path's own key is not (T165).
   const [used] = read.secrets ?? [];
   if (ahead.place != null && used !== undefined) {
-    const { id, key, archivedAt, currentVersionId, currentVersion } = rowOf(tablesOf(db).secrets, used.secret);
-    ahead.place = { ...ahead.place, secret: { id, key, archivedAt, currentVersionId, currentVersion } };
+    const { id, key, archivedAt, currentVersionId, currentVersion, environmentId } = rowOf(tablesOf(db).secrets, used.secret);
+    if (environmentId === environment?.id) ahead.place = { ...ahead.place, secret: { id, key, archivedAt, currentVersionId, currentVersion } };
   }
   return ahead;
 }

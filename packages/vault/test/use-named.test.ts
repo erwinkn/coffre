@@ -355,7 +355,7 @@ test("a handle's stable URL is held to the handle's own place by its id, whateve
   const { vault, cache } = await isolate();
   // The map holds `qa` for the handle, its slugs and its key's id, all of them consistent: only its id tells.
   cache.name(`${w.tokenHash.toString('base64')}\n\n`, { credential: w.credentialId, environment: qa, slugs: { project: w.slug, environment: 'qa' } });
-  cache.key(qa, name, there);
+  cache.key(qa, name, { id: there, through: false });
   const used = byName(await vault.useNamed!(w.ask(name, { place: null })));
   assert.equal(used.secretId, own, "the handle's own place's key");
   assert.deepEqual(used.place, { project: w.slug, environment: 'dev' });
@@ -595,14 +595,6 @@ test("a use by ids logs its request whatever it finds, as before names, its key 
   assert.equal(await uses(), 2, 'nothing written: the app asks again');
 });
 
-test('a fork, which the app reads with its layers, is not served by name', async () => {
-  const w = await named();
-  const fork = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).environments).values({ id: fork, projectId: w.project, slug: 'fork', name: 'Fork', protected: false, parentId: w.dev });
-  const { vault } = await isolate();
-  assert.deepEqual(await vault.useNamed!(w.ask('ANY', { place: { project: w.slug, environment: 'fork' } })), { served: false });
-});
-
 test("an isolate's map of names keeps the most recently used, up to its cap, and none at a cap of 0", () => {
   const ids = (credential: string): Resolved => ({ credential, environment: 'e', slugs: { project: 'p', environment: 'e' } });
   const cache = new UseCache(useLimits(1, { names: 2 }));
@@ -616,7 +608,7 @@ test("an isolate's map of names keeps the most recently used, up to its cap, and
   assert.equal(none.named('a'), undefined);
   // Key ids apart, by environment and name, bounded alike: names asked and dropped leave none behind (review r3 of #412).
   const keys = new UseCache(useLimits(1, { names: 2 }));
-  for (const name of ['A', 'B', 'C', 'D']) keys.key('e', name, `id-${name}`);
+  for (const name of ['A', 'B', 'C', 'D']) keys.key('e', name, { id: `id-${name}`, through: false });
   assert.deepEqual([...keys.keyIds.keys()], ['e\nC', 'e\nD']);
   assert.equal(keys.keyed('e', 'A'), undefined);
 });

@@ -427,15 +427,17 @@ function gateColumns(roles: Readonly<Record<string, { permissions: readonly Perm
  * rows as read, before their seals are checked, which only the vault can (D150 fallback D, W268; formal/Probing.tla,
  * StandingFirst). The named statement decides this first, from rows no key decides (the credential, its account and
  * grants, the roles, the place), and reads the key only for a caller who stands (`use_stands`, 0045; SQLite's twin
- * asks this). A named place is a live environment of its own, never a fork's or a personal config's (`nowhere`), so no
- * parent weighs. Its seals checked and current, this is `standingRefusal` at that place: `use-stands.test.ts` holds
- * the statement's gate to it.
+ * asks this). A named place is a live environment: one of its own, a fork, weighed as any (R18), or a personal config,
+ * weighed with `parents`, its parent, as its owner reads it while they read or use the parent (`personalRefusal`, R8;
+ * `use_stands_personal`, 0050, T165). Its seals checked and current, this is `standingRefusal` at that place:
+ * `use-stands.test.ts` holds the statement's gate to it.
  */
 export function namedStanding(
   principal: PrincipalInput | null, credential: CredentialInput, roles: RolesInput, place: EnvironmentInput, request: Pick<UseRequest, 'purpose' | 'at'>,
+  parents: readonly EnvironmentInput[] = [],
 ): UseCode | null {
   if (credentialEnded(credential, principal, request.at)) return 'credential';
-  return placeRefusal(principal, credential, roles, place, [], request);
+  return placeRefusal(principal, credential, roles, place, parents, request);
 }
 
 /** The environment a personal config at `place` is of, as the view read it: the standing weighs it too. */

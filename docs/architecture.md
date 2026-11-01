@@ -1424,4 +1424,11 @@ Each limit is stated here once; the other documents link to it.
   request's one instant: a token live when its request began is honoured
   for that request, within the use's 3 s deadline ([formal.md](formal.md),
   "Probing.tla").
+  The same holds at a fork and at `dev@me`, the vault resolving the key
+  through what the place inherits in the same call (T165). There, a fork's
+  removal of a key (a dismissal) and a parent's own parent carry no seal: a
+  database writer can make a fork resolve a name to another layer's key,
+  which the vault then decides where it is held, on sealed rows, so the
+  caller gets nothing they could not read there; only which layer answered
+  shows, to someone who can write the database (D154).
   Any other difference by key in a refusal is a bug.

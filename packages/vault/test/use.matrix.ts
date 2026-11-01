@@ -276,7 +276,7 @@ function setMap(row: Row, at: {
   });
   const set = (place: string, key: string | null, credential?: string) => {
     cache.name(`${w.tokenHash.toString('base64')}\n${w.slug}\ndev`, ids(place, credential));
-    cache.key(place, name, key);
+    cache.key(place, name, key === null ? null : { id: key, through: false });
   };
   switch (row.map) {
     case 'another place': case 'an archived place': return set(at.elsewhere!, at.elsewhereKey);

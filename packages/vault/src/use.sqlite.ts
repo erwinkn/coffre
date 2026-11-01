@@ -1,4 +1,5 @@
 
+import { personalOf } from '@coffre/core/schemas';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import type { Database, Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
@@ -301,8 +302,8 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   // A named call's credential first, held to what the app's config accepts (0045, reviews r6 and r7 of D153): one the
   // app would refuse is answered as a token no credential has, before the place, the key or anything else is read.
   const names = call.names;
-  const credential = names === undefined ? undefined : await one<{ id: string; places: string | null; kind: string; provider: string | null; issuer_hash: string | null }>(sql`SELECT
-    c.id, c.places, c.kind, x.provider, x.issuer_hash FROM credentials c LEFT JOIN identities x ON x.id = c.identity_id WHERE c.token_hash = ${names.tokenHash}`);
+  const credential = names === undefined ? undefined : await one<{ id: string; places: string | null; principal: string; kind: string; provider: string | null; issuer_hash: string | null }>(sql`SELECT
+    c.id, c.places, c.principal, c.kind, x.provider, x.issuer_hash FROM credentials c LEFT JOIN identities x ON x.id = c.identity_id WHERE c.token_hash = ${names.tokenHash}`);
   if (names !== undefined && (credential === undefined || !names.accepts.signin
     || (credential.kind === 'browser' && !names.accepts.issuers.includes(`${credential.provider}:${credential.issuer_hash}`)))) return nothing('unknown');
   const newestOf = (kind: Kind, id: string | null) =>
@@ -322,30 +323,68 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   // slugs or a handle's one place, as `use_resolve` reads it, and the key of its name there. Every row it reads is one
   // of those; the ids the vault passed only let it write, when they are those (`right`).
   let read: { credential: string | null; secretId: string | null; place: string | null } = { credential: call.credential, secretId: call.secretId, place: call.place };
-  let resolved: { state: 'nowhere' | null; right: boolean; place: string | null; project: string | null; environment: string | null } | null = null;
+  let resolved: { state: 'nowhere' | null; right: boolean; place: string | null; project: string | null; environment: string | null; cut: boolean } | null = null;
   let stands: boolean | null = null;
   if (names !== undefined && credential !== undefined) {
-    type Place = { id: string; project_id: string; project_slug: string; slug: string; live: number };
-    const placed = sql`SELECT e.id, e.project_id, p.slug AS project_slug, e.slug,
-      e.archived_at IS NULL AND p.archived_at IS NULL AND e.parent_id IS NULL AND e.owner IS NULL AS live
+    type Place = { id: string; project_id: string; project_slug: string; slug: string; parent_id: string | null; live: number };
+    // A fork's place too, with forks served (0050, T165); never a personal config's by its own slug.
+    const placed = sql`SELECT e.id, e.project_id, p.slug AS project_slug, e.slug, e.parent_id,
+      e.archived_at IS NULL AND p.archived_at IS NULL AND e.owner IS NULL AND (e.parent_id IS NULL OR ${names.forks ? 1 : 0}) AS live
       FROM environments e JOIN projects p ON p.id = e.project_id WHERE e.slug NOT LIKE '%~%' AND p.slug NOT LIKE '%~%'`;
     const bound = names.handle ? boundOf(credential.places) : null;
-    const place = names.handle
+    // `dev@me` (0050): dev, then the caller's personal config of it, the place; dev itself while they have none.
+    const mine = names.forks && !names.handle && names.environment !== null ? personalOf(names.environment) : null;
+    let place = names.handle
       ? (bound === null ? undefined : await one<Place>(sql`${placed} AND e.id = ${bound}`))
-      : await one<Place>(sql`${placed} AND p.slug = ${names.project} AND e.slug = ${names.environment}`);
+      : await one<Place>(sql`${placed} AND p.slug = ${names.project} AND e.slug = ${mine ?? names.environment}`);
+    if (mine !== null && place !== undefined && Boolean(place.live)) {
+      const config = await one<{ id: string; archived: number }>(sql`SELECT id, archived_at IS NOT NULL AS archived FROM environments
+        WHERE parent_id = ${place.id} AND owner = ${credential.principal} AND instr(slug, '~') = 0`);
+      if (config !== undefined) {
+        place = { ...place, id: config.id, parent_id: place.id, live: config.archived ? 0 : 1 };
+      }
+    }
     // A handle's place the stable URL does not mean, by the slugs read here: the app's, as a place that is none.
     const state = place === undefined || !place.live || (names.handle && names.unless.includes(`${place.project_slug}/${place.slug}`)) ? 'nowhere' : null;
-    // The caller's standing there first, from rows no key decides (0045's `use_stands`, W268): the key only for one who stands.
+    // The caller's standing there first, from rows no key decides (0045's `use_stands`, W268): the key only for one who
+    // stands. At a personal config, weighed with dev (0050's `use_stands_personal`).
     stands = state === null && place !== undefined && await standsAt(tx, credential.id, place.id, call);
-    const key = !stands || names.key === null ? undefined : await one<{ id: string }>(sql`SELECT id FROM secrets
-      WHERE project_id = ${place!.project_id} AND environment_id = ${place!.id} AND key = ${names.key} AND archived_at IS NULL LIMIT 1`);
-    read = { credential: credential.id, secretId: key?.id ?? null, place: key === undefined ? place?.id ?? null : null };
-    // No standing: on the place alone, whatever seals the isolate passed (0045's `probe`).
-    if (!stands) cached = false;
+    // What the place inherits from, nearest first, for one who stands (0050): a parent archived, deleted, not there, or a
+    // chain that loops or runs past 3 cuts it, and the place reads nothing.
+    const layers = place === undefined ? [] : [place.id];
+    let cut = false;
+    if (stands && names.forks && place!.parent_id !== null) {
+      const seen = new Set(layers);
+      for (let next: string | null = place!.parent_id, depth = 1; next !== null; depth += 1) {
+        const parent: { id: string; parent_id: string | null; slug: string; archived: number } | undefined = depth > 3 || seen.has(next) ? undefined
+          : await one<{ id: string; parent_id: string | null; slug: string; archived: number }>(sql`SELECT id, parent_id, slug, archived_at IS NOT NULL AS archived FROM environments WHERE id = ${next}`);
+        if (parent === undefined || Boolean(parent.archived) || parent.slug.includes('~')) {
+          cut = true;
+          break;
+        }
+        seen.add(parent.id);
+        layers.push(parent.id);
+        next = parent.parent_id;
+      }
+    }
+    // The key, in the nearest layer that settles it: holds it live, or (but the last) removed it.
+    let key: { id: string; environment_id: string } | undefined;
+    if (stands && !cut && names.key !== null) {
+      for (const [depth, layer] of layers.entries()) {
+        key = await one<{ id: string; environment_id: string }>(sql`SELECT id, environment_id FROM secrets
+          WHERE project_id = ${place!.project_id} AND environment_id = ${layer} AND key = ${names.key} AND archived_at IS NULL LIMIT 1`);
+        if (key !== undefined) break;
+        if (depth < layers.length - 1 && await one(sql`SELECT 1 AS removed FROM dismissed_keys WHERE environment_id = ${layer} AND key = ${names.key} AND restored_at IS NULL`) !== undefined) break;
+      }
+    }
+    // Held at the place, by its id; inherited, by its id through the place; none, through the place.
+    read = { credential: credential.id, secretId: key?.id ?? null, place: key === undefined || key.environment_id !== place?.id ? place?.id ?? null : null };
+    // No standing, or a chain cut: on the place alone, whatever seals the isolate passed (0045's `probe`).
+    if (!stands || cut) cached = false;
     resolved = {
       state,
       right: read.credential === call.credential && read.secretId === call.secretId && read.place === call.place,
-      place: place?.id ?? null, project: place?.project_slug ?? null, environment: place?.slug ?? null,
+      place: place?.id ?? null, project: place?.project_slug ?? null, environment: mine !== null ? names.environment : place?.slug ?? null, cut,
     };
   }
 
@@ -395,7 +434,8 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
     x !== undefined && x.environment_id !== s?.environment_id ? x.environment_id : null,
   ];
   const e = [await environmentOf(ids[0]!), await environmentOf(ids[1]!), await environmentOf(ids[2]!)];
-  const own = sSource === null || (x !== undefined && ids[2] === null) ? e[1] : e[2];
+  // A named call's key the place does not hold: the place's own row, a personal config's parent weighed (0050).
+  const own = s === undefined && names !== undefined ? e[0] : sSource === null || (x !== undefined && ids[2] === null) ? e[1] : e[2];
   ids.push(own?.owner != null ? own.parent_id : null);
   e.push(await environmentOf(ids[3]!));
   // What the names name, if not a live place; ids the vault passed that are not the names' (`moved`), nothing written;
@@ -403,7 +443,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   let namedState: 'unknown' | 'nowhere' | 'moved' | 'archived' | null = null;
   if (resolved !== null) {
     namedState = resolved.state ?? (!resolved.right ? 'moved'
-      : e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived))) ? 'archived' : null);
+      : resolved.cut || e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived))) ? 'archived' : null);
     if (namedState !== null) cached = false;
   }
   // Named, a key the place does not hold, and a plain value: decided, never used, so neither an entry nor a cap's row
@@ -478,7 +518,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
     // SQLite's app reads its own rows, as it always has (`app_read` is Postgres's).
     c_token_hash: blob(c?.token_hash), app: null,
     n_credential: resolved === null ? null : read.credential, n_secret: resolved === null ? null : read.secretId, n_place: resolved?.place ?? null,
-    n_project: resolved?.project ?? null, n_environment: resolved?.environment ?? null, n_standing: stands,
+    n_project: resolved?.project ?? null, n_environment: resolved?.environment ?? null, n_standing: stands, n_cut: resolved === null ? null : resolved.cut,
     w_row: wRow,
   } as UseRow;
 }
@@ -511,8 +551,16 @@ async function standsAt(tx: Queryable, credentialId: string, place: string, call
     id: place, projectId: e.project_id, slug: e.slug, owner: e.owner, parentId: e.parent_id, protected: e.protected === null ? null : Boolean(e.protected),
     archived: Boolean(e.archived), projectArchived: Boolean(e.project_archived),
   });
+  // A personal config is weighed with its parent, as the vault's rule weighs it (0050's `use_stands_personal`).
+  const parent = e.owner === null || e.parent_id === null ? undefined : await one<{ id: string; project_id: string; slug: string; owner: string | null; parent_id: string | null; protected: number | null; archived: number; project_archived: number }>(
+    sql`SELECT e.id, e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived
+          FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${e.parent_id}`);
+  const parents = parent === undefined ? [] : [environmentObject({
+    id: parent.id, projectId: parent.project_id, slug: parent.slug, owner: parent.owner, parentId: parent.parent_id, protected: parent.protected === null ? null : Boolean(parent.protected),
+    archived: Boolean(parent.archived), projectArchived: Boolean(parent.project_archived),
+  })];
   const request = { at: call.at, purpose: purposeOf(call.purpose)!.purpose };
-  return namedStanding(principal, credential, roles === undefined ? noEdits() : configObject(roles.value) as RolesInput, environment, request) === null;
+  return namedStanding(principal, credential, roles === undefined ? noEdits() : configObject(roles.value) as RolesInput, environment, request, parents) === null;
 }
 
 /**
