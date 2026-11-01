@@ -47,6 +47,7 @@ import {
   CopyButton,
   EmptyState,
   ErrorLine,
+  MenuButton,
   MenuPopup,
   Modal,
   Notice,
@@ -241,6 +242,8 @@ function EnvironmentLedger({
 
   // Listed by folder: those in none first, then each folder by name.
   const active = byFolder(keys.filter((entry) => !entry.archived)).flatMap(([, entries]) => entries);
+  // Each row's number, its place in that order, whatever the filter and sort list.
+  const numbers = new Map(active.map((entry, index) => [entry, index + 1]));
   const folders = foldersOf(active);
   // In a fork, an inherited key is filed where its parent files it: only the keys held here are filed here.
   const heldHere = (entry: SecretKey) => entry.parent === null || entry.parent.state === 'overridden';
@@ -605,7 +608,7 @@ function EnvironmentLedger({
                   return (
                     <SecretRow
                       key={entry.key}
-                      number={active.indexOf(entry) + 1}
+                      number={numbers.get(entry)!}
                       project={project}
                       environment={environment}
                       entry={entry}
@@ -1663,112 +1666,111 @@ function SecretRow({
             <RowPending status={status} />
           ) : (
             !removed && (canList || leaving || (canWrite && !editing && !leaving) || (canArchive && !leaving && own && !overridden)) && (
-              <Menu.Root>
-                <Menu.Trigger
-                  className="act act-icon act-quiet"
-                  aria-label={`More for ${entry.key}`}
-                  disabled={disabled}
-                >
-                  <MoreHorizontal size={16} />
-                </Menu.Trigger>
-                <MenuPopup align="end">
-                  <SecretReadOnly canReveal={canList && own}>
-                    <Menu.Item className="menu-item" onClick={() => setHistoryOpen((open) => !open)}>
-                      <History size={14} />
-                      {historyOpen ? 'Hide history' : 'Version history'}
-                    </Menu.Item>
-                  </SecretReadOnly>
-                  {canWrite && !editing && inherited && (
-                    <>
-                      <Menu.Item className="menu-item" onClick={() => void startEdit()}>
-                        <Pencil size={14} />
-                        Override…
-                      </Menu.Item>
-                      {parent!.reset && (
-                        <Menu.Item className="menu-item" onClick={() => onFork('override')}>
-                          <RotateBack size={14} />
-                          Use its own value again
-                        </Menu.Item>
-                      )}
-                      <Menu.Item className="menu-item" onClick={() => onFork('remove')}>
-                        <SlashCircle size={14} />
-                        Remove from {environment}
-                      </Menu.Item>
-                    </>
-                  )}
-                  {canWrite && !editing && !leaving && overridden && (
-                    <Menu.Item className="menu-item" onClick={() => onFork('reset')}>
-                      <RotateBack size={14} />
-                      Reset to {parent!.from}
-                    </Menu.Item>
-                  )}
-                  {canWrite && !editing && !leaving && own && (
-                    <Menu.Item className="menu-item" onClick={() => void startEdit({ name: true })}>
+              <MenuButton
+                align="end"
+                disabled={disabled}
+                trigger={
+                  <button type="button" className="act act-icon act-quiet" aria-label={`More for ${entry.key}`}>
+                    <MoreHorizontal size={16} />
+                  </button>
+                }
+              >
+                <SecretReadOnly canReveal={canList && own}>
+                  <Menu.Item className="menu-item" onClick={() => setHistoryOpen((open) => !open)}>
+                    <History size={14} />
+                    {historyOpen ? 'Hide history' : 'Version history'}
+                  </Menu.Item>
+                </SecretReadOnly>
+                {canWrite && !editing && inherited && (
+                  <>
+                    <Menu.Item className="menu-item" onClick={() => void startEdit()}>
                       <Pencil size={14} />
-                      Rename
+                      Override…
                     </Menu.Item>
-                  )}
-                  {canWrite && !editing && !leaving && generated !== null && (
-                    <Menu.Item
-                      className="menu-item"
-                      disabled={regenerateWaits(entry.key, generated, busy)}
-                      onClick={() => setRegenerating(true)}
-                    >
-                      <Generate size={14} />
-                      Regenerate…
-                    </Menu.Item>
-                  )}
-                  {canWrite && !editing && !leaving && own && (
-                    <Menu.Item className="menu-item" onClick={() => setMoving(true)}>
-                      <Folder size={14} />
-                      Move to folder…
-                    </Menu.Item>
-                  )}
-                  {canWrite && !editing && !leaving && own && environments.length > 0 && (
-                    <Menu.Item className="menu-item" onClick={() => setReferring(true)}>
-                      <ArrowRight size={14} />
-                      {reference === null ? 'Make a reference…' : 'Point elsewhere…'}
-                    </Menu.Item>
-                  )}
-                  {canWrite && !editing && !leaving && own && reference !== null && reference.state === 'live' && (
-                    <Menu.Item className="menu-item" onClick={() => setBreaking(holderPath)}>
-                      <SlashCircle size={14} />
-                      Break reference…
-                    </Menu.Item>
-                  )}
-                  {/* Its own value's level: a reference's is its source's, an inherited one's its parent's. */}
-                  {canWrite && !editing && !leaving && markable(entry) && (
-                    <>
-                      <Menu.Separator className="menu-sep" />
-                      <SensitivityItems value={entry.sensitivity} levels={levelsIn(personal)} onChange={chooseLevel} />
-                    </>
-                  )}
-                  {leaving && (
-                    <Menu.Item className="menu-item" onClick={onUndo}>
-                      <RotateBack size={14} />
-                      Don't archive
-                    </Menu.Item>
-                  )}
-                  {/* An override's way out is Reset, which keeps it; archiving there would be the same, by more. */}
-                  {canArchive && !leaving && own && !overridden && (
-                    <>
-                      {(canReveal || canWrite) && <Menu.Separator className="menu-sep" />}
-                      <Menu.Item
-                        className="menu-item menu-item-danger"
-                        onClick={() => {
-                          setReveal(null);
-                          if (blockers.length > 0) setArchiveBlocked(true);
-                          else onMarkArchive();
-                        }}
-                      >
-                        <Archive size={14} />
-                        Archive
-                        <span className="menu-hint">on save</span>
+                    {parent!.reset && (
+                      <Menu.Item className="menu-item" onClick={() => onFork('override')}>
+                        <RotateBack size={14} />
+                        Use its own value again
                       </Menu.Item>
-                    </>
-                  )}
-                </MenuPopup>
-              </Menu.Root>
+                    )}
+                    <Menu.Item className="menu-item" onClick={() => onFork('remove')}>
+                      <SlashCircle size={14} />
+                      Remove from {environment}
+                    </Menu.Item>
+                  </>
+                )}
+                {canWrite && !editing && !leaving && overridden && (
+                  <Menu.Item className="menu-item" onClick={() => onFork('reset')}>
+                    <RotateBack size={14} />
+                    Reset to {parent!.from}
+                  </Menu.Item>
+                )}
+                {canWrite && !editing && !leaving && own && (
+                  <Menu.Item className="menu-item" onClick={() => void startEdit({ name: true })}>
+                    <Pencil size={14} />
+                    Rename
+                  </Menu.Item>
+                )}
+                {canWrite && !editing && !leaving && generated !== null && (
+                  <Menu.Item
+                    className="menu-item"
+                    disabled={regenerateWaits(entry.key, generated, busy)}
+                    onClick={() => setRegenerating(true)}
+                  >
+                    <Generate size={14} />
+                    Regenerate…
+                  </Menu.Item>
+                )}
+                {canWrite && !editing && !leaving && own && (
+                  <Menu.Item className="menu-item" onClick={() => setMoving(true)}>
+                    <Folder size={14} />
+                    Move to folder…
+                  </Menu.Item>
+                )}
+                {canWrite && !editing && !leaving && own && environments.length > 0 && (
+                  <Menu.Item className="menu-item" onClick={() => setReferring(true)}>
+                    <ArrowRight size={14} />
+                    {reference === null ? 'Make a reference…' : 'Point elsewhere…'}
+                  </Menu.Item>
+                )}
+                {canWrite && !editing && !leaving && own && reference !== null && reference.state === 'live' && (
+                  <Menu.Item className="menu-item" onClick={() => setBreaking(holderPath)}>
+                    <SlashCircle size={14} />
+                    Break reference…
+                  </Menu.Item>
+                )}
+                {/* Its own value's level: a reference's is its source's, an inherited one's its parent's. */}
+                {canWrite && !editing && !leaving && markable(entry) && (
+                  <>
+                    <Menu.Separator className="menu-sep" />
+                    <SensitivityItems value={entry.sensitivity} levels={levelsIn(personal)} onChange={chooseLevel} />
+                  </>
+                )}
+                {leaving && (
+                  <Menu.Item className="menu-item" onClick={onUndo}>
+                    <RotateBack size={14} />
+                    Don't archive
+                  </Menu.Item>
+                )}
+                {/* An override's way out is Reset, which keeps it; archiving there would be the same, by more. */}
+                {canArchive && !leaving && own && !overridden && (
+                  <>
+                    {(canReveal || canWrite) && <Menu.Separator className="menu-sep" />}
+                    <Menu.Item
+                      className="menu-item menu-item-danger"
+                      onClick={() => {
+                        setReveal(null);
+                        if (blockers.length > 0) setArchiveBlocked(true);
+                        else onMarkArchive();
+                      }}
+                    >
+                      <Archive size={14} />
+                      Archive
+                      <span className="menu-hint">on save</span>
+                    </Menu.Item>
+                  </>
+                )}
+              </MenuButton>
             )
           )}
         </td>
@@ -2298,34 +2300,33 @@ function ArchivedRow({
           ) : (
             (canList || canArchive) && (
               <div className="acts">
-                <Menu.Root>
-                  <Menu.Trigger
-                    className="act act-icon act-quiet"
-                    aria-label={`More for ${entry.key}`}
-                  >
-                    <MoreHorizontal size={16} />
-                  </Menu.Trigger>
-                  <MenuPopup align="end">
-                    <SecretReadOnly canReveal={canList}>
-                      <Menu.Item
-                        className="menu-item"
-                        onClick={() => setHistoryOpen((open) => !open)}
-                      >
-                        <History size={14} />
-                        {historyOpen ? 'Hide history' : 'Version history'}
+                <MenuButton
+                  align="end"
+                  trigger={
+                    <button type="button" className="act act-icon act-quiet" aria-label={`More for ${entry.key}`}>
+                      <MoreHorizontal size={16} />
+                    </button>
+                  }
+                >
+                  <SecretReadOnly canReveal={canList}>
+                    <Menu.Item
+                      className="menu-item"
+                      onClick={() => setHistoryOpen((open) => !open)}
+                    >
+                      <History size={14} />
+                      {historyOpen ? 'Hide history' : 'Version history'}
+                    </Menu.Item>
+                  </SecretReadOnly>
+                  {canArchive && (
+                    <>
+                      {canList && <Menu.Separator className="menu-sep" />}
+                      <Menu.Item className="menu-item" onClick={onRestore}>
+                        <RotateBack size={14} />
+                        Restore
                       </Menu.Item>
-                    </SecretReadOnly>
-                    {canArchive && (
-                      <>
-                        {canList && <Menu.Separator className="menu-sep" />}
-                        <Menu.Item className="menu-item" onClick={onRestore}>
-                          <RotateBack size={14} />
-                          Restore
-                        </Menu.Item>
-                      </>
-                    )}
-                  </MenuPopup>
-                </Menu.Root>
+                    </>
+                  )}
+                </MenuButton>
               </div>
             )
           )}

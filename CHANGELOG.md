@@ -16,6 +16,16 @@
   data and needs only the instance named. CI scripts that run it as an owner
   add the URL and `--yes`.
 
+- **An environment's page renders in a quarter of the CPU at 500 keys.**
+  On the Workers bench (`pnpm bench:workers --only 'page: environment'`,
+  warm median), it costs 31 ms of CPU at 10 keys (47 before), 44 at 100
+  (123) and 119 at 500 (465), its HTML 1.37 MB at 500 keys (1.68). The page
+  looks the same to the pixel. Closed tooltips and row menus render only
+  their button on the server and mount once the page hydrates, as closed
+  dialogs already did; each icon is one `<svg>` whose strokes are markup
+  made once per glyph, drawn from `lucide`'s data, which replaces
+  `lucide-react` among `@coffre/ui`'s dependencies.
+
 ## 0.15.0 (2026-11-01)
 
 - **0.15's log is the default: every deployment keeps it.** The switch

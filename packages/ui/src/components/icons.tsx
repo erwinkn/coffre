@@ -1,4 +1,3 @@
-import type { LucideIcon } from 'lucide-react';
 import {
   Activity as ActivityGlyph,
   ArrowRight as ArrowRightGlyph,
@@ -51,7 +50,9 @@ import {
   Users as UsersGlyph,
   WandSparkles,
   X as XGlyph,
-} from 'lucide-react';
+  type IconNode,
+} from 'lucide';
+import { glyphMarkup } from './glyph';
 import { markPath } from './mark';
 
 /**
@@ -71,34 +72,6 @@ type IconProps = {
   /** Icons are decorative by default; pass a label when one carries meaning. */
   label?: string;
 };
-
-function Svg({
-  size = 16,
-  className,
-  style,
-  label,
-  children,
-}: IconProps & { children: React.ReactNode }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.6}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      style={style}
-      aria-hidden={label === undefined}
-      aria-label={label}
-      role={label === undefined ? undefined : 'img'}
-    >
-      {children}
-    </svg>
-  );
-}
 
 /**
  * The mark, bare, in the text's colour, so it follows the theme. The tiled
@@ -127,16 +100,26 @@ export function Mark({ size = 16, className, style, label }: IconProps) {
  */
 const STROKE = 1.75;
 
-function lucide(Glyph: LucideIcon) {
-  // Lucide hides a glyph from assistive technology unless it is labelled.
+/**
+ * A glyph as one element, its `<svg>`, with what draws inside it as markup
+ * made once (`glyphMarkup`): a table draws a few icons in each row, and a
+ * tree of elements, each attribute its own write, costs the server more than
+ * the rest of the row. Hidden from assistive technology unless it is labelled.
+ */
+function lucide(glyph: IconNode) {
+  const inner = { __html: glyphMarkup(glyph, STROKE) };
   return function Icon({ size = 16, className, style, label }: IconProps) {
     return (
-      <Glyph
-        size={size}
-        strokeWidth={STROKE}
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 24 24"
         className={className}
         style={style}
-        {...(label === undefined ? {} : { 'aria-label': label, role: 'img' })}
+        aria-hidden={label === undefined ? true : undefined}
+        aria-label={label}
+        role={label === undefined ? undefined : 'img'}
+        dangerouslySetInnerHTML={inner}
       />
     );
   };
