@@ -29,7 +29,7 @@ import { templateDir, templateFiles } from '../src/init.ts';
 import { applyChanges, CLEAN_BREAK, pageMove, ROUTE_FILES } from '../src/layout.ts';
 import { registry } from './registry.ts';
 import { inTerminal, ptySkip } from './pty.ts';
-import { deploymentMigrations, globalCli, HOTLESS, hotless, installOf, migrationsAdded, movedLines, notUpdated, npmPrefixOf, parsePlan, updateCommand, type Plan } from '../src/update.ts';
+import { deploymentMigrations, globalCli, HOTLESS, hotless, installOf, migrationsAdded, movedLines, notUpdated, npmPrefixOf, parsePlan, unchecked, updateCommand, type Plan } from '../src/update.ts';
 import { cliVersion } from '../src/version.ts';
 
 const examples = fileURLToPath(new URL('../../../examples/', import.meta.url));
@@ -199,6 +199,14 @@ test("a Workers deployment whose own setup does Hyperdrive alone, and whose vaul
     }
     bumpPins(dir, '0.16.1');
     assert.equal(hotless(dir), true);
+    // A file it cannot read, as a merge conflict left it: said, never taken for bound.
+    const path = join(dir, 'vault', 'wrangler.jsonc');
+    writeFileSync(path, `<<<<<<< HEAD\n${readFileSync(path, 'utf8')}=======\n{}\n>>>>>>> theirs\n`);
+    assert.throws(() => hotless(dir), /vault\/wrangler\.jsonc is not valid/);
+    assert.match(unchecked('vault/wrangler.jsonc is not valid: InvalidSymbol at offset 0'), /^Could not check that the vault binds its hot path's Hyperdrive config \(vault\/wrangler\.jsonc is not valid: InvalidSymbol at offset 0\)\. Fix vault\/wrangler\.jsonc before you deploy; if it binds no HOT_HYPERDRIVE, run `pnpm exec coffre setup` here/);
+    // Pinned before 0.16, the file is not read at all.
+    bumpPins(dir, '0.15.0');
+    assert.equal(hotless(dir), false);
     assert.match(HOTLESS, /run `pnpm exec coffre setup` here, as the database's administrator, and choose Hyperdrive only\. It makes the hot path's login and its config, binds it in vault\/wrangler\.jsonc, and migrates/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

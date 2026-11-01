@@ -88,14 +88,11 @@ function bindingOf(config: Config, worker: WorkerConfig): string {
 /**
  * Whether a Workers deployment's vault binds no hot path's config yet, as
  * one a release before 0.15 wrote, or the template's placeholder: setup's
- * Hyperdrive alone makes it and binds it. False for a file it cannot read.
+ * Hyperdrive alone makes it and binds it. A file it cannot read throws,
+ * saying what is wrong with it.
  */
 export function hotUnbound(dir: string): boolean {
-  try {
-    return placeholder(readWorker(dir, 'vault/wrangler.jsonc').hyperdrive[BOUND.hot.binding]);
-  } catch {
-    return false;
-  }
+  return placeholder(readWorker(dir, 'vault/wrangler.jsonc').hyperdrive[BOUND.hot.binding]);
 }
 
 /** A config's name, from its Worker's. */
