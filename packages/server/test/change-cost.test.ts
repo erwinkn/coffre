@@ -270,6 +270,10 @@ test('each change route answers in exactly its budget of round trips (T179)', PO
   const failures: string[] = [];
   for (const [n, { name, setup, run }] of CASES.entries()) {
     try {
+      // The warm request and the measured one in one bulk refresh period (a minute, at the default 15-minute window): a
+      // use that crosses into the next moves its key's row on, a statement more on the hot path (`bulkRule`).
+      const left = 60_000 - (Date.now() % 60_000);
+      if (left < 5_000) await new Promise((resolve) => setTimeout(resolve, left + 100));
       for (const i of [2 * n, 2 * n + 1]) if (setup !== undefined) await asRequest(() => setup(i));
       await cost(() => run(2 * n));
       const { statements: ran, ...counts } = await cost(() => run(2 * n + 1));

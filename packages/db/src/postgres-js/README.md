@@ -127,9 +127,13 @@ Eleven, each marked `Coffre:` in the code:
   `toBuffer` and `ReadyForQuery` in `connection.ts`). What its work asks
   in one task waits for the next (`nextTask`: Node's `setImmediate`, a
   timer of 0 on workerd), then goes as one group, in the order the
-  statements were made (`Query.made`; `prepared` in `../prepared.ts` runs
-  a statement once awaited, as a Drizzle builder does, so that this is the
-  order the work awaited them in), its BEGIN ahead of the first group.
+  statements were made (`Query.made`), its BEGIN ahead of the first group.
+  A statement is made when it is started: once awaited, a microtask later
+  (a Drizzle builder, and `prepared` in `../prepared.ts`, which runs one
+  only then, as a builder does), or at once, by `.then`, `execute()` or
+  `later`. So what must go first in a group is started, not awaited:
+  `lockLogHeadRead` (`../log.ts`) starts the head's lock and its read, and
+  a work's first `later` write goes behind them.
   A statement the client cannot send in a group (a value only the server
   can type, one it cannot send) has each go alone, in order. If one fails,
   Postgres skips the rest: those before it answer with their rows
@@ -240,5 +244,5 @@ of which one statement fails; a write left to `later` that fails; and a
 rollback. Every statement records its backend (`pg_backend_pid()`) and its
 transaction (`txid_current()`), which must be one of each per transaction,
 the writes' rows included; what failed or rolled back must keep no row.
-T179 (PR 1): 10,000 transactions, 50 requests at once, on 59 backends, all held.
+T179 (PR 1): 10,800 transactions, 50 requests at once, on 60 backends, all held.
 

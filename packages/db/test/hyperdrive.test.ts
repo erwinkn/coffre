@@ -6,12 +6,14 @@
 // proxy that sees each one, in front of the suite's Postgres.
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+
+import { deriveLogKey } from '@coffre/core/audit';
 import { sql } from 'drizzle-orm';
 
 import { openDatabase } from '../src/connect.ts';
 import { createDatabase, QueryOutsideTransaction, tablesOf } from '../src/database.ts';
-import { forUpdate } from '../src/dialect.ts';
-import { prepared } from '../src/prepared.ts';
+import { lockLogHeadRead } from '../src/log.ts';
 import { HyperdrivePool } from '../src/hyperdrive.ts';
 import { later } from '../src/later.ts';
 
@@ -250,17 +252,51 @@ test("a write left to `later` as a work's first statement goes behind what was a
   try {
     const db = createDatabase(client);
     await db.execute(sql`create temporary table ordered (n int)`);
-    // As `audited` asks it: the head's lock, a lazy prepared select, then the work, whose first statement is a `later`.
-    const lock = prepared((on) => forUpdate(on, on.select({ next: tablesOf(on).auditChainHead.nextSeq }).from(tablesOf(on).auditChainHead)));
+    // As `audited` asks it: the head's lock and its read, then the work, whose first statement is a `later`.
     await db.transaction(async (tx) => {
-      // Awaited at once inside an async function, as `lockLogHead` awaits it, not yet answered when the work starts.
-      const locking = (async () => await lock(tx))();
+      const locking = lockLogHeadRead(tx, deriveLogKey('app', randomBytes(32)));
       later(tx, sql`insert into ordered values (1)`);
       await locking;
     });
     const at = (part: string) => sent.findIndex((text) => text.includes(part));
     assert.ok(at('audit_chain_head') >= 0 && at('audit_chain_head') < at('insert into ordered'), `sent ${JSON.stringify(sent)}`);
     assert.deepEqual([...await db.execute(sql`select n from ordered`)], [{ n: 1 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a write left to `later` with a value it cannot send throws to the work, and the transaction keeps nothing (review r3 of #452)", { skip }, async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  try {
+    const db = createDatabase(client);
+    await db.execute(sql`create temporary table unsendable (n int, at timestamptz)`);
+    await assert.rejects(db.transaction(async (tx) => {
+      await tx.execute(sql`insert into unsendable values (1, now())`);
+      later(tx, sql`insert into unsendable values (2, ${new Date('not a date')})`);
+    }), RangeError);
+    assert.deepEqual([...await db.execute(sql`select count(*)::int as n from unsendable`)], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a write left to `later` goes ahead of a statement asked after it, however that one is started (review r3 of #452)", { skip }, async () => {
+  const client = postgresClient(DATABASE, { max: 1 });
+  try {
+    const db = createDatabase(client);
+    await db.execute(sql`create temporary table parents (id int primary key)`);
+    await db.execute(sql`create temporary table children (parent int references parents (id))`);
+    // Awaited, started with `.then`, and with execute(): the parent first each time, or the reference fails.
+    await db.transaction(async (tx) => {
+      later(tx, sql`insert into parents values (1)`);
+      await tx.execute(sql`insert into children values (1)`);
+      later(tx, sql`insert into parents values (2)`);
+      await tx.execute(sql`insert into children values (2)`).then(() => undefined);
+      later(tx, sql`insert into parents values (3)`);
+      await tx.execute(sql`insert into children values (3)`).execute();
+    });
+    assert.deepEqual([...await db.execute(sql`select count(*)::int as n from children`)], [{ n: 3 }]);
   } finally {
     await client.end();
   }

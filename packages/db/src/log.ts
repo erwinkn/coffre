@@ -165,7 +165,12 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
  * nothing to read again.
  */
 export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead> {
-  const locking = lockLogHead(tx);
+  // Both started now (`.then`), not awaited: made before anything the caller asks after, a work's first `later` write
+  // included, so they go first in their group (postgres-js's `flush`, by `made`).
+  const locking = lockedHead(tx).then(([head]) => {
+    if (head === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+    holding.add(tx);
+  });
   const reading = readUnderHead(tx, key);
   return Promise.all([locking, reading]).then(([, held]) => held);
 }
@@ -388,8 +393,12 @@ export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { se
  * after the append's `check`. The log's own last row says whether the log
  * has moved on from `key`.
  */
-async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
-  const [read] = await underHead(tx, { author: key.author, keyId: key.keyId });
+function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  // Started now, as `.then` starts a statement, not once awaited: `lockLogHeadRead` puts it ahead of what its caller asks next.
+  return underHead(tx, { author: key.author, keyId: key.keyId }).then(([read]) => heldOf(read, key));
+}
+
+function heldOf(read: Awaited<ReturnType<typeof underHead>>[number] | undefined, key: LogKey): HeldHead {
   if (read === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
   if (read.retired) throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
   return {
