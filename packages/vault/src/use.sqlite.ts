@@ -310,7 +310,9 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   const n = await once<{ number: string; mac: Buffer }>('head', sql`SELECT CAST(c.number AS TEXT) AS number, c.mac FROM log_changes c ORDER BY c.number DESC LIMIT 1`);
   const known = call.known;
   let cached = n !== undefined && known !== undefined && n.number === known.newest && Buffer.from(n.mac).equals(known.newestMac);
-  const floor = await once<{ at_floor: number }>('floor', sql`SELECT at_floor FROM log_fence WHERE only_row`);
+  const floor = await once<{ at_floor: number; retired: string }>('floor', sql`SELECT at_floor, retired FROM log_fence WHERE only_row`);
+  // A MAC that names a key the log moved on from (T168), first, as the Postgres function has it.
+  if (floor !== undefined && (JSON.parse(floor.retired) as string[]).includes(call.mac.subarray(0, 4).toString('hex'))) return nothing('superseded');
   if (floor === undefined || call.at < floor.at_floor || Date.now() > call.deadline) return nothing('late');
   const policy = await newestOf('policy', 'instance');
   const logged = policy === undefined ? {} : (JSON.parse(policy.payload) as { value?: { bulk?: { count?: number; windowMs?: number } } }).value?.bulk ?? {};

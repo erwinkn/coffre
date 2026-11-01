@@ -1176,13 +1176,16 @@ export const logBulk = pgTable(
 /**
  * The fence's one row: the lowest `at` a use may still be written with,
  * raised by each checkpoint's barrier (`close_one`), never lowered. Made
- * by the migration; without it every use is refused.
+ * by the migration; without it every use is refused. `retired` holds the
+ * tag of each signing key the log moved on from (T168, `log_rotate`): an
+ * entry whose MAC names one is refused, a use `superseded`.
  */
 export const logFence = pgTable(
   'log_fence',
   {
     onlyRow: boolean('only_row').primaryKey().default(true),
     atFloor: bigint('at_floor', { mode: 'number' }).notNull(),
+    retired: bytea().array().notNull().default(sql`'{}'`),
   },
   (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
 );

@@ -5,7 +5,7 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
-import { changeEntry, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
+import { changeEntry, KEY_OBJECT, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
 import { CursorGone, type ReadRow, type ReadsCursor, type ReadsStore } from './reads.ts';
 import type { RetentionStore } from './retention.ts';
 
@@ -30,6 +30,9 @@ import type { RetentionStore } from './retention.ts';
  *   retention change, and a day's partition and the tiles below a cut
  *   dropped, each through its function, which holds the vault's login to
  *   what a sealed retention change cuts.
+ * - A rotation of the vault's signing key (T168, migration 0049): the
+ *   rotation entries, by their object's index, and the rotation written
+ *   with `log_rotate`, under the barrier's locks.
  *
  * On SQLite one transaction runs at a time: the fence is implicit, every
  * number committed is final, and the barrier only moves the floor. The
@@ -51,8 +54,28 @@ type Options = {
   tileRange?: number;
 };
 
-/** The checkpointer's database, with retention's part. */
-export type LogStore = CheckpointStore & RetentionStore & ReadsStore;
+/** The log's rotations of the vault's signing key (T168), as the checkpointer reads and writes them (`Rotations`). */
+export type RotationStore = {
+  /** Every rotation entry, by number. */
+  rotations(): Promise<LogEntry[]>;
+  /**
+   * The rotations and the newest pair, in one statement, so one snapshot
+   * (Rotation.tla's SnapshotRead): what a reader that keeps nothing bounds
+   * a replaced key from (keyring.ts).
+   */
+  keyringRows(): Promise<{ rotations: LogEntry[]; newest: StoredPair | null }>;
+  /**
+   * The rotation entry, under the barrier's locks (`log_rotate_number`,
+   * then `log_rotate`, one transaction), `make` given its number first, so
+   * that its payload names it under its MAC (NumberInRotation); and
+   * `retire`, the tag of the key it moves the log from, added to the
+   * fence's: its number, or null if the fence holds that tag already.
+   */
+  rotate(make: (number: bigint) => { requestId: string; at: number; payload: string; mac: Buffer }, retire: Buffer): Promise<bigint | null>;
+};
+
+/** The checkpointer's database, with retention's part, the reads' and the rotations'. */
+export type LogStore = CheckpointStore & RetentionStore & ReadsStore & RotationStore;
 
 export function logStore(db: Database, options: Options = {}): LogStore {
   const range = options.tileRange ?? TILE_RANGE;
@@ -252,7 +275,7 @@ export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling:
       ORDER BY n${limitOf(limit)}`;
 }
 
-function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor'> {
+function postgresStore(db: Database, range: number): CheckpointStore & Omit<RetentionStore, 'readsCursor'> & RotationStore {
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
   const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
@@ -387,6 +410,26 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
       const [row] = await rowsOf<{ n: string }>(db, sql`SELECT log_retention(${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea)::text AS n`);
       return BigInt(row!.n);
     },
+    async rotations() {
+      return (await one<RawEntry[]>(db, sql`SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') AS v FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid`)).map(toEntry);
+    },
+    async keyringRows() {
+      const both = await one<{ rotations: RawEntry[]; newest: RawPair | null }>(db, sql`SELECT json_build_object(
+        'rotations', (SELECT coalesce(json_agg(${CHANGE} ORDER BY c.number), '[]') FROM log_changes c WHERE c.object = ${KEY_OBJECT}::uuid),
+        'newest', (SELECT ${PAIR} FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)) AS v`);
+      return { rotations: both.rotations.map(toEntry), newest: toPair(both.newest) };
+    },
+    async rotate(make, retire) {
+      // One transaction: the locks `log_rotate_number` takes hold to its commit, the MAC made in between (a few µs).
+      return db.transaction(async (tx) => {
+        const [taken] = await rowsOf<{ n: string | null }>(tx, sql`SELECT log_rotate_number(${retire}::bytea)::text AS n`);
+        if (taken?.n == null) return null;
+        const number = BigInt(taken.n);
+        const change = make(number);
+        await rowsOf(tx, sql`SELECT log_rotate(${number}::bigint, ${change.requestId}, ${change.at}::bigint, ${change.payload}, ${change.mac}::bytea, ${retire}::bytea)`);
+        return number;
+      });
+    },
     async dropDay(day) {
       const [row] = await rowsOf<{ state: 'detached' | 'dropped' | 'gone' }>(db, sql`SELECT drop_day(${day}::date) AS state`);
       if (row!.state !== 'detached') madeDays.delete(day);
@@ -413,7 +456,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
   };
 }
 
-function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'readsCursor'> {
+function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'readsCursor'> & RotationStore {
   const CHANGE = sql.raw(`json_object('tree', 'changes', 'number', CAST(c.number AS TEXT), 'at', CAST(c.at AS TEXT), 'requestId', c.request_id,
     'object', c.object, 'actor', c.actor, 'payload', c.payload, 'seal', CASE WHEN c.seal IS NULL THEN NULL ELSE hex(c.seal) END, 'mac', hex(c.mac))`);
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
@@ -540,6 +583,29 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
         const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
         await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
           VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${RETENTION_OBJECT}, ${RETENTION_ACTOR}, ${change.payload}, NULL, ${change.mac})`);
+        return BigInt(next!.n);
+      });
+    },
+    async rotations() {
+      return (await one<RawEntry[]>(db, sql`SELECT coalesce(json_group_array(json(${CHANGE})), '[]') AS v FROM (SELECT * FROM log_changes WHERE object = ${KEY_OBJECT} ORDER BY number) c`)).map(toEntry);
+    },
+    async keyringRows() {
+      const both = await one<{ rotations: RawEntry[]; newest: RawPair | null }>(db, sql`SELECT json_object(
+        'rotations', (SELECT coalesce(json_group_array(json(${CHANGE})), '[]') FROM (SELECT * FROM log_changes WHERE object = ${KEY_OBJECT} ORDER BY number) c),
+        'newest', (SELECT json(${PAIR}) FROM log_checkpoints k ORDER BY k.upto DESC LIMIT 1)) AS v`);
+      return { rotations: both.rotations.map(toEntry), newest: toPair(both.newest) };
+    },
+    async rotate(make, retire) {
+      // One writer at a time: the transaction is the barrier's locks. The fence's retired tags are hex, a JSON array.
+      return db.transaction(async (tx) => {
+        const tag = retire.toString('hex');
+        const [fence] = await rowsOf<{ held: number }>(tx, sql`SELECT EXISTS (SELECT 1 FROM log_fence f, json_each(f.retired) j WHERE f.only_row AND j.value = ${tag}) AS held`);
+        if (Number(fence?.held) === 1) return null;
+        const [next] = await rowsOf<{ n: string }>(tx, sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) + 1 AS TEXT) AS n`);
+        const change = make(BigInt(next!.n));
+        await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+          VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${KEY_OBJECT}, 'system:vault', ${change.payload}, NULL, ${change.mac})`);
+        await rowsOf(tx, sql`UPDATE log_fence SET retired = json_insert(retired, '$[#]', ${tag}) WHERE only_row`);
         return BigInt(next!.n);
       });
     },

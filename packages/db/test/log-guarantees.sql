@@ -79,6 +79,24 @@ BEGIN
 END
 $$;
 
+-- The rotation's functions (0050, T168): the vault's alone; the trigger's, nobody's to call.
+DO $$
+DECLARE
+    f text;
+BEGIN
+    FOREACH f IN ARRAY ARRAY['log_rotate_number(bytea)', 'log_rotate(bigint, text, bigint, text, bytea, bytea)'] LOOP
+        IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;
+        END IF;
+    END LOOP;
+    IF has_function_privilege('coffre_vault', 'log_refuse_retired()', 'EXECUTE') OR has_function_privilege('coffre_app', 'log_refuse_retired()', 'EXECUTE') THEN
+        RAISE EXCEPTION 'FAIL: the retired-key trigger''s function is callable';
+    END IF;
+    RAISE NOTICE 'PASS: the rotation''s functions are the vault''s alone';
+END
+$$;
+
 -- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change): the app runs it,
 -- and no other function of the log; the vault and the backup never run it.
 DO $$

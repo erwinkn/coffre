@@ -354,11 +354,20 @@ whether 0.15's log is cut over, so it answers every request but `/livez`
 503, sign-in and every use of a value included, and `/readyz` is red; the
 server's log says why (`cutover_refused`).
 
+A backup from before a rotation of the vault key restores the same way,
+under the configuration after it (the old key in `previousKeks`, or the old
+`signingKey` in `previousSigningKeys`): the checkpointer, its memory reset,
+takes the database's newest pair under the old key and moves the log on to
+the new one again, with a rotation entry of its own
+([audit-tree.md](design/audit-tree.md), "A rotation"). The same test drills
+it.
+
 `packages/server/test/restore-015.test.ts` drills it on Postgres, with
 PostgreSQL 16's `pg_dump` and `pg_restore`: a cut-over instance backed up,
 written to after, restored, refused by the old memory, taken by a new one,
 its trees verified, a token's use serving the value it served at the
-backup, a change sealed on top; and the wrong vault key refused.
+backup, a change sealed on top; the wrong vault key refused; and a backup
+from before a rotation restored under the new key.
 
 ## If the vault key is wrong
 

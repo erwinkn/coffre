@@ -32,7 +32,7 @@ const keys = () => verifierKeys([SIGNING_KEY]);
 
 /** A checkpointer over the vault's login, signing the log as it stands at each `tick`. */
 async function signer() {
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed: SIGNING_KEY, memory: variableMemory(), record: () => {} });
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [SIGNING_KEY], memory: variableMemory(), record: () => {} });
   return async () => {
     const tick = await cp.tick();
     assert.ok(tick.failures.length === 0, tick.failures.join('; '));
@@ -196,7 +196,7 @@ test("a read of a day with no reads' partition yet makes it: a log older than th
 });
 
 test('an unsigned cursor is the start only: anywhere else, or at another time, it is not the vault\'s', async () => {
-  const { mac } = await keys();
+  const { mac } = (await keys()).current;
   assert.equal(cursorHolds(mac, { through: 0n, pair: 0n, at: 0, mac: null }), true);
   assert.equal(cursorHolds(mac, { through: 0n, pair: 0n, at: Date.now() + 86_400_000, mac: null }), false);
   assert.equal(cursorHolds(mac, { through: 4n, pair: 0n, at: 0, mac: null }), false);

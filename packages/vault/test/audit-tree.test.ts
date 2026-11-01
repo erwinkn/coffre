@@ -1164,7 +1164,7 @@ test('T169, review by Fable: an upkeep whose checkpointer was closed under it ra
   const fence = new Fence();
   await fence.close('replaced');
   const alerts: string[] = [];
-  const keep = upkeep(cp, fence.store({ ...store, makeDays: async () => {}, pruneBulk: async () => 0 } as never), { keepDays: 1, seed: Buffer.alloc(32, 9), alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, fence.store({ ...store, makeDays: async () => {}, pruneBulk: async () => 0 } as never), { keepDays: 1, signingKey: Buffer.alloc(32, 9), alert: (m) => alerts.push(m) });
   await keep();
   assert.deepEqual(alerts, []);
 });

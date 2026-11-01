@@ -220,7 +220,7 @@ try {
     await db.owner.execute(sql`DELETE FROM log_tiles`);
     await db.owner.execute(sql`DELETE FROM log_uses`);
     await db.owner.execute(sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
-    checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), seed: derivedSigningKey(kek), memory: join(memory, 'memory') });
+    checkpointer = await runCheckpointer({ database: createDatabase(checkpointerPool), signingKeys: [derivedSigningKey(kek)], memory: join(memory, 'memory') });
   }
   const log = checkpointer === null ? { log: '0.14' as const } : { log: '0.15' as const, sealThrough: checkpointer.sealThrough, heldOutside: checkpointer.heldOutside };
   const deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { bulkLimit: BULK }, { kek }, {}, log) });

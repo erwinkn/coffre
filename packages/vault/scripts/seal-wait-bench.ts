@@ -37,7 +37,7 @@ await owner.unsafe('SELECT make_day($1::date), make_day($2::date)', [day(Date.no
 
 const dir = mkdtempSync(join(tmpdir(), 'coffre-seal-wait-'));
 const vaultPool = postgresClient(vaultUrl, { max: Number(process.env.BENCH_VAULT_POOL ?? 1) });
-const cp = await openLogCheckpointer({ store: logStore(createDatabase(vaultPool)), seed, memory: fileMemory(join(dir, 'memory')) });
+const cp = await openLogCheckpointer({ store: logStore(createDatabase(vaultPool)), signingKeys: [seed], memory: fileMemory(join(dir, 'memory')) });
 
 let running = true;
 // The checkpointer's own beat, as runCheckpointer keeps it.

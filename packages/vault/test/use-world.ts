@@ -11,7 +11,7 @@ import { tablesOf, type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { Sealed } from '../src/checkpointer.ts';
-import { resolveVaultConfig } from '../src/config.ts';
+import { resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
@@ -77,8 +77,8 @@ export const LOG_015: VaultOptions = {
 let cutoverNumber: bigint | null = null;
 
 /** A vault of its own, a fresh isolate: its own seal cache, covers and admission count; and the vault, for its decisions. */
-export async function isolate(options: VaultOptions = {}) {
-  const prepared = await prepareVault(CONFIG, { ...LOG_015, ...options });
+export async function isolate(options: VaultOptions = {}, config: ResolvedVaultConfig = CONFIG) {
+  const prepared = await prepareVault(config, { ...LOG_015, ...options });
   const vault = openVault(db.vault, prepared, hot);
   return { use: (input: UseInput) => vault.use!(input), vault, cache: prepared.uses };
 }

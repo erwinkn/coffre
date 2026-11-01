@@ -415,6 +415,31 @@ REMOVALS=(
   "ReadsSeal ProjectorApart ChangeAnswered"
   "ReadsLive CursorAfterRows EveryUseProjected"
   "ReadsLive DeriveFromSealed EveryUseProjected"
+  # 0.15's log across a rotation of the vault's signing key (Rotation.tla; T168, W277). An isolate under the old key,
+  # serving on after the deploy, is refused at its write, under the lock, ordered against the rotation's entry.
+  "RotationDeploy RetiredRefused OldWritesBelowBoundary"
+  "RotationDeploy RetiredRefused LogWorks"
+  "RotationDeploy RefusedUnderLock OldWritesBelowBoundary"
+  "RotationDeploy RotateUnderLock OldWritesBelowBoundary"
+  # The signer carries its memory across, and takes the database's pair under the old key after a restore.
+  "RotationDeploy MemoryUnderPrevious LogWorks"
+  "RotationDeploy RowUnderPrevious LogWorks"
+  "RotationDeploy PendingAccepted NoFalseAlarm"
+  # Someone who holds the old key: it vouches for nothing past the rotation, in a tick or a check.
+  "RotationLeak BoundaryChecked SealedBelowBoundary"
+  "RotationLeak BoundaryChecked VerifiedSound"
+  "RotationLeak RotationProbed VerifiedSound"
+  "RotationLeak AnchorKeyHeld VerifiedSound"
+  # A config rolled back to the old key: its signer signs nothing, refused by itself or by the trigger.
+  "RotationRollback KeyNeverBack+RetiredRefused NoOldPairOverRotation"
+  # Sol's review r1 of #444: a tick sealing its window in parts leaves a pair under the new key below the rotation; a
+  # rotation's row renumbered; a pair naming a key it is not signed under; a reader whose two reads straddle the deploy.
+  "RotationChunked KeyringBound NoFalseAlarm"
+  "RotationMove NumberInRotation SealedBelowBoundary"
+  "RotationMove NumberInRotation VerifiedSound"
+  "RotationClaim SignerVerified VerifiedSound"
+  "RotationReader SnapshotRead ReaderNoFalseAlarm"
+  "RotationReader SnapshotRead ReaderSound"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -444,6 +469,9 @@ EXPECTED=(
   # Postgres's clock stepping back: a use may sit past its checkpoint's ceiling, which the verifier's bounded read
   # misses, and alarms on: fail closed (HotPathOne.tla's CeilingHolds).
   "HotPathOneChunksClock CeilingHolds"
+  # The rotation entry deleted before its first seal, by someone who holds the old key, who signs a pair over its
+  # place: the rotation's window, a tick long, which no check sees (Rotation.tla).
+  "RotationWindow VerifiedSound"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
@@ -454,8 +482,9 @@ EXPECTED=(
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
 # scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
 # slack and clock-skew scenarios), seal (Seal and Migration015),
-# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention and
-# SealRetentionCrash). A scenario in no case below is in `rest`.
+# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention,
+# SealRetentionCrash and the key's Rotation scenarios). A scenario in no case
+# below is in `rest`.
 SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
 shard_of() {
   case "$1" in
@@ -466,7 +495,7 @@ shard_of() {
     HotPathOneLive|HotPathOneStallLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
     SealPlugin|SealCore|SealStall) echo seal-plugin ;;
-    SealRetention*) echo seal-retention ;;
+    SealRetention*|Rotation*) echo seal-retention ;;
     Seal|Migration015*) echo seal ;;
     *) echo rest ;;
   esac
