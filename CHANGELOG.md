@@ -202,7 +202,8 @@
   a second run (without Cloudflare, the commands its screen shows name the
   three configs after the Workers the deployment's files name too, no
   longer `coffre-vault-hot` whatever they are: a second deployment on an
-  account was refused that name, which the first had), and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
+  account was refused that name, which the first had; a file it cannot
+  read stops it first, saying what is wrong), and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
   adding the binding to a file an earlier release wrote; the database's
   connections are now split three ways, so each config gets a third of
   what is left, 6 on a `max_connections` of 25, where it got 9, and a rerun

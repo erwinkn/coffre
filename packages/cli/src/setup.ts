@@ -41,22 +41,19 @@ import { Cloudflare, configName, type Database, deployedSummary, Later, OWNED } 
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime', hot: 'coffre_vault_hot', backup: 'coffre_backup_login' } as const;
 type Component = keyof typeof ROLES;
 const COMPONENTS = ['app', 'vault', 'hot', 'backup'] as const;
-/** The template's Workers, after which the configs the screen's commands make are named (`configName`), when the deployment names none. */
+/** The template's Workers, after which the configs the screen's commands make are named (`configName`), for a deployment of no Workers. */
 const TEMPLATE = { app: 'coffre', vault: 'coffre-vault' } as const;
 
 /**
  * The Workers a deployment's files name, after which the screen's commands
  * name the configs they make, as setup's Cloudflare path does: an account
  * holds one Hyperdrive config by a name, so a second deployment on it, under
- * Workers of its own, would be refused the template's. The template's for a
- * file setup cannot read.
+ * Workers of its own, would be refused the template's. A file it cannot read
+ * stops setup, before anything is made, with what is wrong with it: the
+ * template's names in its place could be another deployment's.
  */
 export function workerNames(dir: string): { app: string; vault: string } {
-  try {
-    return { app: readWorker(dir, 'app/wrangler.jsonc').name, vault: readWorker(dir, 'vault/wrangler.jsonc').name };
-  } catch {
-    return TEMPLATE;
-  }
+  return { app: readWorker(dir, 'app/wrangler.jsonc').name, vault: readWorker(dir, 'vault/wrangler.jsonc').name };
 }
 /** The logins that run. */
 type Runtime = Exclude<Component, 'backup'>;
@@ -162,6 +159,8 @@ export async function setup(args: string[]): Promise<void> {
     const about = offers && (kind === 'workers' || kind === 'empty') ? "a deployment's database, keys and Cloudflare" : "a deployment's database logins, migrations and keys";
     if (s.ansi) out.write(`\n  ${s.bold('coffre setup')}  ${s.dim(about)}\n\n`);
     if (kind === 'empty' && terminal !== null) kind = await scaffold(dir, terminal.keys, out, clean);
+    // Read first: a file setup cannot read stops it before it asks for anything or makes anything.
+    const names = kind === 'workers' ? workerNames(dir) : TEMPLATE;
     const { url: administrator, secrets: typed } = await readDatabaseUrl(out, s, {
       question: "The database administrator's connection string",
       hint: "Hidden as you type. Your host's admin URL, such as PlanetScale's Connect page gives.",
@@ -197,7 +196,7 @@ export async function setup(args: string[]): Promise<void> {
     } else if (result.keys === null && COMPONENTS.every((component) => result[component].url === null)) {
       out.write(nothingToSave(out));
     } else {
-      await showSecrets(terminal!, setupScreen(result, kind === 'workers' ? workerNames(dir) : TEMPLATE));
+      await showSecrets(terminal!, setupScreen(result, names));
       out.write(summary(result, out));
     }
   } catch (error) {

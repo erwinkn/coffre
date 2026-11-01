@@ -26,12 +26,14 @@ type Run = { status: number | null; stdout: string; stderr: string };
  * or in a Workers deployment's, as its two wrangler.jsonc files make it: the
  * URL piped in.
  */
-function setup(args: string[], how: { stdin?: string; workers?: boolean }): Run {
+/** `coffre setup`, in a directory of its own: with `workers`, a Workers deployment's two files, the template's Workers named, or `vault` its file as given. */
+function setup(args: string[], how: { stdin?: string; workers?: boolean; vault?: string }): Run {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-setup-'));
   const files = how.workers === true ? ['app', 'vault'] : [];
   for (const component of files) {
     mkdirSync(join(dir, component));
-    writeFileSync(join(dir, component, 'wrangler.jsonc'), '{}\n');
+    const named = `{ "name": "${component === 'app' ? 'coffre' : 'coffre-vault'}" }\n`;
+    writeFileSync(join(dir, component, 'wrangler.jsonc'), component === 'vault' ? (how.vault ?? named) : named);
   }
   try {
     const result = spawnSync(process.execPath, ['--conditions=coffre:source', main, 'setup', ...args], {
@@ -201,12 +203,19 @@ test("the configs the screen makes are named after the deployment's Workers: an 
       hyperdriveCommand('create coffre-staging-vault --caching-disabled', 6),
       hyperdriveCommand('create coffre-staging-vault-hot --caching-disabled', 6),
     ]);
-    // A file setup cannot read names nothing: the template's.
-    rmSync(join(dir, 'vault/wrangler.jsonc'));
-    assert.deepEqual(workerNames(dir), { app: 'coffre', vault: 'coffre-vault' });
+    // A file setup cannot read stops it, saying which: the template's names in its place could be another deployment's.
+    writeFileSync(join(dir, 'vault/wrangler.jsonc'), readFileSync(join(dir, 'vault/wrangler.jsonc'), 'utf8').replace(/\}\s*$/, ''));
+    assert.throws(() => workerNames(dir), /^Error: vault\/wrangler\.jsonc is not valid: /);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a Workers file setup cannot read stops it before it asks for anything", () => {
+  const run = setup(['--json'], { stdin: 'postgresql://admin:secret@db.example:5432/coffre\n', workers: true, vault: '{ "name": "coffre-vault"\n' });
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, /vault\/wrangler\.jsonc is not valid: /);
+  assert.doesNotMatch(run.stderr, /Connect|db\.example/, 'it reads no URL and connects to nothing');
 });
 
 test('where the values go: new Hyperdrive configs, or after a reset, the ones to update, never with a password in the command', () => {
