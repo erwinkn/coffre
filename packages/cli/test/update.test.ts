@@ -828,8 +828,22 @@ test("pnpm 11's own global install, as it lays it out: found by asking pnpm, tho
     mkdirSync(home);
     writeFileSync(join(home, 'package.json'), JSON.stringify({ name: 'home', private: true, packageManager: 'pnpm@11.8.0' }));
     const pnpmHome = join(dir, 'pnpm');
-    const base = { ...process.env, PNPM_HOME: pnpmHome, XDG_DATA_HOME: join(dir, 'data'), XDG_CONFIG_HOME: join(dir, 'config'), XDG_STATE_HOME: join(dir, 'state') };
-    const env = { ...base, PATH: `${join(pnpmHome, 'bin')}:${process.env.PATH}` };
+    // `pnpm add -g` ignores a project's packageManager pin: on a host whose own pnpm is another major (12 lays a
+    // global out in global/v11/…/node_modules/.pnpm, not the store's links/), the layout below would be that one's.
+    // So `pnpm` here is 11.8.0 itself, through corepack, wherever the host's pnpm is from.
+    mkdirSync(join(dir, 'shim'));
+    writeFileSync(join(dir, 'shim', 'pnpm'), '#!/bin/sh\nexec corepack pnpm@11.8.0 "$@"\n');
+    chmodSync(join(dir, 'shim', 'pnpm'), 0o755);
+    const base = {
+      ...process.env,
+      PATH: `${join(dir, 'shim')}:${process.env.PATH}`,
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
+      PNPM_HOME: pnpmHome,
+      XDG_DATA_HOME: join(dir, 'data'),
+      XDG_CONFIG_HOME: join(dir, 'config'),
+      XDG_STATE_HOME: join(dir, 'state'),
+    };
+    const env = { ...base, PATH: `${join(pnpmHome, 'bin')}:${base.PATH}` };
     const added = spawnSync('pnpm', ['add', '-g', join(dir, 'cli.tgz')], { cwd: home, env, encoding: 'utf8' });
     assert.equal(added.status, 0, added.stdout + added.stderr);
     const self = spawnSync(join(pnpmHome, 'bin', 'coffre'), [], { env, encoding: 'utf8' }).stdout.trim();
