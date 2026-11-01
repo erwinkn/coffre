@@ -199,7 +199,7 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
  * (review r7). Such a cursor stops the projector too, so retention waits,
  * and alarms once it has waited long.
  */
-async function behindReads(store: RetentionStore, macKey: Buffer, upto: bigint): Promise<string | null> {
+async function behindReads(store: RetentionStore, macKey: LogMacKey, upto: bigint): Promise<string | null> {
   const cursor = await store.readsCursor();
   if (!cursorHolds(macKey, cursor)) return `the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`;
   return cursor.through >= upto ? null : `the reads' projection (through ${cursor.through}) has not reached the cut (${upto}) yet`;

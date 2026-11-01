@@ -4,7 +4,7 @@ import { entryLeaf, inclusionProof, nodesFrom, openPair, tileMap, tilesFor, veri
 import { USE_WAYS } from '@coffre/core/vault';
 
 import { logObject } from './inputs.ts';
-import { authentic, retentionCut } from './log-entry.ts';
+import { authentic, retentionCut, type LogMacKey } from './log-entry.ts';
 
 // The audit pages' reads (T166; docs/design/0.15-plan.md, "As built: T166";
 // formal/Reads.tla). A use is the slim row of R53: its way in, its key, the
@@ -92,28 +92,31 @@ export const PROJECTED_AT_ONCE = 1_000;
 
 const MAC_BYTES = 16;
 
-/** A read's MAC: HMAC-SHA256 under the log's MAC key, over every column but itself, the number included, cut to 16 bytes. */
-export function readMac(key: Buffer, row: Omit<ReadRow, 'mac'>): Buffer {
+/**
+ * A read's MAC: HMAC-SHA256 under the log's MAC key (its key, not its tag: a read is no entry of the log, and the
+ * database refuses none by it), over every column but itself, the number included, cut to 16 bytes.
+ */
+export function readMac(key: LogMacKey, row: Omit<ReadRow, 'mac'>): Buffer {
   const columns = [
     String(row.number), String(row.at), row.credential, String(row.purpose), row.principal, row.secret, row.environment, row.project,
     row.place, row.source, row.sourceEnvironment, row.sourceProject, row.version,
   ];
-  return createHmac('sha256', key).update('coffre.reads.v1\0').update(JSON.stringify(columns)).digest().subarray(0, MAC_BYTES);
+  return createHmac('sha256', key.key).update('coffre.reads.v1\0').update(JSON.stringify(columns)).digest().subarray(0, MAC_BYTES);
 }
 
 /** The cursor's MAC (formal/Reads.tla, CursorMac): over where it stands, so that one moved ahead never has the pages list reads as whole. */
-export function cursorMac(key: Buffer, cursor: Pick<ReadsCursor, 'through' | 'pair' | 'at'>): Buffer {
-  return createHmac('sha256', key).update('coffre.reads.cursor.v1\0').update(`${cursor.through}:${cursor.pair}:${cursor.at}`).digest().subarray(0, MAC_BYTES);
+export function cursorMac(key: LogMacKey, cursor: Pick<ReadsCursor, 'through' | 'pair' | 'at'>): Buffer {
+  return createHmac('sha256', key.key).update('coffre.reads.cursor.v1\0').update(`${cursor.through}:${cursor.pair}:${cursor.at}`).digest().subarray(0, MAC_BYTES);
 }
 
 /** Whether a cursor's MAC holds under `key`: the start, before any read is projected, has none. */
-export function cursorHolds(key: Buffer, cursor: ReadsCursor): boolean {
+export function cursorHolds(key: LogMacKey, cursor: ReadsCursor): boolean {
   if (cursor.mac === null) return cursor.through === 0n && cursor.pair === 0n && cursor.at === 0;
   return cursor.mac.length === MAC_BYTES && timingSafeEqual(cursorMac(key, cursor), cursor.mac);
 }
 
 /** Whether a read's MAC holds under `key`. */
-export function readHolds(key: Buffer, row: ReadRow): boolean {
+export function readHolds(key: LogMacKey, row: ReadRow): boolean {
   return row.mac.length === MAC_BYTES && timingSafeEqual(readMac(key, row), row.mac);
 }
 
@@ -191,7 +194,7 @@ async function rangeAt(store: ReadsStore, verifiers: PairVerifiers, at: bigint):
  * hold stops the projection, an alarm, and the pages say how far they
  * list: nothing it would derive is listed (fail closed).
  */
-export async function projectReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, options: { steps?: number; atOnce?: number } = {}): Promise<Projected> {
+export async function projectReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: LogMacKey }, options: { steps?: number; atOnce?: number } = {}): Promise<Projected> {
   const atOnce = options.atOnce ?? PROJECTED_AT_ONCE;
   let cursor = await store.readsCursor();
   if (!cursorHolds(keys.mac, cursor)) throw new Error(`the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`);
@@ -263,7 +266,7 @@ const PROBLEMS_NAMED = 20;
  * docs/design/0.15-plan.md). Flat: a stretch reads one range however long
  * the log.
  */
-export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, from: bigint): Promise<{ problems: string[]; through: bigint; listed: bigint; next: bigint | null }> {
+export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: LogMacKey }, from: bigint): Promise<{ problems: string[]; through: bigint; listed: bigint; next: bigint | null }> {
   let cursor: ReadsCursor;
   try {
     cursor = await store.readsCursor();
@@ -310,7 +313,7 @@ export async function checkReads(store: ReadsStore, keys: { verifiers: PairVerif
 }
 
 /** What a range's uses, derived again, find wrong in the listing between `after` and `upto` (`checkReads`). */
-async function listedAsSealed(store: ReadsStore, mac: Buffer, uses: readonly LogEntry[], range: { after: bigint; upto: bigint; floor: number; signedAt: number }): Promise<string[]> {
+async function listedAsSealed(store: ReadsStore, mac: LogMacKey, uses: readonly LogEntry[], range: { after: bigint; upto: bigint; floor: number; signedAt: number }): Promise<string[]> {
   const reads = await derive(store, mac, uses);
   if (reads.length === 0) return [];
   const problems: string[] = [];
@@ -398,7 +401,7 @@ function wayObject(use: { credential: string; purpose: number }): string {
  * edited since its seal stops the projection (fail closed), never derives
  * a read from it.
  */
-async function derive(store: ReadsStore, mac: Buffer, entries: readonly LogEntry[]): Promise<ReadRow[]> {
+async function derive(store: ReadsStore, mac: LogMacKey, entries: readonly LogEntry[]): Promise<ReadRow[]> {
   const holds = authentic(mac);
   const read = async (asked: { object: string; below: bigint; first: boolean; use: bigint }[]) => (await store.objects(asked)).map((change, i) => {
     if (change !== null && !holds(change)) throw new Error(`change ${change.number}, which use ${asked[i]!.use} is read from, does not hold to its MAC: edited since its seal`);
@@ -448,13 +451,13 @@ export const NOWHERE = '00000000-0000-0000-0000-000000000000';
  */
 export class Projector {
   readonly #store: ReadsStore;
-  readonly #keys: { verifiers: PairVerifiers; mac: Buffer };
+  readonly #keys: { verifiers: PairVerifiers; mac: LogMacKey };
   readonly #alert: (message: string) => void;
   #running: Promise<boolean> | null = null;
   #failed: string | null = null;
   #stopped = false;
 
-  constructor(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: Buffer }, alert: (message: string) => void) {
+  constructor(store: ReadsStore, keys: { verifiers: PairVerifiers; mac: LogMacKey }, alert: (message: string) => void) {
     this.#store = store;
     this.#keys = keys;
     this.#alert = alert;
