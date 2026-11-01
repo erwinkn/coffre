@@ -349,8 +349,10 @@ the newest pair signed by the vault's key and every entry above it by its
 MAC.
 
 The wrong vault key fails here too: its checkpointer refuses the log's
-checkpoints ("not a pair signed by this log"), and every use of a value is
-refused.
+checkpoints ("not a pair signed by this log"). The app cannot then ask
+whether 0.15's log is cut over, so it answers every request but `/livez`
+503, sign-in and every use of a value included, and `/readyz` is red; the
+server's log says why (`cutover_refused`).
 
 `packages/server/test/restore-015.test.ts` drills it on Postgres, with
 PostgreSQL 16's `pg_dump` and `pg_restore`: a cut-over instance backed up,

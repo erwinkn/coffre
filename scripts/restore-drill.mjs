@@ -95,7 +95,13 @@ async function check(before) {
     const trees = await sealed(admin, BigInt(before.trees.checkpoint.upto) - 1n);
     say(`0.15's log verifies from its newest checkpoint, up to ${trees.checkpoint.upto}`);
 
-    assert.deepEqual(await call(admin, 'GET', '/api/members'), before.members, 'members or grants differ from the backup');
+    // The directory as backed up; how far its reads are listed (T166) moves on with this sign-in's seal, so it is held
+    // apart: there as it was, and vouched for.
+    const { reads, ...directory } = await call(admin, 'GET', '/api/members');
+    const { reads: readsBefore, ...directoryBefore } = before.members;
+    assert.deepEqual(directory, directoryBefore, 'members or grants differ from the backup');
+    assert.equal(reads === undefined, readsBefore === undefined, 'the directory says how far reads are listed, or not, unlike the backup');
+    assert.equal(reads?.forged, undefined, 'the restored reads listing is not vouched for');
     say('members, owners, grants and the removed are as backed up');
 
     assert.equal((await reveal(admin, CANARY)).DRILL_CANARY, before.canary);
@@ -116,10 +122,12 @@ async function check(before) {
 }
 
 async function wrongKek(before) {
-    // The vault seals every member's row under keys that come from its KEK: under another, it can check
-    // nobody's, the Owner's included, so every request it is asked about is an outage, never a verdict.
-    assert.equal(await trySignIn(ADMIN), null, 'signed in under the wrong KEK');
-    say(`${ADMIN} cannot sign in: the vault can say of nobody who they are`);
+    // The vault's keys come from its KEK: under another, its checkpointer refuses the log's checkpoints ("not a pair
+    // signed by this log"), so the app's door, which asks whether 0.15's log is cut over, holds every request at 503,
+    // sign-in's first step included, and the vault decides nothing: an outage, never a verdict.
+    const leave = await fetch(`${API}/auth/signin/github`, { redirect: 'manual' });
+    assert.equal(leave.status, 503, `sign-in under the wrong KEK answered ${leave.status}`);
+    say(`${ADMIN} cannot sign in: coffre answers ${leave.status} from the first step`);
     const asToken = (method, path, body) => fetch(`${API}${path}`, {
         method,
         headers: { authorization: `Bearer ${before.token}`, 'content-type': 'application/json' },
@@ -136,7 +144,8 @@ async function wrongKek(before) {
 
     await fetch(`${API}/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*`);
     const ready = await (await fetch(`${API}/readyz`)).json();
-    assert.equal(ready.checkpointed, false, 'the vault checkpointed under the wrong KEK');
+    assert.equal(ready.ok, false, 'ready under the wrong KEK');
+    assert.notEqual(ready.checkpointed, true, 'the vault checkpointed under the wrong KEK');
     say(`and /readyz turns red: ${JSON.stringify(ready)}`);
 }
 
