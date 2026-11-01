@@ -126,8 +126,12 @@ async function relay(at: string): Promise<{
   const target = new URL(at);
   const server: Server = createServer((client) => {
     const upstream = connect(Number(target.port), target.hostname);
+    // A connection's startup and authentication pass at no delay, opened mid-row too (a pool's connection replaced after
+    // one a deadline cut off): only its statements, from its first Parse or simple Query on, are slowed, both ways. Else
+    // a call that opened one sent nothing within its deadline, its handshake's round trips each slowed (T165, W301).
+    let slowed = false;
     const pass = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) => from.on('data', (chunk) => {
-      if (half === 0) to.write(chunk);
+      if (half === 0 || !slowed) to.write(chunk);
       else setTimeout(() => to.write(chunk), half);
     });
     // The client's messages, framed: its startup (and an SSL request before it) untyped, then each a type and a length.
@@ -149,6 +153,7 @@ async function relay(at: string): Promise<{
         if (pending.length < 5) return;
         const length = pending.readInt32BE(1);
         if (pending.length < 1 + length) return;
+        if (pending[0] === 0x50 || pending[0] === 0x51) slowed = true;
         if (pending[0] === 0x53 || pending[0] === 0x51) statements += 1;
         if (pending[0] === 0x51) unbound += 1;
         if (pending[0] === 0x50) {
@@ -390,6 +395,8 @@ async function cell(row: Row, key: Key) {
   const handled = await runtime.signin!.issueHandle({ ...context, personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: [row.where === 'fork' ? fork : place] });
   const [token, handle] = [issued.token, handled.token];
   const path = `${asks}/API_KEY`;
+  // The key itself, in dev, which a fork and their personal config inherit: what the root's writes name.
+  const held = `${place}/API_KEY`;
   // A person's `dev@me` is the proxy's only where the deployment generates values for dev: by the API alone.
   const url = row.where === 'mine' ? null : `/use/${row.where === 'fork' ? fork : place}/api/v1/thing`;
   // Used before: through another token of theirs, while they stood, whose use leaves the key fresh in their set.
@@ -414,13 +421,13 @@ async function cell(row: Row, key: Key) {
   }
   if (key === 'made since') await root.secrets.set(place, { API_KEY: 'sk_t158_made' });
   if (key === 'deleted') await root.secrets.set(place, { API_KEY: null });
-  if (key === 'a reference, broken since') await root.references.break(path);
+  if (key === 'a reference, broken since') await root.references.break(held);
   if (key === 'its row put back since') await root.secrets.set(place, { API_KEY: 'sk_t158_written' });
   if (key === "a reference, its source's key archived since" || key === "a reference, its source's environment archived since") {
-    await root.secrets.update(path, { archived: true });
+    await root.secrets.update(held, { archived: true });
     if (key === "a reference, its source's key archived since") await root.secrets.update(`${source}/SOURCE_KEY`, { archived: true });
     else await root.environments.update(source, { archived: true });
-    await root.secrets.update(path, { archived: false });
+    await root.secrets.update(held, { archived: false });
   }
   // Their place renamed, their grant there given back, and its slug taken by a new one, where they hold none; or deleted
   // for good, and its slug taken the same: the vault's map holds the old place, and the key's state there.
@@ -532,7 +539,9 @@ test(`through the app, a person is answered alike for every key they may not hav
             if (cached.length > 0) differing.push(`${label}: ${via}, the cached form for ${cached.map((a) => a.key).join(', ')}`);
             // Standing: the form alone here. The app runs no statement of its own on this path, and the vault's
             // matrix holds each refusal's buffers to the same request's from an isolate with no history.
-            if (row.lost === 'they stand') continue;
+            // Standing at the place (a fork's, its parent's grant gone, T165, included): a key's shape may show in its cost,
+            // a key they may know of (R6). Only a caller standing nowhere there is held to reading no key.
+            if (row.lost === 'they stand' || row.lost === 'parent revoked') continue;
             const read: { key: Key; buffers: number }[] = [];
             for (const a of refused) {
               const buffers = await bufferedBy(a.sent[via]);
