@@ -509,7 +509,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       case 75: return BackendKeyData(x); // K
       case 69: return ErrorResponse(x); // E
       case 78: return NoticeResponse(x); // N
-      case 73: return; // I, EmptyQueryResponse
+      case 73: return EmptyQueryResponse(); // I
       // No LISTEN is asked, but a NOTIFY to a channel listened on by hand would come: it is dropped.
       case 65: return; // A, NotificationResponse
       case 71: return CopyInResponse(); // G
@@ -590,6 +590,17 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       terminate();
     } else {
       onopen(connection);
+    }
+  }
+
+  /** Coffre: an empty statement's answer, in place of a CommandComplete: in a group, its member answered, with no rows. */
+  function EmptyQueryResponse(): void {
+    const q = query;
+    if (q === null || q.group === null) return;
+    results ??= [result];
+    if (q.member + 1 < q.group.length) {
+      results.push((result = new Result()));
+      startMember(q, q.member + 1);
     }
   }
 

@@ -778,3 +778,32 @@ test("no COMMIT goes with the writes left to `later` while a statement something
     await client.end();
   }
 });
+
+test("a COPY left to `later` goes alone, so no COMMIT rides behind what the client refuses: the transaction keeps nothing (review r5 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table copied (n int)');
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into copied values ($1)', [1]);
+      laterOn(tx, 'copy (insert into copied values (2) returning n) to stdout');
+    }), { code: 'COPY_NOT_SUPPORTED' });
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from copied')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("an empty statement in a group answers in its place: each result and error stays its own statement's (review r5 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    const answers = await client.begin((tx) => Promise.all([tx.unsafe('-- nothing', [], { simple: false }), tx.unsafe('select 7 as n', [], { simple: false })]));
+    assert.deepEqual(answers.map((rows) => [...rows]), [[], [{ n: 7 }]]);
+    let settled: PromiseSettledResult<unknown>[] = [];
+    await assert.rejects(client.begin(async (tx) => {
+      settled = await Promise.allSettled([tx.unsafe('-- nothing', [], { simple: false }), tx.unsafe('select 1 / $1::int', [0]), tx.unsafe('select 3', [], { simple: false })]);
+    }), { code: '22012' });
+    assert.deepEqual(settled.map((outcome) => (outcome.status === 'fulfilled' ? 'answered' : (outcome.reason as { code?: string }).code)), ['answered', '22012', '25P02']);
+  } finally {
+    await client.end();
+  }
+});

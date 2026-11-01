@@ -615,10 +615,16 @@ export default function postgres(given: Options): Sql {
 /** A transaction's own statements, which go alone (`gather`): its savepoints, and a rollback to one. */
 const OWN = /^\s*(begin|commit|rollback|savepoint|release)\b/i;
 
-/** A statement that cannot go in a group: a value whose type only the server can say, or one the client cannot send. */
+/** A statement that cannot go in a group: a value whose type only the server can say, one the client cannot send, a COPY. */
 function alone(q: Query): boolean {
-  return q.args.some((x) => x === undefined || (x !== null && typeof x === 'object' && inferType(x) === 0)) || q.args.length >= 65534;
+  return q.args.some((x) => x === undefined || (x !== null && typeof x === 'object' && inferType(x) === 0)) || q.args.length >= 65534 || COPY.test(q.text);
 }
+
+/**
+ * A COPY, which the client refuses once Postgres has run it (connection.ts): it goes alone, never in a group whose
+ * COMMIT would go behind it and keep what the client then refused.
+ */
+const COPY = /^(\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)*copy\b/i;
 
 /** What a statement of a group Postgres skipped fails with, behind the one that failed: its transaction is aborted. */
 function skippedError(): PostgresError {
