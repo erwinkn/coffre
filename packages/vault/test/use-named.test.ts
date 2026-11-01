@@ -254,13 +254,16 @@ test("a key renamed, or a token's hash swapped, is `moved`: nothing written, the
   const id = await w.key();
   const name = await w.nameOf(id);
   const { vault } = await isolate();
-  assert.equal(codeOf(await vault.useNamed!(w.ask(name))), 'ok');
+  // Every use in one of the cap's periods: the use of the key renamed rides the first's cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
+  assert.equal(codeOf(await vault.useNamed!(w.ask(name, when))), 'ok');
   await run(db.owner, sql`UPDATE secrets SET key = ${`${name}_RENAMED`} WHERE id = ${id}`);
-  assert.equal(codeOf(await vault.useNamed!(w.ask(name))), 'missing', 'the name the request named holds nothing now');
-  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`))), 'ok');
+  assert.equal(codeOf(await vault.useNamed!(w.ask(name, when))), 'missing', 'the name the request named holds nothing now');
+  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`, when))), 'ok');
   // A writer moves the token's hash off its credential: the request's token names no credential now.
   await run(db.owner, sql`UPDATE credentials SET token_hash = ${randomBytes(32)} WHERE id = ${w.credentialId}`);
-  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`))), 'credential');
+  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`, when))), 'credential');
   assert.equal(await uses(), 1, "one entry: the first use's, which the use of the key renamed rides (its cover: the same credential and key)");
 });
 
@@ -574,8 +577,9 @@ test("a use by ids logs its request whatever it finds, as before names, its key 
   const id = await w.key();
   const other = await w.key();
   const { use } = await isolate();
+  // Every use in one of the cap's periods: `id`'s second, in the set, takes no lock, and is logged.
+  const at = onePeriod();
   const asked = (secretId: string) => {
-    const at = Date.now();
     return use({ credential: w.credentialId, secretId, place: null, purpose: 'use', requestId: newRequestId(), at, deadline: at + 3000 });
   };
   assert.equal((await asked(id)).ok, true);
