@@ -48,6 +48,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
     from 0.14.
   - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
     that the audit pages read ([below](#readstla)).
+- One holds 0.16's proxy definitions edited in the UI, before they are
+  built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
+  when its route is a row an Owner edits ([below](#routingtla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -1940,6 +1943,66 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   transaction, FromChecked its `p_from` (SQLite's write the same, in its
   transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
+
+## 0.16: proxy definitions in the UI
+
+### Routing.tla
+
+Where a key may go once an Owner can edit its route in the UI (T186;
+[proxy-ui.md](design/proxy-ui.md), section 3), written before the code
+(R45). A route's definition is then a row: an edit can land while uses
+are in flight, a database writer can put an old row back, and a code
+definition of the same name can shadow it, then be dropped.
+
+**The model.** One environment, one route, one key, two hosts (`good`,
+`evil`). The definition is a sealed object of the vault's log: each
+change appends a version (its host, and its clearance: "sensitive" when
+an Owner covering the place saved it, else "secret"), and the row holds a
+version, the newest unless a writer put back an older one. A use is the
+app's resolve (its own copy of the definition, read with no seal checked),
+the vault's one call (the row and the newest change's seal, the key's
+nature, decided in one snapshot under the fence, answering with the
+definition decided on), and the send of the kept values, W ticks at most
+after the decision (`cacheSeconds`, or the deadline). An edit is a change
+under the fence, one step: HotPathOne proves the fence for any input. A
+key may be marked sensitive after a save. Deployments flip whether code
+defines the route's name; each new isolate holds the log's code set to its
+own before it serves (a `proxy.code` change, deleting the UI row code
+shadows).
+
+| Protection, in the design | Turned off, TLC finds |
+|---|---|
+| the definition read in the use's statement, after the fence (FencedRead) | `EverySendAllowed`: a use decided on the row an edit had replaced, numbered after it |
+| the row's seal is its newest change's (SealChecked) | `EverySendAllowed`: a writer puts back the old version, and a use is decided on it |
+| the app sends by the definition the vault decided on, which the call answers with (SentAsDecided) | `EverySendAllowed`: the app's own copy, older, says another host than the version decided |
+| kept values go only to the definition they were decided under (BoundToDefinition) | `EverySendAllowed`: values decided for one upstream sent to a newer one the vault never decided on for them |
+| each use weighs the key's nature now against the definition's clearance (ClearanceAtUse) | `EverySendAllowed`: a Developer's route saved while the key was secret sends it once it is sensitive |
+| kept values serve W, no longer (KeptExpires) | `WithinWindow` |
+| the `proxy.code` change deletes the shadowed UI row (ClearSuperseded) | `NoRevival`: code defines the name, then drops it, and the UI row nobody saw since serves again |
+| no proxy request before the isolate's code set is logged (CodeGate) | `NoRevival`: the same, through a deployment that served the name from code without logging it |
+
+- `EverySendAllowed`: every request carrying the key went to the host of a
+  version the vault decided on, the newest when it decided, and cleared for
+  the key's nature then.
+- `WithinWindow`: within W of that decision.
+- `NoRevival`: never under a UI version a code deployment shadowed.
+- `StrictlyCurrent`, `EXPECTED` broken with every protection on: no request
+  under a version an edit has replaced. Values decided before an edit serve
+  out their W, as a revoked handle's do; the design documents that window
+  rather than pay a round trip on every cache hit (its question 4).
+
+| Scenario | What | Distinct states |
+|---|---|---|
+| `Routing` | two edits (any host, either clearance), a key marked sensitive, a row put back, while uses resolve, decide and send | 3,528,620 |
+| `RoutingCode` | one edit, a row put back, and two deployments: code defines the name, then drops it | 660,031 |
+
+**What it does not cover.** The fence itself (HotPathOne). One isolate,
+one live deployment at a time: two app versions serving at once during a
+deploy alternate `proxy.code` changes, which only delete, as the design
+says. The frozen holdings are one clearance per version; the decisions over
+grants, forks and references are the vault's own, held by its tests and
+Lean. The path rules and the allow list are pure functions, held by
+property tests.
 
 ## TLC
 
