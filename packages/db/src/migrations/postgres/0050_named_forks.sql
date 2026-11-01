@@ -5,7 +5,7 @@
 -- - Then, for one who stands, what the place inherits from, nearest first, from rows no key decides: a parent archived, deleted, not there, or a chain that loops or runs past 3 cuts it, and the place reads nothing, as the app's read refuses it whole (`n_cut`, answered `archived`, nothing of the key read).
 -- - Then the key, by its name, in the nearest layer that settles it (`resolveValues`): one that holds it live, or one but the last that removed it (a dismissal not restored). Held at the place, it is used by its id, as before; inherited, by its id through the place, as a fork's read uses it (e1, the whole form), and the vault decides it on the caller's standing where it is held too (`decideChecked`); removed, or held nowhere, it is a key the place does not hold.
 -- - A named call's key the place does not hold reads the place's parent when the place is a personal config (e4), which the standing there weighs.
--- - The app's rows name the place's parent's slug (`parent`), as `app_read` names a fork's.
+-- - The app's rows name the place's parent's slug (`parent`), as `app_read` names a fork's, and, for a key the place inherits, where it is held (`held`: its environment's id and slug), so that the app answers a yes from these rows, reading no layer itself.
 -- Additive: the previous release's calls pass no `p_forks`, and the statement reads what 0046's did for them.
 ALTER TYPE use_row ADD ATTRIBUTE n_cut boolean;
 --> statement-breakpoint
@@ -403,6 +403,7 @@ BEGIN
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
                     'parent', CASE WHEN v_np_parent IS NOT NULL THEN (SELECT pe.slug FROM public.environments pe WHERE pe.id = v_np_parent) END,
+                    'held', CASE WHEN v.e1_id IS NOT NULL AND v.e2_id IS NOT NULL THEN json_build_object('id', v.e2_id, 'slug', v.e2_slug) END,
                     'secrets', CASE WHEN v.s_row IS NULL THEN '[]'::json ELSE json_build_array(json_build_object('secret', v.s_row, 'version', v.sv_row)) END) END,
                 -- A named call's (`n_*`), set below; a binding's row.
                 NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean
@@ -588,6 +589,7 @@ BEGIN
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
                     'parent', CASE WHEN v_np_parent IS NOT NULL THEN (SELECT pe.slug FROM public.environments pe WHERE pe.id = v_np_parent) END,
+                    'held', CASE WHEN v.e1_id IS NOT NULL AND v.e2_id IS NOT NULL THEN json_build_object('id', v.e2_id, 'slug', v.e2_slug) END,
                     'secrets', CASE WHEN v.s_row IS NULL THEN '[]'::json ELSE json_build_array(json_build_object('secret', v.s_row, 'version', v.sv_row)) END) END,
                 -- A named call's (`n_*`), set below; a binding's row.
                 NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean
@@ -721,6 +723,7 @@ BEGIN
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
                     'parent', CASE WHEN v_np_parent IS NOT NULL THEN (SELECT pe.slug FROM public.environments pe WHERE pe.id = v_np_parent) END,
+                    'held', CASE WHEN v.e1_id IS NOT NULL AND v.e2_id IS NOT NULL THEN json_build_object('id', v.e2_id, 'slug', v.e2_slug) END,
                     'secrets', CASE WHEN v.s_row IS NULL THEN '[]'::json ELSE json_build_array(json_build_object('secret', v.s_row, 'version', v.sv_row)) END) END,
                 -- A named call's (`n_*`), set below; a binding's row.
                 NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean
@@ -877,6 +880,7 @@ BEGIN
                     'project', (SELECT to_json(q) FROM public.projects q WHERE q.id = coalesce(v.e1_project, v.e2_project)),
                     'environment', (SELECT to_json(e) FROM public.environments e WHERE e.id = coalesce(v.e1_id, v.e2_id)),
                     'parent', CASE WHEN v_np_parent IS NOT NULL THEN (SELECT pe.slug FROM public.environments pe WHERE pe.id = v_np_parent) END,
+                    'held', CASE WHEN v.e1_id IS NOT NULL AND v.e2_id IS NOT NULL THEN json_build_object('id', v.e2_id, 'slug', v.e2_slug) END,
                     'secrets', CASE WHEN v.s_row IS NULL THEN '[]'::json ELSE json_build_array(json_build_object('secret', v.s_row, 'version', v.sv_row)) END) END,
                 -- A named call's (`n_*`), set below; a binding's row.
                 NULL::uuid, NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::boolean, v.w_row, NULL::boolean

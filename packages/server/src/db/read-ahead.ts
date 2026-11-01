@@ -24,7 +24,14 @@ import { resolvedPlace, secretRowOf, type CredentialRead, type ResolvedPath, typ
  *   readAhead(db, { tokenHash, path: { project: 'market', environment: 'dev' }, keys: ['API_KEY'] })
  *   → { credential: { credential, identity, now, policySeq }, place: { project, environment: dev, secret: null }, secrets: [API_KEY's row] }
  */
-export type ReadAhead = { credential?: CredentialRead | null; place?: ResolvedPath | null; secrets?: SecretRow[] };
+export type ReadAhead = {
+  credential?: CredentialRead | null; place?: ResolvedPath | null; secrets?: SecretRow[];
+  /**
+   * Of a named use's rows (`namedAhead`, T165): where the key the vault used is held, when the place inherits it (a
+   * fork's parent, a personal config's dev), by id and slug; null for a key the place holds itself, or none.
+   */
+  held?: { environmentId: string; slug: string } | null;
+};
 
 export type ReadAsked = { tokenHash?: Buffer; path?: { project: string; environment: string }; keys?: readonly string[] | null };
 
@@ -53,6 +60,8 @@ export function namedAhead(db: Queryable, app: string | null, { personal = false
   const read = JSON.parse(app) as Answer & { now: string };
   const ahead = readAheadOf(db, read, read.now, { tokenHash: true, path: true });
   const environment = ahead.place?.environment ?? null;
+  // Where the key is held, a key the place inherits: the vault's own rows say, as it resolved the names (0050).
+  ahead.held = read.held == null ? null : { environmentId: read.held.id, slug: read.held.slug };
   if (ahead.place != null && environment !== null && personal) {
     ahead.place = {
       ...ahead.place,
@@ -118,6 +127,8 @@ type Answer = {
   environment: Json | null;
   /** The environment's parent's slug, for a fork. */
   parent: string | null;
+  /** A named use's key the place inherits: where it is held (0050). */
+  held?: { id: string; slug: string } | null;
   secrets: { secret: Json; version: Json | null }[] | null;
 };
 

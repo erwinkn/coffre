@@ -368,9 +368,12 @@ try {
   console.log(`rtt ${RTT} ms, ${ROUNDS} rounds a level, each job: ${ISSUE
     ? `a service token's issue to ${MEMBER} by ${ROOT}${values.legacy ? ', as the app issued it before T149' : ''}`
     : `sign-in${SIGNIN_ONLY ? '' : `, list, reveal of ${SEVEN.length} keys`}, all as ${MEMBER}`}`);
-  // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day.
-  await room(1);
-  await job();
+  // Warm: the issuer's keys fetched, the vault's isolates settled, as after the first run of the day. None for levels of
+  // uses alone (`--jobs 0`), which make no job.
+  if (JOBS.some((jobs) => jobs > 0)) {
+    await room(1);
+    await job();
+  }
   // Uses beside, `--uses` a second (uses.ts), as 0.15's hot path makes them.
   if (USES > 0) {
     const today = Date.now();
