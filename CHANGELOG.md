@@ -47,8 +47,15 @@
   - **Deploy 0.15 at once, never gradually.** After the cutover, 0.14's
     writes are refused (below), and a 0.15 vault decides nothing until a
     0.15 app has cut it over. On Workers, `pnpm run deploy` now builds the
-    app first, then deploys the vault and the app back to back: requests
-    in the seconds between the two fail, and clients ask again. With
+    app first, then deploys the vault and the app back to back. Between
+    the two, for as long as the app's upload takes (about 15 s), the old
+    app's calls on the new vault answer 500, which clients do not ask
+    again: reveals, exports, writes, sign-ins and the uses an isolate has
+    not kept. Then the first request to the new app cuts over, and the
+    requests meanwhile answer 503 with Retry-After, for a few seconds. In
+    the rehearsal (W290: 50 uses a second, a sign-in every 5 s, a write
+    every 10 s), 16 requests answered 500 and 194 uses 503, over 20 s; a
+    CI run in that window fails, and must run again. With
     Workers Builds, which builds each Worker apart, start both together. On
     Node, stop every 0.14 process, then start the vault, then the servers:
     no rolling update across replicas.
@@ -85,7 +92,27 @@
      included, so a rollback keeps values readable to the sessions and
      tokens already held while the cause
      is fixed, and only restoring this backup brings 0.14 writes back,
-     losing what was written since.
+     losing what was written since. To roll back on Workers, put the pins
+     and `vault/src/worker.ts` back as 0.14.5 had them, but keep
+     `vault/wrangler.jsonc` as step 2 leaves it, and add to the worker an
+     idle class of the checkpointer's name:
+
+     ```ts
+     export class CoffreCheckpointer {
+       async fetch(): Promise<Response> {
+         return new Response('rolled back to 0.14: the checkpointer is idle', { status: 503 });
+       }
+       async alarm(): Promise<void> {}
+     }
+     ```
+
+     Cloudflare refuses a vault without the class while its object exists
+     (code 10064), and a delete-class migration would erase the newest
+     checkpoint the object remembers. Then `pnpm run deploy`. In the
+     rehearsal (W290), the switch back failed requests for 28 s, then
+     0.14.5 served every read and refused every write and sign-in, with a
+     500; deployed again as in step 4, 0.15 served at once, its log
+     verified whole.
   2. **Update the code.** `pnpm exec coffre update` moves the pins to 0.15;
      then bring the vault to what `coffre init` writes now
      (`examples/workers`): in `vault/src/worker.ts`, `hotDatabase:
@@ -97,21 +124,29 @@
      Node, `src/vault.ts` takes `hotDatabase: env('HOT_DATABASE_URL')` and
      `checkpointer: { memory: env('CHECKPOINTER_MEMORY') }`. Commit, but do
      not push yet where a push deploys (the deploy workflow `coffre init`
-     writes), nor deploy.
+     writes), nor deploy. `coffre update` ends by saying to run `coffre
+     migrate`, then to commit and push to deploy: 0.14.5's CLI says so of
+     every release. For this one, do neither: step 3 migrates.
   3. **Migrate, and give the hot path its login,** before any deploy, as
      every release migrates: `pnpm exec coffre setup` in the deployment's
      directory, as the database's administrator (it needs `CREATEROLE`).
      Answer "No, I'll do Cloudflare myself", since setup's Cloudflare
      path ends with a deploy, and "No" to new passwords for the logins
-     that exist. It migrates (0022 makes `coffre_vault_hot`), gives
-     `coffre_vault_hot`, which cannot log in yet, a password unasked,
-     checks every login's rights, and shows the hot database URL with the
-     `wrangler hyperdrive create coffre-vault-hot --caching-disabled …`
-     command. Run it and put the id it prints under `HOT_HYPERDRIVE` in
+     that exist. It makes `coffre_vault_hot` with a password, unasked (or
+     gives one to the login a migration made, which cannot log in yet),
+     migrates, checks every login's rights, and shows the hot database URL
+     with the `wrangler hyperdrive create <vault Worker>-hot
+     --caching-disabled …` command, `coffre-vault-hot` for the names
+     `coffre init` writes: a Cloudflare account holds a Hyperdrive config's
+     name once, so a second deployment on the account takes its own Workers'
+     names. Run it and put the id it prints under `HOT_HYPERDRIVE` in
      `vault/wrangler.jsonc`; on Node, the URL is `HOT_DATABASE_URL`. The
      database's connections are now split three ways: check each config's
      `--origin-connection-limit`. 0.14.5 keeps serving on the migrated
-     schema, and ignores the new login and config.
+     schema, and ignores the new login and config. The migrations take the
+     log's tables for about a second, in which 0.14.5's requests wait; one
+     may fail on a deadlock with them (a sign-in did, with a 500, in the
+     rehearsal): migrate at a quiet moment too.
   4. **Deploy both Workers at once** (`pnpm run deploy`, or the deploy
      workflow), at a quiet moment. On Node: stop the servers and the vault,
      set `HOT_DATABASE_URL` and `CHECKPOINTER_MEMORY` (a path on
@@ -119,9 +154,11 @@
      start the vault, then the servers. The first request cuts over, in
      seconds, answering 503 with Retry-After meanwhile; the vault starts its
      checkpointer from its first call.
-  5. **Check it:** `/readyz` green; `coffre verify instance` (0.15's log
-     verified from its newest checkpoint); the audit page's sealed log; a
-     `/use` through the proxy.
+  5. **Check it:** `/readyz` green; `coffre --url <the instance> verify
+     instance` (0.15's log verified from its newest checkpoint): without
+     `--url`, outside a directory `coffre login` pinned, it checks the
+     CLI's default instance, and makes its probe project there; the audit
+     page's sealed log; a `/use` through the proxy.
   `docs/design/0.15-plan.md`, "As built: PR 10".
 
 - **0.15's uses: a busy isolate frees up, and a busy use says why.**
@@ -162,7 +199,10 @@
   the vault's rights, and every migrate run gives the role its group and
   settings again when it lacks them, as one dropped and made again does. On Workers, setup makes a third Hyperdrive config,
   `<vault Worker>-hot` (`coffre-vault-hot`), caching off, finds it again on
-  a second run, and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
+  a second run (without Cloudflare, the commands its screen shows name the
+  three configs after the Workers the deployment's files name too, no
+  longer `coffre-vault-hot` whatever they are: a second deployment on an
+  account was refused that name, which the first had), and binds it as `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`,
   adding the binding to a file an earlier release wrote; the database's
   connections are now split three ways, so each config gets a third of
   what is left, 6 on a `max_connections` of 25, where it got 9, and a rerun

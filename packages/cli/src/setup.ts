@@ -22,7 +22,7 @@ import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
-import { deploymentKind, install, installAsLocked, installed } from './deployment.ts';
+import { deploymentKind, install, installAsLocked, installed, readWorker } from './deployment.ts';
 import { init, KINDS, type Kind } from './init.ts';
 import { generateKeys, jsonWarning, keyGuide, keyValues, needsTerminal, type Keys } from './keys.ts';
 import { type GuideBlock, type Screen, showSecrets, type Value } from './secrets.ts';
@@ -41,8 +41,23 @@ import { Cloudflare, configName, type Database, deployedSummary, Later, OWNED } 
 const ROLES = { app: 'coffre_runtime', vault: 'coffre_vault_runtime', hot: 'coffre_vault_hot', backup: 'coffre_backup_login' } as const;
 type Component = keyof typeof ROLES;
 const COMPONENTS = ['app', 'vault', 'hot', 'backup'] as const;
-/** The template's Workers, after which the configs the screen's commands make are named (`configName`). */
+/** The template's Workers, after which the configs the screen's commands make are named (`configName`), when the deployment names none. */
 const TEMPLATE = { app: 'coffre', vault: 'coffre-vault' } as const;
+
+/**
+ * The Workers a deployment's files name, after which the screen's commands
+ * name the configs they make, as setup's Cloudflare path does: an account
+ * holds one Hyperdrive config by a name, so a second deployment on it, under
+ * Workers of its own, would be refused the template's. The template's for a
+ * file setup cannot read.
+ */
+export function workerNames(dir: string): { app: string; vault: string } {
+  try {
+    return { app: readWorker(dir, 'app/wrangler.jsonc').name, vault: readWorker(dir, 'vault/wrangler.jsonc').name };
+  } catch {
+    return TEMPLATE;
+  }
+}
 /** The logins that run. */
 type Runtime = Exclude<Component, 'backup'>;
 const RUNTIMES = ['app', 'vault', 'hot'] as const;
@@ -182,7 +197,7 @@ export async function setup(args: string[]): Promise<void> {
     } else if (result.keys === null && COMPONENTS.every((component) => result[component].url === null)) {
       out.write(nothingToSave(out));
     } else {
-      await showSecrets(terminal!, setupScreen(result));
+      await showSecrets(terminal!, setupScreen(result, kind === 'workers' ? workerNames(dir) : TEMPLATE));
       out.write(summary(result, out));
     }
   } catch (error) {
@@ -769,8 +784,8 @@ export const BACKUP_GUIDE: GuideBlock = {
   ],
 };
 
-/** The screen: the values, and where each goes, with the Hyperdrive commands to copy. */
-export function setupScreen(result: SetupResult): Screen {
+/** The screen: the values, and where each goes, with the Hyperdrive commands to copy, each config named after its Worker. */
+export function setupScreen(result: SetupResult, names: { app: string; vault: string } = TEMPLATE): Screen {
   const { app, vault, backup } = setupValues(result);
   const set = RUNTIMES.filter((component) => result[component].url !== null);
   const created = set.some((component) => result[component].password === 'created');
@@ -781,7 +796,7 @@ export function setupScreen(result: SetupResult): Screen {
   const kept = RUNTIMES.filter((component) => result[component].url === null);
   const hyperdrive = set.map((component) => {
     const login = result[component];
-    const target = login.password === 'created' ? `create ${configName(component, TEMPLATE)} --caching-disabled` : `update <${OWNED[component]} config id>`;
+    const target = login.password === 'created' ? `create ${configName(component, names)} --caching-disabled` : `update <${OWNED[component]} config id>`;
     // Setup can't see what a config allows now, so an update sets the limit too (`cappedLimit`), and says so.
     return { command: hyperdriveCommand(target, limit === null ? null : cappedLimit(null, limit)) };
   });
