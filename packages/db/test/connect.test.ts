@@ -305,3 +305,19 @@ test("on SQLite, `later` writes go in the order asked, raw statements and builde
   }
 });
 
+
+test("on SQLite, a write left to `later` runs through the transaction it was given, whatever database it was built on (review r8 of #452)", { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-sqlite-'));
+  const { db, close } = await openDatabase(`file:${join(dir, 'later-built.db')}`);
+  const lite = db as unknown as Lite;
+  try {
+    await lite.run(sql`CREATE TABLE t (id INTEGER PRIMARY KEY)`);
+    // Built on the database, outside the transaction: run on it, it would wait for the transaction, which waits for it.
+    const write = (db as unknown as { run(query: SQL): SQLWrapper }).run(sql`INSERT INTO t VALUES (1)`);
+    await db.transaction(async (tx) => later(tx, write));
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t`), [{ id: 1 }]);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

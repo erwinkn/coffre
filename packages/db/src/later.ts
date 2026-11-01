@@ -27,13 +27,10 @@ import { engineOf } from './dialect.ts';
  */
 export function later(tx: Transaction, statement: SQLWrapper): void {
   if (engineOf(tx) === 'sqlite') {
-    // A query builder runs itself; a statement of `sql`, through libsql's Drizzle's `run`, started now by its `then`, as
-    // `execute()` starts a builder: so each goes in the order `later` was called (Drizzle's `run` runs again each time
-    // it is awaited, so once, here).
-    const builder = statement as unknown as { execute?: () => Promise<unknown> };
-    const answer = typeof builder.execute === 'function'
-      ? builder.execute()
-      : ((tx as unknown as { run(query: SQLWrapper): PromiseLike<unknown> }).run(statement).then((result) => result) as Promise<unknown>);
+    // Through `tx`, whatever database a builder was made on (one made outside the transaction would wait for it, which
+    // waits for it), with libsql's Drizzle's `run`, started now by its `then`, so each goes in the order `later` was
+    // called (`run` runs again each time it is awaited, so once, here).
+    const answer = (tx as unknown as { run(query: SQLWrapper): PromiseLike<unknown> }).run(statement).then((result) => result) as Promise<unknown>;
     return hold(tx, answer);
   }
   const { sql, params } = (tx as unknown as { dialect: PgDialect }).dialect.sqlToQuery(statement.getSQL());

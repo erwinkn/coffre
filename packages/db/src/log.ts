@@ -565,9 +565,9 @@ const entriesBefore = prepared((db) => vaultEntries(db, lt(tablesOf(db).auditLog
  * `action`, or null for none: whether one was appended since, and nothing
  * of what it says, so its MAC is not checked. One indexed read.
  */
-export async function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
-  const [row] = await newestSeq(db, { action });
-  return (row?.seq as bigint | undefined) ?? null;
+export function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
+  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
+  return newestSeq(db, { action }).then(([row]) => (row?.seq as bigint | undefined) ?? null);
 }
 
 const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));
