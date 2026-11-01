@@ -111,20 +111,24 @@ test("a use the rules refuse is logged as its request all the same, and refused 
   const id = await w.key();
   const other = await w.key();
   const { use } = await isolate();
+  // Every use at one time, so in one of the cap's periods: across a minute's turn, a key in the set moves on, which
+  // decides first, so a use refused there logs nothing, and a repeat rides no cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
   // Its key in the principal's set: its use takes no lock, and is logged whatever it finds.
-  assert.ok(heard(await use(ask(w, id))).ok);
+  assert.ok(heard(await use(ask(w, id, when))).ok);
   // Revoke the grant: a change to the principal (PR 4's access.revoke, played here).
   const revoked = { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } }, revoked, async (tx, value) => {
     await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
     await seal('vault_members', 'principal', w.principal)(tx, value);
   });
-  const outcome = heard(await use(ask(w, id)));
+  const outcome = heard(await use(ask(w, id, when)));
   assert.equal(!outcome.ok && 'code' in outcome && outcome.code, 'no_grant');
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2, 'a refusal is a request like any other');
   assert.equal(await replayAgrees(), 2);
   // A key not in the set would take the lock: refused on the rows of its first call, nothing written, the app's to log.
-  const first = heard(await use(ask(w, other)));
+  const first = heard(await use(ask(w, other, when)));
   assert.deepEqual(first, { ok: false, code: 'no_grant', number: null });
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 2);
 });
@@ -502,24 +506,28 @@ test('covers: a repeat rides its entry, and writes none, until any input changes
   const w = await world();
   const id = await w.key();
   const { use } = await isolate();
-  const first = heard(await use(ask(w, id)));
+  // Every use at one time, so in one of the cap's periods: across a minute's turn, a key in the set moves on, which
+  // decides first, so a use refused there logs nothing, and a repeat rides no cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
+  const first = heard(await use(ask(w, id, when)));
   assert.ok(first.ok && !first.covered);
-  const repeat = await use(ask(w, id));
+  const repeat = await use(ask(w, id, when));
   assert.ok(repeat.ok && repeat.covered && repeat.number === first.number, JSON.stringify(repeat));
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 1, 'a repeat writes nothing');
   // Another purpose is another request: no cover.
-  const reveal = heard(await use(ask(w, id, { purpose: 'reveal' })));
+  const reveal = heard(await use(ask(w, id, { ...when, purpose: 'reveal' })));
   assert.ok(reveal.ok && !reveal.covered);
   // CoverFresh: with its key's bulk row gone (erased by a writer: it is no seal's), a repeat rides no cover, and is logged.
   await run(db.owner, sql`DELETE FROM log_bulk`);
-  const unfresh = heard(await use(ask(w, id)));
+  const unfresh = heard(await use(ask(w, id, when)));
   assert.ok(unfresh.ok && !unfresh.covered, JSON.stringify(unfresh));
   // A change to the key (its value moved): the next repeat is an entry of its own.
   const key = w.keys[0]!.object as Extract<Input, { kind: 'secret' }>;
   const moved = { ...key, nature: 'secret' as const };
   await change({ kind: 'secret', id }, { op: 'secret.write', projectId: key.projectId, environmentId: key.environmentId, version: key.version, nature: 'secret', key: key.key, digest: null, source: null, reference: null }, moved,
     seal('secrets', 'id', id));
-  const after = heard(await use(ask(w, id)));
+  const after = heard(await use(ask(w, id, when)));
   assert.ok(after.ok && !after.covered, 'a cover from before a change covers nothing');
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 4);
   assert.equal(await replayAgrees(), 4);
@@ -780,12 +788,16 @@ test('a use through a place (a fork it is inherited in) reads every input, and i
   const id = await w.key('inherited');
   const fork = await environment(w, 'fork');
   const { use } = await isolate();
-  const through = heard(await use(ask(w, id, { place: fork })));
+  // Every use at one time, so in one of the cap's periods: across a minute's turn, a key in the set moves on, which
+  // decides first, so a use refused there logs nothing, and a repeat rides no cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
+  const through = heard(await use(ask(w, id, { ...when, place: fork })));
   assert.ok(through.ok, JSON.stringify(through));
   assert.equal((await rows<{ place: string }>(db.owner, sql`SELECT place FROM log_uses`))[0]!.place, fork, 'the read is named where it was');
   // From the cache too, and a place that is the key's own is no place to read it through (0.14's throughOk).
-  assert.ok(heard(await use(ask(w, id, { place: fork, purpose: 'reveal' }))).ok);
-  assert.equal(code(heard(await use(ask(w, id, { place: w.dev })))), 'bad_claim');
+  assert.ok(heard(await use(ask(w, id, { ...when, place: fork, purpose: 'reveal' }))).ok);
+  assert.equal(code(heard(await use(ask(w, id, { ...when, place: w.dev })))), 'bad_claim');
   assert.equal(await replayAgrees(), 3);
 });
 

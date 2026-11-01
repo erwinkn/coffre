@@ -148,7 +148,11 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
   const fresh = await w.key();
   const ids = [fresh, await w.key(), await w.key()];
   const { vault, use } = await isolate();
-  const first = await use(ask(w, fresh));
+  // Every use at one time, so in one of the cap's periods: across a minute's turn, a key in the set moves on, which
+  // decides first, so a use refused there logs nothing, and a repeat rides no cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
+  const first = await use(ask(w, fresh, when));
   assert.ok(first.ok);
   answered.set(first.number, first);
   // Her grant revoked: a change to the principal.
@@ -157,7 +161,7 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
     await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
     await seal('vault_members', 'principal', w.principal)(tx, value);
   });
-  const outcome = heard(await vault.useMany!(many(w, ids)));
+  const outcome = heard(await vault.useMany!(many(w, ids, when)));
   // Its first key, in the set, is used and logged in the first call, refused; the others answered `decide`, written nothing.
   assert.ok(!outcome.ok && 'code' in outcome, JSON.stringify(outcome));
   assert.equal(outcome.index, 0);
@@ -167,7 +171,7 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
   assert.equal(await count('log_uses'), 2);
   // The same batch, its fresh key last: refused at its first key, which answered `decide`, logged nothing (the app logs
   // it); its fresh key's request is logged all the same, as every request of a first call that takes no lock is.
-  const unlogged = heard(await vault.useMany!(many(w, [ids[1]!, ids[2]!, fresh])));
+  const unlogged = heard(await vault.useMany!(many(w, [ids[1]!, ids[2]!, fresh], when)));
   assert.deepEqual(unlogged, { ok: false, index: 0, code: 'no_grant', number: null });
   assert.equal(await count('log_bulk'), 1);
   assert.equal(await count('log_uses'), 3);
