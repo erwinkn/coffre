@@ -305,19 +305,59 @@ test("a deployment's PUBLIC_URL and a coffre.json that disagree are refused, not
   assert.equal(instance.seen.length, 0);
 });
 
-test("a deployment's config that cannot be read is an error, not a reason to go on with a coffre.json's instance", async (t) => {
+test("a deployment's config that cannot be read or used is an error, not a reason to go on with a coffre.json's instance", async (t) => {
   const instance = await fakeInstance(t, (method, path) => (method === 'GET' && path === '/api/me' ? OWNER : undefined));
   const { home } = signedInHome(t, instance.origin);
   const dir = deployment(t, 'https://coffre.deployed.test', instance.origin);
   const file = join(dir, 'app', 'wrangler.jsonc');
-  for (const broken of ['{ "name": "app", "vars": { "PUBLIC_URL": ', '{ "name": "app", "vars": { "PUBLIC_URL": "https://coffre.deployed.test/path" } }']) {
-    writeFileSync(file, broken);
+  const broken = [
+    '{ "name": "app", "vars": { "PUBLIC_URL": ',
+    '{ "name": "app", "vars": { "PUBLIC_URL": "https://coffre.deployed.test/path" } }',
+    '{ "name": "app", "vars": { "PUBLIC_URL": 123 } }',
+  ];
+  for (const text of broken) {
+    writeFileSync(file, text);
     const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
-    assert.equal(run.code, 1);
+    assert.equal(run.code, 1, text);
     assert.equal(run.stdout, '');
     assert.ok(run.stderr.startsWith(`coffre: cannot use ${file}: `), run.stderr);
     assert.equal(instance.seen.length, 0);
   }
+  // Naming the instance on the command line, in either spelling, is no matter to a config it need not read.
+  for (const args of [['verify', 'instance', instance.origin, '--yes'], ['--url', instance.origin, 'verify', 'instance', '--yes']]) {
+    const run = await coffre(args, home, '', {}, dir);
+    assert.match(run.stdout, /--yes: going on\./, run.stderr);
+  }
+  // A directory that cannot be searched hides a config as much as a file that cannot be read does.
+  if (process.getuid?.() !== 0) {
+    writeFileSync(file, '{}');
+    chmodSync(join(dir, 'app'), 0);
+    instance.seen.length = 0;
+    let run;
+    try {
+      run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+    } finally {
+      chmodSync(join(dir, 'app'), 0o755);
+    }
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /^coffre: cannot use .*app\/wrangler\.jsonc: EACCES/);
+    assert.equal(instance.seen.length, 0);
+  }
+});
+
+test("only the template's address is no address: a PUBLIC_URL that merely contains example.com names its instance", async (t) => {
+  const instance = await fakeInstance(t, () => undefined);
+  const { home } = signedInHome(t, instance.origin);
+  // A different instance than coffre.json's: refused as a conflict, not passed over for the file's.
+  const dir = deployment(t, 'https://coffre.counterexample.com', instance.origin);
+  const run = await coffre(['verify', 'instance', '--yes'], home, '', {}, dir);
+  assert.equal(run.code, 2);
+  assert.match(run.stderr, /counterexample\.com\): name the one you mean|names it, as PUBLIC_URL \(https:\/\/coffre\.counterexample\.com\)/);
+  // The template's own address names nothing.
+  const template = deployment(t, 'https://secrets.example.com', instance.origin);
+  const fallback = await coffre(['verify', 'instance', '--yes'], home, '', {}, template);
+  assert.match(fallback.stdout, /--yes: going on\./, fallback.stderr);
+  assert.equal(instance.seen.every(({ url }) => !url.includes('example.com')), true);
 });
 
 test("coffre verify instance in a deployment's directory goes to the deployment's instance, with its session, once confirmed with --yes", async (t) => {

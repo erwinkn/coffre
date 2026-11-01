@@ -177,12 +177,13 @@ function localHere(): Local | null {
   return attempt(() => localFor(readPins(), here('Name the instance with --url'), realHome(), readRepoFile));
 }
 
-/** The Workers deployment the command runs in, and the instance its config names: unless --url names the instance. */
-async function deploymentHere(): Promise<Deployment | null> {
-  if (sessionFlags.url !== undefined) return null;
-  // Its own chunk, as setup's: the JSONC parser loads only for it.
+/**
+ * The Workers deployment the command runs in, and the instance its config names, as a call that reads it only when asked:
+ * not with --url, nor when the command names its instance. Its own chunk, as setup's: the JSONC parser loads only for it.
+ */
+async function deploymentHere(): Promise<() => Deployment | null> {
   const { deploymentFor } = await import('./deployment.ts');
-  return attempt(() => deploymentFor(here('Name the instance with --url')));
+  return () => (sessionFlags.url !== undefined ? null : attempt(() => deploymentFor(here('Name the instance with --url'))));
 }
 
 /** A `coffre.json`'s text, or null if there is none: one that is a link or no file is refused, not passed over. */
@@ -2046,7 +2047,7 @@ async function verify(args: string[]): Promise<void> {
   const check = named ?? (await pickCheck());
   switch (check) {
     case 'instance':
-      return verifyInstance(more, readStore(), sessionFlags, localHere(), await deploymentHere());
+      return verifyInstance(more, readStore(), sessionFlags, localHere, await deploymentHere());
     case 'keys': {
       const to = target();
       return verifyKeys(more, client(to), to.origin);

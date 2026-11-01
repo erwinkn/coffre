@@ -74,12 +74,15 @@ type Issued = { member: string; id: string };
  * The instance a run means, and why: named on the command line, or by where it runs (a `coffre.json`, a pin, a
  * deployment's wrangler.jsonc). Never the default session's: the run writes, so it is told where, or it stops.
  */
-export function namedInstance(positional: string | undefined, session: SessionFlags, local: Local | null, deployment: Deployment | null, current: string | null): { requested: string; why: string } {
+export function namedInstance(positional: string | undefined, session: SessionFlags, local: () => Local | null, deployment: () => Deployment | null, current: string | null): { requested: string; why: string } {
   const explicit = positional ?? session.url;
   if (explicit !== undefined) return { requested: explicit, why: 'named on the command line' };
+  // What names it where the command runs is read only now: a broken file there is no matter to one that names its instance.
+  const here = local();
+  const built = deployment();
   const found: { requested: string; why: string }[] = [];
-  if (local !== null) found.push({ requested: local.origin, why: local.by === 'pin' ? `this directory is pinned at ${local.directory}` : `${join(local.directory, REPO_FILE)} names it` });
-  if (deployment !== null) found.push({ requested: deployment.origin, why: `${deployment.file} names it, as PUBLIC_URL` });
+  if (here !== null) found.push({ requested: here.origin, why: here.by === 'pin' ? `this directory is pinned at ${here.directory}` : `${join(here.directory, REPO_FILE)} names it` });
+  if (built !== null) found.push({ requested: built.origin, why: `${built.file} names it, as PUBLIC_URL` });
   const [first, second] = found;
   if (first === undefined) {
     const unasked = current === null ? '' : ` The default session, ${current}, is not used unasked.`;
@@ -99,8 +102,8 @@ export async function verifyInstance(
   args: string[],
   store: Store,
   session: SessionFlags,
-  local: Local | null,
-  deployment: Deployment | null = null,
+  local: () => Local | null,
+  deployment: () => Deployment | null = () => null,
   out: Output = process.stdout,
 ): Promise<void> {
   const { values, positionals } = parseArgs({

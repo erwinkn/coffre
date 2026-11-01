@@ -16153,14 +16153,16 @@ function namedInstance(positional, session, local, deployment, current) {
 		requested: explicit,
 		why: "named on the command line"
 	};
+	const here = local();
+	const built = deployment();
 	const found = [];
-	if (local !== null) found.push({
-		requested: local.origin,
-		why: local.by === "pin" ? `this directory is pinned at ${local.directory}` : `${join(local.directory, REPO_FILE)} names it`
+	if (here !== null) found.push({
+		requested: here.origin,
+		why: here.by === "pin" ? `this directory is pinned at ${here.directory}` : `${join(here.directory, REPO_FILE)} names it`
 	});
-	if (deployment !== null) found.push({
-		requested: deployment.origin,
-		why: `${deployment.file} names it, as PUBLIC_URL`
+	if (built !== null) found.push({
+		requested: built.origin,
+		why: `${built.file} names it, as PUBLIC_URL`
 	});
 	const [first, second] = found;
 	if (first === void 0) {
@@ -16170,7 +16172,7 @@ function namedInstance(positional, session, local, deployment, current) {
 	if (second !== void 0 && instanceOrigin(first.requested) !== instanceOrigin(second.requested)) stop(2, `coffre: ${first.why} (${first.requested}), but ${second.why} (${second.requested}): name the one you mean, \`coffre verify instance <url>\``);
 	return first;
 }
-async function verifyInstance(args, store, session, local, deployment = null, out = process.stdout) {
+async function verifyInstance(args, store, session, local, deployment = () => null, out = process.stdout) {
 	const { values, positionals } = parseArgs({
 		args,
 		allowPositionals: true,
@@ -16861,11 +16863,13 @@ function localHere() {
 	if (sessionFlags.url !== void 0) return null;
 	return attempt(() => localFor(readPins(), here("Name the instance with --url"), realHome(), readRepoFile));
 }
-/** The Workers deployment the command runs in, and the instance its config names: unless --url names the instance. */
+/**
+* The Workers deployment the command runs in, and the instance its config names, as a call that reads it only when asked:
+* not with --url, nor when the command names its instance. Its own chunk, as setup's: the JSONC parser loads only for it.
+*/
 async function deploymentHere() {
-	if (sessionFlags.url !== void 0) return null;
 	const { deploymentFor } = await import("./deployment.ts");
-	return attempt(() => deploymentFor(here("Name the instance with --url")));
+	return () => sessionFlags.url !== void 0 ? null : attempt(() => deploymentFor(here("Name the instance with --url")));
 }
 /** A `coffre.json`'s text, or null if there is none: one that is a link or no file is refused, not passed over. */
 function readRepoFile(path) {
@@ -18567,7 +18571,7 @@ async function verify(args) {
 	}
 	const check = named ?? await pickCheck();
 	switch (check) {
-		case "instance": return verifyInstance(more, readStore(), sessionFlags, localHere(), await deploymentHere());
+		case "instance": return verifyInstance(more, readStore(), sessionFlags, localHere, await deploymentHere());
 		case "keys": {
 			const to = target();
 			return verifyKeys(more, client(to), to.origin);
