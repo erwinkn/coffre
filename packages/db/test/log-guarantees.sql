@@ -53,6 +53,10 @@ DO $$
 BEGIN
     IF NOT has_table_privilege('coffre_app', 'log_reads', 'SELECT') OR has_table_privilege('coffre_app', 'log_reads', 'INSERT')
        OR NOT has_function_privilege('coffre_app', 'log_reads_by(text, bigint, bigint, integer)', 'EXECUTE')
+       OR NOT has_function_privilege('coffre_app', 'log_reads_at(uuid, text, bigint, bigint, integer)', 'EXECUTE')
+       OR NOT has_table_privilege('coffre_app', 'log_read_place_days', 'SELECT') OR has_table_privilege('coffre_app', 'log_read_place_days', 'INSERT')
+       OR has_table_privilege('coffre_vault', 'log_read_place_days', 'INSERT') OR NOT has_table_privilege('coffre_backup', 'log_read_place_days', 'SELECT')
+       OR has_function_privilege('coffre_app', 'log_reads_placed()', 'EXECUTE')
        OR has_function_privilege('coffre_app', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
        OR has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')

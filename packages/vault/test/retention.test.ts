@@ -388,7 +388,11 @@ test("a reader holding a day's reads past drop_reads_day's lock timeout makes th
   await retain(cp, store, { keepDays: 9, macKey, now });
   await retain(cp, store, { keepDays: 9, macKey, now });
   assert.deepEqual([await exists(`log_reads_${D10.replaceAll('-', '')}`), await exists(`log_uses_${D10.replaceAll('-', '')}`)], [false, false]);
-  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${Date.parse(`${D10}T00:00:00Z`) / DAY_MS}`))[0]!.n, 0);
+  // Its members' days of reads go with it, and its places' (T175), which the projector's writes placed.
+  const day = Date.parse(`${D10}T00:00:00Z`) / DAY_MS;
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${day}`))[0]!.n, 0);
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day = ${day}`))[0]!.n, 0);
+  assert.ok((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day > ${day}`))[0]!.n > 0, "the later days' places stay");
 });
 
 /**

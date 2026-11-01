@@ -14663,7 +14663,7 @@ const SECTIONS = [
 		title: "Audit",
 		entries: [{
 			command: "audit",
-			usage: ["audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail] [--json]"],
+			usage: ["audit [<path>] [--limit N] [--actor <id>] [--denied] [--detail]", "      [--before <next>] [--json]"],
 			about: ["a project, environment or KEY: market/prod/DATABASE_URL lists", "who read or changed it, reads of several that listed it included"]
 		}, {
 			command: "audit accept-loss",
@@ -15943,7 +15943,7 @@ const LISTED_WITHIN_MS = 2e4;
 * Reveal the canary once, and find its `secret.read` in the audit log: by
 * the reveal's operation, in 0.14's log; in 0.15's, where a read is its use
 * and names no operation (T166), the token's own read of the canary, on
-* its own page (0.15 lists reads by member, never by place: D160), by its
+* its own page (0.15.0 lists reads by member, never by place: D160), by its
 * credential, for a reveal, of the version the token lists: the use
 * the reveal made, or the one within the minute before it that it rode on
 * (a cover is of the same credential, purpose and key), once listed, which
@@ -18468,6 +18468,8 @@ async function offboard(args) {
 	}
 	if (report.status === "active" && !values.apply) process.stdout.write(`\nNothing changed. Re-run with --apply to remove ${shown}.\n`);
 }
+/** A page's `next` as the server writes it (`AUDIT_NEXT` in @coffre/server's api/audit.ts): `<seq>:<at>.<number>`, each part `-` for a log with nothing older. */
+const AUDIT_NEXT = /^(?:-?[0-9]{1,19}|-):(?:[0-9]{1,16}(?:\.-?[0-9]{1,19})?|-)$/;
 async function audit(args) {
 	const { values, positionals } = parseArgs({
 		args,
@@ -18488,27 +18490,32 @@ async function audit(args) {
 			json: {
 				type: "boolean",
 				default: false
-			}
+			},
+			before: { type: "string" }
 		},
 		allowPositionals: true
 	});
 	const limit = Number(values.limit);
 	if (!Number.isInteger(limit) || limit < 1) fail(`--limit takes a positive number, not "${values.limit}"`);
-	if (positionals.length > 1) fail("usage: coffre audit [<project>[/<environment>[/<KEY>]]] [--limit N] [--actor <id>] [--denied] [--detail] [--json]");
+	if (positionals.length > 1) fail("usage: coffre audit [<project>[/<environment>[/<KEY>]]] [--limit N] [--actor <id>] [--denied] [--detail] [--before <next>] [--json]");
+	const before = values.before;
+	if (before !== void 0 && !AUDIT_NEXT.test(before) && !/^[1-9][0-9]{0,15}$/.test(before)) fail(`--before takes the "next" an earlier page printed, not "${before}"`);
 	const result = await client().audit.list({
 		path: positionals[0],
 		limit,
+		...before === void 0 ? {} : { before: /^[0-9]+$/.test(before) ? Number(before) : before },
 		actor: values.actor === void 0 ? void 0 : apiMember(values.actor),
 		decision: values.denied ? "deny" : void 0,
 		detail: values.detail ? "1" : void 0,
 		sealed: "1"
 	});
 	const notices = () => {
+		if (result.next !== null && result.next !== void 0) process.stderr.write(`Older entries: the same command with --before=${result.next}\n`);
 		const reads = result.reads;
 		if (reads?.forged === true) process.stderr.write("Reads: FORGED: the vault does not vouch for how far they are listed; newer reads may be missing.\n");
 		else if (reads?.behind === true) process.stderr.write(`Reads are sealed through ${reads.through ?? "none yet"}; newer reads are not listed yet.\n`);
 		if (result.readsOmitted === "path") process.stderr.write("Reads are not listed by place: `coffre audit` and `coffre audit --actor <member>` list them.\n");
-		else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log; yours: `coffre audit --actor <you>`.\n");
+		else if (result.readsOmitted === "scope") process.stderr.write("Reads are listed to whoever reads the whole log, and on the page of each place you read; yours: `coffre audit --actor <you>`.\n");
 	};
 	if (values.json) {
 		process.stdout.write(`${JSON.stringify(result.entries, null, 2)}\n`);

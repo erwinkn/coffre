@@ -43,6 +43,7 @@ export function logWriter(owner: Database, macKey: LogMacKey) {
       // The reads' projection of that log (T166), its cursor back at the start.
       await run(owner, sql`DELETE FROM log_reads`);
       await run(owner, sql`DELETE FROM log_read_days`);
+      await run(owner, sql`DELETE FROM log_read_place_days`);
       await run(owner, sql`INSERT INTO log_reads_cursor (only_row, through, pair, at, mac) VALUES (true, 0, 0, 0, NULL) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, mac = NULL`);
       await run(owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 3000}`);
       sqliteNext = 1n;

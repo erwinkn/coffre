@@ -109,3 +109,21 @@ test("audit says on stderr when 0.15's reads lag, are not vouched for, or are li
   const current = await audit(t, [entry(1, {})], ['--json'], { reads: { through: '2026-10-17T10:00:00.000Z', behind: false } });
   assert.equal(current.stderr, '');
 });
+
+test("audit pages back from where a page stopped (--before), and says so on stderr: a place's page may show nothing and still go on (T175, review r1)", async (t) => {
+  // A page of a place that passed over reads its reader may not see: no entry, and a next.
+  const empty = await audit(t, [], ['market/dev', '--actor', 'ada@acme.example', '--json'], { more: true, next: '-:1793553278193.5120' });
+  assert.equal(empty.code, 0, empty.stderr);
+  assert.deepEqual(JSON.parse(empty.stdout), []);
+  assert.match(empty.stderr, /Older entries: the same command with --before=-:1793553278193\.5120/);
+  const older = await audit(t, [entry(1, {})], ['market/dev', '--before=-:1793553278193.5120'], { more: false, next: null });
+  assert.equal(older.code, 0, older.stderr);
+  assert.equal(older.queries[0]!.get('before'), '-:1793553278193.5120');
+  assert.doesNotMatch(older.stderr, /Older entries/);
+  // A seq of 0.14's log alone, as clients before 0.15 page; anything else is refused before a request.
+  assert.equal((await audit(t, [entry(1, {})], ['--before', '5120'])).queries[0]!.get('before'), '5120');
+  const wrong = await audit(t, [], ['--before', 'yesterday']);
+  assert.notEqual(wrong.code, 0);
+  assert.match(wrong.stderr, /--before takes the "next" an earlier page printed/);
+  assert.equal(wrong.queries.length, 0);
+});
