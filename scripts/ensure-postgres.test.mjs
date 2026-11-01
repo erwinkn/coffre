@@ -250,7 +250,7 @@ test("COFFRE_POSTGRES_SUBNET adds the subnet file to compose's files", async (t)
     const files = readFileSync(join(f.dir, 'compose-files'), 'utf8').trim().split('\n');
     assert.ok(files.every((value) => value === 'docker-compose.yml:docker-compose.subnet.yml'), files.join());
     const plain = await fixture(t, 'healthy');
-    assert.equal((await plain.run(plain.port, { COMPOSE_FILE: '' })).code, 0);
+    assert.equal((await plain.run(plain.port, { COFFRE_POSTGRES_SUBNET: '', COMPOSE_FILE: '' })).code, 0);
     assert.ok(readFileSync(join(plain.dir, 'compose-files'), 'utf8').trim().split('\n').every((value) => value === ''), 'no subnet asked, compose files untouched');
 });
 
