@@ -682,7 +682,7 @@ class VaultService implements Vault {
     const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
     return {
       db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
-      oldWrite: (principal, old, through) => this.#oldWrite(principal, old, through),
+      oldWrite: (principal, old, through, starts) => this.#oldWrite(principal, old, through, starts),
     };
   }
 
@@ -699,11 +699,13 @@ class VaultService implements Vault {
    * nothing: no report, which would wait for 0.14's head, or for the
    * vault's settling, past the use's deadline (reviews r3, r4). The next
    * decision about the principal reports what is forged (`#integrity`).
+   * Each page it reads back is asked of `starts` first: none once the use
+   * has lost its race (T177).
    */
-  async #oldWrite(principal: string, old: bigint | null, through: bigint): Promise<boolean> {
+  async #oldWrite(principal: string, old: bigint | null, through: bigint, starts: () => void): Promise<boolean> {
     // On Workers the use's vault is opened over its one hot connection (cloudflare.ts, `openVault(hot, prepared, hot)`):
     // this reads on it, never a second connection in the call.
-    const newest = await newestAccess(this.#db, principal, { authentic: (entry) => this.#authentic(entry), forged: () => {} }, through);
+    const newest = await newestAccess(this.#db, principal, { authentic: (entry) => this.#authentic(entry), forged: () => {} }, through, starts);
     if (newest === 'unreached') return true;
     return typeof newest !== 'string' && (old === null || newest.seq > old);
   }

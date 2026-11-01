@@ -12,13 +12,15 @@ import { decrypt } from '@coffre/core/envelope';
 import type { UseManyInput, UseManyOutcome, UseOutcome } from '@coffre/core/vault';
 import { createDatabase, tablesOf, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
+import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
 import type { Input } from '../src/inputs.ts';
-import { newRequestId } from '../src/use.ts';
+import { vaultLogKey } from '../src/log.ts';
+import { newRequestId, UseCache, useLimits, useMany, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, emptyLog, isolate, LOG_015, replayed, seal, useDatabases, world } from './use-world.ts';
+import { HOT_URL, openTestDatabase, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { ask, change, CONFIG, emptyLog, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -71,7 +73,7 @@ async function counted(options: { batch?: number; before?: (n: number) => Promis
   const vault = openVault(db.vault, prepared, hot);
   // The isolate's first call waits for the cutover's seal: made here, before anything is counted.
   await vault.about();
-  return { useMany: (input: UseManyInput) => vault.useMany!(input), statements: () => statements, cache: prepared.uses, close: () => client.end() };
+  return { useMany: (input: UseManyInput) => vault.useMany!(input), statements: () => statements, cache: prepared.uses, hot, close: () => client.end() };
 }
 
 const opened = (outcome: UseManyOutcome) => {
@@ -102,15 +104,19 @@ test('one statement for every key, up to `limits.batch` (100): two with keys ent
   const ids: string[] = [];
   for (let i = 0; i < 30; i += 1) ids.push(await w.key(`v${i}`));
   const isolate = await counted();
+  // Every batch at one time, so in one of the cap's refresh periods (a minute): a key in the set from an earlier period
+  // moves on, which takes the principal's lock, so a batch either side of a minute's turn makes two statements, not one.
+  const at = onePeriod();
+  const now = () => ({ at, deadline: at + 3000 });
   try {
     const before = isolate.statements();
-    assert.equal(opened(heard(await isolate.useMany(many(w, ids)))).length, 30);
+    assert.equal(opened(heard(await isolate.useMany(many(w, ids, now())))).length, 30);
     assert.equal(isolate.statements() - before, 2, 'round 1 decides, round 2 enters the 30 keys under the lock');
     const warm = isolate.statements();
-    assert.equal(opened(heard(await isolate.useMany(many(w, ids)))).length, 30);
+    assert.equal(opened(heard(await isolate.useMany(many(w, ids, now())))).length, 30);
     assert.equal(isolate.statements() - warm, 1, 'every key fresh in the set: one statement');
     const two = isolate.statements();
-    assert.equal(opened(heard(await isolate.useMany(many(w, ids.slice(0, 2))))).length, 2);
+    assert.equal(opened(heard(await isolate.useMany(many(w, ids.slice(0, 2), now())))).length, 2);
     assert.equal(isolate.statements() - two, 1);
   } finally {
     await isolate.close();
@@ -142,7 +148,11 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
   const fresh = await w.key();
   const ids = [fresh, await w.key(), await w.key()];
   const { vault, use } = await isolate();
-  const first = await use(ask(w, fresh));
+  // Every use at one time, so in one of the cap's periods: across a minute's turn, a key in the set moves on, which
+  // decides first, so a use refused there logs nothing, and a repeat rides no cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
+  const first = await use(ask(w, fresh, when));
   assert.ok(first.ok);
   answered.set(first.number, first);
   // Her grant revoked: a change to the principal.
@@ -151,7 +161,7 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
     await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
     await seal('vault_members', 'principal', w.principal)(tx, value);
   });
-  const outcome = heard(await vault.useMany!(many(w, ids)));
+  const outcome = heard(await vault.useMany!(many(w, ids, when)));
   // Its first key, in the set, is used and logged in the first call, refused; the others answered `decide`, written nothing.
   assert.ok(!outcome.ok && 'code' in outcome, JSON.stringify(outcome));
   assert.equal(outcome.index, 0);
@@ -161,7 +171,7 @@ test('AllDecidedFirst: a batch the vault refuses on its first call\'s rows enter
   assert.equal(await count('log_uses'), 2);
   // The same batch, its fresh key last: refused at its first key, which answered `decide`, logged nothing (the app logs
   // it); its fresh key's request is logged all the same, as every request of a first call that takes no lock is.
-  const unlogged = heard(await vault.useMany!(many(w, [ids[1]!, ids[2]!, fresh])));
+  const unlogged = heard(await vault.useMany!(many(w, [ids[1]!, ids[2]!, fresh], when)));
   assert.deepEqual(unlogged, { ok: false, index: 0, code: 'no_grant', number: null });
   assert.equal(await count('log_bulk'), 1);
   assert.equal(await count('log_uses'), 3);
@@ -319,6 +329,61 @@ test('a batch answered `late` by its timer while the clock is still short of its
     assert.equal(isolate.statements() - before, 1, 'the statement in flight, and none after it');
   } finally {
     await isolate.close();
+  }
+});
+
+test('a batch that loses its race while one key\'s old-write check reads starts no other key\'s (T177)', postgresOnly('the hot pool counted'), async (t) => {
+  const w = await world();
+  const ids = [await w.key(), await w.key()];
+  // A 0.14 access entry about the principal that the new log does not account for, before each key's statement (one
+  // key a statement): each row names another, so each key's check is a read of its own (`oldWrite`).
+  const grant = { actor: ROOT, action: 'access.grant', decision: 'allow' as const, subjectPrincipal: w.principal, metadata: '{}' };
+  const [head] = await rows<{ next_seq: string; head_hash: Buffer }>(db.owner, sql`SELECT next_seq, head_hash FROM audit_chain_head WHERE only_row`);
+  const appended: bigint[] = [];
+  const isolate = await counted({ before: async () => {
+    appended.push((await db.vault.transaction((tx) => appendEntries(tx, vaultLogKey(SIGNING_KEY), [grant], undefined, undefined, [], true))).seqStart);
+  } });
+  // The first check held until the race's timer, under the test's hand, has fired: the clock is seconds short of the
+  // deadline, so only the race lost stops the second.
+  const checks: bigint[] = [];
+  let checking = () => {};
+  const checked = new Promise<void>((resolve) => (checking = resolve));
+  let go = () => {};
+  const held = new Promise<void>((resolve) => (go = resolve));
+  const path: UsePath = {
+    db: isolate.hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { batch: 1 })),
+    oldWrite: async (_principal, _old, through) => {
+      checks.push(through);
+      checking();
+      await held;
+      return true;
+    },
+  };
+  try {
+    // Connected before the timers are the test's: the driver's connect waits on one.
+    await run(isolate.hot, sql`SELECT 1`);
+    const before = isolate.statements();
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const at = Date.now();
+    const answer = useMany(path, many(w, ids, { at, deadline: at + 3_000 }));
+    await checked;
+    t.mock.timers.tick(3_000);
+    t.mock.timers.reset();
+    assert.deepEqual(await answer, { ok: false, busy: 'late', retryAfter: 1 });
+    go();
+    for (const until = Date.now() + 2_000; path.cache.inFlight > 0 && Date.now() < until;) await sleep(10);
+    assert.equal(path.cache.inFlight, 0);
+    assert.ok(Date.now() < at + 3_000);
+    assert.equal(isolate.statements() - before, 2, "both keys' statements, answered before the race was lost");
+    assert.equal(appended.length, 2);
+    assert.deepEqual(checks, [appended[0]], "the first key's check, and no other once the race is lost");
+  } finally {
+    await isolate.close();
+    // 0.14's log as the test found it: an entry in the vault's name has the next isolate's start convert and declare.
+    await withLogUnlocked(db.owner, async (tx) => {
+      await run(tx, sql`DELETE FROM audit_log WHERE seq >= ${head!.next_seq}`);
+      await run(tx, sql`UPDATE audit_chain_head SET next_seq = ${head!.next_seq}, head_hash = ${head!.head_hash} WHERE only_row`);
+    });
   }
 });
 

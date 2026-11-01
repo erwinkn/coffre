@@ -20,7 +20,7 @@ import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, type Resolved } from '../src/use.ts';
 import { ENGINE, openTestDatabase, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { holding as holdingIn, namedWorld, principalLock, slowed as slowedVault } from './named-world.ts';
-import { change, emptyLog, isolate, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { change, emptyLog, isolate, onePeriod, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -173,11 +173,14 @@ test("a use refused on its cover is answered in its one statement, as a key neve
       await seal('vault_members', 'principal', w.principal)(tx, value);
     });
   const { cost, end } = await costed(w);
+  // Before the grant's end, the uses at one time, so in one of the cap's periods (`onePeriod`'s minute ahead may be past
+  // the end); after it, as they come.
+  const at = Date.now();
   try {
     // Used twice, fresh in the set: the isolate's cover of it, which a repeat rides.
-    assert.equal((await cost(held))[0], 'ok');
-    assert.deepEqual(await cost(held), ['ok', 1]);
-    assert.equal((await cost('NEVER_MADE'))[0], 'missing');
+    assert.equal((await cost(held, undefined, at))[0], 'ok');
+    assert.deepEqual(await cost(held, undefined, at), ['ok', 1]);
+    assert.equal((await cost('NEVER_MADE', undefined, at))[0], 'missing');
     await sleep(Math.max(0, ends - Date.now()) + 50);
     assert.deepEqual([await cost(held), await cost('NEVER_MADE')], [['expired', 1], ['expired', 1]]);
   } finally {
@@ -230,15 +233,17 @@ test('a refusal is one statement, whatever the map holds; a use the map has no i
   const w = await named();
   const held = await w.nameOf(await w.key());
   const { cost, end } = await costed(w);
+  // Every use in one of the cap's periods: the repeat rides its cover.
+  const at = onePeriod();
   try {
-    assert.deepEqual(await cost(held), ['ok', 2], 'read by its names, then made by the ids read');
-    assert.deepEqual(await cost('LATER'), ['missing', 1], 'decided on what its names read: nothing');
-    assert.deepEqual(await cost(held), ['ok', 1], 'by the ids the map keeps');
-    assert.deepEqual(await cost('LATER'), ['missing', 1], 'the map holding it as none');
+    assert.deepEqual(await cost(held, undefined, at), ['ok', 2], 'read by its names, then made by the ids read');
+    assert.deepEqual(await cost('LATER', undefined, at), ['missing', 1], 'decided on what its names read: nothing');
+    assert.deepEqual(await cost(held, undefined, at), ['ok', 1], 'by the ids the map keeps');
+    assert.deepEqual(await cost('LATER', undefined, at), ['missing', 1], 'the map holding it as none');
     // Made since, under that name: the use reads it by its name, then makes it by its id.
     const made = await w.key('later-value');
     await run(db.owner, sql`UPDATE secrets SET key = 'LATER' WHERE id = ${made}`);
-    assert.deepEqual(await cost('LATER'), ['ok', 2]);
+    assert.deepEqual(await cost('LATER', undefined, at), ['ok', 2]);
   } finally {
     await end();
   }
@@ -249,13 +254,16 @@ test("a key renamed, or a token's hash swapped, is `moved`: nothing written, the
   const id = await w.key();
   const name = await w.nameOf(id);
   const { vault } = await isolate();
-  assert.equal(codeOf(await vault.useNamed!(w.ask(name))), 'ok');
+  // Every use in one of the cap's periods: the use of the key renamed rides the first's cover.
+  const at = onePeriod();
+  const when = { at, deadline: at + 3000 };
+  assert.equal(codeOf(await vault.useNamed!(w.ask(name, when))), 'ok');
   await run(db.owner, sql`UPDATE secrets SET key = ${`${name}_RENAMED`} WHERE id = ${id}`);
-  assert.equal(codeOf(await vault.useNamed!(w.ask(name))), 'missing', 'the name the request named holds nothing now');
-  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`))), 'ok');
+  assert.equal(codeOf(await vault.useNamed!(w.ask(name, when))), 'missing', 'the name the request named holds nothing now');
+  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`, when))), 'ok');
   // A writer moves the token's hash off its credential: the request's token names no credential now.
   await run(db.owner, sql`UPDATE credentials SET token_hash = ${randomBytes(32)} WHERE id = ${w.credentialId}`);
-  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`))), 'credential');
+  assert.equal(codeOf(await vault.useNamed!(w.ask(`${name}_RENAMED`, when))), 'credential');
   assert.equal(await uses(), 1, "one entry: the first use's, which the use of the key renamed rides (its cover: the same credential and key)");
 });
 
@@ -472,12 +480,16 @@ for (const lost of ['revoked', 'its grant lapsed'] as const) {
   });
 }
 
-/** A vault over a slowed pool, and a use's answer and the statements it took. */
+/**
+ * A vault over a slowed pool, and a use's answer and the statements it sent. `at`, if given, the use's time: uses at one fall in one of the cap's
+ * refresh periods (a minute), as a repeat must to ride its cover; a key in the set from an earlier period moves on, which
+ * decides first, then makes the use, so a repeat either side of a minute's turn sends two statements, not one.
+ */
 async function costed(w: Awaited<ReturnType<typeof named>>) {
   const slow = await slowed();
-  const cost = async (key: string, purpose?: NamedUseInput['purpose']) => {
+  const cost = async (key: string, purpose?: NamedUseInput['purpose'], at?: number) => {
     const before = slow.statements();
-    const code = codeOf(await slow.vault.useNamed!(w.ask(key, purpose === undefined ? {} : { purpose })));
+    const code = codeOf(await slow.vault.useNamed!(w.ask(key, { ...(purpose === undefined ? {} : { purpose }), ...(at === undefined ? {} : { at, deadline: at + 3000 }) })));
     return [code, slow.statements() - before];
   };
   return { cost, end: slow.end };
@@ -565,8 +577,9 @@ test("a use by ids logs its request whatever it finds, as before names, its key 
   const id = await w.key();
   const other = await w.key();
   const { use } = await isolate();
+  // Every use in one of the cap's periods: `id`'s second, in the set, takes no lock, and is logged.
+  const at = onePeriod();
   const asked = (secretId: string) => {
-    const at = Date.now();
     return use({ credential: w.credentialId, secretId, place: null, purpose: 'use', requestId: newRequestId(), at, deadline: at + 3000 });
   };
   assert.equal((await asked(id)).ok, true);

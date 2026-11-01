@@ -224,6 +224,12 @@ export async function genesis(ref: Ref, object: Input): Promise<void> {
   });
 }
 
+/** A time all of a test's uses share, so that they fall in one refresh period (a minute): now, or the next minute's start when it is under 10 s away. */
+export function onePeriod(): number {
+  const now = Date.now();
+  return now % 60_000 > 50_000 ? now - (now % 60_000) + 60_000 : now;
+}
+
 /** A use's input, its time now and its deadline 3 s on. */
 export function ask(w: { credentialId: string }, secretId: string, extra: Partial<UseInput> = {}): UseInput {
   const at = Date.now();

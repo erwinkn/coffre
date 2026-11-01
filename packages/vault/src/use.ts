@@ -308,9 +308,11 @@ export type UsePath = {
    * (UsesSeeOldWrites). An entry forged there is passed over (vault.ts,
    * `#oldWrite`), which writes nothing. Never past `through`: the use's
    * statement committed before this reads, and an entry since is no input it
-   * decided on. Absent, the probe's answer stands.
+   * decided on. Absent, the probe's answer stands. `starts`, before each
+   * statement it sends: it throws once the use has lost its race, whose
+   * answer has gone, so that the reads stop there (`raced`).
    */
-  oldWrite?: (principal: string, old: bigint | null, through: bigint) => Promise<boolean>;
+  oldWrite?: (principal: string, old: bigint | null, through: bigint, starts: () => void) => Promise<boolean>;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -402,13 +404,14 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
     // principals for one credential were written around the log: no lock first, and Postgres ends a wait cycle (40P01).
     const principals = new Set(decided ? pending.map((index) => (settled[index] as Extract<Used, { again: Ids }>).row.c_principal) : []);
     const lock = principals.size === 1 ? [...principals][0] ?? null : null;
-    const answered = await raced(path, input.deadline, (sends) => inStatements(path, made.map((one) => one.call), lock, sends), async (rows) => {
+    const answered = await raced(path, input.deadline, (sends) => inStatements(path, made.map((one) => one.call), lock, sends), async (rows, starts) => {
       if (rows.length !== made.length) throw new Error(`use_batch answered ${rows.length} rows for ${made.length} keys`);
       const forged = new Map<string, Promise<boolean>>();
-      // One check a principal and entry, as every key's row reads the same (`oldWrite`), in turn on the call's connection.
+      // One check a principal and entry, as every key's row reads the same (`oldWrite`), in turn on the call's connection;
+      // none once the race is lost (T177).
       const forgedOf = async (row: UseRow, known: CachedSeals | undefined) => {
         const at = `${row.c_principal}\n${row.m_access}\n${(known?.last ?? lastsOf(row)).mOld}`;
-        if (!forged.has(at)) forged.set(at, forgedPast(path, row, known));
+        if (!forged.has(at)) forged.set(at, forgedPast(path, row, starts, known));
         return forged.get(at)!;
       };
       const out: { row: UseRow; forged: boolean }[] = [];
@@ -498,7 +501,7 @@ async function useOnce(path: UsePath, input: Asked, names?: Names, decided = fal
   const made = ready(path, input, request, names, decided);
   // The statement, then, within the same admission and deadline, the MAC check of an access entry its probe found that
   // the new log does not account for (`oldWrite`), never past that entry: one forged in the vault's name is passed over.
-  const answered = await raced(path, input.deadline, () => callOf(path.db)(path.db, made.call), async (row) => ({ row, forged: await forgedPast(path, row, row.probed ? undefined : made.known) }));
+  const answered = await raced(path, input.deadline, () => callOf(path.db)(path.db, made.call), async (row, starts) => ({ row, forged: await forgedPast(path, row, starts, row.probed ? undefined : made.known) }));
   if ('busy' in answered) return { outcome: answered, row: null, checked: null, request };
   const used = settle(path, input, names, decided, made, answered.row, answered.forged);
   // Refused on a cover, by ids: the request is logged as an entry of its own.
@@ -816,11 +819,12 @@ function standingOf(checked: CheckedView, request: UseRequest): Access {
  * after the statement (`oldWrite`) is within the same place and deadline.
  * Past the deadline, or the race lost, the call starts nothing more, neither the statement
  * after `ready` (nor a batch's next, `sends`) nor, the race lost, the reads after it: its
- * answer has gone. One it had started may still reach Postgres (on Node, its bytes leave on
- * the next turn of the loop), which refuses it past the deadline, and its row is dropped.
- * A round of a batch is one call, its statements made in turn within it.
+ * answer has gone. `then` is handed `starts` for those, which it calls before each (a batch's
+ * `oldWrite` for one key, then another's, T177). One it had started may still reach Postgres
+ * (on Node, its bytes leave on the next turn of the loop), which refuses it past the deadline,
+ * and its row is dropped. A round of a batch is one call, its statements made in turn within it.
  */
-async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => void) => Promise<R>, then: (row: R) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
+async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => void) => Promise<R>, then: (row: R, starts: () => void) => Promise<T>): Promise<T | Extract<UseOutcome, { busy: UseBusy }>> {
   const release = path.cache.admit(deadline);
   // Whether the race is lost: once it is, `then` starts nothing. The timer alone says so, never the clock, so that a
   // statement that answered first is decided on, its entry written (Fable's review of #438).
@@ -831,12 +835,17 @@ async function raced<R, T>(path: UsePath, deadline: number, call: (sends: () => 
   const sends = () => {
     if (lost || Date.now() >= deadline) throw Object.assign(new Error('a use past its deadline sends nothing more'), { code: '57014' });
   };
+  // Before each read after the statement: none once the race is lost. The timer alone, as above: a statement that
+  // answered first is decided on, whatever the clock says by then.
+  const starts = () => {
+    if (lost) throw Object.assign(new Error('a use that lost its race starts nothing more'), { code: '57014' });
+  };
   const running = (async () => {
     await path.ready?.();
     sends();
     const row = await call(sends);
-    if (lost) throw Object.assign(new Error('a use that lost its race starts nothing more'), { code: '57014' });
-    return then(row);
+    starts();
+    return then(row, starts);
   })().finally(release);
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<'late'>((resolve) => {
@@ -880,12 +889,14 @@ function callOf(db: Queryable): (db: Queryable, call: UseCall) => Promise<UseRow
  * then it is passed over, as Migration015.tla's UsesSeeOldWrites reads only
  * authentic writes, and the use is decided as its replay decides it.
  */
-async function forgedPast(path: UsePath, row: UseRow, known?: CachedSeals): Promise<boolean> {
+async function forgedPast(path: UsePath, row: UseRow, starts: () => void, known?: CachedSeals): Promise<boolean> {
   // A row that answers a state (`moved`, `unknown`, `unconfigured`) may name none of these: nothing to check.
   if (path.oldWrite === undefined || row.m_access == null || row.c_principal == null) return false;
   const old = (known?.last ?? lastsOf(row)).mOld ?? null;
   if (old !== null && BigInt(row.m_access) <= BigInt(old)) return false;
-  return !(await path.oldWrite(row.c_principal, old === null ? null : BigInt(old), BigInt(row.m_access)));
+  // The race lost, no read: whatever `oldWrite` does with `starts`, it is not asked.
+  starts();
+  return !(await path.oldWrite(row.c_principal, old === null ? null : BigInt(old), BigInt(row.m_access), starts));
 }
 
 function lastsOf(row: UseRow): Lasts {
