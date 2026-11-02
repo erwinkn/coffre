@@ -8,7 +8,9 @@
 (* or be shadowed by a code definition of the same name. The question this *)
 (* model answers: where may a key go?                                      *)
 (*                                                                         *)
-(* One environment, one route `r`, one key `K` it sends, two hosts. The    *)
+(* One environment, one route `r`, two hosts. The route sends its keys    *)
+(* (K, and K2 beside it) in one request; with OneVersion they are decided  *)
+(* together, so the model tracks K's decision and K2's version only. The   *)
 (* definition is one object of the vault's log (a `proxy` object): `defs[v]` *)
 (* is what change v left, its host and its clearance (the most sensitive   *)
 (* nature it may send: "sensitive" when an Owner covering the place saved  *)
@@ -42,11 +44,12 @@
 (* `r`). An isolate, before its first proxy request, adds its code's names *)
 (* to them (LogCode, a `proxy.code` change when it adds one), deleting the *)
 (* UI definition of a name it adds, whole in the entry. A reservation is   *)
-(* never dropped by a deploy, only by an Owner's audited release, from an  *)
-(* isolate whose code lacks the name (Release). A code name is taken in    *)
-(* every environment, whatever the code item's scope, so only code, never  *)
-(* a rename, changes what is reserved. `shadowed` is a ghost: the UI       *)
-(* versions some isolate's code hid, at a request or on the page.          *)
+(* never dropped by a deploy, only by an instance Owner's audited release, *)
+(* which the app refuses where its code has the name (Release). A code     *)
+(* name is taken in every environment, whatever the code item's scope, so  *)
+(* only code, never a rename, changes what is reserved. `shadowed` is a    *)
+(* ghost: the UI versions some isolate's code hid, when it reserved the    *)
+(* name or showed the version locked.                                      *)
 (*                                                                         *)
 (* Protections, each a constant, TRUE in the code:                         *)
 (***************************************************************************)
@@ -61,7 +64,7 @@ CONSTANTS
     MaxTampers,     \* rows a database writer puts back or forges
     MaxMarks,       \* K made sensitive (once)
     MaxDeploys,     \* isolates restarted on code that flips whether it defines `r`
-    MaxReleases,    \* an Owner's releases of a reserved name
+    MaxReleases,    \* an instance Owner's releases of a reserved name
     Budget          \* proxy requests the isolates make
 
 CONSTANTS
@@ -83,6 +86,11 @@ CONSTANTS
     BoundToDefinition,
     \* Kept values serve W ticks after their decision, no longer.
     KeptExpires,
+    \* A route's keys are all decided on one version: one statement, and any
+    \* later round of the same use must find the same seal (else `moved`);
+    \* the app sends only answers that all carry one seal. Else a later
+    \* round decides K2 on whatever version is newest then.
+    OneVersion,
     \* The use weighs the key's nature now against the definition's
     \* clearance (else only the save checked it, against the nature then).
     ClearanceAtUse,
@@ -97,7 +105,8 @@ CONSTANTS
 
 None == "none"
 NoCopy == [ver |-> 0, host |-> None]
-NoKept == [ver |-> 0, host |-> None, at |-> 0, newest |-> FALSE, nat |-> None, revived |-> FALSE]
+NoKept == [ver |-> 0, host |-> None, at |-> 0, newest |-> FALSE, nat |-> None, revived |-> FALSE,
+           ver2 |-> 0, newest2 |-> FALSE]
 NoSnap == [ver |-> 0, host |-> None, newest |-> 0]
 
 VARIABLES
@@ -251,7 +260,9 @@ Decide(i, mine) ==
            sendTo  == IF SentAsDecided \/ copy[i] = NoCopy THEN answer ELSE copy[i].host
        IN /\ kept' = IF allowed /\ mine
                        THEN [kept EXCEPT ![i] = [ver |-> v, host |-> sendTo, at |-> now, newest |-> v = Newest, nat |-> nature,
-                                                 revived |-> v \in shadowed]]
+                                                 revived |-> v \in shadowed,
+                                                 ver2 |-> IF OneVersion THEN v ELSE 0,
+                                                 newest2 |-> OneVersion /\ v = Newest]]
                        ELSE kept
           /\ copy' = IF allowed /\ (SentAsDecided \/ copy[i] = NoCopy)
                        THEN [copy EXCEPT ![i] = [ver |-> v, host |-> answer]]
@@ -260,16 +271,31 @@ Decide(i, mine) ==
     /\ left' = left - 1
     /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, sent, edits, tampers, marks, deploys, releases>>
 
+\* Without OneVersion: a later round of the same use decides K2, on the row
+\* it reads then (fenced, checked as Decide checks). Refused, nothing is sent.
+DecideSecond(i) ==
+    /\ ~OneVersion /\ ~code[i] /\ Serving(i)
+    /\ kept[i].ver # 0 /\ kept[i].ver2 = 0
+    /\ LET v       == row.ver
+           allowed == /\ row.host = Body(v)
+                      /\ ~SealChecked \/ v = Newest
+                      /\ Body(v) # None
+                      /\ ~ClearanceAtUse \/ nature = "secret" \/ defs[v].clearance = "sensitive"
+       IN kept' = IF allowed THEN [kept EXCEPT ![i].ver2 = v, ![i].newest2 = (v = Newest)]
+                             ELSE [kept EXCEPT ![i] = NoKept]
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, sent, edits, tampers, marks, deploys, releases, left>>
+
 \* A request goes out with the kept values: to the kept definition's
 \* upstream, or, not bound to it, wherever the isolate's copy says now.
 Send(i) ==
-    /\ kept[i].ver # 0 /\ ~code[i]
+    /\ kept[i].ver # 0 /\ kept[i].ver2 # 0 /\ ~code[i]
     /\ KeptExpires => now < kept[i].at + W
     /\ LET h == IF BoundToDefinition \/ copy[i] = NoCopy THEN kept[i].host ELSE copy[i].host
        IN /\ h # None
           /\ sent' = sent \cup {[host |-> h, ver |-> kept[i].ver, at |-> kept[i].at, sentAt |-> now,
                                  newest |-> kept[i].newest, nat |-> kept[i].nat,
-                                 stillNewest |-> kept[i].ver = Newest, revived |-> kept[i].revived]}
+                                 stillNewest |-> kept[i].ver = Newest, revived |-> kept[i].revived,
+                                 ver2 |-> kept[i].ver2, newest2 |-> kept[i].newest2]}
     /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, edits, tampers, marks, deploys, releases, left>>
 
 Tick ==
@@ -281,7 +307,7 @@ Done == now = MaxTime /\ left = 0 /\ UNCHANGED vars
 
 Next ==
     \/ \E i \in Iso, h \in Hosts, c \in {"secret", "sensitive"} : Edit(i, h, c)
-    \/ \E i \in Iso : Release(i) \/ Deploy(i) \/ LogCode(i) \/ Resolve(i) \/ Read(i) \/ Send(i)
+    \/ \E i \in Iso : Release(i) \/ Deploy(i) \/ LogCode(i) \/ Resolve(i) \/ Read(i) \/ DecideSecond(i) \/ Send(i)
     \/ \E i \in Iso, mine \in BOOLEAN : Decide(i, mine)
     \/ Mark
     \/ \E v \in 1..Newest : Tamper(v)
@@ -294,19 +320,20 @@ TypeOK ==
     /\ now \in 1..MaxTime
     /\ row.ver \in 1..Newest
     /\ nature \in {"secret", "sensitive"}
-    /\ \A i \in Iso : copy[i].ver \in 0..Newest /\ kept[i].ver \in 0..Newest
+    /\ \A i \in Iso : copy[i].ver \in 0..Newest /\ kept[i].ver \in 0..Newest /\ kept[i].ver2 \in 0..Newest
 
 (***************************************************************************)
 (* Every request that carried K went where a definition the vault decided  *)
 (* on says, a definition that was the log's newest when it decided (not    *)
 (* one put back or forged, nor one an edit had replaced), and one cleared  *)
-(* for K's nature then: a sensitive key only by an Owner's definition.     *)
+(* for K's nature then: a sensitive key only by an Owner's definition. And *)
+(* K2, in the same request, likewise, by the version it was decided on.    *)
 (***************************************************************************)
 EverySendAllowed ==
     \A s \in sent :
-        /\ s.newest
-        /\ s.host = Body(s.ver)
-        /\ s.nat = "sensitive" => defs[s.ver].clearance = "sensitive"
+        /\ s.newest /\ s.newest2
+        /\ s.host = Body(s.ver) /\ s.host = Body(s.ver2)
+        /\ s.nat = "sensitive" => defs[s.ver].clearance = "sensitive" /\ defs[s.ver2].clearance = "sensitive"
 
 \* And within W of that decision: an edit stops the old upstream's requests
 \* W after it at the latest (a minute by default, a revocation's bound).

@@ -1954,8 +1954,9 @@ Where a key may go once an Owner can edit its route in the UI (T186;
 are in flight, a database writer can put an old row back, and a code
 definition of the same name can shadow it, then be dropped.
 
-**The model.** One environment, one route, one key, two hosts (`good`,
-`evil`). The definition is a sealed object of the vault's log: each
+**The model.** One environment, one route, two hosts (`good`, `evil`).
+The route sends two keys in one request; with `OneVersion` both are decided
+in one step, so the model tracks the second only when that is off. The definition is a sealed object of the vault's log: each
 change appends a version (its host, and its clearance: "sensitive" when
 an Owner covering the place saved it, else "secret"). The row is a seal
 and a body: honest code writes the newest version with its body, and a
@@ -1972,7 +1973,7 @@ save. Two isolates may serve at once, on different code during a deploy:
 a restart flips whether an isolate's code defines the route's name. Before
 it serves, an isolate reserves its code's names in the log (a
 `proxy.code` change, deleting the UI row of a name it adds); no deploy
-drops a reservation, only an Owner's audited release.
+drops a reservation, only an instance Owner's audited release.
 
 | Protection, in the design | Turned off, TLC finds |
 |---|---|
@@ -1983,6 +1984,7 @@ drops a reservation, only an Owner's audited release.
 | kept values go only to the definition they were decided under (BoundToDefinition) | `EverySendAllowed`: values decided for one upstream sent to a newer one the vault never decided on for them |
 | each use weighs the key's nature now against the definition's clearance (ClearanceAtUse) | `EverySendAllowed`: a Developer's route saved while the key was secret sends it once it is sensitive |
 | kept values serve W, no longer (KeptExpires) | `WithinWindow` |
+| a route's keys decided on one version: a later round of the use must find the same seal, and the app sends only answers carrying one (OneVersion) | `EverySendAllowed`: the first key decided on the `good` version, an Owner's edit to `evil`, the second key decided on it in a later round, and the request carries both to `good` |
 | the `proxy.code` change that reserves a name deletes its UI row (ClearSuperseded) | `NoRevival`: code defines the name, then drops it, and the UI row nobody saw since serves again |
 | the vault refuses a save of a reserved name (SaveChecksReserved) | `NoRevival`: during a deploy, an Owner saves the name through the old isolate after the new one reserved it; the new code hides it, and it serves again once code drops the name |
 | no proxy request before the isolate's code names are reserved (CodeGate) | `NoRevival`: the same, through a deployment that served the name from code without reserving it |
@@ -1992,14 +1994,16 @@ drops a reservation, only an Owner's audited release.
   the key's nature then.
 - `WithinWindow`: within W of that decision.
 - `NoRevival`: no use is decided on a UI version some isolate's code
-  shadowed: the newest UI version when that code went live, or one it
-  showed locked, deleted since or not. Values decided on it before code
+  shadowed: the newest UI version when that isolate reserved the name (its
+  gate, before its first proxy request), or one it showed locked, deleted
+  since or not. A deployment that served no proxy request shadowed nothing:
+  nothing served or showed its definition. Values decided on it before code
   shadowed it serve out their W, the window `StrictlyCurrent` documents. `NeverShadowed`, `EXPECTED` broken in
   `RoutingCode`, is the witness that the protected runs do shadow one, so
   `NoRevival` does not hold for want of a case. A code name is taken in
   every environment whatever its scope, so only a deploy changes what code
   shadows, never a rename (proxy-ui.md, section 6).
-- `RoutingRelease`, `EXPECTED` broken: an Owner releases the reserved name
+- `RoutingRelease`, `EXPECTED` broken: an instance Owner releases the reserved name
   while the other isolate's code still defines it, then saves it; that
   isolate hid the new row, and once it restarts on code without the name,
   the row serves again. It takes the Owner's deliberate, audited release,
@@ -2013,13 +2017,18 @@ drops a reservation, only an Owner's audited release.
 |---|---|---|
 | `Routing` | one isolate; two edits (any host, either clearance), a key marked sensitive, two rows put back or forged, while uses (this caller's or another's) resolve, decide and send | 9,266,068 |
 | `RoutingCode` | two isolates, one edit, and two restarts: code defines the name, then drops it, while the other isolate serves and saves | 1,678,179 |
-| `RoutingRelease` | as `RoutingCode`, with an Owner's release of the reserved name (`NoRevival` left out: the `EXPECTED` gap) | 2,949,085 |
+| `RoutingRelease` | as `RoutingCode`, with an instance Owner's release of the reserved name (`NoRevival` left out: the `EXPECTED` gap) | 2,949,085 |
 
-**What it does not cover.** The fence itself (HotPathOne). One route
-and one key, so the reserved set is one name's flag. The frozen holdings are one clearance per version; the decisions over
-grants, forks and references are the vault's own, held by its tests and
-Lean. The path rules and the allow list are pure functions, held by
-property tests.
+**What it does not cover.** The fence itself (HotPathOne). One route,
+so the reserved set is one name's flag. The frozen holdings are one
+clearance per version, frozen at save (proxy-ui.md's question 5, option
+(a)); the decisions over grants, forks and references are the vault's own,
+held by its tests and Lean. The path rules and the allow list are pure
+functions, held by property tests. A deleted row is the vault's `stale`,
+held by PR A's tests. `RoutingCode` and `RoutingRelease` put back no rows:
+a writer who puts back the item a `proxy.code` change deleted makes a
+rollback like any other, since the deletion is a change, and `Routing`
+shows `SealChecked` refuses those.
 
 ## TLC
 

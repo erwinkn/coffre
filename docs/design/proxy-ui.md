@@ -20,7 +20,9 @@ key by whoever controls the upstream.
 1. **Storage.** One Postgres row per environment holds its UI definitions.
    The row is a 0.15 sealed object of the vault's log, kind `proxy`, changed
    only through the vault's change path, like a grant. A database writer
-   cannot forge one, nor put an old one back unseen.
+   cannot forge one, nor put an old one back unseen. Its seal covers a list
+   of item digests, so a use reads its own route's item, not the whole
+   environment.
 2. **Ordering.** An edit is a change under the fence, exclusive. A use reads
    the definition in its one statement, under the fence, shared. So every
    use is decided wholly before or wholly after an edit. Values already
@@ -37,13 +39,14 @@ key by whoever controls the upstream.
    keys as before. The definition rides in the vault's call as one more row
    and one more probe, and comes back in the answer only when the isolate's
    copy is stale. An edit that adds a key costs each isolate one extra call
-   once, the map miss any new key costs today.
+   once, the map miss any new key costs today, and each isolate's first
+   proxy request makes one call to check code's names (section 6).
 5. **Code wins.** A UI definition whose name code also defines is ignored
-   and shown locked (R66). Code's names are reserved in the log before an
-   isolate serves, which deletes such a row, audited, and refuses new saves
-   of the name. No deploy drops a reservation, so a hidden row never comes
-   back when code later drops the name; only an Owner's audited release
-   frees it.
+   and shown locked (R66). An isolate reserves its code's names in the log
+   before it serves its first proxy request. Reserving a name deletes the UI
+   item of that name, audited, and the vault refuses new saves of it. No
+   deploy drops a reservation, so a hidden item never comes back when code
+   later drops the name; only an instance Owner's audited release frees it.
 6. **Matching** runs on the percent-decoded path, segment by segment.
    `..`, `.`, encoded slashes and double encoding are refused, never
    resolved. `*` matches one segment and `**` the rest; a plain path is a
@@ -119,12 +122,29 @@ One table, Postgres first (R50), SQLite for tests and local development:
 ```sql
 CREATE TABLE proxy_definitions (
   environment_id uuid PRIMARY KEY REFERENCES environments(id),
-  items          jsonb NOT NULL,   -- the canonical object: every item, with who saved it
-  seal           bytea NOT NULL    -- the vault's HMAC over (kind, id, items), 16 bytes
+  items          jsonb NOT NULL,   -- the canonical object: name -> item, with who saved it
+  digests        bytea NOT NULL,   -- SHA-256 of each item, in name order: 32 bytes an item
+  seal           bytea NOT NULL    -- the vault's HMAC over (kind, id, names, digests), 16 bytes
 );
-GRANT SELECT ON proxy_definitions TO coffre_app, coffre_backup;
+CREATE TABLE proxy_reserved (    -- one row: the instance's
+  id     smallint PRIMARY KEY CHECK (id = 1),
+  names  jsonb NOT NULL,           -- every name code has reserved, the whole set
+  seal   bytea NOT NULL
+);
+GRANT SELECT ON proxy_definitions, proxy_reserved TO coffre_app, coffre_backup;
 -- written only by the vault's logins, through its change functions
 ```
+
+**A use reads one item, not the environment.** The seal covers the item
+names and their digests, not the items themselves. A use's statement reads
+its route's item (`items -> 'openai'`), the digest list and the seal. The
+vault hashes the item, finds that digest at its name, and checks the MAC
+over the list. A forged item fails the digest, a forged list fails the
+MAC. So what crosses from Postgres to the vault, and what the vault hashes,
+is one item plus 32 bytes per item of the environment: about 2 KB at 50
+items. A save may hold at most 256 items, so the list stays under 8 KB.
+Sealing the whole `items` instead would carry every item, every editor's
+frozen holdings included, on every use of any of them.
 
 The migration only adds (AGENTS.md, "expand, then contract"), and grants
 `coffre_backup` by name as every new table does. An environment with no UI
@@ -133,7 +153,7 @@ definitions has no row.
 **Why one row per environment, not one per item.** The page saves all its
 pending edits at once (save, discard, review), and copying from another
 environment writes many items. One object makes that one change, one seal
-and one entry. A use reads one row for its environment: two for a fork,
+and one entry, and the digest list keeps a use's reads to its own item. A use reads one row for its environment: two for a fork,
 whose parent's definitions it inherits (question 6). The cost is that two
 Owners saving different routes of one environment at once conflict. The
 second gets a 409 and reviews the first's change (below), which is what the
@@ -178,11 +198,21 @@ Three change ops, each through the vault's change path (`change_input`: CAS
 on the seal the caller read, the fence exclusive, the entry numbered under
 it, the answer once sealed):
 
-| Op | Who | Payload, in the entry (R53: the request, not the outcome) |
-|---|---|---|
-| `proxy.save` | a person holding `proxy.edit` on the environment | the environment, the seal the page loaded, and each item added, changed or removed, whole |
-| `proxy.code` | the deployment (actor `deployment`), section 6 | the names it reserves, and each UI item it deletes, whole |
-| `proxy.release` | an Owner, from an isolate whose code lacks the name | the name released |
+| Op | Who | Changes | Payload, in the entry (R53: the request, not the outcome) |
+|---|---|---|---|
+| `proxy.save` | a person holding `proxy.edit` on the environment | the environment's `proxy` object | the environment, the seal the page loaded, and each item added, changed or removed, whole |
+| `proxy.code` | the deployment (actor `deployment`): the app's own call to the vault at its gate, with no HTTP route, so no person or token can make one | the `proxy-reserved` object, and the `proxy` object of each environment holding a name it adds, in one transaction | the names it adds, and each UI item it deletes, whole |
+| `proxy.release` | an instance Owner, through `PUT /api/proxy/reserved` | the `proxy-reserved` object | the name released |
+
+The reserved set follows the policy object's precedent
+([sealed-inputs.md](sealed-inputs.md)): one instance-wide object, kind
+`proxy-reserved`, whose every change carries the **whole set** as its
+value. So "is `maps` reserved" is one read of one row, checked current
+against its newest change's seal, never a sum over earlier entries. Three
+statements probe it: a save (`SaveChecksReserved`), a release, and an
+isolate's gate (section 6). A `proxy.code` change is one entry per object
+it changes, the reserved set's and each environment's, in one transaction
+under the fence.
 
 The audit page shows a `proxy.save` as a diff: `openai: upstream
 api.openai.com → eu.api.openai.com`, with the keys each changed item sends.
@@ -210,14 +240,19 @@ TLC checks:
 - **`EverySendAllowed`.** Every request that carries a key goes to the
   upstream of a definition that (a) the vault decided on, (b) was the log's
   newest when it decided (not a row put back, not one an edit had
-  replaced), and (c) was cleared for the key's nature at that decision.
+  replaced), and (c) was cleared for the key's nature at that decision. A
+  request that carries several keys (Basic's user and password, SigV4's
+  two) carries them under one version.
 - **`WithinWindow`.** That request leaves within W of the decision: W is
   `cacheSeconds` with the cache, or the use's 3 s deadline without it.
-- **`NoRevival`.** No use is decided on a UI definition that code
-  shadowed, by any isolate, then or after code drops the name. Values
-  decided on it just before code shadowed it serve out their W, as after an
-  edit.
-- **`RoutingRelease`**: an Owner who releases a reserved name while an older
+- **`NoRevival`.** No use is decided on a UI definition once code has
+  shadowed it, by any isolate, then or after code drops the name. Code
+  shadows a UI item when an isolate running it reserves the name (its gate,
+  before its first proxy request) or shows the item locked. A deployment
+  that never served a proxy request shadowed nothing, because nothing ever
+  served or showed its definition. Values decided on the UI item just
+  before the reservation serve out their W, as after an edit.
+- **`RoutingRelease`**: an instance Owner who releases a reserved name while an older
   deployment still serving defines it, then saves it, is the one revival
   left: `EXPECTED` broken, and the release dialog says so (section 6).
 - **`StrictlyCurrent`**, the literal reading, fails with every protection
@@ -245,22 +280,35 @@ values serve out the window. Question 4 offers the strict alternative.
 ```
 use (a named use, as 0.15's: one call on a map hit, section 4)
   app      find the handle in the request by its shape (it does not need the definition for that)
-  call     use_credential(token, place, route 'openai', the ids the map holds, the seal of the isolate's copy)
+  call     use_credential(token, both URL readings, the ids the map holds, the digest of the isolate's copy)
              fence shared
              one statement, one snapshot:
                the caller's rows, as today
-               the proxy row(s) of the place (and a fork's parent), and the seal of their newest change
-               the route's keys as the definition read names them, held to the map's ids (else `moved`), and their rows
-             the entry: the request, the route's name included, under its MAC
+               the route's item, the digest list and seal of the place's proxy row (and a fork's parent's),
+                 and the seal of their newest change
+               every key of the route as that item names it, held to the map's ids (else `moved`), and their rows
+             one entry per key: the request, the route's name included, under its MAC
            commit
-  vault    seals checked (proxy object included), then decided twice:
+  vault    seals checked (proxy object included), then every key decided twice:
              for the caller (purpose use, as today)
              for the definition's frozen editor (section 8)
-           answers: the values, and the definition decided on (omitted when the isolate's copy has that seal)
-  app      checks the handle (section 7), and the method and path against the definition's allow list
+           answers: the values, the definition's seal, and its item (omitted when the isolate's copy has that digest)
+  app      sends only if every key's answer carries the same seal (else asks again)
+           checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the cache key includes its seal)
            sends, before the use's deadline, to that definition's upstream
+```
 
+All of a route's keys are decided on one version, in that one statement.
+A use of several keys may need a second round today (`useMany`: a key that
+takes its principal's lock is decided again on fresh rows, after the
+first), and a large batch runs in chunks. Every later round of a route use
+must read the seal the first one read, or the whole use answers `moved`
+and starts over. Otherwise a SigV4 route could have its access key decided
+on version 7 (`good`) and its secret key on version 8 (`evil`), and one
+request carries both to one host (`OneVersion`).
+
+```
 edit (one change)
   vault    reads the row and decides proxy.edit, freezing the editor's holdings
   call     change_input: fence exclusive, CAS on the seal read, write, entry numbered, commit
@@ -281,7 +329,8 @@ described, which `scripts/formal.sh` holds as a failure on every CI run.
 | `BoundToDefinition`: kept values go only to the definition they were decided under | values decided on version 7 (`good`) are served from the cache after the app re-read version 8 (`evil`). The key reaches `evil`, which the vault never decided on for them |
 | `ClearanceAtUse`: each use weighs the key's nature now against the definition's clearance | a Developer routes `K` while it is secret. An Owner marks it sensitive, and the next use sends the sensitive value to the Developer's upstream |
 | `KeptExpires`: kept values serve W, no longer | values sent long after their decision (`WithinWindow`) |
-| `ClearSuperseded`: the `proxy.code` change that reserves a name deletes its UI row | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
+| `OneVersion`: a route's keys are all decided on one version, and the app sends only answers carrying one seal | key 1 is decided on version 7 (`good`), an Owner's edit to version 8 (`evil`) commits, a later round decides key 2 on version 8, and the request carries both to `good`: key 2 goes where no version it was decided on says |
+| `ClearSuperseded`: the `proxy.code` change that reserves a name deletes its UI item | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
 | `SaveChecksReserved`: the vault refuses a save of a reserved name | during a deploy, an Owner saves `openai` through an old isolate after the new one reserved it; the new code hides it, and it serves again when a later deployment drops the name |
 | `CodeGate`: an isolate serves no proxy request before its code's names are reserved | the same revival, through a deployment that served `openai` from code without ever reserving it |
 
@@ -289,12 +338,18 @@ The model runs two isolates, which may run different code during a deploy,
 and a writer who can forge a body or put a row back. What it does not
 cover: the fence's own correctness (that a use and a
 change never overlap, and the number orders them) is `HotPathOne.tla`'s, for
-any input. Here an edit is one step. One route, one key, two hosts. The frozen holdings are reduced to
-one clearance per version ("sensitive" for an Owner, "secret" otherwise).
-The matching rules of section 7 are pure functions, which property tests
-hold, not TLC. That a map hit's ids are held to the route's names is
-Naming.tla's `HeldToNames`, unchanged. Renames are not modelled, because
-they cannot change what code shadows (section 6).
+any input. Here an edit is one step. One route, two hosts; its second key
+appears only when `OneVersion` is off, since with it on both keys share
+every decision. The frozen holdings are reduced to one clearance per
+version ("sensitive" for an Owner, "secret" otherwise); question 5's option
+(b) is not modelled yet. The matching rules of section 7 are pure
+functions, which property tests hold, not TLC. That a map hit's ids are
+held to the route's names is Naming.tla's `HeldToNames`, unchanged. Renames
+are not modelled, because they cannot change what code shadows (section 6).
+A deleted row is the vault's `stale` (PR A tests it). The scenarios with
+deploys put back no rows: a writer who puts back the item `proxy.code`
+deleted is a rollback like any other, which `SealChecked` refuses in
+`Routing`, since a deletion is a change of the object.
 
 ## 4. What `/use` costs, in round trips
 
@@ -310,12 +365,13 @@ of that and adds the route's name to what the request names.
 
 | Case | Today (0.15) | With UI definitions |
 |---|---|---|
-| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement: one more row and one more probe of its newest change, inside the same call. Its body is not sent, because the isolate's copy has the row's seal |
-| Map miss: an isolate cold for that environment, or a key it has not used | 2 calls | **2 calls.** The first resolves the route in the definition read, its keys by name, and answers with the ids and the definition (a few hundred bytes to a few KB). The second makes the use |
+| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement: one more row (the route's item and the digest list) and one more probe of its newest change, inside the same call; two of each through a fork. The item is not sent back, because the isolate's copy has its digest |
+| Map miss: an isolate cold for that environment or URL, or a key it has not used | 2 calls | **2 calls.** The first reads both URL readings by name (section 6): up to two places' proxy rows and probes, four through forks. It picks the reading, resolves the route's keys by name, and answers with the reading, the ids and the item (a few hundred bytes to a few KB). The second makes the use, reading the chosen place only |
 | Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the row's seal differ from the copy's and returns the new body in the same answer. Nothing is refused or retried |
 | Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
 | Cache hit | 0 calls | **0 calls** |
 | A code route | as today | as today. The app names the keys, and no `proxy` row is read |
+| An isolate's first proxy request | as above | **1 more call, once per isolate**: its gate (section 6), a vault call that reads the reserved set. When the isolate's code adds a name, that call makes a `proxy.code` change and answers once it is sealed, about half a second; that happens once per deploy that adds a name |
 
 **What the entry records** (R53: the request, so that the replay decides
 it as live did). A route use's entry carries the route's name in a new
@@ -337,35 +393,41 @@ the two calls of a miss therefore cannot have a key used that the route no
 longer names.
 
 **The isolate's copy comes only from the vault's answers.** The copy saves
-bytes: a call that carries its seal gets the body omitted when the row still
-has that seal. So a seal the isolate sends must stand for a body the vault
-checked. If the copy could come from a read of the app's own (the page's
-`GET …/proxy`, or a bootstrap read), a database writer could do this: change
-the row's body to `evil` while keeping its genuine seal S, let the app read
-that pair, and put the genuine row back. The vault then checks the genuine
-row, sees the app's S, omits the body, and the app sends by its forged copy.
+bytes: a call that carries its digest gets the item omitted when the row's
+item still has that digest. So a digest the isolate sends must stand for an
+item the vault checked. If the copy could come from a read of the app's own
+(the page's `GET …/proxy`, or a bootstrap read), a database writer could do
+this: change the item's body to `evil` (a row whose MAC fails, which the app
+cannot tell), let the app read it and keep the genuine digest D beside it,
+and put the genuine row back. The vault then checks the genuine row, sees
+the app's D, omits the item, and the app sends by its forged copy.
 So the use path never fills its copy from its own reads: a cold isolate
 sends no seal and gets the body (`CopyFromVault` in the model, which finds
 exactly that run without it).
 
-**Invalidation costs no round trip.** The definition's body is the only
-thing the isolate caches, and only to save bytes. Postgres compares the
-copy's seal with the row's inside the use's own snapshot, under the fence:
+**Invalidation costs no round trip.** The route's item is the only thing
+the isolate caches, and only to save bytes. Postgres compares the copy's
+digest with the row's inside the use's own snapshot, under the fence:
 no change commits between that comparison and the decision, so it cannot
 be wrong. The seals are probed on every call anyway, as above. A kept value
 cache entry is invalidated by time only: the window of section 3.
 
-**Bytes and CPU.** The definition body crosses the wire only when stale. The
-second decision (the frozen editor's) is CPU in the Worker over rows the
-statement already read: the key rows are the same, and the holdings come
-with the definition. The cost the statement does add is one row and one
-probe per use, two through a fork, whose parent's object it reads too; the
-`whole` shape already reads the parent environment. The new entry column
-costs bytes on every route use: PR C measures them as PR 3 measured the
-place column (sealed-inputs.md, "A use"). PR C also measures the probes
-against the 30-buffer budget, holds the statement flat as the log grows
-(`request-cost.test.ts`, R48), and must show no regression in the `/use`
-bench (R44).
+**Bytes and CPU.** From Postgres to the vault, every route use carries the
+route's item and the environment's digest list: the item's bytes plus 32 a
+definition, which the vault hashes once and MACs once. That grows with the
+environment's definitions, slowly, and is capped by the 256 items a save
+may hold (about 8 KB of list). From the vault to the app, the item crosses
+only when the isolate's copy is stale. The second decision (the frozen
+editor's) is CPU in the Worker over rows the statement already read: the
+key rows are the same, and the holdings come with the item. The cost the
+statement adds is one row and one probe per use, two through a fork, whose
+parent's object it reads too; the `whole` shape already reads the parent
+environment. The new entry column costs bytes on every route use: PR C
+measures them as PR 3 measured the place column (sealed-inputs.md, "A
+use"). PR C also measures the probes against the 30-buffer budget, holds
+the statement flat as the log grows (`request-cost.test.ts`, R48), and runs
+the `/use` bench against 0.15.1 with an environment of 1 and of 256
+definitions: no regression at 1 (R44), and the cost at 256 stated in the PR.
 
 ## 5. The vault makes no outbound call
 
@@ -378,11 +440,16 @@ deploy. That calls for two checks code upstreams never needed:
 - **No private targets.** A UI upstream is `https://` to a DNS name or a
   public address. Loopback, private, link-local and metadata addresses
   (`169.254.169.254`) are refused at save, as are `localhost` and single-label
-  names. On Workers the platform refuses them anyway. On Node a name can
-  resolve to a private address at request time (DNS rebinding), so the
-  Node fetch for a UI route checks the address it connects to, through
-  undici's `connect` lookup. `insecureUpstreams` lifts both for local fakes,
-  as it lifts the rest today.
+  names. On Node a name can resolve to a private address at request time
+  (DNS rebinding), so the Node fetch for a UI route resolves the name
+  itself, through undici's `connect` lookup, checks every address it
+  returns, and dials only a checked one, before any byte leaves. On Workers
+  a `fetch` and a `connect()` both leave from Cloudflare's network, which
+  does not route to private addresses: only a binding reaches them (R31).
+  PR C checks that claim against production for both, and if `connect()`
+  does reach one, UI tunnels on Workers take only literal public addresses.
+  `insecureUpstreams` lifts these checks for local fakes, as it lifts the
+  rest today.
 - **Database tunnels too.** Today a tunnel's `hosts` is deployment code, so
   the tunnel dials a name it lists without asking where it resolves
   (`dialled` in `postgres-tunnel.ts`). In the UI that list is an Owner's
@@ -390,9 +457,15 @@ deploy. That calls for two checks code upstreams never needed:
   reach a private address with no network binding, and the TCP connection
   and Postgres's SSL request go out before TLS could object. So a UI
   tunnel's hosts follow the same rule: public names or addresses at save,
-  and on Node the address the socket connects to is checked when it
-  connects. The one exception stays R31's: a tunnel through a network code
-  declares, to hosts among that network's.
+  and on Node the tunnel resolves the name, checks the addresses and dials a
+  checked one, so no SYN reaches a private address. The one exception stays
+  R31's: a tunnel through a network code declares, to hosts among that
+  network's.
+- **An egress's hosts are checked at use too.** A UI route's upstream must
+  be among its egress's `hosts` at save (section 1), and a later deploy may
+  narrow that list. So the fetch checks it again on every request, as code
+  routes are checked today, and answers 503 naming the egress when the
+  upstream has left it.
 - **The upstream's origin is fixed by the definition.** The existing rule
   stands: a request goes to `<upstream>/<path>` and nowhere else, and
   redirects stay on the proxy.
@@ -434,10 +507,26 @@ the statement picks one in its snapshot:
 | the environment's | `<a>/<b>` | `<c>`, the rest after it | `<a>/<b>` is an environment the handle was made for |
 | the stable URL | the handle's one environment | `<a>`, the rest from `<b>` | otherwise (a handle of several environments: 409, as today) |
 
-The answer says which reading it took, and the app forwards the rest of the
-path accordingly. This is today's rule, decided where today's `unless`
-decides it, so a `/use` costs the calls section 4 counts, whatever the URL.
-A kept `madeFor` still saves the question when present. `GET /use`, which
+Concretely, for `/use/market/dev/openai/chat`:
+
+- **The request** names the token and both candidates by name:
+  `{ place: 'market/dev', route: 'openai' }` and
+  `{ place: the handle's own, route: 'market' }`.
+- **On a map miss**, the first call resolves both, which reads up to two
+  places' proxy rows (four through forks), picks the reading by the table,
+  and answers with it, the place's id, the route's key ids and the item.
+- **The isolate's map** keys that answer by the token and the URL's first
+  three segments (`market`, `dev`, `openai`), and holds the reading, the
+  place id, the key ids and the item's digest.
+- **On a map hit**, the call names the reading the map holds, with its ids.
+  The statement reads that place only, and answers `moved`, writing
+  nothing, if the rule would now pick the other reading (the handle's
+  made-for list is among the caller's rows it reads anyway) or the route no
+  longer names those keys. Then the isolate reads again, as on a miss.
+
+So a `/use` costs what section 4 counts, whatever the URL, and the
+statement adds the second reading's rows only on a miss. A kept `madeFor`
+still saves the question when present. `GET /use`, which
 answers with no credential, keeps listing code names only, so it reveals
 nothing of an environment's own. The plan (`GET /use/<p>/<e>`) lists the
 environment's UI routes beside code's.
@@ -463,36 +552,52 @@ Erwin allowed: "the deployment may clear superseded UI state"). Without
 clearing, a UI `maps` hidden by code's `maps` comes back to life the day
 code drops `maps`, with an upstream nobody has looked at since. Clearing
 once at a deploy is not enough either, because during a deploy two app
-versions serve at once. Example: deployment B adds code `maps` and clears
-the UI `maps`. An isolate of the old deployment A, whose code has no
-`maps`, is still serving, and an Owner saves a new UI `maps` through it.
+versions serve at once. Example: deployment B adds code `maps`, and B's
+first isolate to serve a proxy request clears the UI `maps`. An isolate of
+the old deployment A, whose code has no `maps`, is still serving, and an
+Owner saves a new UI `maps` through it.
 B's isolates hide it. Months later deployment C drops `maps`, and the hidden
 UI `maps` serves again. So the log keeps the names code has reserved, and
 they outlive the deployment that reserved them:
 
-- **Reserving.** Each isolate, before its first proxy request (a use, or the
-  Proxy tab), checks that every name its code defines is in the log's
-  reserved set. That is one indexed read of the newest `proxy.code` change,
-  with no lock, as the vault reads `bulk.limit` at its start (`#limit`).
-  Most isolates find their names there and go on.
-- If one is missing, the isolate writes a `proxy.code` change adding it.
-  In the same change, the vault deletes every UI item, in every
-  environment, named by a name it adds, each whole in the entry. The actor
-  is the deployment. The isolate serves no proxy request until its names
-  are reserved (`CodeGate`).
+- **Reserving: the gate.** Each isolate, before its first proxy request (a
+  use, a Proxy tab, a save), makes one vault call with its code's names.
+  The vault reads the reserved set (one row, section 2, checked against its
+  newest change's seal, with no lock, as it reads `bulk.limit` at its
+  start), and most isolates find their names there and go on. The isolate
+  keeps the settled answer, never the pending call (AGENTS.md, "What an
+  isolate keeps").
+- If a name is missing, the same call makes a `proxy.code` change adding
+  it: CAS on the reserved set's seal, and in the same transaction every UI
+  item of that name, in every environment, deleted, each whole in its
+  entry. Two first isolates of one deploy race: the loser's CAS fails, it
+  reads the set again, finds the names there, and writes nothing, so
+  reserving is idempotent. The isolate serves no proxy request until its
+  names are reserved (`CodeGate`).
+- **When code shadows.** At that gate, not at the deploy. Until a B isolate
+  serves its first proxy request, A's isolates keep serving the UI `maps`
+  as they did before B, which is the overlap any deploy has. A deployment
+  that never served a proxy request reserved nothing, and nothing ever
+  served or showed its `maps`, so there is nothing to revive. Reserving at
+  the deploy itself would need the deploy pipeline to run the app's config
+  against the vault (`coffre migrate` reads only the schema), for no case
+  anyone could observe.
 - **A save checks the reservation.** The vault refuses a save of a reserved
   name, whichever isolate's page sent it (`SaveChecksReserved`). A's page
   allowed `maps`, but the vault does not: "`maps` is reserved by code".
 - **No deploy drops a reservation.** A deployment that no longer defines
   `maps` leaves it reserved, so nothing hidden can return when code lets go
   of the name. The tab shows it: "`maps` was defined by an earlier
-  deployment's code". An Owner may **release** it, a change of its own
-  (`proxy.release`, audited), which the vault refuses when the releasing
-  isolate's own code defines the name. The release dialog says what it
-  cannot check: that no older deployment still serving defines `maps`. An
-  Owner who releases during a deploy and then saves `maps` is the one
-  revival left, which TLC finds (`RoutingRelease`, an `EXPECTED` gap): it
-  takes that Owner's deliberate, audited act.
+  deployment's code". An instance Owner may **release** it, a change of
+  its own (`proxy.release`, audited). A release frees the name in every
+  environment of every project, which is why a project Owner cannot. The
+  app refuses a release of a name its own code defines; the vault cannot,
+  since deployment code is no input of its log. The release dialog says it
+  frees `maps` instance-wide, and what neither can check: that no older
+  deployment still serving defines `maps`. An instance Owner who releases
+  during a deploy and then saves `maps` is the one revival left, which TLC
+  finds (`RoutingRelease`, an `EXPECTED` gap): it takes that Owner's
+  deliberate, audited act.
 - **During a deploy**, reservations only grow, so the two versions do not
   alternate. The cost is a stale name that stays reserved until someone
   releases it, which is the safe default.
@@ -514,8 +619,12 @@ today's refusals unchanged, and only then is matched:
    them (`..;x`).
 2. **New:** an empty segment other than a trailing one (`//`) is refused,
    since a glob counts segments.
-3. **New:** each segment is percent-decoded once (UTF-8; an invalid sequence
-   is refused), and the decoded segments are matched against the allow list.
+3. **New:** each segment is percent-decoded once, to bytes, and the decoded
+   segments are matched against the allow list. Bytes, not text: no UTF-8
+   check beyond step 1's overlong refusal (a `%FF` segment is forwarded
+   today and still is), no case folding, no Unicode normalization. `Café`
+   written precomposed and decomposed are two different segments, as they
+   are to the upstream.
 4. The path goes on as the app encoded it, byte for byte. After step 1, the
    upstream's own decoding, however often it runs, reads the segments the
    match read.
@@ -533,7 +642,16 @@ today's refusals unchanged, and only then is matched:
 
 What is new is only the matching: today `paths` is compared with the encoded
 path. Globs need the decoded one: `*` must see `a b.pdf`, and a literal
-`documents` must not miss `docu%6Dents`. PR B's property tests run every
+`documents` must not miss `docu%6Dents`.
+
+**Patterns are decoded too, once.** A pattern's segments are percent-decoded
+when it is read: at save for the UI, at startup for code. So today's
+`paths: ['/companies/a%20b']` becomes the segment `a b` and still matches
+`/companies/a%20b`. It does not match `/companies/a%2520b`, which decodes
+once to `a%20b`, a different segment. A pattern that decodes to a dot segment, a slash or an empty
+segment is refused at save. In code it is a startup warning and matches
+nothing, which is what it matches today, since step 1 refuses every
+request it could have matched. PR B's property tests run every
 row above, and random encodings of paths outside a pattern, through the
 old check and the new matcher together.
 
@@ -696,7 +814,9 @@ shows.
 | A compromised app (the `coffre` Worker) | anything | out of scope, as today: it holds the values it opens. The vault makes that loud (every decision logged), not impossible |
 | An Owner | points an upstream, or a tunnel's host, at `169.254.169.254` or a name resolving to `10.0.1.5` | refused at save; on Node also at connect time, HTTP and TCP alike (section 5) |
 | An Owner, during a deploy | saves a name the new code reserved, through an old isolate | refused by the vault: the name is reserved (section 6) |
-| A code change | drops a name UI also had | the UI row was deleted when code first shadowed it, audited (`NoRevival`) |
+| A code change | drops a name UI also had | the UI item was deleted when the first isolate of that code reserved the name, audited (`NoRevival`) |
+| A project Owner | releases a name code reserved | refused: a release frees the name instance-wide, so it takes an instance Owner (section 6) |
+| An Owner | edits a route between the rounds of a use of its two keys | the later round finds another seal: `moved`, and the use starts over on one version (`OneVersion`) |
 | Anyone with `environment.manage` | renames an environment into or out of a code item's scope | nothing a UI item may be called changes: code names are taken in every environment (section 6) |
 
 ## 10. The implementation, in four PRs
@@ -705,16 +825,19 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
 `pnpm formal` keeps `Routing.tla` and the code in step (R45).
 
 **PR A: storage, the change path and the permission.**
-- Migration `0050` (Postgres and SQLite): `proxy_definitions`, grants.
-- `@coffre/vault`: object kind `proxy` (`inputs.ts`: its shape, seal and
-  `applyOp` for `proxy.save` and `proxy.code`; `log-replay.ts`); the vault
-  method that decides a save (proxy.edit on its sealed rows, frozen holdings,
-  CAS).
+- Migration `0050` (Postgres and SQLite): `proxy_definitions`,
+  `proxy_reserved`, grants.
+- `@coffre/vault`: object kinds `proxy` and `proxy-reserved` (`inputs.ts`:
+  their shapes, the digest-list seal, `applyOp` for `proxy.save`,
+  `proxy.code` and `proxy.release`; `log-replay.ts`); the vault method that
+  decides a save (proxy.edit on its sealed rows, the reserved set, frozen
+  holdings, CAS, at most 256 items).
 - `@coffre/core/access`: `proxy.edit`, the role editor's new rule;
   `formal/lean` updated in the same PR (AGENTS.md: a change to the access
   rules changes the Lean model).
 - API: `GET` and `PUT /api/projects/<p>/environments/<e>/proxy`, the save
-  answering once sealed.
+  answering once sealed; `PUT /api/proxy/reserved` (release, instance
+  Owners only).
 - Tests: save, CAS 409, permission matrix (built-in and edited roles,
   protected environments, tokens refused), replay agrees, the row tampered,
   put back or deleted (`stale`, `tampered`), the backup login reads it
@@ -739,10 +862,14 @@ no storage.
 - The proxy: UI routes, signers, verifiers and tunnels; the value cache keyed
   by the definition's seal; the send before the deadline; the plan
   (`GET /use/<p>/<e>`) listing UI routes; `proxy.code` with its gate.
+- If Erwin picked question 5's (b): `Routing.tla` extended first.
 - Tests, one per `Routing.tla` protection, each on Postgres and SQLite: an
-  edit between a use's statement and its send; a row put back; a key marked
-  sensitive after a Developer's save; kept values never sent to a newer
-  upstream; code shadowing then dropping a name. Also `request-cost.test.ts`
+  edit between a use's statement and its send; an edit landing between a
+  route's two keys (its second round, and a chunk boundary), answered
+  `moved`; a row put back; a key marked sensitive after a Developer's save;
+  kept values never sent to a newer upstream; code shadowing then dropping
+  a name; two first isolates reserving at once. Both URL readings, on a hit
+  and a miss, with `moved` when the handle's environments change. Also `request-cost.test.ts`
   (statements and rows flat as the log grows and as an environment gains
   definitions), the `/use` bench against 0.15.1 (no regression, R44),
   conformance for both examples.
@@ -835,6 +962,12 @@ leaves, and receives every rotated value after. It also matches tokens. The
 cost is loud breakage when an Owner leaves; the offboarding preview names
 every affected route before the removal, so it never comes as a surprise.
 
+What this document designs and `Routing.tla` checks is (a): holdings frozen
+at save. (b) adds an input to the use's statement (the editor's principal
+object), an action to the model (the editor removed or demoted) and a
+protection with its own counterexample. If Erwin picks (b), PR C starts by
+extending the model, before its code (R45).
+
 **6. Do forks inherit UI definitions?**
 - (a) By name, like values: `market/dev-eu` serves dev's `openai` unless it
   has its own `openai`. One more row per use through a fork.
@@ -842,4 +975,6 @@ every affected route before the removal, so it never comes as a surprise.
   a fork.
 
 *Recommendation: (a).* A fork that loses its routes would surprise everyone
-who forked for values.
+who forked for values. Under (a), a fork's own item that overrides an
+inherited one is removed with "revert to dev's", which says what will serve
+instead; only an item the parent lacks gets a plain "remove".

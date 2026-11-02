@@ -185,6 +185,7 @@ REMOVALS=(
   "Routing BoundToDefinition EverySendAllowed"
   "Routing ClearanceAtUse EverySendAllowed"
   "Routing KeptExpires WithinWindow"
+  "Routing OneVersion EverySendAllowed"
   "RoutingCode ClearSuperseded NoRevival"
   "RoutingCode SaveChecksReserved NoRevival"
   "RoutingCode CodeGate NoRevival"
