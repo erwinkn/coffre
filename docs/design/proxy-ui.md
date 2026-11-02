@@ -171,8 +171,8 @@ statement reads every level's row at once, in one snapshot: up to four
 rows and four probes per reading. It checks each level, seal and index,
 nearest first, through the one that serves, and weighs none past it: a
 forged grandparent row fails only the uses whose lookup reaches it. The
-seal an answer carries, which `OneVersion` holds and the value cache keys
-on, is the list of the checked levels' seals, nearest first, so an edit at
+seal an answer carries, which `OneVersion` holds and each value-cache
+entry carries, is the list of the checked levels' seals, nearest first, so an edit at
 any of them changes it, a nearer level adding the name included. A missing child row is the
 same check one level up: the child has no row only if its object has no
 logged change (the seal probe sees its newest change), and a row deleted
@@ -346,11 +346,22 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
              for the caller (purpose use, as today)
              for the definition's editor: frozen holdings, intersected with current ones (section 8)
            answers: the values, the definition's seal, its item digest, and its definition, never its holdings (omitted when the app's copy has that digest)
-  app      sends only if every key's answer carries the same seal (else asks again)
+  app      sends only if every key's answer carries a seal and an item digest, the same seal for every key
+             (no seal or no digest: 503, never "the copy's digest confirmed"; another seal: asks again)
            checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the entry carries its seal and item)
            sends, before the use's deadline, to that definition's upstream
 ```
+
+An answer to a route use that carries no seal or no item digest is a
+refusal, never a confirmation. A 0.15 vault ignores the `route` field it
+does not know and answers a plain named use: values, with no item, no seal
+and no digest. Read as "the copy's digest confirmed", that answer would send
+by whatever copy the isolate holds, to its upstream, with the editor never
+decided. That happens when a vault is rolled back under warm 0.16 isolates
+(docs/deploy.md: the vault goes first), which have seen `proxies` and will
+not ask again (section 6). So the app checks presence on every answer, and
+the `proxies` bit is an early gate, not the protection.
 
 All of a route's keys are decided on one version, in that one statement.
 A use of several keys may need a second round today (`useMany`: a key that
@@ -952,7 +963,16 @@ they outlive the deployment that reserved them:
   the other bits, its absence is not kept: each proxy request on an
   isolate that has not seen it asks `about()` again, one more call per
   proxy request for those minutes only, and the first answer that says
-  `proxies` runs the gate before that request is served. That keeps
+  `proxies` runs the gate before that request is served. The re-ask is
+  the same at every gated entry: `fetch`, `socket`, the plan and the
+  Proxy tab's APIs. A failed `about()`, gate or `proxyItem` call is not
+  an absence: that request answers 503, gated or not yet, and the next
+  one asks again, so an error never serves code ungated. On Workers that
+  extra call is not free: `about()` goes through the vault's `#call`,
+  which waits on its isolate's checkpointer start (at most 2 s, once per
+  cold vault isolate), where a use goes on behind it (R58). It adds no
+  Postgres statement (R44, R50), and the wait is accepted for the minutes
+  of a deploy, on isolates that have not seen the bit. That keeps
   `CodeGate` whole. No UI item can exist before the vault says `proxies`,
   since only a vault that says it saves one, so an ungated isolate serving
   code's `maps` hides nothing. Once the vault says it, every proxy request
@@ -1261,7 +1281,10 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   rules changes the Lean model).
 - `about()`'s `proxies` bit (section 6, "Against an older vault"), said
   by a vault with the save; without it the tab's APIs answer 503 naming
-  the vault's release.
+  the vault's release. PR C widens what the bit promises (the gate,
+  `proxyItem`, route uses), so no release ships PR A without PR C: they
+  go out together in 0.16, and none of them is a release on its own or a
+  rollback target. Splitting them would need a second bit.
 - API: `GET` and `PUT /api/projects/<p>/environments/<e>/proxy`, the save
   answering once sealed; `PUT /api/proxy/reserved` (release, instance
   Owners only).
@@ -1303,7 +1326,12 @@ no storage.
   which would read as "the copy's digest confirmed", so without the bit
   the app refuses UI routes (503, naming the vault's release). The app
   asks `about()` again while the bit is absent, and never keeps that
-  absence.
+  absence. Seen once, the bit is kept, and an answer with no seal or no
+  item digest is still a 503 (section 3): that, not the bit, covers a
+  vault rolled back under warm isolates. Tests: a vault rolled back to
+  0.15 after the bit was seen, a UI route's use refused, never sent by the
+  copy; `about()`, the gate and `proxyItem` each failing, the request 503
+  and the next one asking again.
 - `use_credential`: the proxy object(s) and the editor's principal as
   inputs in both shapes, in the seal cache; the named use takes a route; the vault resolves its keys by name,
   decides twice and answers with the definition.

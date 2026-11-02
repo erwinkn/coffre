@@ -85,7 +85,8 @@ CONSTANTS
     \* the vault did not check.
     SentAsDecided,
     \* Kept values go only where the definition they were decided under says
-    \* (the value cache is keyed by its seal), never where a newer copy says.
+    \* (each value-cache entry carries its item and seal), never where a newer
+    \* copy says.
     BoundToDefinition,
     \* Kept values serve W ticks after their decision, no longer.
     KeptExpires,
