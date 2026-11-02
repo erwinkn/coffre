@@ -1582,6 +1582,14 @@ reads it otherwise:
   too (`spoken`). `CoffreConfig.vault` is a `VaultEntry`; the app's two
   handlers wrap it before `createRuntime`, the one place a `Vault` is made
   from the deployment's entry.
+- **A definition is saved only as the proxy would take it.** The allow
+  list's patterns are read by the proxy's own parser (`readPattern` as a
+  Proxy tab's, in `@coffre/core/proxy-match`, moved from the server), so
+  `/tenants/%2561/*`, `/a;v1/*` and `/a./*` are refused at save as code's
+  are; inject rules' names and slots are the proxy's too (`PARAMETER_NAME`,
+  `FIELD_NAME`, `alike`: query `secret` and `SECRET` are one). No allow list
+  is kept as `null`, every request, and an empty one as `[]`, none: the
+  sealed definition says which.
 - **The app's checks**: `credentialProxy({ editable })`, off by default; a
   name code defines (409); an egress or a network, none of which code can
   declare before PR C (400).

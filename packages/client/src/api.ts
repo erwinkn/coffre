@@ -1806,7 +1806,7 @@ export type Api = {
             region: string;
             service: string;
           })[];
-          allow: {
+          allow: null | {
             methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
             path: string;
           }[];
@@ -1887,7 +1887,7 @@ export type Api = {
             region: string;
             service: string;
           })[];
-          allow: {
+          allow: null | {
             methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
             path: string;
           }[];
@@ -1978,7 +1978,7 @@ export type Api = {
             region: string;
             service: string;
           })[];
-          allow: {
+          allow: null | {
             methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
             path: string;
           }[];
@@ -2682,7 +2682,7 @@ export type ProxyPage = {
         region: string;
         service: string;
       })[];
-      allow: {
+      allow: null | {
         methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
         path: string;
       }[];

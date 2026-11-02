@@ -55,7 +55,7 @@ import { database, tunnel as tunnelPostgres, type Database } from './postgres-tu
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { type AllowEntry, allows, bytesOf, climbs, methodsFor, readPattern, requestSegments } from './proxy-match.ts';
+import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, methodsFor, PARAMETER_NAME, readPattern, requestSegments } from '@coffre/core/proxy-match';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
@@ -1234,7 +1234,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
   // Decoded as often as it changes, up to 8 times and refused past, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
   // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
-  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, proxy-match.ts.)
+  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, @coffre/core/proxy-match.)
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
   const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
@@ -1261,7 +1261,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * null: 405 when no entry takes its method, on its path or on any; 403 when
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
- * against an allow list, as written against legacy paths (proxy-match.ts). A `*` takes no empty segment (`//`) and none of `;`
+ * against an allow list, as written against legacy paths (@coffre/core/proxy-match). A `*` takes no empty segment (`//`) and none of `;`
  * parameters, spaces or dots alone, which a server may read as none, nor
  * does an `allow` path's trailing slash count one as what is below it; a
  * prefix, a `**`, a trailing slash past a segment a server reads as one, or
@@ -1992,17 +1992,6 @@ function fieldsIn(request: Request, body: Uint8Array | undefined, name: string, 
 }
 
 /**
- * A field's name as some upstream's parser may read it, the same as
- * another's: up to a `[` (PHP's and qs's arrays, `refresh_token[0]`),
- * case folded (Go's JSON, `SECRET` and `ſecret`), and its letters and
- * digits alone (PHP's `.` and space, `refresh.token`). Another name alike
- * the field's is the field twice, which upstreams read differently.
- */
-function alike(name: string): string {
-  return name.split('[', 1)[0]!.toUpperCase().toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-/**
  * A form's field, as WHATWG's parser reads one: `&`-separated pairs, the
  * name up to the first `=`, `+` a space and `%XX` a byte. Filled, the pair
  * keeps its name as written and takes the value form-encoded. Scanned as
@@ -2315,8 +2304,8 @@ function checkRule(name: string, inject: Inject): Rule {
   if (typeof inject !== 'object' || inject === null || !['header', 'query', 'form', 'json', 'basic', 'sigv4'].includes(inject.kind)) {
     throw new Error(`credentialProxy: ${name}'s inject is header(…), query(…), form(…), json(…), basic(…) or sigv4(…), or a list of them`);
   }
-  if ((inject.kind === 'header' || inject.kind === 'query') && !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
-  if (inBody(inject) && !/^(?=.*[A-Za-z0-9])[A-Za-z0-9_.-]{1,128}$/.test(inject.name)) throw new Error(`credentialProxy: ${name} fills the field ${JSON.stringify(inject.name)}, which is no field name: letters, digits and _.-, a letter or digit among them, at the top of the body`);
+  if ((inject.kind === 'header' || inject.kind === 'query') && !PARAMETER_NAME.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
+  if (inBody(inject) && !FIELD_NAME.test(inject.name)) throw new Error(`credentialProxy: ${name} fills the field ${JSON.stringify(inject.name)}, which is no field name: letters, digits and _.-, a letter or digit among them, at the top of the body`);
   if (inject.kind === 'sigv4' && (!/^[a-z0-9-]{1,32}$/.test(inject.region) || !/^[a-z0-9-]{1,32}$/.test(inject.service))) throw new Error(`credentialProxy: ${name} signs for a region and a service, eu-west-3 and s3`);
   const keys = [...new Set(templatesOf(inject).flatMap((template) => [...template.matchAll(TEMPLATE_KEY)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);

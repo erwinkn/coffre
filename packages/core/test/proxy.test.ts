@@ -53,17 +53,26 @@ test('what no UI definition may be: each refused with its reason', () => {
     ['a rule with no key', { ...ROUTE, inject: [{ kind: 'header', name: 'x-api', template: 'static' }] }, /names no key/],
     ['no rule at all', { ...ROUTE, inject: [] }, /list of 1 to 8/],
     ['one header twice, in two cases', { ...ROUTE, inject: [{ kind: 'header', name: 'X-Key', template: '{A}' }, { kind: 'header', name: 'x-key', template: '{B}' }] }, /set twice/],
+    ['a parameter twice, in two cases', { ...ROUTE, inject: [{ kind: 'query', name: 'secret', template: '{A}' }, { kind: 'query', name: 'SECRET', template: '{B}' }] }, /set twice/],
+    ['a field twice, as a parser reads it', { ...ROUTE, inject: [{ kind: 'json', name: 'refresh_token', template: '{A}' }, { kind: 'json', name: 'refresh.token', template: '{B}' }] }, /set twice/],
+    ['a field name with a space', { ...ROUTE, inject: [{ kind: 'json', name: 'secret token', template: '{A}' }] }, /field's name/],
+    ['a parameter name with a space', { ...ROUTE, inject: [{ kind: 'query', name: 'api key', template: '{A}' }] }, /parameter's name/],
     ['a form beside JSON', { ...ROUTE, inject: [{ kind: 'form', name: 'a', template: '{A}' }, { kind: 'json', name: 'b', template: '{B}' }] }, /never both/],
     ['basic beside authorization', { ...ROUTE, inject: [{ kind: 'basic', user: '{A}', password: '' }, { kind: 'header', name: 'authorization', template: '{B}' }] }, /authorization/],
     ['sigv4 not last', { ...ROUTE, inject: [{ kind: 'sigv4', accessKeyId: '{A}', secretAccessKey: '{B}', sessionToken: null, region: 'eu-west-3', service: 's3' }, { kind: 'header', name: 'x-t', template: '{C}' }] }, /goes last/],
     ['an x-amz- header beside sigv4', { ...ROUTE, inject: [{ kind: 'header', name: 'x-amz-date', template: '{C}' }, { kind: 'sigv4', accessKeyId: '{A}', secretAccessKey: '{B}', sessionToken: null, region: 'eu-west-3', service: 's3' }] }, /x-amz-/],
-    ['a partial glob', { ...ROUTE, allow: [{ methods: [], path: '/doc*' }] }, /stand alone/],
-    ['** before the end', { ...ROUTE, allow: [{ methods: [], path: '/a/**/b' }] }, /comes last/],
-    ['a dot segment', { ...ROUTE, allow: [{ methods: [], path: '/a/../b' }] }, /no empty/],
-    ['an encoded dot segment', { ...ROUTE, allow: [{ methods: [], path: '/a/%2e%2e/b' }] }, /no empty/],
+    ['a partial glob', { ...ROUTE, allow: [{ methods: [], path: '/doc*' }] }, /whole segments/],
+    ['** before the end', { ...ROUTE, allow: [{ methods: [], path: '/a/**/b' }] }, /last only/],
+    ['a dot segment', { ...ROUTE, allow: [{ methods: [], path: '/a/../b' }] }, /dot segment/],
+    ['an encoded dot segment', { ...ROUTE, allow: [{ methods: [], path: '/a/%2e%2e/b' }] }, /dot segment/],
     ['an encoded slash', { ...ROUTE, allow: [{ methods: [], path: '/a%2fb' }] }, /slash/],
-    ['an empty segment', { ...ROUTE, allow: [{ methods: [], path: '/a//b' }] }, /no empty/],
+    ['an empty segment', { ...ROUTE, allow: [{ methods: [], path: '/a//b' }] }, /is empty/],
     ['a trailing slash', { ...ROUTE, allow: [{ methods: [], path: '/companies/' }] }, /\/companies\/\*\*/],
+    // What the proxy's matcher refuses, as a server behind may read it as another path (readPattern, section 7).
+    ['a segment encoded twice', { ...ROUTE, allow: [{ methods: [], path: '/tenants/%2561/*' }] }, /decodes twice/],
+    ['a ; parameter', { ...ROUTE, allow: [{ methods: [], path: '/a;v1/*' }] }, /Tomcat/],
+    ['a trailing dot', { ...ROUTE, allow: [{ methods: [], path: '/a./*' }] }, /Windows/],
+    ['one path twice, encoded and not', { ...ROUTE, allow: [{ methods: ['GET'], path: '/a' }, { methods: ['GET'], path: '/%61' }] }, /each allow entry once/],
     ['a method off the list', { ...ROUTE, allow: [{ methods: ['TRACE'], path: '/a' }] }, /methods are from/],
     ['an entry twice', { ...ROUTE, allow: [{ methods: ['GET'], path: '/a' }, { methods: ['GET'], path: '/a' }] }, /each allow entry once/],
     ['a limit of 0', { ...ROUTE, limit: { perMinute: 0 } }, /at least 1/],
@@ -85,6 +94,14 @@ test('a definition decodes its path segments once: a pattern takes what an encod
   assert.equal(proxyDefinitionProblem({ ...ROUTE, allow: [{ methods: [], path: '/companies/a%20b' }] }), null);
   assert.equal(proxyDefinitionProblem({ ...ROUTE, allow: [{ methods: [], path: '/companies/*/documents/**' }] }), null);
   assert.equal(proxyDefinitionProblem({ ...ROUTE, allow: [{ methods: [], path: '/' }] }), null);
+});
+
+test('no allow list takes every request, an empty one none: each kept as written, as the proxy reads them (section 7)', () => {
+  const allow = (value: unknown) => (canonicalDefinition({ ...ROUTE, allow: value }) as Extract<ProxyDefinition, { kind: 'route' }>).allow;
+  assert.equal(allow(undefined), null);
+  assert.equal(allow(null), null);
+  assert.deepEqual(allow([]), []);
+  assert.notDeepEqual(canonicalDefinition({ ...ROUTE, allow: undefined }), canonicalDefinition({ ...ROUTE, allow: [] }));
 });
 
 test('the version gate: each method one call on this release, and an answer on another, or none, refused before any handler sees it', async () => {

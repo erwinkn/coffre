@@ -1,4 +1,5 @@
 import { CREDENTIAL_NAME } from './identity/workloads.ts';
+import { alike, FIELD_NAME, PARAMETER_NAME, readPattern } from './proxy-match.ts';
 
 /**
  * Proxy definitions written in the UI, per environment (0.16, T186;
@@ -39,8 +40,8 @@ export type ProxyRoute = {
   name: string;
   upstream: string;
   inject: ProxyInject[];
-  /** None: any method on any path. */
-  allow: ProxyAllow[];
+  /** Null: any method on any path, as with no allow list in code; `[]`: no request at all (403). */
+  allow: ProxyAllow[] | null;
   limit: ProxyLimit;
   placeholder: ProxyPlaceholder;
   /** The egress, by the name code declares it under, its requests leave through; null: direct. */
@@ -232,9 +233,15 @@ function injectRule(value: unknown, what: string): ProxyInject {
       if (typeof rule.name !== 'string' || !HEADER_NAME.test(rule.name)) problem(`${what}: a header's name is a token of 1 to 64 characters`);
       return { kind: 'header', name: rule.name.toLowerCase(), template: template(rule.template, `${what}.template`) };
     }
-    case 'query': case 'form': case 'json':
+    case 'query':
       only(rule, ['kind', 'name', 'template'], what);
-      return { kind: rule.kind, name: text(rule.name, `${what}.name`, 128), template: template(rule.template, `${what}.template`) };
+      if (!PARAMETER_NAME.test(text(rule.name, `${what}.name`, 128))) problem(`${what}: a parameter's name is a token of 1 to 128 characters`);
+      return { kind: 'query', name: rule.name as string, template: template(rule.template, `${what}.template`) };
+    case 'form': case 'json':
+      only(rule, ['kind', 'name', 'template'], what);
+      // As the proxy's own check (`checkRule`): a field at the top of the body, named as every parser reads it.
+      if (typeof rule.name !== 'string' || !FIELD_NAME.test(rule.name)) problem(`${what}: a field's name is letters, digits and _.-, a letter or digit among them, 1 to 128`);
+      return { kind: rule.kind, name: rule.name, template: template(rule.template, `${what}.template`) };
     case 'basic': {
       only(rule, ['kind', 'user', 'password'], what);
       const user = text(rule.user, `${what}.user`, 1024, 0);
@@ -274,7 +281,8 @@ function injectOrder(rules: readonly ProxyInject[], name: string): void {
   const slots = new Set<string>();
   for (const rule of rules) {
     if (rule.kind === 'basic' || rule.kind === 'sigv4') continue;
-    const slot = `${rule.kind === 'json' ? 'form' : rule.kind}:${rule.kind === 'header' ? rule.name.toLowerCase() : rule.name}`;
+    // As the proxy reads them (`checkRules`): a header in any case, a parameter or a field as any parser may (`alike`: `secret` and `SECRET` are one).
+    const slot = rule.kind === 'header' ? `header:${rule.name.toLowerCase()}` : `${rule.kind === 'json' ? 'form' : rule.kind}:${alike(rule.name)}`;
     if (slots.has(slot)) problem(`${name}: one rule per header, parameter or field: ${rule.name} is set twice`);
     slots.add(slot);
   }
@@ -282,12 +290,13 @@ function injectOrder(rules: readonly ProxyInject[], name: string): void {
   if (kinds.includes('form') && kinds.includes('json')) problem(`${name}: a body is a form or JSON, never both`);
   if (kinds.filter((kind) => kind === 'basic').length > 1) problem(`${name}: one basic rule at most`);
   const authorization = rules.some((rule) => rule.kind === 'header' && rule.name === 'authorization');
+  const queryAuthorization = rules.some((rule) => rule.kind === 'query' && rule.name.toLowerCase() === 'authorization');
   if (kinds.includes('basic') && authorization) problem(`${name}: basic sets authorization, which another rule sets too`);
   const sigv4 = kinds.filter((kind) => kind === 'sigv4').length;
   if (sigv4 > 1) problem(`${name}: one sigv4 rule at most`);
   if (sigv4 === 1) {
     if (kinds.at(-1) !== 'sigv4') problem(`${name}: sigv4 signs the request as the rules before it leave it, so it goes last`);
-    if (authorization || kinds.includes('basic')) problem(`${name}: sigv4 sets authorization itself`);
+    if (authorization || queryAuthorization || kinds.includes('basic')) problem(`${name}: sigv4 sets authorization itself`);
     if (rules.some((rule) => (rule.kind === 'header' || rule.kind === 'query') && rule.name.toLowerCase().startsWith('x-amz-'))) problem(`${name}: sigv4 sets the x-amz- headers and parameters itself`);
     if (kinds.includes('form') || kinds.includes('json')) problem(`${name}: sigv4 signs the body, which a field would change`);
   }
@@ -401,15 +410,16 @@ function hextets(address: string): number[] {
 
 /**
  * A route's allow list (section 7): each entry its methods, from the fixed
- * list, each once (none: any), and a path of segments, each decoded once.
- * No `.`, `..` or empty segment, before decoding or after, nor a slash or
- * a control character once decoded; `*` and `**` stand alone in a segment,
- * `**` only last; no trailing slash (`/companies/**` says it); no entry
- * twice. `/` alone allows every path.
+ * list, each once (none: any), and a path the proxy's matcher takes as a
+ * Proxy tab's (`readPattern`): no segment a server behind may read as
+ * another (`.`, `..`, empty, `%2561`, `a;v1`, `a.`), `*` and `**` alone in
+ * a segment, `**` only last, no trailing slash (`/companies/**` says it);
+ * no entry twice. `/` alone allows every path.
  */
-function allowOf(value: unknown, name: string): ProxyAllow[] {
-  if (value === null || value === undefined) return [];
-  const entries = list(value, `${name}: allow`, 0, 64).map((entry, i): ProxyAllow => {
+function allowOf(value: unknown, name: string): ProxyAllow[] | null {
+  // None is any request, as in code; an empty list is none (section 7). Kept apart, so the proxy reads the one the Owner meant.
+  if (value === null || value === undefined) return null;
+  const entries = list(value, `${name}: allow`, 0, 64).map((entry, i) => {
     const what = `${name}: allow[${i}]`;
     const allow = record(entry, what);
     only(allow, ['methods', 'path'], what);
@@ -417,31 +427,22 @@ function allowOf(value: unknown, name: string): ProxyAllow[] {
     if (methods.some((method) => !(PROXY_METHODS as readonly unknown[]).includes(method)) || new Set(methods).size !== methods.length) {
       problem(`${what}.methods are from ${PROXY_METHODS.join(', ')}, each once`);
     }
-    return { methods: PROXY_METHODS.filter((method) => methods.includes(method)), path: allowedPath(allow.path, `${what}.path`) };
+    const path = allowedPath(allow.path, `${what}.path`);
+    return { methods: PROXY_METHODS.filter((method) => methods.includes(method)), path: path.written, read: path.read };
   });
-  const seen = new Set(entries.map((entry) => `${entry.methods.join(',')} ${entry.path}`));
+  // Once each, as the proxy reads them: `/a` and `/%61` are one path.
+  const seen = new Set(entries.map((entry) => `${entry.methods.join(',')} ${entry.read}`));
   if (seen.size !== entries.length) problem(`${name}: each allow entry once`);
-  return entries;
+  return entries.map(({ methods, path }) => ({ methods, path }));
 }
 
-function allowedPath(value: unknown, what: string): string {
-  const path = text(value, what, 1024);
-  if (!path.startsWith('/')) problem(`${what} starts with /`);
-  if (path === '/') return path;
-  if (path.endsWith('/')) problem(`${what} ends in no slash: /companies/** takes what is below /companies`);
-  const segments = path.slice(1).split('/');
-  segments.forEach((segment, i) => {
-    if (segment.includes('*') && segment !== '*' && segment !== '**') problem(`${what}: * and ** stand alone in a segment, never within one`);
-    if (segment === '**' && i !== segments.length - 1) problem(`${what}: ** stands for the rest of the path, so it comes last`);
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(segment);
-    } catch {
-      problem(`${what}: ${segment} is no percent-encoded segment`);
-    }
-    if (segment === '' || decoded === '' || decoded === '.' || decoded === '..' || /[/\\\u0000-\u001f\u007f]/.test(decoded)) {
-      problem(`${what}: no empty, . or .. segment, nor one that decodes to a slash or a control character`);
-    }
-  });
-  return path;
+/**
+ * An allow entry's path as the proxy reads a Proxy tab's (`readPattern`,
+ * `ui`): its parse is the matcher's own, so a saved path is one it takes.
+ */
+function allowedPath(value: unknown, what: string): { written: string; read: string } {
+  const written = text(value, what, 1024);
+  const read = readPattern(written, 'ui');
+  if ('problem' in read) problem(`${what}: ${read.problem}`);
+  return { written, read: JSON.stringify(read.pattern) };
 }
