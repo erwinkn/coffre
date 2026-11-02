@@ -1,12 +1,12 @@
 # Proxy definitions in the UI (0.16, T186)
 
-A design for 0.16's headline, written on 2026-11-01 (W304), for Erwin's
-review before any code. Rules R65 and R66; the UX is prototype
+A design for 0.16's headline, written on 2026-11-01 (W304) before any
+code. Rules R65 and R66; the UX is prototype
 [#421](https://github.com/erwinkn/coffre/pull/421) (layout B, refined by
 W260 and W263; draft, never merged). The model is
 [`formal/Routing.tla`](../../formal/Routing.tla), described in
 [docs/formal.md](../formal.md#routingtla). Nothing here is built.
-Section 11 lists the questions only Erwin can settle.
+Section 11 records the six decisions it needed (2026-11-02).
 
 ## In short
 
@@ -155,7 +155,7 @@ does not hash to.
 
 The names are in the index, not only in the hashes, so that the vault can
 tell a route the object lacks from one a writer deleted. That matters for a
-fork (question 6, recommendation (a)): `market/dev-eu` with its own
+fork (decision 6): `market/dev-eu` with its own
 `openai` serves it, and without one serves `market/dev`'s. If the index
 held only `SHA-256(name || item)`, a writer could delete `openai` from
 dev-eu's `items` alone, leave the index and seal alone, and the use would
@@ -189,7 +189,7 @@ is still `stale` and a fork's lookup still falls back by the empty index.
 pending edits at once (save, discard, review), and copying from another
 environment writes many items. One object makes that one change, one seal
 and one entry, and the index keeps a use's reads to its own item. A use reads one row for its environment, and one more
-for each parent of a fork, whose definitions it inherits (question 6), up to four. The cost is that two
+for each parent of a fork, whose definitions it inherits (decision 6), up to four. The cost is that two
 Owners saving different routes of one environment at once conflict. The
 second gets a 409 and reviews the first's change (below), which is what the
 page should do anyway.
@@ -308,7 +308,8 @@ A revocation already works this way: "a revoked handle's values serve no
 longer than this" (`cacheSeconds`'s doc). Its uses and an edit's are
 ordered the same way, by the fence and the log number. A revoke numbered
 before a use refuses it; one numbered after leaves it decided, and its
-values serve out the window. Question 4 offers the strict alternative.
+values serve out the window. Decision 4 accepts that window; section 11
+lists the strict alternatives it set aside.
 
 ### The protocol
 
@@ -492,8 +493,9 @@ change never overlap, and the number orders them) is `HotPathOne.tla`'s, for
 any input. Here an edit is one step. One route, two hosts; its second key
 appears only when `OneVersion` is off, since with it on both keys share
 every decision. The frozen holdings are reduced to one clearance per
-version ("sensitive" for an Owner, "secret" otherwise); question 5's option
-(b) is not modelled yet. The matching rules of section 7 are pure
+version ("sensitive" for an Owner, "secret" otherwise). Decision 5 takes
+option (b), the frozen holdings intersected with the editor's current
+ones, which is not modelled yet: PR C extends the model first. The matching rules of section 7 are pure
 functions, which property tests hold, not TLC. That a map hit's ids are
 held to the route's names is Naming.tla's `HeldToNames`, unchanged. Renames
 are not modelled, because they cannot change what code shadows (section 6).
@@ -538,7 +540,7 @@ entry, as for every other input (R50: the number orders everything). So two
 routes that name the same key with different editors' holdings replay
 apart. The route's two decisions use the place the use resolved (the
 handle's environment, or the one the URL names), and the route as that
-place's object holds it, or its nearest fork ancestor's, by name (question 6).
+place's object holds it, or its nearest fork ancestor's, by name (decision 6).
 
 **A map hit holds the ids to the definition.** The second call of a miss, and
 every hit, carries the ids the map holds. The statement checks that the
@@ -725,7 +727,7 @@ that scope (which only moves where the code item serves, never what a UI
 item may be called), and the app's startup check warns about a scope that
 names no existing environment. A `*/prod` glob can come later if someone asks.
 
-**Names unique across kinds** (W260's pushback 4, question 3). Routes and
+**Names unique across kinds** (W260's pushback 4, decision 3). Routes and
 tunnels share `/use/<name>`, signers and verifiers are named in the same
 URL space, and one list shows all four. A UI name may not equal any other UI
 item's in the environment, nor any code item's of any kind. Code keeps
@@ -977,10 +979,13 @@ This makes routing **preventive for everyone but an Owner covering the
 place**. For those Owners it grants nothing new. R30 already lets them
 loosen a sensitive value to a secret and read it, audited, and break-glass
 lets them read it through a service account. That bears on W260's pushback
-1 (question 1).
+1 (decision 1).
 
-Whether the frozen holdings should also be intersected with the editor's
-holdings now, as R15 does for tokens, is question 5.
+The frozen holdings are also intersected with the editor's holdings now,
+as R15 does for tokens (decision 5): a removed or demoted editor's
+definitions stop routing what they can no longer read, and each use
+answers `route_not_cleared`, naming who must save again. The use's
+statement reads one more object, the editor's principal, in the same call.
 
 ### Copying from another environment
 
@@ -997,7 +1002,7 @@ sandbox's certificate is valid for its own name, and the egress's host check
 passes, so nothing fails. The key reaches Schuman's sandbox, a server of the
 same provider, but not the one prod's key is for. Nobody without
 `proxy.edit` in prod can cause it, and the save is audited, so this is a
-review problem, not an access problem. Question 2 is what the review step
+review problem, not an access problem. Decision 2 is what the review step
 shows.
 
 ## 9. Threats, in one table
@@ -1008,9 +1013,9 @@ shows.
 | A database writer | forges an item beside its genuine index entry, lets the app read them, puts the genuine row back | nothing sent by the forged body: the isolate's copy comes only from vault answers (section 4) |
 | A database writer | deletes the row | the use's probe finds the newest change's seal and no row: `stale` |
 | A Developer with `proxy.edit` | routes a value they cannot read, or one made sensitive later | refused at use: the frozen holdings decide (`ClearanceAtUse`) |
-| An Owner covering the place | routes a sensitive key to a host they control | allowed and audited: the same power as R30's loosening (question 1) |
-| An editor who later leaves | keeps a route to their host, and the value rotates | under question 5's option (a) it keeps sending, their holdings frozen; option (b) stops it |
-| An Owner | copies a dev route into prod and saves it unchanged | prod's key goes to dev's upstream, audited; the review step names that destination (question 2) |
+| An Owner covering the place | routes a sensitive key to a host they control | allowed and audited: the same power as R30's loosening (decision 1) |
+| An editor who later leaves | keeps a route to their host, and the value rotates | stops at their next use once they no longer hold the key: `route_not_cleared` (decision 5) |
+| An Owner | copies a dev route into prod and saves it unchanged | prod's key goes to dev's upstream, audited; the review step names that destination (decision 2) |
 | An Owner, racing an app | edits mid-traffic | old values go to the old host for at most W, never to the new host undecided (section 3) |
 | Someone with a stale page | saves over a newer change | 409: CAS on the seal |
 | A compromised app (the `coffre` Worker) | anything | out of scope, as today: it holds the values it opens. The vault makes that loud (every decision logged), not impossible |
@@ -1028,7 +1033,8 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
 `pnpm formal` keeps `Routing.tla` and the code in step (R45).
 
 **PR A: storage, the change path and the permission.**
-- Migration `0050` (Postgres and SQLite): `proxy_definitions`,
+- Migration at the next free number (Postgres `0053`, SQLite `0029` on
+  `main` today, after #453, #454 and #456): `proxy_definitions`,
   `proxy_reserved`, grants.
 - `@coffre/vault`: object kinds `proxy` and `proxy-reserved` (`inputs.ts`:
   their shapes, the sealed index, `applyOp` for `proxy.save`,
@@ -1070,7 +1076,10 @@ no storage.
 - The proxy: UI routes, signers, verifiers and tunnels; the value cache keyed
   by the definition's seal; the send before the deadline; the plan
   (`GET /use/<p>/<e>`) listing UI routes; `proxy.code` with its gate.
-- If Erwin picked question 5's (b): `Routing.tla` extended first.
+- First, before any code (R45, decision 5(b)): `Routing.tla` extended with
+  the editor's current holdings as an input of the use's statement, an
+  action that removes or demotes the editor, and a protection
+  (`EditorStillHolds`) whose removal TLC must break.
 - Tests, one per `Routing.tla` protection, each on Postgres and SQLite: an
   edit between a use's statement and its send; an edit landing between a
   route's two keys (its second round, and a chunk boundary), answered
@@ -1112,94 +1121,27 @@ no storage.
 PR B can go in parallel with A. C needs A and B. D needs A, and C for real
 uses.
 
-## 11. Questions for Erwin
+## 11. Decisions (2026-11-02, recommendations taken; reversible)
 
-Each has a recommendation; all are reversible.
-
-**1. Owners routing sensitive keys: detective or preventive?** (W260's
-pushback 1.) R16 and R32 say no person ever gets a sensitive value. A
-definition that sends one to a host its editor controls gets it to them, and
-the audit entry only tells after the fact.
-- (a) As decided (R66): Owners covering the place may, audited. Section 8
-  makes it preventive for everyone else.
-- (b) As (a), plus a code-side list the deployment may set,
-  `uiUpstreams: ['*.openai.com', 'api.stripe.com']`: a UI definition that
-  sends a sensitive key must point inside it.
-- (c) A second Owner approves each change that routes a sensitive key.
-
-*Recommendation: (a), with (b) easy to add later.* R30 already lets the same
-Owners read the value, by loosening it or through a service account, so
-(a) adds no power to anyone. (c) adds a workflow for a case that is
-already covered.
-
-**2. What a copy shows before it is saved.** (W260's pushback 2.) Copying
-keeps every field (R66), so a copied route sends the target's keys to the
-source's upstream through the source's egress until someone edits it.
-Section 8 has the example: prod's Schuman key sent to dev's sandbox host,
-with no error anywhere. W260 assumed TLS would fail; it doesn't, because the
-upstream moves with the egress.
-- (a) Keep it silently.
-- (b) Keep it, and the review step names, for each copied item, where it will
-  send which of the target's keys: "`schuman` will send market/prod's
-  SCHUMAN_API_KEY to sandbox.schuman.example (copied from market/dev)".
-  Non-blocking: saving still saves.
-- (c) Clear the upstream and egress on copy, so the copy cannot be saved
-  until someone fills them in.
-
-*Recommendation: (b).* It keeps "copy keeps everything" (R66) and puts the one
-fact that matters, the destination of prod's keys, in front of the Owner
-who saves. (c) would contradict R66.
-
-**3. Names unique across kinds?** (W260's pushback 4.)
-- (a) For UI items: unique across the four kinds in the environment, and
-  against every code name. Code keeps today's per-kind rule, with a startup
-  warning on a cross-kind clash.
-- (b) Per kind everywhere, as code is today.
-
-*Recommendation: (a).* Routes and tunnels share `/use/<name>`, one list shows
-all four, and "code wins by name" needs one meaning of "name".
-
-**4. The window after an edit.** Values decided before an edit keep going to
-the old upstream for up to `cacheSeconds` (section 3).
-- (a) Accept it, as for revocation. The save's confirmation says "the old
-  upstream may receive requests for up to a minute".
-- (b) A save that removes or changes an upstream answers only once the
-  window has passed, up to 60 s of spinner, so that "saved" means "nothing
-  goes there any more".
-- (c) UI routes never cache values (`cacheSeconds: 0` for them): a vault call
-  per request, more load on the hot path.
-
-*Recommendation: (a).* It is the bound the proxy already documents, and the
-old upstream was allowed a moment before.
-
-**5. When the editor leaves or is demoted.**
-- (a) Frozen at save: a definition keeps routing what its editor could read
-  then. The offboarding preview lists the definitions they last saved.
-- (b) Frozen and intersected with the editor's holdings now, as R15 does for
-  tokens: a removed or demoted editor's definitions stop routing what they
-  can no longer read. Each use answers `route_not_cleared`, naming who must
-  save again, until an editor who can does. The use statement reads one
-  more object, the editor's principal (no extra round trip).
-
-*Recommendation: (b).* It closes the case of an editor who plants an upstream,
-leaves, and receives every rotated value after. It also matches tokens. The
-cost is loud breakage when an Owner leaves; the offboarding preview names
-every affected route before the removal, so it never comes as a surprise.
-
-What this document designs and `Routing.tla` checks is (a): holdings frozen
-at save. (b) adds an input to the use's statement (the editor's principal
-object), an action to the model (the editor removed or demoted) and a
-protection with its own counterexample. If Erwin picks (b), PR C starts by
-extending the model, before its code (R45).
-
-**6. Do forks inherit UI definitions?**
-- (a) By name, like values: `market/dev-eu` serves dev's `openai` unless it
-  has its own `openai`, through the whole chain of parents as values
-  inherit. One more row per use per parent.
-- (b) No: each environment holds its own, and "copy from environment" fills
-  a fork.
-
-*Recommendation: (a).* A fork that loses its routes would surprise everyone
-who forked for values. Under (a), a fork's own item that overrides an
-inherited one is removed with "revert to dev's", which says what will serve
-instead; only an item the parent lacks gets a plain "remove".
+1. **Owners routing sensitive keys: (a)**, as R66 decided: Owners covering
+   the place may, audited. A code-side `uiUpstreams` allow list (b) can be
+   added later; a second Owner's approval (c) is not needed, since R30
+   already lets those Owners read the value.
+2. **What a copy shows: (b)**. Copying keeps every field (R66), and the
+   review step names, per copied item, which of the target's keys it will
+   send where, e.g. "`schuman` will send market/prod's SCHUMAN_API_KEY to
+   sandbox.schuman.example (copied from market/dev)". Saving still saves.
+3. **Names: (a)**, unique across the four kinds for UI items and against
+   every code name; code keeps its per-kind rule, warning at startup on a
+   cross-kind clash.
+4. **The window after an edit: (a)**, accepted as for revocation: old values
+   may reach the old upstream for up to `cacheSeconds`, and the save's
+   confirmation says so.
+5. **An editor who leaves or is demoted: (b)**, holdings frozen at save and
+   intersected with the editor's current ones, as R15 does for tokens; uses
+   answer `route_not_cleared` until someone who holds the keys saves again,
+   and the offboarding preview names the routes affected. The model checks
+   (a) today, so PR C extends `Routing.tla` first (section 10).
+6. **Forks: (a)**, definitions inherit by name through the chain of
+   parents, as values do; a fork's own item overrides, and removing it
+   says "revert to dev's".

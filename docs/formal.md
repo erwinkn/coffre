@@ -2013,7 +2013,7 @@ drops a reservation, only an instance Owner's audited release.
 - `StrictlyCurrent`, `EXPECTED` broken with every protection on: no request
   under a version an edit has replaced. Values decided before an edit serve
   out their W, as a revoked handle's do; the design documents that window
-  rather than pay a round trip on every cache hit (its question 4).
+  rather than pay a round trip on every cache hit (its decision 4).
 
 | Scenario | What | Distinct states |
 |---|---|---|
@@ -2023,8 +2023,8 @@ drops a reservation, only an instance Owner's audited release.
 
 **What it does not cover.** The fence itself (HotPathOne). One route,
 so the reserved set is one name's flag. The frozen holdings are one
-clearance per version, frozen at save (proxy-ui.md's question 5, option
-(a)); the decisions over grants, forks and references are the vault's own,
+clearance per version, frozen at save (option (a) of proxy-ui.md's
+decision 5, which takes (b): PR C extends the model to it first); the decisions over grants, forks and references are the vault's own,
 held by its tests and Lean. The path rules and the allow list are pure
 functions, held by property tests. A row is one body per version, so an
 item moved under another name, or deleted from a fork (the sealed
