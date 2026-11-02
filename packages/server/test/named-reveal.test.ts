@@ -56,7 +56,7 @@ const credentials = {
  * `auth`: the deployment's sign-in: coffre's own through GitHub, or Google once it stops configuring GitHub, or
  * Cloudflare Access, under which no coffre token is a credential.
  */
-function runtimeOver(vault: Vault, auth: 'github' | 'google' | 'access' = 'github'): CoffreRuntime {
+function runtimeOver(vault: Vault, auth: 'github' | 'google' | 'access' = 'github', database: FixtureDeps['db'] = deps.db): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN, vault,
     auth: auth === 'access'
@@ -65,7 +65,7 @@ function runtimeOver(vault: Vault, auth: 'github' | 'google' | 'access' = 'githu
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: [credentialProxy({ credentials, cacheSeconds: 0 })],
   });
-  const made = createRuntime(config, deps.db, vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
+  const made = createRuntime(config, database, vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
   made.plugins = checkPlugins(config.plugins);
   return made;
 }
@@ -643,6 +643,27 @@ test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a
     await reveal(token, body);
     assert.deepEqual(calls, ['useNamed'], `${JSON.stringify(body)}: the vault's one call, by name`);
   }
+  // Its key read from the vault's rows, by its path or a list of one alike: no layer of the fork read again, which would
+  // be a snapshot transaction of the app's more (review r3 of #453; `readableValues`).
+  let transactions = 0;
+  const watching = runtimeOver(counted(deps.vault, true), 'github', new Proxy(deps.db, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (key === 'transaction') transactions += 1;
+        return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  }));
+  const opened = async (body: { path: string; keys?: readonly string[] }) => {
+    await reveal(token, body, watching);
+    transactions = 0;
+    const read = await reveal(token, body, watching);
+    assert.deepEqual(read.body.values, { API_KEY: DEV_KEY }, JSON.stringify(body));
+    return transactions;
+  };
+  assert.equal(await opened({ path: 'market/feature', keys: ['API_KEY'] }), await opened({ path: 'market/feature/API_KEY' }), 'a list of one opens what its path does');
   // Another person's `dev@me`, who has no personal config: dev, read as dev, by name.
   const root = clientFor(deps, ROOT);
   await root.members.add('user:fallback@acme.example');

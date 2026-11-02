@@ -246,10 +246,17 @@ async function cell(row: Row, key: Key) {
         coldAnswer: null as { code: string; route: string } | null,
       };
       await measured.end();
-      // Its twin, on the same world, from an isolate with no history (no map, seals or covers): standing, the same
-      // request, whose call must read what this one does; without standing, a request for a key this world never made, its
-      // world's own baseline, which a refusal of no key read costs exactly as (each cell is a world of its own, whose rows
-      // sit where theirs fell: CI read 3 or 4 blocks more of `projects` and `credentials` in one world than another).
+      return result;
+    },
+    /**
+     * Its twin, on the same world, from an isolate with no history (no map, seals or covers): standing, the same
+     * request, whose call must read what this one does; without standing, a request for a key this world never made, its
+     * world's own baseline, which a refusal of no key read costs exactly as (each cell is a world of its own, whose rows
+     * sit where theirs fell: CI read 3 or 4 blocks more of `projects` and `credentials` in one world than another). Asked
+     * once the principal's lock is let go (review r3 of #453): a twin waiting on it too would answer busy as its cell
+     * does, and hide a lock every key's refusal took.
+     */
+    twin: async (result: { coldAnswer: { code: string; route: string } | null; cold: HotCall | null }): Promise<void> => {
       if (!usable(row, key)) {
         const fresh = await slowed(db, { connections: 1 });
         const now = Date.now();
@@ -259,7 +266,6 @@ async function cell(row: Row, key: Key) {
         result.cold = fresh.statements() > 0 ? fresh.last() : null;
         await fresh.end();
       }
-      return result;
     },
   };
 }
@@ -463,7 +469,8 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
             await inPeriod(15_000);
             const made = await cell(row, key);
             results.push({ key, ...(await past(row, async () => {
-              const result = ENGINE === 'postgres' ? await holding(db, principalLocks([made.principal]), () => made.measure()) : await made.measure();
+              const result = await made.measure();
+              await made.twin(result);
               await weigh([result]);
               return result;
             })) });
@@ -478,8 +485,10 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       const measured = await past(batch[0]!, async () => {
         // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a
         // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (#453, 53300 in CI).
-        const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, ...(await c.measure()) })) }));
+        // Their twins after, the locks let go.
+        const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, twin: c.twin, ...(await c.measure()) })) }));
         const answered = ENGINE === 'postgres' ? await holding(db, principalLocks(cells.flatMap(({ cells: keys }) => keys.map((c) => c.principal))), askAll) : await askAll();
+        await each(answered.flatMap(({ results }) => results), (r) => r.twin(r));
         await weigh(answered.flatMap(({ results }) => results));
         return answered;
       });
