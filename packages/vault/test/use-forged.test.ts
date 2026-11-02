@@ -107,6 +107,9 @@ test("a renewal of a credential whose row was put back over an authentic revoke:
   const [row] = await rows<{ kind: string; scope: string | null }>(db.owner, sql`SELECT kind, scope FROM credentials WHERE id = ${w.credentialId}`);
   const columns: CredentialColumns = { id: w.credentialId, principal: credential.principal, kind: row!.kind, scope: row!.scope, revoked: false, expiresAt: credential.expiresAt!, generation: credential.generation };
   const { vault } = await isolate();
+  // The file's cases share the audit log: those before this one's reports stay.
+  const reports = async () => (await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered'`)).length;
+  const before = await reports();
   const outcome = await vault.prepare!({
     actor: ROOT,
     changes: [{ kind: 'credential', id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } }],
@@ -115,8 +118,7 @@ test("a renewal of a credential whose row was put back over an authentic revoke:
   // the old one before the app's `app_change`, had it commit: the revoked credential live a minute more, under an
   // authentic entry. Moved, as an honest write that came between would make it, and so reported nowhere.
   assert.equal(!outcome.ok && outcome.refusal.code, 'moved', JSON.stringify(outcome));
-  const reports = await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered'`);
-  assert.deepEqual(reports, []);
+  assert.equal(await reports(), before, 'nothing reported');
 });
 
 test("the member: their grant revoked, row and grant put back, the revoke's seal column made the old one: refused (Fable's repro)", async () => {

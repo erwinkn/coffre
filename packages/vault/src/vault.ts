@@ -3834,9 +3834,12 @@ class VaultService implements Vault {
         const key = objectKey({ kind: change.kind, id: change.id });
         if (seen.has(key)) continue;
         seen.add(key);
+        // A row read unsealed, or one whose object the log has no change of, is `app_change`'s to refuse (stale): it
+        // holds the first to there being no change at all, which no edit of a seal column fakes. A newest change
+        // that ended the object (its seal null) counts: its seal column could be made the read row's too.
         const read = change.before?.seal ?? null;
-        const newest = logged.get(key)?.[0]?.seal ?? null;
-        if (read === null ? newest !== null : newest === null || !newest.equals(Buffer.from(read, 'base64'))) {
+        const newest = logged.get(key)?.[0];
+        if (read !== null && newest !== undefined && !(newest.seal?.equals(Buffer.from(read, 'base64')) ?? false)) {
           return { ok: false, refusal: refusal('moved', `the ${change.kind} ${change.id} is not, as the app read it, its newest change's: read it again`) };
         }
       }
