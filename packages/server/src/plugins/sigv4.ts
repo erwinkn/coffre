@@ -49,9 +49,9 @@ function canonicalQuery(params: URLSearchParams): string {
     .join('&');
 }
 
-/** The headers a signature covers, with their values: the host, every `x-amz-*`, and the body's type and digest. */
-function signed(headers: Headers, host: string): [string, string][] {
-  const covered = [...headers].filter(([name]) => name.startsWith('x-amz-') || name === 'content-type' || name === 'content-md5');
+/** The headers a signature covers, with their values: the host, every `x-amz-*`, the body's type and digest, and `also`, each lowercase. */
+function signed(headers: Headers, host: string, also: readonly string[]): [string, string][] {
+  const covered = [...headers].filter(([name]) => name.startsWith('x-amz-') || name === 'content-type' || name === 'content-md5' || also.includes(name));
   return [['host', host] as [string, string], ...covered].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
@@ -60,7 +60,9 @@ function signed(headers: Headers, host: string): [string, string][] {
  * session token if the keys carry one, and `authorization`. The host it
  * signs is the URL's, which `fetch` sends: it sets no `host` header.
  * `payloadHash` is the body's SHA-256, hex, or `UNSIGNED-PAYLOAD`, as
- * `x-amz-content-sha256` says it.
+ * `x-amz-content-sha256` says it. `also` names, lowercase, the headers it
+ * signs besides its own: those the credential proxy's rules before it set,
+ * so none is swapped on the way.
  */
 export async function signV4(
   method: string,
@@ -70,6 +72,7 @@ export async function signV4(
   keys: AwsKeys,
   scope: { region: string; service: string },
   now: Date = new Date(),
+  also: readonly string[] = [],
 ): Promise<void> {
   const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const day = stamp.slice(0, 8);
@@ -78,7 +81,7 @@ export async function signV4(
   headers.set('x-amz-content-sha256', payloadHash);
   if (keys.sessionToken !== undefined) headers.set('x-amz-security-token', keys.sessionToken);
   else headers.delete('x-amz-security-token');
-  const covered = signed(headers, url.host);
+  const covered = signed(headers, url.host, also);
   const names = covered.map(([name]) => name);
   const canonical = [
     method,

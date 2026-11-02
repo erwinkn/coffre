@@ -12,6 +12,22 @@
   (`plan_cache_mode = force_custom_plan`); their bodies are unchanged, and
   the previous release runs on it.
 
+- **A credential takes several inject rules, an allow list with globs, and
+  environments (0.16, T186 PR B).** `inject` may be a list, applied in
+  order: `[header('authorization', 'Bearer {KEY}'), header('stripe-account',
+  '{ACCOUNT}')]`; one rule per header, parameter or field, `basic()` and
+  `sigv4()` once each, SigV4 last, signing the headers the rules before it
+  set. `allow: [{ methods, path }]` says which requests a credential takes,
+  each path matched segment by segment, percent-decoded once: a plain path a
+  prefix, `*` one segment, `**` the rest. `methods` and `paths` keep working
+  as before, read as one entry per path; where a credential has a list, a
+  path is now matched decoded (`docu%6Dents` is `documents`), and `//` is
+  refused. `environments: ['market/prod']`, on any credential, tunnel,
+  signer or verifier, serves it there alone. Redaction covers every key of
+  every rule, and what each rule made of them. Two different handles in one
+  request are a 400. Server only: no migration, and `/use` makes the same
+  calls as before.
+
 - **A change's last statements go with its COMMIT, in the app and in the
   vault (T179).** A key written is 16 round trips to Postgres, down from 18
   (24 before 0.16), and a member added 14, down from 18: the app's append,
