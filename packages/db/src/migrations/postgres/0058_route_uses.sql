@@ -96,10 +96,9 @@ DECLARE
     v_holder uuid;
     -- The place's parent: none but a fork's, or a personal config's (dev).
     v_np_parent uuid;
-    -- A named call's, a route use's (T186, `p_route`), or one of no key at its place (a workload's gate, `use_route`):
-    -- its use of a key the place does not hold, or of a plain value, writes no entry and takes no lock, the vault
-    -- deciding it on what was read. (A use by ids of no key wrote nothing before either: its entry's key is not null.)
-    v_quiet boolean := p_token_hash IS NOT NULL OR p_route IS NOT NULL OR p_secret IS NULL;
+    -- A named call's, or a route use's (T186, `p_route`; a workload's gate in `use_route` among them): its use of a key
+    -- the place does not hold, or of a plain value, writes no entry and takes no lock, the vault deciding it on what was read.
+    v_quiet boolean := p_token_hash IS NOT NULL OR p_route IS NOT NULL;
 BEGIN
     -- The way in (T147): a credential, 0; an MCP connection, 1; a Cloudflare binding, 2; each by its id; or, behind
     -- Cloudflare Access, the account, 3, a person's or a service token's, whose object's key the entry names. Its kind is in the entry, the purpose's
@@ -1024,6 +1023,8 @@ DECLARE
     v_row boolean;
     v_number bigint;
     v_newest bytea;
+    level_env json;
+    v_env_number bigint;
     -- The newest change of the route's inputs this statement reads and `use_credential` does not: a cover must be past it.
     v_inputs bigint := 0;
     v_serving jsonb;
@@ -1064,10 +1065,18 @@ BEGIN
                                            AND (coalesce(x ->> 'personal', 'false') = 'true') = (right(p_environment, 3) = '@me')) END;
         -- The handle's places by path, as named now, for the vault's map to pick the next reading by (`made_for`).
         made_for := CASE WHEN coalesce(pg_input_is_valid(v_places, 'jsonb'), false) AND jsonb_typeof(v_places::jsonb) = 'array' THEN (
-            SELECT coalesce(json_agg(q.slug || '/' || e.slug || CASE WHEN coalesce(x ->> 'personal', 'false') = 'true' THEN '@me' ELSE '' END), '[]'::json)
-              FROM jsonb_array_elements(v_places::jsonb) x
-              JOIN public.environments e ON jsonb_typeof(x) = 'object' AND e.id::text = x ->> 'environmentId' AND e.slug NOT LIKE '%~%'
-              JOIN public.projects q ON q.id = e.project_id AND q.slug NOT LIKE '%~%') ELSE '[]'::json END;
+            SELECT coalesce(json_agg(p.path) FILTER (WHERE p.path IS NOT NULL), '[]'::json)
+              FROM (
+                  -- Each place by its environment's key, its id read as a uuid where it is one: a subquery per place, one
+                  -- index probe each, which no plan joins (a join, planned for any values, hashed every environment: 114
+                  -- buffers at 10k; review r1 of #464).
+                  SELECT (SELECT q.slug || '/' || e.slug || CASE WHEN coalesce(x ->> 'personal', 'false') = 'true' THEN '@me' ELSE '' END
+                            FROM public.environments e JOIN public.projects q ON q.id = e.project_id
+                           WHERE e.id = CASE WHEN jsonb_typeof(x) = 'object' AND coalesce(pg_input_is_valid(x ->> 'environmentId', 'uuid'), false)
+                                             THEN (x ->> 'environmentId')::uuid END
+                             AND e.slug NOT LIKE '%~%' AND q.slug NOT LIKE '%~%') AS path
+                    FROM jsonb_array_elements(v_places::jsonb) x
+              ) p) ELSE '[]'::json END;
     END IF;
     v_reading := CASE WHEN p_use THEN (CASE WHEN v_handle AND p_named IS NOT NULL AND (v_made_for OR p_stable IS NULL) THEN 1 ELSE 2 END)
                       ELSE (CASE WHEN p_project IS NOT NULL THEN 1 ELSE 2 END) END;
@@ -1095,7 +1104,8 @@ BEGIN
             NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bytea, NULL::integer, NULL::bigint,
             NULL::bytea, NULL::text, NULL::text, NULL::text,
             false, false, NULL::text[], NULL::boolean, NULL::text[], NULL::jsonb,
-            p_way, p_principal, false, v_route
+            -- Its route, or, for every item (`proxyItem` with no name), one it names only to be quiet: no entry is written.
+            p_way, p_principal, false, coalesce(v_route, 'every')
         );
         IF (gate ->> 'state') IS NOT NULL THEN
             RETURN json_build_object('gate', gate, 'reading', v_reading, 'route', v_route, 'stood', false);
@@ -1128,8 +1138,19 @@ BEGIN
         SELECT x.number, x.seal INTO v_number, v_newest
           FROM public.log_changes x WHERE x.object = public.log_object('proxy', v_layers[l]::text) ORDER BY x.number DESC LIMIT 1;
         v_inputs := greatest(v_inputs, coalesce(v_number, 0));
+        -- The level's environment, its row and seal and its object's newest change: the chain read from `parent_id` is
+        -- the vault's to check link by link, as the rows say it, before any level's item serves (a parent re-pointed
+        -- around the log would graft another environment's definitions onto this one's keys).
+        SELECT json_build_object('project', e.project_id, 'slug', e.slug, 'owner', e.owner, 'parent', e.parent_id, 'protected', e.protected,
+                                 'archived', e.archived_at IS NOT NULL, 'project_archived', q.archived_at IS NOT NULL, 'seal', e.seal, 'last', le.seal),
+               le.number
+          INTO level_env, v_env_number
+          FROM public.environments e LEFT JOIN public.projects q ON q.id = e.project_id
+          LEFT JOIN LATERAL (SELECT x.number, x.seal FROM public.log_changes x WHERE x.object = public.log_object('environment', e.id::text) ORDER BY x.number DESC LIMIT 1) le ON true
+         WHERE e.id = v_layers[l];
+        v_inputs := greatest(v_inputs, coalesce(v_env_number, 0));
         levels := levels || json_build_object('environment', v_layers[l], 'row', coalesce(v_row, false), 'item', v_item, 'digests', v_digests, 'seal', v_seal,
-                                              'newest', v_newest, 'number', v_number::text);
+                                              'newest', v_newest, 'number', v_number::text, 'env', level_env);
         IF v_route IS NOT NULL AND v_item IS NOT NULL THEN
             v_serving := v_item;
             EXIT;

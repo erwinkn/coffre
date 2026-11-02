@@ -178,6 +178,14 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     levels: (read.levels ?? []).map((level): RouteLevelRow => ({
       environment: String(level.environment), row: level.row === true, item: level.item ?? null, digests: bytes(level.digests), seal: bytes(level.seal),
       newest: bytes(level.newest), number: level.number == null ? null : String(level.number),
+      env: level.env == null ? null : (() => {
+        const env = level.env as Record<string, unknown>;
+        return {
+          project: String(env.project), slug: String(env.slug), owner: env.owner == null ? null : String(env.owner), parent: env.parent == null ? null : String(env.parent),
+          protected: env.protected == null ? null : env.protected === true, archived: env.archived === true, project_archived: env.project_archived === true,
+          seal: bytes(env.seal), last: bytes(env.last),
+        };
+      })(),
     })),
     editor: read.editor === null || read.editor === undefined ? null : {
       ...(read.editor as Omit<EditorRow, 'seal' | 'last'>), seal: bytes(read.editor.seal), last: bytes(read.editor.last),

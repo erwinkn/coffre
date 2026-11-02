@@ -135,7 +135,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
           unless: reading === 2 && call.project !== null ? [`${call.project}/${call.environment}`] : [], accepts: call.accepts!, forks: true,
         },
       }, rows)
-      : await useOnce(tx, { ...base, credential: call.credential, secretId: null, place: call.place, way: call.way, principal: call.principal, route }, rows);
+      : await useOnce(tx, { ...base, credential: call.credential, secretId: null, place: call.place, way: call.way, principal: call.principal, route: route ?? 'every' }, rows);
     const none = { reading, route, madeFor, place: null, project: null, personal: false, cut: false, levels: [], editor: null, keys: [], resolved: [], made: false, rows: [] };
     if (handle ? gate.state !== 'moved' || gate.n_standing !== true || gate.n_cut !== false : gate.state !== null) return { ...none, gate, stood: false };
     const place = handle ? gate.n_place! : call.place!;
@@ -161,9 +161,19 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       }
       const record = items !== null && typeof items === 'object' && !Array.isArray(items) ? items as Record<string, unknown> : null;
       const item = route === null ? items : record !== null && Object.hasOwn(record, route) ? record[route] ?? null : null;
+      // The level's environment, row, seal and newest change, which the vault checks the chain by, link by link.
+      const env = await one<EnvironmentRow & { parent_id: string | null }>(sql`SELECT ${ENVIRONMENT} FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${layer}`);
+      const envNewest = await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
+        WHERE c.object = ${objectKey({ kind: 'environment', id: layer })} ORDER BY c.number DESC LIMIT 1`);
+      if (envNewest !== undefined && BigInt(envNewest.number) > inputs) inputs = BigInt(envNewest.number);
       levels.push({
         environment: layer, row: row !== undefined, item, digests: row === undefined ? null : Buffer.from(row.digests), seal: row === undefined ? null : Buffer.from(row.seal),
         newest: newest?.seal == null ? null : Buffer.from(newest.seal), number: newest?.number ?? null,
+        env: env === undefined ? null : {
+          project: env.project_id, slug: env.slug, owner: env.owner, parent: env.parent_id, protected: env.protected === null ? null : Boolean(env.protected),
+          archived: Boolean(env.archived), project_archived: Boolean(env.project_archived), seal: env.seal == null ? null : Buffer.from(env.seal),
+          last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal),
+        },
       });
       if (route !== null && item !== null) {
         serving = item !== null && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
@@ -691,9 +701,9 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
       : resolved.cut || e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived))) ? 'archived' : null);
     if (namedState !== null) cached = false;
   }
-  // Named, a route use's (T186, 0058's `v_quiet`) or one of no key: a key the place does not hold, and a plain value,
-  // decided, never used, so neither an entry nor a cap's row (0044). A use by ids logs its request whatever it finds.
-  const quiet = names !== undefined || call.route != null || call.secretId === null;
+  // Named, or a route use's (T186, 0058's `v_quiet`): a key the place does not hold, and a plain value, decided, never
+  // used, so neither an entry nor a cap's row (0044). A use by ids logs its request whatever it finds.
+  const quiet = names !== undefined || call.route != null;
   const uses = namedState === null && (!quiet || (s !== undefined && (v === undefined || v.plaintext === null)));
 
   const last = (kind: Kind, id: string | null) => (cached ? Promise.resolve(undefined) : newestOf(kind, id));

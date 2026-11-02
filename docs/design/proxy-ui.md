@@ -1631,11 +1631,20 @@ Where C1 settles what this section left open, or reads it otherwise:
   with uses nothing, and the next call is made by the statement's own.
 - **Quiet uses.** A route use's key that the place does not hold, or that
   is plain, writes no entry and takes no lock (`v_quiet`, as a named call's),
-  and a plain value goes back as its text; a use by ids of no key writes
-  nothing either (its entry's key is not null).
+  and a plain value goes back as its text. A workload's gate is such a use
+  of no key at its place (its route named, or `every` for `proxyItem`'s
+  every item), which writes nothing.
+- **The chain is the vault's.** Each level the statement reads carries its
+  environment's row, seal and newest change's seal, and the vault checks
+  every level through the one that serves: sealed, current, the first the
+  place, each the parent of the one before (`chainFault`). A parent
+  re-pointed around the log fails it, `tampered` (review r1: a child's key
+  would otherwise reach an unrelated environment's sealed route).
 - **`OneVersion`** is held across rounds and chunks by comparing each
-  statement's levels' seals, the item's digest and the editor's newest seal
-  with the first's (`versionOf`); any difference starts the use over, at
+  statement's levels' seals, the item's digest, the editor's newest seal,
+  and the roles' and the policy's newest seals with the first's
+  (`versionOf`; the roles and policy since review r1: the editor's decision
+  weighs them); any difference starts the use over, at
   most three times, then `late`. A second round passes every key of its
   chunk, the ones it does not make with no request id: only checked.
 - **Covers**: `use_route` passes a key's cover to `use_credential` only past
@@ -1656,7 +1665,11 @@ Where C1 settles what this section left open, or reads it otherwise:
   each level whole (`proxyServing`), and one level that fails fails all.
 - **Cost** (`use-route-cost.test.ts`): one statement warm; 106 buffers at
   10k entries of history, 105 at 1M; 111 with 256 definitions in the
-  environment (its index, about 11 KB, read whole), the same rows. The new
+  environment (its index, about 11 KB, read whole), the same rows; with a
+  handle's made-for list read (a place reading), 154 at 1k environments in
+  the instance and 145 at 10k. That list is read a subquery per place, by
+  key: as a join, the generic plan hashed every environment (114 buffers at
+  10k, review r1). The new
   `log_uses.route` column costs every use row its null bitmap's second
   byte, which pads the header: measured over 100,000 rows, 126 B a row
   without it, 134 with it null (+8 B, every use but a route's), 141 with

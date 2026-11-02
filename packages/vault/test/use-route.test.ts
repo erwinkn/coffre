@@ -12,12 +12,14 @@ import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { itemDigest, type ProxyItem } from '../src/inputs.ts';
+import { ROLES } from '@coffre/core/access';
+
+import { applyOp, itemDigest, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { replayStored } from '../src/log-replay.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
-import { CONFIG, emptyLog, isolate, LOG_015, SIGNING_KEY, useDatabases } from './use-world.ts';
+import { change, CONFIG, emptyLog, isolate, LOG_015, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -423,3 +425,72 @@ test('a route of more keys than a statement takes: in statements of that many, e
   assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), expected);
 });
 
+
+test("the chain is the vault's: a fork's parent re-pointed around the log at another environment never serves that one's route (review r1 of #464)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // dev-eu-x → dev-eu → dev; and `other`, an environment of the project, whose own `openai` sends to evil.example.
+  const eu = await w.fork('dev-eu');
+  const x = await w.fork('dev-eu-x', eu);
+  await w.grantAt(x, 'developer');
+  const other = await w.environment('other');
+  await w.save({ openai: { definition: route('openai', [name], 'evil.example'), editor: ada } }, other);
+  const { vault } = await isolate();
+  const atFork = w.askRoute('openai', { named: { place: { project: w.slug, environment: 'dev-eu-x' }, route: 'openai' } });
+  assert.deepEqual(answered(await vault.useRoute(atFork)).found, { found: false, fault: null, seals: ['', '', ''] }, 'no level of the chain defines it');
+  // dev-eu's parent, the middle of the chain, re-pointed at `other` around the log: its sealed object still names dev.
+  await run(db.owner, sql`UPDATE environments SET parent_id = ${other} WHERE id = ${eu}`);
+  const grafted = answered(await vault.useRoute({ ...atFork, at: Date.now(), deadline: Date.now() + 3000 }));
+  assert.ok(grafted.found !== null && !grafted.found.found, JSON.stringify(grafted.found));
+  assert.equal(grafted.found.fault, 'tampered');
+  assert.ok(!grafted.outcome.ok);
+});
+
+test("OneVersion holds the roles too: a role edit landing between a use's rounds decides the editor again on the roles after it (review r1 of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {
+  const w = await routeWorld(db);
+  const a = await w.key('a');
+  const nameA = await w.nameOf(a);
+  // Lin, a Developer on dev: what her save froze reads A; Developers read nothing once the role is edited, but use.
+  const lin = await w.member([{ environmentId: w.dev, role: 'developer' }]);
+  await w.save({ s3: { definition: route('s3', [nameA], 'good.example'), editor: lin } });
+  const [config] = await rows<{ value: string }>(db.owner, sql`SELECT value FROM log_config WHERE name = 'roles'`);
+  const roles = JSON.parse(config!.value) as Input;
+  const developer = ROLES.developer!;
+  const op: Op = { op: 'role.define', table: 'roles', role: 'developer', definition: { ...developer, permissions: developer.permissions.filter((permission) => permission !== 'secret.read') } };
+  const edited = applyOp(roles, ROLES_REF, op)!;
+  let edits = 0;
+  const client = postgresClient(HOT_URL, { max: 2 });
+  let statements = 0;
+  const pool = new Proxy(client, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        statements += 1;
+        if (String(args[0]).includes('use_route') && edits === 0 && statements > 1) {
+          edits += 1;
+          return Promise.resolve(sent).then(async (result) => {
+            const ref: Ref = ROLES_REF;
+            await change(ref, { ...op, ref } as unknown as Op, edited, async (tx, value2) => {
+              await run(tx, sql`UPDATE log_config SET value = ${JSON.stringify(edited)}, seal = ${value2} WHERE name = 'roles'`);
+            });
+            return result;
+          });
+        }
+        return sent;
+      };
+    },
+  });
+  try {
+    const prepared = await prepareVault(CONFIG, LOG_015);
+    const vault = openVault(db.vault, prepared, createDatabase(pool));
+    const outcome = await vault.useRoute(w.askRoute('s3'));
+    assert.equal(edits, 1, 'the edit landed between rounds');
+    assert.deepEqual(refused(outcome), { code: 'route_not_cleared', key: nameA });
+  } finally {
+    await client.end();
+  }
+});

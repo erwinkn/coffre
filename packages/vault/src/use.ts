@@ -2,6 +2,7 @@ import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
+import { MAX_PARENTS } from '@coffre/core/vault';
 import {
   type Access, type CredentialAcceptance, type DecidedItem, type NamedKey, type NamedManyInput, type NamedManyOutcome, type NamedUseInput, type NamedUseOutcome, type NamedValue, newUseRequestId,
   type ProxyItemInput, type ProxyItemOutcome, type RouteFound, type RouteUseInput, type RouteUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue,
@@ -260,8 +261,20 @@ export type RouteCall = {
   offset: number; limit: number; lock: string | null; use: boolean;
 };
 
-/** One fork level of a route's place as `use_route` read it (proxy.ts, `RouteLevel`), its newest change's number too. */
-export type RouteLevelRow = { environment: string; row: boolean; item: unknown; digests: Buffer | null; seal: Buffer | null; newest: Buffer | null; number: string | null };
+/**
+ * One fork level of a route's place as `use_route` read it (proxy.ts, `RouteLevel`), its newest change's number too;
+ * and its environment's row, seal and newest change's seal (`env`), which link it to the next level.
+ */
+export type RouteLevelRow = {
+  environment: string; row: boolean; item: unknown; digests: Buffer | null; seal: Buffer | null; newest: Buffer | null; number: string | null;
+  env: LevelEnvironment | null;
+};
+
+/** A level's environment as `use_route` read it: its columns, its seal, and its object's newest change's seal. */
+export type LevelEnvironment = {
+  project: string; slug: string; owner: string | null; parent: string | null; protected: boolean | null; archived: boolean; project_archived: boolean;
+  seal: Buffer | null; last: Buffer | null;
+};
 
 /** The editor's principal as `use_route` read it: their member row, grants and seal, and their object's newest change. */
 export type EditorRow = {
@@ -1662,7 +1675,33 @@ function levelsOf(rows: RouteRows): RouteLevel[] {
 
 /** What every statement of one use must read alike (`OneVersion`): the levels' seals, the item, and its editor's newest change. */
 function versionOf(rows: RouteRows, found: RouteFound): string {
-  return JSON.stringify([found.seals, found.found ? found.item.digest : null, rows.editor?.last?.toString('base64') ?? null]);
+  const seal = (value: Buffer | null | undefined) => value?.toString('base64') ?? null;
+  // The roles and the policy too, which the editor's decision weighs as the first statement read them (review r1).
+  return JSON.stringify([found.seals, found.found ? found.item.digest : null, seal(rows.editor?.last), seal(rows.gate.r_last), seal(rows.gate.p_last)]);
+}
+
+/**
+ * Why the chain a statement read is not the vault's (review r1 of #464): each level's environment sealed and its
+ * object's newest change, the first the place itself, and each the parent of the one before it, through `upto` (the
+ * level that serves, or every level read). A parent re-pointed, or a level planted, around the log, would graft another
+ * environment's definitions onto this place's keys.
+ */
+function chainFault(path: UsePath, rows: RouteRows, servedAt: number | null): 'tampered' | 'stale' | null {
+  const levels = servedAt === null ? rows.levels : rows.levels.slice(0, servedAt + 1);
+  for (const [i, level] of levels.entries()) {
+    const env = level.env;
+    if (env === null) return 'stale';
+    const object = environmentObject({
+      id: level.environment, projectId: env.project, slug: env.slug, owner: env.owner, parentId: env.parent, protected: env.protected, archived: env.archived, projectArchived: env.project_archived,
+    });
+    if (!sealedBy(path.sealKeys, { kind: 'environment', id: level.environment }, object, env.seal)) return 'tampered';
+    if (env.seal === null || env.last === null || !env.seal.equals(env.last)) return 'stale';
+    if (i === 0 && level.environment !== rows.place) return 'tampered';
+    // Linked to the next level read; the last of a lookup that served none, to none, unless the chain ran past its length.
+    const next = levels[i + 1];
+    if (next !== undefined ? object.parentId !== next.environment : servedAt === null && object.parentId !== null && levels.length <= MAX_PARENTS) return 'tampered';
+  }
+  return null;
 }
 
 /**
@@ -1736,6 +1775,11 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     if (rows.personal) return { ...answer, stands: true, personal: true, found: null, keys: [], outcome: { ok: false, index: null, code: 'personal', number: null } };
     if (rows.cut) return { ...answer, stands: false, personal: false, found: null, keys: [], outcome: { ok: false, index: null, code: 'archived', number: null } };
     const looked = routeLookup(path.sealKeys, levelsOf(rows), rows.route!);
+    const linked = chainFault(path, rows, looked.served ? looked.level : null);
+    if (linked !== null) {
+      const found: RouteFound = { found: false, fault: linked, seals: looked.seals };
+      return { ...answer, stands: true, personal: false, found, keys: [], outcome: { ok: false, index: null, code: linked, number: null } };
+    }
     if (!looked.served) {
       const found: RouteFound = { found: false, fault: looked.fault, seals: looked.seals };
       return { ...answer, stands: true, personal: false, found, keys: [], outcome: { ok: false, index: null, code: looked.fault ?? 'missing', number: null } };
@@ -1767,7 +1811,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
       if ('busy' in more) return busyFor(more);
       const lookedAgain = routeLookup(path.sealKeys, levelsOf(more.rows), rows.route!);
       if (!more.rows.made || !lookedAgain.served || versionOf(more.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version
-        || !lookedAgain.digest.equals(looked.digest)) {
+        || !lookedAgain.digest.equals(looked.digest) || chainFault(path, more.rows, lookedAgain.level) !== null) {
         moved = true;
         break;
       }
@@ -1791,7 +1835,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
         const round = await routeStatement(path, ask, guess, { offset, asked: second.slice(offset, offset + chunk), lock });
         if ('busy' in round) return busyFor(round);
         const lookedAgain = routeLookup(path.sealKeys, levelsOf(round.rows), rows.route!);
-        if (!round.rows.made || !lookedAgain.served || !lookedAgain.digest.equals(looked.digest)
+        if (!round.rows.made || !lookedAgain.served || !lookedAgain.digest.equals(looked.digest) || chainFault(path, round.rows, lookedAgain.level) !== null
           || versionOf(round.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version) {
           moved = true;
           break;
@@ -1921,11 +1965,15 @@ export async function proxyItem(path: UsePath, input: ProxyItemInput): Promise<P
   if (rows.cut) return { ok: false, code: 'archived' };
   if (input.name !== null) {
     const looked = routeLookup(path.sealKeys, levelsOf(rows), input.name);
+    const linked = chainFault(path, rows, looked.served ? looked.level : null);
+    if (linked !== null) return { ok: true, personal: false, fault: linked, seals: looked.seals, item: null, items: null, place };
     if (!looked.served) return { ok: true, personal: false, fault: looked.fault, seals: looked.seals, item: null, items: null, place };
     const item: DecidedItem & { level: number } = { name: input.name, digest: looked.digest.toString('base64'), definition: looked.item.definition, level: looked.level };
     return { ok: true, personal: false, fault: null, seals: looked.seals, item, items: null, place };
   }
   const served = proxyServing(path.sealKeys, levelsOf(rows));
+  const linked = chainFault(path, rows, null);
+  if (linked !== null) return { ok: true, personal: false, fault: linked, seals: served.seals, item: null, items: null, place };
   if (!served.ok) return { ok: true, personal: false, fault: served.fault, seals: served.seals, item: null, items: null, place };
   return {
     ok: true, personal: false, fault: null, seals: served.seals, item: null, place,

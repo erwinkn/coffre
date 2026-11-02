@@ -59,7 +59,7 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM ANALYZE`);
 }
 
-test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries; its rows the same at 1 definition and at 256', { ...postgresOnly('the hot path'), timeout: 900_000 }, async () => {
+test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments; its rows the same at 1 definition and at 256', { ...postgresOnly('the hot path'), timeout: 900_000 }, async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);
@@ -120,8 +120,21 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
   await w.save(many);
   await run(db.owner, sql`VACUUM ANALYZE proxy_definitions`);
   const wide = await measured();
+  // The handle's made-for list is read by its environments' ids (review r1 of #464): the same buffers at 1k
+  // environments in the instance and at 10k.
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const environments = async (count: number) => {
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name)
+      SELECT gen_random_uuid(), ${w.project}::uuid, 'e-' || ${String(count)} || '-' || g, 'E' FROM generate_series(1, ${count}) g`);
+    await run(db.owner, sql`VACUUM ANALYZE environments`);
+  };
+  await environments(1_000);
+  const few = await measured();
+  await environments(9_000);
+  const crowded = await measured();
   await client.end();
-  console.log(JSON.stringify({ small, large, wide }));
+  console.log(JSON.stringify({ small, large, wide, few, crowded }));
+  assert.ok(crowded.buffers - few.buffers <= 2, `${few.buffers} buffers at 1k environments, ${crowded.buffers} at 10k`);
   // Flat: no statement reads history, only probes it by index (the uses' own index may grow a level: its insert, a buffer).
   assert.ok(large.buffers - small.buffers <= 2, `${small.buffers} buffers at 10k, ${large.buffers} at 1M`);
   assert.equal(wide.rows, small.rows, 'the same rows at 256 definitions: its route\'s item and the index, never every item');
