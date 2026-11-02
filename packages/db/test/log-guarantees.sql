@@ -68,6 +68,20 @@ BEGIN
 END
 $$;
 
+-- A page of reads plans each call for its own values (0054, R48): a generic plan spans every day's partition. A
+-- CREATE OR REPLACE of either function drops the setting unless it restates it.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_proc
+               WHERE oid IN ('log_reads_by(text, bigint, bigint, integer)'::regprocedure,
+                             'log_reads_at(uuid, text, bigint, bigint, integer)'::regprocedure)
+                 AND NOT coalesce('plan_cache_mode=force_custom_plan' = ANY (proconfig), false)) THEN
+        RAISE EXCEPTION 'FAIL: a page of reads may plan for any values';
+    END IF;
+    RAISE NOTICE 'PASS: a page of reads plans each call for its own values';
+END
+$$;
+
 -- Retention's functions (0027): the vault's alone, each holding it to what a sealed retention change cuts.
 DO $$
 DECLARE
