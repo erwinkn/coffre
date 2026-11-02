@@ -31,9 +31,34 @@ export type AllowEntry = { methods: ReadonlySet<string> | null; path: PathPatter
 /** A pattern that matches nothing: code's, written so that every request it could match is refused anyway. */
 export const NOTHING: PathPattern = { segments: [], tail: 'never' };
 
-/** Bytes, one character each, of `%XX` in `text`, every other character as it is. */
-function percentDecoded(text: string): string {
+/**
+ * A path or a URL with each `%XX` as its byte, one character each, every
+ * other character as it is. It never fails, as decoding the whole as UTF-8
+ * does on a `%FF`: what segments are matched as, and what the handle, which
+ * is ASCII, is looked for in (`coffre%5Fuse_…`).
+ */
+export function bytesOf(text: string): string {
   return text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
+}
+
+/** How many times a segment is decoded, at most, to see what a server behind reads it as: nothing sent encodes deeper. */
+const DEPTH = 8;
+
+/**
+ * Whether some reading of `decoded`, a segment decoded once, as it is or
+ * decoded again, `DEPTH` decodings in all, is `bad`; true, too, when it
+ * still decodes past them, which nothing sent has reason to. A loop, so a
+ * segment of 40 KB of `%2525…` costs `DEPTH` passes over it at most.
+ */
+function anyReading(decoded: string, bad: (view: string) => boolean): boolean {
+  let view = decoded;
+  for (let depth = 1; depth <= DEPTH; depth++) {
+    if (bad(view)) return true;
+    const next = bytesOf(view);
+    if (next === view) return false;
+    view = next;
+  }
+  return true;
 }
 
 /** A string's UTF-8 bytes, one character each. */
@@ -50,7 +75,7 @@ function utf8(text: string): string {
  * refuses each, so a pattern segment that is one matches nothing.
  */
 function unsafeSegment(decoded: string): boolean {
-  return /[/\\\x00-\x1f\x7f\xc0\xc1]/.test(decoded) || /^\.{1,2}[ \t]*$/.test(decoded.split(';')[0]!) || (percentDecoded(decoded) !== decoded && unsafeSegment(percentDecoded(decoded)));
+  return anyReading(decoded, (view) => /[/\\\x00-\x1f\x7f\xc0\xc1]/.test(view) || /^\.{1,2}[ \t]*$/.test(view.split(';')[0]!));
 }
 
 /**
@@ -60,27 +85,28 @@ function unsafeSegment(decoded: string): boolean {
  * before any matching.
  */
 export function climbs(segment: string): boolean {
-  return unsafeSegment(percentDecoded(segment));
+  return unsafeSegment(bytesOf(segment));
 }
 
 /**
- * Whether a request's segment, not empty as sent, is empty to a server that
- * drops `;` parameters, as Tomcat and Spring do, decoded however often:
- * `;x`, `%3Bx`. Such a server reads `/companies/;/documents` as
- * `/companies//documents`, or `/companies/documents`.
+ * Whether a segment, decoded once (`decoded`), is no segment to a server
+ * that drops `;` parameters, as Tomcat and Spring do, or trailing spaces
+ * and dots, as Windows' do, decoded however often: `;x`, `%3Bx`, `%20`,
+ * `...`. Such a server reads `/companies/;x/documents` as
+ * `/companies//documents`, or `/companies/documents`, and a glob counted
+ * it as one.
  */
-function bare(segment: string): boolean {
-  if (segment.split(';')[0] === '') return true;
-  const read = percentDecoded(segment);
-  return read !== segment && bare(read);
+function vanishes(decoded: string): boolean {
+  return anyReading(decoded, (view) => /^[ .]*$/.test(view.split(';')[0]!));
 }
 
 /**
  * A path pattern as written, read: the pattern, or what is wrong with it.
  * `ui` is a definition saved in the Proxy tab, which takes no trailing
  * slash; `code` keeps code's trailing slash, and reads a segment that
- * decodes to a dot segment, a slash or nothing as matching nothing (a
- * warning: before 0.16 such a path matched nothing either).
+ * decodes to a dot segment, a slash, nothing or what `vanishes` (`;x`,
+ * `%20`, `...`) as matching nothing (a warning: no request with such a
+ * segment reaches the upstream).
  */
 export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathPattern; warning?: string } | { problem: string } {
   if (typeof path !== 'string' || !path.startsWith('/')) return { problem: 'a path starts with /' };
@@ -108,12 +134,12 @@ export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathP
       continue;
     }
     if (segment.includes('*')) return { problem: `* and ** stand for whole segments, never part of one: ${JSON.stringify(segment)}` };
-    const decoded = percentDecoded(utf8(segment));
-    if (decoded === '' || unsafeSegment(decoded)) dead ??= segment === '' ? 'an empty segment' : JSON.stringify(segment);
+    const decoded = bytesOf(utf8(segment));
+    if (unsafeSegment(decoded) || vanishes(decoded)) dead ??= segment === '' ? 'an empty segment' : JSON.stringify(segment);
     segments.push(decoded);
   }
   if (dead !== null) {
-    if (from === 'ui') return { problem: `no empty, . or .. segment, nor one that decodes to a slash: ${dead}` };
+    if (from === 'ui') return { problem: `no empty, . or .. segment, none of spaces, dots or ; parameters alone, nor one that decodes to a slash: ${dead}` };
     return { pattern: NOTHING, warning: `${path} has ${dead}, a segment no request reaches the upstream with: it matches nothing` };
   }
   // A plain path is a prefix; one with a glob is matched segment by segment, unless it ends in `**`.
@@ -126,13 +152,14 @@ export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathP
  * upstream itself) as the segments it is matched as, each decoded once, to
  * bytes: no UTF-8 check, case folding or normalization. The root is one
  * empty segment, as a trailing slash is. Null for an empty segment that is
- * not the last (`//`), or one of `;` parameters alone (`;x`, anywhere),
- * which a glob would count as one and a server may read as none.
+ * not the last (`//`), or one that `vanishes` (`;x`, `%20`, `...`,
+ * anywhere), which a glob would count as one and a server may read as none.
  */
 export function requestSegments(relative: string): string[] | null {
   const segments = relative.slice(1).split('/');
-  for (const [at, segment] of segments.entries()) if (segment === '' ? at < segments.length - 1 : bare(segment)) return null;
-  return segments.map(percentDecoded);
+  const decoded = segments.map(bytesOf);
+  for (const [at, segment] of segments.entries()) if (segment === '' ? at < segments.length - 1 : vanishes(decoded[at]!)) return null;
+  return decoded;
 }
 
 /** Whether `pattern` matches the request's decoded `segments`: one pass over the pattern's own. */

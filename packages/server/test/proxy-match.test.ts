@@ -52,7 +52,7 @@ test("section 7's table: each segment decoded once and matched; a dot segment, a
   for (const path of ['/kyc/..%2fadmin', '/kyc/%25252e%25252e/admin', '/kyc/..%20/admin', '/kyc/..%00/admin', '/kyc/..;/admin']) {
     assert.deepEqual(await ask(path), { status: 400, message: "the path may not climb out of the credential's upstream" }, path);
   }
-  assert.deepEqual(await ask('/companies//x'), { status: 400, message: 'the path has an empty segment, // or one of ; parameters alone, which a server may read as none' });
+  assert.deepEqual(await ask('/companies//x'), { status: 400, message: 'the path has an empty segment, //, or one a server may read as none: ; parameters, spaces or dots alone' });
   // `%2e%2e` is `..` to a URL parser, which resolves it before any server code runs: the request is for /admin, outside the list.
   assert.deepEqual(await ask('/kyc/%2e%2e/admin'), { status: 403, message: 'api is not for /admin' });
   assert.equal(reached.length, 2);
@@ -119,16 +119,23 @@ test('the configuration: allow or methods and paths, `**` last, whole-segment gl
   assert.throws(make({ paths: ['companies'] }), /api's path "companies": a path starts with \//);
   assert.throws(make({ allow: [{ path: '/a', method: 'GET' } as never] }), /allow entries are \{ methods, path \}/);
   assert.throws(make({ allow: [{ methods: ['GET POST'] }] }), /methods are a list of methods/);
+  assert.throws(make({ allow: [{ path: '/a' }, {}] }), /api's allow entry \{\} takes every request: give it methods or a path, or leave allow out/);
   const warned = t.mock.method(console, 'warn', () => undefined);
   const dead = proxy({ paths: ['/kyc/%2e%2e', '/ok'] });
   assert.match(String(warned.mock.calls[0]?.arguments[0]), /api's path \/kyc\/%2e%2e has "%2e%2e", a segment no request reaches the upstream with: it matches nothing/);
   assert.equal((await dead.ask('/kyc')).status, 403);
   assert.equal((await dead.ask('/ok')).status, 200);
+  // A segment no request may have, which `requestSegments` refuses: `;` parameters, spaces or dots alone, at any depth.
+  for (const path of ['/a/;x', '/a/%3Bx', '/a/%253Bx', '/a/%20', '/a/...', '/a/%2520']) {
+    warned.mock.resetCalls();
+    proxy({ allow: [{ path }] });
+    assert.match(String(warned.mock.calls[0]?.arguments[0]), /a segment no request reaches the upstream with: it matches nothing/, path);
+  }
 });
 
 test('a pattern from the Proxy tab takes no trailing slash, nor a segment code would only warn about', () => {
   assert.deepEqual(readPattern('/companies/', 'ui'), { problem: 'a path ends in no slash: /companies/** for everything below it' });
-  assert.match((readPattern('/a/%2F', 'ui') as { problem: string }).problem, /no empty, \. or \.\. segment, nor one that decodes to a slash/);
+  assert.match((readPattern('/a/%2F', 'ui') as { problem: string }).problem, /no empty, \. or \.\. segment, none of spaces, dots or ; parameters alone, nor one that decodes to a slash/);
   assert.match((readPattern('/a//b', 'ui') as { problem: string }).problem, /an empty segment/);
   assert.deepEqual(readPattern('/a/*/b/**', 'ui'), { pattern: { segments: ['a', null, 'b'], tail: 'rest' } });
 });

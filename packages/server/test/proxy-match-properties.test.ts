@@ -64,7 +64,7 @@ const LITERALS = ['a', 'b', 'ab', 'companies', 'é', 'a b', 'x;y', "it's", '~_-'
  * And what only a path holds: a `%` of its own, which a server that decodes
  * twice reads as another byte (`%61` as `a`), or as a slash or a dot segment.
  */
-const PERCENT = ['%61', '%62%62', '50%', '%2F', '%2e%2e', '%25', ';x', '%3B', ';'];
+const PERCENT = ['%61', '%62%62', '50%', '%2F', '%2e%2e', '%25', ';x', '%3B', ';', '%20', '...', '%2520', '. .'];
 
 /**
  * Whether a segment, as text, reads as no slash, backslash, control byte or
@@ -83,11 +83,11 @@ const utf8 = (text: string) => String.fromCharCode(...new TextEncoder().encode(t
 /** `%XX` as its byte, one character each. */
 const decode = (text: string) => text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 
-/** Whether a segment, not empty, is empty to a server that drops `;` parameters, decoded however often: refused under a list. */
+/** Whether a segment, not empty, is empty to a server that drops `;` parameters or trailing spaces and dots, decoded however often: refused under a list. */
 function bare(segment: string): boolean {
   if (segment === '') return false;
   for (let view = utf8(segment); ; view = decode(view)) {
-    if (view.split(';')[0] === '') return true;
+    if (/^[ .]*$/.test(view.split(';')[0]!)) return true;
     if (decode(view) === view) return false;
   }
 }
@@ -149,7 +149,7 @@ test(`no encoding of a path outside the allow list reaches the upstream, and a o
     // What the upstream got, as a server reads it decoded once, twice, until it no longer changes: the model takes each.
     let view = reached[0]!.slice('/v1/'.length).split('/').map(decode);
     assert.ok(!view.slice(0, -1).includes(''), `the upstream got ${reached[0]}, with an empty segment`);
-    assert.ok(!reached[0]!.slice('/v1/'.length).split('/').some(bare), `the upstream got ${reached[0]}, with a segment of ; parameters alone`);
+    assert.ok(!reached[0]!.slice('/v1/'.length).split('/').some(bare), `the upstream got ${reached[0]}, with a segment of ; parameters, spaces or dots alone`);
     for (let again = 0; again < 4; again++) {
       assert.ok(inside(view), `the upstream got ${reached[0]}, which reads as /${view.join('/')}, outside ${allow.map((entry) => entry.path).join(' ')}`);
       view = view.map(decode);

@@ -54,7 +54,7 @@ import { database, tunnel as tunnelPostgres, type Database } from './postgres-tu
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { allows, climbs, methodsFor, readPattern, requestSegments, type AllowEntry } from './proxy-match.ts';
+import { type AllowEntry, allows, bytesOf, climbs, methodsFor, readPattern, requestSegments } from './proxy-match.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
@@ -154,8 +154,10 @@ export function prefix(prefix: string): Placeholder {
 export type Egress = { fetch(input: URL, init: RequestInit): Promise<Response> };
 
 /**
- * Which requests a credential takes: these methods (any, unless set or
- * empty), on this path under its upstream (any, unless set). A plain path is
+ * Which requests a credential takes: these methods, on this path under its
+ * upstream, each any unless set, and at least one set. An entry's empty
+ * `methods` is any method, as the Proxy tab's, unlike the legacy
+ * `methods: []` beside `paths`, which takes none. A plain path is
  * a prefix by segments, `/companies` for `/companies/42` and never
  * `/companiesX`; `*` stands for exactly one segment, `/files/*`, and `**`,
  * last, for the rest of the path, `/files/**`. Each segment is matched
@@ -1207,7 +1209,7 @@ type Aim = { target: URL; under: string; relative: string };
 function aim(request: Request, credential: Resolved, rest: string[], search: string): Aim | Response {
   // Nothing the app writes leaves the credential's upstream: no slash or backslash smuggled in a segment, and no dot
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
-  // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
+  // Decoded as often as it changes, up to 8 times and refused past, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
   // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
   // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, proxy-match.ts.)
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
@@ -1237,7 +1239,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
  * (proxy-match.ts). An empty segment but a trailing one, `//`, or one of
- * `;` parameters alone, is refused where an entry names a path: a glob
+ * `;` parameters, spaces or dots alone, is refused where an entry names a path: a glob
  * counts segments, and a server may read either as none. A list of methods
  * alone, or none, sends it on, as S3's keys may hold `//`.
  */
@@ -1245,7 +1247,7 @@ function allowed(credential: Resolved, method: string, relative: string): Respon
   if (credential.allowed === null) return null;
   if (credential.allowed.length === 0) return failure(403, `${credential.name}'s allow list is empty: it takes no request`);
   const segments = credential.allowed.some((entry) => entry.path !== null) ? requestSegments(relative) : [];
-  if (segments === null) return failure(400, 'the path has an empty segment, // or one of ; parameters alone, which a server may read as none');
+  if (segments === null) return failure(400, 'the path has an empty segment, //, or one a server may read as none: ; parameters, spaces or dots alone');
   const verdict = allows(credential.allowed, method, segments);
   if (verdict === 'allowed') return null;
   if (verdict === 'path') return failure(403, `${credential.name} is not for ${relative}`);
@@ -1756,15 +1758,6 @@ function carries(value: string, pattern: RegExp = HANDLE): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * A URL with each `%XX` as its byte, one character each: what the handle,
- * which is ASCII, is looked for in. It never fails, as decoding the whole
- * as UTF-8 does on a `%FF`, which would leave `coffre%5Fuse_…` unseen.
- */
-function bytesOf(text: string): string {
-  return text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 }
 
 /**
@@ -2309,7 +2302,7 @@ function checkRules(name: string, rules: readonly Rule[]): void {
   for (const rule of rules) {
     const slot = rule.kind === 'header' ? `the header ${rule.name}` : rule.kind === 'query' ? `the parameter ${rule.name}` : inBody(rule) ? `the field ${rule.name}` : `${rule.kind}()`;
     // A field as an upstream's parser may read it (`alike`): `secret` and `SECRET` are one.
-    const id = rule.kind === 'header' ? `header ${rule.name}` : rule.kind === 'query' ? `query ${rule.name}` : inBody(rule) ? `field ${alike(rule.name)}` : rule.kind;
+    const id = rule.kind === 'header' ? `header ${rule.name}` : rule.kind === 'query' ? `query ${alike(rule.name)}` : inBody(rule) ? `field ${alike(rule.name)}` : rule.kind;
     if (seen.has(id)) throw new Error(`credentialProxy: ${name} sets ${slot} twice: one rule each`);
     seen.set(id, rule);
   }
@@ -2352,6 +2345,8 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
     if (!Array.isArray(credential.allow)) throw new Error(`credentialProxy: ${name}'s allow is a list of { methods, path }`);
     return credential.allow.map((entry) => {
       if (typeof entry !== 'object' || entry === null || Object.keys(entry).some((option) => option !== 'methods' && option !== 'path')) throw new Error(`credentialProxy: ${name}'s allow entries are { methods, path }`);
+      // An entry of neither would take every request, whatever the others say: say so with no allow at all.
+      if (entry.methods === undefined && entry.path === undefined) throw new Error(`credentialProxy: ${name}'s allow entry {} takes every request: give it methods or a path, or leave allow out`);
       return { methods: methods(entry.methods, false), path: entry.path === undefined ? null : path(entry.path) };
     });
   }

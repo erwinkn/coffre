@@ -74,17 +74,25 @@ test('a presigned URL is refused for a path a request would be, at every decodin
   assert.equal((await presign('/bucket/private/k')).status, 403);
   // A segment of `;` parameters alone, which `*` would count and Tomcat would drop.
   assert.equal((await presign('/bucket/public/;/k')).status, 400);
+  // Encoded deeper than anything sends, 40 KB of `%2525…`: refused, in 8 decodings, never a stack overflow.
+  const deep = await presign(`/bucket/public/%${'25'.repeat(20_000)}2e/k`);
+  assert.equal(deep.status, 400);
+  assert.match(deep.body, /may not climb out/);
+  assert.equal((await presign(`/bucket/public/%${'25'.repeat(7)}41/k`)).status, 200, 'eight decodings, the cap, read as A');
+  assert.equal((await presign(`/bucket/public/%${'25'.repeat(8)}41/k`)).status, 400, 'nine, refused');
 });
 
 test('a segment of ; parameters alone is refused where an entry names a path; a list of methods alone takes // and ;', async () => {
   const { reached, ask } = proxy({ allow: [{ path: '/companies/*/documents' }, { path: '/kyc' }] });
-  for (const path of ['/companies/;/documents', '/companies/;x/documents', '/companies/%3Bx/documents', '/companies/%253Bx/documents', '/kyc/;']) {
+  // And spaces or dots alone, which Windows drops from a segment's end: `/companies/%20/documents` is `/companies//documents` to it.
+  for (const path of ['/companies/;/documents', '/companies/;x/documents', '/companies/%3Bx/documents', '/companies/%253Bx/documents', '/kyc/;', '/companies/%20/documents', '/companies/%20%20/documents', '/companies/.../documents', '/companies/....;x/documents', '/companies/%2520/documents', '/kyc/%20']) {
     const answer = await ask(`/market/dev/api${path}`);
     assert.equal(answer.status, 400, path);
-    assert.match(answer.body, /an empty segment, \/\/ or one of ; parameters alone/, path);
+    assert.match(answer.body, /an empty segment, \/\/, or one a server may read as none: ; parameters, spaces or dots alone/, path);
   }
+  assert.equal((await ask('/market/dev/api/companies/a%20b/documents')).status, 200, 'a space inside a segment is a byte of it');
   assert.equal((await ask('/market/dev/api/companies/a;b/documents')).status, 200, 'a segment with bytes before its parameters is one');
-  assert.equal(reached.length, 1);
+  assert.equal(reached.length, 2);
   const methods = proxy({ methods: ['GET'] });
   for (const path of ['/bucket//key', '/bucket/;/key']) assert.equal((await methods.ask(`/market/dev/api${path}`)).status, 200, path);
   assert.equal((await methods.ask('/market/dev/api/bucket//key', { method: 'PUT' })).status, 405);

@@ -277,6 +277,9 @@ test('the configuration: one rule per slot, Basic and SigV4 own authorization, S
   assert.throws(make([]), /a's inject is a rule or a list of them/);
   assert.throws(make([header('x-a', key('A')), header('X-A', key('B'))]), /a sets the header x-a twice: one rule each/);
   assert.throws(make([query('k', key('A')), query('k', key('B'))]), /a sets the parameter k twice/);
+  // As some upstreams read a parameter: ASP.NET's collections fold case, so `Token` and `token` are one.
+  assert.throws(make([query('Token', key('A')), query('token', key('B'))]), /a sets the parameter token twice/);
+  assert.throws(make([query('api_key', key('A')), query('apiKey', key('B'))]), /a sets the parameter apiKey twice/);
   assert.throws(make([form('secret', key('A')), form('SECRET', key('B'))]), /a sets the field SECRET twice/);
   assert.throws(make([basic(key('A'), key('B')), basic(key('C'), key('D'))]), /a sets basic\(\) twice/);
   assert.throws(make([basic(key('A'), key('B')), header('authorization', key('C'))]), /a's basic\(\) sets the authorization header, which another of its rules sets too/);
