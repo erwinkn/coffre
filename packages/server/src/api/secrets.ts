@@ -1771,6 +1771,9 @@ export async function reveal(
    */
   only?: readonly string[],
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
+  // Each key once, as the vault's named calls take them: `['A', 'A']` is `['A']`, its one key's read (review of T165 PR 2).
+  if (only !== undefined) only = [...new Set(only)];
+  if (use !== undefined && Array.isArray(use.keys)) use = { ...use, keys: [...new Set(use.keys as readonly string[])] };
   const operationId = randomUUID();
   // A request's one key, used by name already (`useByName`): its rows are the use's, and its outcome the value's. Or its
   // several keys (`useManyByName`, T165): the rows each key's named call read, and the values, all or nothing.

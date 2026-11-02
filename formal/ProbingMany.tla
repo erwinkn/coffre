@@ -104,8 +104,8 @@ CONSTANTS
     IdsChecked
 
 Keys == {"k1", "k2"}
-\* The request's order: a refused batch answers its first key refused.
-Order == <<"k1", "k2">>
+\* Which key a refused batch names, and the statements a deferred key before it adds, are not modeled: the tests
+\* hold the first refusal to the request's order, cold or warm (review r2 of T165 PR 2).
 Purposes == {"use", "read"}
 \* The keys she names, or every key the place holds.
 Asks == {"list", "all"}
