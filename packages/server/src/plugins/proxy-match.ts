@@ -8,7 +8,8 @@
 // behind (`stable`), so a request that matches it is the same path to them.
 //
 //   /companies                 a plain path: a prefix by segments, /companies and /companies/42, never /companiesX
-//   /companies/                code's trailing slash, as before 0.16: /companies/ and below, not /companies
+//   /companies/                code's trailing slash: below /companies, /companies/42, not /companies or /companies/
+//                              (a legacy path's, as before 0.16: /companies/ and below, not /companies)
 //   /                          every path
 //   /companies/*/documents     `*`, exactly one non-empty segment: segment by segment, exact
 //   /companies/*/documents/**  `**`, zero or more segments, last only
@@ -23,8 +24,12 @@ const ONE = null;
 /** A path pattern, read: its segments (decoded, `*` as `ONE`), and what may follow them. */
 export type PathPattern = {
   segments: readonly (string | typeof ONE)[];
-  /** `prefix`: anything, a plain path's; `below`: at least one more segment, code's trailing slash; `exact`: nothing; `rest`: anything, `**`; `never`: no path at all. */
-  tail: 'prefix' | 'below' | 'exact' | 'rest' | 'never';
+  /**
+   * `prefix`: anything, a plain path's; `below`: at least one more segment a server reads as one, an `allow`
+   * pattern's trailing slash; `slash`: at least one more segment, as written, a legacy path's trailing slash;
+   * `exact`: nothing; `rest`: anything, `**`; `never`: no path at all.
+   */
+  tail: 'prefix' | 'below' | 'slash' | 'exact' | 'rest' | 'never';
 };
 
 /** One entry of a route's allow list, read: its methods (null: any) and its path (null: any). */
@@ -137,7 +142,7 @@ export function readPattern(path: string, from: 'legacy' | 'code' | 'ui'): { pat
   if (written.at(-1) === '') {
     if (from === 'ui') return { problem: `a path ends in no slash: ${path.replace(/\/+$/, '')}/** for everything below it` };
     written.pop();
-    tail = 'below';
+    tail = from === 'legacy' ? 'slash' : 'below';
   }
   const segments: (string | typeof ONE)[] = [];
   let glob = false;
@@ -208,6 +213,14 @@ export function matches(pattern: PathPattern, segments: readonly string[]): bool
     case 'rest':
       return true;
     case 'below':
+      // A segment past the pattern's that a server reads as one: `/bucket/*/` takes `/bucket/a/b`, never
+      // `/bucket/a/...` or `/bucket/a/;x`, which a server that drops it reads as `/bucket/a`, nor `/bucket/a/`.
+      for (let at = wanted.length; at < count; at++) {
+        const below = segments[at]!;
+        if (below !== '' && !vanishes(below)) return true;
+      }
+      return false;
+    case 'slash':
       return count > wanted.length;
     case 'exact':
       return count === wanted.length;

@@ -452,7 +452,8 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
 - **The handle** rides where the plan put it: in each slot of a key that is
   no plain one (every slot, when all are plain, which then stay
   placeholders), or in `x-coffre-handle`. Two different handles in one
-  request are a 400. A field the handle rides in must hold it; a field of
+  request are a 400, every occurrence counted: a parameter given twice
+  (`?token=H1&token=H2`), a header given twice, two in one slot. A field the handle rides in must hold it; a field of
   plain keys holds what the app sent. A `placeholder` shapes the one header,
   query, form or JSON slot the handle rides in, which the environment's
   plain keys decide: where its secret keys sit in several rules, the plan is
@@ -466,7 +467,11 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   `a%2520b` is `a%20b`, never `a b`. A plain path is a prefix by segments
   (`/companies` takes `/companies/42`, never `/companiesX`); `*` is one
   non-empty segment, matched exactly (`/companies/*/documents`); `**`,
-  last, is the rest, none included (`/models/**` takes `/models`). No
+  last, is the rest, none included (`/models/**` takes `/models`); a
+  trailing slash, in code, a segment below that a server reads as one
+  (`/bucket/*/` takes `/bucket/a/b`, never `/bucket/a`, `/bucket/a/`,
+  `/bucket/a/...` or `/bucket/a/;x`, which a server that drops what
+  vanishes, or a trailing slash, reads as `/bucket/a`). No
   regexes, no partial-segment globs (`doc*`). A pattern is decoded once,
   as it is read. A `*` takes no empty segment (`//`), and none of `;`
   parameters alone (`;x`, `%3Bx`) or of spaces and dots alone (`%20`,
@@ -474,8 +479,8 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   parameters and Windows the trailing spaces and dots, reads as empty or
   none: `/companies/;x/documents` is `/companies/documents` to it, which
   `/companies/*/documents` does not take. Anywhere else such a segment
-  goes on, as on 0.15: past a prefix, a `**` or a trailing slash, what a
-  server makes of it is still inside (`/bucket/a//b`, an S3 key, under
+  goes on, as on 0.15: past a prefix, a `**`, or a trailing slash and a
+  segment a server reads as one, what a server makes of it is still inside (`/bucket/a//b`, an S3 key, under
   `/bucket`). A pattern's literal segment must read as itself to every
   server behind, or the pattern is refused at startup: none empty or a dot
   segment, none still percent-encoded once decoded (`%2561`, `%61` once

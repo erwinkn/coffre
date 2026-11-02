@@ -160,8 +160,10 @@ export type Egress = { fetch(input: URL, init: RequestInit): Promise<Response> }
  * `methods: []` beside `paths`, which takes none. A plain path is
  * a prefix by segments, `/companies` for `/companies/42` and never
  * `/companiesX`; `*` stands for exactly one segment, `/files/*`, and `**`,
- * last, for the rest of the path, `/files/**`. Each segment is matched
- * decoded: `docu%6Dents` is `documents`. No regexes.
+ * last, for the rest of the path, `/files/**`; a trailing slash, a segment
+ * below that a server reads as one, `/files/` for `/files/a` and never
+ * `/files/` or `/files/...`. Each segment is matched decoded: `docu%6Dents`
+ * is `documents`. No regexes.
  */
 export type Allow = { methods?: readonly string[]; path?: string };
 
@@ -353,6 +355,7 @@ const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const TEMPLATE_KEY = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
 /** A handle, wherever the app put it: alone, or inside a header the upstream's own scheme frames. */
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
+const HANDLES = new RegExp(HANDLE.source, 'g');
 /** A request's body that declares no digest is read whole before it is sent on: an API call's, not an upload's. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** A body a form or JSON rule fills a field of is read whole, and parsed: a token refresh's or a siteverify's, never an upload's. */
@@ -1242,9 +1245,10 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
  * (proxy-match.ts). A `*` takes no empty segment (`//`) and none of `;`
- * parameters, spaces or dots alone, which a server may read as none; a
- * prefix, a `**`, a trailing slash or an entry of methods alone takes them,
- * as S3's keys may hold `//`.
+ * parameters, spaces or dots alone, which a server may read as none, nor
+ * does an `allow` path's trailing slash count one as what is below it; a
+ * prefix, a `**`, a trailing slash past a segment a server reads as one, or
+ * an entry of methods alone takes them, as S3's keys may hold `//`.
  */
 function allowed(credential: Resolved, method: string, relative: string): Response | null {
   if (credential.allowed === null) return null;
@@ -1878,36 +1882,42 @@ function riding(credential: Resolved, plain: (key: string) => boolean): readonly
  * The handle, where the app sends it: `x-coffre-handle` (the `credential(name)`
  * helper), or where any rule of the credential takes its key, a form or JSON
  * rule's in its field (`fields`, in the order of the body's rules); null for
- * none; a refusal for two different ones, which no app sends.
+ * none; a refusal for two different ones, which no app sends. Every
+ * occurrence counts: a parameter given twice (`?token=H1&token=H2`), a header
+ * given twice, which `Headers` joins, or two handles in one slot.
  */
 function handleIn(request: Request, credential: Resolved, target: URL, fields: readonly string[] = []): string | null | Response {
   const explicit = request.headers.get('x-coffre-handle');
-  let found = explicit === null ? null : (HANDLE.exec(explicit)?.[0] ?? null);
-  if (explicit !== null && found === null) return null;
+  const found = new Set(explicit === null ? [] : explicit.match(HANDLES) ?? []);
+  if (explicit !== null && found.size === 0) return null;
   let field = 0;
   for (const rule of credential.rules) {
-    const slot = slotOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : null);
-    const handle = slot === null ? null : handleOf(rule, slot);
-    if (handle === null) continue;
-    if (found !== null && handle !== found) return failure(400, `the request carries two different handles: ${credential.name} takes one`);
-    found = handle;
+    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : null)) for (const handle of handlesOf(rule, slot)) found.add(handle);
   }
-  return found;
+  if (found.size > 1) return failure(400, `the request carries two different handles: ${credential.name} takes one`);
+  return found.values().next().value ?? null;
 }
 
-/** What the app put where a rule takes its key: a header, a parameter, a field (given), Basic's pair, or SigV4's access key id. */
-function slotOf(request: Request, rule: Rule, target: URL, field: string | null): string | null {
-  if (rule.kind === 'header') return request.headers.get(rule.name);
-  if (rule.kind === 'query') return target.searchParams.get(rule.name);
-  if (rule.kind === 'form' || rule.kind === 'json') return field;
+/** What the app put where a rule takes its key, each time it put it: a header, a parameter, a field (given), Basic's pair, or SigV4's access key id. */
+function slotsOf(request: Request, rule: Rule, target: URL, field: string | null): string[] {
+  if (rule.kind === 'header') return [request.headers.get(rule.name)].filter((slot) => slot !== null);
+  if (rule.kind === 'query') return target.searchParams.getAll(rule.name);
+  if (rule.kind === 'form' || rule.kind === 'json') return field === null ? [] : [field];
   // The SDK's `Credential=<access key id>/…`: the handle, as the access key it signed with.
-  if (rule.kind === 'sigv4') return /Credential=([^/,\s]+)\//.exec(request.headers.get('authorization') ?? '')?.[1] ?? null;
+  if (rule.kind === 'sigv4') return [...(request.headers.get('authorization') ?? '').matchAll(/Credential=([^/,\s]+)\//g)].map((match) => match[1]!);
   const basic = /^Basic\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
   try {
-    return basic === null ? null : atob(basic[1]!);
+    return basic === null ? [] : [atob(basic[1]!)];
   } catch {
-    return null;
+    return [];
   }
+}
+
+/** Every handle in what the app put where a rule takes its key: a shaped placeholder's slot is that shape exactly, one handle; the handle alone is found wherever the rule frames it. */
+function handlesOf(rule: Rule, slot: string): string[] {
+  if (rule.shape === undefined) return slot.match(HANDLES) ?? [];
+  const handle = rule.shape.exec(slot)?.[1];
+  return handle === undefined ? [] : [handle];
 }
 
 /** The handle in what the app put where a rule takes its key: a shaped placeholder's slot is that shape exactly; the handle alone is found wherever the rule frames it. */

@@ -58,13 +58,24 @@ test("section 7's table: each segment decoded once and matched; a dot segment, a
   assert.equal(reached.length, 2);
 });
 
-test('a plain path is a prefix by segments; code\'s trailing slash takes what is below it; / takes every path', async () => {
+test('a plain path is a prefix by segments; code\'s trailing slash takes what is below it, a segment a server reads as one for allow; / takes every path', async () => {
   const plain = proxy({ allow: [{ path: '/companies' }] });
   for (const path of ['/companies', '/companies/', '/companies/42', '/companies/42/documents']) assert.equal((await plain.ask(path)).status, 200, path);
   for (const path of ['/companiesX', '/compan', '', '/', '/users/companies']) assert.equal((await plain.ask(path)).status, 403, path);
+  // Legacy: what is below as written, as on 0.15, `/companies/` and `/companies/...` included.
   const below = proxy({ paths: ['/companies/'] });
-  for (const path of ['/companies/', '/companies/42']) assert.equal((await below.ask(path)).status, 200, path);
+  for (const path of ['/companies/', '/companies/42', '/companies/...']) assert.equal((await below.ask(path)).status, 200, path);
   assert.equal((await below.ask('/companies')).status, 403);
+  // `allow`: a segment below that a server reads as one. `/bucket/a/...`, `/bucket/a/;x` and `/bucket/a/` are
+  // `/bucket/a` to a server that drops what vanishes, or a trailing slash: which `/bucket/*/` leaves out.
+  for (const pattern of ['/companies/', '/bucket/*/']) {
+    const base = pattern === '/companies/' ? '/companies' : '/bucket/a';
+    const { reached, ask } = proxy({ allow: [{ path: pattern }] });
+    const taken = ['/42', '/42/', '//42', '/;x/42', '/.../42'].map((rest) => `${base}${rest}`);
+    for (const path of taken) assert.equal((await ask(path)).status, 200, `${pattern} ${path}`);
+    for (const rest of ['', '/', '//', '/...', '/;x', '/%20', '/%3Bx', '/.../;x/']) assert.equal((await ask(`${base}${rest}`)).status, 403, `${pattern} ${base}${rest}`);
+    assert.deepEqual(reached, taken.map((path) => `/v1${path}`));
+  }
   const all = proxy({ paths: ['/'] });
   for (const path of ['', '/', '/a', '/a/b/c']) assert.equal((await all.ask(path)).status, 200, path);
 });

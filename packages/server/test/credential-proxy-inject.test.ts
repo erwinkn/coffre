@@ -167,12 +167,18 @@ test('a header and a query parameter: each rule fills its own slot with its key,
   assert.equal(reached.length, 2);
 });
 
-test('two different handles in one request are refused, and nothing is sent', async () => {
+test('two different handles in one request are refused, wherever and however often each is sent, and nothing is sent', async () => {
   const { handle } = await run();
   const { handle: other } = await run();
   const answer = await route(`/use/maps/geocode?signature=${other}`, { headers: { 'x-api-key': handle } });
   assert.deepEqual([answer.status, ((await answer.json()) as { message: string }).message], [400, 'the request carries two different handles: maps takes one']);
   assert.equal((await route(`/use/maps/geocode?signature=${other}`, { headers: { 'x-coffre-handle': handle } })).status, 400);
+  // Every occurrence counts: a parameter given twice, the second another handle, which the first alone would hide; a
+  // header given twice, which Headers joins; two handles in x-coffre-handle.
+  assert.equal((await route(`/use/maps/geocode?signature=${handle}&signature=${other}`, { headers: { 'x-api-key': handle } })).status, 400);
+  const twice = new Headers([['x-api-key', handle], ['x-api-key', other]]);
+  assert.equal((await route('/use/maps/geocode', { headers: twice })).status, 400);
+  assert.equal((await route('/use/maps/geocode', { headers: { 'x-coffre-handle': `${handle}, ${other}` } })).status, 400);
   assert.equal(reached.length, 0);
 });
 

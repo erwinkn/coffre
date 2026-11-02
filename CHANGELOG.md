@@ -24,7 +24,9 @@
   path is now matched decoded (`docu%6Dents` is `documents`); a `*` in an
   `allow` path takes no `//` and no segment of `;` parameters, or of
   spaces and dots, alone (`;x`, `%20`, `...`), which a server may read as
-  none; past a prefix they go on as before. An `allow` path's own segments
+  none; past a prefix they go on as before. An `allow` path's trailing
+  slash takes a segment below that a server reads as one (`/bucket/*/`
+  takes `/bucket/a/b`, never `/bucket/a/...`). An `allow` path's own segments
   must read as themselves to every server behind: one still encoded once
   decoded (`%2561`), with `;` parameters (`a;v1`), ending in a space or a
   dot, or empty, is refused at startup. In `paths`, a `*` is still itself,
@@ -32,8 +34,8 @@
   on 0.15. `environments: ['market/prod']`, on any credential, tunnel,
   signer or verifier, serves it there alone. Redaction covers every key of
   every rule, and what each rule made of them. Two different handles in one
-  request are a 400. Server only: no migration, and `/use` makes the same
-  calls as before.
+  request are a 400, a parameter given twice included. Server only: no
+  migration, and `/use` makes the same calls as before.
 
 - **A change's last statements go with its COMMIT, in the app and in the
   vault (T179).** A key written is 16 round trips to Postgres, down from 18
