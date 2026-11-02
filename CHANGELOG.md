@@ -12,6 +12,33 @@
   (`plan_cache_mode = force_custom_plan`); their bodies are unchanged, and
   the previous release runs on it.
 
+- **A credential takes several inject rules, an allow list with globs, and
+  environments (0.16, T186 PR B).** `inject` may be a list, applied in
+  order: `[header('authorization', 'Bearer {KEY}'), header('stripe-account',
+  '{ACCOUNT}')]`; one rule per header, parameter or field, `basic()` and
+  `sigv4()` once each, SigV4 last, signing the headers the rules before it
+  set. `allow: [{ methods, path }]` says which requests a credential takes,
+  each path matched segment by segment, percent-decoded once: a plain path a
+  prefix, `*` one segment, `**` the rest. `methods` and `paths` keep working
+  as before, read as one entry per path and compared as written
+  (`docu%6Dents` is not `documents`); where a credential uses `allow`, a
+  path is matched decoded (`docu%6Dents` is `documents`); a `*` in an
+  `allow` path takes no `//` and no segment of `;` parameters, or of
+  spaces and dots, alone (`;x`, `%20`, `...`), which a server may read as
+  none; past a prefix they go on as before. An `allow` path's trailing
+  slash takes a segment below that a server reads as one (`/bucket/*/`
+  takes `/bucket/a/b`, never `/bucket/a/...`). An `allow` path's own segments
+  must read as themselves to every server behind: one still encoded once
+  decoded (`%2561`), with `;` parameters (`a;v1`), ending in a space or a
+  dot, or empty, is refused at startup. In `paths`, a `*` is still itself,
+  never a glob, and a path is compared as written, undecoded, `//`, `;x`
+  and `%20` included, as on 0.15 (`/files/%61` never takes `/files/a`).
+  `environments: ['market/prod']`, on any credential, tunnel, signer or
+  verifier, serves it there alone. Redaction covers every key of
+  every rule, and what each rule made of them. Two different handles in one
+  request are a 400, a parameter given twice included. Server only: no
+  migration, and `/use` makes the same calls as before.
+
 - **A change's last statements go with its COMMIT, in the app and in the
   vault (T179).** A key written is 16 round trips to Postgres, down from 18
   (24 before 0.16), and a member added 14, down from 18: the app's append,

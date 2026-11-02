@@ -425,6 +425,100 @@ credentials: { stripe: { upstream: 'https://api.stripe.com', inject: header('aut
 signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY', { limit: { perMinute: 10 } }) },
 ```
 
+**Several rules, an allow list, and environments (0.16).** A credential's
+`inject` may be a list, applied in order, and `allow` says which requests
+it takes, path by path:
+
+```ts
+openai: {
+  upstream: 'https://api.openai.com/v1',
+  inject: [header('authorization', 'Bearer {OPENAI_API_KEY}'), header('openai-organization', '{OPENAI_ORG}')],
+  allow: [{ methods: ['POST'], path: '/chat/completions' }, { methods: ['GET'], path: '/models/**' }],
+},
+s3: {
+  upstream: 'https://s3.eu-west-3.amazonaws.com',
+  inject: [header('x-tenant-key', '{TENANT_KEY}'), sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' })],
+},
+replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key', '{REPLICA_KEY}'), environments: ['market/prod'] },
+```
+
+- **Rules.** One per header (by name, any case), query parameter or
+  field; `basic()` once at most, and never beside a rule that sets
+  `authorization`; `sigv4()` once at most, last, beside no rule that sets
+  `authorization`, an `x-amz-` header or parameter, or a field of the
+  body, whose hash it signs. SigV4 signs the headers the rules before it
+  set (`SignedHeaders` lists them), so none is swapped on the way. A form's
+  or a JSON body's fields, never both. Each rule names a key.
+- **The handle** rides where the plan put it: in each slot of a key that is
+  no plain one (every slot, when all are plain, which then stay
+  placeholders), or in `x-coffre-handle`. Two different handles in one
+  request are a 400, every occurrence counted, whatever its shape: a
+  parameter given twice (`?token=p_H1&token=H2`, the second outside the
+  placeholder's `p_`), a header given twice, two Basic pairs, a handle in
+  `Authorization` beside a `basic()` or `sigv4()` rule, two in one slot. Only
+  one in the placeholder's shape, or in `x-coffre-handle`, lets a request in. A field the handle rides in must hold it; a field of
+  plain keys holds what the app sent. A `placeholder` shapes the one header,
+  query, form or JSON slot the handle rides in, which the environment's
+  plain keys decide: where its secret keys sit in several rules, the plan is
+  a 409 naming it.
+- **`allow`.** A request any entry takes goes: its method among the
+  entry's `methods` (any, when none or empty, unlike the legacy
+  `methods: []`), and its path matching the entry's `path` (any, when
+  none). An entry of any method on any path, `{}` or `{ methods: [] }`,
+  is refused at startup: it would take every request. The path is matched segment by segment, each
+  percent-decoded once, to bytes: `docu%6Dents` is `documents`, and
+  `a%2520b` is `a%20b`, never `a b`. A plain path is a prefix by segments
+  (`/companies` takes `/companies/42`, never `/companiesX`); `*` is one
+  non-empty segment, matched exactly (`/companies/*/documents`); `**`,
+  last, is the rest, none included (`/models/**` takes `/models`); a
+  trailing slash, in code, a segment below that a server reads as one
+  (`/bucket/*/` takes `/bucket/a/b`, never `/bucket/a`, `/bucket/a/`,
+  `/bucket/a/...` or `/bucket/a/;x`, which a server that drops what
+  vanishes, or a trailing slash, reads as `/bucket/a`). No
+  regexes, no partial-segment globs (`doc*`). A pattern is decoded once,
+  as it is read. A `*` takes no empty segment (`//`), and none of `;`
+  parameters alone (`;x`, `%3Bx`) or of spaces and dots alone (`%20`,
+  `...`), which a server that drops them, as Tomcat and Spring do the
+  parameters and Windows the trailing spaces and dots, reads as empty or
+  none: `/companies/;x/documents` is `/companies/documents` to it, which
+  `/companies/*/documents` does not take. Anywhere else such a segment
+  goes on, as on 0.15: past a prefix, a `**`, or a trailing slash and a
+  segment a server reads as one, what a server makes of it is still inside (`/bucket/a//b`, an S3 key, under
+  `/bucket`). A pattern's literal segment must read as itself to every
+  server behind, or the pattern is refused at startup: none empty or a dot
+  segment, none still percent-encoded once decoded (`%2561`, `%61` once
+  decoded, which a server that decodes twice reads as `a`), none with `;`
+  parameters (`a;v1`, `a` to Tomcat), none ending in a space or a dot
+  (`a.`, `a` to Windows). Matched as written, `/tenants/%2561/*` would take
+  `/tenants/%2561/x`, which such a server reads as `/tenants/a/x`, outside
+  the list. A
+  request no entry takes is a 405 when no entry takes its method, on its
+  path or any, and a 403 otherwise; an empty list takes nothing, a 403.
+  `methods` and `paths`, as before, are one entry per path, and keep what
+  they meant: `/` takes every path, `/companies/` what is below
+  `/companies` and not it, a `*` is itself, never a glob (with a warning
+  at startup), `methods: []` takes nothing, `paths: []` no path while
+  its methods still answer first (`methods: ['POST'], paths: []` is a 405
+  to a GET, a 403 to a POST, a presigned URL's too, before its other
+  arguments are read), and a path of theirs is
+  compared as written with the path as it goes, undecoded, `//`, `;x` and
+  `%20` included, as an S3 key prefix may hold them (`/bucket//prefix`
+  takes `/bucket//prefix/file`); another spelling is another path
+  (`/files/%61` takes `/files/%61/x`, never `/files/a/x`), and one a URL
+  never holds as written (`/café`, `/a b`) takes no request, with a warning
+  at startup. A presigned URL is held to
+  the same list, after the same refusals as a request (no segment that
+  decodes, however often, to a slash, a control byte or a dot segment;
+  past 8 decodings, a segment is refused as one). A path of `paths` with a
+  segment that decodes to a dot segment or a slash matched nothing before,
+  and still does, with a warning at startup.
+- **`environments`**, on any credential, tunnel, signer or verifier: the
+  environments it serves, by full path (a bare `prod` would be every
+  project's), `market/dev@me` as `market/dev`. Elsewhere its name is still
+  the deployment's: the plan leaves it out, and a request through it is a
+  404 naming the environment, before anything is opened where the URL
+  names it.
+
 ## 4. The proxy, request by request
 
 `GET /use` says the instance has a proxy, and names its credentials.
@@ -547,11 +641,13 @@ request sent on:
    and an encoded slash or backslash is refused, as is a dot segment with
    path parameters, which Tomcat and Spring read as one (`/..;/`), and any
    of these encoded twice (`%252e%252e`), which a server behind another
-   decodes twice. A credential's `methods` and `paths` narrow it further.
-2. **Who.** The handle, from `x-coffre-handle` if present, else from
-   where the rule puts the key: the header, the query parameter, the
-   body's field, or Basic's user or password. A shaped placeholder's slot
-   must be that shape exactly (section 5). No handle gets a 401.
+   decodes twice. A credential's allow list (`allow`, or `methods` and
+   `paths`, section 3) narrows it further.
+2. **Who.** The handle, from `x-coffre-handle` if present, and from
+   where each rule puts its key: the header, the query parameter, the
+   body's field, Basic's user or password, or SigV4's access key id. A
+   shaped placeholder's slot must be that shape exactly (section 5). No
+   handle gets a 401, two different ones a 400.
 3. **What.** The credential's keys, from the cache for the handle,
    environment and credential, or opened now: `use(handle, …)`, the API's
    read in process, purpose `use`. That is one vault entry naming the keys,
@@ -585,8 +681,9 @@ request sent on:
    (`/use/schumann/dev/maps/…`, another credential). A
    redirect anywhere else is a 502, naming no destination, so the app
    never follows it with the handle.
-6. **Redacted.** Every string the request carried, each value and
-   Basic's assembled base64, as stored and as sent (`Headers` trims a
+6. **Redacted.** Every string the request carried, each value of every
+   rule's and what each rule made of them (a header's filled template,
+   Basic's assembled base64), as stored and as sent (`Headers` trims a
    value's surrounding whitespace), 8 characters or longer, is replaced by
    `[redacted by coffre]` wherever an honest upstream may quote it back:
    in headers, the reason phrase, and a text body (JSON, XML, text, event

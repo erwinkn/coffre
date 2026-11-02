@@ -99,6 +99,20 @@ Each file names its model and its sources in its header.
   whatever the encoding (`..;`, `%2e`, double encoding); redirects never
   followed or leaked; no CR, LF or NUL in a header; redaction the same
   however the body is split; private addresses in every spelling refused.
+- **A route's allow list** (`proxy-match-properties.test.ts`): random
+  patterns, and random encodings of random paths, sent through the proxy's
+  own route, its path check and the matcher together, against a model of
+  the rules, in `allow` and in legacy `paths`: an `allow` pattern with a
+  literal a server behind may read as another (`%2561`, `a;v1`, `a.`, empty)
+  is refused at startup; no encoding of a path the model leaves outside
+  reaches the upstream, at any number of decodings, nor as a server reads
+  it that drops `;` parameters or trailing spaces and dots, or empties or
+  drops a segment of them alone (`/companies/;x/documents` as
+  `/companies/documents`, `/bucket/a/...` as `/bucket/a`), legacy paths with such literals held to the path
+  as sent, as before 0.16; a path written once reaches it
+  exactly when the model takes it, byte for byte, and through legacy paths
+  exactly when one is its prefix as written, undecoded; and matching reads at
+  most as many of the request's segments as each entry's pattern holds.
 - **The Postgres tunnel** (`packages/server/test/tunnel-properties.test.ts`,
   `packages/cli/test/tunnel-properties.test.ts`): each real end, the Durable
   Object's `fromWebSocket` and the listener's `carry`, against a model of
