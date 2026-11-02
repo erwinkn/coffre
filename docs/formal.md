@@ -2024,7 +2024,10 @@ so the reserved set is one name's flag. The frozen holdings are one
 clearance per version, frozen at save (proxy-ui.md's question 5, option
 (a)); the decisions over grants, forks and references are the vault's own,
 held by its tests and Lean. The path rules and the allow list are pure
-functions, held by property tests. A deleted row is the vault's `stale`,
+functions, held by property tests. A row is one body per version, so an
+item moved under another name (the name-bound digests' job) is PR A's
+tests', and a workload's limit and constraints, which never widen where a
+key goes, are not modelled. A deleted row is the vault's `stale`,
 held by PR A's tests. `RoutingCode` and `RoutingRelease` put back no rows:
 a writer who puts back the item a `proxy.code` change deleted makes a
 rollback like any other, since the deletion is a change, and `Routing`

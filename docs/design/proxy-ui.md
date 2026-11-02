@@ -110,8 +110,15 @@ database through a network must name hosts among the network's, which
 keeps R31's rule: private addresses and `sslmode=disable` need an explicit
 binding.
 
-`editable: false`, the default, keeps a deployment exactly as today: no
-Proxy tab writes, and the use path never reads a `proxy` object.
+`editable: false`, the default, keeps a deployment's uses as today: no
+Proxy tab writes, and no use reads a `proxy` object. One thing still runs:
+the gate of section 6, which reserves the names code defines, once per
+isolate, whenever `credentialProxy` is configured. Without it, this run
+would revive a route: D1 (`editable: true`) has a UI `maps`; D2 sets
+`editable: false` and adds code `maps`, which serves `/use/maps`; D3 turns
+`editable` back on and drops code `maps`, and the UI `maps`, unseen since
+D1, would serve again. So `editable` decides what the tab may write and
+whether uses read UI items, never whether code's names are reserved.
 
 ## 2. Storage
 
@@ -123,8 +130,8 @@ One table, Postgres first (R50), SQLite for tests and local development:
 CREATE TABLE proxy_definitions (
   environment_id uuid PRIMARY KEY REFERENCES environments(id),
   items          jsonb NOT NULL,   -- the canonical object: name -> item, with who saved it
-  digests        bytea NOT NULL,   -- SHA-256 of each item, in name order: 32 bytes an item
-  seal           bytea NOT NULL    -- the vault's HMAC over (kind, id, names, digests), 16 bytes
+  digests        bytea NOT NULL,   -- SHA-256(name || canonical item) of each item, sorted: 32 bytes an item
+  seal           bytea NOT NULL    -- the vault's HMAC over (kind, id, digests), 16 bytes
 );
 CREATE TABLE proxy_reserved (    -- one row: the instance's
   id     smallint PRIMARY KEY CHECK (id = 1),
@@ -135,12 +142,17 @@ GRANT SELECT ON proxy_definitions, proxy_reserved TO coffre_app, coffre_backup;
 -- written only by the vault's logins, through its change functions
 ```
 
-**A use reads one item, not the environment.** The seal covers the item
-names and their digests, not the items themselves. A use's statement reads
-its route's item (`items -> 'openai'`), the digest list and the seal. The
-vault hashes the item, finds that digest at its name, and checks the MAC
-over the list. A forged item fails the digest, a forged list fails the
-MAC. So what crosses from Postgres to the vault, and what the vault hashes,
+**A use reads one item, not the environment.** The seal covers the items'
+digests, not the items themselves, and each digest binds its item's name:
+`SHA-256(name || canonical item)`, the list sorted bytewise. A use's
+statement reads its route's item (`items -> 'openai'`), the digest list and
+the seal. The vault hashes the name it asked for with the item it read,
+finds that digest in the list, and checks the MAC over the list. A forged
+item fails the digest, a forged list fails the MAC, and so does a moved
+item: a writer who drops `a` and stores A's body under `b` makes the vault
+hash `("b", A)`, which no sealed digest matches. Position in the list means
+nothing, so SQL picks no digest for the vault. A route the row lacks is
+answered as no such route, which only serves less (R64). So what crosses from Postgres to the vault, and what the vault hashes,
 is one item plus 32 bytes per item of the environment: about 2 KB at 50
 items. A save may hold at most 256 items, so the list stays under 8 KB.
 Sealing the whole `items` instead would carry every item, every editor's
@@ -315,6 +327,44 @@ edit (one change)
   answer   once the entry is sealed (R51)
 ```
 
+### Workloads, signers, verifiers, tunnels and presign
+
+The protocol above is a handle's route use. The other callers and kinds
+take the same use, with what changes for each:
+
+- **Workloads** (a DPoP session or a Cloudflare binding's caller,
+  [workload-access.md](workload-access.md)). UI routes serve them as code
+  routes do, since prod's callers are workloads (R38's sidecar among them).
+  Three steps of today's `workloadForward` read the credential, and each
+  takes its part from a definition the vault gave:
+  - *The limit.* The gate (the principal's Durable Object) counts a use
+    against the route's `limit` before the use call, as today. For a UI
+    route the app passes the limit of its copy, which came from the vault
+    (`CopyFromVault`); a cold isolate's map miss fetches the item first.
+    After an edit to the limit, the first request through each isolate is
+    counted against the old one, and its answer brings the new item. A
+    limit is a throttle, not who may use what: the two decisions of the
+    use still decide that, on the newest version.
+  - *`narrow` constraints* are weighed after the use's answer, on the URL
+    built from the decided definition's upstream, never the copy's, just
+    before the send. A constraint that refuses there sends nothing.
+  - *The use* is today's workload use with the route's name: the session is
+    the caller of the first decision, the frozen editor the second's, and
+    the values are kept per session, place, route and object seal.
+- **Signers and verifiers.** A named use of the item by its name, decided
+  twice like a route's keys, the entry carrying the name. The editor's
+  frozen holdings must read the key, sensitive included only for an Owner
+  covering the place (section 8). Signing alone never hands the key out, so
+  that is stricter than it needs to be; it keeps one rule for every kind,
+  and Erwin may loosen it for signers later.
+- **Tunnels.** A named use of the database item; the tunnel dials the
+  decided item's hosts, checked as section 5 says, and holds the session
+  for the item's object seal.
+- **Presign.** Today a presigned URL assumes one `sigv4` rule and checks the
+  path with its own, weaker rules. A UI route presigns only when `sigv4` is
+  its one inject rule, and the path goes through section 7's matcher and
+  allow list first. Any other route answers presign with 400.
+
 ### What each protection is for
 
 Each row is a constant of `Routing.tla`. With it off, TLC finds the run
@@ -346,6 +396,11 @@ version ("sensitive" for an Owner, "secret" otherwise); question 5's option
 functions, which property tests hold, not TLC. That a map hit's ids are
 held to the route's names is Naming.tla's `HeldToNames`, unchanged. Renames
 are not modelled, because they cannot change what code shadows (section 6).
+The caller is one kind: a workload's use differs only in who the first
+decision is for, and its limit and `narrow` constraints (above) decide
+nothing about where a key may go. The name-bound digests are below the
+model's one body per version: PR A's tests move an item under another
+name and expect `tampered`.
 A deleted row is the vault's `stale` (PR A tests it). The scenarios with
 deploys put back no rows: a writer who puts back the item `proxy.code`
 deleted is a rollback like any other, which `SealChecked` refuses in
@@ -367,11 +422,11 @@ of that and adds the route's name to what the request names.
 |---|---|---|
 | Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement: one more row (the route's item and the digest list) and one more probe of its newest change, inside the same call; two of each through a fork. The item is not sent back, because the isolate's copy has its digest |
 | Map miss: an isolate cold for that environment or URL, or a key it has not used | 2 calls | **2 calls.** The first reads both URL readings by name (section 6): up to two places' proxy rows and probes, four through forks. It picks the reading, resolves the route's keys by name, and answers with the reading, the ids and the item (a few hundred bytes to a few KB). The second makes the use, reading the chosen place only |
-| Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the row's seal differ from the copy's and returns the new body in the same answer. Nothing is refused or retried |
+| Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the route's item hash to another digest than the copy's and returns the new item in the same answer. Nothing is refused or retried |
 | Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
 | Cache hit | 0 calls | **0 calls** |
 | A code route | as today | as today. The app names the keys, and no `proxy` row is read |
-| An isolate's first proxy request | as above | **1 more call, once per isolate**: its gate (section 6), a vault call that reads the reserved set. When the isolate's code adds a name, that call makes a `proxy.code` change and answers once it is sealed, about half a second; that happens once per deploy that adds a name |
+| An isolate's first proxy request | as above | **1 more call, once per isolate**, `editable: false` included: its gate (section 6), a vault call that reads the reserved set. When the isolate's code adds a name, that call makes a `proxy.code` change and answers once it is sealed, about half a second; that happens once per deploy that adds a name |
 
 **What the entry records** (R53: the request, so that the replay decides
 it as live did). A route use's entry carries the route's name in a new
@@ -402,8 +457,14 @@ cannot tell), let the app read it and keep the genuine digest D beside it,
 and put the genuine row back. The vault then checks the genuine row, sees
 the app's D, omits the item, and the app sends by its forged copy.
 So the use path never fills its copy from its own reads: a cold isolate
-sends no seal and gets the body (`CopyFromVault` in the model, which finds
+sends no digest and gets the item (`CopyFromVault` in the model, which finds
 exactly that run without it).
+
+Two values travel, and they do different jobs. The **item digest**
+identifies the copy: an edit of another route of the environment changes
+the object seal but not this item's digest, so the copy stays good. The
+**object seal** is what the answer carries for `OneVersion` (every round of
+one use must read the same one) and what the value cache is keyed by.
 
 **Invalidation costs no round trip.** The route's item is the only thing
 the isolate caches, and only to save bytes. Postgres compares the copy's
@@ -449,7 +510,9 @@ deploy. That calls for two checks code upstreams never needed:
   PR C checks that claim against production for both, and if `connect()`
   does reach one, UI tunnels on Workers take only literal public addresses.
   `insecureUpstreams` lifts these checks for local fakes, as it lifts the
-  rest today.
+  rest today. A route through an egress gets the same exception a tunnel
+  through a network gets (below): its upstream may be private when it is
+  among the hosts that egress's code declares, since code vouched for them.
 - **Database tunnels too.** Today a tunnel's `hosts` is deployment code, so
   the tunnel dials a name it lists without asking where it resolves
   (`dialled` in `postgres-tunnel.ts`). In the UI that list is an Owner's
@@ -651,7 +714,11 @@ when it is read: at save for the UI, at startup for code. So today's
 once to `a%20b`, a different segment. A pattern that decodes to a dot segment, a slash or an empty
 segment is refused at save. In code it is a startup warning and matches
 nothing, which is what it matches today, since step 1 refuses every
-request it could have matched. PR B's property tests run every
+request it could have matched. Two code forms keep today's meaning, as
+special cases: `/` is the prefix of no segments and matches every path,
+and one trailing slash, `/companies/`, matches what it matches today:
+`/companies/` and everything below it, not `/companies` itself. The UI
+refuses a trailing slash at save and offers `/companies/**`. PR B's property tests run every
 row above, and random encodings of paths outside a pattern, through the
 old check and the new matcher together.
 
@@ -812,7 +879,8 @@ shows.
 | An Owner, racing an app | edits mid-traffic | old values go to the old host for at most W, never to the new host undecided (section 3) |
 | Someone with a stale page | saves over a newer change | 409: CAS on the seal |
 | A compromised app (the `coffre` Worker) | anything | out of scope, as today: it holds the values it opens. The vault makes that loud (every decision logged), not impossible |
-| An Owner | points an upstream, or a tunnel's host, at `169.254.169.254` or a name resolving to `10.0.1.5` | refused at save; on Node also at connect time, HTTP and TCP alike (section 5) |
+| An Owner | points an upstream, or a tunnel's host, at `169.254.169.254` or `localhost` | refused at save: a literal private address, `localhost` or a single-label name (section 5) |
+| An Owner | points one at a name resolving to `10.0.1.5` | the vault resolves nothing, so the save cannot see it: refused at connect on Node, HTTP and TCP alike; on Workers, Cloudflare's network does not route there, which PR C checks (section 5) |
 | An Owner, during a deploy | saves a name the new code reserved, through an old isolate | refused by the vault: the name is reserved (section 6) |
 | A code change | drops a name UI also had | the UI item was deleted when the first isolate of that code reserved the name, audited (`NoRevival`) |
 | A project Owner | releases a name code reserved | refused: a release frees the name instance-wide, so it takes an instance Owner (section 6) |
@@ -840,12 +908,13 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   Owners only).
 - Tests: save, CAS 409, permission matrix (built-in and edited roles,
   protected environments, tokens refused), replay agrees, the row tampered,
-  put back or deleted (`stale`, `tampered`), the backup login reads it
+  put back or deleted (`stale`, `tampered`), an item moved under another
+  name (`tampered`), a save refused under `editable: false`, the backup login reads it
   (`test:schema`), Lean cases.
 
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
-- The path rules and the allow list (section 7); several inject rules with
+- The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with
   their order rules; SigV4 over earlier headers; redaction across all of a
   route's keys; `environments` scoping on code items; `allow` beside
   `methods`/`paths`.
@@ -868,7 +937,10 @@ no storage.
   route's two keys (its second round, and a chunk boundary), answered
   `moved`; a row put back; a key marked sensitive after a Developer's save;
   kept values never sent to a newer upstream; code shadowing then dropping
-  a name; two first isolates reserving at once. Both URL readings, on a hit
+  a name; two first isolates reserving at once; the gate reserving under
+  `editable: false`. A workload's route use:
+  its limit counted, a `narrow` constraint weighed on the decided upstream
+  after an edit; presign refused unless `sigv4` is the route's one rule. Both URL readings, on a hit
   and a miss, with `moved` when the handle's environments change. Also `request-cost.test.ts`
   (statements and rows flat as the log grows and as an environment gains
   definitions), the `/use` bench against 0.15.1 (no regression, R44),
