@@ -610,7 +610,8 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
     // An upstream still being typed: the call as written, matched as given.
   }
   const url = target?.href ?? `${base}${asked}`;
-  if (rest.some(climbs)) return { url, refusal: '400: the path may not climb out of the upstream' };
+  // A character beyond ASCII goes as its UTF-8 bytes, encoded (`À` is `%C3%80`), never as the byte its code point names.
+  if (rest.map(asSent).some(climbs)) return { url, refusal: '400: the path may not climb out of the upstream' };
   const under = target === null ? '' : new URL(base).pathname.replace(/\/$/, '');
   const tail = target === null ? written : target.pathname.slice(under.length) || '/';
   if (route.allow === null) return { url, refusal: null };
@@ -630,6 +631,15 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
   if (from === 'legacy' && route.allow.length === 0) entries.push({ methods: legacy, path: NOTHING });
   const answer = allows(entries, method, requestSegments(tail, from === 'legacy'));
   return { url, refusal: answer === 'allowed' ? null : answer === 'method' ? `405: no allow entry takes ${method} there` : `403: no allow entry takes ${method} ${tail}` };
+}
+
+/** A segment as a URL sends it: `/À-propos` goes as `/%C3%80-propos`, what is ASCII as written. */
+function asSent(segment: string): string {
+  try {
+    return segment.replace(/[^\x00-\x7f]+/gu, encodeURIComponent);
+  } catch {
+    return segment; // a lone surrogate: the URL refuses it anyway
+  }
 }
 
 /**

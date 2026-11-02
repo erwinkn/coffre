@@ -6310,7 +6310,21 @@ button.fold-menu {
 }
 
 .proxy-preview-ask .fold-text {
+  /* A long instance and route name gives way, truncated, before the path does. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   padding-right: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proxy-preview-ask .fold-select {
+  flex: none;
+}
+
+.proxy-preview-ask .fold-input {
+  min-width: 6rem;
 }
 
 .proxy-preview-ask .fold-text + .fold-input {

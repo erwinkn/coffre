@@ -618,7 +618,7 @@ function Preview({ route, allowAs, keys, useUrl }: { route: ProxyRoute; allowAs:
             <option key={one}>{one}</option>
           ))}
         </select>
-        <span className="fold-text mono">
+        <span className="fold-text mono" title={`${useUrl}/${route.name}`}>
           {useUrl.replace(/^https?:\/\//, '')}/{route.name}
         </span>
         <input className="fold-input mono" aria-label="Path" value={path} spellCheck={false} onChange={(event) => setPath(event.target.value)} />

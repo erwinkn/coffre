@@ -367,4 +367,8 @@ test('a sample call reads its path as the proxy does: encoded, without its query
   assert.match(sampleCall(open, 'GET', '/%2e%2e/admin').refusal!, /^400/);
   assert.match(sampleCall(open, 'GET', '/a%2fb').refusal!, /^400/);
   assert.equal(sampleCall(open, 'GET', '/a/b').refusal, null);
+  // `À` (U+00C0) and `Á` go as their UTF-8 bytes, `%C3%80`: no slash or dot, whatever the code point.
+  const about: ProxyRoute = { ...route('site'), allow: [{ methods: [], path: '/%C3%80-propos' }] };
+  assert.equal(sampleCall(about, 'GET', '/À-propos').refusal, null);
+  assert.equal(sampleCall(open, 'GET', '/Á/b').refusal, null);
 });
