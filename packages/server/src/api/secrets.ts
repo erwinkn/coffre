@@ -54,9 +54,11 @@ export type SecretKey = {
   key: string;
   /**
    * The reference it is, when it has no value of its own: what it reads,
-   * whether it does, and whether you could open its source where it is.
+   * whether it does, whether you could open its source where it is, and
+   * whether you are an Owner of the source's project, who alone routes a
+   * sensitive source through the proxy (R66; the Proxy tab says so).
    */
-  reference: (ReferenceView & { canOpenSource: boolean }) | null;
+  reference: (ReferenceView & { canOpenSource: boolean; ownsSource: boolean }) | null;
   /** The folder it is listed in within this environment, or null for none. */
   folder: string | null;
   archived: boolean;
@@ -342,7 +344,8 @@ export async function listSecrets(
     if (reference === undefined) return null;
     const { source } = reference;
     const canOpenSource = source !== null && lists(ctx.caller, placeOfRow(source));
-    return { ...reference.view, canOpenSource };
+    const ownsSource = source !== null && ownsProject(ctx.caller, source.projectId);
+    return { ...reference.view, canOpenSource, ownsSource };
   };
   // A reference's value is its source's: as old as the version it reads.
   const writtenAt = (row: SecretRow): Date | null => {

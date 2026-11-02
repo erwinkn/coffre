@@ -1844,14 +1844,30 @@ is fixed in this document, within PR C.
   the use), and answers `notCleared` per item. A save's answer leaves it
   out: its reads would hold the change's locks two round trips longer
   (`change-cost.test.ts`). PR C's use decides the same way; the two share
-  `routeRefusal`, `frozenAllows` and `frozenOwns`.
+  `routeRefusal`, `frozenAllows` and `frozenOwns`. A fork's read also
+  marks what it inherits (`inheritedNotCleared`), decided where the fork
+  resolves the keys: dev's `openai`, saved by someone who reads dev's
+  OPENAI_API_KEY, does not route in dev-eu once dev-eu sets its own value
+  they do not read, though it still routes in dev.
+- **A sensitive reference** is routed by an Owner of its source's project
+  (section 8). The Secrets list says, of each reference, whether you own
+  that project (`reference.ownsSource`, beside `canOpenSource`), so the page
+  checks each key where its value comes from, not by `routesSensitive`.
+- **Edits against another save**: the page keeps the seal it began editing
+  from, so a save that came since, even one a background read already
+  shows, is a 409 whose review says what changed. An edit whose item that
+  save removed stays a row, made again on saving.
 - **The offboarding preview** reads `Vault.proxySavedBy({ member })`: the
   rows that name the member found by their JSON, each object then held by
   the log, so a forged row lists nothing. The member's page lists them, and
   the Remove dialog names those it stops. A demotion stops those whose keys
   it takes away; the page says so rather than predicting each.
 - **Forks**: the tab reads each parent's page beside its own, one round
-  trip; editing an inherited item saves the fork's own (decision 6).
+  trip; editing an inherited item, or saving it again as it is to clear
+  it, saves the fork's own (decision 6).
+- **As code** writes a UI item out scoped to the environment it is in
+  (`environments: ['market/dev']`), as it serves now; a code item shows no
+  snippet, since its binding or limit per service has no words in the tab.
 - **Egresses and networks** stay direct in the tab until PR C declares them
   by name (PR A refuses one with 400).
 

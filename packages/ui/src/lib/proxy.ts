@@ -52,7 +52,7 @@ export const ENCODINGS: readonly ProxyHmac['encoding'][] = ['hex', 'base64', 'ba
  * of its fork, which it inherits by name (decision 6).
  */
 export type ProxyItem = {
-  /** `code:maps`, `own:openai`, `from:openai`: one row's, through every edit. */
+  /** `code:route:maps`, `own:openai`, `from:openai`: one row's, through every edit; code may give a route and a signer one name. */
   id: string;
   source: 'code' | 'own' | 'inherited';
   definition: ProxyDefinition;
@@ -87,7 +87,7 @@ export function itemsOf(page: ProxyPage, place: Place, parents: readonly ParentP
   const code = new Set(page.code.map((item) => item.definition.name));
   const blank = { environments: null, serves: true, limitPerService: false, bound: false };
   const items: ProxyItem[] = page.code.map((item) => ({
-    id: `code:${item.definition.name}`,
+    id: `code:${item.definition.kind}:${item.definition.name}`,
     source: 'code',
     definition: item.definition,
     environments: item.environments,
@@ -113,7 +113,8 @@ export function itemsOf(page: ProxyPage, place: Place, parents: readonly ParentP
       const name = item.definition.name;
       if (held.has(name)) continue;
       held.add(name);
-      items.push({ ...blank, id: `from:${name}`, source: 'inherited', definition: item.definition, savedBy: item.savedBy, savedAt: item.savedAt, routesSensitive: item.routesSensitive, notCleared: item.notCleared ?? null, from: parent.path });
+      // Its mark is this environment's, where its keys resolve here, never the parent's page's.
+      items.push({ ...blank, id: `from:${name}`, source: 'inherited', definition: item.definition, savedBy: item.savedBy, savedAt: item.savedAt, routesSensitive: item.routesSensitive, notCleared: page.inheritedNotCleared?.[name] ?? null, from: parent.path });
     }
   }
   return sortedItems(items);
@@ -144,14 +145,23 @@ export function parentsOf(environments: readonly { slug: string; parent: string 
 
 export type RowState = 'same' | 'changed' | 'added' | 'deleted' | 'resaved';
 
-/** The page's edits, none saved yet: each row's definition as edited (null deletes it), the rows added, and those saved again as they are. */
+/**
+ * The page's edits, none saved yet: each row's definition as edited (null
+ * deletes it), the rows added, and those saved again as they are; each
+ * edited row's item as it was when its edit began, which keeps the edit
+ * when another person's save removes the item; and the page as the first
+ * edit found it, whose seal the save names, so that a save since, read in
+ * the background, is still a 409 the review shows.
+ */
 export type Drafts = {
   edits: Readonly<Record<string, ProxyDefinition | null>>;
   added: readonly { id: string; copiedFrom: string | null }[];
   resaved: readonly string[];
+  origins: Readonly<Record<string, ProxyItem>>;
+  loaded: ProxyPage | null;
 };
 
-export const NO_DRAFTS: Drafts = { edits: {}, added: [], resaved: [] };
+export const NO_DRAFTS: Drafts = { edits: {}, added: [], resaved: [], origins: {}, loaded: null };
 
 /** Who is editing, and where: what the page knows of them, and of the environment's keys. */
 export type Editor = {
@@ -182,6 +192,8 @@ export type Row = {
   removable: boolean;
   /** For a copied row, the environment it came from. */
   copiedFrom: string | null;
+  /** An edited item another person's save removed since: saving makes it again. */
+  gone: boolean;
   /** How its keys stand for this editor: those they may not route, those an Owner routes (sensitive), and those the place lacks. */
   keys: KeyStanding;
 };
@@ -195,7 +207,16 @@ export type KeyStanding = { blocked: string[]; routed: string[]; missing: string
  * only deleting it is offered.
  */
 export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Editor): Row[] {
-  const rows: Row[] = items.map((item) => {
+  // An edit whose item another save removed stays, over the item that now has its name, if any: Bob deleted
+  // dev-eu's own openai while Alice edited it, and dev-eu inherits dev's again; Alice's edit is the override.
+  const present = new Set(items.map((item) => item.id));
+  const orphans = Object.entries(drafts.origins).flatMap(([id, origin]) => {
+    const draft = drafts.edits[id];
+    return present.has(id) || draft == null || sameDefinition(draft, origin.definition) ? [] : [{ id, origin, draft }];
+  });
+  const twin = (id: string) => (id.startsWith('own:') ? `from:${id.slice(4)}` : id.startsWith('from:') ? `own:${id.slice(5)}` : null);
+  const hidden = new Set(orphans.map(({ id }) => twin(id)));
+  const rows: Row[] = items.filter((item) => !hidden.has(item.id)).map((item) => {
     const draft = drafts.edits[item.id];
     const definition = draft ?? item.definition;
     const state: RowState =
@@ -212,13 +233,18 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
       editable: mine && state !== 'deleted' && before.blocked.length === 0,
       removable: mine && item.source === 'own',
       copiedFrom: null,
+      gone: false,
       keys,
     };
   });
+  for (const { id, origin, draft } of orphans) {
+    const before = keyStanding(definitionKeys(origin.definition), editor);
+    rows.push({ id, item: origin, before: origin.definition, definition: draft, state: 'changed', editable: editor.editable && before.blocked.length === 0, removable: editor.editable, copiedFrom: null, gone: true, keys: keyStanding(definitionKeys(draft), editor) });
+  }
   for (const { id, copiedFrom } of drafts.added) {
     const definition = drafts.edits[id];
     if (definition == null) continue;
-    rows.push({ id, item: null, before: null, definition, state: 'added', editable: editor.editable, removable: editor.editable, copiedFrom, keys: keyStanding(definitionKeys(definition), editor) });
+    rows.push({ id, item: null, before: null, definition, state: 'added', editable: editor.editable, removable: editor.editable, copiedFrom, gone: false, keys: keyStanding(definitionKeys(definition), editor) });
   }
   return rows;
 }
@@ -236,10 +262,20 @@ export function keyStanding(names: readonly string[], editor: Pick<Editor, 'keys
     const entry = editor.keys.find((one) => one.key === name && !one.archived);
     if (entry === undefined) standing.missing.push(name);
     else if (entry.readable) continue;
-    else if (entry.sensitivity === 'sensitive' && editor.routesSensitive) standing.routed.push(name);
+    else if (entry.sensitivity === 'sensitive' && (entry.reference === null ? editor.routesSensitive : entry.reference.ownsSource)) standing.routed.push(name);
     else standing.blocked.push(name);
   }
   return standing;
+}
+
+/**
+ * The project a sensitive key's value is from, whose Owners alone route it:
+ * a reference's source's, `billing` for `billing/prod/STRIPE_KEY`; null for
+ * a value of the place's own project.
+ */
+export function sourceProjectOf(name: string, keys: readonly SecretKey[], place: Place): string | null {
+  const source = keys.find((one) => one.key === name && !one.archived)?.reference?.source.split('/')[0];
+  return source === undefined || source === place.project ? null : source;
 }
 
 /** The pending changes, counted. */
@@ -268,7 +304,8 @@ export function countsInWords(counts: { added: number; updated: number; deleted:
 export function saveOf(rows: readonly Row[]): Record<string, ProxyDefinition | null> {
   const items: Record<string, ProxyDefinition | null> = {};
   for (const row of rows) {
-    const was = row.item?.source === 'own' ? row.item.definition.name : null;
+    // An item removed since its edit began has no old name left to remove.
+    const was = row.item?.source === 'own' && !row.gone ? row.item.definition.name : null;
     if (row.state === 'deleted' && was !== null) items[was] = null;
     if ((row.state === 'changed' || row.state === 'resaved') && was !== null && was !== row.definition.name.trim()) items[was] = null;
   }
@@ -353,7 +390,7 @@ function rowProblems(row: Row, rows: readonly Row[], editor: Editor): Problems {
     const { field, words } = fieldOf(refused, name, item.kind);
     if (field !== 'name' || CREDENTIAL_NAME.test(name)) problems[field] ??= words;
   }
-  if (row.keys.blocked.length > 0) problems.keys = blockedInWords(row.keys.blocked, editor.place);
+  if (row.keys.blocked.length > 0) problems.keys = blockedInWords(row.keys.blocked, editor.place, editor.keys);
   return problems;
 }
 
@@ -388,15 +425,35 @@ export function fieldOf(problem: string, name: string, kind: ProxyKind): { field
   }
 }
 
-/** The refusal, in words, of keys the editor may not route. */
-export function blockedInWords(keys: readonly string[], place: Place): string {
-  const them = keys.length === 1 ? 'it' : 'them';
-  return `You can't read ${keys.join(', ')} in ${place.project}/${place.environment}, so you can't route ${them}.`;
+/**
+ * The refusal, in words, of keys the editor may not route: those they cannot
+ * read, and sensitive ones from another project, which only its Owners route.
+ *
+ *   "STRIPE_KEY is sensitive, from billing: only an Owner of billing routes it."
+ */
+export function blockedInWords(keys: readonly string[], place: Place, all: readonly SecretKey[] = []): string {
+  const sentences: string[] = [];
+  const unread = keys.filter((key) => !foreignSensitive(key, all, place));
+  if (unread.length > 0) sentences.push(`You can't read ${unread.join(', ')} in ${place.project}/${place.environment}, so you can't route ${unread.length === 1 ? 'it' : 'them'}.`);
+  for (const key of keys.filter((one) => foreignSensitive(one, all, place))) {
+    const project = sourceProjectOf(key, all, place)!;
+    sentences.push(`${key} is sensitive, from ${project}: only an Owner of ${project} routes it.`);
+  }
+  return sentences.join(' ');
 }
 
-/** What routing sensitive keys means for an Owner, said where it happens. */
-export function routedInWords(keys: readonly string[]): string {
-  return `${keys.join(', ')} ${keys.length === 1 ? 'is' : 'are'} sensitive: as an Owner of this project you may route ${keys.length === 1 ? 'it' : 'them'}, and the save is audited.`;
+const foreignSensitive = (name: string, keys: readonly SecretKey[], place: Place) =>
+  keys.some((one) => one.key === name && !one.archived && one.sensitivity === 'sensitive') && sourceProjectOf(name, keys, place) !== null;
+
+/**
+ * What routing sensitive keys means for an Owner, said where it happens:
+ * an Owner of the project each value is from, the place's or a
+ * reference's source's.
+ */
+export function routedInWords(keys: readonly string[], place: Place, all: readonly SecretKey[] = []): string {
+  const projects = [...new Set(keys.map((key) => sourceProjectOf(key, all, place) ?? place.project))];
+  const owner = projects.length === 1 && projects[0] === place.project ? 'this project' : projects.join(' and ');
+  return `${keys.join(', ')} ${keys.length === 1 ? 'is' : 'are'} sensitive: as an Owner of ${owner} you may route ${keys.length === 1 ? 'it' : 'them'}, and the save is audited.`;
 }
 
 /**
@@ -608,12 +665,20 @@ export function redirects(before: ProxyDefinition | null, after: ProxyDefinition
   }
 }
 
-/** A change, field by field, in words: what the review shows. A field the change leaves is left out. */
+/**
+ * A change, field by field, in words: what the review shows. A field the
+ * change leaves is left out; one it removes, a last rule or allow entry,
+ * shows as removed ('–').
+ *
+ *   Sends 1 header, Sends 2 query  ->  Sends 1 header   =>  [{ label: 'Sends 2', before: 'Query …', after: '–' }]
+ */
 export function diffOf(before: ProxyDefinition | null, after: ProxyDefinition): { label: string; before: string | null; after: string }[] {
-  const fields = fieldsOf(normalized(after));
+  const now = new Map(fieldsOf(normalized(after)));
   const was = before === null ? null : new Map(fieldsOf(normalized(before)));
-  return fields.flatMap(([label, value]) => {
+  const labels = [...now.keys(), ...[...(was?.keys() ?? [])].filter((label) => !now.has(label))];
+  return labels.flatMap((label) => {
     const old = was?.get(label) ?? null;
+    const value = now.get(label) ?? '–';
     return old === value ? [] : [{ label, before: was === null ? null : (old ?? '–'), after: value }];
   });
 }
@@ -677,20 +742,29 @@ const injectCode = (inject: ProxyInject) => {
       return `${inject.kind}(${q(inject.name)}, ${q(inject.template)})`;
   }
 };
-const hmacCode = (value: ProxyHmac, limit: ProxyLimit) => {
-  const options = [`encoding: ${q(value.encoding)}`, value.prefix !== '' && `prefix: ${q(value.prefix)}`, value.maxBytes !== null && `maxBytes: ${value.maxBytes}`, limitCode(limit) !== null && `limit: ${limitCode(limit)}`].filter(
-    (part) => part !== false,
-  );
+const hmacCode = (value: ProxyHmac, limit: ProxyLimit, scope: string | null) => {
+  const options = [
+    `encoding: ${q(value.encoding)}`,
+    value.prefix !== '' && `prefix: ${q(value.prefix)}`,
+    value.maxBytes !== null && `maxBytes: ${value.maxBytes}`,
+    limitCode(limit) !== null && `limit: ${limitCode(limit)}`,
+    scope !== null && `environments: ${scope}`,
+  ].filter((part) => part !== false);
   return `hmac(${q(value.key)}, { ${options.join(', ')} })`;
 };
 
 /**
- * An item as `credentialProxy({ … })` holds it, to move into code: code
- * wins a name both take, in every environment.
+ * An item as `credentialProxy({ … })` holds it, to move into code, serving
+ * the environments named (null: every one), as it serves here: code wins a
+ * name both take, in every environment. Only a UI item has one: code's own
+ * may leave through a binding, or limit each service, which has no words here.
+ *
+ *   openai in market/dev  ->  credentials: { openai: { upstream: …, inject: header('authorization', 'Bearer {OPENAI_API_KEY}'), environments: ['market/dev'] } },
  */
-export function codeOf(definition: ProxyDefinition): string {
+export function codeOf(definition: ProxyDefinition, environments: readonly string[] | null = null): string {
   const item = normalized(definition);
   const name = prop(item.name || 'name');
+  const scope = environments === null ? null : `[${environments.map(q).join(', ')}]`;
   switch (item.kind) {
     case 'route': {
       const lines = [`upstream: ${q(item.upstream)},`];
@@ -699,16 +773,18 @@ export function codeOf(definition: ProxyDefinition): string {
       if (item.placeholder !== null) lines.push(`placeholder: ${item.placeholder.kind === 'prefix' ? `prefix(${q(item.placeholder.prefix)})` : `jwt({ claims: [${item.placeholder.claims.map(q).join(', ')}] })`},`);
       if (item.allow !== null) lines.push(`allow: [`, ...item.allow.map((entry) => `  { ${entry.methods.length === 0 ? '' : `methods: [${entry.methods.map(q).join(', ')}], `}path: ${q(entry.path)} },`), `],`);
       if (limitCode(item.limit) !== null) lines.push(`limit: ${limitCode(item.limit)},`);
+      if (scope !== null) lines.push(`environments: ${scope},`);
       return `credentials: {\n  ${name}: {\n${lines.map((line) => `    ${line}`).join('\n')}\n  },\n},`;
     }
     case 'signer': {
-      const body = item.signer.kind === 'hmac' ? hmacCode(item.signer, item.limit) : `privateKey(${q(item.signer.key)}${limitCode(item.limit) === null ? '' : `, { limit: ${limitCode(item.limit)} }`})`;
+      const options = [limitCode(item.limit) !== null && `limit: ${limitCode(item.limit)}`, scope !== null && `environments: ${scope}`].filter((part) => part !== false);
+      const body = item.signer.kind === 'hmac' ? hmacCode(item.signer, item.limit, scope) : `privateKey(${q(item.signer.key)}${options.length === 0 ? '' : `, { ${options.join(', ')} }`})`;
       return `signers: {\n  ${name}: ${body},\n},`;
     }
     case 'verifier':
-      return `verifiers: {\n  ${name}: ${hmacCode(item.hmac, item.limit)},\n},`;
+      return `verifiers: {\n  ${name}: ${hmacCode(item.hmac, item.limit, scope)},\n},`;
     case 'tunnel': {
-      const options = [item.hosts.length > 0 && `hosts: [${item.hosts.map(q).join(', ')}]`, item.network !== null && `connect: networks[${q(item.network)}]`].filter((part) => part !== false);
+      const options = [item.hosts.length > 0 && `hosts: [${item.hosts.map(q).join(', ')}]`, item.network !== null && `connect: networks[${q(item.network)}]`, scope !== null && `environments: ${scope}`].filter((part) => part !== false);
       return `tunnels: {\n  ${name}: postgres(${q(item.key)}${options.length === 0 ? '' : `, { ${options.join(', ')} }`}),\n},`;
     }
   }

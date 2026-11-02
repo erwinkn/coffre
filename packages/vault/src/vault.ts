@@ -4148,10 +4148,29 @@ class VaultService implements Vault {
     const held = (ref: Ref & { kind: ReadKind }) => heldByLog(keys.seals, this.#db, ref);
     const [proxy, reserved, chain] = await Promise.all([read({ kind: 'proxy', id: input.environmentId }), read(RESERVED_REF), this.#chain(held, input.environmentId)]);
     // Each item that would not route now, marked: what the tab says an Owner must save again (decision 5).
-    const marks = proxy.object === null || chain[0]?.projectId !== input.projectId
-      ? new Map()
-      : await this.#marks(this.#db, (ref) => held(ref).catch(notLogged), chain, proxy.object, Date.now());
-    return proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved, marks);
+    // A fork's inherited items too, nearest parent first, each decided here: where this environment's use resolves
+    // their keys (its own value over a parent's) and for its chain, not the parent's (decision 6).
+    if (chain[0]?.projectId !== input.projectId) return proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved, new Map());
+    const lenient = (ref: Ref & { kind: ReadKind }) => held(ref).catch(notLogged);
+    const parents = await Promise.all(chain.slice(1).map((environment) => lenient({ kind: 'proxy', id: environment.id })));
+    const own = Object.values(proxy.object?.items ?? {});
+    const taken = new Set(own.map((item) => item.definition.name));
+    const inherited: ProxyItem[] = [];
+    for (const parent of parents) {
+      if (parent.log !== 'live' || parent.object.kind !== 'proxy') continue;
+      for (const item of Object.values(parent.object.items)) {
+        if (taken.has(item.definition.name)) continue;
+        taken.add(item.definition.name);
+        inherited.push(item);
+      }
+    }
+    const marks = await this.#marks(this.#db, lenient, chain, [...own, ...inherited], Date.now());
+    const view = proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved, marks);
+    const uncleared = Object.fromEntries(inherited.flatMap((item) => {
+      const mark = marks.get(item.definition.name);
+      return mark == null ? [] : [[item.definition.name, mark]];
+    }));
+    return { ...view, inheritedNotCleared: uncleared };
   }
 
   /**
@@ -4330,16 +4349,16 @@ class VaultService implements Vault {
   }
 
   /**
-   * Each item of an environment's object that would not route now, by name,
-   * and why (`notCleared`, decision 5): its keys resolved where a use finds
+   * Each of these items, its own or inherited, that would not route now in
+   * the chain's first environment, by name, and why (`notCleared`, decision
+   * 5): its keys resolved where a use there finds
    * them, decided for what its save froze and for its editor as they stand,
    * from the objects `held` reads (the log's, never a row's columns). What
    * cannot be read marks nothing: the use decides it, failing closed.
    */
   async #marks(
-    db: Queryable, held: (ref: Ref & { kind: ReadKind }) => Promise<Held>, chain: readonly EnvironmentInput[], object: ProxyObject, at: number,
+    db: Queryable, held: (ref: Ref & { kind: ReadKind }) => Promise<Held>, chain: readonly EnvironmentInput[], items: readonly ProxyItem[], at: number,
   ): Promise<Map<string, NonNullable<ProxyItemView['notCleared']> | null>> {
-    const items = Object.values(object.items);
     if (items.length === 0) return new Map();
     const environmentId = chain[0]!.id;
     const names = [...new Set(items.flatMap((item) => item.keys))];

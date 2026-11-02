@@ -248,6 +248,7 @@ export type Api = {
           endedBy: string | null;
           endedAt: string | null;
           canOpenSource: boolean;
+          ownsSource: boolean;
         };
         folder: string | null;
         archived: boolean;
@@ -1965,6 +1966,12 @@ export type Api = {
       }[];
       reserved: string[];
       reservedState: "ok" | "stale" | "tampered";
+      inheritedNotCleared?: {
+        [key: string]: {
+          key: string;
+          reason: string;
+        };
+      };
       editable: boolean;
       readOnly: null | {
         reason: string;
@@ -2146,6 +2153,12 @@ export type Api = {
       }[];
       reserved: string[];
       reservedState: "ok" | "stale" | "tampered";
+      inheritedNotCleared?: {
+        [key: string]: {
+          key: string;
+          reason: string;
+        };
+      };
       editable: boolean;
       readOnly: null | {
         reason: string;
@@ -2947,6 +2960,12 @@ export type ProxyPage = {
   }[];
   reserved: string[];
   reservedState: "ok" | "stale" | "tampered";
+  inheritedNotCleared?: {
+    [key: string]: {
+      key: string;
+      reason: string;
+    };
+  };
   editable: boolean;
   readOnly: null | {
     reason: string;
@@ -3160,6 +3179,7 @@ export type SecretKey = {
     endedBy: string | null;
     endedAt: string | null;
     canOpenSource: boolean;
+    ownsSource: boolean;
   };
   folder: string | null;
   archived: boolean;

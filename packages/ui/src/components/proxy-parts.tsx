@@ -61,6 +61,13 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
   // The page as it was when a save found another came first: the review says what changed since.
   const [overtaken, setOvertaken] = useState<ProxyPage | null>(null);
   const next = useRef(0);
+  /** A change to the drafts, which remember the page the first one found, and each row's item as its edit began. */
+  const edit = (row: Row | null, change: (current: Drafts) => Drafts) =>
+    setDrafts((current) => {
+      const changed = change(current);
+      const origins = row?.item == null || row.item.source === 'code' || current.origins[row.id] !== undefined ? changed.origins : { ...changed.origins, [row.id]: row.item };
+      return { ...changed, origins, loaded: current.loaded ?? page };
+    });
 
   const state = pageState({ page, place, parents, keys, drafts, tried });
   const { rows, counts, changed, replacing } = state;
@@ -83,11 +90,11 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
     replacing,
     /** Change a row: the first change opens it as an edit. */
     patch: (row: Row, change: (definition: ProxyDefinition) => ProxyDefinition) =>
-      setDrafts((current) => ({ ...current, edits: { ...current.edits, [row.id]: change(current.edits[row.id] ?? row.definition) } })),
+      edit(row, (current) => ({ ...current, edits: { ...current.edits, [row.id]: change(current.edits[row.id] ?? row.definition) } })),
     /** Add items, new or copied from another environment: each a row of its own, its id returned. */
     add: (definitions: readonly ProxyDefinition[], copiedFrom: string | null = null) => {
       const ids = definitions.map(() => `new:${next.current++}`);
-      setDrafts((current) => ({
+      edit(null, (current) => ({
         ...current,
         edits: { ...current.edits, ...Object.fromEntries(ids.map((id, index) => [id, definitions[index]!])) },
         added: [...current.added, ...ids.map((id) => ({ id, copiedFrom }))],
@@ -95,7 +102,7 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
       return ids;
     },
     remove: (row: Row) =>
-      setDrafts((current) => {
+      edit(row, (current) => {
         if (row.state !== 'added') return { ...current, edits: { ...current.edits, [row.id]: null } };
         const { [row.id]: _, ...edits } = current.edits;
         return { ...current, edits, added: current.added.filter((one) => one.id !== row.id) };
@@ -107,7 +114,7 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
         return { ...current, edits, resaved: current.resaved.filter((id) => id !== row.id) };
       }),
     /** Save a row again as it is, under this editor's standing: how an Owner clears a route its editor no longer can (decision 5). */
-    resave: (row: Row) => setDrafts((current) => ({ ...current, resaved: [...current.resaved, row.id] })),
+    resave: (row: Row) => edit(row, (current) => ({ ...current, resaved: [...current.resaved, row.id] })),
     discard: reset,
     /** Save: what is wrong shows now, under its fields; else the review. */
     save: () => {
@@ -120,7 +127,8 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
       setPending(true);
       setError(null);
       try {
-        await coffre.proxy.save(`${place.project}/${place.environment}`, { seal: page.seal, items: saveOf(rows), ...(replacing ? { replace: true } : {}) });
+        // The seal of the page the edits began on: a save since, even one a background read already shows, is a 409.
+        await coffre.proxy.save(`${place.project}/${place.environment}`, { seal: (drafts.loaded ?? page).seal, items: saveOf(rows), ...(replacing ? { replace: true } : {}) });
         // Read again, as the tab reads it: the save's answer leaves out whether each item routes now. Its forks inherit
         // what it holds, and the log has a new entry.
         await refresh(queryClient, affects.proxy(place.project));
@@ -129,8 +137,10 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
       } catch (failure) {
         if (failure instanceof CoffreError && failure.reason === 'proxy_changed') {
           // Someone saved first: read the environment again, keep the edits, and say what changed.
-          setOvertaken(page);
-          await queryClient.fetchQuery({ ...queries.proxy(coffre, place), staleTime: 0 });
+          setOvertaken(drafts.loaded ?? page);
+          const now = await queryClient.fetchQuery({ ...queries.proxy(coffre, place), staleTime: 0 });
+          // Saving again is over what it read now, which the review showed.
+          if (now.ok) setDrafts((current) => ({ ...current, loaded: now }));
         } else setError(proxyFailure(failure));
       } finally {
         setPending(false);
@@ -349,7 +359,7 @@ export function KeySelect({
   const known = value === '' || listed.some((entry) => entry.key === value);
   return (
     <select className={className} aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-      <option value="">{optional ? 'None' : 'Pick a key'}</option>
+      <option value="">{optional ? `No ${label.toLowerCase()}` : 'Pick a key'}</option>
       {!known && <option value={value}>{value} (not here yet)</option>}
       {listed.map((entry) => (
         <option key={entry.key} value={entry.key}>
@@ -494,7 +504,13 @@ export function ReviewDialog({ edits }: { edits: Edits }) {
               <span className="mono">{row.state === 'deleted' ? row.before!.name : row.definition.name}</span>
             </h3>
             {row.state !== 'deleted' && row.state !== 'resaved' && <Diff rows={diffOf(row.before, row.definition).filter((line) => row.before !== null || line.label !== 'Name')} adding={row.before === null} />}
-            {row.state === 'resaved' && <p className="hint">Saved again as it is, under your access: its keys are cleared for you from now on.</p>}
+            {row.state === 'resaved' && (
+              <p className="hint">
+                {row.item?.source === 'inherited'
+                  ? `Saved here as it is, over ${row.item.from}'s, under your access: ${place.environment}'s own from now on, its keys cleared for you.`
+                  : 'Saved again as it is, under your access: its keys are cleared for you from now on.'}
+              </p>
+            )}
             {row.state === 'deleted' && row.item?.from != null && <p className="hint">{place.environment} uses {row.item.from}&apos;s {row.before!.name} again.</p>}
             {row.copiedFrom !== null && <Note tone="warn">{copiedInWords(row.definition, place, row.copiedFrom)}</Note>}
             {row.state !== 'deleted' && row.keys.routed.length > 0 && <Note tone="warn">Routes sensitive {row.keys.routed.join(', ')}: audited as an Owner&apos;s change.</Note>}

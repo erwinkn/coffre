@@ -8,8 +8,11 @@ import assert from 'node:assert/strict';
 import type { ProxyPage, SecretKey } from '@coffre/client';
 
 import {
+  blockedInWords,
   changedSince,
+  codeOf,
   copiedInWords,
+  diffOf,
   fieldOf,
   itemsOf,
   keyStanding,
@@ -18,10 +21,13 @@ import {
   pageState,
   parentsOf,
   redirects,
+  routedInWords,
+  rowsOf,
   sampleCall,
   saveOf,
   type Drafts,
   type ProxyDefinition,
+  type ProxyItem,
   type ProxyRoute,
 } from '../src/lib/proxy.ts';
 
@@ -64,13 +70,13 @@ test("the list: code's items locked, the environment's own, then what its fork i
   const fork = page([route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com'), route('maps')]);
   const items = itemsOf(fork, { project: 'market', environment: 'dev-eu' }, [{ path: 'market/dev', page: dev }]);
   assert.deepEqual(items.map((item) => [item.id, item.source, item.from]), [
-    ['code:maps', 'code', null],
+    ['code:route:maps', 'code', null],
     ['own:openai', 'own', 'market/dev'],
     ['from:stripe', 'inherited', 'market/dev'],
   ]);
   // A code item scoped elsewhere takes its name here and serves nothing.
   const scoped = page([], { code: [{ definition: { kind: 'tunnel', name: 'replica', key: 'REPLICA_URL', hosts: ['10.0.1.5'], network: null }, environments: ['market/prod'], limitPerService: false, bound: true }] });
-  assert.deepEqual(itemsOf(scoped, DEV).map((item) => [item.id, item.serves]), [['code:replica', false]]);
+  assert.deepEqual(itemsOf(scoped, DEV).map((item) => [item.id, item.serves]), [['code:tunnel:replica', false]]);
   assert.deepEqual(parentsOf([{ slug: 'dev', parent: null }, { slug: 'dev-eu', parent: 'dev' }, { slug: 'x', parent: 'dev-eu' }], { project: 'market', environment: 'x' }), ['market/dev-eu', 'market/dev']);
 });
 
@@ -78,6 +84,7 @@ test('a save sends each changed item by name: a rename removes the old name, a d
   const proxy = page([route('openai'), route('partner', ['PARTNER_KEY'], 'api.partner.example'), route('old')]);
   const parentPage = page([route('stripe', ['OPENAI_API_KEY'], 'api.stripe.com')]);
   const drafts: Drafts = {
+    ...NO_DRAFTS,
     edits: { 'own:openai': { ...route('gpt'), upstream: ' https://api.openai.com/v2 ' }, 'own:old': null, 'from:stripe': { ...route('stripe', ['OPENAI_API_KEY'], 'eu.stripe.com') }, 'new:0': route('fresh') },
     added: [{ id: 'new:0', copiedFrom: null }],
     resaved: [],
@@ -95,7 +102,7 @@ test('a save sends each changed item by name: a rename removes the old name, a d
 test("a reader's page: every field inert, nothing to delete or add; a key its editor cannot read leaves the row inert, deletable", () => {
   const reader = state(page([route('openai')], { editable: false, readOnly: { reason: 'missing_proxy_edit', message: 'editing proxy definitions takes proxy.edit here: Owners hold it' }, routesSensitive: false, releases: false }));
   // A row's `editable` is its fieldset's: disabled, every control inert (proxy-sheet.tsx); `removable` its Delete.
-  assert.deepEqual(reader.rows.map((row) => [row.id, row.editable, row.removable]), [['code:maps', false, false], ['own:openai', false, false]]);
+  assert.deepEqual(reader.rows.map((row) => [row.id, row.editable, row.removable]), [['code:route:maps', false, false], ['own:openai', false, false]]);
   assert.equal(reader.editor.editable, false);
   // A forged object: none of it to edit, and only an Owner of the project, who replaces it whole, saves.
   const forged = state(page([], { state: 'tampered' }));
@@ -113,6 +120,7 @@ test("a reader's page: every field inert, nothing to delete or add; a key its ed
 
 test("an edit's problems, once a save is tried, under the field the vault's own check names", () => {
   const drafts: Drafts = {
+    ...NO_DRAFTS,
     edits: {
       'new:0': { ...route('maps'), inject: [{ kind: 'header', name: 'authorization', template: 'Bearer ' }] },
       'new:1': { ...route('Bad Name') },
@@ -137,14 +145,14 @@ test("an edit's problems, once a save is tried, under the field the vault's own 
 
 test('discarding leaves the page as it was loaded; a save of nothing changed is no change', () => {
   const proxy = page([route('openai')]);
-  const edited = state(proxy, { edits: { 'own:openai': route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com') }, added: [], resaved: [] });
+  const edited = state(proxy, { ...NO_DRAFTS, edits: { 'own:openai': route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com') }, added: [], resaved: [] });
   assert.deepEqual([edited.changed, edited.counts], [1, { added: 0, updated: 1, deleted: 0 }]);
   const discarded = state(proxy, NO_DRAFTS);
   assert.deepEqual([discarded.changed, discarded.rows.map((row) => row.state)], [0, ['same', 'same']]);
   // Typed back to what it was: no change at all.
-  assert.equal(state(proxy, { edits: { 'own:openai': route('openai') }, added: [], resaved: [] }).changed, 0);
+  assert.equal(state(proxy, { ...NO_DRAFTS, edits: { 'own:openai': route('openai') }, added: [], resaved: [] }).changed, 0);
   // Saved again as it is, under its editor's standing now: a change of its own, which is how an Owner clears a route.
-  const resaved = state(proxy, { edits: {}, added: [], resaved: ['own:openai'] });
+  const resaved = state(proxy, { ...NO_DRAFTS, edits: {}, added: [], resaved: ['own:openai'] });
   assert.deepEqual([resaved.changed, Object.keys(saveOf(resaved.rows))], [1, ['openai']]);
 });
 
@@ -184,6 +192,75 @@ test("an item that would not route now says why, and who clears it", () => {
   const item = { definition: route('gemini'), savedBy: 'user:lead@acme.example' };
   assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' } }, DEV),
     'gemini does not route now: lead@acme.example, who saved it, no longer reads OPENAI_API_KEY here. Someone who does saves it again.');
-  assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: "OPENAI_API_KEY is sensitive, and its save was not an Owner's of its project" } }, DEV),
+  assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: "OPENAI_API_KEY is sensitive, and its editor was no Owner of its project when they saved it" } }, DEV),
     "gemini does not route now: OPENAI_API_KEY is sensitive, and lead@acme.example's save was not an Owner's. An Owner of market saves it again.");
+});
+
+test('code may give a route and a signer one name: each its own row', () => {
+  const both = page([], {
+    code: [
+      { definition: route('dfns', ['DFNS_KEY'], 'api.dfns.io'), environments: null, limitPerService: false, bound: false },
+      { definition: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'DFNS_KEY' }, limit: NONE }, environments: null, limitPerService: false, bound: false },
+    ],
+  });
+  const ids = itemsOf(both, DEV).map((item) => item.id);
+  assert.deepEqual(ids, ['code:route:dfns', 'code:signer:dfns']);
+  assert.equal(new Set(ids).size, 2);
+});
+
+test('a sensitive reference is routed by an Owner of its source\'s project, not of the place\'s', () => {
+  const reference = (ownsSource: boolean) =>
+    key('BILLING_KEY', { sensitivity: 'sensitive', readable: false, reference: { id: 'r', holder: 'market/dev/BILLING_KEY', source: 'billing/prod/STRIPE_KEY', state: 'live', version: 1, createdBy: 'user:ada@acme.example', createdAt: '', endedBy: null, endedAt: null, canOpenSource: true, ownsSource } });
+  // Ada owns market, not billing: the vault would refuse, and the page says so first.
+  const market = { keys: [...KEYS, reference(false)], routesSensitive: true };
+  assert.deepEqual(keyStanding(['BILLING_KEY'], market), { blocked: ['BILLING_KEY'], routed: [], missing: [] });
+  assert.equal(blockedInWords(['BILLING_KEY'], DEV, market.keys), 'BILLING_KEY is sensitive, from billing: only an Owner of billing routes it.');
+  // An Owner of billing who is no Owner of market routes it, and is told whose Owner they route it as.
+  const billing = { keys: [...KEYS, reference(true)], routesSensitive: false };
+  assert.deepEqual(keyStanding(['BILLING_KEY'], billing).routed, ['BILLING_KEY']);
+  assert.equal(routedInWords(['BILLING_KEY'], DEV, billing.keys), 'BILLING_KEY is sensitive: as an Owner of billing you may route it, and the save is audited.');
+  assert.equal(routedInWords(['STRIPE_KEY'], DEV, KEYS), 'STRIPE_KEY is sensitive: as an Owner of this project you may route it, and the save is audited.');
+});
+
+test('an edit outlives another save removing its item: it stays, over the item that now has its name', () => {
+  const editor = state(page([])).editor;
+  const origin = itemsOf(page([route('openai')]), DEV)[1]!;
+  const inherited: ProxyItem = { ...origin, id: 'from:openai', source: 'inherited', from: 'market/base' };
+  const renamed = { ...NO_DRAFTS, edits: { 'own:openai': route('gpt') }, origins: { 'own:openai': origin } };
+  // Bob deleted openai first: Alice's rename is a row still, saved as the new name alone.
+  const alone = rowsOf([], renamed, editor);
+  assert.deepEqual(alone.map((row) => [row.id, row.state, row.gone, row.definition.name]), [['own:openai', 'changed', true, 'gpt']]);
+  assert.deepEqual(Object.keys(saveOf(alone)), ['gpt']);
+  // dev inherits a parent's openai again: Alice's edit is the override, in its place.
+  const edited = { ...NO_DRAFTS, edits: { 'own:openai': route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com') }, origins: { 'own:openai': origin } };
+  const over = rowsOf([inherited], edited, editor);
+  assert.deepEqual(over.map((row) => [row.id, row.state]), [['own:openai', 'changed']]);
+  assert.deepEqual(Object.keys(saveOf(over)), ['openai']);
+  // A deletion of what is gone already is nothing to save.
+  assert.deepEqual(rowsOf([inherited], { ...NO_DRAFTS, edits: { 'own:openai': null }, origins: { 'own:openai': origin } }, editor).map((row) => [row.id, row.state]), [['from:openai', 'same']]);
+});
+
+test("the review shows what a change removes: a last rule, a last allow entry", () => {
+  const before: ProxyRoute = { ...route('openai', ['OPENAI_API_KEY', 'ORG_ID']), allow: [{ methods: ['GET'], path: '/models' }, { methods: ['POST'], path: '/chat' }] };
+  const after: ProxyRoute = { ...route('openai'), allow: [{ methods: ['GET'], path: '/models' }] };
+  assert.deepEqual(diffOf(before, after), [
+    { label: 'Sends 2', before: 'Header x-key-1: {ORG_ID}', after: '–' },
+    { label: 'Allows 2', before: 'POST /chat', after: '–' },
+  ]);
+});
+
+test('an inherited item whose save no longer clears is saved again here, as the fork\'s own', () => {
+  const parent = page([route('gemini')]);
+  const fork = { project: 'market', environment: 'dev-eu' };
+  const resaved = pageState({ page: page([]), place: fork, parents: [{ path: 'market/dev', page: parent }], keys: KEYS, drafts: { ...NO_DRAFTS, resaved: ['from:gemini'] }, tried: true });
+  const row = resaved.rows.find((one) => one.id === 'from:gemini')!;
+  assert.equal(row.state, 'resaved');
+  assert.deepEqual(Object.keys(saveOf(resaved.rows)), ['gemini']);
+});
+
+test("as code, a UI item serves where it serves now", () => {
+  assert.match(codeOf(route('openai'), ['market/dev']), /environments: \['market\/dev'\],/);
+  assert.match(codeOf({ kind: 'tunnel', name: 'db', key: 'DATABASE_URL', hosts: ['db.internal'], network: null }, ['market/dev']), /postgres\('DATABASE_URL', \{ hosts: \['db.internal'\], environments: \['market\/dev'\] \}\)/);
+  assert.match(codeOf({ kind: 'signer', name: 'sign', signer: { kind: 'private-key', key: 'K' }, limit: NONE }, ['market/dev']), /privateKey\('K', \{ environments: \['market\/dev'\] \}\)/);
+  assert.doesNotMatch(codeOf(route('openai')), /environments/);
 });

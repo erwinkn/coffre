@@ -503,6 +503,13 @@ export type ProxyView = {
   items: ProxyItemView[];
   reserved: string[];
   reservedState: 'ok' | 'tampered' | 'stale';
+  /**
+   * A fork's items it inherits from its parents and would not route here
+   * now, by name (decision 5): decided where this environment's use resolves
+   * their keys, its own values over a parent's, so a parent's page's mark
+   * does not say. Only the tab's read (`proxy`) says it.
+   */
+  inheritedNotCleared?: Record<string, { key: string; reason: string }>;
 };
 
 export type SaveProxyInput = Correlation & Through & ProxyInput & {

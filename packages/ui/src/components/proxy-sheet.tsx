@@ -7,6 +7,7 @@ import type { SecretKey } from '@coffre/client';
 
 import {
   blankInject,
+  blockedInWords,
   codeOf,
   ENCODINGS,
   INJECT_KINDS,
@@ -114,6 +115,8 @@ function Panel({ row, edits, keys }: PanelProps) {
   const definition = row.definition;
   const routed = definition.kind === 'route' || definition.kind === 'tunnel';
   const parent = item?.from?.split('/')[1] ?? null;
+  // Moved into code, it serves where it serves now; code's own is in code already.
+  const asCode = item?.source === 'code' ? null : codeOf(definition, [`${edits.place.project}/${edits.place.environment}`]);
   return (
     <section className={`card proxy-sheet${row.state === 'deleted' ? ' is-leaving' : ''}`} aria-label={definition.name || 'New item'}>
       <header className="proxy-sheet-head">
@@ -149,7 +152,7 @@ function Panel({ row, edits, keys }: PanelProps) {
       {item?.notCleared != null && row.state !== 'resaved' && row.state !== 'deleted' && (
         <div className="proxy-uncleared">
           <Note tone="warn">{notClearedInWords(item, edits.place)}</Note>
-          {row.editable && row.keys.blocked.length === 0 && item.source === 'own' && row.state === 'same' && (
+          {row.editable && row.keys.blocked.length === 0 && item.source !== 'code' && row.state === 'same' && (
             <button className="btn btn-sm" type="button" onClick={() => edits.resave(row)}>
               Save again as you
             </button>
@@ -168,15 +171,18 @@ function Panel({ row, edits, keys }: PanelProps) {
         )}
       </fieldset>
       {definition.kind === 'route' && <Preview route={definition} keys={keys} useUrl={edits.page.useUrl} />}
-      <details className="proxy-as-code">
-        <summary>As code</summary>
-        <div className="proxy-code">
-          <pre className="mono">{codeOf(definition)}</pre>
-          <span className="proxy-code-copy">
-            <CopyButton value={codeOf(definition)} label="Copy as code" />
-          </span>
-        </div>
-      </details>
+      {/* Code's own item is in code already, some of it (a binding, a limit per service) beyond what the page can write out. */}
+      {asCode !== null && (
+        <details className="proxy-as-code">
+          <summary>As code</summary>
+          <div className="proxy-code">
+            <pre className="mono">{asCode}</pre>
+            <span className="proxy-code-copy">
+              <CopyButton value={asCode} label="Copy as code" />
+            </span>
+          </div>
+        </details>
+      )}
     </section>
   );
 }
@@ -185,6 +191,7 @@ function Panel({ row, edits, keys }: PanelProps) {
 function Provenance({ row, edits }: { row: Row; edits: Edits }) {
   const item = row.item;
   if (item === null) return row.copiedFrom === null ? null : <p className="proxy-provenance">Copied from {row.copiedFrom}, not saved yet.</p>;
+  if (row.gone) return <p className="proxy-provenance">Removed by another save since you began editing it: saving makes it again, as you edited it.</p>;
   // Code's item shows locked with code's values, its lock saying where it serves (R66); only one that serves elsewhere says so here.
   if (item.source === 'code') {
     return item.serves ? null : <p className="proxy-provenance">{scopeInWords(item)}: {edits.place.project}/{edits.place.environment} has no {item.definition.name}, and none of its own takes the name.</p>;
@@ -240,11 +247,10 @@ function KeyNotes({ row, edits }: { row: Row; edits: Edits }) {
       {problemOf(edits, row, 'keys')}
       {editing && !row.editable && row.state !== 'deleted' && row.keys.blocked.length > 0 && edits.problems(row).keys === undefined && (
         <Note tone="warn">
-          You can&apos;t read {row.keys.blocked.join(', ')}, so you can&apos;t change where {row.keys.blocked.length === 1 ? 'it goes' : 'they go'}
-          {row.removable ? ', only delete it' : ''}.
+          {blockedInWords(row.keys.blocked, edits.place, edits.editor.keys)} Its fields stay as they are{row.removable ? '; you may delete it' : ''}.
         </Note>
       )}
-      {editing && row.state !== 'same' && row.state !== 'deleted' && row.keys.routed.length > 0 && <Note tone="warn">{routedInWords(row.keys.routed)}</Note>}
+      {editing && row.state !== 'same' && row.state !== 'deleted' && row.keys.routed.length > 0 && <Note tone="warn">{routedInWords(row.keys.routed, edits.place, edits.editor.keys)}</Note>}
       {editing && row.state !== 'deleted' && row.keys.missing.length > 0 && <Note tone="warn">{missingInWords(row.keys.missing, edits.place)}</Note>}
     </>
   );
@@ -404,14 +410,22 @@ function InjectRule({ rule, keys, disabled, invalid, onChange }: { rule: ProxyIn
         onChange={(key) => onChange({ ...rule, [field]: key === '' ? (field === 'sessionToken' ? null : '') : `{${key}}` })}
       />
     );
+    // Two lines: what it signs for, then the keys it signs with, a session token's optional.
     return (
-      <Fold invalid={invalid}>
-        {kind}
-        {pick('accessKeyId', 'Access key ID')}
-        {pick('secretAccessKey', 'Secret access key')}
-        <input className="fold-input fold-short mono" aria-label="Region" value={rule.region} disabled={disabled} placeholder="eu-west-3" onChange={(event) => onChange({ ...rule, region: event.target.value.trim() })} />
-        <input className="fold-input fold-short mono" aria-label="Service" value={rule.service} disabled={disabled} placeholder="s3" onChange={(event) => onChange({ ...rule, service: event.target.value.trim() })} />
-      </Fold>
+      <div className="proxy-fold-stack">
+        <Fold invalid={invalid}>
+          {kind}
+          <span className="fold-text">region</span>
+          <input className="fold-input fold-short mono" aria-label="Region" value={rule.region} disabled={disabled} placeholder="eu-west-3" onChange={(event) => onChange({ ...rule, region: event.target.value.trim() })} />
+          <span className="fold-text">service</span>
+          <input className="fold-input fold-short mono" aria-label="Service" value={rule.service} disabled={disabled} placeholder="s3" onChange={(event) => onChange({ ...rule, service: event.target.value.trim() })} />
+        </Fold>
+        <Fold invalid={invalid}>
+          {pick('accessKeyId', 'Access key ID')}
+          {pick('secretAccessKey', 'Secret access key')}
+          {pick('sessionToken', 'Session token')}
+        </Fold>
+      </div>
     );
   }
   if (rule.kind === 'basic') {

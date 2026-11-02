@@ -192,6 +192,19 @@ test("the tab marks an item that would not route now, until someone who reads it
   assert.equal(mark?.key, 'OPENAI_API_KEY');
 });
 
+test("a fork's inherited item is marked where the fork resolves its keys: its own value over its parent's", ON_015, async () => {
+  await root.access.set(LIN, { 'market/dev': 'router', 'market/dev-eu': null });
+  await lin.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } });
+  const inherited = async () => (await vic.proxy.get('market/dev-eu')).inheritedNotCleared;
+  // dev-eu inherits dev's OPENAI_API_KEY, which Lin reads: cleared in both.
+  assert.deepEqual(await inherited(), {});
+  // dev-eu sets its own, which Lin does not read: dev's item, inherited, would not route there, though it does in dev.
+  await root.secrets.set('market/dev-eu', { OPENAI_API_KEY: 'sk-eu' });
+  assert.equal((await vic.proxy.get('market/dev')).items[0]!.notCleared, null);
+  assert.equal((await inherited())?.openai?.key, 'OPENAI_API_KEY');
+  assert.match((await inherited())!.openai!.reason, /its editor does not read it in dev-eu/);
+});
+
 test("a reference is decided where it lives, its source's sensitive value only by an Owner of the source's project", ON_015, async () => {
   await root.access.set(LIN, { 'market/dev': 'router' });
   // BILLING_REF reads billing/prod's secret: her read of market/dev covers it (R20).
@@ -200,6 +213,9 @@ test("a reference is decided where it lives, its source's sensitive value only b
   assert.equal((await refusal(pat.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } }))).reason, 'route_not_cleared');
   const instance = await root.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } });
   assert.deepEqual(instance.items.map((item) => item.definition.name), ['billing', 'leak']);
+  // What the tab checks first: the Secrets list says, of each reference, whether you own its source's project.
+  const ownsSource = async (client: CoffreClient) => (await client.secrets.list('market/dev')).keys.find((one) => one.key === 'SENSITIVE_REF')!.reference!.ownsSource;
+  assert.deepEqual([await ownsSource(pat), await ownsSource(root)], [false, true]);
 });
 
 test('who may save at all: the tab writes only where the deployment says, a person on a session of theirs, never a name code defines', ON_015, async () => {

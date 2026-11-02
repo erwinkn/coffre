@@ -64,7 +64,9 @@
   each copied item's keys and destination and the minute the old upstream
   may still be sent values. An item whose editor no longer reads its keys
   is marked until someone who does saves it again, and a member's page
-  lists the items they saved, which removing them stops. The audit page
+  lists the items they saved, which removing them stops. A reference in
+  the Secrets list says whether you own its source's project
+  (`ownsSource`), whose Owners alone route a sensitive one. The audit page
   says `proxy.save`, `proxy.code` and `proxy.release` in words. `coffre
   init` writes `credentialProxy({ credentials: {}, editable: true })` and
   the `/use` route; `coffre update` adds the tab's route file and `/use`'s,
