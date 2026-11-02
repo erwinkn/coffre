@@ -387,9 +387,17 @@ around every call:
   - Workers: `VaultEntrypoint.call` is the Worker's only public method.
     Its per-method members become private (`#use`, `#useNamed`,
     `#unwrap`, and the rest), so the hot path's `#behind` and
-    `#prepared` sit behind the check like `#call`.
+    `#prepared` sit behind the check like `#call`. `call` compares the
+    release, then dispatches to the private member with its body intact:
+    each keeps its own pool and start (`use`, `useNamed` and `useMany` the
+    hot login's pool under `#behind`, closed by the deadline in their first
+    argument; the rest `#call` under `#ready`; `sealing` no database and
+    no start, so `/readyz` stays bounded), and `about` still adds `uses`
+    and `batchUses`.
   - In process: `openLocalVault` returns a `VaultEntry` whose `call`
     gates, then dispatches into its `METHODS`, JSON round trip included.
+    `LocalVault` becomes `VaultEntry & { close() }`, so `serveVault` still
+    stops it.
     The two sides are one bundle and cannot differ, but answers go
     through the same envelope so its tests hold it.
   - Node: `serveVault` holds that same entry (`localVault` →
@@ -400,17 +408,23 @@ around every call:
     (`POST /<method>`) go.
 
   The Workers binding is typed `VaultEntry`, not `Vault`, in the
-  examples, `coffre init`'s templates and `createCoffre`'s config.
+  examples, `coffre init`'s templates, `dev/deployment` and
+  `createCoffre`'s config.
 - **The app: one wrapper, `versioned(entry, release)`**, which gives the
   app back a `Vault`: each method becomes `entry.call(<release>, name,
   args)`. An answer on another release, or with none, throws
   `ApiError('deploying', …)` with `retryAfter: '1'` (`deploying: 503` in
   `ERROR_STATUS`, and `errorResponse` adds the header for `deploying` as
-  it does for `unavailable`). No handler sees a mismatch. The wrapper
+  it does for `unavailable`). No handler sees a mismatch. Sign-in checks
+  ask the vault before any handler runs, and their catch-alls in
+  `auth.ts` answer `unavailable`; each rethrows an `ApiError` whose code
+  is `deploying` instead, so a signed-in route answers `deploying` too. The wrapper
   replaces `createRuntime`'s `vault` parameter on its first line, before
   `SigninService`, `WorkloadService` and `McpService` are built from it,
   so no service holds the raw transport. It is kept in a `WeakMap` keyed
-  by the entry it wraps: on Workers `createRuntime` runs per request, and
+  by the entry it wraps, as `{ release, vault }`, and rebuilt when a call
+  names another release (a bundle constant in production; tests build
+  both over one fake entry): on Workers `createRuntime` runs per request, and
   a new wrapper each time would miss `about015`'s cache (keyed by the
   vault object) and add an `about()` call to every use.
 
@@ -1448,7 +1462,11 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   members made private, the hot path's included) and at
   `openLocalVault`'s entry, which `serveVault` serves as `POST /call`;
   `connectVault`'s `call`; the binding typed `VaultEntry` in the
-  examples and `init`'s templates; `versioned` replacing `createRuntime`'s
+  examples, `init`'s templates and `dev/deployment`; `LocalVault` keeping
+  `close`; the test fixtures that speak `Vault` to a local vault (the
+  vault suite's `speaking`, the server suite's `TestVault`) going through
+  `versioned`, and the socket tests posting to `/call`; `auth.ts`'s
+  catch-alls rethrowing `deploying`; `versioned` replacing `createRuntime`'s
   `vault` parameter, kept per entry; `deploying: 503` with
   `Retry-After: 1` in `ERROR_STATUS` and `errorResponse`. Tests, on
   Workers, through the real `serveVault`/`connectVault` pair, and in
@@ -1456,7 +1474,8 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   no entry (counted as `request-cost.test.ts` counts), for a `useNamed`,
   a no-argument method (`about()`) and a string-argument one (`access`);
   an answer on another release, or with none, answered 503 `deploying`
-  with the header, asserted at the API; two runtimes over one Workers
+  with the header, asserted at the API on a signed-in route and a
+  workload route; two runtimes over one Workers
   binding asking `about()` once.
 - PR A and PR C ship in one release, 0.16: code's names must be reserved
   (PR C's gate) from the first UI save (PR A), or a code name served
