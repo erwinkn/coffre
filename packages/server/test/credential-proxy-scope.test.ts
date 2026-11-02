@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
-import { credentialProxy, form, header, sigv4, type Credential } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, header, hmac, postgres, privateKey, sigv4, type Credential } from '../src/plugins/credential-proxy.ts';
 
 const PUBLIC = 'https://coffre.example';
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;
@@ -96,6 +96,46 @@ test('a segment of ; parameters alone is refused where an entry names a path; a 
   const methods = proxy({ methods: ['GET'] });
   for (const path of ['/bucket//key', '/bucket/;/key']) assert.equal((await methods.ask(`/market/dev/api${path}`)).status, 200, path);
   assert.equal((await methods.ask('/market/dev/api/bucket//key', { method: 'PUT' })).status, 405);
+  // Beside an entry that names a path, an entry of methods alone still takes them: it counts no segment, whatever the others name.
+  const mixed = proxy({ allow: [{ methods: ['GET'] }, { methods: ['POST'], path: '/x' }] });
+  for (const path of ['/bucket//key', '/bucket/%20/key', '/bucket/;x/key']) assert.equal((await mixed.ask(`/market/dev/api${path}`)).status, 200, path);
+  assert.equal((await mixed.ask('/market/dev/api/bucket//key', { method: 'POST' })).status, 400, 'POST is the path entry\'s, which counts segments');
+  assert.equal((await mixed.ask('/market/dev/api/x', { method: 'POST' })).status, 200);
+  assert.equal(mixed.reached.length, 4);
+});
+
+test('an allow entry of any method on any path is refused at startup, however it says so: {} and { methods: [] } alike', () => {
+  for (const entry of [{}, { methods: [] }]) {
+    assert.throws(() => proxy({ allow: [{ path: '/a' }, entry] }), /allow entry .* takes every request: give it methods or a path, or leave allow out/, JSON.stringify(entry));
+  }
+  // With a path, `methods: []` is any method on it, and starts.
+  const { ask } = proxy({ allow: [{ methods: [], path: '/health' }] });
+  return Promise.all([ask('/market/dev/api/health', { method: 'DELETE' }), ask('/market/dev/api/other')]).then(([health, other]) => {
+    assert.equal(health.status, 200);
+    assert.equal(other.status, 403);
+  });
+});
+
+test('environments on a signer, a verifier and a tunnel: each is refused, 404, in an environment it does not serve, before anything opens', async () => {
+  const opened: string[] = [];
+  const coffre = { ...fake(), use: async (_handle: unknown, asked: UseAsked) => { opened.push(...(asked.keys as readonly string[])); return { values: {}, plain: [], keys: asked.keys, environment: { path: 'market/dev', personal: false }, expiresAt: LATER }; } } as unknown as PluginContext;
+  const plugin = credentialProxy({
+    credentials: {},
+    signers: { 'ed-key': privateKey('ED_KEY', { environments: ['market/prod'] }) },
+    verifiers: { hook: hmac('HOOK_SECRET', { encoding: 'hex', environments: ['market/prod'] }) },
+    tunnels: { db: postgres('DATABASE_URL', { environments: ['market/prod'] }) },
+  });
+  const post = (body: unknown) => plugin.routes!.fetch(new Request(`${PUBLIC}/use/market/dev`, { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }), coffre);
+  for (const [what, body] of [['sign', { sign: { credential: 'ed-key', message: 'aGk' } }], ['verify', { verify: { credential: 'hook', message: 'aGk', signature: '00' } }]] as const) {
+    const answer = await post(body);
+    assert.equal(answer.status, 404, what);
+    assert.match(await answer.text(), /does not serve market\/dev/, what);
+  }
+  const tunnel = await plugin.routes!.socket!(new Request(`${PUBLIC}/use/market/dev/db`, { headers: { authorization: `Bearer ${HANDLE}`, upgrade: 'websocket' } }), coffre);
+  assert.ok(tunnel instanceof Response);
+  assert.equal(tunnel.status, 404);
+  assert.match(await tunnel.text(), /db does not serve market\/dev/);
+  assert.deepEqual(opened, []);
 });
 
 test('an empty allow list, or paths: [], takes nothing, and says so; methods: [] takes no method, and says so', async () => {

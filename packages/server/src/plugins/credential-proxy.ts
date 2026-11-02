@@ -1168,8 +1168,8 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   }
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
-  // And again on the path as the URL made it, which is the one signed: no dot segment, no slash or backslash in a segment.
-  if (target.pathname.split('/').some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment))) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  // And again on the path as the URL made it, which is the one signed: the same rule, `climbs`, on what URL parsing left.
+  if (target.pathname.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   // Its allow list, as for a request through it: the URL is one.
   const refused = allowed(credential, method, relative);
@@ -1239,13 +1239,16 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
  * (proxy-match.ts). An empty segment but a trailing one, `//`, or one of
- * `;` parameters, spaces or dots alone, is refused where an entry names a path: a glob
- * counts segments, and a server may read either as none. A list of methods
- * alone, or none, sends it on, as S3's keys may hold `//`.
+ * `;` parameters, spaces or dots alone, is refused unless an entry of
+ * methods alone takes the request: a glob counts segments, and a server may
+ * read either as none. Such an entry, or no list, sends it on, as S3's keys
+ * may hold `//`.
  */
 function allowed(credential: Resolved, method: string, relative: string): Response | null {
   if (credential.allowed === null) return null;
   if (credential.allowed.length === 0) return failure(403, `${credential.name}'s allow list is empty: it takes no request`);
+  // An entry of methods alone that takes this one takes any path, counting no segment: the request goes, whatever the others name.
+  if (credential.allowed.some((entry) => entry.path === null && entry.methods !== null && entry.methods.has(method))) return null;
   const segments = credential.allowed.some((entry) => entry.path !== null) ? requestSegments(relative) : [];
   if (segments === null) return failure(400, 'the path has an empty segment, //, or one a server may read as none: ; parameters, spaces or dots alone');
   const verdict = allows(credential.allowed, method, segments);
@@ -2345,9 +2348,11 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
     if (!Array.isArray(credential.allow)) throw new Error(`credentialProxy: ${name}'s allow is a list of { methods, path }`);
     return credential.allow.map((entry) => {
       if (typeof entry !== 'object' || entry === null || Object.keys(entry).some((option) => option !== 'methods' && option !== 'path')) throw new Error(`credentialProxy: ${name}'s allow entries are { methods, path }`);
-      // An entry of neither would take every request, whatever the others say: say so with no allow at all.
-      if (entry.methods === undefined && entry.path === undefined) throw new Error(`credentialProxy: ${name}'s allow entry {} takes every request: give it methods or a path, or leave allow out`);
-      return { methods: methods(entry.methods, false), path: entry.path === undefined ? null : path(entry.path) };
+      const read = { methods: methods(entry.methods, false), path: entry.path === undefined ? null : path(entry.path) };
+      // An entry of any method on any path, `{}` or `{ methods: [] }`, would take every request, whatever the others say: say so
+      // with no allow at all. Checked as read, not as spelled: legacy `methods: []` took none, and carried into an entry it would take all.
+      if (read.methods === null && read.path === null) throw new Error(`credentialProxy: ${name}'s allow entry ${JSON.stringify(entry)} takes every request: give it methods or a path, or leave allow out`);
+      return read;
     });
   }
   if (credential.methods === undefined && credential.paths === undefined) return null;

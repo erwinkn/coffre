@@ -460,22 +460,23 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
 - **`allow`.** A request any entry takes goes: its method among the
   entry's `methods` (any, when none or empty, unlike the legacy
   `methods: []`), and its path matching the entry's `path` (any, when
-  none). An entry of neither, `{}`, is refused at startup: it would take
-  every request. The path is matched segment by segment, each
+  none). An entry of any method on any path, `{}` or `{ methods: [] }`,
+  is refused at startup: it would take every request. The path is matched segment by segment, each
   percent-decoded once, to bytes: `docu%6Dents` is `documents`, and
   `a%2520b` is `a%20b`, never `a b`. A plain path is a prefix by segments
   (`/companies` takes `/companies/42`, never `/companiesX`); `*` is one
   non-empty segment, matched exactly (`/companies/*/documents`); `**`,
   last, is the rest, none included (`/models/**` takes `/models`). No
   regexes, no partial-segment globs (`doc*`). A pattern is decoded once,
-  as it is read. Where an entry names a path, an empty segment but a
-  trailing one (`//`) is refused, and so is one of `;` parameters alone
+  as it is read. Unless an entry of methods alone takes the request, an
+  empty segment but a trailing one (`//`) is refused, and so is one of `;` parameters alone
   (`;x`, `%3Bx`), or of spaces and dots alone (`%20`, `...`), which a
   server that drops them, as Tomcat and Spring do the parameters and
   Windows the trailing spaces and dots, reads as empty: `*` would count
   it, and the server not. A pattern with such a segment matches nothing,
-  with a warning at startup. A list of
-  methods alone counts no segment, and takes `//` as S3's keys hold it. A
+  with a warning at startup. An entry of
+  methods alone counts no segment, and takes `//` as S3's keys hold it,
+  whatever the other entries name. A
   request no entry takes is a 405 when no entry takes its method, on its
   path or any, and a 403 otherwise; an empty list takes nothing, a 403.
   `methods` and `paths`, as before, are one entry per path, and keep what
