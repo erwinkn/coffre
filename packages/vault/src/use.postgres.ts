@@ -148,7 +148,7 @@ function rowFrom(row: Record<string, unknown>): UseRow {
 }
 
 /**
- * A route use on Postgres (T186 PR C): one call of `use_route` (0057), one statement and one round trip, its own
+ * A route use on Postgres (T186 PR C): one call of `use_route` (0058), one statement and one round trip, its own
  * transaction: the gate, the route's levels, its editor and its keys, read; each key's use by ids when the call has
  * them and they are the names' now. It answers one JSON object (`RouteRows`).
  */

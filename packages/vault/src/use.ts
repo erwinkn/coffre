@@ -241,12 +241,12 @@ export type UseCall = {
   names?: Names;
   /** The call a named use makes once the vault has decided the use on the rows of one that answered `decide` or `moved`. */
   decided?: true;
-  /** A route use's (T186, 0057): the UI route its entry names, which its cover must name too. */
+  /** A route use's (T186, 0058): the UI route its entry names, which its cover must name too. */
   route?: string | null;
 };
 
 /**
- * A route use's statement as the vault makes it (0057's `use_route`; `proxyItem`'s, with `use` false): its caller, a
+ * A route use's statement as the vault makes it (0058's `use_route`; `proxyItem`'s, with `use` false): its caller, a
  * handle's names and its URL's readings, or a workload's way in at its place, by id; the reading and credential the
  * isolate's map picked; each key's call by the ids the map holds, in the order the item names them, from `offset` (none:
  * a miss, which reads only), a call with no request id only checked, not made (a second round's keys taken in the first).
@@ -1478,7 +1478,7 @@ async function open(path: UsePath, view: UseView, row: UseRow, deadline: number)
 // --- route uses (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3, 4 and 6; formal/Routing.tla) ---------------
 
 /**
- * A route use, or `proxyItem`'s read, as the vault asks its statement (`use_route`, 0057): a handle by its token, with
+ * A route use, or `proxyItem`'s read, as the vault asks its statement (`use_route`, 0058): a handle by its token, with
  * what the app's config accepts, and its URL's readings; or a workload by its way in at its place, by id.
  */
 type RouteAsk = {

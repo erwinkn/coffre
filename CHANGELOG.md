@@ -15,8 +15,8 @@
   cover rides only an entry of the same route made after the route's and
   its editor's last change. `Vault.proxyItem` reads a place's items as a
   use would, using nothing. Nothing in the app calls either yet (PR C2).
-  Migration 0057 adds `log_uses.route`, `use_credential`'s `p_route` and
-  `use_route`; the previous release runs on it.
+  Migration 0058 adds `log_uses.route`, a route argument to `use_covered`
+  and `use_credential`, and `use_route`; the previous release runs on it.
 
 - **The app and the vault run one release at a time.** Every call between
   them goes through one envelope, `call(release, method, args)`, the

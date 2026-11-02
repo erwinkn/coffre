@@ -98,7 +98,7 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
 }
 
 /**
- * `use_route` (0057) on SQLite: in one transaction, as Postgres's makes it: the reading, the gate (a handle's named call
+ * `use_route` (0058) on SQLite: in one transaction, as Postgres's makes it: the reading, the gate (a handle's named call
  * with no key, or a workload's quiet use of no key at its place), the place's chain, each level's proxy row through the
  * first that holds the route's item, the item's editor's principal, the item's keys resolved by name, and, when the
  * call's ids are the names' now at its reading, each key's use by them (a call with no request id only checked).
@@ -691,7 +691,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
       : resolved.cut || e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived))) ? 'archived' : null);
     if (namedState !== null) cached = false;
   }
-  // Named, a route use's (T186, 0057's `v_quiet`) or one of no key: a key the place does not hold, and a plain value,
+  // Named, a route use's (T186, 0058's `v_quiet`) or one of no key: a key the place does not hold, and a plain value,
   // decided, never used, so neither an entry nor a cap's row (0044). A use by ids logs its request whatever it finds.
   const quiet = names !== undefined || call.route != null || call.secretId === null;
   const uses = namedState === null && (!quiet || (s !== undefined && (v === undefined || v.plaintext === null)));

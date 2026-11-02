@@ -25,7 +25,7 @@ export type ChangeRow = {
 };
 
 /**
- * A use as `log_uses` holds it (the slim row, R53), uuids in lower case. `route`, a route use's (T186, 0057): its
+ * A use as `log_uses` holds it (the slim row, R53), uuids in lower case. `route`, a route use's (T186, 0058): its
  * column comes after `place`, and joins the leaf's columns only when set, so that every entry before keeps its leaf
  * (the column count is in the MAC's data: an entry's route can be neither added nor dropped under its MAC).
  */

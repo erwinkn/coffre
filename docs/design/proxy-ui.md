@@ -1612,7 +1612,7 @@ Where C1 settles what this section left open, or reads it otherwise:
   `ClearanceAtUse` (now found only with a promotion: Lin saved as a
   Developer, made an Owner, the key marked sensitive), and without
   `FencedRead` (the editor's principal read before the fence).
-- **One statement, `use_route` (0057),** in the shape of `use_named_batch`:
+- **One statement, `use_route` (0058),** in the shape of `use_named_batch`:
   the gate first (a handle's named call with no key; a workload's use of no
   key at its place, by ids, which writes nothing), then, for one who
   stands, the chain, each level's row through the first whose `items`

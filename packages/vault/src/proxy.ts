@@ -151,7 +151,7 @@ export function proxyLookup(keys: SealKeys, levels: readonly ProxyLevel[], name:
 }
 
 /**
- * One level of a fork chain as a route use's statement reads it (0057's `use_route`; docs/design/proxy-ui.md, section
+ * One level of a fork chain as a route use's statement reads it (0058's `use_route`; docs/design/proxy-ui.md, section
  * 2): whether its environment has a proxy row, the route's item in it (or, for every item, the row's items whole), the
  * row's index (`digests`) and seal, and the seal of the object's newest change (`undefined`: none ever).
  */
