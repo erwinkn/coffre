@@ -2130,12 +2130,16 @@ seal does not cover the hash, so it is a name, which only the app's
 `auth_mac` binds to its credential. Before anything commits, the app checks
 that MAC on the rows as read (AuthChecked): a key write's app step, and
 for an add a call back to the app between the vault's read and its write,
-no round trip.
+no round trip. The change then names the caller the check vouched for, by
+id under the vault's MAC; nothing after the check resolves the token again
+(ActorFromRead).
 
 **The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
 session; the vault's statement reads and numbers the request; the Worker
 decides on the read; the app's statement takes 0.14's head and the fence,
-holds the read and commits. Beside her: her grant taken away and her
+holds the read and commits. The hold and the commit are two steps: nothing
+that takes the head or the fence comes between them (`held`), but a
+database writer, who takes neither, may (round 7). Beside her: her grant taken away and her
 session revoked (`WritingRevoke`), her grant taken away and given back
 (`WritingABA`), her role redefined, the policy changed and the environment
 archived (`WritingPlace`), the fork's parent archived, the key she replaces
@@ -2152,7 +2156,7 @@ environments is protected, a protected fork is made in it, the project is
 renamed and another made under its slug, and the scope's project likewise
 (`WritingProtect`). Each review round's P1 is one of these adversaries:
 rounds 1 and 2 in Revoke, Place and Fork, round 3 in Names, round 5 in
-Protect, round 6 in Tamper and Add. Every other change is one atomic step; the checkpointer seals
+Protect, rounds 6 and 7 in Tamper and Add. Every other change is one atomic step; the checkpointer seals
 whatever has committed at each tick. A hold that fails asks again, three
 tries in all, then gives up (409).
 
@@ -2160,12 +2164,13 @@ tries in all, then gives up (409).
 |---|---|
 | the vault's statement reads and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
 | the commit holds the read (ReadHeld) | `WritesStandAtCommit` (Revoke, Names), `AddsStandAtCommit` (Protect) |
-| ... every part of it (`Unheld={...}`, each of 23 parts left out in turn: a read function that missed it) | the adversary that moves it: `WritesStandAtCommit` after a revoke, an end, a role redefined, a policy change, an archive of the environment or its parent, a write of the replaced key or a new level on the inherited one, a rename, the parent gaining the key, the personal config deleted; `KeyChangesFlip` without the key; `AddsStandAtCommit` after a demotion, a policy change, a role redefined, the setting closed, the place archived, an environment protected, a protected fork made, the grant's or the scope's slug moved; `AddsFlip` without svc's row; `CommitsAuthentic` without the token's resolution, for a write and an add: the hash copied after the app's check |
+| ... every part of it (`Unheld={...}`, each of 21 parts left out in turn: a read function that missed it) | the adversary that moves it: `WritesStandAtCommit` after a revoke, an end, a role redefined, a policy change, an archive of the environment or its parent, a write of the replaced key or a new level on the inherited one, a rename, the parent gaining the key, the personal config deleted; `KeyChangesFlip` without the key; `AddsStandAtCommit` after a demotion, a policy change, a role redefined, the setting closed, the place archived, an environment protected, a protected fork made, the grant's or the scope's slug moved; `AddsFlip` without svc's row |
 | the decision weighs the read and nothing else (DecideOnRead) | `WritesStandAtCommit`: the roles taken from the isolate's cache; the read and its hold agree, and the role redefined before both is missed |
 | the write's hold runs once its statement holds the fence (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the hold and the write |
 | the read's numbers from the log's newest change, not the row's seal column (ReadOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the hold passes |
 | the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
 | the app checks the caller's `auth_mac` on the rows as read (AuthChecked) | `CommitsAuthentic` (Tamper, Add): a token hash copied onto an Owner's credential; the vault resolves the token to the Owner, read and hold agree, and the write or the add commits as the Owner (round 6) |
+| the change's actor is the checked read's, bound by id; nothing after the check resolves the token again (ActorFromRead) | `CommitsAuthentic` (Tamper, Add): the hash copied onto the Owner's row after the hold and before the COMMIT, which the hold, already passed, cannot see (round 7) |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its

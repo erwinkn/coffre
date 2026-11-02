@@ -440,9 +440,10 @@ REMOVALS=(
   # the vault resolves the token to the Owner, its read and its hold agree, and the write or the add commits as them.
   "WritingTamper AuthChecked CommitsAuthentic"
   "WritingAdd AuthChecked CommitsAuthentic"
-  # The token's resolution left out of the hold: the hash copied after the app's check, before the commit.
-  'WritingTamper Unheld={"tok"} CommitsAuthentic'
-  'WritingAdd Unheld={"tok"} CommitsAuthentic'
+  # The actor taken from what the token resolves to at the commit, not from the checked read (round 7): a database
+  # writer takes no lock, and copies the hash after the hold, before the COMMIT.
+  "WritingTamper ActorFromRead CommitsAuthentic"
+  "WritingAdd ActorFromRead CommitsAuthentic"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"

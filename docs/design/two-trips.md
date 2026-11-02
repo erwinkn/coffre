@@ -133,12 +133,16 @@ takes today's.
    owner and decided sensitivity; and prepares each key's change from its
    object as read (`prepareChanges`, in memory, with keys only the vault
    holds), the request and the digest in its MAC'd payload. It answers the
-   app: the caller (credential and identity rows, with their `auth_mac`),
+   app: the caller (credential and identity rows, with their `auth_mac`,
+   and for an exchanged token its issuing binding's row, with its own),
    each key's id and sensitivity, the envelopes, the prepared changes, and
    the arguments `write_inputs` was called with. Not the read: the app
    never sees the vault's rows.
 4. **The app** checks the rows' `auth_mac` in memory (as `named-use.ts`
-   does) and only then encrypts: the AAD binds `project|environment|key` by
+   does), and for a credential a binding issued (`created_by`
+   `binding:<id>`), that binding as `findCredential` does today
+   (`standingBinding`: its `auth_mac`, its principal and generation, no
+   revocation, no tombstone). Only then it encrypts: the AAD binds `project|environment|key` by
    id (`envelope.ts`), which it learns from the answer. No round trip. Then
    it sends **one Sync**: BEGIN, 0.14's head `FOR UPDATE` (its first
    statement, and kept after PR 6 as a lock alone: see "Locks"), **the
@@ -170,7 +174,9 @@ that same read.**
   newest change in `log_changes` (number, seal, MAC): the credential by
   its token's hash and its identity, each with every column its app
   `auth_mac` covers (`auth-rows.ts`: the token's hash among them) and the
-  `auth_mac` itself, the member row and grants, the roles
+  `auth_mac` itself, and for an exchanged token the binding that issued
+  it, with its tombstone and the columns and MAC `standingBinding` checks
+  (its scope is the credential's), the member row and grants, the roles
   and the policy (two objects: a role's definition is `roles`, the
   instance's policy `policy`), the project, the environment and each one
   of its fork chain (an environment's protection is its own object's
@@ -421,12 +427,13 @@ the app authenticates that resolution (step 3) before anything is written.
    `#setsUp`, `givesService`), and builds svc's new row and its grants,
    their MACs and seals, and their changes from the rows as read (none),
    the digest in each change's payload. It answers the app the caller's
-   credential and identity rows as read, with their `auth_mac`, and the
+   credential and identity rows as read, with their `auth_mac` (and an
+   exchanged token's binding, as a key write's step 3), and the
    prepared add under one MAC of the vault's own, which the vault checks
    when the add comes back: the app carries it, and can neither change it
    nor make one.
-3. **The app** checks the rows' `auth_mac` in memory, as a key write's
-   step 4 does, and only then hands the prepared add back. A row that
+3. **The app** checks the rows' `auth_mac` in memory, and an exchanged
+   token's binding, as a key write's step 4 does, and only then hands the prepared add back. A row that
    fails is refused as `authenticate` refuses it today, and nothing is
    written. This is a second call of the vault's Worker (a service
    binding), not of the database: no round trip.
@@ -450,11 +457,21 @@ credential row, then asks to add their own account as Owner. The vault
 resolves the token to the Owner; its read and its hold agree on the
 substituted row, so the hold passes, and the vault writes a new Owner,
 sealed and MAC'd by its own keys: a forged admin the log vouches for. With
-it, the app finds the row's `auth_mac` wrong and nothing is written. The
-check and the hold meet: the columns the app checked are in the read, so a
-substitution after the check moves the digest and the hold refuses. A key
+it, the app finds the row's `auth_mac` wrong and nothing is written. A key
 write had this check from round 1; the add's two vault statements left the
 app out of the path, and the check with it.
+
+**Who the change is by** (round 7). The check vouches for the rows as read,
+not for what the token resolves to later, and nothing can make it: a
+database writer takes no lock, so they can copy the hash onto an Owner's
+row after the hold and before the COMMIT, which the hold, already passed,
+cannot see. So nothing after the check resolves the token again: the
+prepared changes (a key write's and an add's alike) name the caller by its
+credential and identity ids, under the vault's MAC, and the write takes its
+actor from them. A substitution after the check changes whom the hash
+finds, not whom the change is by. One before the hold moves the digest (the
+hold calls `write_inputs` with the hash again), and the request asks again,
+where the check refuses it.
 
 **The issue lock before the fence** (round 6). Until PR 6 the add still
 appends 0.14's `member.add` entry, and `audit_log_fence`, the trigger on
@@ -550,7 +567,7 @@ protection is a constant; turned off, TLC finds a counterexample:
 | the read's objects by the log's newest change, not the row's column (ReadOnLog) | `WritesStandAtCommit`: a revoked session's row put back, live, by a database writer |
 | by number, not value (ReadByNumber) | `CommitsReplay`: Ada's grant taken and given back; the write commits on equal values, and the log, replayed at its commit, shows the member changed after the read its change binds |
 | the app checks the caller's `auth_mac` on the rows the vault read before anything commits (AuthChecked): a key write's step 4, an add's step 3 | `CommitsAuthentic`: a database writer copies a token hash they hold onto a live Owner's credential; the vault resolves the token to the Owner, its read and hold agree, and a write or an add commits as the Owner (round 6) |
-| ... and the hold covers the columns it checked (`Unheld` = the token's resolution) | `CommitsAuthentic`: the substitution made after the app's check and before the commit |
+| the change's actor is the checked read's, by id under the vault's MAC; nothing after the check resolves the token again (ActorFromRead) | `CommitsAuthentic`: a database writer, who takes no lock, copies the hash onto the Owner's row after the hold and before the COMMIT (round 7). The model splits the hold from the write's rows and COMMIT for this: nothing that takes the head or the fence comes between, a database writer may |
 | a change answers once sealed (WaitForSeal, R51) | `AnsweredSealed` |
 
 Two properties hold besides: `TwoTrips` (a write or an add that committed
@@ -669,7 +686,9 @@ Each with what the key write and the first member add then cost:
 5. **The member add's front door, `admit_inputs`, read, write and
    `admit_outcome`**, the scope carried by slug, the app's `auth_mac`
    check between the read and the write (a test puts a known token's hash
-   on an Owner's credential row and expects no add), with the same
+   on an Owner's credential row and expects no add; another corrupts only
+   an exchanged token's binding's `auth_mac` and expects no write and no
+   add, as `authenticate` refuses it today), with the same
    regression cases. Its 0.14 `member.add` entry still needs the head read before its
    MAC: read, head, write, 3 round trips (14 today).
 6. **0.16, the contraction.** The two routes stop writing 0.14's entries;

@@ -45,8 +45,10 @@
 (* COMMITTED: each statement reads afresh, so a hold sent as a statement   *)
 (* after the locks reads after them). Locks: 0.14's head (held across      *)
 (* steps by the app's statement only when its hold runs before the fence)  *)
-(* and the fence. A session's revoke takes the fence and not the head:     *)
-(* 0.16's, once 0047's head in `revoke_credential` is contracted away.     *)
+(* and the fence; from a hold to its COMMIT, both (`held`), which a        *)
+(* database writer ignores. A session's revoke takes the fence, not the    *)
+(* head: 0.16's, once 0047's head in `revoke_credential` is contracted     *)
+(* away.                                                                   *)
 (* Today's revoke takes the head too, which only adds order, so this is    *)
 (* the stronger adversary.                                                 *)
 (*                                                                         *)
@@ -130,7 +132,12 @@ CONSTANTS
     WaitForSeal,
     \* The app checks the caller's rows' `auth_mac`, as the vault read them,
     \* before anything commits: a key write's step 4, an add's step 3.
-    AuthChecked
+    AuthChecked,
+    \* The change's actor is the credential the checked read resolved, by
+    \* id under the vault's MAC: neither the hold nor the write resolves the
+    \* token again. Without, the write takes the actor from what the token
+    \* resolves to at the commit.
+    ActorFromRead
 
 Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
@@ -176,6 +183,7 @@ VARIABLES
     next,       \* the log's next number
     sealedTo,   \* the checkpointer has sealed every number below this
     head,       \* who holds 0.14's head across steps, or None
+    held,       \* who holds the head and the fence from its hold to its COMMIT
     pc, l, tries,
     trips,      \* round trips each process made on its path
     requests,   \* ghost: each write's request, as decided live and by the replay
@@ -183,7 +191,7 @@ VARIABLES
     admits,     \* ghost: each committed member add
     answered    \* ghost: each change answered, with its number
 
-vars == <<ok, names, svc, kver, seal, putBack, next, sealedTo, head,
+vars == <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, held,
           pc, l, tries, trips, requests, writes, admits, answered>>
 
 \* An object's row as stored: put back to its first state by a database
@@ -226,7 +234,9 @@ Holds(p) == ~ReadHeld \/ \A o \in Parts(Kind(p)) \ Unheld : Part(Read(Kind(p)), 
 \* Ghosts, from the truth at the commit, not from any read:
 \* the writer or adder stands on what is (the objects as the log has them,
 \* not a row put back), and its names still resolve as it decided ...
-NamesAsRead(p) == \A n \in Parts(Kind(p)) \cap NameParts : names[n] = l[p].read[n].name
+\* (The token's resolution is not among them: it says who asks, which the
+\* change binds by id, CommitsAuthentic.)
+NamesAsRead(p) == \A n \in (Parts(Kind(p)) \cap NameParts) \ {Token} : names[n] = l[p].read[n].name
 WriteStands(p) == (\A o \in WriteObjects \ {"key"} : ok[o]) /\ NamesAsRead(p)
 AddStands(p) == /\ \A o \in AddObjects \ {"bob", "svc"} : ok[o]
                 /\ p = "cy" \/ ok["bob"]
@@ -241,7 +251,7 @@ Init ==
     /\ svc = FALSE /\ kver = 0
     /\ seal = [o \in Objects |-> 0]
     /\ putBack = {}
-    /\ next = 1 /\ sealedTo = 1 /\ head = None
+    /\ next = 1 /\ sealedTo = 1 /\ head = None /\ held = None
     /\ pc = [p \in Procs |-> CASE p \in Writers -> "w.vault"
                                 [] p \in Adders -> "a.read"
                                 [] p = "ck" -> "ck"
@@ -263,10 +273,14 @@ Numbered(o) == /\ seal' = [seal EXCEPT ![o] = @ + 1]
 Again(p, from) ==
     /\ IF tries[p] < MaxTries THEN Goto(p, from) ELSE Goto(p, "done")
     /\ tries' = [tries EXCEPT ![p] = @ + 1]
+\* Who the change is by: the credential the read resolved the token to,
+\* which the app's check vouched for (0: the caller's own), bound by id;
+\* or (a removal) whom the token resolves to at the commit.
+Actor(p) == IF ActorFromRead THEN l[p].read[Token].name ELSE names[Token]
 \* A committed change, as the ghosts record it.
 Committed(p, o, stands) ==
     [p |-> p, n |-> next, stands |-> stands, replays |-> Replays(p),
-     from |-> l[p].seals[o], was |-> seal[o], authentic |-> names[Token] = 0]
+     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0]
 
 -----------------------------------------------------------------------------
 (* A key write *)
@@ -294,7 +308,7 @@ WVault(p) ==
                         /\ Goto(p, "w.decide")
                    ELSE /\ UNCHANGED <<next, requests>>
                         /\ Goto(p, "w.rest")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, tries, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, held, tries, writes, admits, answered>>
 
 \* Without one statement under the fence: the rest of the read, and the
 \* request numbered, in a later step. A change between the two tears what
@@ -307,14 +321,14 @@ WRest(p) ==
           /\ requests' = requests \cup {Request(p, r)}
     /\ next' = next + 1
     /\ Goto(p, "w.decide")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, tries, trips, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, held, tries, trips, writes, admits, answered>>
 
 \* The Worker decides on the read; allowed, it wraps and seals the change,
 \* and the app checks the caller's rows. No round trip.
 WDecide(p) ==
     /\ pc[p] = "w.decide"
     /\ IF Decide(p, l[p].read) /\ AppChecks(l[p].read) THEN Goto(p, "w.app") ELSE Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
 
 \* The write itself: the key's next version, its change numbered.
 Commit(p) ==
@@ -323,32 +337,41 @@ Commit(p) ==
     /\ l' = [l EXCEPT ![p].n = next]
     /\ writes' = writes \cup {Committed(p, "key", WriteStands(p))}
 
-\* The app's statement, its hold after the fence: one atomic step. One
-\* round trip. (The code takes the head, then the fence, then holds, then
-\* writes: one step here, since the head and the fence are held from the
-\* hold to COMMIT, and every change of what the read reads takes one of
-\* them.)
+\* The app's statement, to its hold. One round trip. The code takes the
+\* head, then the fence, then holds; from the hold to COMMIT it keeps both,
+\* so no change that takes either comes between (`held`). A database writer
+\* takes neither, so the write's rows and its COMMIT are a step of their own
+\* (WCommit), after the hold, with only such a writer between (round 7).
 WApp(p) ==
     /\ pc[p] = "w.app"
-    /\ head = None
+    /\ head = None /\ held = None
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ IF Holds(p)
          THEN IF HoldAfterFence
-                THEN /\ Commit(p) /\ Goto(p, "w.seal")
+                THEN /\ held' = p /\ Goto(p, "w.commit")
                      /\ UNCHANGED <<head, tries>>
                 \* Its hold under 0.14's head, then a wait for the fence.
                 ELSE /\ head' = p /\ Goto(p, "w.fence")
-                     /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
+                     /\ UNCHANGED <<held, tries>>
          ELSE /\ Again(p, "w.vault")
-              /\ UNCHANGED <<kver, seal, next, l, head, writes>>
-    /\ UNCHANGED <<ok, names, svc, putBack, sealedTo, requests, admits, answered>>
+              /\ UNCHANGED <<head, held>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, l, requests, writes, admits, answered>>
 
-\* The same statement, after its wait for the fence.
+\* The same statement, after its wait for the fence (a removal: the hold
+\* ran before it).
 WFence(p) ==
     /\ pc[p] = "w.fence"
-    /\ head' = None
+    /\ held = None
+    /\ head' = None /\ held' = p
+    /\ Goto(p, "w.commit")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, l, tries, trips, requests, writes, admits, answered>>
+
+\* The rows, the key's update, the change, COMMIT; the locks let go.
+WCommit(p) ==
+    /\ pc[p] = "w.commit"
+    /\ held' = None
     /\ Commit(p) /\ Goto(p, "w.seal")
-    /\ UNCHANGED <<ok, names, svc, putBack, sealedTo, tries, trips, requests, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, putBack, sealedTo, head, tries, trips, requests, admits, answered>>
 
 -----------------------------------------------------------------------------
 (* A member add *)
@@ -361,7 +384,7 @@ ARead(p) ==
          THEN Goto(p, "done") /\ UNCHANGED l
          ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("add"), seals |-> seal]]
               /\ Goto(p, "a.decide")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, tries, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, held, tries, requests, writes, admits, answered>>
 
 \* The Worker decides on the read: the adder's standing, svc no member yet;
 \* then the app checks the adder's rows, between the vault's two calls.
@@ -370,23 +393,32 @@ ARead(p) ==
 ADecide(p) ==
     /\ pc[p] = "a.decide"
     /\ IF Decide(p, l[p].read) /\ AppChecks(l[p].read) THEN Goto(p, "a.write") ELSE Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
 
-\* The write: rows, head, fence, the hold, the row, its change. One round trip.
+\* The write: rows, head, fence, the hold. One round trip. As a key
+\* write's, the row and its COMMIT are a step of their own (ACommit), with
+\* only a database writer between.
 AWrite(p) ==
     /\ pc[p] = "a.write"
-    /\ head = None
+    /\ head = None /\ held = None
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ IF Holds(p)
-         THEN /\ svc' = TRUE
-              /\ Numbered("svc")
-              /\ l' = [l EXCEPT ![p].n = next]
-              /\ admits' = admits \cup {Committed(p, "svc", AddStands(p))}
-              /\ Goto(p, "a.seal")
+         THEN /\ held' = p /\ Goto(p, "a.commit")
               /\ UNCHANGED tries
          ELSE /\ Again(p, "a.read")
-              /\ UNCHANGED <<svc, seal, next, l, admits>>
-    /\ UNCHANGED <<ok, names, kver, putBack, sealedTo, head, requests, writes, answered>>
+              /\ UNCHANGED held
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, requests, writes, admits, answered>>
+
+\* svc's row, its change, COMMIT; the locks let go.
+ACommit(p) ==
+    /\ pc[p] = "a.commit"
+    /\ held' = None
+    /\ svc' = TRUE
+    /\ Numbered("svc")
+    /\ l' = [l EXCEPT ![p].n = next]
+    /\ admits' = admits \cup {Committed(p, "svc", AddStands(p))}
+    /\ Goto(p, "a.seal")
+    /\ UNCHANGED <<ok, names, kver, putBack, sealedTo, head, tries, trips, requests, writes, answered>>
 
 -----------------------------------------------------------------------------
 (* The seal wait, the answer, and everything else *)
@@ -397,29 +429,30 @@ Answer(p) ==
     /\ ~WaitForSeal \/ l[p].n < sealedTo
     /\ answered' = answered \cup {[p |-> p, n |-> l[p].n]}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, held, l, tries, trips, requests, writes, admits>>
 
 \* Every other change, one atomic step: 0.14's head and the fence (a
 \* session's revoke the fence alone, which the head's holder does not stop).
 Change(p) ==
     /\ pc[p] = "change"
+    /\ held = None
     /\ p = "end" \/ head = None
     /\ ok' = [ok EXCEPT ![Moves[p]] = FALSE]
     /\ Numbered(Moves[p])
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, sealedTo, head, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
 
 \* Ada's grant given back once taken: the same row, a newer change.
 GiveBack(p) ==
     /\ pc[p] = "giveback"
-    /\ head = None
+    /\ head = None /\ held = None
     /\ ~ok["member"]
     /\ ok' = [ok EXCEPT !["member"] = TRUE]
     /\ Numbered("member")
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, sealedTo, head, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
 
 \* A database writer puts cA's row back as it was, live, once it is revoked.
 \* Nothing logged: the log's newest change of cA is still the revoke.
@@ -428,7 +461,7 @@ Tamper(p) ==
     /\ seal["cred"] > 0
     /\ putBack' = putBack \cup {"cred"}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
 
 \* A database writer copies a token hash onto another credential: around
 \* coffre, no lock, nothing logged.
@@ -436,27 +469,27 @@ Substitute(p) ==
     /\ pc[p] = "substitute"
     /\ names' = [names EXCEPT ![Token] = 1]
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
 
 \* A rename, a key appearing, a config deleted, a project made under an old
 \* slug: an app write under 0.14's head, which moves what a name resolves
 \* to and no seal.
 Rename(p) ==
     /\ pc[p] = "rename"
-    /\ head = None
+    /\ head = None /\ held = None
     /\ names' = [names EXCEPT ![Renames[p]] = @ + 1]
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
 
 \* A tick seals every number committed so far.
 Tick ==
     /\ "ck" \in Procs
     /\ sealedTo < next
     /\ sealedTo' = next
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, head, pc, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, head, held, pc, l, tries, trips, requests, writes, admits, answered>>
 
-Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p)
-        \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ Answer(p) \/ Change(p)
+Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p) \/ WCommit(p)
+        \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ ACommit(p) \/ Answer(p) \/ Change(p)
         \/ GiveBack(p) \/ Tamper(p) \/ Substitute(p) \/ Rename(p)
 
 Terminating ==
@@ -476,6 +509,7 @@ TypeOK ==
     /\ seal \in [Objects -> Nat]
     /\ putBack \subseteq {"cred"}
     /\ head \in Procs \cup {None}
+    /\ held \in Procs \cup {None}
     /\ sealedTo <= next
     /\ \A p \in Procs : tries[p] <= MaxTries + 1
 
@@ -512,11 +546,15 @@ AddsFlip == \A a \in admits : a.from = a.was
 \* and the commit, not even and back.
 CommitsReplay == \A c \in writes \cup admits : c.replays
 
-\* A write or an add commits only for the caller its token is: the token's
-\* hash still resolves, at the commit, to the credential the app's MAC
-\* binds it to. Without it, a database writer who copies a token hash they
-\* hold onto an Owner's credential writes, or adds an Owner, as the Owner,
-\* with every change sealed and MAC'd by the vault's own keys (round 6).
+\* A write or an add commits only as the caller its token is: the change's
+\* actor is the credential the app's `auth_mac` vouched the token for, as
+\* read. Not "the token still resolves to it at the commit": a database
+\* writer takes no lock, and may move the hash between the hold and the
+\* COMMIT (round 7); what they cannot do is make the change name anyone
+\* but the checked caller. Without the check, one who copies a token hash
+\* they hold onto an Owner's credential writes, or adds an Owner, as the
+\* Owner, with every change sealed and MAC'd by the vault's own keys
+\* (round 6).
 CommitsAuthentic == \A c \in writes \cup admits : c.authentic
 
 \* Every change answers only once sealed (R51).
