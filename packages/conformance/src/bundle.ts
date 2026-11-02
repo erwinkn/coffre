@@ -33,6 +33,8 @@ export const SERVER_TABLES = [
   'mcp_approvals',
   'mcp_connections',
   'oauth_clients',
+  'proxy_definitions',
+  'proxy_reserved',
   'secret_references',
   'secret_versions',
   'service_bindings',

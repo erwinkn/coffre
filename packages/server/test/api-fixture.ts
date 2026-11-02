@@ -33,6 +33,8 @@ export type FixtureDeps = {
   /** The audit anchor, in memory: `resetDatabase` forgets it with the log. */
   anchor: AnchorStore;
   waitUntil?: ApiContext['waitUntil'];
+  /** What the deployment's credential proxy says, as `credentialProxy({ … })` would (`ProxyCode`): none unless set. */
+  proxy?: ApiContext['proxy'];
   signin?: SigninService;
   workloads?: WorkloadService;
 };
@@ -439,6 +441,7 @@ export async function contextFor(
     personalToken: null,
     credentialExpiresAt: null,
     rotateAfterDays: 365,
+    proxy: deps.proxy ?? null,
   };
 }
 
@@ -524,6 +527,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
     vaultMembers,
     logChanges,
     logConfig,
+    proxyDefinitions,
+    proxyReserved,
     logUses,
     logBulk,
     logReads,
@@ -546,6 +551,9 @@ export async function resetDatabase(owner: Database): Promise<void> {
   // 0.15's log, which the change path writes (unless COFFRE_TEST_LOG=0.14), gone with the rows it is of.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
+  // 0.16's proxy definitions, the vault's objects too.
+  await owner.delete(proxyDefinitions);
+  await owner.delete(proxyReserved);
   // Its uses and their cap's rows: a test's reads count from none.
   await owner.delete(logUses);
   await owner.delete(logBulk);
@@ -601,7 +609,7 @@ export async function decisionInputs(owner: Database, except: readonly string[] 
   const tables = tablesOf(owner);
   const inputs = { vaultMembers: tables.vaultMembers, vaultGrants: tables.vaultGrants, credentials: tables.credentials, secrets: tables.secrets,
     secretVersions: tables.secretVersions, secretReferences: tables.secretReferences, environments: tables.environments, projects: tables.projects, logConfig: tables.logConfig,
-    serviceBindings: tables.serviceBindings };
+    proxyDefinitions: tables.proxyDefinitions, proxyReserved: tables.proxyReserved, serviceBindings: tables.serviceBindings };
   const { auditLog } = tables;
   const text = (row: object) => JSON.stringify(row, (_key, value: unknown) => (typeof value === 'bigint' ? value.toString() : value));
   const read: Record<string, string[]> = {};

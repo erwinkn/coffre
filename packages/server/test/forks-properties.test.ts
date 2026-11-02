@@ -7,7 +7,7 @@ import { eq, inArray, sql } from 'drizzle-orm';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { MAX_PARENTS, world } from '../../../scripts/properties/domain.ts';
 import { openTestDatabase, resetDatabase, testVault, type TestVault } from './api-fixture.ts';
-import { dismissedKeys, environments, projects, secretReferences, secrets, secretVersions } from './db/tables.ts';
+import { dismissedKeys, environments, projects, proxyDefinitions, secretReferences, secrets, secretVersions } from './db/tables.ts';
 import type { ApiContext } from '../src/api/context.ts';
 import { inheritedRows, resolveKeys } from '../src/api/inheritance.ts';
 import { missingKeys } from '../src/api/missing.ts';
@@ -75,6 +75,7 @@ async function clear(): Promise<void> {
   await db.update(secrets).set({ currentVersionId: null });
   await db.delete(secretVersions);
   await db.delete(secrets);
+  await db.delete(proxyDefinitions);
   await db.delete(environments);
   await db.delete(projects);
 }

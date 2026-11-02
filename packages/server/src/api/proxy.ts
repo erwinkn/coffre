@@ -5,7 +5,7 @@ import type { ProxyDefinition, ProxyView, Refusal as VaultRefusal } from '@coffr
 
 import type { ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { denied, need, Refusal, through, vaultCredential, withRefusals, type ApiContext } from './context.ts';
+import { denied, Refusal, through, vaultCredential, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 
@@ -60,7 +60,6 @@ export async function saveProxy(ctx: ApiContext, place: ResolvedPath, input: Pro
     const refused = (error: ApiError, reason: string, metadata: Record<string, unknown> = {}) =>
       new Refusal(error, denied(ctx, 'proxy.save', reason, { ...where, metadata: { names: Object.keys(input.items), ...metadata } }));
     const cannot = mayEdit(ctx, place);
-    if (cannot?.reason === 'missing_proxy_edit') need(ctx, 'proxy.edit', placeOf(place.project, environment), 'proxy.save', where);
     if (cannot !== null) throw refused(cannot.error, cannot.reason);
     const code = ctx.proxy!;
     // What needs this deployment's code, which the vault cannot see: a name code defines, and an egress or a network it

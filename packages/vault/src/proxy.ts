@@ -3,7 +3,7 @@ import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import type { ProxyItemView, ProxyView } from '@coffre/core/vault';
 
 import { placeIn, refuses, type Reader } from './decide.ts';
-import type { EnvironmentInput, FrozenGrant, ProxyInput, ReservedInput, SecretInput } from './inputs.ts';
+import { sealed, type EnvironmentInput, type FrozenGrant, type ProxyInput, type ProxyItem, type ReservedInput, type SealKeys, type SecretInput } from './inputs.ts';
 
 /**
  * The pure part of the proxy's decisions (0.16, T186;
@@ -94,4 +94,45 @@ export function reservedProblem(names: unknown): string | null {
     return `the names code reserves are a list of at most ${MAX_RESERVED} credential names`;
   }
   return null;
+}
+
+/**
+ * One level of a fork chain as a lookup reads it: its environment's proxy
+ * row, if any (`readObject`: a row whose index column is not its items' has
+ * no seal), the row's seal, and the seal of the object's newest change
+ * (`undefined`: none ever).
+ */
+export type ProxyLevel = { environmentId: string; row: ProxyInput | null; seal: Buffer | null; newest: Buffer | null | undefined };
+
+/**
+ * The item a route's name serves at a place (docs/design/proxy-ui.md,
+ * section 2; decision 6): the levels nearest first, the place, then each
+ * fork parent, each checked in turn, its seal the vault's and its newest
+ * change's, through the first whose sealed index names the route; none past
+ * it is weighed. A level with no object (no change ever, no row) passes the
+ * lookup on; one whose row a writer put back, deleted or planted is
+ * `stale`, one whose items or index fail the seal `tampered`, and the
+ * lookup stops there, never falling back to a parent: a fork's own item a
+ * writer deleted from its row, its index left, fails the seal over the row,
+ * and the parent's never serves in its place. `seals` lists the checked
+ * levels' seals, nearest first, which an answer carries (`OneVersion`).
+ */
+export function proxyLookup(keys: SealKeys, levels: readonly ProxyLevel[], name: string):
+  | { served: true; item: ProxyItem; level: number; seals: (Buffer | null)[] }
+  | { served: false; fault: 'tampered' | 'stale' | null; seals: (Buffer | null)[] } {
+  const seals: (Buffer | null)[] = [];
+  for (const [level, { environmentId, row, seal, newest }] of levels.entries()) {
+    if (newest === undefined || newest === null) {
+      // No change ever: no object, unless a row was planted. A change that left none: no proxy change does.
+      if (row !== null || newest === null) return { served: false, fault: 'stale', seals };
+      seals.push(null);
+      continue;
+    }
+    if (row === null) return { served: false, fault: 'stale', seals };
+    if (!sealed(keys, { kind: 'proxy', id: environmentId }, row, seal)) return { served: false, fault: 'tampered', seals };
+    if (seal === null || !newest.equals(seal)) return { served: false, fault: 'stale', seals };
+    seals.push(seal);
+    if (Object.hasOwn(row.items, name)) return { served: true, item: row.items[name]!, level, seals };
+  }
+  return { served: false, fault: null, seals };
 }

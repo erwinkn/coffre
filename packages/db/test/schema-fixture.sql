@@ -16,6 +16,7 @@ DELETE FROM vault_members;
 DELETE FROM dismissed_keys;
 UPDATE secrets SET current_version_id = NULL;
 DELETE FROM secret_versions;
+DELETE FROM proxy_definitions;
 DELETE FROM secrets;
 DELETE FROM environments;
 DELETE FROM projects;

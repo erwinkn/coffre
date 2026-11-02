@@ -494,7 +494,7 @@ const PROXY_CODE = 'proxy.code';
 const PROXY_RELEASE = 'proxy.release';
 
 /** Who reserves the names code defines: the deployment, through the app's own call at its gate; no person or token makes one. */
-const CODE_ACTOR = 'deployment';
+const CODE_ACTOR = 'system:deployment';
 
 /** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
 const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
