@@ -201,7 +201,7 @@ export class AppChanges {
     // An environment's slug moved (a rename, a deletion's tombstone): what the vault's issue compares of the policy. The
     // issue lock exclusive, its rows written and before the fence its append takes, orders the issue against it (`holdIssues`).
     if (calls.length > 0 && this.#changes.some((change) => change.kind === 'environment' && change.before !== null
-      && change.before.columns.slug !== change.after.slug && (only === null || only.has(change.id)))) await holdIssues(tx, { awaited: false });
+      && change.before.columns.slug !== change.after.slug && (only === null || only.has(change.id)))) await holdIssues(tx, { final: true });
     this.#numbers = append === undefined ? await laterChanges(tx, calls) : await append(calls);
   }
 

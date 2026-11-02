@@ -186,12 +186,12 @@ export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead>
  * IssuePolicyHeld, Migration015.tla's PolicyIssueFirst; T149, review r3).
  * SQLite's transactions hold the whole file.
  */
-export async function holdIssues(tx: Transaction, { awaited = true }: { awaited?: boolean } = {}): Promise<void> {
+export async function holdIssues(tx: Transaction, { final = false }: { final?: boolean } = {}): Promise<void> {
   if (engineOf(tx) === 'sqlite') return;
   const statement = sql`SELECT pg_advisory_xact_lock(1668244070, 1)`;
-  // Nothing awaits it (`awaited: false`): it goes with what the transaction asks next, in its place (`later`).
-  if (awaited) await tx.execute(statement);
-  else later(tx, statement);
+  // `final`: nothing awaits it, it goes with what the transaction asks next, in its place (`later`), as `appendEntries`'s.
+  if (final) later(tx, statement);
+  else await tx.execute(statement);
 }
 
 /**
@@ -700,9 +700,13 @@ export async function laterChanges(tx: Transaction, calls: readonly PreparedChan
   return numbersOf(laterRows(tx, callsOf(calls, sql``, true)), calls);
 }
 
-/** Numbers that must all be: a null is a row that moved, which fails the transaction, as `app_change_strict` does. */
-function strictly(numbers: readonly (bigint | null)[]): bigint[] {
-  if (numbers.some((number) => number === null)) throw new MovedRow('an object this write changes moved since it was read');
+/**
+ * Numbers that must all be: a null is a row that moved, which fails the
+ * transaction, as `app_change_strict` and `change_input_strict` do. The
+ * vault's change path calls it too, so that the rule lives once.
+ */
+export function strictly(numbers: readonly (bigint | null)[], what = 'write'): bigint[] {
+  if (numbers.some((number) => number === null)) throw new MovedRow(`an object this ${what} changes moved since it was read`);
   return numbers as bigint[];
 }
 
@@ -721,10 +725,10 @@ function callsOf(calls: readonly PreparedChange[], before: SQL, strict: boolean)
 
 type NumberRow = { ord: number; number: string | number | null };
 
-/** The calls' numbers, in their order. */
-function numbersIn(rows: readonly Record<string, unknown>[]): (bigint | null)[] {
+/** The calls' numbers, in their order: `app_change`'s, or `change_input`'s (`function`). */
+export function numbersIn(rows: readonly Record<string, unknown>[], function_ = 'app_change'): (bigint | null)[] {
   const numbers = rows as unknown as NumberRow[];
-  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('app_change answered out of order');
+  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error(`${function_} answered out of order`);
   return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
 }
 

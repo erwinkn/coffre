@@ -20,7 +20,6 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
-import { watched } from './db/postgres-pool.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round trips");
@@ -33,7 +32,7 @@ class PerRequest {
   pool: Client | null = null;
   readonly client: Client = new Proxy({} as Client, {
     get: (_, key) => {
-      // No hook of a postgres.js client's own: `watched` infers a transaction's BEGIN and end, as for any Hyperdrive pool.
+      // Not a postgres.js client (`options`) nor a promise (`then`): the database takes it as a Hyperdrive pool.
       if (key === 'options' || key === 'then') return undefined;
       if (this.pool === null) throw new Error('no request under way');
       const value: unknown = Reflect.get(this.pool, key, this.pool);
@@ -79,7 +78,7 @@ before(async () => {
   relays = { app: await relay(TEST_RUNTIME_DATABASE_URL, 'app'), vault: await relay(TEST_VAULT_DATABASE_URL, 'vault'), hot: await relay(TEST_HOT_DATABASE_URL, 'hot') };
   vaultPool = new HyperdrivePool(relays.vault.url);
   const opened = await localVault(
-    { database: createDatabase(watched(vaultPool, () => {})), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
+    { database: createDatabase(vaultPool), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
   );
   vault = opened;
@@ -99,7 +98,7 @@ before(async () => {
   runtime = {
     ...createRuntime(
       resolveConfig({ publicUrl: ORIGIN, vault: counted, auth, auditChainKey: deps.chainKey.toString('base64') }),
-      createDatabase(watched(appClient.client, () => {})),
+      createDatabase(appClient.client),
       counted,
       { json: async (url) => { throw new Error(`no fetch in this test: ${url.href}`); } },
     ),

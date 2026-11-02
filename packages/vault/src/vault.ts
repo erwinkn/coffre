@@ -876,7 +876,7 @@ class VaultService implements Vault {
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
     // Nothing awaits it: it goes with the next member's reads, or the changes and the COMMIT.
-    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) }, { awaited: false });
+    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) }, { final: true });
     // The member's object as the rows hold it now, which 0.15's change of it must have left, and the access entry its
     // row names, which that change accounts for (`changes.ts`).
     return { object: principalObject(row, decided), accessSeq: next.accessSeq };

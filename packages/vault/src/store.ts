@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type Crede
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { entryColumns, MovedRow, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { entryColumns, numbersIn, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { objectKey, type EnvironmentInput, type Input, type Kind, type Ref } from './inputs.ts';
@@ -231,13 +231,13 @@ export async function updateMember(
   tx: Transaction,
   principal: string,
   change: Partial<Omit<Member, 'principal'>>,
-  /** Nothing awaits it: it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
-  { awaited = true }: { awaited?: boolean } = {},
+  /** `final`: nothing awaits it, it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
+  { final = false }: { final?: boolean } = {},
 ): Promise<void> {
   const { vaultMembers } = tablesOf(tx);
   const statement = tx.update(vaultMembers).set(storedChange(change)).where(eq(vaultMembers.principal, principal));
-  if (awaited) await statement;
-  else later(tx, statement);
+  if (final) later(tx, statement);
+  else await statement;
 }
 
 // --- grants ---------------------------------------------------------------------
@@ -1167,7 +1167,7 @@ export async function changeInputs(tx: Transaction, calls: readonly ChangeCall[]
     for (const call of calls) numbers.push(await changeOnSqlite(tx, call));
     return numbers;
   }
-  return inputNumbers(await rowsOf(tx, inputCalls(calls, false)));
+  return numbersIn(await rowsOf(tx, inputCalls(calls, false)), 'change_input');
 }
 
 /**
@@ -1179,8 +1179,8 @@ export async function changeInputs(tx: Transaction, calls: readonly ChangeCall[]
 export async function laterInputs(tx: Transaction, calls: readonly ChangeCall[]): Promise<ChangeNumbers> {
   const requests = calls.map(({ requestId }) => requestId);
   if (calls.length === 0) return { answer: Promise.resolve([]), requests };
-  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(allNumbered(await changeInputs(tx, calls))), requests };
-  const answer = laterRows(tx, inputCalls(calls, true)).then((rows) => allNumbered(inputNumbers(rows)));
+  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(strictly(await changeInputs(tx, calls), 'decision')), requests };
+  const answer = laterRows(tx, inputCalls(calls, true)).then((rows) => strictly(numbersIn(rows, 'change_input'), 'decision'));
   answer.catch(() => {});
   return { answer, requests };
 }
@@ -1194,18 +1194,6 @@ function inputCalls(calls: readonly ChangeCall[], strict: boolean): SQL {
     SELECT c.ord, ${sql.raw(strict ? 'change_input_strict' : 'change_input')}(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.value, c.seal_from, c.seal, c.mac) AS number
       FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, value, seal_from, seal, mac)
      ORDER BY c.ord`;
-}
-
-function inputNumbers(rows: readonly Record<string, unknown>[]): (bigint | null)[] {
-  const numbers = rows as unknown as { ord: number; number: string | number | null }[];
-  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('change_input answered out of order');
-  return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
-}
-
-/** Numbers that must all be: a null is a row that moved, which fails the transaction, as `change_input_strict` does. */
-function allNumbered(numbers: readonly (bigint | null)[]): bigint[] {
-  if (numbers.some((number) => number === null)) throw new MovedRow('an object this decision changes moved since it was read');
-  return numbers as bigint[];
 }
 
 /** Postgres's `data_corrupted`, which `change_input` raises on a row that is not its object's newest change's. */
