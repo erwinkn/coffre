@@ -54,6 +54,28 @@ function unsafeSegment(decoded: string): boolean {
 }
 
 /**
+ * Whether a request's segment, as sent, climbs out of where it seems to
+ * be: decoded, however often, a slash, a control byte or a dot segment
+ * (`unsafeSegment`). A request or a presigned URL with one is refused
+ * before any matching.
+ */
+export function climbs(segment: string): boolean {
+  return unsafeSegment(percentDecoded(segment));
+}
+
+/**
+ * Whether a request's segment, not empty as sent, is empty to a server that
+ * drops `;` parameters, as Tomcat and Spring do, decoded however often:
+ * `;x`, `%3Bx`. Such a server reads `/companies/;/documents` as
+ * `/companies//documents`, or `/companies/documents`.
+ */
+function bare(segment: string): boolean {
+  if (segment.split(';')[0] === '') return true;
+  const read = percentDecoded(segment);
+  return read !== segment && bare(read);
+}
+
+/**
  * A path pattern as written, read: the pattern, or what is wrong with it.
  * `ui` is a definition saved in the Proxy tab, which takes no trailing
  * slash; `code` keeps code's trailing slash, and reads a segment that
@@ -104,11 +126,12 @@ export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathP
  * upstream itself) as the segments it is matched as, each decoded once, to
  * bytes: no UTF-8 check, case folding or normalization. The root is one
  * empty segment, as a trailing slash is. Null for an empty segment that is
- * not the last (`//`), which a glob would count as one.
+ * not the last (`//`), or one of `;` parameters alone (`;x`, anywhere),
+ * which a glob would count as one and a server may read as none.
  */
 export function requestSegments(relative: string): string[] | null {
   const segments = relative.slice(1).split('/');
-  for (let at = 0; at < segments.length - 1; at++) if (segments[at] === '') return null;
+  for (const [at, segment] of segments.entries()) if (segment === '' ? at < segments.length - 1 : bare(segment)) return null;
   return segments.map(percentDecoded);
 }
 

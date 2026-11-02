@@ -52,7 +52,7 @@ test("section 7's table: each segment decoded once and matched; a dot segment, a
   for (const path of ['/kyc/..%2fadmin', '/kyc/%25252e%25252e/admin', '/kyc/..%20/admin', '/kyc/..%00/admin', '/kyc/..;/admin']) {
     assert.deepEqual(await ask(path), { status: 400, message: "the path may not climb out of the credential's upstream" }, path);
   }
-  assert.deepEqual(await ask('/companies//x'), { status: 400, message: 'the path has an empty segment, //' });
+  assert.deepEqual(await ask('/companies//x'), { status: 400, message: 'the path has an empty segment, // or one of ; parameters alone, which a server may read as none' });
   // `%2e%2e` is `..` to a URL parser, which resolves it before any server code runs: the request is for /admin, outside the list.
   assert.deepEqual(await ask('/kyc/%2e%2e/admin'), { status: 403, message: 'api is not for /admin' });
   assert.equal(reached.length, 2);

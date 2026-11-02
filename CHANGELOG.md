@@ -21,8 +21,9 @@
   each path matched segment by segment, percent-decoded once: a plain path a
   prefix, `*` one segment, `**` the rest. `methods` and `paths` keep working
   as before, read as one entry per path; where a credential has a list, a
-  path is now matched decoded (`docu%6Dents` is `documents`), and `//` is
-  refused. `environments: ['market/prod']`, on any credential, tunnel,
+  path is now matched decoded (`docu%6Dents` is `documents`), and `//`
+  and a segment of `;` parameters alone (`;x`) are refused where an entry
+  names a path; a `*` in `paths` is still itself, never a glob. `environments: ['market/prod']`, on any credential, tunnel,
   signer or verifier, serves it there alone. Redaction covers every key of
   every rule, and what each rule made of them. Two different handles in one
   request are a 400. Server only: no migration, and `/use` makes the same

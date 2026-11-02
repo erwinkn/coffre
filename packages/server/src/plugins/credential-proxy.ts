@@ -54,7 +54,7 @@ import { database, tunnel as tunnelPostgres, type Database } from './postgres-tu
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { allows, methodsFor, readPattern, requestSegments, type AllowEntry } from './proxy-match.ts';
+import { allows, climbs, methodsFor, readPattern, requestSegments, type AllowEntry } from './proxy-match.ts';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
@@ -201,7 +201,7 @@ export type Credential = {
   allow?: readonly Allow[];
   /** The methods it may be used with, `['GET', 'POST']`; any, unless set. Read as `allow`'s entries' methods. */
   methods?: readonly string[];
-  /** The paths under `upstream` it may be used on, each as an `allow` entry's path, `['/companies']`; any, unless set. A trailing slash, `/companies/`, takes what is below it and not `/companies` itself. */
+  /** The paths under `upstream` it may be used on, each as an `allow` entry's path, `['/companies']`; any, unless set. A trailing slash, `/companies/`, takes what is below it and not `/companies` itself; a `*` is itself, as before 0.16, never a glob. */
   paths?: readonly string[];
   /** The environments it serves, by path, `['market/prod']`; every one, unless set. Its name is the deployment's in every environment all the same. */
   environments?: readonly string[];
@@ -1155,9 +1155,10 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#\u0000-\u001F\u007F]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
   const query = asked.query ?? {};
   if (typeof query !== 'object' || query === null || Object.values(query).some((value) => typeof value !== 'string')) return failure(400, 'query is a map of strings, response-content-disposition and the like');
-  // The same rules as a request through it: under the upstream, its paths, no dot segment and no slash smuggled in a segment.
+  // The same rules as a request through it: under the upstream, its allow list, and no segment that climbs, decoded however
+  // often, a slash, a control byte or a dot segment (`..;`, `%252e%252e`), since a server behind may decode it again.
   const segments = asked.path.slice(1).split('/');
-  if (segments.some((segment) => /^(\.|%2e){1,2}$/i.test(segment) || /%2f|%5c|\\/i.test(segment))) return failure(400, 'the path may not climb out of the credential\'s upstream');
+  if (segments.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const target = new URL(`${credential.base.href.replace(/\/$/, '')}/${segments.join('/')}`);
   for (const [name, value] of Object.entries(query as Record<string, string>)) {
     if (name.toLowerCase().startsWith('x-amz-')) return failure(400, 'the X-Amz- parameters are the signature\'s own');
@@ -1208,11 +1209,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
   // Decoded as often as it changes, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
   // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
-  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`).
-  const climbs = (segment: string): boolean => {
-    const read = bytesOf(segment);
-    return /[/\\\x00-\x1f\x7f\xc0\xc1]/.test(read) || /^\.{1,2}[ \t]*$/.test(read.split(';')[0]!) || (read !== segment && climbs(read));
-  };
+  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, proxy-match.ts.)
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
   const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
@@ -1237,22 +1234,25 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
 /**
  * The refusal of a request its credential's allow list does not take, or
  * null: 405 when no entry takes its method, on its path or on any; 403 when
- * it is its path no entry takes. `relative` is the path under the upstream
- * as it goes, each segment matched decoded once (proxy-match.ts). An empty
- * segment but a trailing one, `//`, is refused where there is a list: a
- * glob counts segments, and a server may read `//` as one slash. A route
- * with none sends it on, as S3's keys may hold one.
+ * it is its path no entry takes, or there is no entry. `relative` is the
+ * path under the upstream as it goes, each segment matched decoded once
+ * (proxy-match.ts). An empty segment but a trailing one, `//`, or one of
+ * `;` parameters alone, is refused where an entry names a path: a glob
+ * counts segments, and a server may read either as none. A list of methods
+ * alone, or none, sends it on, as S3's keys may hold `//`.
  */
 function allowed(credential: Resolved, method: string, relative: string): Response | null {
   if (credential.allowed === null) return null;
-  const segments = requestSegments(relative);
-  if (segments === null) return failure(400, 'the path has an empty segment, //');
+  if (credential.allowed.length === 0) return failure(403, `${credential.name}'s allow list is empty: it takes no request`);
+  const segments = credential.allowed.some((entry) => entry.path !== null) ? requestSegments(relative) : [];
+  if (segments === null) return failure(400, 'the path has an empty segment, // or one of ; parameters alone, which a server may read as none');
   const verdict = allows(credential.allowed, method, segments);
   if (verdict === 'allowed') return null;
   if (verdict === 'path') return failure(403, `${credential.name} is not for ${relative}`);
   // The methods taken on this path, if an entry takes it, else on any: one list, as `methods` gives it, says no more than that.
   const any = methodsFor(credential.allowed, null);
   const here = methodsFor(credential.allowed, segments);
+  if (any.length === 0) return failure(405, `${credential.name} takes no method`);
   return failure(405, here.length === 0 || here.length === any.length ? `${credential.name} takes ${any.join(', ')}` : `${credential.name} takes ${here.join(', ')} on ${relative}`);
 }
 
@@ -1366,6 +1366,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
       const found = await routed(path);
       if (found instanceof Response) return found;
       route = found;
+      // Not by name (a SQLite vault's, or an environment `unless` names): the environment, found, is held to the scope all the same.
+      if (!serves(credential, route)) return notServed(credential.name, route);
       opened = await valuesFor(coffre, proxy, handle, route, credential, through);
     } else {
       route = made.environment.path;
@@ -1539,21 +1541,29 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   // Each rule in order: the headers the rules before SigV4 set, which it signs too, so none is swapped on the way.
   const set: string[] = [];
   const filled: string[] = [];
+  // What each rule made of its values, as it set it: a later step may drop the header (SigV4 drops host, a filled body
+  // its digests), and the upstream may have seen it all the same, or echo what the app sent.
+  const made: string[] = [];
   let filling: Rule['kind'] = credential.rules[0]!.kind;
   try {
     for (const rule of credential.rules) {
       filling = rule.kind;
+      let assembled: string;
       if (rule.kind === 'header') {
         headers.set(rule.name, render(rule.template, values));
+        assembled = headers.get(rule.name)!;
         set.push(rule.name);
       } else if (rule.kind === 'basic') {
-        headers.set('authorization', `Basic ${btoa(binary(new TextEncoder().encode(`${render(rule.user, values)}:${render(rule.password, values)}`)))}`);
+        assembled = btoa(binary(new TextEncoder().encode(`${render(rule.user, values)}:${render(rule.password, values)}`)));
+        headers.set('authorization', `Basic ${assembled}`);
         set.push('authorization');
       } else if (rule.kind === 'query') {
-        target.searchParams.set(rule.name, render(rule.template, values));
+        assembled = render(rule.template, values);
+        target.searchParams.set(rule.name, assembled);
       } else if (inBody(rule)) {
-        filled.push(render(rule.template, values));
-      } else if (rule.kind === 'sigv4') {
+        assembled = render(rule.template, values);
+        filled.push(assembled);
+      } else {
         // The app's own signature and the headers it signed are its handle's: signed again, for the upstream's host and path.
         for (const name of ['authorization', 'x-amz-date', 'x-amz-security-token']) headers.delete(name);
         // The hash the session's proof bound; else the client's own, as a streamed upload declared it or as sent on, or as its
@@ -1565,7 +1575,9 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
           secretAccessKey: render(rule.secretAccessKey, values),
           ...(rule.sessionToken === undefined ? {} : { sessionToken: render(rule.sessionToken, values) }),
         }, rule, undefined, set);
+        assembled = headers.get('authorization')!;
       }
+      if (rule.keys.some((key) => !plain.includes(key))) made.push(assembled);
     }
     if (filled.length > 0) body = out.fields!.fill(filled);
   } catch {
@@ -1592,13 +1604,6 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   // form an honest upstream may echo it in (`echoed`). A plain value is no secret, and an upstream quotes an account's id
   // back as a matter of course: it stays, and so does what a rule made of plain values alone.
   const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
-  let field = 0;
-  const made = credential.rules.flatMap((rule) => {
-    const assembled = rule.kind === 'header' ? headers.get(rule.name)! : rule.kind === 'form' || rule.kind === 'json' ? filled[field++]!
-      : rule.kind === 'basic' ? headers.get('authorization')!.slice('Basic '.length)
-      : rule.kind === 'sigv4' ? headers.get('authorization')! : target.searchParams.get(rule.name)!;
-    return rule.keys.some((key) => !plain.includes(key)) ? [assembled] : [];
-  });
   const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
 
   // A streamed body's refusal, once `scanned` stops it: the answer, whatever the upstream made of the broken request.
@@ -2354,7 +2359,11 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
   const taken = methods(credential.methods, true);
   if (credential.paths === undefined) return [{ methods: taken, path: null }];
   if (!Array.isArray(credential.paths)) throw new Error(`credentialProxy: ${name}'s paths are a list, ['/companies']`);
-  return credential.paths.map((given) => ({ methods: taken, path: path(given) }));
+  // A `*` in `paths` is the byte it was before 0.16, never a glob: an old path keeps what it took. `allow` takes globs.
+  return credential.paths.map((given) => {
+    if (typeof given === 'string' && given.includes('*')) console.warn(`credentialProxy: ${name}'s path ${given} takes * as itself, as before 0.16: allow: [{ path }] reads * and ** as globs`);
+    return { methods: taken, path: path(typeof given === 'string' ? given.replaceAll('*', '%2A') : given) };
+  });
 }
 
 /** The environments a code item serves, checked: full paths, `market/prod`, since a bare `prod` would be every project's. */

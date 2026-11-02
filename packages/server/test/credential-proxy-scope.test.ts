@@ -1,0 +1,124 @@
+// What PR B's first review found, each through the plugin's route with a fake
+// coffre and an egress for the upstream: a code item's `environments` on the
+// stable URL when the vault's one call finds nothing by name, a presigned
+// URL's path held to a request's refusals, and rules a later step drops a
+// header of. No database: what is checked is the plugin's own work.
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
+import { credentialProxy, form, header, sigv4, type Credential } from '../src/plugins/credential-proxy.ts';
+
+const PUBLIC = 'https://coffre.example';
+const HANDLE = `coffre_use_${'h'.repeat(43)}`;
+const LATER = new Date(Date.now() + 3_600_000).toISOString();
+const SECRET = 'sk_live_0123456789abcdef';
+
+/** coffre, as a plugin sees it: the handle stands for `market/dev`, whose keys each hold SECRET. `madeFor` plays the vault's one call. */
+function fake(madeFor?: 'found' | 'none'): PluginContext {
+  const used = (keys: readonly string[]) => ({
+    values: Object.fromEntries(keys.map((key) => [key, SECRET])),
+    plain: [],
+    keys,
+    environment: { path: 'market/dev', personal: false },
+    expiresAt: LATER,
+  });
+  return {
+    publicUrl: PUBLIC,
+    workload: async () => null,
+    handle: async () => ({ expiresAt: LATER, paths: ['market/dev'] }),
+    use: async (_handle: string | WorkloadUse, asked: UseAsked) => used(asked.keys as readonly string[]),
+    ...(madeFor === undefined ? {} : { useMadeFor: async (_handle: string, asked: { keys: readonly [string] }) => (madeFor === 'found' ? used(asked.keys) : null) }),
+  } as unknown as PluginContext;
+}
+
+/** A proxy of one credential, `api`, and what reached its upstream. */
+function proxy(credential: Partial<Credential>, coffre = fake()) {
+  const reached: { url: URL; headers: Headers }[] = [];
+  const egress = { fetch: async (url: URL, init: RequestInit) => {
+    reached.push({ url, headers: new Headers(init.headers) });
+    return new Response('ok');
+  } };
+  const plugin = credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), egress, ...credential } } });
+  const ask = async (path: string, init: RequestInit = {}) => {
+    const answer = await plugin.routes!.fetch(new Request(`${PUBLIC}/use${path}`, { ...init, headers: { 'x-coffre-handle': HANDLE, ...init.headers } }), coffre);
+    return { status: answer.status, body: answer.status === 200 ? '' : await answer.text() };
+  };
+  return { reached, ask };
+}
+
+test('a credential scoped to market/prod: the stable URL refuses a market/dev handle, whether the vault finds it by name, finds nothing, or has no such call', async () => {
+  for (const madeFor of ['found', 'none', undefined] as const) {
+    const { reached, ask } = proxy({ environments: ['market/prod'] }, fake(madeFor));
+    const answer = await ask('/api/x/y');
+    assert.equal(answer.status, 404, String(madeFor));
+    assert.match(answer.body, /api does not serve market\/dev/);
+    assert.equal(reached.length, 0, String(madeFor));
+  }
+  // Served where it is scoped: the same stable URL, the vault's call finding nothing by name, goes on.
+  const served = proxy({ environments: ['market/dev'] }, fake('none'));
+  assert.equal((await served.ask('/api/x/y')).status, 200);
+  assert.equal(served.reached[0]!.url.pathname, '/v1/x/y');
+});
+
+test('a presigned URL is refused for a path a request would be, at every decoding depth, before its allow list', async () => {
+  const s3 = sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' });
+  const { ask } = proxy({ upstream: 'https://s3.eu-west-3.amazonaws.com', inject: s3, allow: [{ path: '/bucket/public/**' }] });
+  const presign = (path: string) => ask('/market/dev', { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 'api', path } }) });
+  assert.equal((await presign('/bucket/public/k')).status, 200);
+  for (const path of ['/bucket/public/%252e%252e/private/k', '/bucket/public/..;/private/k', '/bucket/public/..%20/private/k', '/bucket/public/%00/k', '/bucket/public/a%252fb/k']) {
+    const answer = await presign(path);
+    assert.equal(answer.status, 400, path);
+    assert.match(answer.body, /may not climb out/, path);
+  }
+  assert.equal((await presign('/bucket/private/k')).status, 403);
+  // A segment of `;` parameters alone, which `*` would count and Tomcat would drop.
+  assert.equal((await presign('/bucket/public/;/k')).status, 400);
+});
+
+test('a segment of ; parameters alone is refused where an entry names a path; a list of methods alone takes // and ;', async () => {
+  const { reached, ask } = proxy({ allow: [{ path: '/companies/*/documents' }, { path: '/kyc' }] });
+  for (const path of ['/companies/;/documents', '/companies/;x/documents', '/companies/%3Bx/documents', '/companies/%253Bx/documents', '/kyc/;']) {
+    const answer = await ask(`/market/dev/api${path}`);
+    assert.equal(answer.status, 400, path);
+    assert.match(answer.body, /an empty segment, \/\/ or one of ; parameters alone/, path);
+  }
+  assert.equal((await ask('/market/dev/api/companies/a;b/documents')).status, 200, 'a segment with bytes before its parameters is one');
+  assert.equal(reached.length, 1);
+  const methods = proxy({ methods: ['GET'] });
+  for (const path of ['/bucket//key', '/bucket/;/key']) assert.equal((await methods.ask(`/market/dev/api${path}`)).status, 200, path);
+  assert.equal((await methods.ask('/market/dev/api/bucket//key', { method: 'PUT' })).status, 405);
+});
+
+test('an empty allow list, or paths: [], takes nothing, and says so; methods: [] takes no method, and says so', async () => {
+  for (const credential of [{ allow: [] }, { paths: [] }]) {
+    const answer = await proxy(credential).ask('/market/dev/api/a');
+    assert.equal(answer.status, 403);
+    assert.match(answer.body, /api's allow list is empty: it takes no request/);
+  }
+  const none = await proxy({ methods: [] }).ask('/market/dev/api/a');
+  assert.equal(none.status, 405);
+  assert.match(none.body, /api takes no method/);
+});
+
+test('a * in code\'s paths is itself, as before 0.16, with a warning: never a glob, and no path of old fails to start', async (t) => {
+  const warned = t.mock.method(console, 'warn', () => undefined);
+  const { ask } = proxy({ paths: ['/files/*', '/a/**/b'] });
+  assert.match(String(warned.mock.calls[0]?.arguments[0]), /api's path \/files\/\* takes \* as itself, as before 0\.16/);
+  assert.equal((await ask('/market/dev/api/files/*/x')).status, 200);
+  assert.equal((await ask('/market/dev/api/files/%2A')).status, 200);
+  assert.equal((await ask('/market/dev/api/files/anything')).status, 403);
+  assert.equal((await ask('/market/dev/api/a/**/b/c')).status, 200);
+  assert.equal((await ask('/market/dev/api/a/x/b')).status, 403);
+});
+
+test('a header a later step drops is still redacted, and the request goes: host before SigV4, content-md5 before a form field', async () => {
+  const s3 = sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' });
+  const signed = proxy({ upstream: 'https://s3.eu-west-3.amazonaws.com', inject: [header('x-host', 'h-{HOST_KEY}'), header('host', '{HOST_KEY}'), s3] });
+  assert.equal((await signed.ask('/market/dev/api/bucket/k')).status, 200);
+  const filled = proxy({ inject: [header('content-md5', 'm-{MD5_KEY}'), form('secret', '{KEY}')] });
+  const body = new URLSearchParams({ secret: HANDLE, other: 'x' }).toString();
+  const answer = await filled.ask('/market/dev/api/verify', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+  assert.equal(answer.status, 200);
+  assert.equal(filled.reached[0]!.headers.get('content-md5'), null, 'the body changed: its digest is dropped');
+});

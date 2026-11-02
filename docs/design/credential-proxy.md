@@ -466,12 +466,19 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   non-empty segment, matched exactly (`/companies/*/documents`); `**`,
   last, is the rest, none included (`/models/**` takes `/models`). No
   regexes, no partial-segment globs (`doc*`). A pattern is decoded once,
-  as it is read. Where there is a list, an empty segment but a trailing
-  one (`//`) is refused. A request no entry takes is a 405 when no entry
-  takes its method, on its path or any, and a 403 otherwise. `methods` and
-  `paths`, as before, are one entry per path, and keep what they meant:
-  `/` takes every path, `/companies/` what is below `/companies` and not
-  it, and `methods: []` takes nothing. A path of theirs that decodes to a
+  as it is read. Where an entry names a path, an empty segment but a
+  trailing one (`//`) is refused, and so is one of `;` parameters alone
+  (`;x`, `%3Bx`), which a server that drops them, as Tomcat and Spring do,
+  reads as empty: `*` would count it, and the server not. A list of
+  methods alone counts no segment, and takes `//` as S3's keys hold it. A
+  request no entry takes is a 405 when no entry takes its method, on its
+  path or any, and a 403 otherwise; an empty list takes nothing, a 403.
+  `methods` and `paths`, as before, are one entry per path, and keep what
+  they meant: `/` takes every path, `/companies/` what is below
+  `/companies` and not it, a `*` is itself, never a glob (with a warning
+  at startup), and `methods: []` takes nothing. A presigned URL is held to
+  the same list, after the same refusals as a request (no segment that
+  decodes, however often, to a slash, a control byte or a dot segment). A path of theirs that decodes to a
   dot segment, a slash or nothing matched nothing before, and still does,
   with a warning at startup.
 - **`environments`**, on any credential, tunnel, signer or verifier: the
