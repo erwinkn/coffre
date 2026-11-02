@@ -1741,7 +1741,43 @@ before PR C. Where C2a settles what this section left open:
   the place reading where the handle's kept made-for list names `<a>/<b>`,
   else the stable one. The place reading's copy is keyed by place and
   route, not by handle, so another handle's copy says nothing of this
-  URL; with no list kept, the use's answer decides.
+  URL; with no list kept, the use's answer decides. That holds for a URL
+  with the place reading alone too (`/use/123/dev/openai/files`, `123`
+  being no route name; review r2 of #467): a list is kept only once the
+  vault checked the handle, so a stranger's handle-shaped token is the
+  use's 401, never the copy's 403 telling them the route and its allow
+  list.
+- **A service binding's call** carries no handle and is served no UI route
+  until C2b: the proxy tells it by `PluginContext.binding`, before it
+  looks at any copy, since a handle's kept values would otherwise answer
+  a binding's request that carries the same handle, skipping the
+  binding's own checks (review r2 of #467). It gets code's answer, 404 for
+  a name code lacks.
+- **An Owner's upstream on Node** (section 5, "No private targets"; review
+  r2 of #467). A UI route's request goes out through the runtime's
+  `publicFetch` (`PluginContext.publicFetch`, from the platform's
+  transport): on Node, undici's fetch on an `Agent` whose connections
+  resolve the name through `publicLookup` as they open, so
+  `internal.acme.example` resolving to `10.0.0.5` is refused before the
+  SYN, however it resolved at save; on Workers, the platform's fetch. A
+  runtime without one (a hand-built one) answers 503 before the use, so no
+  use is logged for a request that is never sent. `insecureUpstreams`
+  keeps the global fetch, for local fakes. Code's routes are unchanged:
+  their upstream is the deployment's, reviewed and deployed.
+  `@coffre/server` depends on `undici` (7.30.1, Node 24's own) for it;
+  only the Node entry imports it.
+- **A project named as code's credential is.** With code's `maps` and an
+  environment `maps/dev`, `/use/maps/dev/openai/models` from a handle made
+  for `maps/dev` is the place reading: its third segment is code's
+  credential if code has it, else the environment's UI route `openai`
+  (review r2 of #467; the opposite collision, a third segment code names,
+  was r1's).
+- **One key, one placeholder**, across code's and the UI's routes: two
+  that read `OPENAI_API_KEY` with different placeholders (`a_`, `b_`)
+  would give the app one value that one of them refuses. Startup refuses
+  this of code alone; the plan refuses it (409 `conflict`, naming both) of
+  the routes the environment serves, code's and its UI's together (review
+  r2 of #467).
 - **Refusals.** A key the item's editor no longer routes is 403
   `route_not_cleared`, the vault's reason naming them: the caller may
   read the key, so D153's single 404 hides nothing here. A refusal of the

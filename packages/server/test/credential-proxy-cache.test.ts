@@ -22,6 +22,7 @@ function coffre() {
   const held = { values: { API_KEY: '' } as Record<string, string>, expiresAt: LATER };
   const context: PluginContext = {
     publicUrl: PUBLIC,
+    binding: false,
     api: () => assert.fail('api'),
     exchange: () => assert.fail('exchange'),
     signOut: () => assert.fail('signOut'),

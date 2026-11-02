@@ -60,6 +60,8 @@ export type CoffreRuntime = {
    * where no key-bound session is taken.
    */
   gates?: Gates;
+  /** A request to a host an Owner typed, a UI route's upstream: the transport's (`WorkloadTransport.fetch`); absent, none is sent. */
+  publicFetch?: WorkloadTransport['fetch'];
 };
 
 /**
@@ -132,6 +134,7 @@ export function createRuntime(
     rotateAfterDays: config.rotateAfterDays,
     plugins: config.plugins,
     gates,
+    ...(transport.fetch === undefined ? {} : { publicFetch: transport.fetch }),
   };
 }
 

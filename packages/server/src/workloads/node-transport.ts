@@ -3,6 +3,8 @@ import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { LookupFunction } from 'node:net';
 
+import { Agent, fetch as undiciFetch } from 'undici';
+
 import { isPublicAddress } from './addresses.ts';
 import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, type WorkloadTransport } from './transport.ts';
 
@@ -17,6 +19,7 @@ import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, ty
  */
 export function nodeTransport(): WorkloadTransport {
   return {
+    fetch: publicFetch(),
     json: (url) =>
       new Promise((resolve, reject) => {
         const loopback = url.protocol === 'http:';
@@ -39,6 +42,20 @@ export function nodeTransport(): WorkloadTransport {
         request.end();
       }),
   };
+}
+
+/**
+ * A fetch that dials only public addresses, for a host an Owner typed (a UI route's upstream; docs/design/proxy-ui.md,
+ * section 5): undici's, whose connections resolve their name through `lookup` as they open, so a name that resolves to
+ * `10.0.0.5` sends no byte, however it resolved a moment before, and a pooled connection is one to a checked address.
+ * TLS still checks the certificate against the name.
+ *
+ *   https://api.openai.com/v1/models, resolving to 162.159.140.245    sent
+ *   https://internal.acme.example/x, resolving to 10.0.0.5               refused before the SYN: ENOTPUBLIC
+ */
+export function publicFetch(lookup: LookupFunction = publicLookup): NonNullable<WorkloadTransport['fetch']> {
+  const dispatcher = new Agent({ connect: { lookup } });
+  return (url, init) => undiciFetch(url, { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher }) as unknown as Promise<Response>;
 }
 
 /** `dns.lookup`, refusing a name with any answer that is not public. */

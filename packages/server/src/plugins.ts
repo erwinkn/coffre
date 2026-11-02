@@ -77,6 +77,20 @@ export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;
 export type PluginContext = {
   publicUrl: string;
   /**
+   * Whether the request came through a Cloudflare service binding
+   * (`bindingRoute`): its service's call, carrying no handle, token or
+   * session, which `workload` answers for. Which service is coffre's to
+   * know, never the plugin's.
+   */
+  binding: boolean;
+  /**
+   * A request to a host an Owner typed in a web page, a UI route's upstream:
+   * on Node, one that dials only public addresses, whatever the name
+   * resolves to; on Workers, the platform's fetch. Absent, the plugin sends
+   * none (docs/design/proxy-ui.md, section 5).
+   */
+  publicFetch?: (url: URL, init: RequestInit) => Promise<Response>;
+  /**
    * The API as whoever `token` names, which the plugin read from its
    * request: a service, personal or CLI token with coffre's sign-in, Access's
    * assertion behind Cloudflare Access; never a cookie, which coffre alone
@@ -789,6 +803,8 @@ function pluginContext(
       }
     },
     publicUrl: runtime.publicUrl,
+    binding: binding !== null,
+    ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),
     workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
     recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {

@@ -21,7 +21,7 @@ import { clientFor, LOG } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
-import { checkPlugins } from '../src/plugins.ts';
+import { bindingRoute, checkPlugins } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { credentialProxy, header, privateKey, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
@@ -88,10 +88,10 @@ useMcp(async () => {
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
-/** A save in market/dev's Proxy tab, on the seal it shows now, by `as`. */
-async function save(items: Record<string, ProxyDefinition | null>, as: CoffreClient = root): Promise<void> {
-  const page = await as.proxy.get('market/dev');
-  await as.proxy.save('market/dev', { seal: page.seal, items });
+/** A save in `path`'s Proxy tab, market/dev's by default, on the seal it shows now, by `as`. */
+async function save(items: Record<string, ProxyDefinition | null>, as: CoffreClient = root, path = 'market/dev'): Promise<void> {
+  const page = await as.proxy.get(path);
+  await as.proxy.save(path, { seal: page.seal, items });
 }
 
 /** A handle for DEV on `path`, market/dev by default, as `coffre run` makes one. */
@@ -362,4 +362,79 @@ test('a two-segment stable URL whose handle rides only in the body: the UI route
   const answer = await route('/use/login/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `grant_type=client_credentials&client_secret=${token}` });
   assert.equal(answer.status, 200, await answer.clone().text());
   assert.deepEqual([reached.at(-1)!.method, reached.at(-1)!.url], ['POST', '/login/token']);
+});
+
+test("a service binding's call is never served a handle's kept values: no UI route for it before C2b, the copy unread (review r2 of #467)", ON_015, async () => {
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
+  const before = reached.length;
+  // The same URL and handle through a binding, on the same isolate, within cacheSeconds: nothing sent.
+  const bound = await bindingRoute(new Request(`${ORIGIN}/use/market/dev/openai/models`, as(token)), runtime, 'token:svc')!;
+  assert.equal(bound.status, 404, await bound.clone().text());
+  assert.equal(reached.length, before);
+});
+
+test("a place copy's allow list refuses only a handle whose checked made-for list chose that place: a stranger's token is 401, never the copy's 403 (review r2 of #467)", ON_015, async () => {
+  // `123` can be no route's name, so `/use/123/dev/openai/…` has the place reading alone.
+  await root.projects.create('123');
+  await root.environments.create('123/dev');
+  await root.secrets.set('123/dev', { OPENAI_API_KEY: OPENAI });
+  await root.access.set(`user:${DEV}`, { market: 'developer', 123: 'developer' });
+  await save({ openai: uiRoute('openai', '/openai') }, root, '123/dev');
+  const token = await handle('123/dev');
+  assert.equal((await route('/use/123/dev/openai/models', as(token))).status, 200);
+  assert.equal((await route('/use/123/dev/openai/files', as(token))).status, 403);
+  const stranger = await route('/use/123/dev/openai/files', as(`coffre_use_${'A'.repeat(43)}`));
+  assert.equal(stranger.status, 401, await stranger.clone().text());
+});
+
+for (const cacheSeconds of [60, 0]) {
+  test(`a project named as code's credential is: its environment's UI route at the place URL, cacheSeconds ${cacheSeconds} (review r2 of #467)`, ON_015, async () => {
+    deploy(proxyOf({ cacheSeconds }));
+    await root.projects.create('maps');
+    await root.environments.create('maps/dev');
+    await root.secrets.set('maps/dev', { OPENAI_API_KEY: OPENAI });
+    await root.access.set(`user:${DEV}`, { market: 'developer', maps: 'developer' });
+    await save({ openai: uiRoute('openai', '/openai') }, root, 'maps/dev');
+    const token = await handle('maps/dev');
+    const plan = await (await route('/use/maps/dev', as(token))).json() as { credentials: Record<string, string> };
+    assert.equal(plan.credentials.openai, `${ORIGIN}/use/maps/dev/openai`);
+    const answer = await route('/use/maps/dev/openai/models', as(token));
+    assert.equal(answer.status, 200, await answer.clone().text());
+    assert.equal(reached.at(-1)!.url, '/openai/models');
+    assert.equal(reached.at(-1)!.headers.authorization, `Bearer ${OPENAI}`);
+  });
+}
+
+test('two routes reading one key with different placeholders: the plan refuses (409), as startup refuses it of code (review r2 of #467)', ON_015, async () => {
+  const shaped = (name: string, prefix: string): ProxyDefinition => ({ ...uiRoute(name, `/${name}`), placeholder: { kind: 'prefix', prefix } } as ProxyDefinition);
+  await save({ alpha: shaped('alpha', 'a_'), beta: shaped('beta', 'b_') });
+  const planned = await route('/use/market/dev', as(await handle()));
+  assert.equal(planned.status, 409, await planned.clone().text());
+  assert.match((await planned.json() as { message: string }).message, /alpha and beta read OPENAI_API_KEY with different placeholders/);
+});
+
+test("a UI route's upstream goes out through the runtime's public fetch, and a runtime without one sends nothing (review r2 of #467)", ON_015, async () => {
+  deploy(proxyOf({ insecureUpstreams: false, cacheSeconds: 0 }, false));
+  await save({ openai: { ...uiRoute('openai', ''), upstream: 'https://api.openai.example/v1' } as ProxyDefinition });
+  const token = await handle();
+  const sent: { url: string; authorization: string | null }[] = [];
+  const kept = runtime.publicFetch;
+  try {
+    runtime.publicFetch = async (url, init) => {
+      sent.push({ url: url.href, authorization: new Headers(init.headers).get('authorization') });
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    };
+    const answer = await route('/use/openai/models', as(token));
+    assert.equal(answer.status, 200, await answer.clone().text());
+    assert.deepEqual(sent, [{ url: 'https://api.openai.example/v1/models', authorization: `Bearer ${OPENAI}` }]);
+    delete runtime.publicFetch;
+    const none = await route('/use/openai/models', as(token));
+    assert.equal(none.status, 503, await none.clone().text());
+    assert.equal(sent.length, 1);
+  } finally {
+    if (kept === undefined) delete runtime.publicFetch;
+    else runtime.publicFetch = kept;
+  }
 });

@@ -12,6 +12,12 @@
 export type WorkloadTransport = {
   /** GET a JSON document, or throw `FetchRefused` saying why. */
   json(url: URL): Promise<unknown>;
+  /**
+   * A request to a host an Owner typed in a web page, a UI route's upstream (docs/design/proxy-ui.md, section 5): on
+   * Node, one that dials only public addresses (`publicFetch`); on Workers, the platform's, whose network reaches no
+   * private one. Absent, such a request is refused (`insecureUpstreams` aside), never sent through the global fetch.
+   */
+  fetch?(url: URL, init: RequestInit): Promise<Response>;
 };
 
 /** Everything, from DNS to the last byte. */
@@ -42,6 +48,7 @@ export class FetchRefused extends Error {
 /** The standard `fetch`, as on Workers. */
 export function fetchTransport(fetchImpl: typeof fetch = fetch): WorkloadTransport {
   return {
+    fetch: (url, init) => fetchImpl(url, init),
     async json(url) {
       let response: Response;
       try {

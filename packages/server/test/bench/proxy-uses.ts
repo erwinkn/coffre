@@ -114,13 +114,16 @@ let current = null as Phase | null;
 let running = true;
 const inflight = new Set<Promise<void>>();
 let next = 0;
+// Each request's own number, however its handle was picked: a UI route's path differs every time (review r2 of #467).
+let requests = 0;
 
 const use = async (phase: Phase, due: number) => {
+  const nth = requests++;
   // At random under a map smaller than the handles: in turn, each would be the one just dropped.
   const handle = load.handles[load.names === undefined ? next++ % load.handles.length : Math.floor(Math.random() * load.handles.length)]!;
   try {
     // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
-    const rest = load.ui === undefined ? 'v1/thing' : `v1/thing/${next}`;
+    const rest = load.ui === undefined ? 'v1/thing' : `v1/thing/${nth}`;
     const url = load.stable ? `${load.origin}/use/api/${rest}` : `${load.origin}/use/${load.path}/api/${rest}`;
     const response = await answer(new Request(url, { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
