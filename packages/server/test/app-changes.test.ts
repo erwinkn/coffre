@@ -11,6 +11,7 @@ import type { CoffreClient } from '@coffre/client';
 import { issuedGrant, sealedSessionScope, storedScope } from '@coffre/core/access';
 import { defineSignin, github, type BindingPolicy } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
+import { logObject } from '@coffre/db/log';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
@@ -208,7 +209,8 @@ test("a credential 0.14 made, which the log never held, is revoked and signed ou
   assert.ok(session.ok);
   // As 0.14 left them: no seal, no change.
   await db.owner.update(credentials).set({ seal: null }).where(inArray(credentials.id, [issued.id, session.credential.id]));
-  await db.owner.delete(logChanges);
+  // Their changes gone, and theirs alone: the members' stay, which the vault decides on (T179 PR 2).
+  await db.owner.delete(logChanges).where(inArray(logChanges.object, [issued.id, session.credential.id].map((id) => logObject('credential', id))));
   await root.tokens.revoke(`token:${SERVICE}`, issued.id);
   await signin.signOut(session.credential.token, meta());
   const ended = await db.owner.select({ id: credentials.id, revokedAt: credentials.revokedAt }).from(credentials).where(inArray(credentials.id, [issued.id, session.credential.id]));

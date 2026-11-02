@@ -369,6 +369,30 @@ its trees verified, a token's use serving the value it served at the
 backup, a change sealed on top; the wrong vault key refused; and a backup
 from before a rotation restored under the new key.
 
+### A member refused as tampered
+
+On 0.15's log, a member whose row is not the one the log last sealed
+(written around the vault, or put back from before a change) is refused
+everything, as tampered: no use, no change, and no start over, a
+deployment's named Owner included (T179 PR 2). The reseal that would make
+such a row the log's again is not built yet (the 0.15 plan's PR 9). Until
+it is, there are two ways back:
+
+- **Undo the write**, when it was to the member's own rows. Put their
+  `vault_members` row and their `vault_grants` rows back exactly as the
+  log last sealed them, from any backup taken after their newest change
+  (0.15's log names it: the newest `log_changes` entry of their object).
+  The vault checks the row against that change's seal, so the copy must
+  be byte for byte; deleting the row does not help, since the change
+  still names it. When the write moved an environment one of their grants
+  is on to another project (its `project_id`), the member's rows are
+  untouched and the environment's row is the one to put back.
+- **Restore the instance** from such a backup, as above. This is the only
+  way back when the write was to 0.15's log itself (its member's newest
+  `log_changes` entry edited or deleted) or was a genuine 0.14 access
+  entry about them past the one that change accounts for (an old
+  isolate's, after the deploy).
+
 ## If the vault key is wrong
 
 The vault's configuration names the vault key `kek`, and the keys it

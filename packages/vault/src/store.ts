@@ -9,7 +9,7 @@ import { entryColumns, numbersIn, strictly, withinBytes, type ChangeNumbers } fr
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
-import { CUTOVER_OBJECT } from './log-entry.ts';
+import { CUTOVER_OBJECT, type ChangeRow } from './log-entry.ts';
 import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
@@ -407,6 +407,90 @@ export function newestSealsQuery(refs: readonly Ref[]): SQL {
   const keys = JSON.stringify([...new Set(refs.map((ref) => objectKey(ref)))]);
   return sql`SELECT c.object, c.seal FROM json_each(${keys}) k
     JOIN log_changes c ON c.object = k.value AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.value)`;
+}
+
+/**
+ * A member's row as 0.15's log holds it to (T179 PR 2): the row's own
+ * seal, and its object's newest change, whole, its MAC to check (`row`),
+ * with the 0.14 access entry that change accounts for (`old`,
+ * `Changes.cite`), or null for none. `seal` is null for a member with no
+ * row, or a row the log never sealed.
+ */
+export type MemberLog = {
+  seal: Buffer | null;
+  newest: { seal: Buffer | null; old: bigint | null; row: Omit<ChangeRow, 'number'> } | null;
+  /** Read by `memberLogs` alone (a snapshot has its own, `newestAccess`): the vault's newest allowed access entry about the member, unchecked. */
+  access?: bigint | null;
+};
+
+/** The columns `memberLogs` reads, as the drivers answer them: the newest change's as `log_changes` names them. */
+export type MemberLogColumns = {
+  seal: Buffer | Uint8Array | null; number: string | number | bigint | null;
+  at: string | number | bigint | null; request_id: string | null; object: string | null; actor: string | null; payload: string | null;
+  newest: Buffer | Uint8Array | null; mac: Buffer | Uint8Array | null;
+};
+
+/** A member's `MemberLog` from its columns: `newest` from the change's number, which only a change has; its `old` from its payload. */
+export function memberLogOf(row: MemberLogColumns): MemberLog {
+  if (row.number === null) return { seal: bytes(row.seal), newest: null };
+  const payload = row.payload ?? '';
+  let old: bigint | null = null;
+  try {
+    const named = (JSON.parse(payload) as { old?: unknown }).old;
+    if (typeof named === 'string' || typeof named === 'number') old = BigInt(named);
+  } catch {
+    // A payload no change of the vault's writes: its MAC fails it (`#onLog`).
+  }
+  return {
+    seal: bytes(row.seal),
+    newest: {
+      seal: bytes(row.newest),
+      old,
+      row: {
+        at: Number(row.at), requestId: String(row.request_id).toLowerCase(), object: String(row.object).toLowerCase(), actor: String(row.actor), payload,
+        seal: bytes(row.newest), mac: bytes(row.mac) ?? Buffer.alloc(0),
+      },
+    },
+  };
+}
+
+/**
+ * Each of `principals`' `MemberLog`, in one statement: the row by its key,
+ * its newest change by one probe of `log_changes_object_idx`, newest first,
+ * and its newest access entry by one probe, whatever the logs' length
+ * (R48). A principal asked has an entry whether or not it has a row.
+ */
+export async function memberLogs(db: Queryable, principals: readonly string[]): Promise<Map<string, MemberLog>> {
+  if (principals.length === 0) return new Map();
+  const rows = await rowsOf<MemberLogColumns & { principal: string; access: string | number | bigint | null }>(db, engineOf(db) === 'postgres' ? memberLogsPostgres(principals) : memberLogsSqlite(principals));
+  return new Map(rows.map((row) => [row.principal, { ...memberLogOf(row), access: row.access == null ? null : BigInt(String(row.access)) }]));
+}
+
+/** The vault's newest allowed access entry about principal `p`, unchecked: one probe, as a use's (`m_access`, 0053). */
+function newestAccessSeq(p: SQL, actions: SQL): SQL {
+  return sql`(SELECT a.seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${p} AND a.decision = 'allow' AND a.action IN ${actions} ORDER BY a.seq DESC LIMIT 1)`;
+}
+
+function memberLogsPostgres(principals: readonly string[]): SQL {
+  const asked = sql`unnest(${sql.param([...principals])}::text[])`;
+  const actions = sql`(SELECT unnest(${sql.param([...ACCESS_ACTIONS])}::text[]))`;
+  return sql`SELECT p.principal, m.seal, l.number, l.at, l.request_id::text AS request_id, l.object::text AS object, l.actor, l.payload, l.seal AS newest, l.mac,
+      ${newestAccessSeq(sql`p.principal`, actions)} AS access
+    FROM ${asked} AS p (principal)
+    LEFT JOIN vault_members m ON m.principal = p.principal
+    LEFT JOIN LATERAL (
+      SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', p.principal) ORDER BY x.number DESC LIMIT 1
+    ) l ON true`;
+}
+
+/** SQLite has no `log_object`: each member's object key, as the vault computes it (`objectKey`), beside its principal. */
+function memberLogsSqlite(principals: readonly string[]): SQL {
+  const pairs = JSON.stringify(principals.map((principal) => ({ p: principal, k: objectKey({ kind: 'principal', id: principal }) })));
+  const actions = sql`(SELECT value FROM json_each(${JSON.stringify(ACCESS_ACTIONS)}))`;
+  return sql`SELECT a.p AS principal, m.seal, c.number, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac, ${newestAccessSeq(sql`a.p`, actions)} AS access
+    FROM (SELECT json_extract(value, '$.p') AS p, json_extract(value, '$.k') AS k FROM json_each(${pairs})) a
+    LEFT JOIN vault_members m ON m.principal = a.p
+    LEFT JOIN log_changes c ON c.object = a.k AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = a.k)`;
 }
 
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {

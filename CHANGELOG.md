@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **The vault decides about a member from 0.15's log, not 0.14's (T179
+  PR 2).** Once the cutover is written, a decision checks a member's row
+  as a use does: the row's seal is the vault's over it and its newest
+  change's, and 0.14's log holds no genuine access entry about them past
+  the one that change accounts for. It also checks that change's MAC,
+  which a use does not check yet (T190). It reads that with the decision's own
+  statement, where it used to walk back through 0.14's access entries a
+  page at a time, which one statement cannot do. No route makes one more
+  round trip. A member whose row fails is no longer started over under
+  0.15's log, a deployment's named Owner included: the start over wrote a
+  row the log could not seal. They stay refused, holding nothing, as 0.15
+  already did for every other change to them. No reseal ships yet (the
+  0.15 plan's PR 9), so until one does an operator recovers such a member
+  by undoing the write (their `vault_members` and `vault_grants` rows put
+  back as the log last sealed them, from a backup taken since their last
+  change) or by restoring the whole instance (`docs/restore.md`, "A member
+  refused as tampered"). A tampered service account a token is issued for
+  is refused as tampered, where it was `gone`. A member holding a grant on
+  an environment whose row a writer re-parented to another project is
+  refused whole, by decisions as by uses, where decisions used to keep
+  their other grants: the grant's project is part of what the member's
+  seal covers. Putting the environment's row back recovers them all.
+
 - **The vault uses a UI definition's keys, as its route (T186, PR C1).**
   `Vault.useRoute` finds a route, signer, verifier or tunnel written in the
   UI by its name at the place (a handle's URL read the place way or the

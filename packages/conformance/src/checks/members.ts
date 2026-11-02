@@ -121,6 +121,7 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
   const [login] = await using(deployment.vaultRuntime(), (sql) => sql.query<{ name: string }>('SELECT current_user AS name'));
   const person = await member(deployment, people, 'seal-race');
   const { admin } = people;
+  let forged: string | undefined;
   try {
     await using(deployment.database(), (holder) => using(deployment.database(), async (sql) => {
       const [place] = await query<{ id: string }>(sql, `SELECT e.id FROM environments e JOIN projects p ON p.id = e.project_id
@@ -143,6 +144,7 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
         }, 10);
         await query(sql, `INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by)
           VALUES ($1, $2, 'viewer', $3, $4)`, [person.member, place.id, Date.now(), person.member]);
+        forged = place.id;
       } finally {
         await holder.exec('ROLLBACK');
         if (pending !== undefined) await pending;
@@ -160,9 +162,14 @@ export async function sealingRace(deployment: Deployment, people: People): Promi
       expect(response.status === 401 && body.error === 'unauthenticated', 'the forged grant let its member read', body);
     }));
   } finally {
-    // Removal recovers this disposable member even if a broken build sealed the forged grant.
+    // Under 0.15's log a tampered member is not started over until a reseal makes its row the
+    // log's again, so the forgery is taken back first, as memberTampering restores its rows.
+    if (forged !== undefined) {
+      await using(deployment.database(), (sql) => query(sql, `DELETE FROM vault_grants
+        WHERE principal = $1 AND environment_id = $2`, [person.member, forged]));
+    }
     await admin.api.members.remove(person.member);
   }
   expect((await admin.api.audit.verify()).ok, 'the log did not verify after recovering the sealing-race member');
-  return 'a grant inserted while the vault waited on the head was refused as tampered and logged; removal recovered the member';
+  return 'a grant inserted while the vault waited on the head was refused as tampered and logged; taking it back and removing the member recovered';
 }

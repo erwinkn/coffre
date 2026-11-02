@@ -72,7 +72,21 @@ export function snapshotQuery(asked: Asked): SQL {
           ORDER BY seq DESC LIMIT 1
         ) e
       ),
-      'policy', (SELECT ${ENTRY} FROM policy e),
+      'policy', (SELECT ${ENTRY} FROM policy e),${seals
+        ? sql`
+      -- What 0.15's log holds each asked member's row to (T179 PR 2, \`memberLogs\`): the row's seal, and its object's newest
+      -- change, whole, whose MAC the vault checks and whose payload names the 0.14 entry it accounts for. One probe each.
+      'memberLogs', (
+        SELECT coalesce(json_agg(json_build_object(
+          'principal', asked.principal, 'seal', encode(m.seal, 'hex'), 'number', l.number::text, 'at', l.at::text, 'requestId', l.request_id,
+          'object', l.object, 'actor', l.actor, 'payload', l.payload, 'newest', encode(l.seal, 'hex'), 'mac', encode(l.mac, 'hex'))), '[]')
+        FROM unnest(${principals}) AS asked (principal)
+        LEFT JOIN vault_members m ON m.principal = asked.principal
+        LEFT JOIN LATERAL (
+          SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', asked.principal) ORDER BY x.number DESC LIMIT 1
+        ) l ON true
+      ),`
+        : sql``}
       'settings', ${asked.settings === true
         ? sql`(SELECT ${ENTRY} FROM audit_log e WHERE author = 'vault' AND action = 'settings.change' AND decision = 'allow' ORDER BY seq DESC LIMIT 1)`
         : sql`NULL`},
