@@ -725,7 +725,9 @@ NewChangeLock(h) ==
 \* fence advanced. Without, 0.14's MAC no longer holds over the row. One that writes no 0.14 entry
 \* (EntryLess) writes the app's row under the app's MAC, which 0.14's use reads again under the
 \* head: its fence moves, its entry does not. A member that fails its check (MemberHolds) is refused,
-\* tampered, and nothing written (`#standing`). The commit lets the locks go.
+\* tampered, and nothing written (`#standing`); with one value for content this branch is stated,
+\* not proved (removing it breaks no invariant), and the vault's tests hold it. The commit lets the
+\* locks go.
 NewChangeRun(h) ==
     /\ nc[h].pc = "locked"
     /\ IF Content(row) /= nc[h].read

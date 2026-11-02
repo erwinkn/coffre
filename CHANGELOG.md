@@ -6,7 +6,8 @@
   PR 2).** Once the cutover is written, a decision checks a member's row
   as a use does: the row's seal is the vault's over it and its newest
   change's, and 0.14's log holds no genuine access entry about them past
-  the one that change accounts for. It reads that with the decision's own
+  the one that change accounts for. It also checks that change's MAC,
+  which a use does not check yet (T190). It reads that with the decision's own
   statement, where it used to walk back through 0.14's access entries a
   page at a time, which one statement cannot do. No route makes one more
   round trip. A member whose row fails is no longer started over under

@@ -1788,11 +1788,19 @@ The cutover from 0.14 (the plan's PR 9).
 - a 0.15 use and a 0.15 change, both checking the member (MemberHolds: the
   row's seal its object's and its newest change's, and UsesSeeOldWrites'
   Accounted); a change of a member that fails it is refused and writes
-  nothing. The vault's own 0.15 decisions weigh a member by this check, not
+  nothing. That refusal is stated, not proved: the content is one value,
+  so a change that kept a tampered member's other grants looks like one
+  that wrote them anew, and removing the branch breaks no invariant; the
+  vault's tests hold it (`vault.test.ts`, the 0.15 start-over and refused
+  cases). The vault's own 0.15 decisions weigh a member by this check, not
   by 0.14's walk back through its access entries (T179 PR 2, vault.ts's
   `#onLog`). Decisions read the row, its seals and its access in one Sync
   under the row's lock; reads (`#read`, `#issuerRead`, `#sweep`) in one
-  snapshot, as NewUseRun reads them together. Either only removes
+  snapshot, as NewUseRun reads them together. `#anOwner` (another Owner,
+  for the last-Owner check and `#declare`) reads that Owner's row, grants
+  and log in three statements under the head but not the row's lock: a
+  vault write to it needs the head, and a write around the vault cannot
+  forge a seal and MAC that pass. Either only removes
   interleavings from the use's, so the use's invariants and removals cover
   them, with no action of their own. The model's newest seal is always the
   vault's: no action edits a 0.15 entry in place. The code's decisions check

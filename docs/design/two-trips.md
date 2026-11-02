@@ -681,7 +681,8 @@ Each with what the key write and the first member add then cost:
    compatibility step above), so that one statement can read what a
    decision needs. No route's cost moves. Built: `#onLog` in vault.ts
    checks a member as a use does, its row's seal, its newest change's and
-   the 0.14 entries that change accounts for (`memberLogs`, read with the
+   the 0.14 entries that change accounts for, and that change's MAC too,
+   which a use does not check yet (T190) (`memberLogs`, read with the
    decision's snapshot); a tampered member is no longer started over under
    0.15's log, which could not seal the row it writes (a reseal does, plan
    PR 9).
