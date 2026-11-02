@@ -34,7 +34,7 @@ import { requestsUnique } from './store.ts';
  * Across a rotation of the vault's signing key (T168, formal/Rotation.tla):
  * the newest pair may be under a key the vault replaced while the log moves
  * on from it, never at or past that key's rotation (RotationProbed), nor
- * past a pair held outside under the current key (AnchorKeyHeld); above
+ * at or past a pair held outside under the current key (AnchorKeyHeld); above
  * the newest pair, a replaced key's entry counts below its rotation, or
  * while there is none yet and the newest pair is under it (PendingAccepted,
  * BoundaryChecked, KeyringBound: keyring.ts), whichever key the newest
@@ -111,7 +111,7 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
 /**
  * The key the newest pair is under, held to the rotations (T168; keyring.ts,
  * the rule every reader holds to): a key the vault replaced is taken only
- * below its own rotation (RotationProbed), and never above a pair held
+ * below its own rotation (RotationProbed), and never at or above a pair held
  * outside under the current key (AnchorKeyHeld); and which keys vouch for an
  * entry above it, each previous one below its own rotation whatever key the
  * newest pair is under (KeyringBound: a tick seals its window in parts). The
@@ -137,8 +137,10 @@ async function underKeys(
     if (newest.upto >= retired) problems.push(`checkpoint ${newest.upto}: under ${under.origin}, at or past the rotation that retired it (${retired})`);
     for (const notes of anchors) {
       // The held pair's own place, from the pair its signatures open: one not under the current key is no anchor here.
+      // At its very place too, as the signer refuses it: the walk takes a pair with the held one's heads, time and floor
+      // for that pair, whichever key signed it (Muse's review r7 of #444).
       const at = (await openPair(notes, keys.current.verifiers))?.upto;
-      if (at !== undefined && at < newest.upto) problems.push(`checkpoint ${newest.upto}: under ${under.origin}, a replaced key, past the pair held outside under the current key (up to ${at})`);
+      if (at !== undefined && at <= newest.upto) problems.push(`checkpoint ${newest.upto}: under ${under.origin}, a replaced key, at or past the pair held outside under the current key (up to ${at})`);
     }
   }
   return {

@@ -39,9 +39,9 @@
 (* (NumberInRotation): an entry's MAC covers every column but the number, *)
 (* which a database writer can change. A previous key's pair is taken (at *)
 (* open, and by the verifier) only below its own rotation (RotationProbed)*)
-(* and never over a pair under the current key held outside               *)
-(* (AnchorKeyHeld), the key a pair is under being the one its signature   *)
-(* holds under, never a name it carries (SignerVerified).                 *)
+(* and never at or over a pair under the current key held                 *)
+(* outside (AnchorKeyHeld), the key a pair is under being the one         *)
+(* its signature holds under, never a name it carries (SignerVerified).   *)
 (*                                                                         *)
 (* The verifier (verifier.ts) checks the database's newest pair, the pair  *)
 (* held outside (the signer's memory) and every entry above the newest     *)
@@ -80,8 +80,8 @@
 (*   RowUnderPrevious    ... and the database's newest row;                *)
 (*   RotationProbed      a pair under a previous key is taken only below   *)
 (*                       that key's rotation entry;                        *)
-(*   AnchorKeyHeld       ... and never above a pair under the current key  *)
-(*                       held outside (the memory);                        *)
+(*   AnchorKeyHeld       ... and never at or above a pair under the        *)
+(*                       current key held outside (the memory);            *)
 (*   PendingAccepted     the verifier takes a rotation under way;          *)
 (*   KeyNeverBack        a signer whose key the log moved on from signs    *)
 (*                       nothing (a replaced key, once retired, cannot     *)
@@ -199,6 +199,10 @@ LogKey(h) == IF ChainRule
 Configured(k) == k = cfg.cur \/ k \in cfg.prev
 \* Whether the entries of a pair sealing up to u extend those of p: p's place and leaves are its prefix.
 Extends(sealed, u, p) == p.upto <= u /\ p.sealed = {e \in sealed : e.n <= p.upto}
+\* Whether two pairs at one place are one, as the code compares them (samePair, sameNotes): their heads, never the key
+\* that signed them. A pair Eve signs again under A, with the heads of the signer's own, is that pair to them (Muse's
+\* review r7 of #444).
+SameNotes(a, b) == a.upto = b.upto /\ a.sealed = b.sealed
 
 \* An entry a key vouches for (BoundaryChecked): the current key's always; a previous key's below `bound`, its rotation's
 \* number. The signer counts from the rotation it wrote or read at its open (`bound`), never from the database again.
@@ -219,11 +223,11 @@ KeyBound(a, k) ==
     THEN IF Counted(entries, a) # {} THEN RetiredAt(entries, a) ELSE IF k = a THEN Never ELSE 0
     ELSE IF k = a THEN RetiredAt(entries, a) ELSE 0
 
-\* A pair under a previous key, taken as the newest: below its own rotation (RotationProbed), and never above a pair
-\* under the current key held outside (AnchorKeyHeld).
+\* A pair under a previous key, taken as the newest: below its own rotation (RotationProbed), and never at or above a
+\* pair under the current key held outside (AnchorKeyHeld): at its very place too, which SameNotes cannot tell apart.
 PreviousTaken(r, held) ==
     /\ RotationProbed => r.upto < RetiredAt(entries, Under(r))
-    /\ AnchorKeyHeld => ~(held.key = cfg.cur /\ held.upto < r.upto)
+    /\ AnchorKeyHeld => ~(held.key = cfg.cur /\ held.upto <= r.upto)
 
 Down == [pc |-> "down", head |-> NoPair, next |-> NoPair, bound |-> Never]
 
@@ -300,7 +304,7 @@ Open ==
            \* The head it takes, or None when it refuses.
            head == IF ~mOpens \/ ~rOpens THEN NoPair
                    ELSE IF m = NoPair THEN r                                     \* no memory: the database's word
-                   ELSE IF m.upto = r.upto THEN (IF m = r THEN r ELSE NoPair)
+                   ELSE IF m.upto = r.upto THEN (IF SameNotes(m, r) THEN r ELSE NoPair)
                    ELSE IF m.upto > r.upto                                       \* memory ahead: the entries give it again
                         THEN (IF Extends(m.sealed, m.upto, r) /\ m.sealed \ r.sealed = {e \in entries : r.upto < e.n /\ e.n <= m.upto}
                               THEN m ELSE NoPair)
@@ -530,7 +534,7 @@ Verified ==
     /\ \/ k = cfg.cur
        \/ PendingAccepted /\ k \in cfg.prev /\ PreviousTaken(r, memory)
     \* The pair held outside: one it opens, a prefix of the newest, and that very pair at its place (verifyLog).
-    /\ memory = NoPair \/ (Configured(memory.key) /\ Extends(r.sealed, r.upto, memory) /\ (memory.upto = r.upto => memory = r))
+    /\ memory = NoPair \/ (Configured(memory.key) /\ Extends(r.sealed, r.upto, memory) /\ (memory.upto = r.upto => SameNotes(memory, r)))
     /\ \A e \in Above(r) : e.key = cfg.cur \/ (e.key \in cfg.prev /\ (BoundaryChecked => e.n < KeyBound(e.key, k)))
 
 -----------------------------------------------------------------------------

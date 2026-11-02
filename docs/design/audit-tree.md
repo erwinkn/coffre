@@ -495,8 +495,9 @@ and keeps the old one configured (`previousKeks`, `previousSigningKeys`).
 The vault's signing keys are then `[new, …previous]`, and the log's rule is
 R41's: a replaced key vouches only for what came before the rotation.
 - **The boundary is an entry.** At its first start under the new key, the
-  checkpointer finds the log under another (the `to` of the newest
-  rotation entry, else the key of its head) and writes the rotation: a
+  checkpointer finds the log under another (its own key once a rotation
+  into it counts, else the key of its head: a rotation planted into the
+  old key counts for nothing, below) and writes the rotation: a
   change of the log's own object `log_object('log', 'key')`, its payload
   naming both keys by origin and its own number, its MAC the new key's.
   One transaction: `log_rotate_number` takes the barrier's locks (the
@@ -583,7 +584,18 @@ R41's: a replaced key vouches only for what came before the rotation.
   that cursor among numbers below the rotation (a stretch listed again, or
   skipped, which the check of the reads names), or replace such a pair,
   with uses of her own, which `coffre verify log`'s walk names (it chains
-  every pair to the newest). Nothing at or past the rotation.
+  every pair to the newest). Nothing at or past the rotation, so long as
+  the database's newest pair is the vault's: a reader holds no pair
+  outside, and the projector keeps the bound it read at a run's start for
+  the whole run. So one who holds the old key, deletes the rotation and
+  signs the newest pair again under it, takes these readers back to before
+  the rotation (the old key pending, vouching on) until a check against a
+  pair held outside names it: the verifier's, at or past the signer's
+  pair under the new key, its very place included (AnchorKeyHeld; Muse's
+  review r7), and the signer's next start. A rotation landing mid-run
+  leaves the projector on the old bound for that run alone; the old key's
+  writes past it are refused (`superseded`), so only such a forger has
+  any there.
 - **Seals.** A use checks an object's seal under every key the vault holds,
   the replaced ones included, whatever the change's number: one who holds
   the old key and writes the database can still seal a row the use takes,

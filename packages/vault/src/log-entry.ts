@@ -43,9 +43,6 @@ export function logMacKey(seed: Uint8Array): LogMacKey {
   };
 }
 
-/** The tag a MAC names: its key's. */
-export const tagOf = (mac: Uint8Array): Buffer => Buffer.from(mac.subarray(0, TAG_BYTES));
-
 /** The MAC of a tree's columns: the key's tag, then the HMAC cut to what is left of 16 bytes. */
 const mac = (key: LogMacKey, tree: LogEntry['tree'], columns: readonly LeafValue[]) =>
   Buffer.concat([key.tag, createHmac('sha256', key.key).update(macData(tree, columns)).digest().subarray(0, MAC_BYTES - TAG_BYTES)]);

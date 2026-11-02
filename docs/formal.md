@@ -2030,7 +2030,7 @@ tag), so the database can tell them apart.
 | ... and the database's newest row (RowUnderPrevious) | `LogWorks`: after a restore (the memory reset), "not a pair signed by this log" |
 | a previous key vouches for an entry only below its rotation, in a tick (from the boundary the signer wrote or read at its open) and in the verifier (BoundaryChecked) | `SealedBelowBoundary`, `VerifiedSound`: Eve's entry under A past the rotation sealed, and passed |
 | a pair under a previous key is taken only below that key's rotation (RotationProbed) | `VerifiedSound`: Eve's pair under A over the rotation, before its first seal, passed |
-| ... and never above a pair under the current key held outside (AnchorKeyHeld) | `VerifiedSound`: the rotation's row deleted once sealed, Eve's pair under A above the memory's passed |
+| ... and never at or above a pair under the current key held outside (AnchorKeyHeld; at its very place too, which the code's comparison of pairs, by heads, cannot tell apart: Muse's review r7) | `VerifiedSound`: the rotation's row deleted once sealed, Eve's pair under A at or above the memory's passed |
 | the verifier takes the rotation under way: the newest pair under A while no rotation from A is at or below it (PendingAccepted) | `NoFalseAlarm`: every check alarms between the deploy and the rotation's first seal |
 | a signer whose key the log moved on from signs nothing, and the trigger refuses its rotation (KeyNeverBack + RetiredRefused, each covering the other) | `NoOldPairOverRotation`: a config rolled back to A, A signs pairs over its own rotation |
 | a rotation counts only at the number its payload names, under its MAC (NumberInRotation: `rotationOf`; the number taken first, `log_rotate_number`, then MAC'd) | `SealedBelowBoundary`, `VerifiedSound` (`RotationMove`): the sealed rotation moved up, the signer started again counts from there and seals Eve's entry under A between; the check passes it (Sol's review r1 of #444) |
@@ -2094,8 +2094,15 @@ rotation (the projector lists a stretch again, or skips one, which the
 check of the reads names), or replace a pair below the rotation the
 projector has yet to list, with uses of her own (`coffre verify log`'s
 walk, which chains every pair to the newest, names it). Nothing at or
-past the rotation. Tested in `packages/vault/test/reads-rotation.test.ts`
-and, for retention, `retention.test.ts`.
+past the rotation, so long as the database's newest pair is the vault's
+(Muse's review r7): these readers hold no pair outside, and the projector
+keeps a run's bound for the run, so a forger who deletes the rotation and
+signs the newest pair again under the old key takes them back to before
+it, until the verifier's check against the signer's pair (AnchorKeyHeld,
+at or past its place) or the signer's next start names it. Neither the
+projector against such a pair nor a rotation landing mid-run is modelled.
+Tested in `packages/vault/test/reads-rotation.test.ts` and, for
+retention, `retention.test.ts`.
 
 ## TLC
 

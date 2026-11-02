@@ -9,7 +9,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
 import { KekRegistry, LocalKekProvider, type KekProvider } from '@coffre/core/kek';
-import { decodePair, encodePair, splitNote, type PairNotes } from '@coffre/core/merkle';
+import { decodePair, encodePair, signPair, splitNote, type PairNotes } from '@coffre/core/merkle';
 import type { TreeVerification, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { sql } from 'drizzle-orm';
@@ -633,9 +633,37 @@ test('a pair the old key signs above the signer\'s first pair under the new key 
   await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${moved!.number}`);
   assert.ok(forger.pair.pair.upto > now.cp.pair.pair.upto);
   const check = await verify(now.vault);
-  assert.ok(check.problems.some((p) => p.includes('a replaced key, past the pair held outside under the current key')), check.problems.join('\n'));
+  assert.ok(check.problems.some((p) => p.includes('a replaced key, at or past the pair held outside under the current key')), check.problems.join('\n'));
   await assert.rejects(vaultUnder(rotation.after, w.memory), /a key the signer replaced, at or past the pair it remembers under its own/);
   assert.ok(newer.length > 0);
+});
+
+test('a pair the old key signs at the very place of the signer\'s pair under the new key, its heads, time and floor, is refused by the check as by the next start (AnchorKeyHeld, Muse\'s review r7)', async () => {
+  const rotation = ROTATIONS[0]!;
+  const w = await underOldKey(rotation.before);
+  await w.old.cp.close();
+  const now = await vaultUnder(rotation.after, w.memory);
+  // Its first call made (the cutover's seal, through its checkpointer) before that one closes (T169: closed for good).
+  clean(await verify(now.vault));
+  await now.cp.tick();
+  await now.cp.close();
+  const [moved] = await rotations();
+  const held = now.cp.pair.pair;
+  assert.ok(held.upto >= moved!.number);
+  // Someone who holds the old key and writes the database: the rotation's row gone, the newest row signed again under the
+  // old key, every number of it the same (the walk takes it for the held pair), and a use under the old key above it.
+  const [, previous] = resolveVaultConfig(rotation.after).signingKeys;
+  const oldKey = await logKey(previous!);
+  const forged = await signPair(oldKey.signers, held.upto, held.at, { changes: held.changes, uses: held.uses }, held.floor, held.prev);
+  assert.equal(signer(forged.notes), oldKey.origin);
+  await run(db.owner, sql`UPDATE log_checkpoints SET changes_note = ${forged.notes.changes}, uses_note = ${forged.notes.uses} WHERE upto = ${held.upto}`);
+  const planted = await plantUse(w.old.keys.mac);
+  assert.ok(planted > held.upto);
+  await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${moved!.number}`);
+  const check = await verify(now.vault);
+  assert.ok(!check.ok);
+  assert.ok(check.problems.includes(`checkpoint ${held.upto}: under ${oldKey.origin}, a replaced key, at or past the pair held outside under the current key (up to ${held.upto})`), check.problems.join('\n'));
+  await assert.rejects(vaultUnder(rotation.after, w.memory), /a key the signer replaced, at or past the pair it remembers under its own/);
 });
 
 test('a replaced key, back as the signing key, signs nothing: the rotation that retired it stands (KeyNeverBack)', async () => {
