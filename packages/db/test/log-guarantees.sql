@@ -83,7 +83,7 @@ BEGIN
 END
 $$;
 
--- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change, and 0051's
+-- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change, and 0052's
 -- app_change_strict, which raises where it answers null): the app runs them, and no other function of the log; the
 -- vault and the backup never run them. The vault's change_input_strict is the vault's alone, as change_input is.
 DO $$
