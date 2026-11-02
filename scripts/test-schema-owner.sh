@@ -99,44 +99,61 @@ SQL
 done
 
 # A member of the owner may migrate (a managed Postgres's admin login, say): a function it makes is its own, one it
-# replaces keeps its owner, and `use_credential` runs as its owner. Hand the member 0045's and 0051's helpers, as if it
-# had made them (the owner's grant moves with each), then replay 0057 as the member, which makes `use_covered` and
-# replaces `use_credential`: its owner must still execute every function the uses call, found from their bodies (T187).
+# replaces keeps its owner, and each use function runs as its owner. So the owner migrates up to 0056, the member the
+# rest: 0057 makes `use_covered` and replaces `use_credential` (T187), 0058 makes both again and `use_route` (T186 PR C),
+# while 0048's `use_batch`, 0055's `use_named_batch` and 0045's and 0051's helpers stay the owner's. Each use function's
+# owner must then execute every use function it calls, through those that run as their caller, read from their bodies.
 docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
 CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
 SQL
 psql_owner -d postgres -c "CREATE DATABASE member"
-migrate member
-docker exec -i "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres -d member <<'SQL'
-ALTER FUNCTION use_stands(uuid, uuid, smallint, bigint, jsonb) OWNER TO migration_member;
-ALTER FUNCTION use_admits(jsonb, text) OWNER TO migration_member;
-ALTER FUNCTION use_stands_personal(uuid, uuid, bigint, jsonb) OWNER TO migration_member;
-ALTER FUNCTION use_scope_holds(uuid, uuid, text, jsonb) OWNER TO migration_member;
-SQL
-{
-    echo "DROP FUNCTION use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid);"
-    cat packages/db/src/migrations/postgres/0057_use_covered.sql
-} | docker exec -i -e PGPASSWORD=local-member-only "$container" \
-    psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U migration_member -d member
+before="$scratch/migrations-0056"
+cp -r packages/db/src/migrations/postgres "$before"
+node -e 'const fs = require("fs"), path = require("path"), tree = process.argv[1], f = path.join(tree, "meta/_journal.json"), j = JSON.parse(fs.readFileSync(f, "utf8"));
+const cut = j.entries.find((e) => e.tag === "0057_use_covered").idx;
+for (const e of j.entries.filter((e) => e.idx >= cut)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`), { force: true }); }
+j.entries = j.entries.filter((e) => e.idx < cut); fs.writeFileSync(f, JSON.stringify(j))' "$before"
+(cd packages/db && node --conditions=coffre:source --input-type=module -e '
+    const { postgresClient } = await import("./src/postgres.ts");
+    const { createDatabase } = await import("./src/database.ts");
+    const { migrate } = await import("drizzle-orm/postgres-js/migrator");
+    const client = postgresClient(process.argv[1], { max: 1 });
+    await migrate(createDatabase(client), { migrationsFolder: process.argv[2] });
+    await client.end();
+' "postgresql://migration_owner:local-owner-only@127.0.0.1:$port/member" "$before")
+DATABASE_URL="postgresql://migration_member:local-member-only@127.0.0.1:$port/member" \
+    pnpm --filter @coffre/db run db:migrate
 psql_owner -d member <<'SQL'
 DO $$
-DECLARE v_missing text;
+DECLARE
+    v_call record;
+    v_calls integer := 0;
 BEGIN
-    IF (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND pg_get_userbyid(proowner) = 'migration_member'
-          AND proname IN ('use_covered', 'use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds')) <> 5 THEN
-        RAISE EXCEPTION 'the replay did not leave the use''s helpers the member''s';
+    IF (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname = 'use_credential') <> 'migration_member'
+       OR (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname = 'use_batch') <> 'migration_owner' THEN
+        RAISE EXCEPTION 'the member did not make use_credential, or the owner did not keep use_batch';
     END IF;
-    WITH RECURSIVE called (oid) AS (
-        SELECT oid FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('use_credential', 'use_batch', 'use_named_batch')
-        UNION
-        SELECT g.oid FROM called c JOIN pg_proc f ON f.oid = c.oid
-          JOIN pg_proc g ON g.pronamespace = 'public'::regnamespace AND f.prosrc ~ ('\m' || g.proname || '\s*\(')
-    )
-    SELECT string_agg(oid::regprocedure::text, ', ') INTO v_missing FROM called WHERE NOT has_function_privilege(current_user, oid, 'EXECUTE');
-    IF v_missing IS NOT NULL THEN
-        RAISE EXCEPTION 'use_credential''s owner cannot execute %', v_missing;
-    END IF;
-    PERFORM use_covered(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    FOR v_call IN
+        WITH RECURSIVE uses AS (
+            SELECT oid, proname, prosecdef, proowner, prosrc FROM pg_proc
+             WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'use\_%'
+        ), calls(caller, runner, callee) AS (
+            SELECT c.oid, c.proowner, e.oid FROM uses c JOIN uses e ON e.oid <> c.oid AND c.prosrc ~ ('[^a-z_]' || e.proname || '\s*\(')
+             WHERE c.prosecdef
+            UNION
+            SELECT k.caller, k.runner, e.oid FROM calls k JOIN uses c ON c.oid = k.callee AND NOT c.prosecdef
+              JOIN uses e ON e.oid <> c.oid AND c.prosrc ~ ('[^a-z_]' || e.proname || '\s*\(')
+        )
+        SELECT caller::regprocedure AS caller, pg_get_userbyid(runner) AS runner, callee::regprocedure AS callee FROM calls
+    LOOP
+        v_calls := v_calls + 1;
+        IF NOT has_function_privilege(v_call.runner, v_call.callee, 'EXECUTE') THEN
+            RAISE EXCEPTION '%, running as %, cannot execute %', v_call.caller, v_call.runner, v_call.callee;
+        END IF;
+    END LOOP;
+    -- use_batch, use_named_batch and use_route call use_credential; it calls use_covered, use_stands and
+    -- use_stands_personal, and they use_admits and use_scope_holds as its owner.
+    IF v_calls < 8 THEN RAISE EXCEPTION 'read % calls between the use functions, fewer than they make', v_calls; END IF;
 END $$;
 SQL
 

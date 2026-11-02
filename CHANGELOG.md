@@ -17,6 +17,10 @@
   use would, using nothing. Nothing in the app calls either yet (PR C2).
   Migration 0058 adds `log_uses.route`, a route argument to `use_covered`
   and `use_credential`, and `use_route`; the previous release runs on it.
+  Where a member of the database's owner runs it, what it makes is that
+  login's while `use_batch` and `use_named_batch` stay the owner's, so it
+  grants each use function's owner EXECUTE on those it calls, as 0057
+  does: without that, every batch would fail with 42501.
 
 - **The app and the vault run one release at a time.** Every call between
   them goes through one envelope, `call(release, method, args)`, the
