@@ -39,9 +39,11 @@ key by whoever controls the upstream.
    copy is stale. An edit that adds a key costs each isolate one extra call
    once, the map miss any new key costs today.
 5. **Code wins.** A UI definition whose name code also defines is ignored
-   and shown locked (R66). The first proxy request under a new code config
-   deletes such a row, audited, so that it never comes back to life when
-   code later drops the name.
+   and shown locked (R66). Code's names are reserved in the log before an
+   isolate serves, which deletes such a row, audited, and refuses new saves
+   of the name. No deploy drops a reservation, so a hidden row never comes
+   back when code later drops the name; only an Owner's audited release
+   frees it.
 6. **Matching** runs on the percent-decoded path, segment by segment.
    `..`, `.`, encoded slashes and double encoding are refused, never
    resolved. `*` matches one segment and `**` the rest; a plain path is a
@@ -172,14 +174,15 @@ how a use weighs it. An item the save did not change keeps its `savedBy` and
 
 ### Changes and audit
 
-Two change ops, each through the vault's change path (`change_input`: CAS
+Three change ops, each through the vault's change path (`change_input`: CAS
 on the seal the caller read, the fence exclusive, the entry numbered under
 it, the answer once sealed):
 
 | Op | Who | Payload, in the entry (R53: the request, not the outcome) |
 |---|---|---|
 | `proxy.save` | a person holding `proxy.edit` on the environment | the environment, the seal the page loaded, and each item added, changed or removed, whole |
-| `proxy.code` | the deployment (actor `deployment`), section 6 | the code config's names (digest and list), and each UI item it deletes, whole |
+| `proxy.code` | the deployment (actor `deployment`), section 6 | the names it reserves, and each UI item it deletes, whole |
+| `proxy.release` | an Owner, from an isolate whose code lacks the name | the name released |
 
 The audit page shows a `proxy.save` as a diff: `openai: upstream
 api.openai.com → eu.api.openai.com`, with the keys each changed item sends.
@@ -210,8 +213,13 @@ TLC checks:
   replaced), and (c) was cleared for the key's nature at that decision.
 - **`WithinWindow`.** That request leaves within W of the decision: W is
   `cacheSeconds` with the cache, or the use's 3 s deadline without it.
-- **`NoRevival`.** A UI definition that code shadowed is never used again
-  after code drops the name.
+- **`NoRevival`.** No use is decided on a UI definition that code
+  shadowed, by any isolate, then or after code drops the name. Values
+  decided on it just before code shadowed it serve out their W, as after an
+  edit.
+- **`RoutingRelease`**: an Owner who releases a reserved name while an older
+  deployment still serving defines it, then saves it, is the one revival
+  left: `EXPECTED` broken, and the release dialog says so (section 6).
 - **`StrictlyCurrent`**, the literal reading, fails with every protection
   on. That is an `EXPECTED` gap in `scripts/formal.sh`, kept so the window
   stays documented: values decided before an edit serve out their W.
@@ -268,17 +276,20 @@ described, which `scripts/formal.sh` holds as a failure on every CI run.
 |---|---|
 | `FencedRead`: the definition is read in the use's statement, after the fence, in one snapshot with the decision | the use reads `openai` → `api.openai.com`, Ada's edit commits, the use is decided on the old row and numbered after the edit (`EverySendAllowed`) |
 | `SealChecked`: the row's seal must be its newest change's | a writer puts back version 7 after version 8, and a use is decided on it |
+| `CopyFromVault`: the isolate's copy comes only from vault answers, never from a read of its own | a writer forges the body under a genuine seal, the app reads that pair, the writer puts the genuine row back; the vault checks the genuine row, confirms the app's seal, and the app sends by the forged body (section 4) |
 | `SentAsDecided`: the app sends by the definition the vault decided on (returned in the answer, or confirmed by seal), never by its own unchecked copy | the app's copy still says version 7. The vault decides on version 8, a Developer's (clearance `secret`, host `evil`), and the app sends to version 7's host, which no current definition allows |
 | `BoundToDefinition`: kept values go only to the definition they were decided under | values decided on version 7 (`good`) are served from the cache after the app re-read version 8 (`evil`). The key reaches `evil`, which the vault never decided on for them |
 | `ClearanceAtUse`: each use weighs the key's nature now against the definition's clearance | a Developer routes `K` while it is secret. An Owner marks it sensitive, and the next use sends the sensitive value to the Developer's upstream |
 | `KeptExpires`: kept values serve W, no longer | values sent long after their decision (`WithinWindow`) |
-| `ClearSuperseded`: the `proxy.code` change deletes the shadowed UI row | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
-| `CodeGate`: an isolate serves no proxy request before its code set is logged | the same revival, through a deployment that served `openai` from code without ever logging that it shadowed the UI row |
+| `ClearSuperseded`: the `proxy.code` change that reserves a name deletes its UI row | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
+| `SaveChecksReserved`: the vault refuses a save of a reserved name | during a deploy, an Owner saves `openai` through an old isolate after the new one reserved it; the new code hides it, and it serves again when a later deployment drops the name |
+| `CodeGate`: an isolate serves no proxy request before its code's names are reserved | the same revival, through a deployment that served `openai` from code without ever reserving it |
 
-What the model does not cover: the fence's own correctness (that a use and a
+The model runs two isolates, which may run different code during a deploy,
+and a writer who can forge a body or put a row back. What it does not
+cover: the fence's own correctness (that a use and a
 change never overlap, and the number orders them) is `HotPathOne.tla`'s, for
-any input. Here an edit is one step. One route, one key, two hosts, one
-isolate, one live deployment at a time. The frozen holdings are reduced to
+any input. Here an edit is one step. One route, one key, two hosts. The frozen holdings are reduced to
 one clearance per version ("sensitive" for an Owner, "secret" otherwise).
 The matching rules of section 7 are pure functions, which property tests
 hold, not TLC. That a map hit's ids are held to the route's names is
@@ -325,6 +336,18 @@ Naming.tla's `HeldToNames`, applied to the route's names. An edit between
 the two calls of a miss therefore cannot have a key used that the route no
 longer names.
 
+**The isolate's copy comes only from the vault's answers.** The copy saves
+bytes: a call that carries its seal gets the body omitted when the row still
+has that seal. So a seal the isolate sends must stand for a body the vault
+checked. If the copy could come from a read of the app's own (the page's
+`GET …/proxy`, or a bootstrap read), a database writer could do this: change
+the row's body to `evil` while keeping its genuine seal S, let the app read
+that pair, and put the genuine row back. The vault then checks the genuine
+row, sees the app's S, omits the body, and the app sends by its forged copy.
+So the use path never fills its copy from its own reads: a cold isolate
+sends no seal and gets the body (`CopyFromVault` in the model, which finds
+exactly that run without it).
+
 **Invalidation costs no round trip.** The definition's body is the only
 thing the isolate caches, and only to save bytes. Postgres compares the
 copy's seal with the row's inside the use's own snapshot, under the fence:
@@ -360,6 +383,16 @@ deploy. That calls for two checks code upstreams never needed:
   Node fetch for a UI route checks the address it connects to, through
   undici's `connect` lookup. `insecureUpstreams` lifts both for local fakes,
   as it lifts the rest today.
+- **Database tunnels too.** Today a tunnel's `hosts` is deployment code, so
+  the tunnel dials a name it lists without asking where it resolves
+  (`dialled` in `postgres-tunnel.ts`). In the UI that list is an Owner's
+  input: `hosts: ['db.attacker.example']`, resolving to `10.0.1.5`, would
+  reach a private address with no network binding, and the TCP connection
+  and Postgres's SSL request go out before TLS could object. So a UI
+  tunnel's hosts follow the same rule: public names or addresses at save,
+  and on Node the address the socket connects to is checked when it
+  connects. The one exception stays R31's: a tunnel through a network code
+  declares, to hosts among that network's.
 - **The upstream's origin is fixed by the definition.** The existing rule
   stands: a request goes to `<upstream>/<path>` and nowhere else, and
   redirects stay on the proxy.
@@ -383,17 +416,31 @@ deploy would be involved, so nothing would clear it. With the name taken
 everywhere, whether code shadows a UI item depends on the code config alone,
 never on what environments are called.
 
-**Which URL names what.** Today `/use/<a>/<b>/…` names an environment when
-`<a>/<b>` is one the handle was made for, and is otherwise the stable URL of
-credential `<a>`; where `<a>` names no credential, it is an environment's
-URL with no lookup ([credential-proxy.md](credential-proxy.md), section 4,
-"Which route"). A UI name depends on the environment, so the app can no
-longer tell from its config alone that `<a>` names nothing. Any `<a>` that
-is no code name now takes the lookup the stable URL already takes: the
-handle's environments (`madeFor`, kept for `cacheSeconds`). The rule itself
-is unchanged. `GET /use`, which answers with no credential, keeps listing
-code names only, so it reveals nothing of an environment's own. The plan
-(`GET /use/<p>/<e>`) lists the environment's UI routes beside code's.
+**Which URL names what, in the same call.** Today `/use/<a>/<b>/…` names an
+environment when `<a>/<b>` is one the handle was made for, and is otherwise
+the stable URL of credential `<a>` ([credential-proxy.md](credential-proxy.md),
+section 4, "Which route"). Where `<a>` names a code credential, the app asks
+the handle's environments first (`madeFor`, a vault call of its own, kept for
+`cacheSeconds`); with no cache, a named use already folds that question into
+its one call (`unless` in `NamedUseInput`: "served not by name when the
+handle's is one"). A UI name depends on the environment, so the app can no
+longer tell from its config that `<a>` names nothing, and taking `madeFor`
+for every such URL would be a second call on every request with
+`cacheSeconds: 0`. So a route use carries **both readings** of the URL, and
+the statement picks one in its snapshot:
+
+| Reading | Place | Route | Taken when |
+|---|---|---|---|
+| the environment's | `<a>/<b>` | `<c>`, the rest after it | `<a>/<b>` is an environment the handle was made for |
+| the stable URL | the handle's one environment | `<a>`, the rest from `<b>` | otherwise (a handle of several environments: 409, as today) |
+
+The answer says which reading it took, and the app forwards the rest of the
+path accordingly. This is today's rule, decided where today's `unless`
+decides it, so a `/use` costs the calls section 4 counts, whatever the URL.
+A kept `madeFor` still saves the question when present. `GET /use`, which
+answers with no credential, keeps listing code names only, so it reveals
+nothing of an environment's own. The plan (`GET /use/<p>/<e>`) lists the
+environment's UI routes beside code's.
 
 **Scoping code items** (R66): `environments: ['market/prod']` on any code
 item, by full path, because the config is instance-wide and a bare `prod`
@@ -411,32 +458,44 @@ item's in the environment, nor any code item's of any kind. Code keeps
 today's per-kind rule: making it stricter would break a deployment that has
 a credential and a signer both named `dfns`.
 
-**Clearing superseded rows** (W260's proposal, which Erwin allowed: "the
-deployment may clear superseded UI state"). Without clearing, a UI `maps`
-hidden by code's `maps` comes back to life the day code drops `maps`, with an
-upstream nobody has looked at since. So:
+**Reserved names, and clearing superseded rows** (W260's proposal, which
+Erwin allowed: "the deployment may clear superseded UI state"). Without
+clearing, a UI `maps` hidden by code's `maps` comes back to life the day
+code drops `maps`, with an upstream nobody has looked at since. Clearing
+once at a deploy is not enough either, because during a deploy two app
+versions serve at once. Example: deployment B adds code `maps` and clears
+the UI `maps`. An isolate of the old deployment A, whose code has no
+`maps`, is still serving, and an Owner saves a new UI `maps` through it.
+B's isolates hide it. Months later deployment C drops `maps`, and the hidden
+UI `maps` serves again. So the log keeps the names code has reserved, and
+they outlive the deployment that reserved them:
 
-- Each isolate, at its first proxy request (a use, or the Proxy tab),
-  compares a digest of its code config's names (scopes play no part: see
-  above) with the newest
-  `proxy.code` change in the log. This is one indexed read, no lock, as the
-  vault does for `bulk.limit` at its start (`#limit`). Most isolates find
-  it equal and go on.
-- If they differ, it writes a `proxy.code` change. In the same change, the
-  vault deletes every UI item, in every environment, whose name code now
-  defines, each whole in the entry. The actor is the deployment.
-- The isolate serves no proxy request until that change has landed, or it
-  found the log already equal (`CodeGate`). So a deployment that ever served
-  `maps` from code has logged it, and the UI `maps` is gone before any later
-  deployment could revive it.
-- **During a deploy**, two app versions with different code sets may serve at
-  once, and each new isolate of either writes its set: the changes
-  alternate until the old version is gone. Clearing only deletes, so the
-  only harm is this. An Owner creates UI `maps` after the new config
-  dropped it; an isolate of the old config, still starting, then deletes it
-  again. That deletion is in the log, whole, and restorable. The alternation
-  costs a change per isolate start for the overlap's length; a deploy on
-  Workers rolls over in a minute or two.
+- **Reserving.** Each isolate, before its first proxy request (a use, or the
+  Proxy tab), checks that every name its code defines is in the log's
+  reserved set. That is one indexed read of the newest `proxy.code` change,
+  with no lock, as the vault reads `bulk.limit` at its start (`#limit`).
+  Most isolates find their names there and go on.
+- If one is missing, the isolate writes a `proxy.code` change adding it.
+  In the same change, the vault deletes every UI item, in every
+  environment, named by a name it adds, each whole in the entry. The actor
+  is the deployment. The isolate serves no proxy request until its names
+  are reserved (`CodeGate`).
+- **A save checks the reservation.** The vault refuses a save of a reserved
+  name, whichever isolate's page sent it (`SaveChecksReserved`). A's page
+  allowed `maps`, but the vault does not: "`maps` is reserved by code".
+- **No deploy drops a reservation.** A deployment that no longer defines
+  `maps` leaves it reserved, so nothing hidden can return when code lets go
+  of the name. The tab shows it: "`maps` was defined by an earlier
+  deployment's code". An Owner may **release** it, a change of its own
+  (`proxy.release`, audited), which the vault refuses when the releasing
+  isolate's own code defines the name. The release dialog says what it
+  cannot check: that no older deployment still serving defines `maps`. An
+  Owner who releases during a deploy and then saves `maps` is the one
+  revival left, which TLC finds (`RoutingRelease`, an `EXPECTED` gap): it
+  takes that Owner's deliberate, audited act.
+- **During a deploy**, reservations only grow, so the two versions do not
+  alternate. The cost is a stale name that stays reserved until someone
+  releases it, which is the safe default.
 
 ## 7. Matching, injection and redaction
 
@@ -626,6 +685,7 @@ shows.
 | Who | Tries | Outcome |
 |---|---|---|
 | A database writer, no key | edits an upstream, adds a route, or puts back an old row | refused (`tampered`, `stale`); fails closed (R64) |
+| A database writer | forges a body under a genuine seal, lets the app read it, puts the genuine row back | nothing sent by the forged body: the isolate's copy comes only from vault answers (section 4) |
 | A database writer | deletes the row | the use's probe finds the newest change's seal and no row: `stale` |
 | A Developer with `proxy.edit` | routes a value they cannot read, or one made sensitive later | refused at use: the frozen holdings decide (`ClearanceAtUse`) |
 | An Owner covering the place | routes a sensitive key to a host they control | allowed and audited: the same power as R30's loosening (question 1) |
@@ -634,7 +694,8 @@ shows.
 | An Owner, racing an app | edits mid-traffic | old values go to the old host for at most W, never to the new host undecided (section 3) |
 | Someone with a stale page | saves over a newer change | 409: CAS on the seal |
 | A compromised app (the `coffre` Worker) | anything | out of scope, as today: it holds the values it opens. The vault makes that loud (every decision logged), not impossible |
-| An Owner | points an upstream at `169.254.169.254` | refused at save; on Node also at connect time |
+| An Owner | points an upstream, or a tunnel's host, at `169.254.169.254` or a name resolving to `10.0.1.5` | refused at save; on Node also at connect time, HTTP and TCP alike (section 5) |
+| An Owner, during a deploy | saves a name the new code reserved, through an old isolate | refused by the vault: the name is reserved (section 6) |
 | A code change | drops a name UI also had | the UI row was deleted when code first shadowed it, audited (`NoRevival`) |
 | Anyone with `environment.manage` | renames an environment into or out of a code item's scope | nothing a UI item may be called changes: code names are taken in every environment (section 6) |
 

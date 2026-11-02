@@ -4,265 +4,317 @@
 (* A route sends an environment's key to the upstream its definition       *)
 (* names. Until 0.16 that definition was deployment code; now an Owner may *)
 (* write it in the UI, so it is a row of the database, which can change    *)
-(* while uses are in flight, be put back by a database writer, or be       *)
-(* shadowed by a code definition of the same name. The question this      *)
+(* while uses are in flight, be forged or put back by a database writer,   *)
+(* or be shadowed by a code definition of the same name. The question this *)
 (* model answers: where may a key go?                                      *)
 (*                                                                         *)
 (* One environment, one route `r`, one key `K` it sends, two hosts. The    *)
-(* definition is one object of the vault's log (a `proxy` object, sealed): *)
-(* `defs[v]` is what change v left, its host and its clearance (the most   *)
-(* sensitive nature it may send: "sensitive" when its editor was an Owner  *)
-(* covering the place, R32's set, else "secret"). `row` is the version the *)
-(* database row holds: always the newest, unless a writer with no key put  *)
-(* back an earlier one (it cannot forge a seal, only replay one).          *)
+(* definition is one object of the vault's log (a `proxy` object): `defs[v]` *)
+(* is what change v left, its host and its clearance (the most sensitive   *)
+(* nature it may send: "sensitive" when an Owner covering the place saved  *)
+(* it, else "secret"). The row is a version (its seal) and a body (its     *)
+(* host). Honest code writes the newest version with its body. A database  *)
+(* writer with no key may put back an earlier version, body and seal       *)
+(* (Tamper), or change the body under the seal it finds (Forge): a seal is *)
+(* a MAC over the body, so the vault refuses a forged row (`tampered`),    *)
+(* always; only a row put back passes a MAC.                               *)
 (*                                                                         *)
-(* A use, in the code:                                                     *)
+(* Isolates (Iso): each runs one deployment's code, which defines `r` or   *)
+(* not (code[i]); two may serve at once, during a deploy. A use, in the    *)
+(* code:                                                                   *)
 (*   the app resolves `r` (Resolve): code first; else the environment's    *)
-(*   UI definitions, its per-isolate copy, or read now (an app read, no    *)
-(*   seal checked);                                                        *)
-(*   the vault's one call, `use_credential` (Decide): under the fence      *)
-(*   shared, the definition row, its seal and the newest change's, and     *)
-(*   the key's nature, all in one snapshot; it allows or refuses, answers  *)
-(*   with the definition it decided on, and the app keeps the values       *)
-(*   beside it (`kept`, the value cache);                                  *)
+(*   UI definition, by the copy the isolate keeps (copy[i]: a seal and a   *)
+(*   body), which only saves bytes;                                        *)
+(*   the vault's one call (Decide): under the fence shared, the row, its   *)
+(*   MAC, the seal of the newest change, and the key's nature, in one      *)
+(*   snapshot; it allows or refuses, and answers with the body decided on, *)
+(*   or, when the isolate's copy carries that seal, confirms the copy;     *)
 (*   the request goes out (Send): to the kept definition's upstream,       *)
 (*   while the kept values serve (`cacheSeconds`, or the use's deadline    *)
 (*   with no cache: W ticks after the decision).                           *)
 (* An edit (Edit) is a change: under the fence exclusive, so no use        *)
 (* overlaps it (HotPathOne.tla proves that part for any input); here it is *)
 (* one step. An Owner may route a sensitive key; anyone else with          *)
-(* proxy.edit only a key that is secret now (the save's own check).        *)
+(* proxy.edit only a key that is secret now (the save's own check). The    *)
+(* page refuses a name its own isolate's code defines.                     *)
 (*                                                                         *)
-(* Code definitions: the live deployment's code may define `r` (code),     *)
-(* and then code wins: no use goes through the UI definition, which the    *)
-(* page shows locked (it was `shadowed`, a ghost: the UI version newest    *)
-(* when that code went live, seen locked by someone or skipped by a use,   *)
-(* whether or not it was deleted since). A code name is taken in every     *)
-(* environment, whatever the code item's scope (proxy-ui.md, section 6),  *)
-(* so only a deploy changes whether code defines `r`, never a rename. A    *)
-(* deploy flips `code` and starts new isolates.                            *)
-(* At its first proxy request each isolate holds the log's code set to its *)
-(* own (LogCode): when they differ it writes a `proxy.code` change, which  *)
-(* deletes a UI definition its code now shadows, the whole definition in   *)
-(* the entry for an Owner to restore. One deployment is live at a time.    *)
+(* Code names: the log keeps the names code has reserved (`reserved`, for  *)
+(* `r`). An isolate, before its first proxy request, adds its code's names *)
+(* to them (LogCode, a `proxy.code` change when it adds one), deleting the *)
+(* UI definition of a name it adds, whole in the entry. A reservation is   *)
+(* never dropped by a deploy, only by an Owner's audited release, from an  *)
+(* isolate whose code lacks the name (Release). A code name is taken in    *)
+(* every environment, whatever the code item's scope, so only code, never  *)
+(* a rename, changes what is reserved. `shadowed` is a ghost: the UI       *)
+(* versions some isolate's code hid, at a request or on the page.          *)
 (*                                                                         *)
 (* Protections, each a constant, TRUE in the code:                         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
+    Iso,            \* the isolates
     Hosts,          \* where a definition may point: {"good", "evil"}
     W,              \* how long a decision's values serve, in ticks: cacheSeconds, or the deadline
     MaxTime,        \* how far the clock runs
-    MaxEdits,       \* edits of `r` in the UI
-    MaxTampers,     \* rows a database writer puts back
+    MaxEdits,       \* saves of `r` in the UI
+    MaxTampers,     \* rows a database writer puts back or forges
     MaxMarks,       \* K made sensitive (once)
-    MaxDeploys,     \* deployments that flip whether code defines `r`
+    MaxDeploys,     \* isolates restarted on code that flips whether it defines `r`
+    MaxReleases,    \* an Owner's releases of a reserved name
     Budget          \* proxy requests the isolates make
 
 CONSTANTS
     \* The use reads the definition in the statement after the fence, in
     \* one snapshot with its decision (else: read before, decided after).
     FencedRead,
-    \* The definition row's seal must be its newest change's (`stale`).
+    \* The row's seal must be its newest change's (`stale`).
     SealChecked,
-    \* The app sends by the definition the vault decided on, which the call
-    \* answers with (or confirms the app's copy of, by its seal), never by a
-    \* copy of its own the vault did not see.
+    \* The isolate's copy comes only from the vault's answers, never from a
+    \* read of its own (the page's, or a bootstrap): so a seal it sends, and
+    \* the vault confirms, stands for a body the vault checked.
+    CopyFromVault,
+    \* The app sends by the definition the vault decided on (its answer's
+    \* body, or the copy it confirmed by seal), never by a copy the vault
+    \* did not confirm.
     SentAsDecided,
     \* Kept values go only where the definition they were decided under says
-    \* (the value cache is keyed by the definition's seal), never where a
-    \* newer copy of the app's says.
+    \* (the value cache is keyed by its seal), never where a newer copy says.
     BoundToDefinition,
     \* Kept values serve W ticks after their decision, no longer.
     KeptExpires,
     \* The use weighs the key's nature now against the definition's
     \* clearance (else only the save checked it, against the nature then).
     ClearanceAtUse,
-    \* A `proxy.code` change deletes the UI definition code shadows.
+    \* A `proxy.code` change that reserves `r` deletes its UI definition.
     ClearSuperseded,
-    \* An isolate serves nothing of the proxy before its code set is logged.
+    \* The vault refuses a save of a reserved name, whatever the saving
+    \* isolate's code says (an older deployment's isolate, still serving).
+    SaveChecksReserved,
+    \* An isolate serves nothing of the proxy before its code's names are
+    \* reserved in the log.
     CodeGate
 
-None == [host |-> "none", clearance |-> "none"]
-NoKept == [ver |-> 0, host |-> "none", at |-> 0, newest |-> FALSE, nat |-> "none"]
-NoSnap == [ver |-> 0, newest |-> 0]
+None == "none"
+NoCopy == [ver |-> 0, host |-> None]
+NoKept == [ver |-> 0, host |-> None, at |-> 0, newest |-> FALSE, nat |-> None, revived |-> FALSE]
+NoSnap == [ver |-> 0, host |-> None, newest |-> 0]
 
 VARIABLES
     now,
-    defs,       \* the log: defs[v], what change v left
-    row,        \* the version the row holds
+    defs,       \* the log: defs[v], what change v left: [host, clearance]
+    row,        \* the row: [ver (its seal), host (its body)]
     nature,     \* K's nature: "secret" or "sensitive"
-    code,       \* the live deployment's code defines `r`
-    logged,     \* its code set is the log's (a `proxy.code` change landed, or nothing to change)
-    shadowed,   \* ghost: UI versions a deployment defining `r` showed locked
-    hidden,     \* ghost: the newest UI version when the live code began to define `r`, or 0
-    cached,     \* the app's copy of the definition: the version it read, or 0
-    snap,       \* without FencedRead: what the use read before the fence
-    kept,       \* the value cache: the version decided, the host the app sends to, when, ghosts
+    reserved,   \* the log's code names include `r`
+    code,       \* code[i]: isolate i's code defines `r`
+    logged,     \* logged[i]: isolate i's names are reserved (or it found them so)
+    shadowed,   \* ghost: UI versions an isolate's code hid
+    copy,       \* copy[i]: the isolate's copy of the definition
+    snap,       \* snap[i]: without FencedRead, what its use read before the fence
+    kept,       \* kept[i]: its value cache: the version decided, the host it sends to, when, ghosts
     sent,       \* ghost: every request that went out with K
-    edits, tampers, marks, deploys, left
+    edits, tampers, marks, deploys, releases, left
 
-vars == <<now, defs, row, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
+vars == <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent,
+          edits, tampers, marks, deploys, releases, left>>
 
 Newest == Len(defs)
+Body(v) == defs[v].host
 
 Init ==
     /\ now = 1
     /\ defs = <<[host |-> "good", clearance |-> "sensitive"]>>
-    /\ row = 1
+    /\ row = [ver |-> 1, host |-> "good"]
     /\ nature = "secret"
-    /\ code = FALSE
-    /\ logged = TRUE
+    /\ reserved = FALSE
+    /\ code = [i \in Iso |-> FALSE]
+    /\ logged = [i \in Iso |-> TRUE]
     /\ shadowed = {}
-    /\ hidden = 0
-    /\ cached = 0
-    /\ snap = NoSnap
-    /\ kept = NoKept
+    /\ copy = [i \in Iso |-> NoCopy]
+    /\ snap = [i \in Iso |-> NoSnap]
+    /\ kept = [i \in Iso |-> NoKept]
     /\ sent = {}
-    /\ edits = 0 /\ tampers = 0 /\ marks = 0 /\ deploys = 0
+    /\ edits = 0 /\ tampers = 0 /\ marks = 0 /\ deploys = 0 /\ releases = 0
     /\ left = Budget
 
-\* An edit of `r` in the UI: an Owner's (clearance "sensitive") or another
-\* editor's, who may name only a key that is secret now. The page refuses a
-\* name the live code defines. A change: it writes the newest version.
-Edit(h, c) ==
-    /\ edits < MaxEdits /\ ~code
+\* A change writes the newest version, its body with it.
+Write(d) == /\ defs' = Append(defs, d) /\ row' = [ver |-> Newest + 1, host |-> d.host]
+
+\* A save of `r` through isolate i's page: an Owner's (clearance
+\* "sensitive") or another editor's, who may name only a key that is secret
+\* now. The page refuses a name its code defines; the vault, with
+\* SaveChecksReserved, a name the log reserves.
+Edit(i, h, c) ==
+    /\ edits < MaxEdits /\ ~code[i]
+    /\ SaveChecksReserved => ~reserved
     /\ c = "secret" => nature = "secret"
-    /\ defs' = Append(defs, [host |-> h, clearance |-> c])
-    /\ row' = Newest + 1
+    /\ Write([host |-> h, clearance |-> c])
     /\ edits' = edits + 1
-    /\ UNCHANGED <<now, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<now, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, tampers, marks, deploys, releases, left>>
+
+\* An Owner releases the reserved name, from an isolate whose code lacks it.
+Release(i) ==
+    /\ releases < MaxReleases /\ reserved /\ ~code[i]
+    /\ reserved' = FALSE /\ releases' = releases + 1
+    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, marks, deploys, left>>
 
 \* K made sensitive (`coffre mark`), a change of its own.
 Mark ==
     /\ marks < MaxMarks /\ nature = "secret"
     /\ nature' = "sensitive" /\ marks' = marks + 1
-    /\ UNCHANGED <<now, defs, row, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, tampers, deploys, left>>
+    /\ UNCHANGED <<now, defs, row, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, deploys, releases, left>>
 
-\* A database writer puts back a row the vault once sealed.
+\* A database writer puts back a row the vault once sealed, body and seal.
 Tamper(v) ==
-    /\ tampers < MaxTampers /\ v \in 1..Newest /\ v # row
-    /\ row' = v /\ tampers' = tampers + 1
-    /\ UNCHANGED <<now, defs, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, marks, deploys, left>>
+    /\ tampers < MaxTampers /\ v \in 1..Newest
+    /\ row # [ver |-> v, host |-> Body(v)]
+    /\ row' = [ver |-> v, host |-> Body(v)] /\ tampers' = tampers + 1
+    /\ UNCHANGED <<now, defs, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, marks, deploys, releases, left>>
 
-\* A deployment whose code defines `r`, or no longer does. New isolates:
-\* no cache, and the code set not yet held to the log's.
-Deploy ==
+\* ... or changes the body under the seal it finds: the MAC no longer holds.
+Forge(h) ==
+    /\ tampers < MaxTampers /\ h # row.host
+    /\ row' = [row EXCEPT !.host = h] /\ tampers' = tampers + 1
+    /\ UNCHANGED <<now, defs, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, marks, deploys, releases, left>>
+
+\* Isolate i restarts on code that defines `r`, or no longer does: no copy,
+\* no kept values, its names not yet reserved.
+Deploy(i) ==
     /\ deploys < MaxDeploys
-    /\ code' = ~code /\ logged' = FALSE
-    /\ hidden' = IF ~code /\ defs[Newest].host # "none" THEN Newest ELSE 0
-    /\ cached' = 0 /\ snap' = NoSnap /\ kept' = NoKept
+    /\ code' = [code EXCEPT ![i] = ~code[i]]
+    /\ logged' = [logged EXCEPT ![i] = FALSE]
+    /\ copy' = [copy EXCEPT ![i] = NoCopy]
+    /\ snap' = [snap EXCEPT ![i] = NoSnap]
+    /\ kept' = [kept EXCEPT ![i] = NoKept]
     /\ deploys' = deploys + 1
-    /\ UNCHANGED <<now, defs, row, nature, shadowed, sent, edits, tampers, marks, left>>
+    /\ UNCHANGED <<now, defs, row, nature, reserved, shadowed, sent, edits, tampers, marks, releases, left>>
 
-\* The isolate's first proxy request holds the log's code set to its own:
-\* a `proxy.code` change where they differ, deleting a UI definition its
-\* code shadows (a change: it writes the newest version).
-LogCode ==
-    /\ ~logged
-    /\ logged' = TRUE
-    /\ IF ClearSuperseded /\ code /\ defs[Newest].host # "none"
-         THEN /\ defs' = Append(defs, None)
-              /\ row' = Newest + 1
-         ELSE UNCHANGED <<defs, row>>
-    /\ UNCHANGED <<now, nature, code, shadowed, hidden, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
+\* Before its first proxy request, the isolate reserves its code's names: a
+\* `proxy.code` change when it adds one, which deletes the UI definition of
+\* the name it reserves (a change: the newest version, "none").
+LogCode(i) ==
+    /\ ~logged[i]
+    /\ logged' = [logged EXCEPT ![i] = TRUE]
+    /\ IF code[i] /\ ~reserved
+         THEN /\ reserved' = TRUE
+              \* The UI version its code hides from now on, deleted or not.
+              /\ shadowed' = IF Body(Newest) # None THEN shadowed \cup {Newest} ELSE shadowed
+              /\ IF ClearSuperseded /\ Body(Newest) # None
+                   THEN Write([host |-> None, clearance |-> None])
+                   ELSE UNCHANGED <<defs, row>>
+         ELSE UNCHANGED <<reserved, defs, row, shadowed>>
+    /\ UNCHANGED <<now, nature, code, copy, snap, kept, sent, edits, tampers, marks, deploys, releases, left>>
 
-\* A proxy request resolves `r`, or the page shows it: code first, the UI
-\* definition shown locked; else the app's copy of the UI definition, read
-\* now (an app read: no seal checked) if it has none.
-Resolve ==
-    /\ left > 0 /\ (CodeGate => logged)
+Serving(i) == CodeGate => logged[i]
+
+\* A proxy request resolves `r`, or the page shows it. Code first: the UI
+\* definition, if any, is hidden (shadowed). Else, without CopyFromVault,
+\* the isolate may fill its copy from a read of its own, no MAC checked.
+Resolve(i) ==
+    /\ left > 0 /\ Serving(i)
     /\ left' = left - 1
-    /\ IF code
-         THEN /\ shadowed' = IF hidden # 0 THEN shadowed \cup {hidden} ELSE shadowed
-              /\ UNCHANGED cached
-         ELSE /\ cached' = row
+    /\ IF code[i]
+         THEN /\ shadowed' = IF Body(Newest) # None THEN shadowed \cup {Newest} ELSE shadowed
+              /\ UNCHANGED copy
+         ELSE /\ copy' = IF CopyFromVault THEN copy ELSE [copy EXCEPT ![i] = [ver |-> row.ver, host |-> row.host]]
               /\ UNCHANGED shadowed
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, hidden, snap, kept, sent, edits, tampers, marks, deploys>>
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, snap, kept, sent, edits, tampers, marks, deploys, releases>>
 
 \* Without FencedRead: the use's reads take their snapshot before the fence.
-Read ==
-    /\ ~FencedRead /\ ~code /\ cached # 0 /\ snap = NoSnap
-    /\ snap' = [ver |-> row, newest |-> Newest]
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, hidden, cached, kept, sent, edits, tampers, marks, deploys, left>>
+Read(i) ==
+    /\ ~FencedRead /\ ~code[i] /\ Serving(i) /\ snap[i] = NoSnap
+    /\ snap' = [snap EXCEPT ![i] = [ver |-> row.ver, host |-> row.host, newest |-> Newest]]
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, kept, sent, edits, tampers, marks, deploys, releases, left>>
 
-\* The vault's one call decides, on the row it read, against the newest
-\* change (in its own snapshot, or the early one without FencedRead), and
-\* answers with the definition it decided on, which the app's copy becomes.
-\* The app keeps the values with the upstream it will send them to: the
-\* decided definition's, or, without SentAsDecided, its own copy's.
-Decide ==
-    /\ left > 0 /\ ~code /\ cached # 0
-    /\ (CodeGate => logged)
-    /\ FencedRead \/ snap # NoSnap
-    /\ LET v       == IF FencedRead THEN row ELSE snap.ver
-           newest  == IF FencedRead THEN Newest ELSE snap.newest
-           sealOK  == ~SealChecked \/ v = newest
+\* The vault's call decides on the row it read (in its own snapshot, or the
+\* early one without FencedRead): refused if the row's MAC does not hold,
+\* or (SealChecked) its seal is not the newest change's, or it holds no
+\* definition, or (ClearanceAtUse) K is sensitive and the definition not an
+\* Owner's. Allowed, it answers with the body it decided on, unless the
+\* isolate's copy carries that seal, which it confirms. The app keeps the
+\* values with the upstream it will send them to: the answer's (or the
+\* confirmed copy's), or, without SentAsDecided, its copy's whatever it is.
+\* The value cache is per caller, the copy per route: a use by another
+\* caller (~mine) refreshes the copy and leaves this caller's kept values.
+\* A decision on a version code hid is a revival (the ghost, NoRevival);
+\* values decided before code hid it serve out their W, as after an edit.
+Decide(i, mine) ==
+    /\ left > 0 /\ ~code[i] /\ Serving(i)
+    /\ FencedRead \/ snap[i] # NoSnap
+    /\ LET r       == IF FencedRead THEN [ver |-> row.ver, host |-> row.host, newest |-> Newest] ELSE snap[i]
+           v       == r.ver
+           macOK   == r.host = Body(v)
+           sealOK  == ~SealChecked \/ v = r.newest
            clearOK == ~ClearanceAtUse \/ nature = "secret" \/ defs[v].clearance = "sensitive"
-           allowed == sealOK /\ defs[v].host # "none" /\ clearOK
-       IN /\ kept' = IF allowed
-                       THEN [ver |-> v, host |-> IF SentAsDecided THEN defs[v].host ELSE defs[cached].host,
-                             at |-> now, newest |-> v = Newest, nat |-> nature]
+           allowed == macOK /\ sealOK /\ Body(v) # None /\ clearOK
+           answer  == IF copy[i].ver = v THEN copy[i].host ELSE Body(v)
+           sendTo  == IF SentAsDecided \/ copy[i] = NoCopy THEN answer ELSE copy[i].host
+       IN /\ kept' = IF allowed /\ mine
+                       THEN [kept EXCEPT ![i] = [ver |-> v, host |-> sendTo, at |-> now, newest |-> v = Newest, nat |-> nature,
+                                                 revived |-> v \in shadowed]]
                        ELSE kept
-          /\ cached' = IF SentAsDecided THEN v ELSE cached
-    /\ snap' = NoSnap
+          /\ copy' = IF allowed /\ (SentAsDecided \/ copy[i] = NoCopy)
+                       THEN [copy EXCEPT ![i] = [ver |-> v, host |-> answer]]
+                       ELSE copy
+    /\ snap' = [snap EXCEPT ![i] = NoSnap]
     /\ left' = left - 1
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, hidden, sent, edits, tampers, marks, deploys>>
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, sent, edits, tampers, marks, deploys, releases>>
 
 \* A request goes out with the kept values: to the kept definition's
-\* upstream, or, not bound to it, wherever the app's copy says now.
-Send ==
-    /\ kept.ver # 0 /\ ~code
-    /\ KeptExpires => now < kept.at + W
-    /\ BoundToDefinition \/ cached # 0
-    /\ LET h == IF BoundToDefinition THEN kept.host ELSE defs[cached].host
-       IN /\ h # "none"
-          /\ sent' = sent \cup {[host |-> h, ver |-> kept.ver, at |-> kept.at, sentAt |-> now,
-                                 newest |-> kept.newest, nat |-> kept.nat, stillNewest |-> kept.ver = Newest,
-                                 revived |-> kept.ver \in shadowed]}
-    /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, hidden, cached, snap, kept, edits, tampers, marks, deploys, left>>
+\* upstream, or, not bound to it, wherever the isolate's copy says now.
+Send(i) ==
+    /\ kept[i].ver # 0 /\ ~code[i]
+    /\ KeptExpires => now < kept[i].at + W
+    /\ LET h == IF BoundToDefinition \/ copy[i] = NoCopy THEN kept[i].host ELSE copy[i].host
+       IN /\ h # None
+          /\ sent' = sent \cup {[host |-> h, ver |-> kept[i].ver, at |-> kept[i].at, sentAt |-> now,
+                                 newest |-> kept[i].newest, nat |-> kept[i].nat,
+                                 stillNewest |-> kept[i].ver = Newest, revived |-> kept[i].revived]}
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, edits, tampers, marks, deploys, releases, left>>
 
 Tick ==
     /\ now < MaxTime
     /\ now' = now + 1
-    /\ UNCHANGED <<defs, row, nature, code, logged, shadowed, hidden, cached, snap, kept, sent, edits, tampers, marks, deploys, left>>
+    /\ UNCHANGED <<defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, marks, deploys, releases, left>>
 
 Done == now = MaxTime /\ left = 0 /\ UNCHANGED vars
 
 Next ==
-    \/ \E h \in Hosts, c \in {"secret", "sensitive"} : Edit(h, c)
+    \/ \E i \in Iso, h \in Hosts, c \in {"secret", "sensitive"} : Edit(i, h, c)
+    \/ \E i \in Iso : Release(i) \/ Deploy(i) \/ LogCode(i) \/ Resolve(i) \/ Read(i) \/ Send(i)
+    \/ \E i \in Iso, mine \in BOOLEAN : Decide(i, mine)
     \/ Mark
     \/ \E v \in 1..Newest : Tamper(v)
-    \/ Deploy \/ LogCode \/ Resolve \/ Read \/ Decide \/ Send \/ Tick \/ Done
+    \/ \E h \in Hosts : Forge(h)
+    \/ Tick \/ Done
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ now \in 1..MaxTime
-    /\ row \in 1..Newest
+    /\ row.ver \in 1..Newest
     /\ nature \in {"secret", "sensitive"}
-    /\ cached \in 0..Newest
-    /\ kept.ver \in 0..Newest
+    /\ \A i \in Iso : copy[i].ver \in 0..Newest /\ kept[i].ver \in 0..Newest
 
 (***************************************************************************)
 (* Every request that carried K went where a definition the vault decided  *)
 (* on says, a definition that was the log's newest when it decided (not    *)
-(* one put back, nor one an edit had replaced), and one cleared for K's    *)
-(* nature then: a sensitive key only by an Owner's definition.             *)
+(* one put back or forged, nor one an edit had replaced), and one cleared  *)
+(* for K's nature then: a sensitive key only by an Owner's definition.     *)
 (***************************************************************************)
 EverySendAllowed ==
     \A s \in sent :
         /\ s.newest
-        /\ s.host = defs[s.ver].host
+        /\ s.host = Body(s.ver)
         /\ s.nat = "sensitive" => defs[s.ver].clearance = "sensitive"
 
 \* And within W of that decision: an edit stops the old upstream's requests
 \* W after it at the latest (a minute by default, a revocation's bound).
 WithinWindow == \A s \in sent : s.sentAt < s.at + W
 
-\* A UI definition that code shadowed never comes back when code drops the
-\* name: nobody looked at it while it was locked.
+\* A UI definition that code hid is never decided on again: nobody looked
+\* at it while it was locked. (Values decided on it before code hid it
+\* serve out their W, the window StrictlyCurrent documents.)
 NoRevival == \A s \in sent : ~s.revived
 
 (***************************************************************************)
@@ -272,7 +324,7 @@ NoRevival == \A s \in sent : ~s.revived
 (***************************************************************************)
 StrictlyCurrent == \A s \in sent : s.stillNewest
 
-\* A witness, not a gap (EXPECTED in RoutingCode): code does shadow a UI
+\* A witness, not a gap (EXPECTED in RoutingCode): code does hide a UI
 \* version in the protected runs, so NoRevival is not held vacuously.
 NeverShadowed == shadowed = {}
 
