@@ -110,7 +110,8 @@ Each file names its model and its sources in its header.
   drops a segment of them alone (`/companies/;x/documents` as
   `/companies/documents`, `/bucket/a/...` as `/bucket/a`), legacy paths with such literals held to the path
   as sent, as before 0.16; a path written once reaches it
-  exactly when the model takes it, byte for byte; and matching reads at
+  exactly when the model takes it, byte for byte, and through legacy paths
+  exactly when one is its prefix as written, undecoded; and matching reads at
   most as many of the request's segments as each entry's pattern holds.
 - **The Postgres tunnel** (`packages/server/test/tunnel-properties.test.ts`,
   `packages/cli/test/tunnel-properties.test.ts`): each real end, the Durable

@@ -30,6 +30,8 @@ export type PathPattern = {
    * `exact`: nothing; `rest`: anything, `**`; `never`: no path at all.
    */
   tail: 'prefix' | 'below' | 'slash' | 'exact' | 'rest' | 'never';
+  /** A legacy path's: its segments as written, matched against the request's as it goes, undecoded, as before 0.16. */
+  written?: true;
 };
 
 /** One entry of a route's allow list, read: its methods (null: any) and its path (null: any). */
@@ -129,10 +131,11 @@ function unstable(decoded: string): string | null {
  * slash; `code` an `allow` pattern in code, which keeps code's trailing
  * slash. Each refuses a literal segment that is not `stable`. `legacy` is a
  * path of code's `paths`, as before 0.16: no glob, `*` itself, and each
- * segment matched as written, decoded once, `//`, `;x` and `%20` included,
- * as S3's key prefixes may hold them; one that decodes to a slash, a control
- * byte or a dot segment matches nothing (a warning: no request with one
- * reaches the upstream).
+ * segment compared as written with the request's as it goes, undecoded,
+ * `//`, `;x` and `%20` included, as S3's key prefixes may hold them:
+ * `/files/%61` takes `/files/%61/x`, never `/files/a/x`. One that decodes to
+ * a slash, a control byte or a dot segment matches nothing, and one a URL
+ * never holds as written (`/café`, `/a b`) no request: each a warning.
  */
 export function readPattern(path: string, from: 'legacy' | 'code' | 'ui'): { pattern: PathPattern; warning?: string } | { problem: string } {
   if (typeof path !== 'string' || !path.startsWith('/')) return { problem: 'a path starts with /' };
@@ -149,9 +152,8 @@ export function readPattern(path: string, from: 'legacy' | 'code' | 'ui'): { pat
   let dead: string | null = null;
   for (const [at, segment] of written.entries()) {
     if (from === 'legacy') {
-      const decoded = bytesOf(utf8(segment));
-      if (unsafeSegment(decoded)) dead ??= JSON.stringify(segment);
-      segments.push(decoded);
+      if (unsafeSegment(bytesOf(utf8(segment)))) dead ??= JSON.stringify(segment);
+      segments.push(segment);
       continue;
     }
     if (segment === '**') {
@@ -172,6 +174,12 @@ export function readPattern(path: string, from: 'legacy' | 'code' | 'ui'): { pat
     segments.push(decoded);
   }
   if (dead !== null) return { pattern: NOTHING, warning: `${path} has ${dead}, a segment no request reaches the upstream with: it matches nothing` };
+  if (from === 'legacy') {
+    const pattern: PathPattern = { segments, tail, written: true };
+    // Compared as written, as before 0.16, with a request's path as a URL holds it: `/café` with `/caf%C3%A9`, never equal.
+    const held = new URL(`http://x${path}`).pathname;
+    return held === path ? { pattern } : { pattern, warning: `${path} is ${held} in a URL, and is compared as written, as before 0.16: no request matches it` };
+  }
   // A plain path is a prefix; one with a glob is matched segment by segment, unless it ends in `**`.
   if (glob && tail === 'prefix') tail = 'exact';
   return { pattern: { segments, tail } };
@@ -180,13 +188,15 @@ export function readPattern(path: string, from: 'legacy' | 'code' | 'ui'): { pat
 /**
  * A request's path under the upstream (`/companies/42`, `/` for the
  * upstream itself) as the segments it is matched as, each decoded once, to
- * bytes: no UTF-8 check, case folding or normalization. The root is one
+ * bytes: no UTF-8 check, case folding or normalization; or, against legacy
+ * paths (`written`), as it goes, undecoded. The root is one
  * empty segment, as a trailing slash is. An empty segment (`//`) or one
  * that `vanishes` (`;x`, `%20`, `...`) stays as it is: only a `*` refuses
  * one (`matches`).
  */
-export function requestSegments(relative: string): string[] {
-  return relative.slice(1).split('/').map(bytesOf);
+export function requestSegments(relative: string, written = false): string[] {
+  const segments = relative.slice(1).split('/');
+  return written ? segments : segments.map(bytesOf);
 }
 
 // Whether `pattern` matches the request's decoded `segments`: one pass over

@@ -156,7 +156,7 @@ test('a * in code\'s paths is itself, as before 0.16, with a warning: never a gl
   const { ask } = proxy({ paths: ['/files/*', '/a/**/b'] });
   assert.match(String(warned.mock.calls[0]?.arguments[0]), /api's path \/files\/\* takes \* as itself, as before 0\.16/);
   assert.equal((await ask('/market/dev/api/files/*/x')).status, 200);
-  assert.equal((await ask('/market/dev/api/files/%2A')).status, 200);
+  assert.equal((await ask('/market/dev/api/files/%2A')).status, 403, 'compared as written, as on 0.15: `%2A` is not `*`');
   assert.equal((await ask('/market/dev/api/files/anything')).status, 403);
   assert.equal((await ask('/market/dev/api/a/**/b/c')).status, 200);
   assert.equal((await ask('/market/dev/api/a/x/b')).status, 403);

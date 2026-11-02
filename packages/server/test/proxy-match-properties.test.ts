@@ -3,8 +3,9 @@
 // route, the proxy's path check and the matcher together, held to a model
 // of section 7's rules written here: a plain path a prefix by segments, `*`
 // one non-empty segment, `**` the rest, code's trailing slash a segment
-// below that a server reads as one; code's `paths`, as before 0.16, literals
-// matched as written, a trailing slash any segment below.
+// below that a server reads as one; code's `paths`, as before 0.16, each
+// literal compared as written with the path as it goes, undecoded (`/%61`
+// takes `/%61`, never `/a`), a trailing slash any segment below.
 //
 // - An `allow` pattern with a literal a server behind may read as another
 //   (`%2561`, `a;v1`, `a.`, empty) is refused at startup.
@@ -12,9 +13,10 @@
 //   whatever does reach it, the model takes, however many times a server
 //   behind decodes it, drops its `;` parameters or its trailing spaces and
 //   dots. A legacy path with such a literal is held to what it was: the
-//   path as sent, decoded once.
+//   path as sent, as written.
 // - A path written once-encoded, any byte of it, reaches the upstream exactly
-//   when the model takes it, byte for byte as the app wrote it.
+//   when the model takes it, byte for byte as the app wrote it; through
+//   legacy paths, exactly when they take it as written.
 // - Matching reads each entry's pattern once against the request: at most
 //   min(pattern, path) segments per entry, the path's past a trailing slash.
 import assert from 'node:assert/strict';
@@ -171,7 +173,9 @@ const patterns = (legacy: boolean) => gs.composite((tc) => {
   // A legacy path a server may read as another, by a literal or its trailing slash (`/companies/` takes `/companies/`,
   // which one that drops trailing slashes reads as `/companies`), is held to what it was, not to every reading.
   const sound = segments.every((segment) => segment === null || stable(segment)) && model.tail !== 'slash';
-  return { path, model, segments, valid: legacy || sound, sound, dead };
+  // And as a legacy path is compared, as written, with the path as it goes.
+  const raw: Model = { segments: text, tail: model.tail };
+  return { path, model, raw, segments, valid: legacy || sound, sound, dead };
 });
 
 test(`no encoding of a path outside the allow list reaches the upstream, and a once-encoded path inside it does, byte for byte, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
@@ -214,12 +218,14 @@ test(`no encoding of a path outside the allow list reaches the upstream, and a o
   }
   const answer = await plugin.routes!.fetch(new Request(`${PUBLIC}/use/market/dev/api/${encoded}`, { headers: { 'x-coffre-handle': HANDLE } }), coffre);
   const inside = (segments: readonly string[]) => allow.some((entry) => !entry.dead && takes(entry.model, segments));
+  const asWritten = (segments: readonly string[]) => allow.some((entry) => !entry.dead && takes(entry.raw, segments));
 
   if (reached.length === 1) {
     assert.equal(answer.status, 200);
     // What the upstream got, decoded once, as it was matched: the model takes it.
     let view = reached[0]!.slice('/v1/'.length).split('/').map(decode);
     assert.ok(inside(view), `the upstream got ${reached[0]}, outside ${allow.map((entry) => entry.path).join(' ')}`);
+    if (legacy) assert.ok(asWritten(reached[0]!.slice('/v1/'.length).split('/')), `the upstream got ${reached[0]}, which no legacy path ${allow.map((entry) => entry.path).join(' ')} is as written`);
     // And as a server reads it decoded once, twice, until it no longer changes, each segment that vanishes kept, emptied
     // or gone, its `;` parameters and trailing spaces and dots dropped: the model takes each, unless a legacy path's
     // own literal is one such a server reads as another, which it takes as before 0.16.
@@ -232,7 +238,7 @@ test(`no encoding of a path outside the allow list reaches the upstream, and a o
   } else assert.notEqual(answer.status, 200);
   if (once && path.every(safe)) {
     // Written once: the request is the path, which goes exactly when the model takes it, as the app wrote it.
-    assert.equal(reached.length === 1, inside(path.map(utf8)), `status ${answer.status}`);
+    assert.equal(reached.length === 1, legacy ? asWritten(encoded.split('/')) : inside(path.map(utf8)), `status ${answer.status}`);
     if (reached.length === 1) assert.equal(reached[0], `/v1/${encoded}`);
   }
 }, many));

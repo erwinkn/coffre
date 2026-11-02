@@ -1244,7 +1244,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * null: 405 when no entry takes its method, on its path or on any; 403 when
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
- * (proxy-match.ts). A `*` takes no empty segment (`//`) and none of `;`
+ * against an allow list, as written against legacy paths (proxy-match.ts). A `*` takes no empty segment (`//`) and none of `;`
  * parameters, spaces or dots alone, which a server may read as none, nor
  * does an `allow` path's trailing slash count one as what is below it; a
  * prefix, a `**`, a trailing slash past a segment a server reads as one, or
@@ -1253,7 +1253,8 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
 function allowed(credential: Resolved, method: string, relative: string): Response | null {
   if (credential.allowed === null) return null;
   if (credential.allowed.length === 0) return failure(403, `${credential.name}'s allow list is empty: it takes no request`);
-  const segments = credential.allowed.some((entry) => entry.path !== null) ? requestSegments(relative) : [];
+  // Legacy paths (`written`) and an allow list's never mix: the request's segments as the one kind or the other compares them.
+  const segments = credential.allowed.some((entry) => entry.path !== null) ? requestSegments(relative, credential.allowed.some((entry) => entry.path?.written === true)) : [];
   const verdict = allows(credential.allowed, method, segments);
   if (verdict === 'allowed') return null;
   if (verdict === 'path') return failure(403, `${credential.name} is not for ${relative}`);

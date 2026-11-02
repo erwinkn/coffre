@@ -104,8 +104,8 @@ test('`*` is one non-empty segment and the pattern is matched exactly; `**`, las
   assert.equal((await ask('/modelsX')).status, 403);
 });
 
-test('a pattern is decoded once: `/a%20b` matches `/a%20b` and `/a b`, never `/a%2520b`; bytes, not text', async () => {
-  const { ask } = proxy({ paths: ['/files/a%20b', '/café'] });
+test('an allow pattern is decoded once: `/a%20b` matches `/a%20b` and `/a b`, never `/a%2520b`; bytes, not text', async () => {
+  const { ask } = proxy({ allow: [{ path: '/files/a%20b' }, { path: '/café' }] });
   assert.equal((await ask('/files/a%20b')).status, 200);
   assert.equal((await ask('/files/a b')).status, 200);
   assert.equal((await ask('/files/a%2520b')).status, 403);
@@ -113,6 +113,23 @@ test('a pattern is decoded once: `/a%20b` matches `/a%20b` and `/a b`, never `/a
   // Decomposed, an e and a combining accent: another segment, as it is to the upstream.
   assert.equal((await ask('/cafe%CC%81')).status, 403);
   assert.equal((await ask('/CAF%C3%A9')).status, 403, 'no case folding');
+});
+
+test('a legacy path is compared as written with the path as it goes, undecoded, as on 0.15: another spelling of it is another path', async (t) => {
+  const { reached, ask } = proxy({ paths: ['/files/%61', '/docs/a'] });
+  assert.equal((await ask('/files/%61/x')).status, 200);
+  assert.equal((await ask('/docs/a/x')).status, 200);
+  assert.deepEqual(reached.splice(0), ['/v1/files/%61/x', '/v1/docs/a/x']);
+  for (const path of ['/files/a/x', '/files/%2561/x', '/docs/%61/x', '/docs/%61', '/Docs/a']) assert.equal((await ask(path)).status, 403, path);
+  assert.deepEqual(reached, []);
+  // One a URL never holds as written matches no request, as on 0.15, and says so.
+  const warned = t.mock.method(console, 'warn', () => {});
+  const unheld = proxy({ paths: ['/café', '/a b'] });
+  assert.deepEqual(warned.mock.calls.map((call) => String(call.arguments[0])), [
+    "credentialProxy: api's path /café is /caf%C3%A9 in a URL, and is compared as written, as before 0.16: no request matches it",
+    "credentialProxy: api's path /a b is /a%20b in a URL, and is compared as written, as before 0.16: no request matches it",
+  ]);
+  for (const path of ['/caf%C3%A9', '/a%20b']) assert.equal((await unheld.ask(path)).status, 403, path);
 });
 
 test('methods per entry: a request any entry takes goes; 405 names the methods its path takes, 403 a path none takes', async () => {

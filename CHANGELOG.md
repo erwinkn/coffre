@@ -30,9 +30,10 @@
   must read as themselves to every server behind: one still encoded once
   decoded (`%2561`), with `;` parameters (`a;v1`), ending in a space or a
   dot, or empty, is refused at startup. In `paths`, a `*` is still itself,
-  never a glob, and `//`, `;x` or `%20` in a path is matched as written, as
-  on 0.15. `environments: ['market/prod']`, on any credential, tunnel,
-  signer or verifier, serves it there alone. Redaction covers every key of
+  never a glob, and a path is compared as written, undecoded, `//`, `;x`
+  and `%20` included, as on 0.15 (`/files/%61` never takes `/files/a`).
+  `environments: ['market/prod']`, on any credential, tunnel, signer or
+  verifier, serves it there alone. Redaction covers every key of
   every rule, and what each rule made of them. Two different handles in one
   request are a 400, a parameter given twice included. Server only: no
   migration, and `/use` makes the same calls as before.

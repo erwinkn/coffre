@@ -497,10 +497,13 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   `methods` and `paths`, as before, are one entry per path, and keep what
   they meant: `/` takes every path, `/companies/` what is below
   `/companies` and not it, a `*` is itself, never a glob (with a warning
-  at startup), `methods: []` takes nothing, and a segment of theirs is
-  matched as written, decoded once, `//`, `;x` and `%20` included, as an S3
-  key prefix may hold them (`/bucket//prefix` takes
-  `/bucket//prefix/file`). A presigned URL is held to
+  at startup), `methods: []` takes nothing, and a path of theirs is
+  compared as written with the path as it goes, undecoded, `//`, `;x` and
+  `%20` included, as an S3 key prefix may hold them (`/bucket//prefix`
+  takes `/bucket//prefix/file`); another spelling is another path
+  (`/files/%61` takes `/files/%61/x`, never `/files/a/x`), and one a URL
+  never holds as written (`/café`, `/a b`) takes no request, with a warning
+  at startup. A presigned URL is held to
   the same list, after the same refusals as a request (no segment that
   decodes, however often, to a slash, a control byte or a dot segment;
   past 8 decodings, a segment is refused as one). A path of `paths` with a
