@@ -409,6 +409,55 @@ REMOVALS=(
   "LifecycleCompromised AudienceSealed SignInsOnValidTokens"
   # A binding of fetched keys, whose tokens the app verifies: the vault still takes only one it sealed.
   "LifecycleFetched BindingSealed SignInsOnValidTokens"
+  # A change in two round trips (Writing.tla, T179): a key write as one vault statement and one app statement, a
+  # member add as the vault's read and its write, each commit holding the whole read its decision weighed.
+  # The read one statement under the fence: a change between two of its parts tears the request from the log.
+  "WritingRevoke RequestUnderFence RequestsReplay"
+  # No hold at all: every adversary commits past.
+  "WritingRevoke ReadHeld WritesStandAtCommit"
+  "WritingNames ReadHeld WritesStandAtCommit"
+  "WritingProtect ReadHeld AddsStandAtCommit"
+  # The hold skipping one part of the read, each in turn: a read function that missed it. Each review round's P1 is
+  # one of these (rounds 1 and 2: the fork chain, the roles; round 3: the names; round 5: the protected set).
+  'WritingRevoke Unheld={"cred"} WritesStandAtCommit'
+  'WritingRevoke Unheld={"member"} WritesStandAtCommit'
+  'WritingPlace Unheld={"roles"} WritesStandAtCommit'
+  'WritingPlace Unheld={"policy"} WritesStandAtCommit'
+  'WritingPlace Unheld={"env"} WritesStandAtCommit'
+  'WritingFork Unheld={"parent"} WritesStandAtCommit'
+  'WritingFork Unheld={"parentKey"} WritesStandAtCommit'
+  'WritingRevoke Unheld={"key"} KeyChangesFlip'
+  'WritingNames Unheld={"keyName"} WritesStandAtCommit'
+  'WritingNames Unheld={"chain"} WritesStandAtCommit'
+  'WritingNames Unheld={"me"} WritesStandAtCommit'
+  'WritingAdd Unheld={"bob"} AddsStandAtCommit'
+  'WritingAdd Unheld={"policy"} AddsStandAtCommit'
+  'WritingSetUp Unheld={"roles"} AddsStandAtCommit'
+  'WritingSetUp Unheld={"settings"} AddsStandAtCommit'
+  'WritingSetUp Unheld={"place"} AddsStandAtCommit'
+  'WritingProtect Unheld={"prot"} AddsStandAtCommit'
+  'WritingProtect Unheld={"envs"} AddsStandAtCommit'
+  'WritingProtect Unheld={"slug"} AddsStandAtCommit'
+  'WritingProtect Unheld={"scope"} AddsStandAtCommit'
+  'WritingAdd Unheld={"svc"} AddsFlip'
+  # The decision weighing anything but the read (the roles from its isolate's cache): the hold holds the read, and
+  # the role redefined before both is missed.
+  "WritingPlace DecideOnRead WritesStandAtCommit"
+  # The hold before the fence: a session's revoke, which takes the fence and not the head, between it and the write.
+  "WritingRevoke HoldAfterFence WritesStandAtCommit"
+  # The read's numbers from the row's own seal column: a database writer puts a revoked session back, live.
+  "WritingTamper ReadOnLog WritesStandAtCommit"
+  # The hold by value alone: a grant taken and given back passes, and the log no longer shows the read at the commit.
+  "WritingABA ReadByNumber CommitsReplay"
+  "WritingAdd WaitForSeal AnsweredSealed"
+  # The app's auth_mac check left out (round 6): a database writer copies a token hash onto an Owner's credential;
+  # the vault resolves the token to the Owner, its read and its hold agree, and the write or the add commits as them.
+  "WritingTamper AuthChecked CommitsAuthentic"
+  "WritingAdd AuthChecked CommitsAuthentic"
+  # The actor taken from what the token resolves to at the commit, not from the checked read (round 7): a database
+  # writer takes no lock, and copies the hash after the hold, before the COMMIT.
+  "WritingTamper ActorFromRead CommitsAuthentic"
+  "WritingAdd ActorFromRead CommitsAuthentic"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"

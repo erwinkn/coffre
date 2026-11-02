@@ -51,6 +51,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   - [`formal/Rotation.tla`](../formal/Rotation.tla): the log across a
     rotation of the vault's signing key, and
     [`formal/Keyring.tla`](../formal/Keyring.tla), its keyring across two.
+- [`formal/Writing.tla`](../formal/Writing.tla) holds a change in two round
+  trips (T179, [below](#writingtla)), the design 0.16's change routes follow.
 - One holds 0.16's proxy definitions edited in the UI, before they are
   built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
   when its route is a row an Owner edits ([below](#routingtla)).
@@ -2106,6 +2108,123 @@ at or past its place) or the signer's next start names it. Neither the
 projector against such a pair nor a rotation landing mid-run is modelled.
 Tested in `packages/vault/test/reads-rotation.test.ts` and, for
 retention, `retention.test.ts`.
+
+### Writing.tla
+
+A change in two round trips (T179; [two-trips.md](design/two-trips.md)), the
+design before the code. A key write is one vault statement and one app
+statement; a member add, the vault's read and its write; each then waits for
+its seal (R51).
+
+**The read and its hold.** One function (`write_inputs`, `admit_inputs`)
+reads everything the decision weighs: every object with its newest change
+in the log, every name and set as resolved. The decision takes that read and
+nothing else, and the commit calls the same function again and goes ahead
+only if it answers the same. In the model that function is `Read`, which the
+vault's read and the hold both call. Its parts: for a key write, Ada's
+session, her member object, the roles, the policy, the environment, its fork
+parent, the parent's keys weighed and the key itself, and what the key's
+name, the fork chain and `env@me` resolve to; for an add, the adder's
+object, the roles, the policy, the services setting, the grant's place, the
+project's other environments and svc's row, and what the grant's slugs,
+the project's set of environments and the scope's slug resolve to. Both
+read what the caller's token hash resolves to (`tok`): the credential's
+seal does not cover the hash, so it is a name, which only the app's
+`auth_mac` binds to its credential. Before anything commits, the app checks
+that MAC on the rows as read (AuthChecked): a key write's app step, and
+for an add a call back to the app between the vault's read and its write,
+no round trip. The change then names the caller the check vouched for, by
+id under the vault's MAC; nothing after the check resolves the token again
+(ActorFromRead).
+
+**The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
+session; the vault's statement reads and numbers the request; the Worker
+decides on the read; the app's statement takes 0.14's head and the fence,
+holds the read and commits. The hold and the commit are two steps: nothing
+that takes the head or the fence comes between them (`held`), but a
+database writer, who takes neither, may (round 7). Beside her: her grant taken away and her
+session revoked (`WritingRevoke`), her grant taken away and given back
+(`WritingABA`), her role redefined, the policy changed and the environment
+archived (`WritingPlace`), the fork's parent archived, the key she replaces
+written and the key she inherits marked sensitive (`WritingFork`), the key
+she writes renamed, the parent gaining it, sensitive, and her personal
+config deleted (`WritingNames`), her session revoked and its row put back,
+live, by a database writer, and a token hash copied onto her credential by
+another (`WritingTamper`). Bob and Cy each add svc while Bob is demoted,
+the policy changes so that only Owners add, and a database writer copies a
+token hash onto Bob's credential (`WritingAdd`); Bob, no admin, sets up svc with a first grant while the
+roles are redefined, the services setting is closed and the grant's place
+archived (`WritingSetUp`), or on a whole project while one of its
+environments is protected, a protected fork is made in it, the project is
+renamed and another made under its slug, and the scope's project likewise
+(`WritingProtect`). Each review round's P1 is one of these adversaries:
+rounds 1 and 2 in Revoke, Place and Fork, round 3 in Names, round 5 in
+Protect, rounds 6 and 7 in Tamper and Add. Every other change is one atomic step; the checkpointer seals
+whatever has committed at each tick. A hold that fails asks again, three
+tries in all, then gives up (409).
+
+| protection | turned off, TLC finds |
+|---|---|
+| the vault's statement reads and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
+| the commit holds the read (ReadHeld) | `WritesStandAtCommit` (Revoke, Names), `AddsStandAtCommit` (Protect) |
+| ... every part of it (`Unheld={...}`, each of 21 parts left out in turn: a read function that missed it) | the adversary that moves it: `WritesStandAtCommit` after a revoke, an end, a role redefined, a policy change, an archive of the environment or its parent, a write of the replaced key or a new level on the inherited one, a rename, the parent gaining the key, the personal config deleted; `KeyChangesFlip` without the key; `AddsStandAtCommit` after a demotion, a policy change, a role redefined, the setting closed, the place archived, an environment protected, a protected fork made, the grant's or the scope's slug moved; `AddsFlip` without svc's row |
+| the decision weighs the read and nothing else (DecideOnRead) | `WritesStandAtCommit`: the roles taken from the isolate's cache; the read and its hold agree, and the role redefined before both is missed |
+| the write's hold runs once its statement holds the fence (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the hold and the write |
+| the read's numbers from the log's newest change, not the row's seal column (ReadOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the hold passes |
+| the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
+| the app checks the caller's `auth_mac` on the rows as read (AuthChecked) | `CommitsAuthentic` (Tamper, Add): a token hash copied onto an Owner's credential; the vault resolves the token to the Owner, read and hold agree, and the write or the add commits as the Owner (round 6) |
+| the change's actor is the checked read's, bound by id; nothing after the check resolves the token again (ActorFromRead) | `CommitsAuthentic` (Tamper, Add): the hash copied onto the Owner's row after the hold and before the COMMIT, which the hold, already passed, cannot see (round 7) |
+| a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
+
+`TwoTrips` holds in every scenario: a write or an add that commits at its
+first try made two round trips. It follows from the steps' shape, so it says
+what the steps are and proves nothing more. `EveryRequestEnds`, a liveness
+property under weak fairness, holds too: every write and add ends,
+committed or given up, within its tries.
+
+**What it abstracts.** A seal is a counter each change moves; the vault's
+StaleFirst and `ChangeChecksSeal` (HotPathOne) are one check here, and
+SealedObjects holds the seals themselves against a forger. A part of the
+read is its number and its value, or what a name resolves to; the digest
+the code compares (a SHA-256 of `write_inputs`' answer) is that comparison.
+That the digest covers everything the decision weighs is the code's types,
+not the model's: `decide.ts` takes one `WriteInputs`, made only from that
+answer. `DecideOnRead` shows why that matters, and `Unheld` what each part
+of the read holds; neither proves a given `write_inputs` complete. The hold
+reads, takes no lock and writes nothing. A request here is the record that
+binds it: its committed change, or the outcome record the Worker MACs when
+nothing commits; the ids the vault's statement resolves sit unsealed beside
+the request row, which proves nothing from them (two-trips.md, "The
+request and its refusals"). `RequestsReplay` checks that the decision's
+inputs are the log at the request's number; that the replay recomputes the
+same decision from them is HotPathOne's `ReplayAgrees`. The decision is
+`decide.ts`'s, reduced to its inputs; which roles write where is the Lean
+model's. A session's expiry changes nothing in the read: it is judged at
+the vault's clock, at the decision, as today. Every object exists from the
+start with seal 0, so a key that appears in the parent, a protected fork
+made in a project or a project made under an old slug is not an object
+here: it is a move of `names`, as a rename is (a key's object holds no
+name). Names are app rows, unsealed, as today; each move of one is an app
+write under 0.14's head. A session's revoke takes the fence and not 0.14's
+head, as it will once 0.16 contracts 0047's head away; today's takes the
+head too, which only adds order. The app's statement is two steps: its
+hold (the head, the issue lock, the fence, the read again) and its COMMIT
+(the rows, the change). Between them `held` names who holds the head and
+the fence, and every change that takes one of them (a revoke, a give-back,
+a rename, another write or add) waits for it. A database writer takes no
+lock, so its moves (`Tamper`, `Substitute`) can still come between the
+hold and the COMMIT: that is how round 7 found a token hash copied onto an
+Owner's credential after the hold, and why the change names the caller the
+app checked, by id, and never resolves the token again (`ActorFromRead`).
+Its rows come after the fence, as `app_change`
+already updates a key's row after it; every statement that locks a key's
+row holds 0.14's head first, so this adds no wait Migration015's
+`NoWaitCycle` would have to check. An add's write takes its rows, in
+principal order, then the head, then the fence, as `change_input` does, and
+holds after them. An app and a vault of different versions are refused
+while both deploy (503 `deploying`), so the model has one version. The seal
+is HotPathOne's and Seal.tla's, here a tick that seals every committed
+number.
 
 ## 0.16: proxy definitions in the UI
 
