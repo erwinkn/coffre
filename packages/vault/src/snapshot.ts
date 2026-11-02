@@ -161,7 +161,9 @@ function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, Buffer | null> |
     members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
     grants: new Map(asked.principals.map((principal) => [principal, raw.grants.filter((grant) => grant.principal === principal).map(grantOf)])),
     newestAccess: new Map(raw.access.map((entry) => [entry.subjectPrincipal!, entryOf(entry)])),
-    memberLogs: members ?? new Map((raw.memberLogs ?? []).map(({ principal, seal, number, newest: last, old }) => [principal, store.memberLogOf({ seal: hex(seal), number, newest: hex(last), old })])),
+    memberLogs: members ?? new Map((raw.memberLogs ?? []).map(({ principal, seal, number, at, requestId, object, actor, payload, newest: last, mac }) => [principal, store.memberLogOf({
+      seal: hex(seal), number, at, request_id: requestId, object, actor, payload, newest: hex(last), mac: hex(mac),
+    })])),
     newestPolicy: raw.policy === null ? null : entryOf(raw.policy),
     newestSettings: asked.settings !== true ? undefined : raw.settings == null ? null : entryOf(raw.settings),
     environments: new Map<string, EnvironmentRow>([...gone.map(([id, last]) => [id, store.goneEnvironment(id, last)] as const), ...raw.environments.map(({ id, projectId, slug, owner, parentId, deleted, archived, ...sealed }) => [id, {
@@ -217,7 +219,10 @@ type Raw = {
     protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: string | null;
   }[];
   /** With `asked.seals`, on Postgres: each asked principal's row's seal and its newest change (`MemberLog`). */
-  memberLogs?: { principal: string; seal: string | null; number: string | null; newest: string | null; old: string | null }[];
+  memberLogs?: {
+    principal: string; seal: string | null; number: string | null; at: string | null; requestId: string | null; object: string | null; actor: string | null;
+    payload: string | null; newest: string | null; mac: string | null;
+  }[];
   /** With `asked.seals`, on Postgres: the places asked that the log holds a change of and no row answers to. */
   gone?: { id: string; newest: string | null }[];
   /** With `asked.seals`, on SQLite: every place id asked, row or none. */

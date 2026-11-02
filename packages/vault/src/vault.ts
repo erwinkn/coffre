@@ -158,7 +158,7 @@ import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRef
 import type { ResolvedVaultConfig } from './config.ts';
 import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
 import { TICK_MS } from './log-checkpointer.ts';
-import { authentic, changeEntry, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
+import { authentic, changeEntry, entryMac, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
 import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
@@ -253,7 +253,7 @@ export type PreparedVault = {
    * with, from the vault's signing keys, and what each waits on to answer.
    * Null under 0.14's alone.
    */
-  log015: (ChangeKeys & { sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing }) | null;
+  log015: (ChangeKeys & { macs: readonly LogMacKey[]; sealThrough: SealThrough; heldOutside: () => Promise<readonly PairNotes[]>; sealing: () => Promise<Sealing> | Sealing }) | null;
   /** Whether this process wrote its bulk cap into 0.15's log, or found it there (`#limit`). */
   limited: boolean;
   /** Whether 0.15's log is cut over from 0.14, as this process found it (`cutover`): until then, nothing of 0.15's runs. */
@@ -323,7 +323,7 @@ function log015(
 ): NonNullable<PreparedVault['log015']> {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
   if (heldOutside === undefined) throw new Error("0.15's log is verified against the pairs held where no database writer reaches: give the vault the checkpointer's heldOutside");
-  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), sealThrough, heldOutside, sealing };
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), macs: seeds.map((seed) => logMacKey(seed)), sealThrough, heldOutside, sealing };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -427,6 +427,11 @@ const KEY_CHECK_SAMPLE = 3;
 
 /** The vault's first entry under a new key, which the keys it replaced count only before (`#settle`). */
 const KEY_ROTATE = 'key.rotate';
+
+/** Whether two MACs are the same bytes, in constant time. */
+function sameMac(a: Buffer, b: Buffer): boolean {
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /** Why a tampered member is not started over under 0.15's log (`#startOver`). */
 const START_OVER_015 = "this member's record failed the vault's integrity check, and 0.15's log changes no member whose row it does not hold: a reseal makes it the log's again";
@@ -944,6 +949,12 @@ class VaultService implements Vault {
   ): Promise<Fault | null> {
     const log = logs?.get(principal) ?? reads?.memberLogs.get(principal) ?? (await store.memberLogs(db, [principal])).get(principal)!;
     const { newest } = log;
+    // The newest change's own MAC, under any of the vault's keys, as a seal is: its seal and `old` are only what a writer
+    // could not have edited once it holds (0.14's walk checked each entry it took so).
+    if (newest !== null && !this.#prepared.log015!.macs.some((key) => sameMac(entryMac(key, { tree: 'changes', row: newest.row }), newest.row.mac))) {
+      this.#report(reports, principal, 'mac', 'log:change');
+      return 'mac';
+    }
     if (row === undefined) {
       if (newest !== null) {
         // Deleted outright, unless another decision admitted them since the row was read.

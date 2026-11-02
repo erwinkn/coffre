@@ -23,7 +23,7 @@ import { checkpointMessage, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoi
 import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
-import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound } from '@coffre/db/log';
+import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound, logObject } from '@coffre/db/log';
 import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
@@ -3025,6 +3025,24 @@ test('under 0.15\'s log, a member row put back with its seal, or one never seale
   assert.equal((await w.vault.access(ADA)).status, 'tampered');
   // Each the vault's seal over no object her row holds: reported once.
   assert.deepEqual((await tamperings(w)).map(([, code]) => code), ['mac']);
+});
+
+test('under 0.15\'s log, an old member row put back with the newest change\'s seal edited to match it is refused: the change\'s MAC fails (T179 PR 2, review r1)', { skip: LOG === '0.15' ? false : "0.15's log only" }, async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const putBack = await snapshot(ADA);
+  const { vaultMembers } = tablesOf(db.owner);
+  const [before] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: null, expiresAt: null }] })).ok);
+  // The revoked row put back, seal and all, and the revoke's change edited to name that seal: its payload, and so the
+  // 0.14 entry it accounts for, left as they were. Only the change's MAC, over its seal, tells.
+  await putBack();
+  await run(db.owner, sql`UPDATE log_changes SET seal = ${before.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${logObject('principal', ADA)})`);
+  assert.equal((await w.vault.access(ADA)).status, 'tampered');
+  const secret = await w.secret(w.dev);
+  const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) });
+  assert.equal(!read.ok && read.refusal.code, 'tampered');
+  assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
 });
 
 test('an entry forged in the vault\'s name about a member is passed over and reported, not obeyed', async () => {
