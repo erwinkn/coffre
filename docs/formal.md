@@ -2204,11 +2204,16 @@ here: it is a move of `names`, as a rename is (a key's object holds no
 name). Names are app rows, unsealed, as today; each move of one is an app
 write under 0.14's head. A session's revoke takes the fence and not 0.14's
 head, as it will once 0.16 contracts 0047's head away; today's takes the
-head too, which only adds order. A step is one statement that takes the
-fence, so the app's statement (the head, the issue lock, the fence, the
-hold, the rows, the change) is one step: sound because the head and the
-fence are held from the hold to COMMIT and every change of what the read
-reads takes one of them. Its rows come after the fence, as `app_change`
+head too, which only adds order. The app's statement is two steps: its
+hold (the head, the issue lock, the fence, the read again) and its COMMIT
+(the rows, the change). Between them `held` names who holds the head and
+the fence, and every change that takes one of them (a revoke, a give-back,
+a rename, another write or add) waits for it. A database writer takes no
+lock, so its moves (`Tamper`, `Substitute`) can still come between the
+hold and the COMMIT: that is how round 7 found a token hash copied onto an
+Owner's credential after the hold, and why the change names the caller the
+app checked, by id, and never resolves the token again (`ActorFromRead`).
+Its rows come after the fence, as `app_change`
 already updates a key's row after it; every statement that locks a key's
 row holds 0.14's head first, so this adds no wait Migration015's
 `NoWaitCycle` would have to check. An add's write takes its rows, in

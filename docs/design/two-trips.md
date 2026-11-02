@@ -595,8 +595,9 @@ no round trip: it is a statement of the same Sync.
   after 0.16 stops the appends, a lock and nothing read: `app_change`
   takes the head again inside, so without it a two-trip write (rows, then
   head) and a route still head-first (`patchSecret`: head, then rows)
-  would wait on each other until Postgres kills one. Neither Writing (one
-  atomic step) nor Migration015 (the head first, assumed) would see it;
+  would wait on each other until Postgres kills one. Neither Writing (its
+  locks one owner, `head` and `held`, with no row locks) nor Migration015
+  (the head first, assumed) would see it;
 - the vault's request: the fence shared alone, as a use;
 - a member add's write: both members' queues and rows in principal order,
   then 0.14's head, then the issue lock shared, then the fence, then the
