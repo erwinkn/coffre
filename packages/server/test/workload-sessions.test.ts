@@ -2,6 +2,7 @@
 // 4.1 and 5): the exchange at /api/auth/workload for each kind of ID token,
 // every request checked live in one statement with its proof and its gate,
 // renewal on the database's clock, logout, and the strict instance.
+import { RELEASE, versioned, type VaultEntry } from '@coffre/core/vault';
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
@@ -472,6 +473,20 @@ test('a session reaches the routes a service token does, and none only a person 
   const [denied] = (await entries('token.use'));
   assert.equal(denied!.route, 'GET /sessions');
   assert.equal((await call(held, 'GET', '/api/projects')).status, 200);
+});
+
+test("a vault on another release: a workload's session answers 503 deploying, Retry-After 1, and stands again once both match", async () => {
+  await bindGithub();
+  const held = await githubSession();
+  let theirs = RELEASE;
+  const entry: VaultEntry = { call: async (release, method, args) => (theirs === RELEASE ? deps.vault.call(release, method, args) : { release: theirs }) };
+  const over = { ...runtime, vault: versioned(entry) } as CoffreRuntime;
+  assert.equal((await call(held, 'GET', '/api/projects', { to: over })).status, 200);
+  theirs = '9.9.9';
+  const refused = await call(held, 'GET', '/api/projects', { to: over });
+  assert.deepEqual([refused.status, refused.body.error, refused.headers.get('retry-after')], [503, 'deploying', '1']);
+  theirs = RELEASE;
+  assert.equal((await call(held, 'GET', '/api/projects', { to: over })).status, 200, 'the session stands: nothing ended it');
 });
 
 test("a session issues no credential and changes no one's access, in any mode: a token, binding or code it made would read what it may only use", async () => {

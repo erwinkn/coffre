@@ -212,7 +212,7 @@ test('who saves: a person holding proxy.edit, on a session; a Developer, a token
 
 test('what a save refuses before it reads: a definition the rules refuse, an item under another name, 257 items, a personal config', ON_015, async () => {
   const w = await world();
-  refusedWith(await w.save({ seal: null, items: { openai: { ...route('openai'), upstream: 'https://169.254.169.254' } } }), 'invalid', /private/);
+  refusedWith(await w.save({ seal: null, items: { openai: { ...route('openai'), upstream: 'https://169.254.169.254' } as ProxyDefinition } }), 'invalid', /private/);
   refusedWith(await w.save({ seal: null, items: { maps: route('openai') } }), 'invalid', /own name/);
   const many = Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`r${i}`, route(`r${i}`)]));
   refusedWith(await w.save({ seal: null, items: many }), 'invalid', /256/);

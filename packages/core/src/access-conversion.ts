@@ -10,6 +10,7 @@ import {
   ROLES,
   type GrantPlace,
   type InstanceRole,
+  type Permission,
   type Place,
   type BuiltinRole as Role,
   type Scope,
@@ -143,6 +144,9 @@ export function convertEveryProjectGrants(input: ConversionInput): Conversion {
   return { role, scope, grants: [...given.values()], narrowed };
 }
 
+/** The permissions made after 0.4, which no grant of 0.4's held. */
+const SINCE_04: readonly Permission[] = ['proxy.edit'];
+
 /**
  * The strongest instance role a person's lasting grants on every project
  * add up to, never more than they held: an owner of 0.4 (an Admin) who
@@ -155,7 +159,9 @@ function instanceRoleFor(previous: InstanceRole, everyProject: readonly EveryPro
   const all = lasting.find((grant) => grant.environmentSlug === null)?.role;
   if (previous === 'admin') {
     const adds = all === undefined ? [] : ROLES[all].permissions;
-    const owner = INSTANCE_ROLES.owner.permissions.every((permission) => instanceRoleGrants('admin', permission) || (adds as readonly string[]).includes(permission));
+    // Over 0.4's permissions: one made since (`proxy.edit`, 0.16) is no part of what they held then.
+    const owner = INSTANCE_ROLES.owner.permissions.filter((permission) => !SINCE_04.includes(permission))
+      .every((permission) => instanceRoleGrants('admin', permission) || (adds as readonly string[]).includes(permission));
     return { role: owner ? 'owner' : 'admin', scope: EVERYWHERE };
   }
   if (previous !== 'member') return { role: previous, scope: EVERYWHERE };

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **The app and the vault run one release at a time.** Every call between
+  them goes through one envelope, `call(release, method, args)`, the
+  `VAULT` binding's only method, and the Node vault's only route (`POST
+  /call`). A vault on another release runs nothing, and the app answers
+  503 `deploying` with `Retry-After: 1` until both Workers match: deploy
+  and roll back both together. Deployments type the binding `VaultEntry`
+  (`@coffre/server/cloudflare`), as `coffre init` writes it. A 0.15 app in
+  front of this vault, or this app in front of a 0.15 vault, fails its
+  calls for the seconds of the deploy.
+
+- **Proxy definitions per environment, stored (T186, PR A).** An
+  environment's routes, signers, verifiers and tunnels written in the UI
+  are one sealed object of the vault's log, which only the vault changes:
+  a save by a person holding the new `proxy.edit` permission there (Owners
+  hold it as roles ship; a role an Owner gives it reads values too), from
+  the seal the page loaded, each item's keys cleared for its editor and
+  their holdings frozen with it. `GET`/`PUT /api/projects/<p>/<e>/proxy`
+  and `PUT /api/proxy/reserved`; nothing serves them yet (PR C), and the
+  page comes with PR D. `credentialProxy({ editable: true })` lets the tab
+  write. Migration 0055 adds `proxy_definitions` and `proxy_reserved`, and
+  `change_input` for their two kinds; the previous release runs on it.
+
 - **A page of reads costs as much on a connection's sixth call as on its
   first.** `log_reads_by` and `log_reads_at`, which list a member's reads
   and a key's, an environment's or a project's, let Postgres switch to a

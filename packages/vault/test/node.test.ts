@@ -8,12 +8,13 @@ import { join } from 'node:path';
 
 import { RELEASE, versioned } from '@coffre/core/vault';
 import { isUnavailable } from '@coffre/db/dialect';
+import { sql } from 'drizzle-orm';
 
 import { failureOf } from '../src/failure.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { connectVault, localVault, serveVault } from '../src/node.ts';
 import { prepareVault } from '../src/vault.ts';
-import { openTestDatabase, sealed } from './database.ts';
+import { openTestDatabase, rows, sealed } from './database.ts';
 
 // The vault as a process of its own, which the server reaches over a Unix
 // socket (src/node.ts).
@@ -52,6 +53,45 @@ test('the vault leaves an idle connection open for the server to reuse: it never
   } finally {
     agent.destroy();
     await vault.close();
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('over the socket, a call on another release answers this release and runs nothing; the per-method routes are gone', async () => {
+  const db = await openTestDatabase();
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-socket-'));
+  const served = await serveVault({
+    socket: join(dir, 'vault.sock'),
+    database: db.vault,
+    hotDatabase: await db.hot(),
+    checkpointer: { memory: join(dir, 'memory') },
+    kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
+    owners: ['root@acme.example'],
+  });
+  try {
+    const entry = connectVault(served.socket);
+    const entries = async () => (await rows<{ n: string | number }>(db.vault, sql`SELECT count(*) AS n FROM audit_log`))[0]!.n;
+    const before = await entries();
+    for (const [method, args] of [['about', []], ['access', ['user:root@acme.example']], ['useNamed', [{ tokenHash: 'x' }]]] as const) {
+      assert.deepEqual(await entry.call('0.0.1', method, [...args] as unknown[]), { release: RELEASE }, method);
+    }
+    assert.equal(await entries(), before, 'nothing written');
+    // The app's side: another release is `deploying`; this one is served.
+    await assert.rejects(versioned(entry, '0.0.1').about(), (error: Error & { code?: string }) => error.code === 'deploying');
+    assert.equal(typeof (await versioned(entry).access('user:root@acme.example')).role, 'string');
+    // An app of 0.15, which posts to /<method>: no such route, before anything is read.
+    const old = await new Promise<number>((resolve, reject) => {
+      const req = request({ socketPath: served.socket, method: 'POST', path: '/access', headers: { 'content-type': 'application/json' } }, (res) => {
+        res.resume();
+        resolve(res.statusCode!);
+      });
+      req.on('error', reject);
+      req.end(JSON.stringify(['user:root@acme.example']));
+    });
+    assert.equal(old, 404);
+  } finally {
+    await served.close();
     await db.close();
     rmSync(dir, { recursive: true, force: true });
   }

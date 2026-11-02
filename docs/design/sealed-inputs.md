@@ -29,6 +29,8 @@ Every input a decision reads is one object of the log. Its row carries a
 | environment | uuid | project, slug (renamed by its own change: a scoped role's filters read it), protected, a fork's parent, a personal config's owner, deleted, archived |
 | roles | one, `instance` | an Owner's edits of the roles, and the roles they made |
 | policy | one, `instance` | the bulk cap's count and window (R52) |
+| proxy | the environment's uuid | its proxy definitions written in the UI (0.16), each item with who saved it and what that save froze of them; its seal covers the index of their digests, names included, not their bodies ([proxy-ui.md](proxy-ui.md), section 2) |
+| proxy-reserved | one, `instance` | every name the deployment's code reserved and no instance Owner released |
 
 A seal covers the **object**, never the row's other columns: bookkeeping
 the app updates outside any change (a credential's `last_used_at` and

@@ -1538,6 +1538,48 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   parent refused, a reference decided where it lives, a key not yet
   created accepted.
 
+**PR A as built** (W310). Where it settles what this section left open, or
+reads it otherwise:
+- **The routes** take the API's shape for an environment's own leaf:
+  `GET`/`PUT /api/projects/<p>/<e>/proxy`, as `…/missing` and `…/version`.
+  The page's answer adds `editable` (this caller may save here now) and
+  `code` (the names this deployment's code defines, shown locked).
+- **Frozen holdings** are kept per place, not per grant: what the editor
+  holds in each column (`heldColumns`) at the environment and each fork
+  parent above it, and whether they own its project; and, for each project
+  a reference's source is in, whether they own it. An instance role has no
+  grant to freeze, and these are the only places an item's keys resolve
+  (`FrozenGrant` in `inputs.ts`). A reference made later into a project
+  the save did not see routes nothing sensitive until the item is saved
+  again.
+- **The object's CAS is on its newest change, not its row.** `change_input`
+  writes a `proxy` row whole from its value, moving on only from the seal
+  of the object's newest change, under the fence; it never weighs the row.
+  The vault decides each save from the object as its log has it
+  (`heldByLog`), so a forged row is never carried on, and a `tampered` or
+  `stale` one takes only a save that replaces it whole (`replace: true`),
+  by an Owner of the project. An item the save does not change keeps its
+  editor and holdings; a save that changes nothing logs nothing.
+- **Every decision also writes a vault entry** (`proxy.save`, `proxy.code`,
+  `proxy.release`): each refusal, and the audit page's diff, the sensitive
+  keys an item routes among it (R66).
+- **`proxy.code` is a vault method already** (`reserveProxy`), with no
+  route: PR C's gate calls it. An environment whose row fails its seal is
+  passed over: it serves nothing (R64), and the name stays reserved.
+- **The fork lookup** (section 2) is a pure function, `proxyLookup` in
+  `packages/vault/src/proxy.ts`, over full rows; PR C's statement reads one
+  item and the index.
+- **The version gate's helpers live in `@coffre/core/vault`**: `gated`
+  (the vault's side), `versioned` (the app's) and `Deploying`, which the
+  app's `toErrorBody` answers 503 `deploying` and sign-in's catch-alls
+  rethrow (`deployingIn`), so the vault suite speaks through the envelope
+  too (`spoken`). `CoffreConfig.vault` is a `VaultEntry`; the app's two
+  handlers wrap it before `createRuntime`, the one place a `Vault` is made
+  from the deployment's entry.
+- **The app's checks**: `credentialProxy({ editable })`, off by default; a
+  name code defines (409); an egress or a network, none of which code can
+  declare before PR C (400).
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

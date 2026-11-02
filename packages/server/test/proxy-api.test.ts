@@ -8,13 +8,15 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { defineSignin, github } from '@coffre/core/identity';
+import { defineSignin, github, signin } from '@coffre/core/identity';
 import { RELEASE, versioned, type ProxyDefinition, type VaultEntry } from '@coffre/core/vault';
 import { and, asc, eq } from 'drizzle-orm';
 
+import { keeps015 } from '../src/api/changes.ts';
 import { SigninService } from '../src/api/signin.ts';
+import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import type { CoffreRuntime } from '../src/runtime.ts';
+import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { LOG } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
@@ -227,4 +229,17 @@ test("a vault on another release: a signed-in request answers 503 deploying, Ret
   theirs = RELEASE;
   assert.deepEqual((await bearer(token.token, over).proxy.get('market/dev')).items, [], 'the same credential, served again: never signed out');
   assert.ok(calls.length > 0);
+});
+
+test('two runtimes over one vault binding, as a Worker makes one per request, ask the vault about() once: one versioned vault per entry', async () => {
+  const asked: string[] = [];
+  const entry: VaultEntry = { call: async (release, method, args) => (asked.push(method), deps.vault.call(release, method, args)) };
+  const config = resolveConfig({ publicUrl: ORIGIN, vault: entry, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
+  const transport = { json: async () => ({}) };
+  const first = createRuntime(config, deps.db, versioned(entry), transport);
+  const second = createRuntime(config, deps.db, versioned(entry), transport);
+  assert.equal(first.vault, second.vault);
+  await keeps015(first.vault);
+  await keeps015(second.vault);
+  assert.deepEqual(asked.filter((method) => method === 'about'), ['about']);
 });

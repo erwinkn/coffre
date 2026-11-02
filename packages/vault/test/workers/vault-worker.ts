@@ -29,7 +29,13 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const { method, args, release } = (await request.json()) as { method: string; args: unknown[]; release?: string };
     // The binding's one entry, as an app on `release` calls it: its answer, the envelope, whole (the version gate).
-    if (release !== undefined) return Response.json({ ok: true, result: await env.VAULT.call(release, method as never, args) });
+    if (release !== undefined) {
+      try {
+        return Response.json({ ok: true, result: await env.VAULT.call(release, method as never, args) });
+      } catch (error) {
+        return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+      }
+    }
     // The checkpointer's object started from outside the vault, its connection opened before the calls counted, and the
     // reads' projector's beside it, which opens its own at its first alarm.
     if (method === 'startCheckpointer') {

@@ -161,7 +161,7 @@ import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, heldByLog, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
+import { Changes, heldFrom, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
@@ -4004,14 +4004,20 @@ class VaultService implements Vault {
     const keys = this.#log015();
     if (!UUID.test(String(input?.projectId)) || !UUID.test(String(input?.environmentId))) throw new Error('an environment is named by its project\'s id and its own');
     await this.#settled();
+    // The row and its newest change, read apart: a save that commits between them makes them disagree for that read
+    // alone, so a disagreement is read once more before it is shown as one. The seal shown is the one the items were
+    // checked against, which a save names.
     const read = async <K extends 'proxy' | 'proxy-reserved'>(ref: Ref & { kind: K }) => {
-      const newest = await store.newestChange(this.#db, ref);
-      try {
-        const held = await heldByLog(keys.seals, this.#db, ref);
-        return { object: held.log === 'live' ? (held.object as Extract<Input, { kind: K }>) : null, seal: newest?.seal ?? null, state: 'ok' as const };
-      } catch (error) {
-        if (!(error instanceof NotLogged)) throw error;
-        return { object: null, seal: newest?.seal ?? null, state: error.fault };
+      for (let attempt = 0; ; attempt += 1) {
+        const [row, newest] = await Promise.all([store.readObject(this.#db, ref), store.newestChange(this.#db, ref)]);
+        try {
+          const held = heldFrom(keys.seals, ref, row, newest);
+          return { object: held.log === 'live' ? (held.object as Extract<Input, { kind: K }>) : null, seal: newest?.seal ?? null, state: 'ok' as const };
+        } catch (error) {
+          if (!(error instanceof NotLogged)) throw error;
+          if (attempt === 0) continue;
+          return { object: null, seal: newest?.seal ?? null, state: error.fault };
+        }
       }
     };
     const [proxy, reserved] = await Promise.all([read({ kind: 'proxy', id: input.environmentId }), read(RESERVED_REF)]);
@@ -4066,12 +4072,20 @@ class VaultService implements Vault {
       if (input.caller !== 'person' || input.credentialScope != null || !actor.startsWith('user:')) throw refused('not_allowed', 'a person edits proxy definitions, signed in as themselves');
       // The objects it weighs, each as its log has it (`held`: a forged one refuses it), and the newest change of the
       // environment's proxy object, which its page must have loaded.
-      const [member, roles, reserved, place, newest] = await Promise.all([
+      // The object it changes among them, as its log has it: a forged one only replaced whole, which reads none of it. And
+      // the keys any item asked for names, where the environment itself holds them: a fork's parents are read after.
+      const askedKeys = [...new Set([...asked.values()].flatMap((definition) => (definition === null ? [] : definitionKeys(definition))))];
+      const [member, roles, reserved, place, newest, current, own] = await Promise.all([
         changes.held(d.tx, { kind: 'principal', id: actor }),
         changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }),
         changes.held(d.tx, RESERVED_REF),
         changes.held(d.tx, { kind: 'environment', id: environmentId }),
         store.newestChange(d.tx, ref),
+        input.replace === true ? null : changes.held(d.tx, ref).catch((error: unknown) => {
+          if (error instanceof NotLogged) return error;
+          throw error;
+        }),
+        store.secretsNamed(d.tx, [environmentId], askedKeys),
       ]);
       if (place.log !== 'live' || place.object.kind !== 'environment' || place.object.projectId !== projectId) throw refused('invalid', 'no such environment');
       const chain = [place.object];
@@ -4096,15 +4110,8 @@ class VaultService implements Vault {
       const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
       const taken = [...asked].find(([name, definition]) => definition !== null && names.includes(name));
       if (taken !== undefined) throw refused('reserved', `${taken[0]} is reserved by the deployment's code: an instance Owner may release it`);
-      // The object it changes, as its log has it; a forged one only replaced whole.
-      let before: ProxyObject | null = null;
-      if (input.replace !== true) {
-        const held = await changes.held(d.tx, ref).catch((error: unknown) => {
-          if (error instanceof NotLogged) throw refused('tampered', "this environment's proxy definitions failed the vault's integrity check: an Owner of its project replaces them whole");
-          throw error;
-        });
-        before = held.log === 'live' && held.object.kind === 'proxy' ? held.object : null;
-      }
+      if (current instanceof NotLogged) throw refused('tampered', "this environment's proxy definitions failed the vault's integrity check: an Owner of its project replaces them whole");
+      const before: ProxyObject | null = current?.log === 'live' && current.object.kind === 'proxy' ? current.object : null;
       // What changes: an item whose definition is the one it holds keeps its save (its editor, its holdings).
       const saved = new Map<string, ProxyDefinition | null>();
       for (const [name, definition] of asked) {
@@ -4117,7 +4124,7 @@ class VaultService implements Vault {
       // Each changed item's keys, resolved by name where the use will find them: the nearest place of the fork chain
       // that holds one, its value's nature a reference's source's; and cleared for the editor.
       const sending = [...new Set([...saved.values()].flatMap((definition) => (definition === null ? [] : definitionKeys(definition))))];
-      const resolved = await this.#proxyKeys(d.tx, changes, chain, sending);
+      const resolved = await this.#proxyKeys(d.tx, changes, chain, sending, own);
       const cleared = new Map<string, string[]>();
       for (const key of resolved.values()) {
         const why = routeRefusal(reader, key, chain);
@@ -4158,8 +4165,12 @@ class VaultService implements Vault {
    * has it, and a reference's source's nature and project. A key no place
    * holds, or one archived, is left out: decided at each use.
    */
-  async #proxyKeys(db: Queryable, changes: Changes, chain: readonly EnvironmentInput[], names: readonly string[]): Promise<Map<string, ResolvedKey>> {
-    const found = await store.secretsNamed(db, chain.map((environment) => environment.id), names);
+  async #proxyKeys(
+    db: Queryable, changes: Changes, chain: readonly EnvironmentInput[], names: readonly string[], own: readonly { id: string; environmentId: string; key: string }[],
+  ): Promise<Map<string, ResolvedKey>> {
+    if (names.length === 0) return new Map();
+    const parents = chain.slice(1).map((environment) => environment.id);
+    const found = [...own.filter((row) => names.includes(row.key)), ...(parents.length === 0 ? [] : await store.secretsNamed(db, parents, names))];
     const nearest = new Map<string, { id: string; holder: EnvironmentInput }>();
     for (const holder of chain) {
       for (const row of found) if (row.environmentId === holder.id && !nearest.has(row.key)) nearest.set(row.key, { id: row.id, holder });

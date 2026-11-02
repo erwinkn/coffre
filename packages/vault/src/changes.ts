@@ -79,7 +79,12 @@ export type Held = { log: 'unlogged' } | { log: 'gone' } | { log: 'live'; object
  * row gone, or a row its seal does not cover.
  */
 export async function heldByLog(keys: SealKeys, db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
-  const [{ row, seal }, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+  const [read, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+  return heldFrom(keys, ref, read, newest);
+}
+
+/** `heldByLog`, on an object's row and its newest change as read. */
+export function heldFrom(keys: SealKeys, ref: Ref & { kind: ReadKind }, { row, seal }: { row: Input | null; seal: Buffer | null }, newest: { seal: Buffer | null } | null): Held {
   if (newest === null) {
     if (seal !== null) throw new NotLogged(ref, 'stale');
     return { log: 'unlogged' };
@@ -107,6 +112,11 @@ type Staged = { ref: Ref & { kind: ReadKind }; steps: Step[]; read?: Read; old?:
 export class Changes {
   readonly #keys: ChangeKeys;
   readonly #staged = new Map<string, Staged>();
+  /**
+   * The proxy's objects as `held` read them in this decision's transaction, which `prepare` takes rather than
+   * read them again: nothing writes between the two but the decision, whose writes come after `prepare`.
+   */
+  readonly #seen = new Map<string, [{ row: Input | null; seal: Buffer | null }, { seal: Buffer | null } | null]>();
   /** The calls `commit` made, once it has: what the transaction's failure is of (`failed`). */
   #made: readonly ChangeCall[] | null = null;
 
@@ -140,8 +150,10 @@ export class Changes {
    * An object as the log has it (`heldByLog`), checked against its seal, for
    * a decision to weigh before it stages anything.
    */
-  held(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
-    return heldByLog(this.#keys.seals, db, ref);
+  async held(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
+    const read = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+    if (ref.kind === 'proxy' || ref.kind === 'proxy-reserved') this.#seen.set(objectKey(ref), read);
+    return heldFrom(this.#keys.seals, ref, ...read);
   }
 
   /** What a key with no object would be unarchived as (`keptObjects`): null for one its log never held. */
@@ -189,7 +201,7 @@ export class Changes {
       const newest = await newestChange(db, ref);
       return { logged: true, seal: newest?.seal ?? null, now: null, afters: [] };
     }
-    const [{ row, seal }, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+    const [{ row, seal }, newest] = this.#seen.get(objectKey(ref)) ?? await Promise.all([readObject(db, ref), newestChange(db, ref)]);
     // Before the cutover: a row, unsealed, that the log has never heard of; or the roles, whose edits 0.14's policy
     // holds until the cutover's genesis writes them (a role defined before it is 0.14's alone). Not the roles' or the
     // policy's row, which only change_input writes, sealed: one with no seal was planted.
@@ -448,7 +460,8 @@ function writes(ref: Ref): boolean {
  * their index (`digests`, base64), and the reserved names as their set.
  */
 function rowValue(after: Input): string {
-  if (after.kind === 'proxy') return canonical({ items: after.items, digests: indexBytes(after.items).toString('base64') });
+  // Not canonical: the row's own encoding (jsonb) is none, and the seal covers the index, whose digests are canonical.
+  if (after.kind === 'proxy') return JSON.stringify({ items: after.items, digests: indexBytes(after.items).toString('base64') });
   if (after.kind === 'proxy-reserved') return canonical({ names: after.names });
   return canonical(after);
 }

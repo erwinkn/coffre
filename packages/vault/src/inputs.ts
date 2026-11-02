@@ -320,8 +320,16 @@ export function canonical(value: unknown): string {
 
 /** An item's digest: SHA-256 over its canonical encoding, which an index entry names and a use checks the item it read against. */
 export function itemDigest(item: ProxyItem): Buffer {
-  return createHash('sha256').update(canonical(item)).digest();
+  let digest = DIGESTS.get(item);
+  if (digest === undefined) DIGESTS.set(item, (digest = createHash('sha256').update(canonical(item)).digest()));
+  return digest;
 }
+
+/**
+ * Each item's digest, once per object read: a save checks the object it read, makes the next from it, seals that and
+ * writes its index, each over the same items. Items are never changed in place (`applyOp` makes new ones).
+ */
+const DIGESTS = new WeakMap<ProxyItem, Buffer>();
 
 /**
  * The index of an environment's proxy definitions: each item's name beside

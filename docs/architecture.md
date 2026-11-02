@@ -329,6 +329,8 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | what an MCP client asking to connect is and wants, and the person's answer | `GET /api/oauth/authorizations?client_id=…`, `POST /api/oauth/authorizations {"request": {…}, "approve": true, "scopes": ["read"]}` |
 | the MCP clients I connected, and disconnecting one | `GET /api/apps`, `DELETE /api/apps/:id` |
 | the audit log, and verifying it | `GET /api/audit?path=market/prod/DATABASE_URL` → `{entries, more}`, `GET /api/audit/verification` |
+| an environment's proxy definitions written in the UI, for whoever lists it; saved by a person holding `proxy.edit` there, from the seal the page loaded (409 `proxy_changed` otherwise), where the deployment's `credentialProxy({ editable: true })` lets the tab write ([design](design/proxy-ui.md)) | `GET /api/projects/market/dev/proxy`, `PUT /api/projects/market/dev/proxy {"seal": "…", "items": {"openai": {"kind": "route", …}, "maps": null}}` |
+| free a name the deployment's code reserved, in every environment: an Owner of the whole instance | `PUT /api/proxy/reserved {"release": "maps"}` |
 
 Three conventions carry it:
 
@@ -559,9 +561,18 @@ them, which starts them over.
 
 ### Transports
 
+Every call between the app and the vault goes through one envelope,
+`call(release, method, args)`, whatever the transport: the vault answers a
+call on another release with its own and runs nothing, no read, no lock, no
+write, no entry, and the app answers 503 `deploying` with `Retry-After: 1`
+for the seconds of a deploy (`VaultEntry` and `versioned` in
+`@coffre/core/vault`; [proxy-ui.md](design/proxy-ui.md), "One version at a
+time"). The release is the packages' one version. A deploy or a rollback
+moves both Workers; nothing serves across two releases.
+
 - **Workers**: the vault is a Worker of its own, `coffre-vault`, with no
   public route. The app reaches its RPC entrypoint through the `VAULT`
-  service binding. Each call opens the shared Postgres database through
+  service binding, whose one method is `call`. Each call opens the shared Postgres database through
   `VAULT_HYPERDRIVE`, using the vault's login: one connection, which its
   queries take turns on, closed when the call is done. No database
   connection lives across requests.
@@ -569,8 +580,8 @@ them, which starts them over.
   opens the same Postgres database as the app, through its own login, and
   answers on a Unix socket. The socket is its authentication: a file made
   `0660`, which only the vault's user and a group it shares with the server
-  may open. Each call is one HTTP POST over the socket, `/<method>` with
-  the arguments as a JSON array. The process facing the network holds no vault key.
+  may open. Each call is one HTTP POST over the socket, `/call`, its body
+  the envelope, `{ release, method, args }`. The process facing the network holds no vault key.
 - **Node, in process** (`localVault`): for tests and local development.
   Both components use one SQLite file. Each call's arguments and results
   go through JSON as over RPC, so nothing that only works in-process gets in.
