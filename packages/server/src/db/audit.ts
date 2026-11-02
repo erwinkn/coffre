@@ -1,7 +1,7 @@
 import { deriveLogKey, GENESIS_HASH, verifyEntries, type ChainVerification, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import type { PreparedChange } from '@coffre/core/vault';
 import { tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { appendEntries, MOVES_FROM, type Appended, type HeldHead } from '@coffre/db/log';
+import { appendEntries, MOVES_FROM, type Appended, type ChangeNumbers, type HeldHead } from '@coffre/db/log';
 import { and, eq, inArray, min } from 'drizzle-orm';
 
 import { auditHashAt, auditRange } from './queries.ts';
@@ -50,9 +50,12 @@ export async function appendAudit(
    * over from 0.14 (`appendEntries`).
    */
   log015 = false,
-  /** The append as its transaction's last statement, which nothing awaits (`appendEntries`), and the head it holds, read (`lockLogHeadRead`). */
+  /**
+   * The append as one of its transaction's last statements, which nothing awaits, its changes' numbers answering after
+   * the COMMIT as `later` (`appendEntries`), and the head it holds, read (`lockLogHeadRead`).
+   */
   { final = false, locked }: { final?: boolean; locked?: HeldHead } = {},
-): Promise<Appended & { changes: (bigint | null)[] }> {
+): Promise<Appended & { changes: (bigint | null)[]; later: ChangeNumbers | null }> {
   return appendEntries(
     tx,
     appLogKey(chainKey),

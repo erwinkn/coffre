@@ -146,7 +146,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -774,6 +774,8 @@ class VaultService implements Vault {
   }
 
   async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline }: How): Promise<Outcome<T>> {
+    // The changes of the attempt under way, whose failure, heard as the transaction's, they say (`Changes.failed`).
+    let staged: Changes | null = null;
     try {
       const committed = await this.#db.transaction(async (tx) => {
         // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
@@ -786,7 +788,7 @@ class VaultService implements Vault {
         const log015 = this.#prepared.log015;
         const d: Decision = {
           tx, members, at: this.#at(reads), reads, log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
-          changes: log015 === null ? null : new Changes(log015),
+          changes: (staged = log015 === null ? null : new Changes(log015)),
         };
         const result = await decide(d);
         // Each object 0.15's log will change, read and checked before the writes change its rows.
@@ -799,7 +801,8 @@ class VaultService implements Vault {
         if (entries.length > 0) {
           // Under the head the decision's reads took: a remote key's decision takes it late, and reads again with it.
           if (d.reads.head === null) throw new Error('a decision appends only under the head it read with');
-          const appended = await this.#append(tx, entries, d.underLock, d.reads);
+          // Nothing awaits it: what it says comes from the head the snapshot read, and it goes with what follows.
+          const appended = await this.#append(tx, entries, d.underLock, d.reads, { final: true });
           at = appended.occurredAt;
           entries.forEach((entry, i) => {
             if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
@@ -822,15 +825,18 @@ class VaultService implements Vault {
         // here to the commit, so as few round trips as can be. The append comes first, and its trigger took the issue
         // lock before the fence (0026): a change taking the fence before the issue lock would wait in a circle with the
         // barrier, which takes them in that order (Migration015.tla, IssueBeforeFence).
-        const numbers = d.changes === null ? [] : await d.changes.commit(tx, at, written);
+        // With the COMMIT, under its Sync: their numbers answer after it.
+        const numbers = d.changes === null ? null : await d.changes.commit(tx, at, written);
         return { result, numbers };
       });
       this.#reported(reports);
       // A change answers once its entries are sealed (R51; HotPathOne's CommitBeforeAnswer): the newest of them, with
       // every number below it.
-      if (committed.numbers.length > 0) await this.#prepared.log015!.sealThrough(committed.numbers.reduce((a, b) => (a > b ? a : b)));
+      const newest = committed.numbers === null ? null : await newestCommitted(this.#db, committed.numbers);
+      if (newest !== null) await this.#prepared.log015!.sealThrough(newest);
       return { ok: true, ...committed.result };
-    } catch (caught) {
+    } catch (thrown) {
+      const caught = (staged as Changes | null)?.failed(thrown) ?? thrown;
       const error = caught instanceof NotLogged ? this.#notLogged(reports, caught) : caught;
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
       const entries = [...reports, ...readsByPlace(error.entries)];
@@ -859,16 +865,18 @@ class VaultService implements Vault {
    * hold it, and the access entry their row names, for 0.15's log.
    */
   async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<{ object: PrincipalInput; accessSeq: bigint } | null> {
-    const row = await store.member(d.tx, principal);
+    // The row and the grants together, one round trip: plain reads, after the decision's writes, under its row lock.
+    const [row, held] = await Promise.all([store.member(d.tx, principal), store.grants(d.tx, principal)]);
     if (row === undefined) return null;
     const decided = d.grants.get(principal);
     if (decided === undefined) throw new Error(`sealing ${principal} without the grants this decision verified`);
-    if (!sameGrants(await store.grants(d.tx, principal), decided)) {
+    if (!sameGrants(held, decided)) {
       this.#report(d.reports, principal, 'mac', row.mac.toString('hex'));
       throw new Refused(refusal('tampered', REFUSAL_MESSAGES.tampered), []);
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
-    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
+    // Nothing awaits it: it goes with the next member's reads, or the changes and the COMMIT.
+    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) }, { final: true });
     // The member's object as the rows hold it now, which 0.15's change of it must have left, and the access entry its
     // row names, which that change accounts for (`changes.ts`).
     return { object: principalObject(row, decided), accessSeq: next.accessSeq };
@@ -1302,6 +1310,8 @@ class VaultService implements Vault {
     underLock: readonly ((locked: Queryable) => Promise<void>)[] = [],
     /** A snapshot that holds the head: what it read under it is read again by nothing. */
     held?: Snapshot,
+    /** Nothing in the transaction awaits the append (`appendEntries`): it goes with what follows, its COMMIT at the latest. */
+    { final = false }: { final?: boolean } = {},
   ): Promise<Appended> {
     const prepared = this.#prepared;
     const head = held?.head ?? undefined;
@@ -1312,7 +1322,7 @@ class VaultService implements Vault {
         throw new Error(prepared.superseded);
       }
       for (const check of underLock) await check(locked);
-    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], prepared.log015 !== null);
+    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], prepared.log015 !== null, { final });
     // The head still held, as this append left it, for the next append of the same transaction: a remote key's intent,
     // then the decision's reports.
     if (head !== undefined) {

@@ -20,7 +20,6 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
-import { watched } from './db/postgres-pool.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round trips");
@@ -33,7 +32,7 @@ class PerRequest {
   pool: Client | null = null;
   readonly client: Client = new Proxy({} as Client, {
     get: (_, key) => {
-      // No hook of a postgres.js client's own: `watched` infers a transaction's BEGIN and end, as for any Hyperdrive pool.
+      // Not a postgres.js client (`options`) nor a promise (`then`): the database takes it as a Hyperdrive pool.
       if (key === 'options' || key === 'then') return undefined;
       if (this.pool === null) throw new Error('no request under way');
       const value: unknown = Reflect.get(this.pool, key, this.pool);
@@ -44,7 +43,7 @@ class PerRequest {
 
 type Relay = Awaited<ReturnType<typeof postgresProxy>>;
 /** A change's round trips: the app's, the vault's, the hot path's, and its vault calls; the statements, for a failure's message. */
-type Cost = { app: number; vault: number; hot: number; calls: number; statements: string[] };
+type Cost = { app: number; vault: number; hot: number; calls: number; ms: number; statements: string[] };
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -73,10 +72,13 @@ before(async () => {
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
 
-  relays = { app: await postgresProxy(TEST_RUNTIME_DATABASE_URL), vault: await postgresProxy(TEST_VAULT_DATABASE_URL), hot: await postgresProxy(TEST_HOT_DATABASE_URL) };
+  // Each Sync's statements, in the trace a failure prints; with `COFFRE_CHANGE_COST_RTT_MS`, each held that long, as
+  // Hyperdrive far from its database holds it, for what a change takes end to end.
+  const relay = (url: string, side: string) => postgresProxy(url, { delayMs: RTT_MS, onSync: (sent) => void statements.push(`${side} Sync: ${sent.map(shown).join(' | ') || '(none)'}`) });
+  relays = { app: await relay(TEST_RUNTIME_DATABASE_URL, 'app'), vault: await relay(TEST_VAULT_DATABASE_URL, 'vault'), hot: await relay(TEST_HOT_DATABASE_URL, 'hot') };
   vaultPool = new HyperdrivePool(relays.vault.url);
   const opened = await localVault(
-    { database: createDatabase(watched(vaultPool, ({ text }) => statements.push(`vault: ${shown(text)}`))), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
+    { database: createDatabase(vaultPool), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
   );
   vault = opened;
@@ -96,7 +98,7 @@ before(async () => {
   runtime = {
     ...createRuntime(
       resolveConfig({ publicUrl: ORIGIN, vault: counted, auth, auditChainKey: deps.chainKey.toString('base64') }),
-      createDatabase(watched(appClient.client, ({ text }) => statements.push(`app: ${shown(text)}`))),
+      createDatabase(appClient.client),
       counted,
       { json: async (url) => { throw new Error(`no fetch in this test: ${url.href}`); } },
     ),
@@ -125,7 +127,8 @@ after(async () => {
   await db.close();
 });
 
-const shown = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 60);
+const shown = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 48);
+const RTT_MS = Number(process.env.COFFRE_CHANGE_COST_RTT_MS ?? 0);
 
 /** `work` on a connection of its own, as one request on Workers, closed after. */
 async function asRequest<T>(work: () => Promise<T>): Promise<T> {
@@ -144,8 +147,10 @@ async function asRequest<T>(work: () => Promise<T>): Promise<T> {
 async function cost(work: () => Promise<unknown>): Promise<Cost> {
   const from = { app: relays.app.syncs, vault: relays.vault.syncs, hot: relays.hot.syncs, calls };
   statements = [];
+  const started = performance.now();
   await asRequest(work);
-  return { app: relays.app.syncs - from.app, vault: relays.vault.syncs - from.vault, hot: relays.hot.syncs - from.hot, calls: calls - from.calls, statements };
+  const ms = Math.round(performance.now() - started);
+  return { app: relays.app.syncs - from.app, vault: relays.vault.syncs - from.vault, hot: relays.hot.syncs - from.hot, calls: calls - from.calls, ms, statements };
 }
 
 type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown> };
@@ -241,32 +246,32 @@ const tokens = new Map<number, string>();
  * on Cloudflare (docs/design/0.15-plan.md, "As built: T171").
  */
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
-  'key set, one': { app: 14, vault: 4 },
-  'key set, existing': { app: 14, vault: 4 },
-  'key set, five': { app: 18, vault: 4 },
-  'key archived': { app: 13, vault: 1 },
-  'key restored (a version)': { app: 14, vault: 8 },
+  'key set, one': { app: 13, vault: 3 },
+  'key set, existing': { app: 13, vault: 3 },
+  'key set, five': { app: 17, vault: 3 },
+  'key archived': { app: 12, vault: 1 },
+  'key restored (a version)': { app: 13, vault: 7 },
   'key renamed': { app: 9, vault: 1 },
   'key filed in a folder': { app: 6, vault: 1 },
-  'reference made': { app: 16, vault: 8 },
-  'reference broken': { app: 4, vault: 15 },
+  'reference made': { app: 15, vault: 7 },
+  'reference broken': { app: 4, vault: 13 },
   'project made': { app: 4, vault: 1 },
   'project renamed': { app: 5, vault: 1 },
-  'project archived': { app: 9, vault: 1 },
-  'environment made': { app: 6, vault: 1 },
-  'environment forked': { app: 45, vault: 4, hot: 1 },
-  'environment renamed': { app: 7, vault: 1 },
-  'environment protected': { app: 5, vault: 10 },
-  'environment archived': { app: 11, vault: 1 },
-  'member added': { app: 8, vault: 10 },
-  'access granted': { app: 3, vault: 12 },
-  'member removed': { app: 10, vault: 12 },
+  'project archived': { app: 8, vault: 1 },
+  'environment made': { app: 5, vault: 1 },
+  'environment forked': { app: 43, vault: 3, hot: 1 },
+  'environment renamed': { app: 6, vault: 1 },
+  'environment protected': { app: 5, vault: 8 },
+  'environment archived': { app: 10, vault: 1 },
+  'member added': { app: 8, vault: 6 },
+  'access granted': { app: 3, vault: 8 },
+  'member removed': { app: 10, vault: 8 },
   'token issued': { app: 4, vault: 6 },
   'token revoked': { app: 2, vault: 3 },
 };
 
 test('each change route answers in exactly its budget of round trips (T179)', POSTGRES, async () => {
-  const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number }> = {};
+  const table: Record<string, { app: number; vault: number; hot: number; total: number; calls: number; ms: number }> = {};
   const failures: string[] = [];
   for (const [n, { name, setup, run }] of CASES.entries()) {
     try {
@@ -287,6 +292,6 @@ test('each change route answers in exactly its budget of round trips (T179)', PO
       failures.push(`${name}: ${(error as Error).message}`);
     }
   }
-  if (process.env.COFFRE_CHANGE_COST_VERBOSE || failures.length > 0) console.table(table);
+  if (process.env.COFFRE_CHANGE_COST_VERBOSE || RTT_MS > 0 || failures.length > 0) console.table(table);
   assert.deepEqual(failures, []);
 });

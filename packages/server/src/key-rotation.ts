@@ -226,8 +226,10 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
     prepared?.expectRevoked(ended);
     await prepared?.commit(tx);
     return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others };
+  }).catch((error: unknown) => {
+    throw prepared === null ? error : prepared.failed(error);
   });
-  await prepared?.sealed();
+  await prepared?.sealed(db);
   if (unsigned.length > 0) {
     console.error({ event: 'auth_row_unsigned', rows: unsigned.slice(0, NAMED), count: unsigned.length }, 'rows neither app key signed are left as they are, and fail as before');
   }

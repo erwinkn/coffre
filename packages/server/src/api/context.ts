@@ -6,7 +6,7 @@ import { lockLogHeadRead } from '@coffre/db/log';
 
 import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
 import type { ReadAhead } from '../db/read-ahead.ts';
-import { keeps015, type AppChanges } from './changes.ts';
+import { AppChanges, keeps015 } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
@@ -224,18 +224,20 @@ export async function audited<T>(
       const locked = await held;
       await fenced;
       const result = await working;
+      // Nothing awaits the append, nor the changes: they go with the COMMIT, under its Sync (`later`).
       if (changes === null) {
-        // Nothing awaits the append: it goes with the COMMIT.
         if (log.length > 0) await appendAudit(tx, ctx.chainKey, log, [], log015, { final: true, locked });
       } else if (log.length > 0) {
         // The changes in the append's own statement: one round trip less under the head (T123).
-        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, log015, { locked })).changes);
+        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, log015, { final: true, locked })).later);
       } else {
         await changes.commit(tx);
       }
       return result;
+    }).catch((error: unknown) => {
+      throw changes === null ? error : changes.failed(error);
     });
-    await changes?.sealed();
+    await changes?.sealed(ctx.db);
     return result;
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
