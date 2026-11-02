@@ -120,8 +120,9 @@ export async function usesMany(vault: Vault): Promise<boolean> {
  * between. Read and prepare again (`retrying`); left to the caller, 409.
  */
 export class ObjectMoved extends ApiError {
-  constructor() {
-    super('conflict', 'what this changes was changed while it ran: try again', 'changed');
+  /** `retryAfter`: said once a write's tries are spent (a two-trip write's three, two-trips.md, "Retries"). */
+  constructor(retryAfter?: string) {
+    super('conflict', 'what this changes was changed while it ran: try again', 'changed', retryAfter);
   }
 }
 

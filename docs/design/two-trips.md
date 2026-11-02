@@ -337,6 +337,51 @@ tries in all, as `retrying` gives moved rows now; then 409 `changed`, with
 fails fast (R44); it never queues. Each try is two round trips, and each
 committed try made exactly two.
 
+As built in PR 3, and kept as it is by PR 6 and PR 7: a hold that fails
+(`hold_inputs` raises `coffre_moved`, or a new key's name is taken first)
+rolls the app's transaction back and asks the vault again, three tries in
+all, then 409 `changed` with `Retry-After: 1`. A try the vault no longer
+serves takes today's path instead of a fourth trip, as a first read it does
+not serve does: a refusal, an object other than the caller's credential
+not as its log has it (StaleFirst, `stale`; a newest change whose MAC fails,
+`tampered`), a key this path does not write (`shape`). That path reads
+everything again under the head and the fence, and answers and logs as it
+always has (formal/Writing.tla, `WToday`). PR 6's outcome record moves only
+the refusals off it; what the two-trip path does not serve (forks until
+PR 3b, references and a key service until PR 7, SQLite) keeps it.
+
+The caller's own credential never goes down today's path. Not as its log
+has it (a row put back, its newest change's MAC broken: `forged`), or
+revoked or expired at the vault's clock (`ended`): 401, as today's path
+answers a credential it finds ended, there and then. Today's path reads
+the row again and holds it to its `auth_mac` alone, so a session revoked,
+then put back by a database writer between the two reads, would pass it.
+
+What an abandoned try leaves behind, with nothing waiting on it:
+
+- **its number**, drawn from `log_number` by `write_request`: a gap in the
+  log, which a checkpoint seals past as it does a rolled-back change's;
+- **its 0.14 `key.wrap` entries**, one per key, committed by the vault
+  before it answered (until 0.16 stops them): records of wraps that were
+  made, each an allowed key operation with no intent left open, which no
+  `secret.write` names. The committed try's `secret.write` names its own
+  try's wrap (`relatedSeq`), and a request writes once whichever path
+  commits it (`WritesNameTheirWrap`, `OneWritePerRequest`). Today's path
+  leaves the same: one `key.wrap` per try of its sixteen, and one for any
+  write that fails after its wrap;
+- **its changes, prepared and MAC'd, never written**: the app's
+  transaction rolled back, and they name a request no record binds;
+- nothing else: the vault's statement reads and numbers, it writes nothing,
+  and a try it does not serve wraps nothing and appends nothing.
+
+`write-held.test.ts` holds each case against a vault that serves no
+`writeKeys`: a refusal the read finds (a forged change, a row put back) is
+answered with today's status and body and adds exactly today's entries; a
+served try abandoned at its hold, then refused StaleFirst, adds its one
+`key.wrap` and then exactly today's entries; one abandoned, then not served
+(the key made a reference meanwhile), writes once down today's path, its
+`secret.write` naming that path's wrap, and the audit verifies.
+
 ## The request and its refusals
 
 The statement records the request, not its outcome (R53), as a use does:
@@ -702,8 +747,10 @@ Each with what the key write and the first member add then cost:
    `hold_inputs` flat as the log grows, and a regression case per
    adversary of formal/Writing.tla's scenarios (each review round's P1
    among them), each failing with its part of the read left out.
-   Key write: 1 + 2 + 2 = 5 round trips (16 today). Built: see "As built:
-   PR 3" below, for what it serves and what it leaves to later PRs.
+   Key write: 1 + 2 + 2 = 5 round trips (16 today). Built without
+   `write_outcome` and the request row, which come with PR 6: a refusal
+   takes today's path meanwhile ("Retries"). See "As built: PR 3" below,
+   for what it serves and what it leaves to later PRs.
 4. **The audit pages, the offboarding report and the members' watermark
    read the log**: writes, their refusals and member changes, place
    filters included; and `memberAccess`, `missingMembers` and
@@ -727,7 +774,10 @@ Each with what the key write and the first member add then cost:
    keeps it as a lock (above). The services setting's changes move into
    `log_changes` with §11's other vault changes, and `admit_inputs` reads
    the setting's newest change there. `change-cost.test.ts` holds a key write to `{ app: 1, vault: 1 }`
-   and a first member add to `{ app: 0, vault: 2 }`.
+   and a first member add to `{ app: 0, vault: 2 }`. The request row and
+   `write_outcome` land here: a refusal is answered and logged by the
+   vault's outcome record, no longer by today's path. The retry loop
+   stays as PR 3 built it.
 7. **The other change routes**, each in the same shape; references join the
    key write once `write_request` seals their making and their end, and a
    remote key-encryption key once the request and outcome records stand
@@ -775,7 +825,12 @@ What it does not build yet, and why that is sound meanwhile:
   it was decided for and the read's digest in its payload, under the vault's MAC. The stored read and the outcome
   record (`write_outcome`) are for the replay of a decision and for the audit pages' refusals, which read 0.14's
   entries until PR 4 and PR 6. So every refusal, a vault's, a seal's or a MAC's, goes down today's path, which
-  refuses and logs it as now: a refusal costs today's trips, and the vault's `writeKeys` call before them.
+  refuses and logs it as now: a refusal costs today's trips, and the vault's `writeKeys` call before them (R64
+  allows a refused request's extra trips). Its status and body are today's, pinned by `write-held.test.ts`. A
+  forged change's refusal relies on today's path checking MACs too: T190 (#466), which this PR builds on
+  (formal/Writing.tla, `TodayChangeMacChecked`).
+- **A caller's credential revoked or expired is refused 401 there and then** (`ended`), as today's path answers
+  it: sent down that path, its second read would take a row put back meanwhile.
 - **A caller's credential not as its log has it is refused, never sent down today's path** (`forged`, 401): a
   session revoked and its row put back whole carries its `auth_mac`, which `findCredential` alone would take. So
   the two-trip write refuses it where today's path would not, on both engines (reported with T179 PR 3).

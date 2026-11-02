@@ -1,10 +1,8 @@
-import { timingSafeEqual } from 'node:crypto';
-
 import type { Access, CredentialAcceptance, SecretColumns, WriteKeysInput } from '@coffre/core/vault';
 
 import { credentialEnded, keyRefusals, readerOf, sensitiveRefusals, useOnlyRefusals, type Reader } from './decide.ts';
 import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
-import { entryMac, type ChangeRow, type LogMacKey } from './log-entry.ts';
+import { changeHolds, type ChangeRow, type LogMacKey } from './log-entry.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
 
 /**
@@ -124,7 +122,7 @@ export function parseInputs(text: string): WriteInputs {
     const archived = row !== null && row.archived_at != null;
     const versionId = row === null || row.current_version_id == null ? null : String(row.current_version_id);
     // Its object as a use reads it: an archived key is none (`secret.delete`), as is one with no value of its own here
-    // (a reference, which this path does not serve: `unserved` below, before its object is weighed).
+    // (a reference, which this path does not serve: `shape` in `decideWrite`, before its seal is weighed).
     const object: SecretInput | null = row === null || archived || version === null ? null : {
       kind: 'secret', id: id!, projectId: String(row.project_id), environmentId: String(row.environment_id), version: String(version.id),
       nature: version.sensitive === true ? 'sensitive' : version.digest != null ? 'plain' : 'secret',
@@ -143,6 +141,7 @@ export function parseInputs(text: string): WriteInputs {
 export type Unserved =
   | 'credential' // no credential of the token, one its config does not accept, or one of a kind this path leaves out
   | 'forged' // the caller's own credential, not as its log has it: a row put back, or its newest change's MAC broken (401, never today's path)
+  | 'ended' // the caller's own credential revoked or expired at the vault's clock (401, as today's path answers it, never sent there)
   | 'tampered' // a newest change whose MAC does not hold (T190)
   | 'stale' // a row its object's newest change does not seal (StaleFirst), or 0.14's access entry the log does not account for
   | 'place' // no such place, or one this path leaves out (archived, deleted, a fork, a personal config)
@@ -157,14 +156,6 @@ export type WriteDecided = {
   environment: EnvironmentInput;
   keys: { name: string; id: string; created: boolean; sensitive: boolean; before: ReadKey }[];
 };
-
-/** A newest change's MAC, under any of the vault's keys, as `#onLog` checks a member's (T190's `changeHolds`). */
-export function changeMacHolds(macs: readonly LogMacKey[], row: ChangeRow): boolean {
-  return macs.some((key) => {
-    const made = entryMac(key, { tree: 'changes', row });
-    return made.length === row.mac.length && timingSafeEqual(made, row.mac);
-  });
-}
 
 /**
  * The decision, on the read alone (DecideOnRead), in the order the use path takes: every newest change held to its MAC
@@ -198,7 +189,7 @@ export function decideWrite(
   ];
   // Every newest change's MAC first: its seal is only what a writer could not have written once it holds (T190). Then
   // each row's seal: the vault's over the row, and the one its object's newest change left (StaleFirst).
-  const holds = ({ held }: { held: Held<Input> }) => held.newest === null || changeMacHolds(keys.macs, held.newest);
+  const holds = ({ held }: { held: Held<Input> }) => held.newest === null || changeHolds(keys.macs, held.newest);
   const stands = ({ held, ref }: { held: Held<Input>; ref: Ref }) => {
     const newest = held.newest?.seal ?? null;
     const valid = held.row === null ? held.seal === null : sealed(keys.seals, ref, held.row, held.seal);
@@ -208,6 +199,12 @@ export function decideWrite(
   // The caller's own credential first, which no other path may then answer for: a session revoked and its row put back
   // live (WritingTamper's dbw), whose MAC the app's check would find whole, is refused here, never written on.
   if (!holds(objects[0]!) || !stands(objects[0]!)) return 'forged';
+  // ... then revoked or expired, as the log has it: answered 401 here, as today's path answers it, and never sent down
+  // that path, which reads the row again and would take one a database writer put back meanwhile (formal/Writing.tla,
+  // WToday). Before any other object's refusal, which goes down that path.
+  if (credential.row.revoked || (credential.row.expiresAt !== null && request.at >= credential.row.expiresAt)) return 'ended';
+  // A key whose object this path does not rebuild (archived, a reference): today's path, before its seal is weighed.
+  if (read.keys.some((key) => key.id !== null && key.object.row === null)) return 'shape';
   if (!objects.every(holds)) return 'tampered';
   if (!objects.every(stands)) return 'stale';
   // 0.14's newest access entry about the principal, which its newest change must account for (UsesSeeOldWrites).

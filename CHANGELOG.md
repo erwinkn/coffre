@@ -68,11 +68,12 @@
   holds that same read again under the fence before it writes
   (`hold_inputs`): a revoke, a rename, an archive or another write that
   commits in between makes the write ask again, three tries in all, then
-  409 `changed`. Five keys cost the same five round trips as one (twenty
-  before). A write stands at its commit, not only at its decision: today a
+  409 `changed` with `Retry-After: 1`. Five keys cost the same five
+  round trips as one (twenty before). A write stands at its commit, not only at its decision: today a
   write the vault allowed before a revoke could commit after it. A
   session revoked and its row put back whole is refused 401 on this path,
-  where the rest of the API takes it on its MAC alone. Everything else
+  where the rest of the API takes it on its MAC alone; one revoked or
+  expired is answered 401 there and then, as before. Everything else
   writes as before: a reference, an archive, a marking, a plain or
   sensitive value asked for, a dry run, a fork or `dev@me`, a binding's or
   a workload's token, SQLite, a key service's vault, and every refusal,

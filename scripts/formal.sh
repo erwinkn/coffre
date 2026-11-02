@@ -487,6 +487,11 @@ REMOVALS=(
   # MAC says the vault never wrote it.
   "WritingForge ChangeMacChecked WritesStandAtCommit"
   "WritingForge ChangeMacChecked AddsStandAtCommit"
+  # Today's path without T190 (PR 3's fallback): a request the two-trip path refused for its forged grant goes down a
+  # path that trusts the forged seal, and writes on the grant the log took away.
+  "WritingForge TodayChangeMacChecked WritesStandAtCommit"
+  # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
+  "WritingFallBack FallBackUncommitted OneWritePerRequest"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"

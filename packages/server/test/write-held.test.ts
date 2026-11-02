@@ -37,8 +37,11 @@ test.after(async () => {
 
 const run = (on: Queryable, query: ReturnType<typeof sql>) => rowsOf(on, query);
 
-/** A fresh instance: market/dev holding API_KEY, Ada a developer there, and each one's browser session. */
-async function world() {
+/**
+ * A fresh instance: market/dev holding API_KEY, Ada a developer there, and each one's browser session. `fast: false`:
+ * a vault that serves no `writeKeys`, every write down today's path, to answer as the two-trip path's refusals must.
+ */
+async function world({ fast = true }: { fast?: boolean } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
   const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
@@ -55,6 +58,7 @@ async function world() {
   const hooked = new Proxy(vault, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
+      if (key === 'writeKeys' && !fast) return undefined;
       if (typeof value !== 'function') return value;
       if (key !== 'writeKeys') return (value as (...args: unknown[]) => unknown).bind(target);
       return async (input: WriteKeysInput) => {
@@ -86,7 +90,7 @@ async function world() {
       headers: { cookie: `${sessionCookieName(runtime.auth)}=${token}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
       body: JSON.stringify(patch),
     }), runtime, { sourceIp: null });
-    return { status: response.status, body: await response.json() as Record<string, unknown> };
+    return { status: response.status, body: await response.json() as Record<string, unknown>, retryAfter: response.headers.get('retry-after') };
   };
   /** Ada signs her session out, from it, as her browser does. */
   const signOut = async () => {
@@ -157,7 +161,7 @@ test("Ada's session revoked between the read and the hold: nothing commits on it
   w.between(w.signOut);
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
-  assert.deepEqual(served(w.answers), ['served', 'credential']);
+  assert.deepEqual(served(w.answers), ['served', 'ended']);
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
@@ -230,6 +234,8 @@ test('a hold that keeps failing gives up after three tries: 409 `changed`, nothi
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.equal(wrote.status, 409, JSON.stringify(wrote.body));
   assert.equal(wrote.body.reason ?? (wrote.body.error as { reason?: string } | undefined)?.reason, 'changed');
+  // Asked again in a second (two-trips.md, "Retries").
+  assert.equal(wrote.retryAfter, '1');
   assert.deepEqual(served(w.answers), ['served', 'served', 'served']);
   const after = (await keyRow('API_KEY'))!;
   assert.equal(after.id, before.id);
@@ -332,4 +338,141 @@ test("the read moves with every part a key write's decision weighs, its numbers 
     assert.notEqual(now, digest, what);
     digest = now;
   }
+});
+
+// Today's path, after the vault's call (T179 PR 3's fallback; formal/Writing.tla, WToday): what the vault's call left
+// behind, and what the request then answers, against a vault that serves no `writeKeys` at all.
+
+/** What a request added: the 0.14 entries (author, action, decision), oldest first, and the 0.15 changes, by object. */
+async function since<T>(work: () => Promise<T>): Promise<{ result: T; entries: string[]; changes: number; wraps: { seq: string; operation: string | null }[] }> {
+  const [{ seq }] = await run(db.owner, sql`SELECT coalesce(max(seq), 0)::text AS seq FROM audit_log`) as { seq: string }[];
+  const [{ number }] = await run(db.owner, sql`SELECT coalesce(max(number), 0)::text AS number FROM log_changes`) as { number: string }[];
+  const result = await work();
+  const entries = await run(db.owner, sql`SELECT author, action, decision FROM audit_log WHERE seq > ${seq} ORDER BY seq`) as { author: string; action: string; decision: string }[];
+  const [{ changes }] = await run(db.owner, sql`SELECT count(*)::int AS changes FROM log_changes WHERE number > ${number}`) as { changes: number }[];
+  const wraps = await run(db.owner, sql`SELECT seq::text AS seq, operation_id AS operation FROM audit_log WHERE seq > ${seq} AND author = 'vault' AND action = 'key.wrap' ORDER BY seq`) as { seq: string; operation: string | null }[];
+  return { result, entries: entries.map((entry) => `${entry.author} ${entry.action} ${entry.decision}`), changes: Number(changes), wraps };
+}
+
+/** The same write, made once with the two-trip path and once without, on the same instance made the same way. */
+async function bothWays(arrange: (w: Awaited<ReturnType<typeof world>>) => Promise<void>) {
+  const attempt = async (fast: boolean) => {
+    const w = await world({ fast });
+    await arrange(w);
+    const made = await since(() => w.write({ API_KEY: 'fake-ada' }));
+    return { ...made, answers: served(w.answers), verified: (await w.root.audit.verify()).ok };
+  };
+  return { fast: await attempt(true), today: await attempt(false) };
+}
+
+test("a refusal the vault's read finds (a forged change's MAC, a row its newest change does not seal) is answered as today's path answers it, status and body, and the vault's call adds nothing to either log (T190; StaleFirst)", { skip: POSTGRES }, async () => {
+  const cases: [string, string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>][] = [
+    ["Ada's grant taken, her rows put back and the revoke's seal forged (WritingForge)", 'tampered', async (w) => {
+      const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
+      const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+      await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
+      await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+      await db.owner.insert(vaultGrants).values(grants);
+      await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+      await run(db.owner, sql`UPDATE log_changes SET seal = ${member!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${logObject('principal', `user:${ADA}`)})`);
+    }],
+    ["Ada's grant taken and her rows put back, the log left as it is (StaleFirst)", 'stale', async (w) => {
+      const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
+      const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+      await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
+      await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
+      await db.owner.insert(vaultGrants).values(grants);
+      await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+    }],
+    ['API_KEY written again, then its row put back to its first version (StaleFirst)', 'stale', async (w) => {
+      const [first] = await db.owner.select().from(secrets).where(eq(secrets.key, 'API_KEY'));
+      await w.root.secrets.set('market/dev', { API_KEY: 'fake-root' });
+      await db.owner.update(secrets).set(first!).where(eq(secrets.id, first!.id));
+    }],
+  ];
+  for (const [what, why, arrange] of cases) {
+    const { fast, today } = await bothWays(arrange);
+    assert.deepEqual(fast.answers, [why], what);
+    assert.notEqual(fast.result.status, 200, what);
+    // The same answer, the same entries, the same changes: the vault's unserved call wrote nothing (the number its
+    // statement drew from `log_number` is a gap, which the checkpoints seal past, as a rolled-back change's).
+    assert.deepEqual({ status: fast.result.status, body: fast.result.body }, { status: today.result.status, body: today.result.body }, what);
+    assert.deepEqual(fast.entries, today.entries, what);
+    assert.equal(fast.changes, today.changes, what);
+    assert.equal(fast.verified, today.verified, what);
+  }
+});
+
+test("Ada's session revoked before her write: 401, as today's path answers it, and never sent down that path (ended)", { skip: POSTGRES }, async () => {
+  const { fast, today } = await bothWays(async (w) => w.signOut());
+  assert.deepEqual(fast.answers, ['ended']);
+  assert.deepEqual({ status: fast.result.status, body: fast.result.body }, { status: today.result.status, body: today.result.body });
+  assert.equal(fast.result.status, 401);
+  assert.deepEqual(fast.entries, today.entries);
+});
+
+test("a try the vault served, abandoned at its hold, then refused StaleFirst: today's path refuses it as it would have alone, and the abandoned try leaves only its `key.wrap`, which no write names (WToday)", { skip: POSTGRES }, async () => {
+  /** API_KEY written again, and a way to put its row back to its first version, as a database writer would. */
+  const rewritten = async (w: Awaited<ReturnType<typeof world>>) => {
+    const [first] = await db.owner.select().from(secrets).where(eq(secrets.key, 'API_KEY'));
+    await w.root.secrets.set('market/dev', { API_KEY: 'fake-root' });
+    return async () => void (await db.owner.update(secrets).set(first!).where(eq(secrets.id, first!.id)));
+  };
+  const w = await world();
+  // Between the first try's read and its hold.
+  w.between(await rewritten(w));
+  const made = await since(() => w.write({ API_KEY: 'fake-ada' }));
+  assert.deepEqual(served(w.answers), ['served', 'stale']);
+  // Today's path alone, the row put back before the write.
+  const t = await world({ fast: false });
+  await (await rewritten(t))();
+  const today = await since(() => t.write({ API_KEY: 'fake-ada' }));
+  assert.notEqual(today.result.status, 200);
+  assert.deepEqual({ status: made.result.status, body: made.result.body }, { status: today.result.status, body: today.result.body });
+  // The first try's wrap, then exactly what today's path logs; no change in 0.15's log.
+  assert.deepEqual(made.entries, ['vault key.wrap allow', ...today.entries]);
+  assert.equal(made.changes, today.changes);
+  const answer = w.answers[0]!;
+  assert.ok(answer.served);
+  assert.deepEqual(made.wraps.map((wrap) => wrap.seq).slice(0, 1), [String(answer.keys[0]!.seq)]);
+  const named = await run(db.owner, sql`SELECT count(*)::int AS n FROM audit_log WHERE related_seq = ${answer.keys[0]!.seq}`) as { n: number }[];
+  assert.equal(Number(named[0]!.n), 0);
+});
+
+test("a try the vault served, abandoned at its hold, then not served (the key made a reference meanwhile): today's path writes it once, and its write names its own wrap, not the abandoned try's (WToday, OneWritePerRequest)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  await w.root.environments.create('market/prod');
+  await w.root.secrets.set('market/prod', { SOURCE: 'fake-source' });
+  w.between(async () => void (await w.root.secrets.set('market/dev', { API_KEY: { ref: 'market/prod/SOURCE' } })));
+  const made = await since(() => w.write({ API_KEY: 'fake-ada' }));
+  assert.equal(made.result.status, 200, JSON.stringify(made.result.body));
+  assert.deepEqual(served(w.answers), ['served', 'shape']);
+  const answer = w.answers[0]!;
+  assert.ok(answer.served);
+  const row = (await keyRow('API_KEY'))!;
+  assert.equal((await versionOf(row.currentVersionId))?.createdBy, ADA);
+  // One write of Ada's, one change of hers for the key, its entry naming a wrap of its own operation.
+  const writes = await run(db.owner, sql`SELECT related_seq::text AS related, operation_id AS operation FROM audit_log WHERE action = 'secret.write' AND decision = 'allow' AND actor = ${`user:${ADA}`}`) as { related: string; operation: string }[];
+  assert.equal(writes.length, 1);
+  const changes = async (id: string) => (await run(db.owner, sql`SELECT payload FROM log_changes WHERE object = ${logObject('secret', id)} AND actor = ${`user:${ADA}`} ORDER BY number`) as { payload: string }[])
+    .map(({ payload }) => (JSON.parse(payload) as { op: string }).op);
+  const mine = await changes(row.id);
+  const verified = (await w.root.audit.verify()).ok;
+  // As today's path alone writes over a reference: the same changes, none of the abandoned try's.
+  const t = await world({ fast: false });
+  await t.root.environments.create('market/prod');
+  await t.root.secrets.set('market/prod', { SOURCE: 'fake-source' });
+  await t.root.secrets.set('market/dev', { API_KEY: { ref: 'market/prod/SOURCE' } });
+  const today = await since(() => t.write({ API_KEY: 'fake-ada' }));
+  assert.equal(today.result.status, 200);
+  assert.deepEqual(mine, await changes((await keyRow('API_KEY'))!.id));
+  // The first try's wrap, the Owner's reference made between it and its hold, then exactly what today's path logs.
+  assert.deepEqual(made.entries, ['vault key.wrap allow', 'vault reference.create allow', 'app secret.reference allow', ...today.entries]);
+  const abandoned = String(answer.keys[0]!.seq);
+  assert.notEqual(writes[0]!.related, abandoned);
+  const named = made.wraps.find((wrap) => wrap.seq === writes[0]!.related);
+  assert.ok(named !== undefined, 'the write names a wrap of this request');
+  assert.equal(named.operation, writes[0]!.operation);
+  assert.ok(made.wraps.some((wrap) => wrap.seq === abandoned), "the abandoned try's wrap stands, named by no write");
+  assert.equal(verified, true);
 });

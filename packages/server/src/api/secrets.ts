@@ -1005,7 +1005,9 @@ async function heldWrite(ctx: ApiContext, place: ResolvedPath, patch: Record<str
     try {
       return await heldOnce(ctx, place, environment, patch, recipes, written, tried);
     } catch (error) {
-      if (!(error instanceof ObjectMoved) || tries >= 3) throw error;
+      if (!(error instanceof ObjectMoved)) throw error;
+      // Three tries in all, then 409 `changed`, asked again in a second (two-trips.md, "Retries"): a churn fails fast (R44).
+      if (tries >= 3) throw new ObjectMoved('1');
       const again = await written.again();
       // Its credential no longer the caller's: as the credential's own check answers it (today's path would go on with
       // the caller the first try checked, revoked since).

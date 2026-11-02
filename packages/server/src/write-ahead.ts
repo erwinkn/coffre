@@ -5,7 +5,7 @@ import { hashToken, tokenKind, type TokenKind } from '@coffre/core/identity';
 import { personalOf } from '@coffre/core/schemas';
 import type { WriteKeysOutcome } from '@coffre/core/vault';
 
-import { authenticateRequest, refusedByKind, unauthenticated, type AuthenticatedIdentity } from './auth.ts';
+import { authenticateRequest, endedCredential, refusedByKind, unauthenticated, type AuthenticatedIdentity } from './auth.ts';
 import { vaultWrites } from './api/changes.ts';
 import { MAX_BODY_KEYS, PARAMS, routeParts } from './api/router.ts';
 import { secretPatch } from './api/routes.ts';
@@ -121,7 +121,7 @@ export class Written {
   async again(): Promise<WriteTry | string> {
     this.wipe();
     const next = await this.#ask();
-    if (next === 'forged') return 'credential';
+    if (next === 'forged' || next === 'ended') return 'credential';
     if (typeof next === 'string') return next;
     if (!(await this.#still(next))) {
       wipeTry(next);
@@ -192,6 +192,9 @@ export async function writeAhead(
   // The caller's credential not as its log has it (put back, or its change forged): refused, as an unknown one is, and
   // never down today's path, whose check of its MAC alone would take it.
   if (first === 'forged') return { identity: unauthenticated(runtime.auth), written: null };
+  // Revoked or expired, as the log has it: as the credential's own check answers it (`authenticateRequest`), and not down
+  // today's path, whose second read of the row would take one put back meanwhile (formal/Writing.tla, Today).
+  if (first === 'ended') return { identity: endedCredential(), written: null };
   if (typeof first === 'string') return null;
   const rows = (tried: WriteTry) => namedAhead(runtime.db, tried.answer.app);
   const ahead = rows(first);

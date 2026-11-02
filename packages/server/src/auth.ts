@@ -137,6 +137,9 @@ export function unauthenticated(auth: AuthConfig): Response {
   );
 }
 
+/** A credential its check found unknown, expired or revoked: the 401 a signed-out caller gets (and the two-trip write's, write-ahead.ts). */
+export const endedCredential = () => errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
+
 export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
@@ -245,7 +248,7 @@ export async function authenticateRequest(
       console.error('checking a credential failed', { requestId, error: logged(error.cause) });
       return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
     }
-    return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
+    return endedCredential();
   }
 
   try {
