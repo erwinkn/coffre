@@ -1580,7 +1580,8 @@ async function routeStatement(
     at: ask.at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: workload?.way ?? 'credential' }), deadline: ask.deadline,
     // No use is made under it: the key's tag, so that the statement's MAC names the key the isolate holds (D162).
     mac: Buffer.concat([path.macKey.tag, Buffer.alloc(MAC_BYTES - TAG_BYTES)]),
-    keys: keys.asked === null ? null : keys.asked.map((made) => made.call),
+    // An empty slice is no ids: `use_route` refuses an empty list, and a statement asked none is a miss.
+    keys: keys.asked === null || keys.asked.length === 0 ? null : keys.asked.map((made) => made.call),
     offset: keys.offset, limit: cache.limits.batch, lock: keys.lock, use: ask.use,
   };
   return raced(path, ask.deadline, () => routeCallOf(path.db)(path.db, call), async (rows, starts) => {
@@ -1802,7 +1803,9 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     const editor = editorOf(path, rows, first.editorForged);
     if ('fault' in editor) return { ...named, outcome: { ok: false, index: null, code: editor.fault, number: null } };
     // A miss, or ids no longer the names': the use is made by the statement's now (2 calls), which the map keeps too.
-    if (!rows.made) {
+    // So is a map whose list is not the item's keys now: a key added past the first statement's, or one dropped from its
+    // end, leaves the first statement right and the rest past what the map holds (Fable's review of #464).
+    if (!rows.made || prepared === null || prepared.length !== rows.keys.length) {
       guess = guessFrom(ask, rows);
       continue;
     }
@@ -1810,9 +1813,13 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     // The rest of the first round: the keys past the first statement's, in statements of that many, each read as the first.
     const answered: { row: UseRow | null; forged: boolean }[] = rows.rows.map((row, i) => ({ row, forged: first.keysForged[i]! }));
     let moved = false;
+    // The newest statement's read: a use that starts over is made by its ids, not the map's older ones.
+    let latest = rows;
     for (let offset = chunk; offset < rows.keys.length; offset += chunk) {
-      const more = await routeStatement(path, ask, guess, { offset, asked: prepared!.slice(offset, offset + chunk), lock: null });
+      const more = await routeStatement(path, ask, guess, { offset, asked: prepared.slice(offset, offset + chunk), lock: null });
       if ('busy' in more) return busyFor(more);
+      keepRoute(cache, ask, more.rows);
+      latest = more.rows;
       const lookedAgain = routeLookup(path.sealKeys, levelsOf(more.rows), rows.route!);
       if (!more.rows.made || !lookedAgain.served || versionOf(more.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version
         || !lookedAgain.digest.equals(looked.digest) || chainFault(path, more.rows) !== null) {
@@ -1822,22 +1829,24 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
       answered.push(...more.rows.rows.map((row, i) => ({ row, forged: more.keysForged[i]! })));
     }
     if (moved) {
-      guess = guessOf(cache, ask);
+      guess = guessFrom(ask, latest);
       continue;
     }
     if (answered.length !== rows.keys.length || answered.some((one) => one.row === null)) throw new Error('a route use made no use of a key its statement was asked');
-    const decided = decideRoute(path, ask, prepared!, answered, item, editor.principal, gate.checked, rows.keys, false);
+    const decided = decideRoute(path, ask, prepared, answered, item, editor.principal, gate.checked, rows.keys, false);
     if ('refused' in decided) return { ...named, outcome: decided.refused };
     // Keys that take their principal's lock: made in a second round, decided again on what it reads, each statement under
     // the lock and read as the first round read it (OneVersion).
     if (decided.again.length > 0) {
       const lock = answered[decided.again[0]!]!.row!.c_principal;
       const again = new Set(decided.again);
-      const second = prepared!.map((made, i) => (again.has(i) ? { ...made, call: { ...made.call, decided: true as const } } : { ...made, call: { ...made.call, requestId: '' } }));
+      const second = prepared.map((made, i) => (again.has(i) ? { ...made, call: { ...made.call, decided: true as const } } : { ...made, call: { ...made.call, requestId: '' } }));
       for (let offset = 0; offset < rows.keys.length && !moved; offset += chunk) {
         if (!second.slice(offset, offset + chunk).some((made) => made.call.requestId !== '')) continue;
         const round = await routeStatement(path, ask, guess, { offset, asked: second.slice(offset, offset + chunk), lock });
         if ('busy' in round) return busyFor(round);
+        keepRoute(cache, ask, round.rows);
+        latest = round.rows;
         const lookedAgain = routeLookup(path.sealKeys, levelsOf(round.rows), rows.route!);
         if (!round.rows.made || !lookedAgain.served || !lookedAgain.digest.equals(looked.digest) || chainFault(path, round.rows) !== null
           || versionOf(round.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version) {
@@ -1849,7 +1858,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
         for (const [i, row] of round.rows.rows.entries()) if (row !== null) answered[offset + i] = { row, forged: round.keysForged[i]! };
       }
       if (moved) {
-        guess = guessOf(cache, ask);
+        guess = guessFrom(ask, latest);
         continue;
       }
       const remade = decideRoute(path, ask, second, answered, item, editor.principal, gate.checked, rows.keys, true, again);

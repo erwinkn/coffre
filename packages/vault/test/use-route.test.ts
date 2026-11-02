@@ -425,6 +425,90 @@ test('a route of more keys than a statement takes: in statements of that many, e
   assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), expected);
 });
 
+test("a route lengthened past a statement's keys while the map holds the shorter list: a miss, then served (Fable's review of #464)", async () => {
+  const w = await routeWorld(db);
+  const made = [await w.key('one'), await w.key('two'), await w.key('three')];
+  const named = await Promise.all(made.map(async (id, i) => ({ name: await w.nameOf(id), value: ['one', 'two', 'three'][i]! })));
+  // The key added sorts last, so the first statement's ids are still the names': only the rest are past the map's list.
+  named.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ many: { definition: route('many', named.slice(0, 2).map((one) => one.name)), editor: ada } });
+  const { vault } = await isolate({ uses: { batch: 2 } });
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), Object.fromEntries(named.slice(0, 2).map((one) => [one.name, one.value])));
+  await w.save({ many: { definition: route('many', named.map((one) => one.name)), editor: ada } });
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), Object.fromEntries(named.map((one) => [one.name, one.value])));
+});
+
+test("a later statement's fresh ids reach the map: an edit between a use's statements costs it one attempt, not two (Fable's review of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {
+  const w = await routeWorld(db);
+  const made = [await w.key('one'), await w.key('two'), await w.key('three'), await w.key('four')];
+  const names = await Promise.all(made.map((id) => w.nameOf(id)));
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ many: { definition: route('many', names.slice(0, 3)), editor: ada } });
+  // An isolate whose hot pool adds a key to the route right after the use's first statement, its map warm on three.
+  let armed = false;
+  let routed = 0;
+  const client = postgresClient(HOT_URL, { max: 2 });
+  const pool = new Proxy(client, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        if (!String(args[0]).includes('use_route')) return sent;
+        // A first round's statement: no principal's lock (a key new to the cap's set takes one more, under it).
+        const params = args[1] as unknown[];
+        if (params[params.length - 2] === null) routed += 1;
+        if (!armed) return sent;
+        armed = false;
+        return Promise.resolve(sent).then(async (result) => {
+          await w.save({ many: { definition: route('many', names), editor: ada } });
+          return result;
+        });
+      };
+    },
+  });
+  try {
+    const prepared = await prepareVault(CONFIG, { ...LOG_015, uses: { batch: 2 } });
+    const vault = openVault(db.vault, prepared, createDatabase(pool));
+    const expected = (n: number) => Object.fromEntries(names.slice(0, n).map((one, i) => [one, ['one', 'two', 'three', 'four'][i]!]));
+    assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), expected(3));
+    armed = true;
+    routed = 0;
+    assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), expected(4));
+    // Attempt 1: its first statement, then the second answers the four keys' ids; attempt 2, by those: two statements.
+    assert.equal(routed, 4, 'the retry is made by the ids the second statement read, not the map\'s three');
+  } finally {
+    await client.end();
+  }
+});
+
+test("the editor's principal row is the vault's: a grant planted around the log is `tampered`, a row put back from before a change `stale` (Fable's review of #464)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const lin = await w.member([{ environmentId: w.dev, role: 'developer' }]);
+  await w.save({ openai: { definition: route('openai', [name]), editor: lin } });
+  const { vault } = await isolate();
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
+  const sealOf = async () => (await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${lin.principal}`))[0]!.seal;
+  const grants = async (role: string) => {
+    await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${lin.principal}`);
+    await run(db.owner, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
+      VALUES (${lin.principal}, NULL, ${w.dev}, NULL, ${role}, ${Date.now()}, 'root')`);
+  };
+  const before = await sealOf();
+  // A grant widened in the rows, the log not told: the row is not what its seal covers.
+  await grants('owner');
+  assert.deepEqual(refused(await vault.useRoute(w.askRoute('openai'))), { code: 'tampered', key: null });
+  // Demoted through the log, then her rows put back as they were, seal and all: the vault's seal, not her newest change's.
+  await grants('developer');
+  await w.restand(lin, []);
+  await grants('developer');
+  await run(db.owner, sql`UPDATE vault_members SET seal = ${before} WHERE principal = ${lin.principal}`);
+  assert.deepEqual(refused(await vault.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
+});
+
 
 test("the chain is the vault's: a fork's parent re-pointed around the log at another environment never serves that one's route (review r1 of #464)", async () => {
   const w = await routeWorld(db);

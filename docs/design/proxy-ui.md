@@ -1659,6 +1659,12 @@ Where C1 settles what this section left open, or reads it otherwise:
   through them); any difference starts the use over, at
   most three times, then `late`. A second round passes every key of its
   chunk, the ones it does not make with no request id: only checked.
+  A use that starts over is made by the ids its newest statement read,
+  which every statement also leaves in the isolate's map: an edit landing
+  between two statements costs one attempt, not two (Fable's review of
+  #464). A first statement whose ids are right but whose map held a list
+  of another length (a key added past the first chunk, or one dropped from
+  the end) is a miss too, never a later chunk sent past the list's end.
 - **Covers**: `use_route` passes a key's cover to `use_credential` only past
   the newest change of the route's levels and editor, which
   `use_credential` does not read; `use_credential` matches the cover's
