@@ -22,7 +22,7 @@
 (* it signed outside the database, and opens as Checkpointer.open does: it *)
 (* compares its memory with the database's newest row, each opened under  *)
 (* a key it is configured with. Then, when the log is under another key    *)
-(* than its own (the `to` of the newest rotation entry, else the key of    *)
+(* than its own (its own once a rotation into it counts, else the key of  *)
 (* its head), it writes the rotation entry, under its key, from that key,  *)
 (* adding that key to `retired`, in one transaction under the locks the    *)
 (* barrier takes, exclusive (RotateUnderLock). Each tick then seals the    *)
@@ -94,25 +94,30 @@
 (*                       rotation, whatever key the newest pair is under;  *)
 (*   SnapshotRead        a reader reads the rotations and the newest pair  *)
 (*                       in one statement;                                 *)
-(*   OneBoundary         the signer refuses to write a rotation from a key *)
-(*                       the log already holds a rotation from, whatever   *)
-(*                       the fence's `retired` says (Muse's review r2);    *)
-(*   HeadAnchors         ... and any rotation while its head, the pair it  *)
-(*                       took from its memory and the database, is under   *)
-(*                       its own key: the log reached that key already,    *)
-(*                       whatever rotations a database writer deleted      *)
-(*                       (Muse's review r3).                               *)
+(*   ChainRule           a rotation counts only where the key whose MAC it *)
+(*                       carries vouches at its number: one into the       *)
+(*                       current key anywhere, one into a key it replaced  *)
+(*                       only below that key's own bound (rotations.ts,    *)
+(*                       Keyring.tla, which holds it across a third key).  *)
+(*                       A rotation planted into the old key past its own  *)
+(*                       counts for nothing, so the signer writes no second*)
+(*                       boundary whatever the fence's `retired` says      *)
+(*                       (Muse's review r2), nor any once a pair under its *)
+(*                       own key sealed its rotation, whatever rotations a *)
+(*                       database writer deleted (r3): the two cases it    *)
+(*                       replaced, OneBoundary and HeadAnchors.            *)
 (*                                                                         *)
 (* Not modelled: two signers at once, which the hosts rule out (one Durable*)
 (* Object; one runner per memory), though the rotation's transaction reads *)
 (* the log's key again under its locks; the kinds of entries and the two   *)
 (* trees, witnesses and time (Seal.tla's), the same here for every key;    *)
 (* retention, whose cut and wait on the projector take the readers' bound  *)
-(* (retention.test.ts rotates under it); a rotation through a third key    *)
-(* (the code's rule is the same for each; rotation.test.ts rotates A to B  *)
-(* to C); a reader's state across calls, the projector's cursor and its    *)
-(* ranges, each held to the pair that starts it (docs/formal.md, "The      *)
-(* readers", says what that leaves to someone who holds A), and its other  *)
+(* (retention.test.ts rotates under it); a rotation through a third key,   *)
+(* whose destination is itself a key the log moved on from: Keyring.tla's  *)
+(* (rotation.test.ts rotates A to B to C); a reader's state across calls,  *)
+(* the projector's cursor and its ranges, each held to the pair that       *)
+(* starts it (docs/formal.md, "The readers", says what that leaves to      *)
+(* someone who holds A), and its other                                     *)
 (* checks (a read's columns, the cursor's place), which Reads.tla's are.   *)
 (* The cursor's two numbers are test-held, deliberately: a cursor counts   *)
 (* below the rotation only with its pair at or below its through and its   *)
@@ -138,7 +143,7 @@ CONSTANTS
     EveFence,     \* BOOLEAN: Eve edits the fence's `retired` and plants a rotation into A, under A
     BoundaryChecked, RetiredRefused, RefusedUnderLock, RotateUnderLock, MemoryUnderPrevious, RowUnderPrevious,
     RotationProbed, AnchorKeyHeld, PendingAccepted, KeyNeverBack,
-    NumberInRotation, SignerVerified, KeyringBound, SnapshotRead, OneBoundary, HeadAnchors
+    NumberInRotation, SignerVerified, KeyringBound, SnapshotRead, ChainRule
 
 Keys == {"A", "B"}
 None == "none"
@@ -179,10 +184,17 @@ Newest == CHOOSE r \in rows : \A x \in rows : x.upto <= r.upto
 \* The rotation entries a reader takes: each at the number its payload names, with NumberInRotation.
 Rotations(S) == {e \in S : e.from # None /\ (NumberInRotation => e.at = e.n)}
 RotationsFrom(S, k) == {e \in Rotations(S) : e.from = k}
+\* Those that count, by ChainRule: with two keys, one into the current key (into the key it replaced, a rotation would
+\* count only below that key's own bound, which only a rotation into the current key gives, from it: none). Without,
+\* each on its MAC alone, as the rule was.
+Counted(S, k) == IF ChainRule THEN {e \in RotationsFrom(S, k) : e.key = cfg.cur} ELSE RotationsFrom(S, k)
 \* The number of k's rotation entry in S; past every number when there is none.
-RetiredAt(S, k) == IF RotationsFrom(S, k) = {} THEN Never ELSE Min({e.n : e \in RotationsFrom(S, k)})
-\* The key the log is under, as the signer reads it at its open: the newest rotation's, else its head's.
-LogKey(h) == IF Rotations(entries) = {} THEN h.key
+RetiredAt(S, k) == IF Counted(S, k) = {} THEN Never ELSE Min({e.n : e \in Counted(S, k)})
+\* The key the log is under, as the signer reads it at its open: the current key once a rotation into it counts (any:
+\* ChainRule), else its head's. Without ChainRule, the newest rotation's, else its head's, as the rule was.
+LogKey(h) == IF ChainRule
+             THEN IF \E e \in Rotations(entries) : e.key = cfg.cur THEN cfg.cur ELSE h.key
+             ELSE IF Rotations(entries) = {} THEN h.key
              ELSE (CHOOSE e \in Rotations(entries) : \A x \in Rotations(entries) : x.n <= e.n).key
 Configured(k) == k = cfg.cur \/ k \in cfg.prev
 \* Whether the entries of a pair sealing up to u extend those of p: p's place and leaves are its prefix.
@@ -204,7 +216,7 @@ Under(r) == IF SignerVerified THEN r.key ELSE r.claim
 \* row gone: a fails closed). Without KeyringBound, the rule the verifier had: a counts only above a pair under a.
 KeyBound(a, k) ==
     IF KeyringBound
-    THEN IF RotationsFrom(entries, a) # {} THEN RetiredAt(entries, a) ELSE IF k = a THEN Never ELSE 0
+    THEN IF Counted(entries, a) # {} THEN RetiredAt(entries, a) ELSE IF k = a THEN Never ELSE 0
     ELSE IF k = a THEN RetiredAt(entries, a) ELSE 0
 
 \* A pair under a previous key, taken as the newest: below its own rotation (RotationProbed), and never above a pair
@@ -301,8 +313,8 @@ Open ==
                \* A previous key's bound: its rotation's number; with none, the rotation is the signer's to write (it then
                \* counts from that one), or gone (its key vouches for nothing).
                /\ s' = [pc |-> IF LogKey(head) # cfg.cur THEN "rotate" ELSE "tick", head |-> head, next |-> NoPair,
-                        bound |-> IF \E k \in cfg.prev : RotationsFrom(entries, k) # {}
-                                  THEN RetiredAt(entries, CHOOSE k \in cfg.prev : RotationsFrom(entries, k) # {})
+                        bound |-> IF \E k \in cfg.prev : Counted(entries, k) # {}
+                                  THEN RetiredAt(entries, CHOOSE k \in cfg.prev : Counted(entries, k) # {})
                                   ELSE 0]
     /\ UNCHANGED <<seq, entries, retired, w, cfg, crashes, deployed, rolled, eve, backup, restored, Ghosts>>
 
@@ -319,16 +331,6 @@ Rotate ==
        \* `log_rotate` reads the fence again under its locks: the log moved on from that key already, its rotation's row
        \* gone or moved (no number to count from), and it writes no second boundary: refused, an alarm.
        ELSE IF LogKey(s.head) \in retired
-       THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
-       \* Its head under its own key (HeadAnchors): the log reached that key, so a rotation the newest says it is
-       \* still to write is not the vault's (its own deleted or moved, one into the old key planted). Refused, an alarm:
-       \* the head is the signer's own evidence, its memory's, which no database writer edits.
-       ELSE IF HeadAnchors /\ s.head.key = cfg.cur
-       THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
-       \* A rotation from that key the log already holds (OneBoundary): the log was moved on from it once, and a key
-       \* never comes back, so the newest rotation naming it is not the vault's. Refused, an alarm, whatever the fence
-       \* says: a second boundary would let the key vouch up to the later one.
-       ELSE IF OneBoundary /\ RotationsFrom(entries, LogKey(s.head)) # {}
        THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
        ELSE LET e == Entry(seq + 1, cfg.cur, LogKey(s.head), TRUE) IN
             /\ seq' = seq + 1
@@ -488,7 +490,7 @@ Bounded(rot) == IF rot # 0 THEN rot ELSE IF Under(Newest) = "A" THEN Never ELSE 
 
 ReadRotations ==
     /\ Reader /\ deployed /\ ~rolled /\ rd.pc \in {"idle", "done"}
-    /\ LET rot == IF RotationsFrom(entries, "A") # {} THEN RetiredAt(entries, "A") ELSE 0 IN
+    /\ LET rot == IF Counted(entries, "A") # {} THEN RetiredAt(entries, "A") ELSE 0 IN
        rd' = IF SnapshotRead THEN Answered(rot, Bounded(rot)) ELSE [rd EXCEPT !.pc = "read", !.rot = rot]
     /\ UNCHANGED <<Db, w, Signer, eve, backup, restored, badSeal, oldPair, rotations, gone>>
 

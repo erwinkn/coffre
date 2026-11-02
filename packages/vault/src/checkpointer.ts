@@ -42,6 +42,8 @@ import {
 import { UNSEALED, type Sealing } from '@coffre/core/vault';
 import { isUnavailable } from '@coffre/db/dialect';
 
+import { chainOf, UNBOUNDED } from './rotations.ts';
+
 /**
  * 0.15's checkpointer (docs/design/audit-tree.md): every tick it seals what
  * has committed into the two trees, signs both heads as one pair, remembers
@@ -644,12 +646,18 @@ export class Checkpointer {
       }
       return null;
     };
-    // The rotations the log holds, each MAC'd by the key it moves the log to (one the signer holds): where each key it
-    // moved on from stops vouching. One from the signer's own key: a replaced key, back, which signs nothing more.
-    const rotations = options.rotations === undefined ? [] : await readRotations(options.rotations, keys);
-    const retiredAt = (origin: string) => rotations.find((r) => r.from === origin)?.number ?? null;
-    const own_ = retiredAt(own.origin);
-    if (own_ !== null) throw new Error(`the log moved on from this signer's key (${own.origin}) at ${own_}: a replaced key signs nothing more`);
+    // The rotations the log holds, weighed by the chain rule (`chainOf`, rotations.ts) under the key of the head
+    // taken: where each key the signer replaced stops vouching.
+    const entries = options.rotations === undefined ? [] : await options.rotations.read();
+    const of = options.rotations?.of ?? (() => null);
+    const chain = (under: string) => chainOf({ current: own, previous: options.previous ?? [] }, entries, of, under);
+    // One from the signer's own key, MAC'd by a key it holds: a replaced key, back, which signs nothing more
+    // (KeyNeverBack). A refusal, so taken on the MAC alone, with no chain to weigh it.
+    const back = entries.find((e) => {
+      const r = of(e);
+      return r?.from === own.origin && keys.some((key) => key.origin === r.to && key.authentic(e));
+    });
+    if (back !== undefined) throw new Error(`the log moved on from this signer's key (${own.origin}) at ${back.number}: a replaced key signs nothing more`);
     const record = await options.memory.last();
     let mine: { pair: Pair; notes: PairNotes; key: PreviousKey } | null = null;
     if (record !== null) {
@@ -669,7 +677,7 @@ export class Checkpointer {
       const genesis = mine ?? { ...(await signPair(signers, 0n, 0, { changes: empty, uses: empty })), key: own };
       await options.memory.remember(encodePair(genesis.notes));
       await rewrite(store, { upto: 0n, notes: genesis.notes }, { changes: [], uses: [] });
-      return Checkpointer.moved(store, signers, verifiers, { ...options, fence }, { changes: Edge.empty(), uses: Edge.empty() }, genesis, rotations);
+      return Checkpointer.moved(store, signers, verifiers, { ...options, fence }, { changes: Edge.empty(), uses: Edge.empty() }, genesis, chain(genesis.key.origin));
     }
     const found = await opened(row.notes);
     if (found === null || found.pair.upto !== row.upto) {
@@ -678,8 +686,8 @@ export class Checkpointer {
     if (found.key !== own) {
       // A pair under a key the signer replaced is the newest only while the log is moving on from it: below its rotation
       // (RotationProbed), and never at or above a pair the signer remembers under its own (AnchorKeyHeld).
-      const until = retiredAt(found.key.origin);
-      if (until !== null && row.upto >= until) {
+      const until = chain(found.key.origin).until(found.key.origin);
+      if (row.upto >= until) {
         throw new Error(`the newest checkpoint (${row.upto}) is under ${found.key.origin}, at or past the rotation that retired it (${until})`);
       }
       if (mine?.key === own && row.upto >= mine.pair.upto) {
@@ -737,15 +745,20 @@ export class Checkpointer {
       }
       await options.memory.remember(encodePair(row.notes));
     }
-    return Checkpointer.moved(store, signers, verifiers, { ...options, fence }, edges, head, rotations);
+    return Checkpointer.moved(store, signers, verifiers, { ...options, fence }, edges, head, chain(head.key.origin));
   }
 
   /**
    * The checkpointer over its head, the log moved on to the signer's key
-   * first if it is under another (T168): the key of the newest rotation, or
-   * else the key of the head. The rotation goes in before anything is sealed
-   * under the signer's key, under the barrier's locks; every key it replaced
-   * vouches from then on only below its rotation.
+   * first if it is under another (T168): it is under the signer's key once a
+   * rotation into it counts, and else under the key of the head. The
+   * rotation goes in before anything is sealed under the signer's key, under
+   * the barrier's locks; every key it replaced vouches from then on only
+   * below its rotation. The chain is weighed under the head's key: a
+   * rotation that does not count (one planted into a key the log moved on
+   * from, past its bound; the vault's own deleted or moved) moves nothing,
+   * and a key whose rotation is gone vouches for nothing (Rotation.tla's
+   * ChainRule, which OneBoundary and HeadAnchors were two cases of).
    */
   private static async moved(
     store: CheckpointStore,
@@ -754,24 +767,18 @@ export class Checkpointer {
     options: Options & { fence: Fence },
     edges: Record<TreeName, Edge>,
     head: { pair: Pair; notes: PairNotes; key: PreviousKey },
-    rotations: { number: bigint; from: string; to: string }[],
+    chain: ReturnType<typeof chainOf>,
   ): Promise<Checkpointer> {
     const own = originOf(signers);
-    const at = rotations.at(-1)?.to ?? head.key.origin;
-    const boundaries = new Map(rotations.map((r) => [r.from, r.number]));
+    const at = chain.rotations.some((r) => r.to === own) ? own : head.key.origin;
+    const boundaries = new Map<string, bigint>();
+    for (const key of options.previous ?? []) {
+      const until = chain.until(key.origin);
+      if (until >= 0n && until < UNBOUNDED) boundaries.set(key.origin, until);
+    }
     if (at !== own) {
       if (options.rotations === undefined) throw new Error(`the log is under ${at}, not this signer's key (${own}), and it cannot write the rotation`);
-      // The signer's head, from its memory or a row it opened, is under its own key already (HeadAnchors, Rotation.tla):
-      // the log reached this key, so no rotation is left to write, and a newest rotation that says otherwise is not the
-      // vault's (its own deleted or renumbered, one into an old key planted). Refused on the signer's own evidence,
-      // whatever rows a database writer removed (Muse's review r3).
-      if (head.key.origin === own) throw new Error(`the log's newest rotation says it is under ${at}, but the signer's head (up to ${head.pair.upto}) is under its own key (${own}): a rotation not the vault's, refused`);
-      // The log already moved on from that key (OneBoundary, Rotation.tla): a key never comes back, so the newest
-      // rotation naming it is no rotation of the vault's, and a second would let the key vouch up to it. Refused
-      // whatever the fence's `retired` says, a row a database writer edits; `log_rotate_number` reading it again
-      // under the locks stays as the guard against two opens at once.
-      const before = boundaries.get(at);
-      if (before !== undefined) throw new Error(`the log's newest rotation says it is under ${at}, which it moved on from at ${before}: a rotation not the vault's, refused`);
+      // `log_rotate_number` reads the fence again under the locks: two opens at once write one rotation.
       const number = await options.rotations.write(at);
       if (number === null) throw new Error(`the log moved on from ${at} meanwhile: open again`);
       boundaries.set(at, number);
@@ -1299,20 +1306,4 @@ function originOf(signers: PairSigners): string {
   const name = signers.changes.name;
   if (!name.endsWith('/changes')) throw new Error(`the changes tree's key is named ${name}, not <origin>/changes`);
   return name.slice(0, -'/changes'.length);
-}
-
-/**
- * The log's rotations, by number, each authentic under the key it moves the
- * log to, which the signer holds; one per key moved from, the first. Others
- * (a writer's, under no such key) are none: the tick refuses their entries.
- */
-async function readRotations(rotations: Rotations, keys: readonly PreviousKey[]): Promise<{ number: bigint; from: string; to: string }[]> {
-  const found: { number: bigint; from: string; to: string }[] = [];
-  for (const entry of (await rotations.read()).sort((a, b) => (a.number < b.number ? -1 : 1))) {
-    const r = rotations.of(entry);
-    const to = r === null ? undefined : keys.find((key) => key.origin === r.to);
-    if (r === null || to === undefined || !to.authentic(entry) || found.some((f) => f.from === r.from)) continue;
-    found.push({ number: entry.number, ...r });
-  }
-  return found;
 }

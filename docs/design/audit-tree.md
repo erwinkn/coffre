@@ -506,14 +506,19 @@ R41's: a replaced key vouches only for what came before the rotation.
   that number and adds the old key's tag to `log_fence.retired`
   (migration 0053). An entry's MAC covers every column but its number,
   which a database writer can change: a rotation counts only at the
-  number it names (`rotationOf`), so one moved up extends nothing. Nor
-  does the checkpointer write a second rotation from a key the log already
-  moved on from: `retired` is a row a database writer edits too, so a
-  newest rotation naming such a key (planted under it, the fence emptied)
-  is refused at its open, never answered with a later boundary
-  (OneBoundary); and none at all while its head, the pair it took from its
-  memory and the database, is under its own key: the log reached that key,
-  whatever rotation rows a database writer deleted or moved (HeadAnchors).
+  number it names (`rotationOf`), so one moved up extends nothing. And a
+  rotation is an entry like any other: it counts only where the key whose
+  MAC it carries, the key it moves the log to, vouches at its number
+  (`chainOf`, `rotations.ts`; ChainRule). A rotation into the current key
+  counts anywhere; one into a key it replaced only below that key's own
+  bound, a chain from the current key back. So a rotation planted into
+  the old key past its own counts for nothing, `retired` emptied or not (a
+  row a database writer edits too), and the checkpointer writes no second
+  boundary; one whose own rotation row is deleted or moved, once a pair
+  under the new key sealed it, vouches for nothing, and nothing planted
+  into it counts either. With three keys, someone who holds A and B moves
+  A's bound only below B's own rotation, where B vouches anyway
+  (Keyring.tla).
   Then the checkpointer ticks, so that the rotation is
   sealed under the new key within a tick.
 - **Old isolates write nothing past it.** A use whose MAC names a retired

@@ -2,6 +2,7 @@ import { openPair, type LogEntry, type Pair, type PairNotes, type PairVerifiers 
 
 import { logKeys } from './log-checkpointer.ts';
 import { authentic, rotationOf, type LogMacKey } from './log-entry.ts';
+import { chainOf } from './rotations.ts';
 
 /**
  * The vault's keys of 0.15's log held to its rotations (T168;
@@ -20,7 +21,9 @@ import { authentic, rotationOf, type LogMacKey } from './log-entry.ts';
  * the new key), and for nothing once it is not: a rotation's row deleted
  * leaves its key vouching for nothing, never for everything (fail closed).
  * Each is Rotation.tla's: a rotation counts at the number its payload names
- * (NumberInRotation, `rotationOf`); the newest pair is under the key its
+ * (NumberInRotation, `rotationOf`), and only where the key it moves the log
+ * to vouches at that number (ChainRule, `chainOf`; Keyring.tla's, with a
+ * third key); the newest pair is under the key its
  * signatures hold under, never a name it carries (SignerVerified); a
  * replaced key's bound is its own rotation's, whatever key the newest pair
  * is under (KeyringBound: a tick seals its window in parts, so a pair under
@@ -51,16 +54,13 @@ export type KeyringStore = {
   keyringRows(): Promise<{ rotations: LogEntry[]; newest: { upto: bigint; notes: PairNotes } | null }>;
 };
 
-/** Past every number: a key the rotation under way has yet to retire. */
-const UNBOUNDED = (1n << 63n) - 1n;
-
 /** A keyring with no key replaced: the current key alone. */
 export const alone = (keys: VerifierKeys): Keyring => ({ current: keys.current, previous: [] });
 
 /**
- * The keyring the log's rotations give: each rotation authentic under the
- * key it moves the log to, which the vault holds, the first from each key.
- * Reads nothing when the vault holds no replaced key.
+ * The keyring the log's rotations give: those that count by the chain rule
+ * (`chainOf`, rotations.ts), each where the key it moves the log to vouches
+ * at its number. Reads nothing when the vault holds no replaced key.
  */
 export async function keyringOf(keys: VerifierKeys, store: KeyringStore): Promise<Keyring> {
   if (keys.previous.length === 0) return alone(keys);
@@ -70,17 +70,9 @@ export async function keyringOf(keys: VerifierKeys, store: KeyringStore): Promis
 
 /** The keyring the rotations give, `under` the key the newest pair's signatures hold under (null: none, or no pair). */
 export function ringOf(keys: VerifierKeys, rotations: readonly LogEntry[], under: KeyCheck | null): Keyring {
-  const all = [keys.current, ...keys.previous];
-  const until = new Map<string, bigint>();
-  for (const entry of [...rotations].sort((a, b) => (a.number < b.number ? -1 : 1))) {
-    const r = rotationOf(entry);
-    const to = r === null ? undefined : all.find((key) => key.origin === r.to);
-    if (r !== null && to !== undefined && authentic(to.mac)(entry) && !until.has(r.from)) until.set(r.from, entry.number);
-  }
-  return {
-    current: keys.current,
-    previous: keys.previous.map((key) => ({ key, until: until.get(key.origin) ?? (under === key ? UNBOUNDED : -1n) })),
-  };
+  const weighed = (key: KeyCheck) => ({ origin: key.origin, authentic: authentic(key.mac) });
+  const { until } = chainOf({ current: weighed(keys.current), previous: keys.previous.map(weighed) }, rotations, rotationOf, under?.origin ?? null);
+  return { current: keys.current, previous: keys.previous.map((key) => ({ key, until: until(key.origin) })) };
 }
 
 /** The key a pair's signatures hold under, the current one first: never a name its notes carry (SignerVerified). */

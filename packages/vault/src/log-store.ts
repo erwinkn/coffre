@@ -605,7 +605,9 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
         const change = make(BigInt(next!.n));
         await rowsOf(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
           VALUES (${BigInt(next!.n)}, ${change.at}, ${change.requestId}, ${KEY_OBJECT}, 'system:vault', ${change.payload}, NULL, ${change.mac})`);
-        await rowsOf(tx, sql`UPDATE log_fence SET retired = json_insert(retired, '$[#]', ${tag}) WHERE only_row`);
+        const retired = await rowsOf(tx, sql`UPDATE log_fence SET retired = json_insert(retired, '$[#]', ${tag}) WHERE only_row RETURNING 1 AS n`);
+        // No fence row (a damaged or partial restore): no key retired, so the whole rotation fails, closed.
+        if (retired.length !== 1) throw new Error("the log's fence row is gone");
         return BigInt(next!.n);
       });
     },

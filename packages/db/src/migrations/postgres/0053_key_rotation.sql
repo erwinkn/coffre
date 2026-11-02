@@ -49,6 +49,8 @@ BEGIN
     INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
     VALUES (p_number, p_at, p_request, public.log_object('log', 'key'), 'system:vault', p_payload, NULL, p_mac);
     UPDATE public.log_fence SET retired = array_append(retired, p_from) WHERE only_row;
+    -- No fence row (a damaged or partial restore): no key retired, so the whole rotation fails, closed.
+    IF NOT FOUND THEN RAISE EXCEPTION 'the log''s fence row is gone' USING ERRCODE = 'object_not_in_prerequisite_state'; END IF;
     RETURN p_number;
 END
 $$;

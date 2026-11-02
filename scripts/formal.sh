@@ -451,9 +451,12 @@ REMOVALS=(
   "RotationReader SnapshotRead ReaderSound"
   # Muse's review r2 of #444: the fence's `retired` is a row a database writer edits; a rotation into the old key,
   # planted past its own, must not make the signer write a second boundary.
-  "RotationFence OneBoundary SealedBelowBoundary"
-  # Muse's review r3: the vault's own rotation deleted as well; the signer's head, under its own key, refuses.
-  "RotationFenceGone HeadAnchors SealedBelowBoundary"
+  "RotationFence ChainRule SealedBelowBoundary"
+  # Muse's review r3: the vault's own rotation deleted as well; the planted rotation still counts for nothing.
+  "RotationFenceGone ChainRule SealedBelowBoundary"
+  # Fable's review r6: two rotations, A to B to C, and someone who holds A and B; a rotation counts only where the key
+  # it moves the log to vouches at its number (Keyring.tla).
+  "RotationChain ChainRule KeyringSound"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.

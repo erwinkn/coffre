@@ -421,7 +421,7 @@ async function plantRotationIntoOld(w: Awaited<ReturnType<typeof underOldKey>>, 
   return { planted, number };
 }
 
-test('a rotation into the old key, planted past its own with the fence emptied before its first seal, writes no second boundary: the next start refuses (OneBoundary, review r2)', async () => {
+test('a rotation into the old key, planted past its own with the fence emptied before its first seal, counts for nothing: the next start writes no second boundary, and its tick refuses what was planted (ChainRule, review r2)', async () => {
   const rotation = ROTATIONS[0]!;
   const w = await underOldKey(rotation.before);
   await w.old.cp.close();
@@ -431,17 +431,23 @@ test('a rotation into the old key, planted past its own with the fence emptied b
   await now.cp.close();
   const [moved] = await rotations();
   const oldKey = await logKey(resolveVaultConfig(rotation.after).signingKeys[1]!);
-  const { planted } = await plantRotationIntoOld(w, oldKey.origin);
+  const { planted, number } = await plantRotationIntoOld(w, oldKey.origin);
   assert.ok(moved!.number < planted);
-  // The signer, started again, refuses rather than move the log on from the old key a second time, which would have
-  // let it vouch for the planted use, below that second rotation.
-  await assert.rejects(vaultUnder(rotation.after, w.memory), new RegExp(`moved on from at ${moved!.number}: a rotation not the vault's, refused`));
+  // The planted rotation is into the old key past that key's own rotation, where its MAC vouches for nothing: no
+  // rotation, so the log is under the new key and the signer, started again, writes none (a second boundary would have
+  // let the old key vouch for the planted use, below it).
+  const again = await vaultUnder(rotation.after, w.memory);
   assert.equal((await rotations()).length, 2);
   assert.deepEqual(await retired(), []);
+  const ring = await keyringOf(await verifierKeys(resolveVaultConfig(rotation.after).signingKeys), logStore(db.vault));
+  assert.deepEqual(ring.previous.map((p) => p.until), [moved!.number]);
+  const tick = await again.cp.tick();
+  assert.ok(!tick.signed);
+  assert.deepEqual(tick.failures, [planted, number].map((n) => `${n}: under a key the log moved on from, past its rotation`));
 });
 
 for (const gone of ['deleted', 'renumbered'] as const) {
-  test(`a rotation into the old key, planted with the fence emptied and the vault's own rotation, sealed, ${gone}, writes no second boundary: the signer's head refuses (HeadAnchors, review r3)`, async () => {
+  test(`a rotation into the old key, planted with the fence emptied and the vault's own rotation, sealed, ${gone}, counts for nothing: the old key vouches for nothing, and the tick refuses what was planted (ChainRule, review r3)`, async () => {
     const rotation = ROTATIONS[0]!;
     const w = await underOldKey(rotation.before);
     await w.old.cp.close();
@@ -455,13 +461,22 @@ for (const gone of ['deleted', 'renumbered'] as const) {
     // no rotation from the old key, and the fence names none.
     if (gone === 'deleted') await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${moved!.number}`);
     else await run(db.owner, sql`UPDATE log_changes SET number = ${moved!.number + 1_000_000n} WHERE number = ${moved!.number}`);
-    const { planted } = await plantRotationIntoOld(w, oldKey.origin);
+    const { planted, number } = await plantRotationIntoOld(w, oldKey.origin);
     // At or past the rotation (SQLite numbers the next entry max + 1: the deleted rotation's own number, free again).
     assert.ok(moved!.number <= planted);
-    // The signer's head, its memory's pair, is under the new key: the log reached it, and no rotation is left to write.
-    await assert.rejects(vaultUnder(rotation.after, w.memory), /but the signer's head \(up to \d+\) is under its own key \(coffre\.log\/[0-9a-f]{16}\): a rotation not the vault's, refused/);
+    // The newest pair is under the new key, so the old key, no rotation of it counting, vouches for nothing: the planted
+    // rotation into it counts for nothing either, and the signer writes none (Rotation.tla's ChainRule).
+    const again = await vaultUnder(rotation.after, w.memory);
     assert.equal((await rotations()).length, gone === 'deleted' ? 1 : 2);
     assert.deepEqual(await retired(), []);
+    const ring = await keyringOf(await verifierKeys(resolveVaultConfig(rotation.after).signingKeys), logStore(db.vault));
+    assert.deepEqual(ring.previous.map((p) => p.until), [-1n]);
+    const tick = await again.cp.tick();
+    assert.ok(!tick.signed);
+    // Each above the head (SQLite may number the planted use at the deleted rotation's place, below it, sealed already).
+    const above = [planted, number].filter((n) => n > now.cp.pair.pair.upto);
+    assert.ok(above.includes(number));
+    assert.deepEqual(tick.failures.filter((f) => above.some((n) => f.startsWith(`${n}:`))), above.map((n) => `${n}: its MAC does not hold`));
   });
 }
 
@@ -508,6 +523,73 @@ test('two rotations, A to B to C: each key vouches below its own rotation, the s
   const tick = await again.cp.tick();
   assert.ok(!tick.signed);
   assert.deepEqual(tick.failures, problems);
+});
+
+test('two rotations, A to B to C, and someone who holds A and B: a rotation from A planted under B past B\'s own counts for nothing, the vault\'s deleted or not (ChainRule, Fable\'s review r6)', async () => {
+  const [a, b, c] = [b64(), b64(), b64()];
+  const configs = {
+    a: { kek: { id: 'vault-a', key: a }, owners },
+    b: { kek: { id: 'vault-b', key: b }, previousKeks: [{ id: 'vault-a', key: a }], owners },
+    c: { kek: { id: 'vault-c', key: c }, previousKeks: [{ id: 'vault-b', key: b }, { id: 'vault-a', key: a }], owners },
+  } satisfies Record<string, VaultConfig>;
+  const w = await underOldKey(configs.a);
+  await w.old.cp.close();
+  const underB = await vaultUnder(configs.b, w.memory);
+  assert.ok((await underB.cp.tick()).signed);
+  await underB.cp.close();
+  const underC = await vaultUnder(configs.c, w.memory);
+  assert.ok((await underC.cp.tick()).signed);
+  const [first, second] = await rotations();
+  const [, kb, ka] = await Promise.all(resolveVaultConfig(configs.c).signingKeys.map((key) => logKey(key)));
+  const keys = await verifierKeys(resolveVaultConfig(configs.c).signingKeys);
+  const bounds = async () => (await keyringOf(keys, logStore(db.vault))).previous.map((p) => p.until);
+  assert.deepEqual(await bounds(), [second!.number, first!.number]);
+  // A rotation from A into B, MAC'd under B, at the number it names: authentic, and past B's own rotation, where B
+  // vouches for nothing. A use under A below it, which such a rotation would vouch for.
+  const plant = async () => {
+    const use = await plantUse(ka!.mac);
+    // The fence's `retired` emptied first: a row she writes, and its trigger would refuse a change under B.
+    await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE log_fence SET retired = '{}'` : sql`UPDATE log_fence SET retired = '[]'`);
+    const [next] = await rows<{ n: string | number }>(db.owner, ENGINE === 'postgres'
+      ? sql`SELECT nextval('log_number') AS n`
+      : sql`SELECT max(n) + 1 AS n FROM (SELECT max(number) AS n FROM log_changes UNION ALL SELECT max(number) FROM log_uses)`);
+    const number = BigInt(next!.n);
+    const row = { at: Date.now(), requestId: randomUUID(), object: KEY_OBJECT, actor: 'system:vault', payload: rotationPayload(ka!.origin, kb!.origin, number), seal: null };
+    await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (${number}, ${row.at}, ${row.requestId}, ${KEY_OBJECT}, 'system:vault', ${row.payload}, NULL, ${entryMac(kb!.mac, { tree: 'changes', row })})`);
+    assert.ok(second!.number < use && use < number);
+    return { use, number };
+  };
+  // Beside the vault's own rotation from A: A's bound stays the vault's.
+  const one = await plant();
+  assert.deepEqual(await bounds(), [second!.number, first!.number]);
+  // The vault's own deleted: A vouches for nothing, never up to the planted one (a rotation counting on its MAC alone
+  // would have given A the planted rotation's number, and vouched for the use below it).
+  await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${first!.number}`);
+  const two = await plant();
+  assert.deepEqual(await bounds(), [second!.number, -1n]);
+  const problems = (await verify(underC.vault)).problems;
+  for (const n of [one.use, two.use]) assert.ok(problems.includes(`${n}: under a key the log moved on from, past its rotation`), JSON.stringify(problems));
+  // vouch, the same keyring: a use under A between B's rotation and the planted one is forged.
+  const vouched = (number: bigint) => {
+    const row = { at: Date.now(), requestId: 7n, credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
+    return { tree: 'uses', number: String(number), at: row.at, requestId: String(row.requestId), credential: row.credential, secret: row.secret, purpose: 1, place: null, mac: entryMac(ka!.mac, { tree: 'uses', row }).toString('hex') } as const;
+  };
+  assert.deepEqual((await underC.vault.vouch!({ entries: [vouched(two.use)] })).forged, [String(two.use)]);
+});
+
+test('a rotation over a database whose fence row is gone fails whole: no rotation, no key left unretired past it (Fable\'s review r6)', async () => {
+  const rotation = ROTATIONS[0]!;
+  const w = await underOldKey(rotation.before);
+  await w.old.cp.close();
+  await run(db.owner, sql`DELETE FROM log_fence`);
+  try {
+    // Postgres's says it in the failed query's cause.
+    await assert.rejects(vaultUnder(rotation.after, w.memory), (e: Error) => /the log's fence row is gone/.test(`${e.message} ${(e.cause as Error | undefined)?.message}`));
+    assert.deepEqual(await rotations(), []);
+  } finally {
+    // Put back for the tests after (`empty` updates the row, it never makes it).
+    await run(db.owner, sql`INSERT INTO log_fence (only_row, at_floor) VALUES (true, 0)`);
+  }
 });
 
 test('a pair the old key signs over its own rotation is refused, by the next start and by the check (RotationProbed)', async () => {

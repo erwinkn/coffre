@@ -144,7 +144,9 @@
   whose cut for a day that ended before the rotation is under the old key).
   A rotation's
   entry names its own number under its MAC, so that one moved counts for
-  nothing.
+  nothing, and counts only where the key it moves the log to vouches at
+  that number, so that one planted under a key replaced since counts for
+  nothing either.
   `runCheckpointer`'s, `keepCheckpointer`'s and the checkpointer object's
   `seed` is now `signingKeys`, all of the vault's. Modelled first
   (`formal/Rotation.tla`), each protection shown necessary (T168).

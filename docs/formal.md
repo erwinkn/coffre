@@ -49,7 +49,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
     that the audit pages read ([below](#readstla));
   - [`formal/Rotation.tla`](../formal/Rotation.tla): the log across a
-    rotation of the vault's signing key.
+    rotation of the vault's signing key, and
+    [`formal/Keyring.tla`](../formal/Keyring.tla), its keyring across two.
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -1991,8 +1992,8 @@ tag), so the database can tell them apart.
   abort. The fence holds `retired`, the keys the log moved on from.
 - **The signer** opens as `Checkpointer.open`, its memory and the
   database's newest row each under a key it holds; writes the rotation
-  entry when the log is under another key than its own (the newest
-  rotation's `to`, else its head's key), under the barrier's locks, adding
+  entry when the log is under another key than its own (its own once a
+  rotation into it counts, else its head's key), under the barrier's locks, adding
   that key to `retired`; and ticks. It remembers a pair before writing it,
   and a crash can fall between any two steps, the rotation and its first
   pair under B among them. The deploy replaces it whatever it was doing,
@@ -2012,7 +2013,8 @@ tag), so the database can tell them apart.
   A out of the fence's `retired` (a row of the database's, as writable as
   the floor beside it) and plants a rotation into A, under A, past A's
   own, and in `RotationFenceGone` she deletes the vault's own rotation,
-  sealed, as well. `RotationChunked` seals a
+  sealed, as well. `RotationChain` (its own module, `Keyring.tla`) rotates
+  twice, A to B to C, and gives her A and B. `RotationChunked` seals a
   backlog a part at a time (`WINDOW_MAX`), so a pair under B can lie below
   the rotation.
 - **A restore** puts back a backup taken at any moment, the signer's memory
@@ -2034,8 +2036,7 @@ tag), so the database can tell them apart.
 | a rotation counts only at the number its payload names, under its MAC (NumberInRotation: `rotationOf`; the number taken first, `log_rotate_number`, then MAC'd) | `SealedBelowBoundary`, `VerifiedSound` (`RotationMove`): the sealed rotation moved up, the signer started again counts from there and seals Eve's entry under A between; the check passes it (Sol's review r1 of #444) |
 | a pair is taken under the key its signatures hold under, never a name its notes carry (SignerVerified: `signedUnder`) | `VerifiedSound` (`RotationClaim`): Eve's pair under A over the rotation, naming B, takes the current key's rule and passes (r1) |
 | a replaced key's entries are bounded by its own rotation, whatever key the newest pair is under (KeyringBound: no fast path for a newest pair under the current key) | `NoFalseAlarm` (`RotationChunked`): a pair under B below the rotation, A's honest entries above it refused by every check (r1) |
-| the signer writes no rotation from a key the log already holds a rotation from, whatever `retired` says (OneBoundary: `Checkpointer.moved`) | `SealedBelowBoundary` (`RotationFence`): A taken out of the fence, a rotation into A planted past A's own; the signer started again moves the log on from A a second time and seals Eve's entry under A below that second boundary (Muse's review r2 of #444) |
-| ... and none while its head, the pair it took from its memory and the database, is under its own key (HeadAnchors: `Checkpointer.moved`) | `SealedBelowBoundary` (`RotationFenceGone`): as in `RotationFence`, the vault's own rotation, sealed, deleted too, so no row says the log moved on from A; the signer started again, its head under B, moves the log on from A a second time (Muse's review r3 of #444) |
+| a rotation counts only where the key whose MAC it carries vouches at its number: one into the current key anywhere, one into a key it replaced only below that key's own bound, a chain from the current key back (ChainRule: `chainOf`, `packages/vault/src/rotations.ts`, which the signer's open and every reader call) | `SealedBelowBoundary` (`RotationFence`): A taken out of the fence, a rotation into A planted past A's own; the signer started again moves the log on from A a second time and seals Eve's entry under A below that second boundary (Muse's review r2 of #444). `SealedBelowBoundary` (`RotationFenceGone`): the vault's own rotation, sealed, deleted too; the same (r3). `KeyringSound` (`RotationChain`): with A and B hers after A to B to C, she deletes A to B and plants one under B past B's own rotation, and every reader takes A's word up to it (Fable's review r6 of #444) |
 | a reader reads the rotations and the newest pair in one statement (SnapshotRead: `keyringRows`) | `ReaderNoFalseAlarm`, `ReaderSound` (`RotationReader`): the rotations read before the deploy's rotation, the newest pair after its first seal, A's history refused; or the pair read before the rotation sealed, A trusted past it (r1) |
 
 Liveness (`LogWorks`, `RotationDeploy`; weak fairness on the signer's steps
@@ -2052,12 +2053,25 @@ between the two. The signer itself is not fooled: it counts from the
 rotation it wrote, so it seals nothing under A past it
 (`SealedBelowBoundary` holds there).
 
+**A third key** (`formal/Keyring.tla`, `RotationChain`). One rotation
+cannot show a rotation whose destination is itself a bounded key: with A to
+B to C, B vouches only below B to C, so an A-to-B entry under B's MAC past
+it, which someone who holds A and B can write, must count for nothing. The
+module keeps only what that takes: the vault's writes, deploys, rotations
+and pairs under its key, gaps, and Eve, who holds A and B, forging entries
+and rotations at any number no entry holds and deleting sealed rotations.
+Its reader bounds each key by the chain rule, a round at a time as
+`chainOf` does. `KeyringSound`: no entry she forged is taken at a number
+where none of her keys vouched; `NoFalseAlarm`: with nobody but the vault
+at work, every entry it wrote is taken. Without ChainRule (each rotation on
+its MAC alone) TLC finds Fable's trace. Not modelled there: the signer's
+steps, locks and fence (Rotation.tla's), a rotation deleted before its first
+seal (`RotationWindow`), pairs Eve signs, and two deploys inside one tick.
+
 **Not modelled:** two signers at once, which the hosts rule out (one Durable
 Object, one runner per memory), though `log_rotate` reads the fence again
 under its locks; the kinds of entries and the two trees, retention, witnesses
-and time, the same for every key (Seal.tla's); a rotation through a third key
-(the code's rule is the same for each, and `rotation.test.ts` rotates A to B
-to C end to end); seals, which a use checks under every
+and time, the same for every key (Seal.tla's); seals, which a use checks under every
 key the vault holds (see audit-tree.md, "A rotation").
 
 **The readers.** The reads' projector (Reads.tla's, which models one key),
@@ -2163,7 +2177,7 @@ every pull request that is not a version-only bump:
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
     - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
-      ten, about 3.5 minutes of it here before the last two);
+      eleven, about 3.5 minutes of it here before the last three);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints
