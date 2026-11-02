@@ -201,6 +201,7 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   const w = await world();
   const row = token();
   await write(row, await prepare(w, row), false);
+  const issued = (await stored(row.id))!.seal;
   const renewed = { ...row, expiresAt: new Date(row.expiresAt.getTime() + 60_000) };
   const revoked = { ...row, revokedAt: new Date() };
   const [renew, revoke] = [await prepare(w, renewed, row), await prepare(w, revoked, row)];
@@ -227,6 +228,11 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');
   assert.equal((await stored(row.id))!.expiresAt.getTime(), renewed.expiresAt.getTime());
   await holdsReplay(w.keys, row.id);
+  // The row put back to its issue, with the seal the vault made over it then (ChangeChecksSeal): the wrapper lets the
+  // inner refusal through as stale, the put-back error, not as moved, which would read again (review r3).
+  await db.owner.update(credentials).set({ expiresAt: row.expiresAt, seal: issued }).where(eq(credentials.id, row.id));
+  await assert.rejects(commit(revoked, await prepare(w, revoked, row)), (error: unknown) => isStaleChange(error) && !isMovedChange(error));
+  assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');
 });
 
 test('a row the vault never sealed is refused as tampered before anything is written; one the app says it never sealed is 0.14\'s, and logs nothing', async () => {

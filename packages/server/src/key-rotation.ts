@@ -227,7 +227,7 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
     await prepared?.commit(tx);
     return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others };
   }).catch((error: unknown) => {
-    throw prepared === null ? error : AppChanges.failed(error);
+    throw prepared === null ? error : prepared.failed(error);
   });
   await prepared?.sealed(db);
   if (unsigned.length > 0) {

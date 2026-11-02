@@ -115,6 +115,8 @@ export class AppChanges {
   readonly #calls: readonly PreparedChange[];
   /** The numbers of the changes its transaction made, which answer with its COMMIT (`commit`). */
   #numbers: ChangeNumbers | null = null;
+  /** Whether its transaction reached `commit`: only then can it fail with what `failed` maps. */
+  #committed = false;
   #dropped = false;
   #only: Set<string> | null = null;
 
@@ -193,6 +195,7 @@ export class AppChanges {
    * `ObjectMoved`: read and prepared again (`retrying`).
    */
   async commit(tx: Transaction, append?: (calls: readonly PreparedChange[]) => Promise<ChangeNumbers | null>): Promise<void> {
+    this.#committed = true;
     const only = this.#only;
     const calls = this.#dropped ? [] : only === null ? this.#calls : this.#calls.filter((call) => only.has(call.id));
     // An environment's slug moved (a rename, a deletion's tombstone): what the vault's issue compares of the policy. The
@@ -205,8 +208,10 @@ export class AppChanges {
   /**
    * What the transaction that committed these changes failed with, as its caller hears it: a row moved since it was
    * read is `ObjectMoved`, read again; one that is not its object's newest change's, put back around coffre, says so.
+   * Before `commit`, no change ran, and the error is the work's own, unchanged (as the vault's `Changes.failed`).
    */
-  static failed(error: unknown): unknown {
+  failed(error: unknown): unknown {
+    if (!this.#committed) return error;
     if (isMovedChange(error)) return new ObjectMoved();
     if (isStaleChange(error)) return new Error("an object this write changes is not its newest change's: a row was put back around coffre", { cause: error });
     return error;

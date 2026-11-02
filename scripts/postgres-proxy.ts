@@ -38,7 +38,8 @@ export async function postgresProxy(database: string, { delayMs = 0, onSync }: {
     // What the client sent of a message not yet whole; the startup message, first, has no type.
     let unread = Buffer.alloc(0);
     let started = false;
-    // The statements of the Sync being written, for `onSync`; the named statements parsed, by name, for a Bind.
+    // The statements of the Sync being written, for `onSync`; those parsed in it and not bound yet, whose Parse listed
+    // them; the named statements parsed, by name, for a Bind.
     let group: string[] = [];
     let parsed = new Set<string>();
     const named = new Map<string, string>();
@@ -54,7 +55,8 @@ export async function postgresProxy(database: string, { delayMs = 0, onSync }: {
         if (unread.length < length) break;
         if (started && onSync !== undefined) {
           // Parse ('P': its name, then its text) and simple Query ('Q': its text), each a C string; a Bind ('B': its
-          // portal, then its statement) of a statement parsed under an earlier Sync, that statement's text.
+          // portal, then its statement) but the first of a statement its Parse listed, that statement's text; a Close
+          // ('C', 'S', its name) of a statement forgets it.
           if (unread[0] === 0x50) {
             const name = cString(unread, 5);
             const { text } = cString(unread, name.end + 1);
@@ -64,8 +66,9 @@ export async function postgresProxy(database: string, { delayMs = 0, onSync }: {
           }
           if (unread[0] === 0x42) {
             const statement = cString(unread, cString(unread, 5).end + 1).text;
-            if (!parsed.has(statement)) group.push(named.get(statement) ?? `(prepared ${statement})`);
+            if (!parsed.delete(statement)) group.push(named.get(statement) ?? `(prepared ${statement})`);
           }
+          if (unread[0] === 0x43 && unread[5] === 0x53) named.delete(cString(unread, 6).text);
           if (unread[0] === 0x51) group.push(cString(unread, 5).text);
         }
         if (started && (unread[0] === 0x53 || unread[0] === 0x51)) { // 'S', 'Q'

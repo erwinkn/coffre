@@ -235,7 +235,7 @@ export async function audited<T>(
       }
       return result;
     }).catch((error: unknown) => {
-      throw changes === null ? error : AppChanges.failed(error);
+      throw changes === null ? error : changes.failed(error);
     });
     await changes?.sealed(ctx.db);
     return result;

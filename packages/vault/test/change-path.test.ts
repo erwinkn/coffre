@@ -256,6 +256,12 @@ test('change_input_strict, with the COMMIT: its number answers after it; a chang
   // The second from the same seal: refused in Postgres, the transaction with it.
   await assert.rejects(commit(protect(false), BO), (error: unknown) => isMovedChange(error) && !store.isStale(error));
   assert.deepEqual(await written(BO), [], 'rolled back with the change');
+  // The row's seal put back to the one before (ChangeChecksSeal): the wrapper lets the inner refusal through as stale,
+  // `NotLogged`, not as moved, which would read again (review r3).
+  const { environments } = tablesOf(db.owner);
+  await db.owner.update(environments).set({ seal: from }).where(eq(environments.id, w.prod));
+  await assert.rejects(commit(protect(false), BO), (error: unknown) => store.isStale(error) && !isMovedChange(error));
+  assert.deepEqual(await written(BO), [], 'rolled back with the change');
   assert.equal((await opsOf(w.keys, ref)).length, 2);
 });
 
