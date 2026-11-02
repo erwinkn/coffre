@@ -1,19 +1,24 @@
 import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
-import { type Access, type CredentialAcceptance, type NamedKey, type NamedManyInput, type NamedManyOutcome, type NamedUseInput, type NamedUseOutcome, type NamedValue, newUseRequestId, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue } from '@coffre/core/vault';
+import { CREDENTIAL_NAME } from '@coffre/core/identity';
+import {
+  type Access, type CredentialAcceptance, type DecidedItem, type NamedKey, type NamedManyInput, type NamedManyOutcome, type NamedUseInput, type NamedUseOutcome, type NamedValue, newUseRequestId,
+  type ProxyItemInput, type ProxyItemOutcome, type RouteFound, type RouteUseInput, type RouteUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue,
+} from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
 import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
-import { noEdits, objectKey, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
+import { noEdits, objectKey, sealed as sealedBy, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type PrincipalInput, type ProxyItem, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
 import { entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
-import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callUse as callPostgres } from './use.postgres.ts';
-import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callUse as callSqlite } from './use.sqlite.ts';
+import { proxyServing, routeEditorRefusal, routeLookup, type RouteLevel } from './proxy.ts';
+import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callRoute as routePostgres, callUse as callPostgres } from './use.postgres.ts';
+import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as routeSqlite, callUse as callSqlite } from './use.sqlite.ts';
 
 /**
  * 0.15's use (docs/design/0.15-plan.md, PR 5; hot-path-one.md, "A use";
@@ -135,6 +140,13 @@ export class UseCache {
    * no key of when read: bounded on its own, so that names asked and dropped leave none behind (review r3 of #412).
    */
   readonly keyIds = new Map<string, KeyId | null>();
+  /**
+   * Route uses' (T186; docs/design/proxy-ui.md, section 6): a handle's made-for places by path, by its token's hash,
+   * which pick the reading of its next URL; and each route's keys' ids, in the order its item names them, by the place
+   * and the route's name, whoever asks. Ids only, bounded as `names`: a statement holds them to the names it reads.
+   */
+  readonly madeFor = new Map<string, ReadonlySet<string>>();
+  readonly routeKeys = new Map<string, RouteKeys>();
   readonly limits: UseLimits;
   readonly max: number;
 
@@ -194,6 +206,9 @@ export class UseCache {
   }
 }
 
+/** A route's keys as its place's item named them when last read, and each one's id there (null: not held). */
+export type RouteKeys = { keys: readonly string[]; ids: readonly (KeyId | null)[] };
+
 /** A Map as an LRU: `key`'s value, moved to the end, the most recent; a Map iterates in the order of insertion. */
 function recall<T>(map: Map<string, T>, key: string): T | undefined {
   const found = map.get(key);
@@ -226,6 +241,43 @@ export type UseCall = {
   names?: Names;
   /** The call a named use makes once the vault has decided the use on the rows of one that answered `decide` or `moved`. */
   decided?: true;
+  /** A route use's (T186, 0057): the UI route its entry names, which its cover must name too. */
+  route?: string | null;
+};
+
+/**
+ * A route use's statement as the vault makes it (0057's `use_route`; `proxyItem`'s, with `use` false): its caller, a
+ * handle's names and its URL's readings, or a workload's way in at its place, by id; the reading and credential the
+ * isolate's map picked; each key's call by the ids the map holds, in the order the item names them, from `offset` (none:
+ * a miss, which reads only), a call with no request id only checked, not made (a second round's keys taken in the first).
+ */
+export type RouteCall = {
+  tokenHash: Buffer | null; accepts: CredentialAcceptance | null;
+  project: string | null; environment: string | null; named: string | null; stable: string | null; reading: 1 | 2 | null;
+  credential: string | null; way: number; principal: string | null; place: string | null;
+  at: number; purpose: number; deadline: number; mac: Buffer;
+  keys: readonly (UseCall | null)[] | null;
+  offset: number; limit: number; lock: string | null; use: boolean;
+};
+
+/** One fork level of a route's place as `use_route` read it (proxy.ts, `RouteLevel`), its newest change's number too. */
+export type RouteLevelRow = { environment: string; row: boolean; item: unknown; digests: Buffer | null; seal: Buffer | null; newest: Buffer | null; number: string | null };
+
+/** The editor's principal as `use_route` read it: their member row, grants and seal, and their object's newest change. */
+export type EditorRow = {
+  principal: string; status: string | null; owner: boolean | null; role: string | null; scope: string | null; generation: number | null; seal: Buffer | null;
+  g_project: (string | null)[] | null; g_environment: (string | null)[] | null; g_slug: (string | null)[] | null; g_role: string[] | null; g_expires: (string | null)[] | null;
+  last: Buffer | null; number: string | null; old: string | null; access: string | null;
+};
+
+/** A route's key as `use_route` resolved its name: its id (null: the place holds none), and the app's rows of it. */
+export type ResolvedRow = { id: string | null; sensitive: boolean | null; secret: unknown; version: unknown; held: { environmentId: string; slug: string } | null };
+
+/** What `use_route` answers. */
+export type RouteRows = {
+  gate: UseRow; reading: 1 | 2; route: string | null; madeFor: string[] | null; stood: boolean; place: string | null; project: string | null;
+  personal: boolean; cut: boolean; levels: RouteLevelRow[]; editor: EditorRow | null; keys: string[]; resolved: ResolvedRow[];
+  made: boolean; rows: (UseRow | null)[];
 };
 
 /**
@@ -511,7 +563,7 @@ function batchOf(db: Queryable): (db: Queryable, calls: readonly UseCall[], lock
 }
 
 /** A use's request as the vault makes it: by its ids, and its way in's (`wayOf`). */
-type Ids = { credential: string; secretId: string | null; place: string | null; way?: Way; principal?: string | null };
+type Ids = { credential: string; secretId: string | null; place: string | null; way?: Way; principal?: string | null; route?: string };
 
 /**
  * A use's answer inside the vault: its outcome, its row, the view it decided on, if it got that far. A named one may
@@ -520,7 +572,7 @@ type Ids = { credential: string; secretId: string | null; place: string | null; 
  * or by ids, `again`, the use the vault allowed on the rows the call read, to be made by their ids, decided (D153).
  */
 type Used =
-  | { unknown: true } | { nowhere: true } | { again: Ids; row: UseRow }
+  | { unknown: true } | { nowhere: true } | { again: Ids; row: UseRow; checked?: CheckedView }
   | { outcome: UseOutcome | { ok: true; plain: string; versionId: string }; row: UseRow | null; checked: CheckedView | null; request: UseRequest };
 
 /**
@@ -555,6 +607,8 @@ async function useOnce(path: UsePath, input: Asked, names?: Names, decided = fal
 /** What a use asks the vault, by ids: the request's, or a named call's ids as its isolate's map holds them (none: null). */
 type Asked = Pick<UseInput, 'place' | 'purpose' | 'keepsSensitive' | 'requestId' | 'at' | 'deadline'> & {
   credential: string | null; secretId: string | null; way?: Way; principal?: string | null;
+  /** A route use's (T186): its route, which its entry names; decided as a named use is, a plain value handed back. */
+  route?: string;
 };
 
 /** The request a use decides, as the log's replay reads it back. */
@@ -562,7 +616,8 @@ function requestOf(input: Asked, names: Names | undefined): UseRequest {
   const way = input.way ?? 'credential';
   return {
     credential: input.credential ?? '', ...(way === 'credential' ? {} : { way }), secretId: input.secretId ?? '', place: input.place, purpose: input.purpose,
-    keepsSensitive: input.keepsSensitive === true, at: input.at, ...(names === undefined ? {} : { plain: true as const }),
+    keepsSensitive: input.keepsSensitive === true, at: input.at, ...(names === undefined && input.route === undefined ? {} : { plain: true as const }),
+    ...(input.route === undefined ? {} : { route: input.route }),
   };
 }
 
@@ -576,10 +631,11 @@ function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | 
   const purpose = purposeCode(request);
   const key = `${input.credential ?? ''}\n${input.secretId ?? ''}\n${input.place ?? ''}`;
   // The seals a probe of these ids read, for the cached form: a use by ids only. A named call always probes, so that
-  // its work is the same whatever the key and whatever this isolate kept of earlier uses (D153; review r12).
-  const known = input.credential === null || names !== undefined ? undefined : cache.seals.get(key);
-  // A cover is of the same request but its id and time: the same credential, key, place and purpose.
-  const coverKey = `${key}\n${purpose}`;
+  // its work is the same whatever the key and whatever this isolate kept of earlier uses (D153; review r12); a route
+  // use too, which names its route.
+  const known = input.credential === null || names !== undefined || input.route !== undefined ? undefined : cache.seals.get(key);
+  // A cover is of the same request but its id and time: the same credential, key, place and purpose, and route (T186).
+  const coverKey = `${key}\n${purpose}${input.route === undefined ? '' : `\n${input.route}`}`;
   const held = input.secretId === null ? undefined : cache.covers.get(coverKey);
   // A cover a change this isolate knows of came after is no cover; one it cannot judge, the statement judges.
   const cover = held !== undefined && input.at < held.until && input.at >= held.at && (known?.inputs == null || BigInt(held.number) > BigInt(known.inputs)) ? held : undefined;
@@ -590,8 +646,9 @@ function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | 
     // all the same, so that every MAC the statement takes names the key the isolate holds (D162; T168 refuses by it).
     mac: input.credential === null
       ? Buffer.concat([path.macKey.tag, Buffer.alloc(MAC_BYTES - TAG_BYTES)])
-      : entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId ?? '', purpose, place: input.place } }),
+      : entryMac(path.macKey, { tree: 'uses', row: { at: input.at, requestId: BigInt(input.requestId), credential: input.credential, secret: input.secretId ?? '', purpose, place: input.place, route: input.route ?? null } }),
     deadline: input.deadline,
+    ...(input.route === undefined ? {} : { route: input.route }),
     ...(cover === undefined ? {} : { cover }),
     ...(known === undefined ? {} : { known }),
     ...(names === undefined ? {} : { names }),
@@ -626,7 +683,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
     // allowed, made by those ids, in a second call. A moved call read every seal anew (0045), so the map's never judge
     // the names' rows.
     const ids: Ids = names === undefined
-      ? { credential: input.credential!, secretId: input.secretId, place: input.place, way, principal: input.principal ?? null }
+      ? { credential: input.credential!, secretId: input.secretId, place: input.place, way, principal: input.principal ?? null, ...(input.route === undefined ? {} : { route: input.route }) }
       : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null || inherited(row) ? row.n_place : null, way, principal: null };
     const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
     const view = viewOf(row, named, row.probed ? undefined : known);
@@ -643,7 +700,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
       if (Date.now() >= input.deadline) return { outcome: busy('late'), row, checked, request: named };
       return { outcome: { ok: true, plain: row.v_plaintext!, versionId: value.version }, row, checked, request: named };
     }
-    return { again: ids, row };
+    return { again: ids, row, checked };
   }
   const view = viewOf(row, request, row.probed ? undefined : known);
   // An input whose row names another object than the cache's seal is of: `stale`, and the next use probes.
@@ -652,7 +709,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
   const code = decidedOn(checked, request, row);
   // The seals a probe read, kept for the next use's cached form: by ids alone. A named call never runs the cached form
   // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12).
-  if (row.probed && row.newest !== null && !view.changed && names === undefined) {
+  if (row.probed && row.newest !== null && !view.changed && names === undefined && input.route === undefined) {
     cache.keep(cache.seals, key, {
       newest: row.newest, newestMac: row.newest_mac!, inputs: row.inputs, ids: view.ids,
       cap: { count: Number(row.cap_count), windowMs: Number(row.cap_window) }, last: lastsOf(row),
@@ -1416,4 +1473,462 @@ async function open(path: UsePath, view: UseView, row: UseRow, deadline: number)
   } finally {
     dek.fill(0);
   }
+}
+
+// --- route uses (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3, 4 and 6; formal/Routing.tla) ---------------
+
+/**
+ * A route use, or `proxyItem`'s read, as the vault asks its statement (`use_route`, 0057): a handle by its token, with
+ * what the app's config accepts, and its URL's readings; or a workload by its way in at its place, by id.
+ */
+type RouteAsk = {
+  handle: { tokenHash: Buffer; token: string; accepts: CredentialAcceptance } | null;
+  workload: { credential: string; way: Way; principal: string | null; place: string } | null;
+  project: string | null; environment: string | null; named: string | null; stable: string | null;
+  at: number; deadline: number; use: boolean;
+};
+
+/** The reading, credential and place the isolate's map picks for a route use, and the route's keys' ids it holds there. */
+type RouteGuess = { reading: 1 | 2 | null; credential: string | null; place: string | null; route: string | null; keyed: RouteKeys | undefined };
+
+/** What a statement of a route use read, and whether each row's principal had an access entry forged past what its log accounts for. */
+type RouteRound = { rows: RouteRows; gateForged: boolean; keysForged: boolean[]; editorForged: boolean };
+
+/** The engine's `use_route`. */
+function routeCallOf(db: Queryable): (db: Queryable, call: RouteCall) => Promise<RouteRows> {
+  return engineOf(db) === 'postgres' ? routePostgres : routeSqlite;
+}
+
+const ROUTE_ATTEMPTS = 3;
+
+/** Why a route use's input is not one: a bug of the app's, which fails the call. */
+function checkRoute(input: { caller: RouteUseInput['caller'] }, names: readonly (string | null)[]): RouteAsk['workload'] {
+  for (const name of names) if (name !== null && (typeof name !== 'string' || !CREDENTIAL_NAME.test(name))) throw new Error('a route is named as a credential is');
+  const { caller } = input;
+  if (caller?.kind === 'handle') {
+    if (typeof caller.tokenHash !== 'string') throw new Error("a route use's handle names its token, by hash");
+    return null;
+  }
+  if (caller?.kind !== 'workload' || typeof caller.place !== 'string' || !UUID.test(caller.place)) throw new Error("a route use names its caller: a handle's token, or a workload's way in at its place");
+  checkIds({ credential: caller.credential, secretId: null, place: null, way: caller.way });
+  const way = wayOf({ credential: caller.credential, way: caller.way });
+  return { credential: way.credential, way: way.way, principal: way.principal, place: caller.place };
+}
+
+/** The reading of a handle's URL, and its ids, as the isolate's map holds them (section 6): none it cannot pick. */
+function guessOf(cache: UseCache, ask: RouteAsk): RouteGuess {
+  if (ask.workload !== null) {
+    const route = ask.stable;
+    return { reading: 2, credential: ask.workload.credential, place: ask.workload.place, route, keyed: route === null ? undefined : recall(cache.routeKeys, `${ask.workload.place}\n${route}`) };
+  }
+  const { token } = ask.handle!;
+  const madeFor = ask.named === null ? undefined : recall(cache.madeFor, token);
+  const reading = ask.named === null ? 2 : madeFor === undefined ? null : madeFor.has(`${ask.project}/${ask.environment}`) || ask.stable === null ? 1 : 2;
+  if (reading === null) return { reading: null, credential: null, place: null, route: null, keyed: undefined };
+  const found = cache.named(reading === 1 ? `${token}\n${ask.project}\n${ask.environment}` : `${token}\n\n`);
+  const route = reading === 1 ? ask.named : ask.stable;
+  return {
+    reading, credential: found?.credential ?? null, place: found?.environment ?? null, route,
+    keyed: found === undefined || route === null ? undefined : recall(cache.routeKeys, `${found.environment}\n${route}`),
+  };
+}
+
+/** The reading, credential, place and keys' ids a statement read: what the use's next statement is made by, map or none. */
+function guessFrom(ask: RouteAsk, rows: RouteRows): RouteGuess {
+  return {
+    reading: rows.reading, credential: ask.workload?.credential ?? rows.gate.n_credential, place: rows.place, route: rows.route,
+    keyed: rows.keys.length === rows.resolved.length ? { keys: rows.keys, ids: rows.resolved.map((one) => (one.id === null ? null : { id: one.id, through: one.held !== null })) } : undefined,
+  };
+}
+
+/** A key of a route use as the vault asks it: by the ids the isolate maps it to, its entry naming the route. */
+function routeAsked(ask: RouteAsk, guess: RouteGuess, id: KeyId | null, requestId: string): Asked {
+  const workload = ask.workload;
+  return {
+    credential: guess.credential, secretId: id?.id ?? null, place: id === null || id.through ? guess.place : null,
+    purpose: 'use', requestId, at: ask.at, deadline: ask.deadline, route: guess.route!,
+    ...(workload === null ? {} : { way: workload.way, principal: workload.principal }),
+  };
+}
+
+/**
+ * One statement of a route use (`use_route`): its keys, from `offset`, by the ids `asked` holds, the ones `made` names
+ * made (the rest only checked: a second round's), decided as `decided` says, under the principal's lock with `lock`.
+ */
+async function routeStatement(
+  path: UsePath, ask: RouteAsk, guess: RouteGuess, keys: { offset: number; asked: Ready[] | null; lock: string | null },
+): Promise<RouteRound | Extract<UseOutcome, { busy: UseBusy }>> {
+  const { cache } = path;
+  const workload = ask.workload;
+  const call: RouteCall = {
+    tokenHash: ask.handle?.tokenHash ?? null, accepts: ask.handle?.accepts ?? null,
+    project: ask.project, environment: ask.environment, named: ask.named, stable: ask.stable, reading: guess.reading,
+    credential: keys.asked === null ? (workload?.credential ?? null) : guess.credential, way: WAYS.indexOf(workload?.way ?? 'credential'), principal: workload?.principal ?? null, place: workload?.place ?? null,
+    at: ask.at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: workload?.way ?? 'credential' }), deadline: ask.deadline,
+    // No use is made under it: the key's tag, so that the statement's MAC names the key the isolate holds (D162).
+    mac: Buffer.concat([path.macKey.tag, Buffer.alloc(MAC_BYTES - TAG_BYTES)]),
+    keys: keys.asked === null ? null : keys.asked.map((made) => made.call),
+    offset: keys.offset, limit: cache.limits.batch, lock: keys.lock, use: ask.use,
+  };
+  return raced(path, ask.deadline, () => routeCallOf(path.db)(path.db, call), async (rows, starts) => {
+    const forgedOf = forgedOnce(path, starts);
+    const gateForged = await forgedOf(rows.gate, undefined);
+    const keysForged: boolean[] = [];
+    for (const row of rows.rows) keysForged.push(row === null ? false : await forgedOf(row, undefined));
+    const editor = rows.editor;
+    let editorForged = false;
+    if (editor !== null && path.oldWrite !== undefined && editor.access !== null && !(editor.old !== null && BigInt(editor.access) <= BigInt(editor.old))) {
+      starts();
+      editorForged = !(await path.oldWrite(editor.principal, editor.old === null ? null : BigInt(editor.old), BigInt(editor.access), starts));
+    }
+    return { rows, gateForged, keysForged, editorForged };
+  });
+}
+
+/** What the isolate's map keeps of a statement's read: the handle's made-for places, its place's ids, the route's keys' ids. */
+function keepRoute(cache: UseCache, ask: RouteAsk, rows: RouteRows): void {
+  if (ask.handle !== null) {
+    const { token } = ask.handle;
+    if (rows.madeFor !== null) remember(cache.madeFor, token, new Set(rows.madeFor), cache.limits.names);
+    if (rows.stood) keep(cache, rows.reading === 1 ? `${token}\n${ask.project}\n${ask.environment}` : `${token}\n\n`, null, rows.gate);
+  }
+  if (rows.stood && rows.place !== null && rows.route !== null && rows.keys.length > 0 && rows.resolved.length === rows.keys.length) {
+    remember(cache.routeKeys, `${rows.place}\n${rows.route}`, {
+      keys: rows.keys,
+      ids: rows.resolved.map((one) => (one.id === null ? null : { id: one.id, through: one.held !== null })),
+    }, cache.limits.names);
+  }
+}
+
+/** The gate's decision on a statement's first row: the caller, as a use decides them at the place, or why not. */
+type Gate =
+  | { unknown: true } | { nowhere: true } | Extract<UseOutcome, { busy: UseBusy }>
+  | { credential: Extract<UseOutcome, { code: UseCode }> }
+  | { checked: CheckedView; request: UseRequest; stands: boolean; code: UseCode | null };
+
+function gateOf(path: UsePath, ask: RouteAsk, round: RouteRound, seals: typeof sealed): Gate {
+  const { rows } = round;
+  const base = { purpose: 'use' as const, requestId: '0', at: ask.at, deadline: ask.deadline };
+  let used: ReturnType<typeof settle>;
+  if (ask.handle !== null) {
+    const gateNames: Names = {
+      tokenHash: ask.handle.tokenHash, project: rows.reading === 1 ? ask.project : null, environment: rows.reading === 1 ? ask.environment : null, key: null,
+      handle: rows.reading === 2, unless: rows.reading === 2 && ask.project !== null ? [`${ask.project}/${ask.environment}`] : [], accepts: ask.handle.accepts, forks: true,
+    };
+    const asked: Asked = { ...base, credential: null, secretId: null, place: null };
+    used = settle(path, asked, gateNames, false, ready(path, asked, requestOf(asked, gateNames), gateNames, false, seals), rows.gate, round.gateForged);
+  } else {
+    const workload = ask.workload!;
+    // Its use of no key at its place, decided as a route use's: on its standing there, `missing` for one who stands.
+    const asked: Asked = { ...base, credential: workload.credential, secretId: null, place: workload.place, way: workload.way, principal: workload.principal, route: rows.route ?? '' };
+    used = settle(path, asked, undefined, false, ready(path, asked, requestOf(asked, undefined), undefined, false, seals), rows.gate, round.gateForged);
+  }
+  if ('unknown' in used) return { unknown: true };
+  if ('nowhere' in used) return { nowhere: true };
+  if ('again' in used || 'allowed' in used || 'uncovered' in used) throw new Error("a route use's gate made a use");
+  if ('busy' in used.outcome) return used.outcome;
+  const checked = used.checked!;
+  if (routeOf(checked, ask.at) === 'credential') {
+    const outcome = used.outcome.ok ? null : used.outcome;
+    if (outcome === null || !('code' in outcome)) throw new Error('a use was allowed on a credential its seals do not bear out');
+    return { credential: outcome };
+  }
+  const code = used.outcome.ok ? null : 'code' in used.outcome ? used.outcome.code : null;
+  const stands = ask.handle !== null ? rows.gate.n_standing === true && rows.gate.n_cut === false && code === 'missing' : code === 'missing';
+  return { checked, request: used.request, stands, code };
+}
+
+/** The route's editor's principal as the statement read it, its seals checked: theirs now, or a row a writer changed. */
+function editorOf(path: UsePath, rows: RouteRows, forged: boolean): { principal: PrincipalInput | null } | { fault: 'tampered' | 'stale' } {
+  const editor = rows.editor;
+  if (editor === null) return { fault: 'tampered' };
+  const principal = editor.status === null ? null : principalObject({
+    principal: editor.principal, status: editor.status, generation: editor.generation ?? 0, ...memberStanding({ owner: editor.owner === true, role: editor.role, scope: editor.scope }),
+  }, grantsOf(editor as unknown as UseRow));
+  const ref = { kind: 'principal' as const, id: editor.principal };
+  const valid = principal === null ? editor.seal === null : sealedBy(path.sealKeys, ref, principal, editor.seal);
+  const current = principal === null ? editor.last === null : editor.seal !== null && editor.last !== null && editor.seal.equals(editor.last);
+  if (!valid) return { fault: 'tampered' };
+  // As a caller's (UsesSeeOldWrites): current only while 0.14's newest access entry about them is one the log accounts for, or forged.
+  const accounted = editor.access === null || (editor.old !== null && BigInt(editor.access) <= BigInt(editor.old)) || forged;
+  if (!current || !accounted) return { fault: 'stale' };
+  return { principal };
+}
+
+/** The levels a statement read, as the lookup weighs them. */
+function levelsOf(rows: RouteRows): RouteLevel[] {
+  return rows.levels.map((level) => ({ environmentId: level.environment, row: level.row, item: level.item, digests: level.digests, seal: level.seal, newest: level.number === null ? undefined : level.newest }));
+}
+
+/** What every statement of one use must read alike (`OneVersion`): the levels' seals, the item, and its editor's newest change. */
+function versionOf(rows: RouteRows, found: RouteFound): string {
+  return JSON.stringify([found.seals, found.found ? found.item.digest : null, rows.editor?.last?.toString('base64') ?? null]);
+}
+
+/**
+ * A route use (T186 PR C; docs/design/proxy-ui.md, section 3; formal/Routing.tla): the vault's one call, two on a map
+ * miss. Its first statement (`use_route`) decides the caller's standing at the place first, then reads the route's item
+ * through the fork chain, its editor's principal and its keys, all under the fence, in one snapshot (FencedRead), and
+ * makes each key's use by the ids this isolate maps the route to when they are the names' now; otherwise it uses nothing,
+ * and the vault asks again by the ids it read. The vault checks each level's seal and the item against its sealed index
+ * (SealChecked), then decides each key twice: for the caller, as a use; and for the item's editor, what their save froze
+ * intersected with what they hold now (ClearanceAtUse, EditorStillHolds). A key that would take its principal's lock is
+ * decided first and made in a second round; a route of more keys than a statement takes is made in statements of that
+ * many: each statement must read the levels' seals, the item and the editor as the first read them, or the whole use
+ * starts over (`OneVersion`). All or nothing: every value, opened, with the item it was decided on (left out where the
+ * app's copy has its digest: CopyFromVault, SentAsDecided); or the first key refused; or busy.
+ *
+ *   Bo's handle, `/use/openai/chat/completions`, the map warm        1 call: its gate, the item, Ada's principal, its key's use
+ *   the same, Ada removed since she saved `openai`                   1 call: route_not_cleared, its entry written, nothing opened
+ *   the same, an Owner pointed `openai` elsewhere since              1 call: the new item, the use decided on it
+ */
+export async function useRoute(path: UsePath, input: RouteUseInput): Promise<RouteUseOutcome> {
+  checkInput({ ...input, requestId: '0' });
+  if (input.purpose !== 'use') throw new Error('a route use uses its keys');
+  if (input.named !== null && (typeof input.named?.place?.project !== 'string' || typeof input.named.place.environment !== 'string')) throw new Error("a route use's place reading names its place by slugs");
+  const workload = checkRoute(input, [input.named?.route ?? null, input.stable]);
+  if (input.stable === null && input.named === null) throw new Error('a route use names its route');
+  if (workload !== null && input.named !== null) throw new Error("a workload's route use names its route at its place");
+  if (!Array.isArray(input.digests) || input.digests.some((digest) => typeof digest !== 'string')) throw new Error("a route use names its copies' digests");
+  const { cache } = path;
+  const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
+  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
+  if (cache.full()) return busyFor(busy('overloaded'));
+  const handle = input.caller.kind === 'handle' ? { tokenHash: Buffer.from(input.caller.tokenHash, 'base64'), token: input.caller.tokenHash, accepts: acceptsOf(input.caller) } : null;
+  const ask: RouteAsk = {
+    handle, workload, project: input.named?.place.project ?? null, environment: input.named?.place.environment ?? null, named: input.named?.route ?? null, stable: input.stable,
+    at: input.at, deadline: input.deadline, use: true,
+  };
+  const digests = new Set(input.digests);
+  const seals = sealedOnce();
+  let guess = guessOf(cache, ask);
+  for (let attempt = 0; attempt < ROUTE_ATTEMPTS; attempt++) {
+    // Each key's use, by the ids the map holds, made ready for the first statement's keys; none on a miss.
+    const keyed = guess.keyed;
+    const chunk = cache.limits.batch;
+    const asks = keyed === undefined || guess.credential === null || guess.place === null ? null
+      : keyed.ids.map((id) => routeAsked(ask, guess, id, newUseRequestId()));
+    const prepared = asks?.map((one) => ready(path, one, requestOf(one, undefined), undefined, false, seals)) ?? null;
+    const first = await routeStatement(path, ask, guess, { offset: 0, asked: prepared === null ? null : prepared.slice(0, chunk), lock: null });
+    if ('busy' in first) return busyFor(first);
+    keepRoute(cache, ask, first.rows);
+    const gate = gateOf(path, ask, first, seals);
+    if ('unknown' in gate) {
+      if (handle !== null) cache.madeFor.delete(handle.token);
+      return { served: true, route: 'credential', outcome: { ok: false, code: 'credential', number: null } };
+    }
+    if ('nowhere' in gate) return { served: false };
+    if ('busy' in gate) return busyFor(gate);
+    if ('credential' in gate) return { served: true, route: 'credential', outcome: gate.credential };
+    const { rows } = first;
+    const placed = handle === null ? null : mapped(rows.gate);
+    const at = handle !== null ? placeOf(gate.checked, rows.gate) : workloadPlace(gate.checked, workload!.place);
+    const answer = {
+      served: true as const, route: 'name' as const, standing: standingOf(gate.checked, gate.request),
+      app: rows.gate.app == null ? null : JSON.stringify(rows.gate.app),
+      place: placed?.slugs ?? null, at, reading: rows.reading === 1 ? 'named' as const : 'stable' as const,
+      expiresAt: gate.checked.credential.row?.expiresAt ?? null,
+    };
+    // Nothing of the route read for one who stands nowhere there, or at a place cut: the place's refusal.
+    if (!gate.stands || !rows.stood) {
+      return { ...answer, stands: false, personal: false, found: null, keys: [], outcome: { ok: false, index: null, code: gate.code === 'missing' || gate.code === null ? 'stale' : gate.code, number: null } };
+    }
+    if (rows.personal) return { ...answer, stands: true, personal: true, found: null, keys: [], outcome: { ok: false, index: null, code: 'personal', number: null } };
+    if (rows.cut) return { ...answer, stands: false, personal: false, found: null, keys: [], outcome: { ok: false, index: null, code: 'archived', number: null } };
+    const looked = routeLookup(path.sealKeys, levelsOf(rows), rows.route!);
+    if (!looked.served) {
+      const found: RouteFound = { found: false, fault: looked.fault, seals: looked.seals };
+      return { ...answer, stands: true, personal: false, found, keys: [], outcome: { ok: false, index: null, code: looked.fault ?? 'missing', number: null } };
+    }
+    const item: ProxyItem = looked.item;
+    const digest = looked.digest.toString('base64');
+    const found: RouteFound = { found: true, level: looked.level, seals: looked.seals, item: { name: rows.route!, digest, definition: digests.has(digest) ? null : item.definition } };
+    const keys: NamedKey[] = rows.keys.map((key, i) => {
+      const one = rows.resolved[i];
+      return {
+        key, secretId: one?.id ?? null, held: one?.held ?? null, left: false,
+        app: rows.gate.app == null || one?.secret == null ? null : JSON.stringify({ ...(rows.gate.app as Record<string, unknown>), secrets: [{ secret: one.secret, version: one.version }] }),
+      };
+    });
+    const named = { ...answer, stands: true, personal: false, found, keys };
+    const editor = editorOf(path, rows, first.editorForged);
+    if ('fault' in editor) return { ...named, outcome: { ok: false, index: null, code: editor.fault, number: null } };
+    // A miss, or ids no longer the names': the use is made by the statement's now (2 calls), which the map keeps too.
+    if (!rows.made) {
+      guess = guessFrom(ask, rows);
+      continue;
+    }
+    const version = versionOf(rows, found);
+    // The rest of the first round: the keys past the first statement's, in statements of that many, each read as the first.
+    const answered: { row: UseRow | null; forged: boolean }[] = rows.rows.map((row, i) => ({ row, forged: first.keysForged[i]! }));
+    let moved = false;
+    for (let offset = chunk; offset < rows.keys.length; offset += chunk) {
+      const more = await routeStatement(path, ask, guess, { offset, asked: prepared!.slice(offset, offset + chunk), lock: null });
+      if ('busy' in more) return busyFor(more);
+      const lookedAgain = routeLookup(path.sealKeys, levelsOf(more.rows), rows.route!);
+      if (!more.rows.made || !lookedAgain.served || versionOf(more.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version
+        || !lookedAgain.digest.equals(looked.digest)) {
+        moved = true;
+        break;
+      }
+      answered.push(...more.rows.rows.map((row, i) => ({ row, forged: more.keysForged[i]! })));
+    }
+    if (moved) {
+      guess = guessOf(cache, ask);
+      continue;
+    }
+    if (answered.length !== rows.keys.length || answered.some((one) => one.row === null)) throw new Error('a route use made no use of a key its statement was asked');
+    const decided = decideRoute(path, ask, prepared!, answered, item, editor.principal, gate.checked, rows.keys, false);
+    if ('refused' in decided) return { ...named, outcome: decided.refused };
+    // Keys that take their principal's lock: made in a second round, decided again on what it reads, each statement under
+    // the lock and read as the first round read it (OneVersion).
+    if (decided.again.length > 0) {
+      const lock = answered[decided.again[0]!]!.row!.c_principal;
+      const again = new Set(decided.again);
+      const second = prepared!.map((made, i) => (again.has(i) ? { ...made, call: { ...made.call, decided: true as const } } : { ...made, call: { ...made.call, requestId: '' } }));
+      for (let offset = 0; offset < rows.keys.length && !moved; offset += chunk) {
+        if (!second.slice(offset, offset + chunk).some((made) => made.call.requestId !== '')) continue;
+        const round = await routeStatement(path, ask, guess, { offset, asked: second.slice(offset, offset + chunk), lock });
+        if ('busy' in round) return busyFor(round);
+        const lookedAgain = routeLookup(path.sealKeys, levelsOf(round.rows), rows.route!);
+        if (!round.rows.made || !lookedAgain.served || !lookedAgain.digest.equals(looked.digest)
+          || versionOf(round.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version) {
+          moved = true;
+          break;
+        }
+        const editorAgain = editorOf(path, round.rows, round.editorForged);
+        if ('fault' in editorAgain) return { ...named, outcome: { ok: false, index: null, code: editorAgain.fault, number: null } };
+        for (const [i, row] of round.rows.rows.entries()) if (row !== null) answered[offset + i] = { row, forged: round.keysForged[i]! };
+      }
+      if (moved) {
+        guess = guessOf(cache, ask);
+        continue;
+      }
+      const remade = decideRoute(path, ask, second, answered, item, editor.principal, gate.checked, rows.keys, true, again);
+      if ('refused' in remade) return { ...named, outcome: remade.refused };
+      for (const [i, one] of remade.allowed) decided.allowed.set(i, one);
+      for (const [i, one] of remade.plain) decided.plain.set(i, one);
+    }
+    // Every key allowed: each opened, within the deadline.
+    const values: (NamedValue | null)[] = rows.keys.map((_, i) => decided.plain.get(i) ?? null);
+    const indices = [...decided.allowed.keys()].sort((a, b) => a - b);
+    const opened = await Promise.all(indices.map((i) => opening(path, decided.allowed.get(i)!, ask.deadline)));
+    for (const [n, one] of opened.entries()) {
+      const outcome = 'outcome' in one ? one.outcome : null;
+      if (outcome === null || !outcome.ok || !('value' in outcome)) return { ...named, outcome: routeRefusal(indices[n]!, one) };
+      values[indices[n]!] = { number: outcome.number, covered: outcome.covered, value: outcome.value };
+    }
+    return { ...named, outcome: { ok: true, values } };
+  }
+  // The names moved under it, statement after statement: nothing decided, ask again.
+  return busyFor(busy('late'));
+}
+
+/** Where a workload's route use was, by the ids of its place's row as the gate checked it. */
+function workloadPlace(checked: CheckedView, place: string): { projectId: string; environmentId: string } | null {
+  const read = checked.environments.get(place);
+  return read !== undefined && read.row !== null && read.valid && read.current ? { projectId: read.row.projectId, environmentId: read.row.id } : null;
+}
+
+/** A route use's answer for its key at `index`, not allowed: refused, or busy. */
+function routeRefusal(index: number, used: Used | Allowed | Uncovered): Extract<RouteUseOutcome, { route: 'name' }>['outcome'] {
+  if (!('outcome' in used)) throw new Error('a refused key answered a named state');
+  const { outcome } = used;
+  if ('busy' in outcome) return outcome;
+  if (outcome.ok) throw new Error('a use allowed is no refusal');
+  return { ok: false, index, code: outcome.code, number: outcome.number };
+}
+
+/**
+ * Each of a round's keys decided on its row: for the caller, as its use (`settle`), then, allowed, for the route's
+ * editor (`routeEditorRefusal`): their save's holdings intersected with their principal as the statement read it. The
+ * first key refused, in the item's order, answers; else the keys allowed (sealed, to open; plain, their text), and those
+ * a second round makes, under their principal's lock. `only`: a second round's keys, the rest decided already.
+ */
+function decideRoute(
+  path: UsePath, ask: RouteAsk, prepared: readonly Ready[], answered: readonly { row: UseRow | null; forged: boolean }[], item: ProxyItem, editor: PrincipalInput | null,
+  gate: CheckedView, names: readonly string[], decided: boolean, only?: ReadonlySet<number>,
+): { refused: Extract<RouteUseOutcome, { route: 'name' }>['outcome'] } | { allowed: Map<number, Allowed>; plain: Map<number, NamedValue>; again: number[] } {
+  const allowed = new Map<number, Allowed>();
+  const plain = new Map<number, NamedValue>();
+  const again: number[] = [];
+  const roles = gate.roles.row ?? noEdits();
+  for (const [i, made] of prepared.entries()) {
+    if (only !== undefined && !only.has(i)) continue;
+    const { row, forged } = answered[i]!;
+    if (row === null) throw new Error('a route use answered no row for a key it made');
+    const asked = routeAskOf(ask, made);
+    const used = settle(path, asked, undefined, decided, made, row, forged);
+    if ('unknown' in used || 'nowhere' in used) throw new Error('a use by ids answered a named state');
+    // Refused on a cover: answered as it is, its request logged by the app, as a named use's is.
+    if ('uncovered' in used) return { refused: { ok: false, index: i, code: used.outcome.code, number: null } };
+    if ('again' in used && decided) throw new Error('use_route answered `decide` to a call of keys it was decided for');
+    const checked = 'again' in used ? used.checked ?? null : 'checked' in used ? used.checked : null;
+    if (!('again' in used) && 'outcome' in used && !used.outcome.ok) return { refused: routeRefusal(i, used) };
+    if ('outcome' in used && 'busy' in used.outcome) return { refused: used.outcome };
+    // Allowed for the caller: then for the editor, on the same rows (EditorStillHolds, ClearanceAtUse).
+    if (checked === null) throw new Error('a use allowed with no rows decided on');
+    const why = routeEditorRefusal(item, editor, roles, checked, ask.at, names[i]!);
+    if (why !== null) return { refused: { ok: false, index: i, code: 'route_not_cleared', number: row.number, why } };
+    if ('again' in used) again.push(i);
+    else if ('allowed' in used) allowed.set(i, used);
+    else if ('outcome' in used && used.outcome.ok && 'plain' in used.outcome) plain.set(i, { plain: used.outcome.plain, versionId: used.outcome.versionId });
+    else throw new Error('a route use allowed a key it neither opens nor hands back');
+  }
+  return { allowed, plain, again };
+}
+
+/** A key's use as its call was made ready (`routeAsked`), from the call. */
+function routeAskOf(ask: RouteAsk, made: Ready): Asked {
+  const { call } = made;
+  const workload = ask.workload;
+  return {
+    credential: call.credential, secretId: call.secretId, place: call.place, purpose: 'use', requestId: call.requestId === '' ? '0' : call.requestId, at: ask.at, deadline: ask.deadline,
+    route: call.route!, ...(workload === null ? {} : { way: workload.way, principal: workload.principal }),
+  };
+}
+
+/**
+ * A place's UI definitions as a route use would find them (`Vault.proxyItem`; docs/design/proxy-ui.md, section 3):
+ * one statement (`use_route`, using nothing), the caller decided at the place first as a use decides them; then the
+ * named item through the fork chain, its keys resolved by name for the map, or, with no name, every item the place
+ * serves. It decides no use, opens no value and writes no entry.
+ */
+export async function proxyItem(path: UsePath, input: ProxyItemInput): Promise<ProxyItemOutcome> {
+  checkInput({ ...input, requestId: '0', purpose: 'use' });
+  const workload = checkRoute(input, [input.name]);
+  if (input.place !== null && (workload !== null || typeof input.place?.project !== 'string' || typeof input.place.environment !== 'string')) throw new Error("proxyItem's place is a handle's, by slugs");
+  const { cache } = path;
+  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busy('late');
+  if (cache.full()) return busy('overloaded');
+  const handle = input.caller.kind === 'handle' ? { tokenHash: Buffer.from(input.caller.tokenHash, 'base64'), token: input.caller.tokenHash, accepts: acceptsOf(input.caller) } : null;
+  const ask: RouteAsk = {
+    handle, workload, project: input.place?.project ?? null, environment: input.place?.environment ?? null,
+    named: input.place !== null ? input.name : null, stable: input.place === null ? input.name : null, at: input.at, deadline: input.deadline, use: false,
+  };
+  const seals = sealedOnce();
+  const round = await routeStatement(path, ask, { reading: null, credential: null, place: null, route: input.name, keyed: undefined }, { offset: 0, asked: null, lock: null });
+  if ('busy' in round) return round;
+  keepRoute(cache, ask, round.rows);
+  const gate = gateOf(path, ask, round, seals);
+  if ('unknown' in gate || 'nowhere' in gate) return { ok: false, code: 'credential' };
+  if ('busy' in gate) return gate;
+  if ('credential' in gate) return { ok: false, code: 'credential' };
+  const { rows } = round;
+  if (!gate.stands || !rows.stood) return { ok: false, code: gate.code === 'missing' || gate.code === null ? 'stale' : gate.code };
+  const place = handle !== null ? placeOf(gate.checked, rows.gate) : workloadPlace(gate.checked, workload!.place);
+  if (rows.personal) return { ok: true, personal: true, fault: null, seals: [], item: null, items: null, place };
+  if (rows.cut) return { ok: false, code: 'archived' };
+  if (input.name !== null) {
+    const looked = routeLookup(path.sealKeys, levelsOf(rows), input.name);
+    if (!looked.served) return { ok: true, personal: false, fault: looked.fault, seals: looked.seals, item: null, items: null, place };
+    const item: DecidedItem & { level: number } = { name: input.name, digest: looked.digest.toString('base64'), definition: looked.item.definition, level: looked.level };
+    return { ok: true, personal: false, fault: null, seals: looked.seals, item, items: null, place };
+  }
+  const served = proxyServing(path.sealKeys, levelsOf(rows));
+  if (!served.ok) return { ok: true, personal: false, fault: served.fault, seals: served.seals, item: null, items: null, place };
+  return {
+    ok: true, personal: false, fault: null, seals: served.seals, item: null, place,
+    items: served.items.map((one) => ({ name: one.name, digest: one.digest.toString('base64'), definition: one.item.definition, level: one.level })),
+  };
 }

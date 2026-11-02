@@ -116,7 +116,7 @@ function heads(notes: PairNotes) {
 type RawEntry = {
   tree: TreeName; number: string; at: string; requestId: string; mac: string;
   object?: string; actor?: string; payload?: string; seal?: string | null;
-  credential?: string; secret?: string; purpose?: number; place?: string | null;
+  credential?: string; secret?: string; purpose?: number; place?: string | null; route?: string | null;
 };
 
 const hex = (value: string | null | undefined) => (value === null || value === undefined ? null : Buffer.from(value, 'hex'));
@@ -128,7 +128,7 @@ function toEntry(r: RawEntry): LogEntry {
     });
   }
   return useEntry({
-    number: BigInt(r.number), at: Number(r.at), requestId: BigInt(r.requestId), credential: r.credential!, secret: r.secret!, purpose: Number(r.purpose), mac: hex(r.mac)!, place: r.place ?? null,
+    number: BigInt(r.number), at: Number(r.at), requestId: BigInt(r.requestId), credential: r.credential!, secret: r.secret!, purpose: Number(r.purpose), mac: hex(r.mac)!, place: r.place ?? null, route: r.route ?? null,
   });
 }
 
@@ -178,14 +178,14 @@ export function tileKeys(keys: readonly TileKey[]): SQL {
 type WindowRow = {
   tree: TreeName; n: string; at: string; request_id: string; mac: Buffer;
   object: string | null; actor: string | null; payload: string | null; seal: Buffer | null;
-  credential: string | null; secret: string | null; purpose: number | null; place: string | null;
+  credential: string | null; secret: string | null; purpose: number | null; place: string | null; route: string | null;
 };
 
 function fromRow(r: WindowRow): LogEntry {
   if (r.tree === 'changes') {
     return changeEntry({ number: BigInt(r.n), at: Number(r.at), requestId: r.request_id, object: r.object!, actor: r.actor!, payload: r.payload!, seal: r.seal, mac: r.mac });
   }
-  return useEntry({ number: BigInt(r.n), at: Number(r.at), requestId: BigInt(r.request_id), credential: r.credential!, secret: r.secret!, purpose: r.purpose!, mac: r.mac, place: r.place });
+  return useEntry({ number: BigInt(r.n), at: Number(r.at), requestId: BigInt(r.request_id), credential: r.credential!, secret: r.secret!, purpose: r.purpose!, mac: r.mac, place: r.place, route: r.route });
 }
 
 type RawPair = { upto: string; changes: string; uses: string };
@@ -267,10 +267,10 @@ async function located(found: Located | null | undefined, tiles: (keys: TileKey[
 export function postgresWindow(after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number, byNumber = false): SQL {
   return sql`
       ${first(sql`SELECT 'changes' AS tree, c.number AS n, c.at::text AS at, c.request_id, c.object::text AS object, c.actor, c.payload, c.seal, c.mac,
-             NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place
+             NULL::text AS credential, NULL::text AS secret, NULL::smallint AS purpose, NULL::text AS place, NULL::text AS route
         FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}
       UNION ALL
-      ${first(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text
+      ${first(sql`SELECT 'uses', u.number, u.at::text, u.request_id::text, NULL::text, NULL::text, NULL::text, NULL::bytea, u.mac, u.credential::text, u.secret::text, u.purpose, u.place::text, u.route
         FROM log_uses u WHERE u.at >= ${floor} AND u.at <= ${ceiling} AND u.number > ${after} AND u.number <= ${upto}`, byNumber ? sql`u.number` : sql`u.at`, limit)}
       ORDER BY n${limitOf(limit)}`;
 }
@@ -279,7 +279,7 @@ function postgresStore(db: Database, range: number): CheckpointStore & Omit<Rete
   const CHANGE = sql.raw(`json_build_object('tree', 'changes', 'number', c.number::text, 'at', c.at::text, 'requestId', c.request_id,
     'object', c.object::text, 'actor', c.actor, 'payload', c.payload, 'seal', encode(c.seal, 'hex'), 'mac', encode(c.mac, 'hex'))`);
   const USE = sql.raw(`json_build_object('tree', 'uses', 'number', u.number::text, 'at', u.at::text, 'requestId', u.request_id::text,
-    'credential', u.credential::text, 'secret', u.secret::text, 'purpose', u.purpose, 'mac', encode(u.mac, 'hex'), 'place', u.place::text)`);
+    'credential', u.credential::text, 'secret', u.secret::text, 'purpose', u.purpose, 'mac', encode(u.mac, 'hex'), 'place', u.place::text, 'route', u.route)`);
   const PAIR = sql.raw(`json_build_object('upto', k.upto::text, 'changes', k.changes_note, 'uses', k.uses_note)`);
   /** The entries in (after, upto], uses read from `floor` on: one JSON array, by number. */
   /**
@@ -460,7 +460,7 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
   const CHANGE = sql.raw(`json_object('tree', 'changes', 'number', CAST(c.number AS TEXT), 'at', CAST(c.at AS TEXT), 'requestId', c.request_id,
     'object', c.object, 'actor', c.actor, 'payload', c.payload, 'seal', CASE WHEN c.seal IS NULL THEN NULL ELSE hex(c.seal) END, 'mac', hex(c.mac))`);
   const USE = sql.raw(`json_object('tree', 'uses', 'number', CAST(u.number AS TEXT), 'at', CAST(u.at AS TEXT), 'requestId', CAST(u.request_id AS TEXT),
-    'credential', u.credential, 'secret', u.secret, 'purpose', u.purpose, 'mac', hex(u.mac), 'place', u.place)`);
+    'credential', u.credential, 'secret', u.secret, 'purpose', u.purpose, 'mac', hex(u.mac), 'place', u.place, 'route', u.route)`);
   const PAIR = sql.raw(`json_object('upto', CAST(k.upto AS TEXT), 'changes', k.changes_note, 'uses', k.uses_note)`);
   const window = (after: bigint, upto: bigint, floor: SQL, ceiling: SQL = sql`9223372036854775807`, limit?: number, byNumber = false) => sql`(SELECT coalesce(json_group_array(json(e.v)), '[]') FROM (
       ${first(sql`SELECT c.number AS n, ${CHANGE} AS v FROM log_changes c WHERE c.number > ${after} AND c.number <= ${upto}`, sql`c.number`, limit)}

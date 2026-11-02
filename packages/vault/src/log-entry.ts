@@ -24,9 +24,13 @@ export type ChangeRow = {
   number: bigint; at: number; requestId: string; object: string; actor: string; payload: string; seal: Buffer | null; mac: Buffer;
 };
 
-/** A use as `log_uses` holds it (the slim row, R53), uuids in lower case. */
+/**
+ * A use as `log_uses` holds it (the slim row, R53), uuids in lower case. `route`, a route use's (T186, 0057): its
+ * column comes after `place`, and joins the leaf's columns only when set, so that every entry before keeps its leaf
+ * (the column count is in the MAC's data: an entry's route can be neither added nor dropped under its MAC).
+ */
 export type UseRow = {
-  number: bigint; at: number; requestId: bigint; credential: string; secret: string; purpose: number; mac: Buffer; place: string | null;
+  number: bigint; at: number; requestId: bigint; credential: string; secret: string; purpose: number; mac: Buffer; place: string | null; route?: string | null;
 };
 
 export const MAC_BYTES = 16;
@@ -48,7 +52,7 @@ const mac = (key: LogMacKey, tree: LogEntry['tree'], columns: readonly LeafValue
   Buffer.concat([key.tag, createHmac('sha256', key.key).update(macData(tree, columns)).digest().subarray(0, MAC_BYTES - TAG_BYTES)]);
 
 const changeColumns = (r: Omit<ChangeRow, 'number' | 'mac'>): LeafValue[] => [BigInt(r.at), r.requestId, r.object, r.actor, r.payload, r.seal];
-const useColumns = (r: Omit<UseRow, 'number' | 'mac'>): LeafValue[] => [BigInt(r.at), r.requestId, r.credential, r.secret, r.purpose, r.place];
+const useColumns = (r: Omit<UseRow, 'number' | 'mac'>): LeafValue[] => [BigInt(r.at), r.requestId, r.credential, r.secret, r.purpose, r.place, ...(r.route == null ? [] : [r.route])];
 
 /** An entry's MAC, as its writer stores it. */
 export function entryMac(key: LogMacKey, entry: { tree: 'changes'; row: Omit<ChangeRow, 'number' | 'mac'> } | { tree: 'uses'; row: Omit<UseRow, 'number' | 'mac'> }): Buffer {

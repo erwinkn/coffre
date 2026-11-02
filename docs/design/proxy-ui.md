@@ -1601,6 +1601,69 @@ reads it otherwise:
   name code defines (409); an egress or a network, none of which code can
   declare before PR C (400).
 
+**PR C as built, the vault's half (C1, W312).** PR C ships as two PRs:
+C1, the model and the vault; C2, the app and the proxy on top of it.
+Where C1 settles what this section left open, or reads it otherwise:
+- **The model first.** `Routing.tla` gains two editors, the version's
+  clearance frozen from its editor's standing at the save, `Restand` (a
+  promotion, a demotion, a removal), and `EditorStillHolds`. Scenario
+  `RoutingEditor` (1,061,512 states) holds; TLC breaks `EverySendAllowed`
+  without `EditorStillHolds` (Ada removed, her route still sends), without
+  `ClearanceAtUse` (now found only with a promotion: Lin saved as a
+  Developer, made an Owner, the key marked sensitive), and without
+  `FencedRead` (the editor's principal read before the fence).
+- **One statement, `use_route` (0057),** in the shape of `use_named_batch`:
+  the gate first (a handle's named call with no key; a workload's use of no
+  key at its place, by ids, which writes nothing), then, for one who
+  stands, the chain, each level's row through the first whose `items`
+  holds the route (`items -> route`, the `digests` column, the seal, and the
+  object's newest change), the serving item's editor's principal, the
+  item's stored keys resolved by name through the chain, and, when the
+  vault's ids are the names' now at the reading it picked, each key's use
+  by ids, `use_credential` with `p_route`. Otherwise it uses nothing and
+  answers the ids: the vault's second call makes the use (2 calls on a
+  miss, whatever the map holds, `names: 0` included).
+- **The reading** is the statement's: it reads the credential's `places`
+  and the candidate environment, and answers the handle's made-for paths,
+  which the vault keeps per token (`UseCache.madeFor`) to pick the next
+  reading; the route's keys' ids are kept per place and route
+  (`UseCache.routeKeys`), never per path. A pick the statement disagrees
+  with uses nothing, and the next call is made by the statement's own.
+- **Quiet uses.** A route use's key that the place does not hold, or that
+  is plain, writes no entry and takes no lock (`v_quiet`, as a named call's),
+  and a plain value goes back as its text; a use by ids of no key writes
+  nothing either (its entry's key is not null).
+- **`OneVersion`** is held across rounds and chunks by comparing each
+  statement's levels' seals, the item's digest and the editor's newest seal
+  with the first's (`versionOf`); any difference starts the use over, at
+  most three times, then `late`. A second round passes every key of its
+  chunk, the ones it does not make with no request id: only checked.
+- **Covers**: `use_route` passes a key's cover to `use_credential` only past
+  the newest change of the route's levels and editor, which
+  `use_credential` does not read; `use_credential` matches the cover's
+  entry on its route too.
+- **The editor's decision** (`routeEditorRefusal`, proxy.ts) is one
+  function for the live use and the replay (`routeDecision` in
+  log-replay.ts, over the log's own objects): `routeRefusal` on the
+  editor's standing now, then `frozenAllows`/`frozenOwns` on what the save
+  froze, at the key's holder, the place protected or not as the policy is
+  now. An editor's principal row that fails its seal, or is not its
+  newest change, refuses the use `tampered` or `stale` (R64).
+- **A level's lookup on the item alone** (`routeLookup`): the index parsed
+  from `digests` (`parseIndex`) and its seal checked as the whole object's
+  (`sealedIndex`), the item hashed against its entry; an item the sealed
+  index lacks is `tampered`. Every item (`proxyItem` with no name) checks
+  each level whole (`proxyServing`), and one level that fails fails all.
+- **Cost** (`use-route-cost.test.ts`): one statement warm; 106 buffers at
+  10k entries of history, 105 at 1M; 111 with 256 definitions in the
+  environment (its index, about 11 KB, read whole), the same rows. The new
+  `log_uses.route` column costs every use row its null bitmap's second
+  byte, which pads the header: measured over 100,000 rows, 126 B a row
+  without it, 134 with it null (+8 B, every use but a route's), 141 with
+  a route of six letters.
+  No CHECK on it: on the partitioned table it would scan every day under
+  an exclusive lock while the previous release serves.
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

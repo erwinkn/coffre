@@ -3,7 +3,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { GATE_ROLES } from './decide.ts';
-import type { NamedAhead, NamedBatchCall, NamedBatchRows, UseCall, UseRow } from './use.ts';
+import type { EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
  * A use on Postgres: one call of `use_credential` (0024's, as 0053 has it), one
@@ -26,7 +26,8 @@ export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
     ${call.names === undefined ? null : sql.param([...call.names.accepts.issuers])}::text[],
     ${call.names === undefined ? null : GATE_ROLES}::jsonb,
     ${call.way}::smallint, ${call.principal}::text,
-    ${call.names?.forks === true}::boolean
+    ${call.names?.forks === true}::boolean,
+    ${call.route ?? null}::text
   )::text AS use`);
   return rowOf(row!.use);
 }
@@ -144,4 +145,45 @@ function rowFrom(row: Record<string, unknown>): UseRow {
     if (typeof value === 'string') row[name] = Buffer.from(value.slice(2), 'hex');
   }
   return row as UseRow;
+}
+
+/**
+ * A route use on Postgres (T186 PR C): one call of `use_route` (0057), one statement and one round trip, its own
+ * transaction: the gate, the route's levels, its editor and its keys, read; each key's use by ids when the call has
+ * them and they are the names' now. It answers one JSON object (`RouteRows`).
+ */
+export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRows> {
+  const keys = call.keys;
+  const list = <T>(of: (one: UseCall | null) => T) => (keys === null ? null : sql.param(keys.map(of)));
+  const [row] = await rowsOf<{ route: string }>(db, sql`SELECT use_route(
+    ${call.tokenHash}::bytea, ${call.project}::text, ${call.environment}::text, ${call.named}::text, ${call.stable}::text, ${call.reading}::smallint,
+    ${call.accepts?.signin ?? null}::boolean, ${call.accepts === null ? null : sql.param([...call.accepts.issuers])}::text[], ${call.tokenHash === null ? null : GATE_ROLES}::jsonb,
+    ${call.credential}::uuid, ${call.tokenHash === null ? call.way : null}::smallint, ${call.principal}::text, ${call.place}::uuid,
+    ${String(call.at)}::bigint, ${call.purpose}::smallint, ${String(call.deadline)}::bigint, ${call.mac}::bytea,
+    ${list((one) => one?.secretId ?? null)}::uuid[], ${list((one) => one?.place ?? null)}::uuid[],
+    ${list((one) => (one === null || one.requestId === '' ? null : one.requestId))}::bigint[], ${list((one) => (one === null || one.requestId === '' ? null : one.mac))}::bytea[],
+    ${list((one) => one?.cover?.number ?? null)}::bigint[], ${list((one) => (one?.cover === undefined ? null : String(one.cover.at)))}::bigint[], ${list((one) => one?.cover?.requestId ?? null)}::bigint[],
+    ${list((one) => one?.decided === true)}::boolean[],
+    ${call.offset}::integer, ${call.limit}::integer, ${call.lock}::text, ${call.use}::boolean
+  )::text AS route`);
+  type Read = Omit<RouteRows, 'gate' | 'rows' | 'levels' | 'editor' | 'madeFor'> & {
+    gate: Record<string, unknown>; rows: (Record<string, unknown> | null)[] | null; levels: Record<string, unknown>[] | null; editor: Record<string, unknown> | null; made_for: string[] | null;
+  };
+  let read = JSON.parse(row!.route) as Read;
+  if (inexact(read.gate) || (read.rows ?? []).some((one) => one !== null && inexact(one))) read = exactly(row!.route) as Read;
+  const bytes = (value: unknown) => (typeof value === 'string' ? Buffer.from(value.slice(2), 'hex') : null);
+  return {
+    gate: rowFrom(read.gate), reading: read.reading, route: read.route ?? null, madeFor: read.made_for ?? null, stood: read.stood === true, place: read.place ?? null,
+    project: read.project ?? null, personal: read.personal === true, cut: read.cut === true,
+    levels: (read.levels ?? []).map((level): RouteLevelRow => ({
+      environment: String(level.environment), row: level.row === true, item: level.item ?? null, digests: bytes(level.digests), seal: bytes(level.seal),
+      newest: bytes(level.newest), number: level.number == null ? null : String(level.number),
+    })),
+    editor: read.editor === null || read.editor === undefined ? null : {
+      ...(read.editor as Omit<EditorRow, 'seal' | 'last'>), seal: bytes(read.editor.seal), last: bytes(read.editor.last),
+      generation: read.editor.generation == null ? null : Number(read.editor.generation),
+    },
+    keys: read.keys ?? [], resolved: (read.resolved ?? []) as ResolvedRow[], made: read.made === true,
+    rows: (read.rows ?? []).map((one) => (one === null ? null : rowFrom(one))),
+  };
 }

@@ -1127,6 +1127,8 @@ export const logUses = pgTable(
     mac: bytea().notNull(),
     // The environment it was asked at, when not the secret's own (a fork, a reference).
     place: uuid(),
+    // The UI route it was a use of (0.16, T186; docs/design/proxy-ui.md, section 4), under its MAC: null for every other.
+    route: text(),
   },
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),

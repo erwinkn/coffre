@@ -1,0 +1,128 @@
+// A route use costs one statement on a warm map, and the same however long the log grows (R44, R48; T186 PR C;
+// docs/design/proxy-ui.md, section 4): `use_route`'s buffers, counted by EXPLAIN over the function's own statements, at
+// 10k and at 1M entries of history; and its rows the same with one definition in the environment and with 256, whose
+// index grows (the buffers it adds are stated, not held flat: the index is read whole, its seal over all of it).
+import test, { after, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+
+import { createDatabase } from '@coffre/db';
+import { postgresClient, type PostgresClient } from '@coffre/db/connect';
+import { sql } from 'drizzle-orm';
+
+import { GATE_ROLES } from '../src/decide.ts';
+import { purposeCode } from '../src/log-replay.ts';
+import { newRequestId } from '../src/use.ts';
+import { openVault, prepareVault } from '../src/vault.ts';
+import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { route, routeWorld } from './route-world.ts';
+import { CONFIG, emptyLog, LOG_015, useDatabases } from './use-world.ts';
+
+let db: TestDatabase;
+before(async () => {
+  db = await openTestDatabase();
+  await useDatabases(db);
+  await emptyLog();
+});
+after(() => db.close());
+
+/** The hot pool, each statement counted as it is sent. */
+function counting(): { pool: PostgresClient; statements: () => number } {
+  let statements = 0;
+  const pool = new Proxy(postgresClient(HOT_URL, { max: 2 }), {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        statements += 1;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  return { pool, statements: () => statements };
+}
+
+/** History that is not this use's: other credentials' uses, other objects' changes, other principals' bulk rows. */
+async function grow(total: number): Promise<void> {
+  const uses = Math.round(total * 0.9);
+  const changes = Math.max(5_000, Math.round(total * 0.01));
+  const others = Math.max(50_000, Math.round(total * 0.09));
+  const now = Date.now();
+  await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place, route)
+    SELECT nextval('log_number'), ${now - 80_000_000}::bigint + (g * 80000000::bigint / ${uses}), g, gen_random_uuid(), gen_random_uuid(), 4, ${randomBytes(16)}, NULL,
+           CASE WHEN g % 3 = 0 THEN 'openai' END
+      FROM generate_series(1, ${uses}) g`);
+  await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+    SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total)}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)}
+      FROM generate_series(1, ${changes}) g`);
+  await run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) SELECT 'token:other-' || (g % 1000), gen_random_uuid(), ${now} FROM generate_series(1, ${others}) g`);
+  await run(db.owner, sql`VACUUM ANALYZE`);
+}
+
+test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries; its rows the same at 1 definition and at 256', { ...postgresOnly('the hot path'), timeout: 900_000 }, async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
+  const { pool, statements } = counting();
+  const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
+  try {
+    // Cold: the map's miss reads the ids (one statement), then the use, its key entering the set, decided first and made
+    // under the lock (two more). Warm, its key in the set: one.
+    const cold = await vault.useRoute(w.askRoute('openai'));
+    assert.ok(cold.served && cold.route === 'name' && cold.outcome.ok, JSON.stringify(cold));
+    const before = statements();
+    const warm = await vault.useRoute(w.askRoute('openai'));
+    assert.ok(warm.served && warm.route === 'name' && warm.outcome.ok, JSON.stringify(warm));
+    assert.equal(statements() - before, 1, 'a warm route use is one statement');
+  } finally {
+    await pool.end();
+  }
+
+  const client = postgresClient(HOT_URL, { max: 1 });
+  const [made] = await rows<{ places: string | null }>(db.owner, sql`SELECT places FROM credentials WHERE id = ${w.credentialId}`);
+  assert.ok(made !== undefined);
+  /** The statement's work, as the hot login runs it on a connection of its own, its plans made: the least of several runs. */
+  const measured = async (): Promise<{ buffers: number; rows: number }> => {
+    let least = Infinity;
+    let read = 0;
+    for (let i = 0; i < 6; i += 1) {
+      const at = Date.now();
+      const args = [
+        w.tokenHash, w.slug, 'dev', 'openai', null, 1, true, [], GATE_ROLES,
+        w.credentialId, null, null, null,
+        String(at), purposeCode({ purpose: 'use', keepsSensitive: false }), String(at + 3000), randomBytes(16),
+        [key], [null], [newRequestId()], [randomBytes(16)], [null], [null], [null], [false],
+        0, 100, null, true,
+      ] as never[];
+      const call = 'use_route($1::bytea, $2::text, $3::text, $4::text, $5::text, $6::smallint, $7::boolean, $8::text[], $9::jsonb, $10::uuid, $11::smallint, $12::text, $13::uuid, '
+        + '$14::bigint, $15::smallint, $16::bigint, $17::bytea, $18::uuid[], $19::uuid[], $20::bigint[], $21::bytea[], $22::bigint[], $23::bigint[], $24::bigint[], $25::boolean[], '
+        + '$26::integer, $27::integer, $28::text, $29::boolean)';
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number; 'Actual Rows': number } }[] })['QUERY PLAN'][0]!.Plan;
+      least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+      // Its answer, made by the ids: each use one entry.
+      const [answer] = await client.unsafe(`SELECT ${call}::text AS route`, args.map((arg, k) => (k === 19 ? [newRequestId()] : arg)) as never[]) as unknown as { route: string }[];
+      const parsed = JSON.parse(answer!.route) as { made: boolean; levels: unknown[]; rows: unknown[] };
+      assert.equal(parsed.made, true, 'made by the ids');
+      read = parsed.levels.length + parsed.rows.length;
+    }
+    return { buffers: least, rows: read };
+  };
+  await grow(10_000);
+  const small = await measured();
+  await grow(990_000);
+  const large = await measured();
+  // 255 more definitions in dev: its index read whole, every use.
+  const many: Parameters<typeof w.save>[0] = {};
+  for (let i = 0; i < 255; i += 1) many[`r${String(i).padStart(3, '0')}`] = { definition: route(`r${String(i).padStart(3, '0')}`, [name]), editor: ada };
+  await w.save(many);
+  await run(db.owner, sql`VACUUM ANALYZE proxy_definitions`);
+  const wide = await measured();
+  await client.end();
+  console.log(JSON.stringify({ small, large, wide }));
+  // Flat: no statement reads history, only probes it by index (the uses' own index may grow a level: its insert, a buffer).
+  assert.ok(large.buffers - small.buffers <= 2, `${small.buffers} buffers at 10k, ${large.buffers} at 1M`);
+  assert.equal(wide.rows, small.rows, 'the same rows at 256 definitions: its route\'s item and the index, never every item');
+});

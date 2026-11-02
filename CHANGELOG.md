@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **The vault uses a UI definition's keys, as its route (T186, PR C1).**
+  `Vault.useRoute` finds a route, signer, verifier or tunnel written in the
+  UI by its name at the place (a handle's URL read the place way or the
+  stable way, or a workload's place), through the fork chain, its seal
+  checked against its object's newest change, and uses every key it sends
+  in one statement on a warm map (two on a miss): each key decided for the
+  caller, as any use, and for the item's editor, what their save froze
+  intersected with what they hold now, so an editor demoted or removed, or
+  a key made sensitive under a Developer's route, stops it
+  (`route_not_cleared`). Every entry names its route, under its MAC, and a
+  cover rides only an entry of the same route made after the route's and
+  its editor's last change. `Vault.proxyItem` reads a place's items as a
+  use would, using nothing. Nothing in the app calls either yet (PR C2).
+  Migration 0057 adds `log_uses.route`, `use_credential`'s `p_route` and
+  `use_route`; the previous release runs on it.
+
 - **The app and the vault run one release at a time.** Every call between
   them goes through one envelope, `call(release, method, args)`, the
   `VAULT` binding's only method, and the Node vault's only route (`POST
