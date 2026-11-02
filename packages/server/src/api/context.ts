@@ -2,11 +2,11 @@ import { makesProjects, runsInstance, type Permission } from '@coffre/core/acces
 import type { McpScope } from '@coffre/core/mcp';
 import type { Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { lockLogHead } from '@coffre/db/log';
+import { lockLogHeadRead } from '@coffre/db/log';
 
-import { appendAudit, type AuditEntry } from '../db/audit.ts';
+import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
 import type { ReadAhead } from '../db/read-ahead.ts';
-import { keeps015, type AppChanges } from './changes.ts';
+import { AppChanges, keeps015 } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
@@ -212,21 +212,32 @@ export async function audited<T>(
   try {
     const result = await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
-      // Take the head before any application rows.
-      await lockLogHead(tx);
-      if (ctx.caller !== undefined) await policyStill({ caller: ctx.caller }, tx);
-      const result = await work(tx, log);
+      // Take the head before any application rows, with what the append reads under it; then the policy, then the
+      // work's first reads: asked together, they go in that order under one Sync (postgres-js's `gather`).
+      const held = lockLogHeadRead(tx, appLogKey(ctx.chainKey));
+      const fenced = ctx.caller === undefined ? null : policyStill({ caller: ctx.caller }, tx);
+      const working = work(tx, log);
+      // Each heard at once, though awaited in turn: the head's refusal first, then the policy's, then the work's; one
+      // left unawaited behind an earlier refusal fails no one.
+      fenced?.catch(() => {});
+      working.catch(() => {});
+      const locked = await held;
+      await fenced;
+      const result = await working;
+      // Nothing awaits the append, nor the changes: they go with the COMMIT, under its Sync (`later`).
       if (changes === null) {
-        if (log.length > 0) await appendAudit(tx, ctx.chainKey, log, [], log015);
+        if (log.length > 0) await appendAudit(tx, ctx.chainKey, log, [], log015, { final: true, locked });
       } else if (log.length > 0) {
         // The changes in the append's own statement: one round trip less under the head (T123).
-        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, log015)).changes);
+        await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, log015, { final: true, locked })).later);
       } else {
         await changes.commit(tx);
       }
       return result;
+    }).catch((error: unknown) => {
+      throw changes === null ? error : changes.failed(error);
     });
-    await changes?.sealed();
+    await changes?.sealed(ctx.db);
     return result;
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;

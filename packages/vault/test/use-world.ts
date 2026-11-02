@@ -5,13 +5,13 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { encrypt, freshDek } from '@coffre/core/envelope';
+import { encrypt, freshDek, ownerKey } from '@coffre/core/envelope';
 import type { UseInput, UseOutcome } from '@coffre/core/vault';
 import { tablesOf, type Database, type Queryable } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import type { Sealed } from '../src/checkpointer.ts';
-import { resolveVaultConfig } from '../src/config.ts';
+import { resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
@@ -77,8 +77,8 @@ export const LOG_015: VaultOptions = {
 let cutoverNumber: bigint | null = null;
 
 /** A vault of its own, a fresh isolate: its own seal cache, covers and admission count; and the vault, for its decisions. */
-export async function isolate(options: VaultOptions = {}) {
-  const prepared = await prepareVault(CONFIG, { ...LOG_015, ...options });
+export async function isolate(options: VaultOptions = {}, config: ResolvedVaultConfig = CONFIG) {
+  const prepared = await prepareVault(config, { ...LOG_015, ...options });
   const vault = openVault(db.vault, prepared, hot);
   return { use: (input: UseInput) => vault.use!(input), vault, cache: prepared.uses };
 }
@@ -165,12 +165,13 @@ export async function world(options: {
   await genesis({ kind: 'environment', id: dev }, objects.environment);
   const keys: { id: string; value: string; object: Input }[] = [];
   /** A key in `dev`, or another environment of the project, with a value of its own, sealed. */
-  const key = async (value = `value-${keys.length}`, sensitive = false, environment = dev) => {
+  /** A key in `environment` (`dev` by default), sealed; `owner`, a personal config's, whose wrap binds them. */
+  const key = async (value = `value-${keys.length}`, sensitive = false, environment = dev, owner: string | null = null) => {
     const id = randomUUID();
     const version = randomUUID();
     const dek = freshDek();
     const sealed = encrypt(Buffer.from(value), { projectId: project, environmentId: environment, secretId: id }, dek);
-    const context = { projectId: project, environmentId: environment, secretId: id, ...(sensitive ? { sensitive: true as const } : {}) };
+    const context = { projectId: project, environmentId: environment, secretId: id, ...(owner === null ? {} : { owner: ownerKey(owner) }), ...(sensitive ? { sensitive: true as const } : {}) };
     const wrapped = await CONFIG.keks.wrap(dek, context, { deadline: Date.now() + 5000, signal: new AbortController().signal });
     await db.owner.insert(t.secrets).values({ id, projectId: project, environmentId: environment, key: `KEY_${keys.length}_${id.slice(0, 4)}` });
     await db.owner.insert(t.secretVersions).values({

@@ -12,7 +12,7 @@
 //   nothing: the verifier holds the rows to it later. Under a bucket lock
 //   rule a Worker or a database writer cannot overwrite or delete what it
 //   holds; an admin of the Cloudflare account can lift the rule (R54).
-import { decodePair, encodePair, noteSigner, openPair, pairVerifiers, witnessPair, type PairNotes, type TreeName, type WitnessAnswer, type WitnessState } from '@coffre/core/merkle';
+import { decodePair, encodePair, noteSigner, openPairUnder, pairVerifiers, witnessPair, type PairNotes, type TreeName, type WitnessAnswer, type WitnessState } from '@coffre/core/merkle';
 
 import type { Witness } from './checkpointer.ts';
 import type { ObjectNamespace, ObjectState } from './checkpointer-workers.ts';
@@ -24,6 +24,13 @@ export type WitnessSettings = {
   key: string;
   /** The log's two verifier keys, as the vault's checkpointer signs them. */
   log: Record<TreeName, string>;
+  /**
+   * The log's verifier keys under each signing key the vault replaced, the
+   * newest first (T168): the pair this witness holds may be under one, and
+   * the first pair under `log` it cosigns must extend it. No pair under one
+   * of these is cosigned: a replaced key vouches for nothing new.
+   */
+  previous?: readonly Record<TreeName, string>[];
 };
 
 type Publication = { notes: PairNotes; from: Record<TreeName, number>; proofs: Record<TreeName, string[]> };
@@ -62,10 +69,11 @@ export function witnessObject<Env>(settings: (env: Env) => WitnessSettings | Pro
     async #answerOr(p: Publication | null): Promise<Response> {
       const s = await settings(this.#env);
       const log = await pairVerifiers(s.log);
+      const previous = await Promise.all((s.previous ?? []).map((keys) => pairVerifiers(keys)));
       const self = await noteSigner(s.name, Buffer.from(s.key, 'base64'));
       const stored = await this.#state.storage.get<string>('pair');
       const notes = stored === undefined ? null : decodePair(stored);
-      const pair = notes === null ? null : await openPair(notes, log);
+      const pair = notes === null ? null : await openPairUnder(notes, [log, ...previous]);
       // A pair held that no longer opens (the log's keys changed in its settings, a record damaged) is never forgotten
       // into a fresh witness: that would cosign whatever comes next. A new witness is a new name.
       if (stored !== undefined && pair === null) return Response.json({ ok: false, reason: 'the pair this witness holds does not open under the log\'s keys: name a new witness' }, { status: 500 });

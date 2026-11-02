@@ -193,7 +193,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
     // ahead of the statement's. Upstream sent BEGIN alone and waited for it.
     if (q.options.simple) return b.typed('Q').str((q.begin === null ? '' : q.begin + ';\n') + q.statement!.string + N).end();
     // Coffre: a group's statements, each its Parse, Describe, Bind and Execute, and one Sync after the last.
-    if (q.group !== null) return Buffer.concat([...q.group.flatMap((member) => [Parse(member), DescribeUnnamed, Bind(member.parameters, member.statement!.types), ExecuteOnly]), Sync]);
+    // A transaction's group carries its BEGIN ahead of its first statement (`together`, index.ts).
+    if (q.group !== null) {
+      const members = q.group.flatMap((member) => [Parse(member), DescribeUnnamed, Bind(member.parameters, member.statement!.types), ExecuteOnly]);
+      return Buffer.concat([...(q.begin === null ? [] : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly]), ...members, Sync]);
+    }
     const statement = q.describeFirst ? [Parse(q), DescribeUnnamed, Flush] : [Parse(q), DescribeUnnamed, bound(q)];
     return Buffer.concat(q.begin === null ? statement : [b.typed('P').str(N).str(q.begin + N).i16(0).end(), BindNothing, ExecuteOnly, ...statement]);
   }
@@ -325,7 +329,11 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
         handle(incoming.subarray(0, length + 1));
       } catch (e) {
         if (query?.describeFirst) write(Sync);
-        errored(e);
+        // Coffre: in a transaction's group, an answer of Postgres's the client could not read (a row a parser refused): that
+        // statement fails alone, and the group reads on, as Postgres runs on, its COMMIT included (`together`, index.ts).
+        // A pool's group of reads fails whole, as it says.
+        if (query !== null && query.unread !== null) query.unread.set(query.member, e);
+        else errored(e);
       }
       incoming = incoming.subarray(length + 1);
       remaining = 0;
@@ -505,7 +513,7 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       case 75: return BackendKeyData(x); // K
       case 69: return ErrorResponse(x); // E
       case 78: return NoticeResponse(x); // N
-      case 73: return; // I, EmptyQueryResponse
+      case 73: return EmptyQueryResponse(); // I
       // No LISTEN is asked, but a NOTIFY to a channel listened on by hand would come: it is dropped.
       case 65: return; // A, NotificationResponse
       case 71: return CopyInResponse(); // G
@@ -549,6 +557,8 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
 
   function ReadyForQuery(x: Buffer): void {
     if (query) {
+      // Coffre: a group's statements answered before the one that failed keep their results.
+      if (errorResponse && query.group !== null) query.answered = (results ?? []).slice(0, query.member);
       if (errorResponse) errored(errorResponse);
       else query.resolve(results || result);
     } else if (errorResponse) {
@@ -584,6 +594,17 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
       terminate();
     } else {
       onopen(connection);
+    }
+  }
+
+  /** Coffre: an empty statement's answer, in place of a CommandComplete: in a group, its member answered, with no rows. */
+  function EmptyQueryResponse(): void {
+    const q = query;
+    if (q === null || q.group === null) return;
+    results ??= [result];
+    if (q.member + 1 < q.group.length) {
+      results.push((result = new Result()));
+      startMember(q, q.member + 1);
     }
   }
 
@@ -774,7 +795,10 @@ export function createConnection(options: Settings, queue: Queue<Connection>, { 
   }
 
   function CopyOutResponse(): void {
-    errorResponse ??= Errors.generic('COPY_NOT_SUPPORTED', 'COPY is not supported by this client');
+    const refused = Errors.generic('COPY_NOT_SUPPORTED', 'COPY is not supported by this client');
+    // Coffre: in a transaction's group, the COPY fails alone, which Postgres ran (`unread`, above).
+    if (query !== null && query.unread !== null) query.unread.set(query.member, refused);
+    else errorResponse ??= refused;
   }
 
   function NoticeResponse(x: Buffer): void {

@@ -324,7 +324,7 @@ test('a COPY reaching the client fails, and leaves the connection to the next st
   }
 });
 
-test('a BEGIN that fails runs none of its transaction outside it: not its first statement, sent with it, nor any after', { skip }, async () => {
+test('a BEGIN that fails runs none of its transaction outside it: not the statements sent with it, nor any after', { skip }, async () => {
   const sent: string[] = [];
   const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {}, debug: (_: number, text: string, values: unknown[]) => void sent.push([text, ...values].join(' ')) });
   try {
@@ -342,9 +342,10 @@ test('a BEGIN that fails runs none of its transaction outside it: not its first 
       after = await tx.unsafe('insert into kept values ($1)', [6]).catch((e: unknown) => e);
     }), refused);
     assert.equal((after as { code?: string }).code, 'TRANSACTION_NOT_BEGUN');
-    // Each first statement went with its BEGIN, and nothing else: not 4, behind it, nor 6, after it, nor a rollback.
+    // Each first statement went with its BEGIN, and 4, asked with 3, under the same Sync, which Postgres skipped whole;
+    // nothing else: not 6, asked after, nor a rollback.
     const begin = 'begin isolation level bogus';
-    assert.deepEqual(sent.slice(1), [begin, 'insert into kept values ($1) 1', begin, 'insert into kept values (2)', begin, 'insert into kept values ($1) 3', begin, 'insert into kept values ($1) 5']);
+    assert.deepEqual(sent.slice(1), [begin, 'insert into kept values ($1) 1', begin, 'insert into kept values (2)', begin, 'insert into kept values ($1) 3', 'insert into kept values ($1) 4', begin, 'insert into kept values ($1) 5']);
     // Nothing ran; the connection is the pool's again, and a transaction on it begins.
     assert.deepEqual([...await client.unsafe('select count(*)::int as n from kept')], [{ n: 0 }]);
     await client.begin((tx) => tx.unsafe('insert into kept values ($1)', [7]));
@@ -668,7 +669,7 @@ test('a transaction Postgres did not commit whole does not resolve: a savepoint\
   }
 });
 
-test('a connection cut as a transaction\'s BEGIN goes: nothing that waited behind it is sent, and the pool\'s next statement runs on the next connection', { skip, timeout: 30_000 }, async () => {
+test('a connection cut as a transaction\'s BEGIN goes: nothing of it runs, and the pool\'s next statement runs on the next connection', { skip, timeout: 30_000 }, async () => {
   const owner = postgresClient(DATABASE, { max: 1 });
   const { client, sent } = sending('coffre-tx-cut-begin');
   try {
@@ -679,8 +680,9 @@ test('a connection cut as a transaction\'s BEGIN goes: nothing that waited behin
     await cutWhileAsleep(owner, 'coffre-tx-cut-begin');
     await assert.rejects(cut, { code: 'CONNECTION_CLOSED' });
     await after;
+    // The insert asked with the sleep went under its Sync, behind it, and never ran: the connection went first.
     assert.deepEqual([...await owner.unsafe('select n from cutbegin')], [{ n: 2 }]);
-    assert.ok(!sent.includes('insert into cutbegin values ($1) 1'));
+    assert.ok(sent.includes('insert into cutbegin values ($1) 2'));
   } finally {
     await client.end();
     await owner.unsafe('drop table if exists cutbegin').catch(() => {});
@@ -705,6 +707,170 @@ test('a transaction\'s error says what failed: a first statement\'s syntax, the 
         return 'ok';
       });
     }), { code: '22P02' });
+  } finally {
+    await client.end();
+  }
+});
+
+/** A write nothing awaits, as `later` (@coffre/db) asks one of a transaction: its COMMIT may go with it. */
+function laterOn(tx: TransactionSql, text: string, values: unknown[] = []): void {
+  const query = tx.unsafe(text, values) as unknown as { later: boolean; execute(): unknown };
+  query.later = true;
+  query.execute();
+}
+
+test("a COMMIT goes with the writes left to `later` only if each can go in their group: one the client cannot send fails the transaction, which keeps nothing (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table alone (n int)');
+    // A statement with more parameters than the protocol takes: it goes alone, and fails before Postgres hears of it.
+    const many = Array.from({ length: 65_534 }, (_, i) => i);
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into alone values ($1)', [1]);
+      laterOn(tx, 'insert into alone values ($1)', [2]);
+      laterOn(tx, `select ${many.map((i) => `$${i + 1}::int`).join(', ')}`, many);
+    }), { code: 'MAX_PARAMETERS_EXCEEDED' });
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from alone')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a group the client cannot write, its COMMIT in it, rolls the transaction back: the connection goes back to the pool idle (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  const other = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await other.unsafe('drop table if exists unwritten');
+    await other.unsafe('create table unwritten (n int, at timestamptz)');
+    // An invalid date: its serializer throws as the group is written, so none of it, the COMMIT included, is sent.
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into unwritten values ($1, now())', [1]);
+      laterOn(tx, 'insert into unwritten values ($1, $2)', [2, new Date('not a date')]);
+      laterOn(tx, 'insert into unwritten values ($1, now())', [3]);
+    }), RangeError);
+    // Rolled back, not left open: the next statement on the connection is in no transaction, and nothing was kept.
+    assert.deepEqual([...await client.unsafe("select now() = statement_timestamp() as idle")], [{ idle: true }]);
+    assert.deepEqual([...await other.unsafe('select count(*)::int as n from unwritten')], [{ n: 0 }]);
+  } finally {
+    await other.unsafe('drop table if exists unwritten').catch(() => {});
+    await Promise.all([client.end(), other.end()]);
+  }
+});
+
+test("no COMMIT goes with the writes left to `later` while a statement something awaits is unanswered: what it asks after is refused, and the transaction rolls back (review r1 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table pending (n int)');
+    let after: unknown;
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into pending values ($1)', [1]);
+      // Left running: once the sleep answers, it asks another statement.
+      void tx.unsafe('select pg_sleep(0.2)').then(async () => {
+        after = await tx.unsafe('insert into pending values ($1)', [2]).catch((e: unknown) => e);
+      });
+      // The sleep sent on its own, unanswered, when the work leaves a write to `later` and returns.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      laterOn(tx, 'insert into pending values ($1)', [3]);
+    }), { code: 'TRANSACTION_UNFINISHED' });
+    assert.ok(after instanceof Error);
+    assert.deepEqual([...await client.unsafe('select count(*)::int as n from pending')], [{ n: 0 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a statement left to `later` whose answer the client cannot read, once Postgres ran it, fails alone: the COMMIT behind it stands, and the transaction says it committed (reviews r5, r6 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table unread (n int)');
+    const kept = async () => [...await client.unsafe('select n from unread order by n')].map((row) => row.n);
+    // A COPY, which the client refuses once Postgres has run it, however it is written.
+    await client.begin(async (tx) => {
+      await tx.unsafe('insert into unread values ($1)', [1]);
+      laterOn(tx, 'copy (insert into unread values (2) returning n) to stdout');
+      laterOn(tx, '-- a comment\rcopy (insert into unread values (3) returning n) to stdout');
+    });
+    assert.deepEqual(await kept(), [1, 2, 3]);
+    // A row a parser refuses: the same, the statement alone failing.
+    const integers = client.options.parsers[23];
+    client.options.parsers[23] = () => {
+      throw new Error('cannot decode integer');
+    };
+    await client.begin(async (tx) => {
+      await tx.unsafe('insert into unread values (4)');
+      laterOn(tx, 'insert into unread values (5) returning n');
+    });
+    // Awaited, the same refusal fails the transaction, which keeps nothing: something awaited the answer.
+    await assert.rejects(client.begin(async (tx) => {
+      await tx.unsafe('insert into unread values (6)');
+      await tx.unsafe('insert into unread values (7) returning n');
+    }), /cannot decode integer/);
+    client.options.parsers[23] = integers!;
+    assert.deepEqual(await kept(), [1, 2, 3, 4, 5]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("an empty statement in a group answers in its place: each result and error stays its own statement's (review r5 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    const answers = await client.begin((tx) => Promise.all([tx.unsafe('-- nothing', [], { simple: false }), tx.unsafe('select 7 as n', [], { simple: false })]));
+    assert.deepEqual(answers.map((rows) => [...rows]), [[], [{ n: 7 }]]);
+    let settled: PromiseSettledResult<unknown>[] = [];
+    await assert.rejects(client.begin(async (tx) => {
+      settled = await Promise.allSettled([tx.unsafe('-- nothing', [], { simple: false }), tx.unsafe('select 1 / $1::int', [0]), tx.unsafe('select 3', [], { simple: false })]);
+    }), { code: '22012' });
+    assert.deepEqual(settled.map((outcome) => (outcome.status === 'fulfilled' ? 'answered' : (outcome.reason as { code?: string }).code)), ['answered', '22012', '25P02']);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a COMMIT folded with `later` writes is settled by Postgres's command: one the client failed to read with it (a notice's callback) still committed (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1, onnotice: () => {
+    throw new Error('notice callback failed');
+  } });
+  try {
+    await client.unsafe('create temporary table noticed (n int)');
+    await client.unsafe("create function pg_temp.noticed() returns trigger language plpgsql as $$ begin raise notice 'checked'; return null; end $$");
+    await client.unsafe('create constraint trigger noticed after insert on noticed deferrable initially deferred for each row execute function pg_temp.noticed()');
+    // The notice comes at the COMMIT, which rides with the insert: Postgres committed, and the transaction says so.
+    await client.begin(async (tx) => {
+      await tx.unsafe('select 1');
+      laterOn(tx, 'insert into noticed values ($1)', [1]);
+    });
+    assert.deepEqual([...await client.unsafe('select n from noticed')], [{ n: 1 }]);
+  } finally {
+    await client.end();
+  }
+});
+
+test("a pool's group of reads fails whole when the client cannot read one of their answers, never answering part of it (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  const integers = client.options.parsers[23]!;
+  client.options.parsers[23] = (x: string) => {
+    if (x === '2') throw new Error('cannot decode 2');
+    return integers(x);
+  };
+  try {
+    await assert.rejects(client.group([{ query: 'select n from (values (1), (2), (3)) v(n)' }, { query: 'select 4 as n' }]), /cannot decode 2/);
+  } finally {
+    client.options.parsers[23] = integers;
+    await client.end();
+  }
+});
+
+test("a transaction's statements go in the order they were started, whatever order they were built in (review r7 of #452)", { skip, timeout: 15_000 }, async () => {
+  const client = postgres({ ...postgresOptions(DATABASE), max: 1 });
+  try {
+    await client.unsafe('create temporary table started (n int)');
+    const [, [counted]] = await client.begin((tx) => {
+      const count = tx.unsafe('select count(*)::int as n from started');
+      const insert = tx.unsafe('insert into started values (1)');
+      return Promise.all([insert, count]);
+    });
+    assert.deepEqual(counted, { n: 1 });
   } finally {
     await client.end();
   }

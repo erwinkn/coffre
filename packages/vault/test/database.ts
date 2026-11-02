@@ -140,13 +140,14 @@ export type TestDatabase = { owner: Database; vault: Database; connect(connectio
 
 /**
  * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
- * up to `connections` at once (10 unless set).
+ * up to `connections` at once (10 unless set). `connections`, each pool's own: a matrix that runs beside the others,
+ * a process of its own each, keeps its share of Postgres's connections (forks.matrix.ts).
  */
-export async function openTestDatabase(): Promise<TestDatabase> {
+export async function openTestDatabase({ connections: pools }: { connections?: number } = {}): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
   const open = async (login: string, connections?: number): Promise<Database> => {
     if (ENGINE === 'postgres') {
-      const client = postgresClient(login, { max: connections ?? 10 });
+      const client = postgresClient(login, { max: connections ?? pools ?? 10 });
       opened.push(() => client.end());
       return createDatabase(client);
     }
@@ -316,6 +317,7 @@ async function endLeftOpen(owner: Database): Promise<void> {
 export async function emptyReads(owner: Database): Promise<void> {
   await run(owner, sql`DELETE FROM log_reads`);
   await run(owner, sql`DELETE FROM log_read_days`);
+  await run(owner, sql`DELETE FROM log_read_place_days`);
   await run(owner, sql`INSERT INTO log_reads_cursor (only_row, through, pair, at, mac) VALUES (true, 0, 0, 0, NULL) ON CONFLICT (only_row) DO UPDATE SET through = 0, pair = 0, at = 0, mac = NULL`);
 }
 

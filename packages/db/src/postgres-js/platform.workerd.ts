@@ -197,6 +197,9 @@ export const clearImmediate: Platform['clearImmediate'] = (handle) => {
   tasks.delete(handle as number);
 };
 
+export const nextTask: Platform['nextTask'] = (fn) => setTimeout(fn, 0);
+export const cancelTask: Platform['cancelTask'] = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>);
+
 export const now: Platform['now'] = () => performance.now();
 
 export const randomBytes: Platform['randomBytes'] = (length) => crypto.getRandomValues(Buffer.alloc(length));

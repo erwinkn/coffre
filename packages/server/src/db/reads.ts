@@ -5,13 +5,14 @@ import { sql, type SQL } from 'drizzle-orm';
 import type { ChangePoint } from './queries.ts';
 
 // 0.15's reads as the audit pages list them (T166; docs/design/0.15-plan.md,
-// "As built: T166"; formal/Reads.tla). Each use a signed pair seals, the
-// vault's projector writes once, from the sealed objects at its number, under
-// a MAC of the vault's that covers its number too (`log_reads`): whose read it
-// was, its key's place, the fork it was read in, through a reference its
-// source then, the version read. These reads list them on the whole log and
-// by member (no page of a place lists them in 0.15: D160), a page at a time,
-// each from an index read newest first and no further than a page.
+// "As built: T166" and "As built: T175"; formal/Reads.tla). Each use a signed
+// pair seals, the vault's projector writes once, from the sealed objects at
+// its number, under a MAC of the vault's that covers its number too
+// (`log_reads`): whose read it was, its key's place, the fork it was read in,
+// through a reference its source then, the version read. These reads list
+// them on the whole log, by member, and by place (a key, an environment, a
+// project: T175), a page at a time, each from an index read newest first and
+// no further than a page.
 
 /** A read as a page lists it: the projector's row, and the names of what it names, as the rows say them now. */
 export type ListedRead = {
@@ -44,16 +45,36 @@ export type ListedRead = {
 };
 
 /**
- * Places a list of reads is held to: any of these projects, environments or
- * keys, and none of the environments `except` names (a protected one the
- * caller's role leaves out). A read is at its key's environment, at the fork
- * it was read in, and through a reference at its source's.
+ * A place whose reads a page lists (T175), by its id: a key, an environment
+ * or a project. A read is at its key, that key's environment and project; at
+ * the fork it was read in; and through a reference at its source, the
+ * source's environment and project.
+ */
+export type ReadPlace = { kind: 'secret' | 'environment' | 'project'; id: string };
+
+/**
+ * Which reads a page lists: every one, a member's (`actors`), or a place's
+ * (`at`). A place's page reads each read at it, whoever's: who may see each
+ * one, and whose it is, its caller decides from the row (`api/audit.ts`).
  */
 export type ReadFilter = {
   /** The members whose reads, as the log names them: `user:ada@acme.example`, `token:ci`. */
   actors?: readonly string[];
+  at?: undefined;
   before?: ChangePoint;
   limit: number;
+} | {
+  actors?: undefined;
+  at: ReadPlace;
+  before?: ChangePoint;
+  limit: number;
+};
+
+/** The columns of `log_reads` that put a read at a place of each kind, each with its index (migration 0050). */
+const AT: Record<ReadPlace['kind'], readonly string[]> = {
+  secret: ['secret', 'source'],
+  environment: ['environment', 'place', 'source_environment'],
+  project: ['project', 'source_project'],
 };
 
 /** Above every read: a page's start without `before`, and, below a time alone, above every read at it. */
@@ -66,8 +87,11 @@ const bigint = (value: number | bigint) => sql`CAST(${String(value)} AS bigint)`
  * 0.15's records are listed, below `before`: up to `limit`, and whether there
  * are more. Every read, by the projection's own index; a member's, by
  * `log_reads_principal_idx`, through a function that holds its plan to it
- * (migration 0049). However many reads the log holds, a page reads as many
- * index entries as it shows. No page of a place lists reads in 0.15 (D160).
+ * (migration 0049); a place's, by the index of each column that puts a read
+ * there, through `log_reads_at` (0050). However many reads the log holds,
+ * and however many forks, references or sources a place has had, a page
+ * reads no more index entries than a page's worth from each of its few
+ * streams.
  */
 export async function readsPage(db: Queryable, filter: ReadFilter): Promise<{ rows: ListedRead[]; more: boolean }> {
   const engine = dialect.engineOf(db);
@@ -83,11 +107,19 @@ function pageSql(engine: dialect.Engine, filter: ReadFilter, take: number): SQL 
   const actors = filter.actors?.filter((actor) => actor.startsWith('user:') || actor.startsWith('token:'));
   if (actors?.length === 0) return null;
   const [at, number] = [bigint(filter.before?.at ?? MAX), bigint(filter.before?.number ?? MAX)];
-  const streams = actors === undefined
-    ? [sql`SELECT r.at, r.number FROM log_reads r WHERE (r.at, r.number) < (${at}, ${number}) ORDER BY r.at DESC, r.number DESC LIMIT ${take}`]
-    : actors.map((actor) => (engine === 'postgres'
-      ? sql`SELECT * FROM log_reads_by(${actor}, ${at}, ${number}, ${take})`
-      : sql`SELECT at, number FROM log_reads WHERE principal = ${actor} AND (at, number) < (${at}, ${number}) ORDER BY at DESC, number DESC LIMIT ${take}`));
+  // A place's: on Postgres its days alone, each day's streams in turn (`log_reads_at`); SQLite has no partitions, and
+  // reads each stream's index.
+  const place = filter.at;
+  const streams = place !== undefined
+    ? (engine === 'postgres'
+      ? [sql`SELECT * FROM log_reads_at(CAST(${place.id} AS uuid), ${place.kind}, ${at}, ${number}, ${take})`]
+      : AT[place.kind].map((column) => sql`SELECT at, number FROM log_reads WHERE ${sql.raw(column)} = ${place.id} AND (at, number) < (${at}, ${number})
+          ORDER BY at DESC, number DESC LIMIT ${take}`))
+    : actors === undefined
+      ? [sql`SELECT r.at, r.number FROM log_reads r WHERE (r.at, r.number) < (${at}, ${number}) ORDER BY r.at DESC, r.number DESC LIMIT ${take}`]
+      : actors.map((actor) => (engine === 'postgres'
+        ? sql`SELECT * FROM log_reads_by(${actor}, ${at}, ${number}, ${take})`
+        : sql`SELECT at, number FROM log_reads WHERE principal = ${actor} AND (at, number) < (${at}, ${number}) ORDER BY at DESC, number DESC LIMIT ${take}`));
   return sql`SELECT DISTINCT f.at, f.number FROM (${sql.join(streams.map((each) => sql`SELECT * FROM (${each}) s`), sql` UNION ALL `)}) f ORDER BY f.at DESC, f.number DESC LIMIT ${take}`;
 }
 

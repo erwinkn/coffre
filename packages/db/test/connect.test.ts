@@ -6,9 +6,10 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConnectionOptions } from 'node:tls';
-import { sql, type SQL } from 'drizzle-orm';
+import { sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 import { engineOfUrl, openDatabase, postgresClient, postgresOptions, writes } from '../src/connect.ts';
+import { later } from '../src/later.ts';
 import { migrateDatabase } from '../src/migrate.ts';
 
 test('MySQL URLs are refused before opening a connection or running migrations', async () => {
@@ -241,5 +242,82 @@ test("a URL's other parts are read as node-postgres reads them, and no query par
   // A parse error, a malformed escape included, never prints the URL's password.
   for (const url of ['not a url: password', 'postgres://u%zz:password@h/db', 'postgres://u:password@h/d%zzb', 'postgres://u:password@h%zz/db', 'postgres://u:password@h/db?port=abc', 'postgres://u:password@h/db?port=70000']) {
     assert.throws(() => postgresOptions(url), (error: Error) => error.message === 'invalid Postgres URL');
+  }
+});
+
+test("on SQLite, a write left to `later` runs in its turn, and the transaction's COMMIT waits for it: one that failed rolls the transaction back", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-sqlite-'));
+  const { db, close } = await openDatabase(`file:${join(dir, 'later.db')}`);
+  const lite = db as unknown as Lite;
+  try {
+    await lite.run(sql`CREATE TABLE t (id INTEGER PRIMARY KEY)`);
+    await db.transaction(async (tx) => {
+      later(tx, sql`INSERT INTO t VALUES (1)`);
+      later(tx, sql`INSERT INTO t VALUES (2)`);
+    });
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }]);
+    // The second a duplicate: the first, written, is rolled back with it, and the error is the duplicate's.
+    await assert.rejects(db.transaction(async (tx) => {
+      later(tx, sql`INSERT INTO t VALUES (3)`);
+      later(tx, sql`INSERT INTO t VALUES (1)`);
+    }), (error: unknown) => /UNIQUE/.test(String((error as { cause?: unknown }).cause ?? error)));
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }]);
+    // And the file's lock went with the rollback: the next transaction runs.
+    await db.transaction(async (tx) => later(tx, sql`INSERT INTO t VALUES (4)`));
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }, { id: 4 }]);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("on SQLite, `later` writes go in the order asked, raw statements and builders alike; a savepoint's go with it, its rollback taking its failures (review r4 of #452)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-sqlite-'));
+  const { db, close } = await openDatabase(`file:${join(dir, 'later-order.db')}`);
+  const lite = db as unknown as Lite;
+  try {
+    await lite.run(sql`CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)`);
+    await lite.run(sql`INSERT INTO t VALUES (1, 0)`);
+    // A raw statement, then a builder's (Drizzle's `run`, lazy until started): the second's write is the last.
+    await db.transaction(async (tx) => {
+      later(tx, sql`UPDATE t SET n = 1 WHERE id = 1`);
+      later(tx, (tx as unknown as { run(query: SQL): SQLWrapper }).run(sql`UPDATE t SET n = 2 WHERE id = 1`));
+    });
+    assert.deepEqual(await lite.all(sql`SELECT n FROM t WHERE id = 1`), [{ n: 2 }]);
+    // A duplicate left to `later` in a savepoint whose work then fails: rolled back with it, the outer work goes on.
+    await db.transaction(async (tx) => {
+      await tx.transaction(async (inner) => {
+        later(inner, sql`INSERT INTO t VALUES (1, 9)`);
+        throw new Error('rolled back');
+      }).catch(() => {});
+      later(tx, sql`INSERT INTO t VALUES (2, 0)`);
+    });
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }]);
+    // One that fails in a savepoint whose work returns: the savepoint fails with it, and the outer work may catch it.
+    await db.transaction(async (tx) => {
+      await assert.rejects(tx.transaction(async (inner) => later(inner, sql`INSERT INTO t VALUES (1, 9)`)), (error: unknown) => /UNIQUE/.test(String((error as { cause?: unknown }).cause ?? error)));
+      later(tx, sql`INSERT INTO t VALUES (3, 0)`);
+    });
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t ORDER BY id`), [{ id: 1 }, { id: 2 }, { id: 3 }]);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("on SQLite, a write left to `later` runs through the transaction it was given, whatever database it was built on (review r8 of #452)", { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-sqlite-'));
+  const { db, close } = await openDatabase(`file:${join(dir, 'later-built.db')}`);
+  const lite = db as unknown as Lite;
+  try {
+    await lite.run(sql`CREATE TABLE t (id INTEGER PRIMARY KEY)`);
+    // Built on the database, outside the transaction: run on it, it would wait for the transaction, which waits for it.
+    const write = (db as unknown as { run(query: SQL): SQLWrapper }).run(sql`INSERT INTO t VALUES (1)`);
+    await db.transaction(async (tx) => later(tx, write));
+    assert.deepEqual(await lite.all(sql`SELECT id FROM t`), [{ id: 1 }]);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

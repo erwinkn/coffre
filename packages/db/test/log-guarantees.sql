@@ -53,6 +53,10 @@ DO $$
 BEGIN
     IF NOT has_table_privilege('coffre_app', 'log_reads', 'SELECT') OR has_table_privilege('coffre_app', 'log_reads', 'INSERT')
        OR NOT has_function_privilege('coffre_app', 'log_reads_by(text, bigint, bigint, integer)', 'EXECUTE')
+       OR NOT has_function_privilege('coffre_app', 'log_reads_at(uuid, text, bigint, bigint, integer)', 'EXECUTE')
+       OR NOT has_table_privilege('coffre_app', 'log_read_place_days', 'SELECT') OR has_table_privilege('coffre_app', 'log_read_place_days', 'INSERT')
+       OR has_table_privilege('coffre_vault', 'log_read_place_days', 'INSERT') OR NOT has_table_privilege('coffre_backup', 'log_read_place_days', 'SELECT')
+       OR has_function_privilege('coffre_app', 'log_reads_placed()', 'EXECUTE')
        OR has_function_privilege('coffre_app', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
        OR has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
@@ -61,6 +65,20 @@ BEGIN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';
     END IF;
     RAISE NOTICE 'PASS: only the vault reaches the 0.15 log';
+END
+$$;
+
+-- A page of reads plans each call for its own values (0054, R48): a generic plan spans every day's partition. A
+-- CREATE OR REPLACE of either function drops the setting unless it restates it.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_proc
+               WHERE oid IN ('log_reads_by(text, bigint, bigint, integer)'::regprocedure,
+                             'log_reads_at(uuid, text, bigint, bigint, integer)'::regprocedure)
+                 AND NOT coalesce('plan_cache_mode=force_custom_plan' = ANY (proconfig), false)) THEN
+        RAISE EXCEPTION 'FAIL: a page of reads may plan for any values';
+    END IF;
+    RAISE NOTICE 'PASS: a page of reads plans each call for its own values';
 END
 $$;
 
@@ -79,17 +97,50 @@ BEGIN
 END
 $$;
 
--- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change): the app runs it,
--- and no other function of the log; the vault and the backup never run it.
+-- The rotation's functions (0053, T168): the vault's alone; the trigger's, nobody's to call.
 DO $$
+DECLARE
+    f text;
 BEGIN
-    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_app', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE') THEN
-        RAISE EXCEPTION 'FAIL: app_change is not the app''s alone';
+    FOREACH f IN ARRAY ARRAY['log_rotate_number(bytea)', 'log_rotate(bigint, text, bigint, text, bytea, bytea)'] LOOP
+        IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;
+        END IF;
+    END LOOP;
+    IF has_function_privilege('coffre_vault', 'log_refuse_retired()', 'EXECUTE') OR has_function_privilege('coffre_app', 'log_refuse_retired()', 'EXECUTE') THEN
+        RAISE EXCEPTION 'FAIL: the retired-key trigger''s function is callable';
     END IF;
-    RAISE NOTICE 'PASS: the app logs its own changes through app_change, and runs no other function of the log';
+    RAISE NOTICE 'PASS: the rotation''s functions are the vault''s alone';
+END
+$$;
+
+-- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change, and 0052's
+-- app_change_strict, which raises where it answers null): the app runs them, and no other function of the log; the
+-- vault and the backup never run them. The vault's change_input_strict is the vault's alone, as change_input is.
+DO $$
+DECLARE
+    f text;
+BEGIN
+    FOREACH f IN ARRAY ARRAY['app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)',
+                             'app_change_strict(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)'] LOOP
+        IF NOT has_function_privilege('coffre_app', f, 'EXECUTE') OR has_function_privilege('coffre_vault', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the app''s alone', f;
+        END IF;
+    END LOOP;
+    FOREACH f IN ARRAY ARRAY['change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)',
+                             'change_input_strict(text, text, text, bigint, text, text, text, bytea, bytea, bytea)'] LOOP
+        IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;
+        END IF;
+    END LOOP;
+    -- A committed change whose number the client could not read, the app reads again (`newestCommitted`).
+    IF NOT has_table_privilege('coffre_app', 'log_changes', 'SELECT') OR has_table_privilege('coffre_app', 'log_changes', 'INSERT') THEN
+        RAISE EXCEPTION 'FAIL: the app does not read its changes, or writes them';
+    END IF;
+    RAISE NOTICE 'PASS: the app logs its own changes through app_change and app_change_strict, and runs no other function of the log';
 END
 $$;
 
@@ -153,9 +204,11 @@ BEGIN
        OR has_database_privilege('coffre_vault_hot', current_database(), 'CREATE') OR has_database_privilege('coffre_vault_hot', current_database(), 'TEMPORARY') THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;
-    -- W268's gate and its helper run inside use_credential, as its owner: no login calls them itself.
+    -- W268's gate and its helpers run inside use_credential, as its owner: no login calls them itself (a personal
+    -- config's, 0051's, too).
     IF EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN (VALUES ('coffre_app'), ('coffre_vault'), ('coffre_vault_hot'), ('coffre_backup')) AS login (name)
-                WHERE p.proname IN ('use_stands', 'use_admits') AND p.pronamespace = 'public'::regnamespace AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
+                WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds') AND p.pronamespace = 'public'::regnamespace
+                  AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
         RAISE EXCEPTION 'FAIL: a login may call the named use''s gate itself';
     END IF;
     RAISE NOTICE 'PASS: coffre_vault_hot is the vault''s, with lock_timeout 1s, statement_timeout 2s and generic plans';

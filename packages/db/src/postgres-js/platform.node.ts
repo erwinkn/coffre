@@ -14,6 +14,8 @@ export const isIP: Platform['isIP'] = (host) => net.isIP(host);
 
 export const setImmediate: Platform['setImmediate'] = (fn) => globalThis.setImmediate(fn);
 export const clearImmediate: Platform['clearImmediate'] = (handle) => globalThis.clearImmediate(handle as NodeJS.Immediate | undefined);
+export const nextTask: Platform['nextTask'] = setImmediate;
+export const cancelTask: Platform['cancelTask'] = clearImmediate;
 
 export const now: Platform['now'] = () => performance.now();
 

@@ -48,6 +48,13 @@ export interface Platform {
   /** Run `fn` once what is running now is done, before any timer; and cancel it. */
   setImmediate(fn: () => void): unknown;
   clearImmediate(handle: unknown): void;
+  /**
+   * Run `fn` in a task of its own, once every microtask asked before it has run, and cancel it: what a transaction
+   * waits for before it sends the statements its work asked together (`begin`, index.ts). Node's `setImmediate`;
+   * a timer of 0 on workerd, whose `setImmediate` here is a microtask.
+   */
+  nextTask(fn: () => void): unknown;
+  cancelTask(handle: unknown): void;
   /** Milliseconds, monotonic. */
   now(): number;
   randomBytes(length: number): Buffer;

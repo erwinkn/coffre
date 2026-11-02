@@ -351,7 +351,7 @@ export function testVault(
       const memory = mkdtempSync(join(tmpdir(), 'coffre-reads-'));
       // On a connection of its own, closed after: on SQLite, a connection the vault reads on meanwhile is another.
       const own = TEST_ENGINE === 'postgres' ? null : await openDatabase(process.env.COFFRE_TEST_DATABASE_URL!);
-      const signer = await runCheckpointer({ database: own?.db ?? await openVaultDatabase(), seed: config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64'), memory: join(memory, 'memory'), intervalMs: 3_600_000 });
+      const signer = await runCheckpointer({ database: own?.db ?? await openVaultDatabase(), signingKeys: [config.signingKey === undefined ? signingKey : Buffer.from(config.signingKey, 'base64')], memory: join(memory, 'memory'), intervalMs: 3_600_000 });
       try {
         await signer.checkpointer.tick();
         await signer.projected();

@@ -146,7 +146,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -160,7 +160,7 @@ import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as seale
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
-import { checkReads, cursorHolds, readHolds, type ReadRow } from './reads.ts';
+import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
 import { apply, replayFault, type LoggedMember, type Replayed } from './replay.ts';
 import { principalObject } from './objects.ts';
@@ -171,6 +171,7 @@ import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk
 import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member } from './store.ts';
 import { use, UseCache, useLimits, useMany, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
+import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
 
 
 export type VaultOptions = {
@@ -288,7 +289,6 @@ export type PreparedVault = {
   /** What 0.15's verifier checks the log with (verifier.ts), once a call first needs them. */
   verifier: VerifierKeys | null;
   /** The log's MAC key under each signing key, which `vouch` checks an entry with: made once a call first needs them. */
-  vouchKeys?: LogMacKey[];
   /** This isolate's 0.15 uses: their admission count, seal cache and covers (use.ts). */
   uses: UseCache;
 };
@@ -774,16 +774,21 @@ class VaultService implements Vault {
   }
 
   async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline }: How): Promise<Outcome<T>> {
+    // The changes of the attempt under way, whose failure, heard as the transaction's, they say (`Changes.failed`).
+    let staged: Changes | null = null;
     try {
       const committed = await this.#db.transaction(async (tx) => {
-        await store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared);
-        const members = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals, shared);
-        // Then the head, and everything the decision reads, in one statement (`snapshot` says why it holds).
-        const reads = await this.#snapshot(tx, principals, asked, !late, shared);
+        // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
+        // (`snapshot` says why it holds): asked together, they go in that order under one Sync (postgres-js's `gather`).
+        const [, members, reads] = await Promise.all([
+          store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared),
+          principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
+          this.#snapshot(tx, principals, asked, !late, shared),
+        ]);
         const log015 = this.#prepared.log015;
         const d: Decision = {
           tx, members, at: this.#at(reads), reads, log: [], writes: [], touched: new Set(), grants: new Map(), reports, after: [], underLock: [],
-          changes: log015 === null ? null : new Changes(log015),
+          changes: (staged = log015 === null ? null : new Changes(log015)),
         };
         const result = await decide(d);
         // Each object 0.15's log will change, read and checked before the writes change its rows.
@@ -796,7 +801,8 @@ class VaultService implements Vault {
         if (entries.length > 0) {
           // Under the head the decision's reads took: a remote key's decision takes it late, and reads again with it.
           if (d.reads.head === null) throw new Error('a decision appends only under the head it read with');
-          const appended = await this.#append(tx, entries, d.underLock, d.reads);
+          // Nothing awaits it: what it says comes from the head the snapshot read, and it goes with what follows.
+          const appended = await this.#append(tx, entries, d.underLock, d.reads, { final: true });
           at = appended.occurredAt;
           entries.forEach((entry, i) => {
             if (isAccessEntry(entry)) accessSeq.set(entry.subjectPrincipal!, appended.seqStart + BigInt(i));
@@ -819,15 +825,18 @@ class VaultService implements Vault {
         // here to the commit, so as few round trips as can be. The append comes first, and its trigger took the issue
         // lock before the fence (0026): a change taking the fence before the issue lock would wait in a circle with the
         // barrier, which takes them in that order (Migration015.tla, IssueBeforeFence).
-        const numbers = d.changes === null ? [] : await d.changes.commit(tx, at, written);
+        // With the COMMIT, under its Sync: their numbers answer after it.
+        const numbers = d.changes === null ? null : await d.changes.commit(tx, at, written);
         return { result, numbers };
       });
       this.#reported(reports);
       // A change answers once its entries are sealed (R51; HotPathOne's CommitBeforeAnswer): the newest of them, with
       // every number below it.
-      if (committed.numbers.length > 0) await this.#prepared.log015!.sealThrough(committed.numbers.reduce((a, b) => (a > b ? a : b)));
+      const newest = committed.numbers === null ? null : await newestCommitted(this.#db, committed.numbers);
+      if (newest !== null) await this.#prepared.log015!.sealThrough(newest);
       return { ok: true, ...committed.result };
-    } catch (caught) {
+    } catch (thrown) {
+      const caught = (staged as Changes | null)?.failed(thrown) ?? thrown;
       const error = caught instanceof NotLogged ? this.#notLogged(reports, caught) : caught;
       if (!(error instanceof Refused || error instanceof Outage)) throw error;
       const entries = [...reports, ...readsByPlace(error.entries)];
@@ -856,16 +865,18 @@ class VaultService implements Vault {
    * hold it, and the access entry their row names, for 0.15's log.
    */
   async #seal(d: Decision, principal: string, accessSeq: bigint | undefined): Promise<{ object: PrincipalInput; accessSeq: bigint } | null> {
-    const row = await store.member(d.tx, principal);
+    // The row and the grants together, one round trip: plain reads, after the decision's writes, under its row lock.
+    const [row, held] = await Promise.all([store.member(d.tx, principal), store.grants(d.tx, principal)]);
     if (row === undefined) return null;
     const decided = d.grants.get(principal);
     if (decided === undefined) throw new Error(`sealing ${principal} without the grants this decision verified`);
-    if (!sameGrants(await store.grants(d.tx, principal), decided)) {
+    if (!sameGrants(held, decided)) {
       this.#report(d.reports, principal, 'mac', row.mac.toString('hex'));
       throw new Refused(refusal('tampered', REFUSAL_MESSAGES.tampered), []);
     }
     const next = { ...row, accessSeq: accessSeq ?? row.accessSeq };
-    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) });
+    // Nothing awaits it: it goes with the next member's reads, or the changes and the COMMIT.
+    await store.updateMember(d.tx, principal, { accessSeq: next.accessSeq, mac: memberMac(this.#prepared.rowKey, next, decided) }, { final: true });
     // The member's object as the rows hold it now, which 0.15's change of it must have left, and the access entry its
     // row names, which that change accounts for (`changes.ts`).
     return { object: principalObject(row, decided), accessSeq: next.accessSeq };
@@ -1299,6 +1310,8 @@ class VaultService implements Vault {
     underLock: readonly ((locked: Queryable) => Promise<void>)[] = [],
     /** A snapshot that holds the head: what it read under it is read again by nothing. */
     held?: Snapshot,
+    /** Nothing in the transaction awaits the append (`appendEntries`): it goes with what follows, its COMMIT at the latest. */
+    { final = false }: { final?: boolean } = {},
   ): Promise<Appended> {
     const prepared = this.#prepared;
     const head = held?.head ?? undefined;
@@ -1309,7 +1322,7 @@ class VaultService implements Vault {
         throw new Error(prepared.superseded);
       }
       for (const check of underLock) await check(locked);
-    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], prepared.log015 !== null);
+    }, head === undefined ? undefined : { head, last: head.last, at: held!.at }, [], prepared.log015 !== null, { final });
     // The head still held, as this append left it, for the next append of the same transaction: a remote key's intent,
     // then the decision's reports.
     if (head !== undefined) {
@@ -3598,7 +3611,7 @@ class VaultService implements Vault {
     const store = logStore(this.#db);
     const newest = await store.newest();
     if (newest === null || newest.upto < number) return false;
-    const pair = await openPair(newest.notes, (await this.#verifierKeys()).verifiers);
+    const pair = await openPair(newest.notes, (await this.#verifierKeys()).current.verifiers);
     if (pair === null || pair.upto !== newest.upto) return false;
     const proof = await proveIn(store, number, { pair, notes: newest.notes }, { tree: 'changes' }).catch(() => null);
     return proof !== null;
@@ -3977,31 +3990,37 @@ class VaultService implements Vault {
 
   /**
    * The entries of 0.15's log, as an audit page read them, whose MAC holds
-   * under none of the vault's signing keys over the columns it shows (T166):
-   * forged, or edited, around coffre. A malformed one is named too. Pure
-   * CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
+   * under no key that vouches at their number over the columns it shows
+   * (T166): forged, or edited, around coffre. A malformed one is named too.
+   * The current key vouches for any; a key it replaced, only below its
+   * rotation (T168, keyring.ts, R41), whose bounds are read, in one
+   * statement, only when an entry fails the current key and the vault holds
+   * a replaced one, and kept by no isolate (a restore moves them).
+   * Otherwise pure CPU: about 3 µs an entry, `VOUCHED_AT_ONCE` at most.
    */
   async vouch(input: VouchInput): Promise<{ forged: string[] }> {
     const entries: unknown = (input as { entries?: unknown } | undefined)?.entries;
     if (!Array.isArray(entries) || entries.length > VOUCHED_AT_ONCE) throw new Error(`vouch takes up to ${VOUCHED_AT_ONCE} entries`);
-    const macs = (this.#prepared.vouchKeys ??= this.#config.signingKeys.map((seed) => logMacKey(seed)));
-    return {
-      forged: entries.flatMap((entry: VouchedEntry) => {
-        const named = typeof entry?.number === 'string' ? entry.number : '?';
-        if (entry?.tree === 'cursor') {
-          const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
-          const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
-          const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
-          return cursor !== null && macs.some((key) => cursorHolds(key, cursor)) ? [] : [named];
-        }
-        if (entry?.tree === 'reads') {
-          const read = vouchedRead(entry);
-          return read !== null && macs.some((key) => readHolds(key, read)) ? [] : [named];
-        }
-        const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
-        return logged !== null && macs.some((key) => authentic(key)(logged)) ? [] : [named];
-      }),
-    };
+    const keys = await this.#verifierKeys();
+    const asked = entries.map((entry: VouchedEntry): { named: string; holds: (ring: Keyring) => boolean } => {
+      const named = typeof entry?.number === 'string' ? entry.number : '?';
+      if (entry?.tree === 'cursor') {
+        const at = typeof entry.through === 'string' && /^[0-9]{1,19}$/.test(entry.through) && typeof entry.pair === 'string' && /^[0-9]{1,19}$/.test(entry.pair) && Number.isSafeInteger(entry.at);
+        const mac = entry.mac === null ? null : typeof entry.mac === 'string' && /^[0-9a-f]{32}$/.test(entry.mac) ? Buffer.from(entry.mac, 'hex') : undefined;
+        const cursor = at && mac !== undefined ? { through: BigInt(entry.through), pair: BigInt(entry.pair), at: entry.at, mac } : null;
+        return { named, holds: (ring) => cursor !== null && cursorVouched(ring, cursor) };
+      }
+      if (entry?.tree === 'reads') {
+        const read = vouchedRead(entry);
+        return { named, holds: (ring) => read !== null && readVouched(ring, read) };
+      }
+      const logged = vouchedEntry(entry as Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>);
+      return { named, holds: (ring) => logged !== null && entryVouched(ring, logged) === 'held' };
+    });
+    const failing = asked.filter((a) => !a.holds(alone(keys)));
+    if (failing.length === 0 || keys.previous.length === 0) return { forged: failing.map((a) => a.named) };
+    const ring = await keyringOf(keys, logStore(this.#db));
+    return { forged: failing.filter((a) => !a.holds(ring)).map((a) => a.named) };
   }
 
   /**

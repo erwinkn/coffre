@@ -46,8 +46,26 @@ export function prepared<Q extends Select>(
       ? session.prepareQuery(built.query, built.fields, 'all', true)
       : session.prepareQuery(built.query, built.fields, undefined, true);
     query.joinsNotNullableMap = built.joinsNotNullableMap;
-    return (built.engine === 'sqlite' ? query.all(values) : query.execute(values)) as Promise<Awaited<Q>>;
+    const engine = built.engine;
+    return lazy(() => (engine === 'sqlite' ? query.all(values) : query.execute(values)) as Promise<Awaited<Q>>);
   };
+}
+
+/**
+ * A statement run once first awaited, as a Drizzle builder is: so that a
+ * transaction's statements asked together go in the order they were
+ * awaited, whichever way each was built (postgres-js's `gather`). Run when
+ * called, this one would go ahead of a builder awaited before it.
+ */
+function lazy<T>(run: () => Promise<T>): Promise<T> {
+  let answer: Promise<T> | undefined;
+  const asked = () => (answer ??= run());
+  return {
+    then: (resolve, reject) => asked().then(resolve, reject),
+    catch: (reject) => asked().catch(reject),
+    finally: (done) => asked().finally(done),
+    [Symbol.toStringTag]: 'Statement',
+  } as Promise<T>;
 }
 
 /** Drizzle's session, Postgres's or SQLite's, as `prepared` calls it. */

@@ -38,6 +38,13 @@ const int64 = customType<{ data: bigint; driverData: number | bigint }>({
   fromDriver: (value) => BigInt(value),
 });
 
+/** A list of byte strings, read as Postgres's bytea[]: a JSON array of hex. */
+const byteList = customType<{ data: Buffer[]; driverData: string }>({
+  dataType: () => 'text',
+  toDriver: (value) => JSON.stringify(value.map((bytes) => bytes.toString('hex'))),
+  fromDriver: (value) => (JSON.parse(value) as string[]).map((hex) => Buffer.from(hex, 'hex')),
+});
+
 const time = (name: string) => integer(name, { mode: 'timestamp_ms' });
 const now = sql`(CAST(unixepoch('subsec') * 1000 AS INTEGER))`;
 const createdAt = () => time('created_at').notNull().default(now);
@@ -973,6 +980,16 @@ export const logReads = sqliteTable(
     check('log_reads_mac_check', sql`octet_length(${table.mac}) = 16`),
     uniqueIndex('log_reads_number_idx').on(table.at, table.number),
     index('log_reads_principal_idx').on(table.principal, table.at, table.number),
+    // A place's reads (T175): each column naming a place a read is at, newest first. Its key's, its environment's and its
+    // project's; the fork it was read in; through a reference, the source's three. Those that only some reads name are
+    // partial. A page of a place reads each of its few streams no further than a page (`log_reads_at`).
+    index('log_reads_secret_idx').on(table.secret, table.at, table.number),
+    index('log_reads_environment_idx').on(table.environment, table.at, table.number),
+    index('log_reads_project_idx').on(table.project, table.at, table.number),
+    index('log_reads_place_idx').on(table.place, table.at, table.number).where(sql`${table.place} IS NOT NULL`),
+    index('log_reads_source_idx').on(table.source, table.at, table.number).where(sql`${table.source} IS NOT NULL`),
+    index('log_reads_source_environment_idx').on(table.sourceEnvironment, table.at, table.number).where(sql`${table.sourceEnvironment} IS NOT NULL`),
+    index('log_reads_source_project_idx').on(table.sourceProject, table.at, table.number).where(sql`${table.sourceProject} IS NOT NULL`),
   ],
 );
 
@@ -981,6 +998,16 @@ export const logReadDays = sqliteTable(
   'log_read_days',
   { principal: text().notNull(), day: integer({ mode: 'number' }).notNull() },
   (table) => [primaryKey({ name: 'log_read_days_pkey', columns: [table.principal, table.day] })],
+);
+
+/** The days each place's reads are in (schema.ts). */
+export const logReadPlaceDays = sqliteTable(
+  'log_read_place_days',
+  { place: text().notNull(), day: integer({ mode: 'number' }).notNull() },
+  (table) => [
+    primaryKey({ name: 'log_read_place_days_pkey', columns: [table.place, table.day] }),
+    index('log_read_place_days_day_idx').on(table.day),
+  ],
 );
 
 /** How far the projector has gone (schema.ts). */
@@ -1014,6 +1041,8 @@ export const logFence = sqliteTable(
   {
     onlyRow: flag('only_row').primaryKey().default(true),
     atFloor: integer('at_floor', { mode: 'number' }).notNull(),
+    /** The tags of the signing keys the log moved on from (T168), hex, a JSON array. */
+    retired: byteList('retired').notNull().default(sql`'[]'`),
   },
   (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
 );

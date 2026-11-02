@@ -350,6 +350,7 @@ const BUSY: Record<UseBusy, string> = {
   replayed: 'coffre is busy: the vault has seen this use\'s request already; try again',
   ahead: "coffre is busy: this server's clock is ahead of its database's; try again in a moment",
   unconfigured: 'coffre is busy: its vault has no access policy logged yet; try again in a moment',
+  superseded: 'coffre is busy: this server still holds a signing key its vault replaced, as during a deploy; try again in a moment',
 };
 
 /**

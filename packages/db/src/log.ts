@@ -5,6 +5,7 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lt, lte, sql, ty
 
 import { afterCommit } from './commits.ts';
 import { tablesOf, type Queryable, type Transaction } from './database.ts';
+import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
@@ -155,6 +156,26 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
 }
 
 /**
+ * Lock the log's head, and read under it what an append of `key`'s reads
+ * (`readUnderHead`), asked together: under one Sync on Hyperdrive, the
+ * lock first, then the read, a statement of its own that so waits for
+ * nothing and sees every append committed before the lock. What the
+ * transaction asks beside them, in the same task, goes with them, after
+ * (postgres-js's `gather`). Hand the result to the append (`locked`):
+ * nothing to read again.
+ */
+export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  // Both started now (`.then`), not awaited: made before anything the caller asks after, a work's first `later` write
+  // included, so they go first in their group (postgres-js's `flush`, by `made`).
+  const locking = lockedHead(tx).then(([head]) => {
+    if (head === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
+    holding.add(tx);
+  });
+  const reading = readUnderHead(tx, key);
+  return Promise.all([locking, reading]).then(([, held]) => held);
+}
+
+/**
  * Take the issue lock exclusive (migration 0026's, `1668244070, 1`): every
  * issue in flight, a sign-in or a token's, ends first, and none starts
  * until this transaction does. A write that moves what an issue's policy
@@ -165,9 +186,12 @@ export async function lockLogHead(tx: Transaction): Promise<{ nextSeq: bigint; h
  * IssuePolicyHeld, Migration015.tla's PolicyIssueFirst; T149, review r3).
  * SQLite's transactions hold the whole file.
  */
-export async function holdIssues(tx: Transaction): Promise<void> {
+export async function holdIssues(tx: Transaction, { final = false }: { final?: boolean } = {}): Promise<void> {
   if (engineOf(tx) === 'sqlite') return;
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(1668244070, 1)`);
+  const statement = sql`SELECT pg_advisory_xact_lock(1668244070, 1)`;
+  // `final`: nothing awaits it, it goes with what the transaction asks next, in its place (`later`), as `appendEntries`'s.
+  if (final) later(tx, statement);
+  else await tx.execute(statement);
 }
 
 /**
@@ -276,7 +300,17 @@ export async function appendEntries(
    * over, migration 0047's trigger refuses a write's entry without it.
    */
   log015 = false,
-): Promise<Appended & { changes: (bigint | null)[] }> {
+  /**
+   * `final`: nothing in the transaction awaits the append: on Postgres it
+   * goes with what the transaction asks next, its COMMIT at the latest,
+   * under one Sync (`later`), and what it fails with fails the transaction.
+   * Its changes then go through `app_change_strict`: a row moved since it
+   * was read fails the transaction too (`isMovedChange`), never answers
+   * null, and their numbers come as `later`, once the COMMIT has answered
+   * (`newestCommitted`), `changes` left empty.
+   */
+  { final = false }: { final?: boolean } = {},
+): Promise<Appended & { changes: (bigint | null)[]; later: ChangeNumbers | null }> {
   if (entries.length === 0) throw new Error('appendEntries called with no entries');
   const { auditChainHead, auditLog } = tablesOf(tx);
 
@@ -334,24 +368,30 @@ export async function appendEntries(
   }
 
   let numbers: (bigint | null)[] = [];
+  let numbered: ChangeNumbers | null = null;
   if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE && changes.length > 0) {
     // The entries, the head that names the last of them, and the changes, in one statement. The changes run in the
     // select list, in their order; the inserts after it, and their trigger (the fence, for an entry that changes
     // access) at its end: each takes the issue lock before the fence, so either order is the locks' (migration 0026).
-    numbers = await callChanges(tx, changes, sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()}),
-      moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row) `);
+    const statement = callsOf(changes, sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()}),
+      moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row) `, final);
+    if (final) numbered = numbersOf(laterRows(tx, statement), changes);
+    else numbers = numbersIn(await rowsOf(tx, statement));
   } else if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
-    await tx.execute(sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
-      UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`);
+    const statement = sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()})
+      UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row`;
+    if (final) later(tx, statement);
+    else await tx.execute(statement);
   } else {
     await tx.insert(auditLog).values(rows);
     await tx.update(auditChainHead).set({ nextSeq: seq, headHash: prevHash }).where(eq(auditChainHead.onlyRow, true));
-    numbers = await appChanges(tx, changes);
+    if (final && changes.length > 0) numbered = await laterChanges(tx, changes);
+    else numbers = await appChanges(tx, changes);
   }
   const written = { nextSeq: seq, headHash: prevHash };
   afterCommit(tx, () => remember(key, written));
-  return { seqStart: head.nextSeq, ...written, occurredAt: now, changes: numbers };
+  return { seqStart: head.nextSeq, ...written, occurredAt: now, changes: numbers, later: numbered };
 }
 
 /** A head locked by a statement of the caller's, and what it read under the lock (`appendEntries`). */
@@ -364,8 +404,12 @@ export type HeldHead = { head: { nextSeq: bigint; headHash: Buffer }; last: { se
  * after the append's `check`. The log's own last row says whether the log
  * has moved on from `key`.
  */
-async function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
-  const [read] = await underHead(tx, { author: key.author, keyId: key.keyId });
+function readUnderHead(tx: Transaction, key: LogKey): Promise<HeldHead> {
+  // Started now, as `.then` starts a statement, not once awaited: `lockLogHeadRead` puts it ahead of what its caller asks next.
+  return underHead(tx, { author: key.author, keyId: key.keyId }).then(([read]) => heldOf(read, key));
+}
+
+function heldOf(read: Awaited<ReturnType<typeof underHead>>[number] | undefined, key: LogKey): HeldHead {
   if (read === undefined) throw new Error('audit_chain_head is missing; refusing to write an unchained entry');
   if (read.retired) throw new KeyRetired(`the log moved on from ${key.keyId}: a key the ${key.author} rotated from writes no more`);
   return {
@@ -532,9 +576,9 @@ const entriesBefore = prepared((db) => vaultEntries(db, lt(tablesOf(db).auditLog
  * `action`, or null for none: whether one was appended since, and nothing
  * of what it says, so its MAC is not checked. One indexed read.
  */
-export async function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
-  const [row] = await newestSeq(db, { action });
-  return (row?.seq as bigint | undefined) ?? null;
+export function newestVaultSeq(db: Queryable, action: string): Promise<bigint | null> {
+  // Started now (`.then`): `policyNow` reads it ahead of what a transaction's work asks next.
+  return newestSeq(db, { action }).then(([row]) => (row?.seq as bigint | undefined) ?? null);
 }
 
 const newestSeq = prepared((db) => newestSeqQuery(db, sql.placeholder('action')));
@@ -608,21 +652,91 @@ export async function appChanges(tx: Transaction, calls: readonly PreparedChange
     for (const call of calls) numbers.push(await changeOnSqlite(tx, call, bytes));
     return numbers;
   }
-  return callChanges(tx, calls, sql``);
+  return numbersIn(await rowsOf(tx, callsOf(calls, sql``, false)));
+}
+
+/**
+ * The numbers of a write's changes, made by a statement nothing in its transaction awaits (`later`): they answer once
+ * Postgres has run it, with the transaction's COMMIT at the latest, so only what follows the transaction reads them.
+ * Every one is a number: a row moved since it was read failed the transaction (`isMovedChange`).
+ */
+export type ChangeNumbers = { readonly answer: Promise<bigint[]>; /** The request ids of the calls that make an entry. */ readonly requests: readonly string[] };
+
+/** The calls' request ids, but those that make no entry (0.14's rows: `app_change` answers 0). */
+function requestsOf(calls: readonly { requestId: string | null }[]): string[] {
+  return calls.flatMap(({ requestId }) => (requestId === null ? [] : [requestId]));
+}
+
+/**
+ * Once the transaction that made them has committed: the newest of the changes' numbers, which a change's answer
+ * waits to see sealed (R51); null when they made no entry. Their answer; or, when the client could not read it though
+ * Postgres ran the COMMIT (a row it failed to parse, a notice handler that threw: the transaction is Postgres's to
+ * decide, postgres-js/index.ts), their entries, read again by request id: a committed write never answers failed for
+ * it, nor answers before its seal.
+ */
+export async function newestCommitted(db: Queryable, numbers: ChangeNumbers): Promise<bigint | null> {
+  const read = await numbers.answer.catch(async (unread: unknown) => {
+    // No call made an entry (0.14's rows, each answering 0): committed, there is no seal to wait for (review r2).
+    if (numbers.requests.length === 0) return [];
+    const requests = sql.join(numbers.requests.map((request) => sql`${request}`), sql`, `);
+    const rows = await rowsOf<{ number: string | number | bigint }>(db, sql`SELECT number FROM log_changes WHERE request_id IN (${requests})`)
+      .catch((reread: unknown) => { throw new Error('the changes\' numbers could not be read, nor read again by request id', { cause: new AggregateError([unread, reread]) }); });
+    if (rows.length !== numbers.requests.length) throw unread;
+    return rows.map(({ number }) => BigInt(number));
+  });
+  return read.reduce<bigint | null>((newest, number) => (number > 0n && (newest === null || number > newest) ? number : newest), null);
+}
+
+/**
+ * `appChanges` for a write that goes on without their numbers: on Postgres, asked with `later`, so that they go with
+ * what the transaction asks next, its COMMIT at the latest, under one Sync; through `app_change_strict` (migration
+ * 0052), so that a row moved since it was read fails the transaction (`isMovedChange`), Postgres skipping the COMMIT,
+ * where `app_change`'s null would let it keep the rows without their change. On SQLite, made in turn, a moved row
+ * failing alike.
+ */
+export async function laterChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<ChangeNumbers> {
+  if (calls.length === 0) return { answer: Promise.resolve([]), requests: [] };
+  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(strictly(await appChanges(tx, calls))), requests: requestsOf(calls) };
+  return numbersOf(laterRows(tx, callsOf(calls, sql``, true)), calls);
+}
+
+/**
+ * Numbers that must all be: a null is a row that moved, which fails the
+ * transaction, as `app_change_strict` and `change_input_strict` do. The
+ * vault's change path calls it too, so that the rule lives once.
+ */
+export function strictly(numbers: readonly (bigint | null)[], what = 'write'): bigint[] {
+  if (numbers.some((number) => number === null)) throw new MovedRow(`an object this ${what} changes moved since it was read`);
+  return numbers as bigint[];
 }
 
 const bytes = (b64: string | null) => (b64 === null ? null : Buffer.from(b64, 'base64'));
 
-/** `app_change`, once per call, in order, in one statement: after `before`, a `WITH` of the caller's. */
-async function callChanges(tx: Transaction, calls: readonly PreparedChange[], before: SQL): Promise<(bigint | null)[]> {
+/** `app_change`, or `app_change_strict`, once per call, in order, in one statement: after `before`, a `WITH` of the caller's. */
+function callsOf(calls: readonly PreparedChange[], before: SQL, strict: boolean): SQL {
   const rows = sql.join(calls.map((c, i) => sql`(${i}::int, ${c.kind}::text, ${c.id}::text, ${c.requestId}::text, ${c.at}::bigint, ${c.actor}::text, ${c.payload}::text, ${bytes(c.sealFrom)}::bytea, ${bytes(c.seal)}::bytea, ${bytes(c.mac)}::bytea, ${bytes(c.restores)}::bytea)`), sql`, `);
+  const call = strict ? sql.raw('app_change_strict') : sql.raw('app_change');
   // A volatile function in the select list runs after the sort: each call in `ord`'s order, each from the seal the one before leaves.
-  const numbers = await rowsOf<{ ord: number; number: string | number | null }>(tx, sql`${before}
-    SELECT c.ord, app_change(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.seal_from, c.seal, c.mac, c.restores) AS number
+  return sql`${before}
+    SELECT c.ord, ${call}(c.kind, c.id, c.request, c.at, c.actor, c.payload, c.seal_from, c.seal, c.mac, c.restores) AS number
       FROM (VALUES ${rows}) AS c(ord, kind, id, request, at, actor, payload, seal_from, seal, mac, restores)
-     ORDER BY c.ord`);
-  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error('app_change answered out of order');
+     ORDER BY c.ord`;
+}
+
+type NumberRow = { ord: number; number: string | number | null };
+
+/** The calls' numbers, in their order: `app_change`'s, or `change_input`'s (`function`). */
+export function numbersIn(rows: readonly Record<string, unknown>[], function_ = 'app_change'): (bigint | null)[] {
+  const numbers = rows as unknown as NumberRow[];
+  if (numbers.some(({ ord }, i) => Number(ord) !== i)) throw new Error(`${function_} answered out of order`);
   return numbers.map(({ number }) => (number === null ? null : BigInt(number)));
+}
+
+/** A strict call's numbers, as they answer. */
+function numbersOf(rows: Promise<Record<string, unknown>[]>, calls: readonly PreparedChange[]): ChangeNumbers {
+  const answer = rows.then((read) => strictly(numbersIn(read)));
+  answer.catch(() => {});
+  return { answer, requests: requestsOf(calls) };
 }
 
 /**
@@ -645,6 +759,25 @@ export function isStaleChange(error: unknown): boolean {
 }
 
 class StaleRow extends Error {}
+
+/**
+ * Whether `error` is a strict change's refusal of a row whose seal moved since it was read (`app_change_strict`,
+ * `change_input_strict`: SQLSTATE CF001), which its writer reads again: what `app_change` and `change_input` answer null for.
+ */
+export function isMovedChange(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (cause instanceof MovedRow || (cause as { code?: unknown }).code === MOVED) return true;
+  }
+  return false;
+}
+
+/** The SQLSTATE the strict changes raise for a moved row (migration 0052). */
+export const MOVED = 'CF001';
+
+/** A moved row, where no function raised it: SQLite's steps, or a call that answered null. */
+export class MovedRow extends Error {
+  readonly code = MOVED;
+}
 
 const APP_OPS: Record<PreparedChange['kind'], readonly string[]> = {
   credential: ['credential.issue', 'credential.revoke', 'credential.renew', 'credential.scope'],

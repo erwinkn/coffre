@@ -176,15 +176,15 @@ export async function references(deployment: Deployment, { admin, reader, leaver
   try {
     const read = await reader.api.secrets.reveal(`${DEV}/${HELD}`);
     expect(read.values[HELD] === canaries[source], "a viewer on dev did not read prod's value through dev's reference");
-    // On the whole log, filed at the source, the holder beside it, once sealed and projected, a tick or two on (T166).
-    // 0.15 lists reads by member and on the whole log, not by place (D160): the source's page and the holder's say so.
+    // On the whole log, filed at the source, the holder beside it, once sealed and projected, a tick or two on (T166);
+    // and on the source's environment's page and the holder's (T175).
     const through = (entries: AuditEntryView[]) => entries.filter((entry) => entry.action === 'secret.read' && entry.actorId === reader.email
       && `${entry.project}/${entry.environment}/${entry.key}` === source && (entry.metadata.via as { path?: unknown } | undefined)?.path === `${DEV}/${HELD}`);
     expect(await listed(async () => through((await admin.api.audit.list({ limit: 200, sealed: '1' })).entries).length >= 1),
       "the read through the reference is not on the whole log, filed at its source with the holder beside it");
     for (const path of [PROD, DEV]) {
       const page = await admin.api.audit.list({ path, limit: 200, sealed: '1' });
-      expect(page.readsOmitted === 'path' || through(page.entries).length >= 1, `${path}'s log neither lists the read through the reference nor says where it is`, page.readsOmitted);
+      expect(through(page.entries).length >= 1, `${path}'s log does not list the read through the reference`, page.entries.slice(0, 5));
     }
 
     // What it reads cannot be archived while it reads it (D41): not the key, nor its environment. Its

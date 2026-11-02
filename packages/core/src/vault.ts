@@ -1563,6 +1563,13 @@ export type NamedUseInput = {
    * as a token no credential has, whatever the request names.
    */
   accepts: CredentialAcceptance;
+  /**
+   * Whether the app reads a fork's answer by name, and `<env>@me`'s (T165, B2): the vault then serves a fork's path, a
+   * handle's place that is a fork, and `dev@me`, its caller's personal config of dev or, while they have none, dev,
+   * each resolving the key through what the place inherits, in its one call. Without it (an app of 0.15.0), it serves
+   * none of them by name (`served: false`), and the app reads them as ever.
+   */
+  forks?: boolean;
   purpose: Purpose;
   keepsSensitive?: boolean;
   requestId: string;
@@ -1574,8 +1581,9 @@ export type NamedUseInput = {
 export type CredentialAcceptance = { signin: boolean; issuers: readonly string[] };
 
 /**
- * A named use's answer. `served: false`: none the vault serves this way (a fork, a personal config, a handle of
- * several environments, or a place its stable URL does not mean), and the app reads it as ever. Otherwise the route
+ * A named use's answer. `served: false`: none the vault serves this way (no live place of those names, a personal
+ * config by its own slug, a handle of several environments, a place its stable URL does not mean; and, unless the
+ * call says the app reads them, `forks`, a fork and `dev@me`), and the app reads it as ever. Otherwise the route
  * the request takes, which the vault picks on the credential and its account alone (`routeOf`; D153, review r2):
  *
  * - `credential`: the credential's own check answers (401; a token of 0.10's sealed first): no credential its seals
@@ -1598,8 +1606,13 @@ export type NamedUseOutcome =
     at: { projectId: string; environmentId: string } | null;
   };
 
-/** Why a use was not decided at all: the app answers 503, with `Retry-After`. */
-export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured';
+/**
+ * Why a use was not decided at all: the app answers 503, with `Retry-After`.
+ * `superseded`: the vault that asked holds a signing key the log moved on
+ * from (T168), as an isolate does for the moments a deploy takes; a newer
+ * one answers.
+ */
+export type UseBusy = 'late' | 'overloaded' | 'replayed' | 'ahead' | 'unconfigured' | 'superseded';
 
 /** A value a use opened: its data key, base64, and the version it decrypts, with what its ciphertext is bound to. */
 export type UsedValue = {

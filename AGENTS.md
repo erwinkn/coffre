@@ -178,7 +178,14 @@ call has one Postgres client through Hyperdrive (`HyperdrivePool` in
 `@coffre/db`), connected on its first query. Its queries take turns on it,
 and a transaction holds it from BEGIN to COMMIT; the app's plain reads
 asked together take one turn, under one Sync, one round trip
-(`groupReads`), and fail together. So code inside a
+(`groupReads`), and fail together. A transaction's statements asked
+together go under one Sync too, BEGIN with the first, in the order they
+were started, and the writes
+it leaves to `later` (`@coffre/db`) with its
+COMMIT: a transaction that reads what it needs together (`Promise.all`)
+and leaves the writes whose answer it does not need to `later` is two
+round trips, which `packages/server/test/change-cost.test.ts` holds each
+change route to (T179). So code inside a
 transaction queries through its `tx`, never the database: a query on the
 database would wait for the transaction, which waits for it. `createDatabase`
 refuses one at once, on Node too, so the suites catch it: each transaction's
@@ -215,7 +222,7 @@ unsupported diff select full validation.
   for tests and local development; deployed app databases use Postgres.
 - `pnpm test:matrices` runs the generated matrices of 0.15's use by name
   (every `packages/*/test/*.matrix.ts`: `packages/vault/test/use.matrix.ts`,
-  `packages/server/test/named.matrix.ts`): every key a caller may not have
+  `packages/vault/test/forks.matrix.ts`, `packages/server/test/named.matrix.ts`): every key a caller may not have
   answered alike, whatever the vault's map holds, each statement slowed. They
   take about three quarters of an hour, so `pnpm test` leaves them out;
   `pnpm test:matrices:sqlite` runs them on SQLite. Needs Postgres. CI runs

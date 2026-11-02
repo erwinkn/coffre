@@ -39,15 +39,18 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - Four more hold the workload-access design before it is built
   ([below](#workload-access)): `formal/Workload.tla` and the three
   `formal/Workload*.tla` beside it.
-- Four hold 0.15's rewrite of the vault and the audit log, the spec its
+- Five hold 0.15's rewrite of the vault and the audit log, the spec its
   code follows ([below](#015-the-hot-path-sealing-and-the-cutover)):
   - [`formal/HotPathOne.tla`](../formal/HotPathOne.tla): uses, changes,
     sealed inputs, covers, the deadline and the bulk cap;
   - [`formal/Seal.tla`](../formal/Seal.tla): sealing into two Merkle trees;
   - [`formal/Migration015.tla`](../formal/Migration015.tla): the cutover
-    from 0.14.
+    from 0.14;
   - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
-    that the audit pages read ([below](#readstla)).
+    that the audit pages read ([below](#readstla));
+  - [`formal/Rotation.tla`](../formal/Rotation.tla): the log across a
+    rotation of the vault's signing key, and
+    [`formal/Keyring.tla`](../formal/Keyring.tla), its keyring across two.
 - One holds 0.16's proxy definitions edited in the UI, before they are
   built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
   when its route is a row an Owner edits ([below](#routingtla)).
@@ -579,6 +582,23 @@ move to Cloudflare Access (`BehindAccess`); `ProbingProvider` and
 `ProbingAccess` take each alone. Any request's credential may expire
 while it is under way (`Expiries`).
 
+Where she asks (`Where`, T165): an environment of its own; a fork of it,
+whose key may be its own, its parent's (inherited, which takes her standing
+at the parent too, R8), or its parent's that the fork removed, and whose
+chain someone may cut by archiving the parent (`Cut`), after which the fork
+reads nothing; her personal config of dev, `dev@me`, whose own values are
+hers while she reads or uses dev, whatever she asks, and whose other keys
+are dev's, for what she asks (R20); or `dev@me` with no config of hers,
+read as dev. Her standing at the parent is its own variable
+(`grantedParent`, `RevokeParent`), and the fork may remove a key or bring it
+back (`Dismiss`). Each is the vault's one call by name, the chain resolved
+in it (`ForksByName`); before T165 the vault served none of them by name,
+and the app's own path answered (`AppPath`): `access`, its reads, then a
+use by ids, whose calls hang on the key. `ProbingFork`, `ProbingMine` and
+`ProbingFallback` check them; the first two leave the credential's own
+dimensions (provider, Access, expiry) and the place archived to `Probing`,
+which nothing of a fork changes, to keep TLC to minutes.
+
 One step is one request, whole. `CallerFromUse` is the code's shape, not a
 protection: before PR B, an answer about Ada kept from an earlier request
 (`Accesses`), which a refusal confirms first (`Recalled.confirm`); with
@@ -603,6 +623,10 @@ is, sealed (`useByName`, `Vault.useNamed`).
 | One clock: the app's own check of the credential, after the vault's call, judges its expiry at the use's `at`, the instant the vault judged its end at (`authenticateRequest`, `verify`'s `at`; review r8 of D153) | her token expiring between the request's start and the app's check: a 401 after the vault's two calls and her principal's lock for a key her grant covers, a 401 after one call for a key never made (`NoIsFixed`, `Probing`) |
 | A named call decides her standing at the place, for what she asks, from rows no key decides, before it reads anything of the key's; without standing she is answered on the place alone, as for a key it does not hold, by the same statement, no cover or seals of the isolate's weighed (`use_credential` and `use_stands`, migration 0045, `v_stands`; SQLite's `standsAt`; `namedStanding`, which `use-stands.test.ts` holds the gate to; W268) | a refusal's call reads the key by its name, a reference and its source, before deciding: its work inside hangs on the key's shape (`NoKeyBeforeStanding`, `Probing`, `ProbingFloor`); and with it, a plain value goes back on its own read again (`NoIsFixed`, `Probing`, with `PlainByStanding` off too: the gate refuses her before any plain value is reached) |
 | Before PR B, a busy refusal on a kept answer confirms it first (`Recalled.confirm`) | the same 503 against 403 (`SameAnswer`, `ProbingKept`) |
+| A fork's request, and `dev@me`'s, is the vault's one call by name: the statement finds the place (the fork; her personal config of dev, or dev while she has none) and resolves the key through what it inherits, its own first, then each parent's unless a nearer layer removed it (`use_credential`, migration 0051, `p_forks`, `v_layers`; SQLite's twin; `NamedUseInput.forks`, which the app sets; T165) | before T165, the app's own path, `access` and a use by ids: a reference repointed around the log costs 2 calls beside 1 for a key never made (`NoIsFixed`, `ProbingFork`, `ProbingMine`, `ProbingFallback`) |
+| A key a fork inherits is decided on her standing where it is held, the parent, too (`decideChecked` at the key's own environment, the fork the place it is read through; R8) | on the fork's standing alone: she is handed a value of a parent she does not read, where a key never made is refused (`NoIsFixed`, `ProbingFork`) |
+| A fork whose chain is cut (a parent archived, deleted, not there, or a chain that loops or runs past 3) reads nothing: the statement refuses it on the place, before any key (`n_cut`, answered `archived`; the app's read refuses such a fork whole) | on 0.15.0's rules, which weigh the key's own place and its value's archived: the fork's own key handed back, where a key never made is refused (`NoIsFixed`, `ProbingFork`) |
+| The gate at her personal config weighs dev, as the vault's rule does: hers while she reads or uses dev, whatever she asks (`use_stands_personal`, migration 0051; `namedStanding` with its parent; `personalRefusal`) | on her owning it alone: revoked at dev, her call reads the key's name before the rule refuses her (`NoKeyBeforeStanding`, `ProbingMine`); and without the gate at all, at a fork or her config alike (`StandingFirst`, `ProbingFork`, `ProbingMine`) |
 
 `refusedHere`, which reviews d2 and d4 of #416 needed (a map out of date
 decided on its caller's standing, at the place the request names now:
@@ -623,8 +647,14 @@ Postgres with the principal's lock held and every statement slowed; for
 every key they may not have, the same answer, the same number of the
 vault's calls, no row of the cap's, and its request's entry only where its
 key's row of the cap's is fresh) and `packages/server/test/named.matrix.ts`
-(the same through the app, by the API and the proxy, byte for byte); both
-run as CI's `Use matrices` job (`pnpm test:matrices`). What it abstracts:
+(the same through the app, by the API and the proxy, byte for byte); and,
+at a fork and at `dev@me`, `packages/vault/test/forks.matrix.ts` (both
+engines: the place, a fork, a fork of a fork, her personal config or dev
+read for `dev@me`, by how she lost her standing, at the place or at the
+parent, the map and the window, over eight key states, its own, inherited,
+made since, removed, deleted, never made, a reference ended, a row put
+back; without standing, the same blocks of the key's relations read for
+every key); all run as CI's `Use matrices` job (`pnpm test:matrices`). What it abstracts:
 the load itself (busy is a choice of TLC's, the same in both runs, as
 admission reads nothing a request names; so is a lock held on Ada's
 principal), the calls' own costs (each call, one statement, costs the same
@@ -716,6 +746,9 @@ the cap, a batch refused on its first call's rows, a key the rules refuse.
 | `ProbingKept` | The same before PR B: decided on an answer about Ada kept from before the revoke, which a refusal confirms first (#406 r2) | 114 thousand |
 | `ProbingProvider` | `Probing` with her browser session's sign-in provider removed from the deployment's config and nothing else of the deployment's changing, three requests: every `no` alike (review r6 of D153) | 62 thousand |
 | `ProbingAccess` | `Probing` with the deployment moving its sign-in to Cloudflare Access, three requests: the same (review r7 of D153) | 84 thousand |
+| `ProbingFork` | `Probing` at a fork: its own key, its parent's inherited (her standing there revoked or kept) or removed, the chain cut, three requests, her credential's own dimensions and the place archived left to `Probing` (T165) | 340 thousand |
+| `ProbingMine` | `Probing` at her personal config of dev, `dev@me`: her own value, dev's inherited or removed, the gate weighing dev, three requests, as `ProbingFork` (T165) | 66 thousand |
+| `ProbingFallback` | `Probing` at `dev@me` with no config of hers, read as dev, four requests (T165) | 183 thousand |
 | `Naming` | One request's key name mapped to its id once, while the key is renamed and another named so (T145, PR B) | 31 |
 | `Batching` | Two requests of one principal's, each two keys of three as one batch, at most two keys in the cap's set, every start of their rows, while the caller's standing is revoked or restored once and time ages a row once (T167, B2) | 76 thousand |
 | `BatchingRefused` | The same, the second request naming a key the rules refuse whatever the standing | 26 thousand |
@@ -1938,11 +1971,141 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   it (core's `verifyLog`), before anything is derived from it. A range
   that does not hold stops the projector.
 - CountChecked is `checkReads`, behind `GET /api/audit/reads` (`coffre
-  verify log`). CursorMac is `cursorMac`, ReplaceOnConflict and
+  verify log`), which also holds each listed read to its member's day and
+  its places' (T175), which the pages of each read. CursorMac is `cursorMac`, ReplaceOnConflict and
   IdempotentByNumber `project_reads`' upsert, CursorAfterRows its single
   transaction, FromChecked its `p_from` (SQLite's write the same, in its
   transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
+
+### Rotation.tla
+
+0.15's log across a rotation of the vault's signing key (T168, W277;
+[audit-tree.md](design/audit-tree.md), "A rotation"). Everything the log's
+integrity rests on comes from that key: its trees' signing keys, so every
+pair, and its entries' MAC key. A deploy moves the vault to a new key B (a
+new local KEK, or a new `signingKey` beside a key service) and keeps the
+old one, A, as previous; isolates still under A serve beside B's for the
+moments it takes. Each MAC names its key (its first four bytes, the key's
+tag), so the database can tell them apart.
+
+**The parties.**
+- **Writers** under A, and under B once deployed, each append as Seal.tla's
+  appends do: the fence's lock shared, then the number, then a commit or an
+  abort. The fence holds `retired`, the keys the log moved on from.
+- **The signer** opens as `Checkpointer.open`, its memory and the
+  database's newest row each under a key it holds; writes the rotation
+  entry when the log is under another key than its own (its own once a
+  rotation into it counts, else its head's key), under the barrier's locks, adding
+  that key to `retired`; and ticks. It remembers a pair before writing it,
+  and a crash can fall between any two steps, the rotation and its first
+  pair under B among them. The deploy replaces it whatever it was doing,
+  a pair remembered and not written included (the rotation mid-tick).
+- **The verifier** checks the newest pair, the pair held outside (the
+  signer's memory) and the entries above, with the vault's keys.
+- **A reader** (`Reader`, `RotationReader`): the vault's `vouch` and the
+  reads' projector, which bound A from the rotations and the newest pair
+  (`keyringOf`, `packages/vault/src/keyring.ts`) for one call, keeping
+  nothing.
+- **Eve** holds A (it leaked: why one rotates) and writes the database past
+  every lock and trigger: entries under A at numbers she takes, pairs
+  under A at any place over entries she chooses, rows and entries deleted;
+  in `RotationMove` she renumbers a sealed rotation's row (an entry's MAC
+  covers every column but its number), in `RotationClaim` her pairs carry
+  the name of a key they are not signed under, in `RotationFence` she takes
+  A out of the fence's `retired` (a row of the database's, as writable as
+  the floor beside it) and plants a rotation into A, under A, past A's
+  own, and in `RotationFenceGone` she deletes the vault's own rotation,
+  sealed, as well. `RotationChain` (its own module, `Keyring.tla`) rotates
+  twice, A to B to C, and gives her A and B. `RotationChunked` seals a
+  backlog a part at a time (`WINDOW_MAX`), so a pair under B can lie below
+  the rotation.
+- **A restore** puts back a backup taken at any moment, the signer's memory
+  reset by hand ([restore.md](restore.md)); **a rollback** starts the
+  signer under A again, B previous.
+
+| protection, in the code | turned off, TLC finds |
+|---|---|
+| a writer under a retired key is refused (RetiredRefused: `use_credential`'s `superseded`, the trigger on `log_changes`, migration 0053) | `OldWritesBelowBoundary`: an isolate under A commits past the rotation; and `LogWorks`: no tick can seal past its entry, every change fails at its seal |
+| ... in the statement that takes its number, under the lock (RefusedUnderLock) | `OldWritesBelowBoundary`: a writer that checked before the rotation took its number after it |
+| the rotation written under the barrier's locks, exclusive (RotateUnderLock: `log_rotate`) | `OldWritesBelowBoundary`: a writer under the lock, its check passed, numbered past the rotation |
+| the signer opens its memory under a previous key (MemoryUnderPrevious) | `LogWorks`: "the signer remembers a pair it did not sign", the bug T168 found |
+| ... and the database's newest row (RowUnderPrevious) | `LogWorks`: after a restore (the memory reset), "not a pair signed by this log" |
+| a previous key vouches for an entry only below its rotation, in a tick (from the boundary the signer wrote or read at its open) and in the verifier (BoundaryChecked) | `SealedBelowBoundary`, `VerifiedSound`: Eve's entry under A past the rotation sealed, and passed |
+| a pair under a previous key is taken only below that key's rotation (RotationProbed) | `VerifiedSound`: Eve's pair under A over the rotation, before its first seal, passed |
+| ... and never at or above a pair under the current key held outside (AnchorKeyHeld; at its very place too, which the code's comparison of pairs, by heads, cannot tell apart: Muse's review r7) | `VerifiedSound`: the rotation's row deleted once sealed, Eve's pair under A at or above the memory's passed |
+| the verifier takes the rotation under way: the newest pair under A while no rotation from A is at or below it (PendingAccepted) | `NoFalseAlarm`: every check alarms between the deploy and the rotation's first seal |
+| a signer whose key the log moved on from signs nothing, and the trigger refuses its rotation (KeyNeverBack + RetiredRefused, each covering the other) | `NoOldPairOverRotation`: a config rolled back to A, A signs pairs over its own rotation |
+| a rotation counts only at the number its payload names, under its MAC (NumberInRotation: `rotationOf`; the number taken first, `log_rotate_number`, then MAC'd) | `SealedBelowBoundary`, `VerifiedSound` (`RotationMove`): the sealed rotation moved up, the signer started again counts from there and seals Eve's entry under A between; the check passes it (Sol's review r1 of #444) |
+| a pair is taken under the key its signatures hold under, never a name its notes carry (SignerVerified: `signedUnder`) | `VerifiedSound` (`RotationClaim`): Eve's pair under A over the rotation, naming B, takes the current key's rule and passes (r1) |
+| a replaced key's entries are bounded by its own rotation, whatever key the newest pair is under (KeyringBound: no fast path for a newest pair under the current key) | `NoFalseAlarm` (`RotationChunked`): a pair under B below the rotation, A's honest entries above it refused by every check (r1) |
+| a rotation counts only where the key whose MAC it carries vouches at its number: one into the current key anywhere, one into a key it replaced only below that key's own bound, a chain from the current key back (ChainRule: `chainOf`, `packages/vault/src/rotations.ts`, which the signer's open and every reader call) | `SealedBelowBoundary` (`RotationFence`): A taken out of the fence, a rotation into A planted past A's own; the signer started again moves the log on from A a second time and seals Eve's entry under A below that second boundary (Muse's review r2 of #444). `SealedBelowBoundary` (`RotationFenceGone`): the vault's own rotation, sealed, deleted too; the same (r3). `KeyringSound` (`RotationChain`): with A and B hers after A to B to C, she deletes A to B and plants one under B past B's own rotation, and every reader takes A's word up to it (Fable's review r6 of #444) |
+| a reader reads the rotations and the newest pair in one statement (SnapshotRead: `keyringRows`) | `ReaderNoFalseAlarm`, `ReaderSound` (`RotationReader`): the rotations read before the deploy's rotation, the newest pair after its first seal, A's history refused; or the pair read before the rotation sealed, A trusted past it (r1) |
+
+Liveness (`LogWorks`, `RotationDeploy`; weak fairness on the signer's steps
+and a writer holding the lock): every entry an honest writer commits is
+sealed in time, the signer never left refusing, across the deploy, a crash
+and a restore.
+
+`EXPECTED` (`RotationWindow`): Eve deletes the rotation entry before its
+first seal and signs a pair under A over its place. No check sees it: the
+database no longer shows the rotation, and the memory still holds A's
+pair. This is R51's window for the rotation, normally the moment between
+its write and the tick right after it, longer only if the signer crashes
+between the two. The signer itself is not fooled: it counts from the
+rotation it wrote, so it seals nothing under A past it
+(`SealedBelowBoundary` holds there).
+
+**A third key** (`formal/Keyring.tla`, `RotationChain`). One rotation
+cannot show a rotation whose destination is itself a bounded key: with A to
+B to C, B vouches only below B to C, so an A-to-B entry under B's MAC past
+it, which someone who holds A and B can write, must count for nothing. The
+module keeps only what that takes: the vault's writes, deploys, rotations
+and pairs under its key, gaps, and Eve, who holds A and B, forging entries
+and rotations at any number no entry holds and deleting sealed rotations.
+Its reader bounds each key by the chain rule, a round at a time as
+`chainOf` does. `KeyringSound`: no entry she forged is taken at a number
+where none of her keys vouched; `NoFalseAlarm`: with nobody but the vault
+at work, every entry it wrote is taken. Without ChainRule (each rotation on
+its MAC alone) TLC finds Fable's trace. Not modelled there: the signer's
+steps, locks and fence (Rotation.tla's), a rotation deleted before its first
+seal (`RotationWindow`), pairs Eve signs, and two deploys inside one tick.
+
+**Not modelled:** two signers at once, which the hosts rule out (one Durable
+Object, one runner per memory), though `log_rotate` reads the fence again
+under its locks; the kinds of entries and the two trees, retention, witnesses
+and time, the same for every key (Seal.tla's); seals, which a use checks under every
+key the vault holds (see audit-tree.md, "A rotation").
+
+**The readers.** The reads' projector (Reads.tla's, which models one key),
+`coffre verify log`'s check of the reads, the vault's `vouch` and
+retention's cut and its wait on the projector take a key's word for
+pairs, entries, reads and the cursor, through the same function the
+verifier's rule calls, `ringOf` (`keyringOf` reads it in one statement): a
+replaced key vouches below its rotation's number only; one no rotation
+retired yet, while the newest pair is under it; otherwise for nothing. A
+reader keeps no bound between calls: across a restore, the rotation comes
+back at another number. What the model checks of them is that one bound,
+read in one statement (`Reader`, SnapshotRead): a stateless call, as
+`vouch` is. The projector's state across the two keys is not modelled
+(Muse's review r3 of #444): its cursor under the old key, its ranges
+walked under the keys that vouch where each starts, each held to the pair
+that starts it, not to the newest. So someone who holds the old key and
+writes the database can, below the rotation, still do what the leak let
+her do before it: move the old key's cursor among numbers below the
+rotation (the projector lists a stretch again, or skips one, which the
+check of the reads names), or replace a pair below the rotation the
+projector has yet to list, with uses of her own (`coffre verify log`'s
+walk, which chains every pair to the newest, names it). Nothing at or
+past the rotation, so long as the database's newest pair is the vault's
+(Muse's review r7): these readers hold no pair outside, and the projector
+keeps a run's bound for the run, so a forger who deletes the rotation and
+signs the newest pair again under the old key takes them back to before
+it, until the verifier's check against the signer's pair (AnchorKeyHeld,
+at or past its place) or the signer's next start names it. Neither the
+projector against such a pair nor a rotation landing mid-run is modelled.
+Tested in `packages/vault/test/reads-rotation.test.ts` and, for
+retention, `retention.test.ts`.
 
 ## 0.16: proxy definitions in the UI
 
@@ -2095,7 +2258,7 @@ shards 10.9 (5.8 and 5.5 here).
 | hotpath-skew | 5.4 min | 29 min | 11.0 min (measured) |
 | seal | 4.9 min | 23 min | about 10 min (estimated) |
 | seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
-| seal-retention | 3.9 min | not measured | about 8 min (estimated) |
+| seal-retention | 6.5 min, Rotation's 2.6 of it | not measured | about 13 min (estimated) |
 
 Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
@@ -2135,7 +2298,8 @@ every pull request that is not a version-only bump:
     - `hotpath-skew` (its slack and clock-skew scenarios);
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
-    - `seal-retention` (SealRetention and SealRetentionCrash);
+    - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
+      eleven, about 3.5 minutes of it here before the last three);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints

@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- **A page of reads costs as much on a connection's sixth call as on its
+  first.** `log_reads_by` and `log_reads_at`, which list a member's reads
+  and a key's, an environment's or a project's, let Postgres switch to a
+  generic plan after five calls on a connection, one that scanned every
+  day's partition of the reads: about 23,000 to 30,000 pages at a hundred
+  days, against 19 to 35, and `log_reads_at` planned so again after each
+  new day. Migration 0054 pins both to a plan for each call's own values
+  (`plan_cache_mode = force_custom_plan`); their bodies are unchanged, and
+  the previous release runs on it.
+
+- **A change's last statements go with its COMMIT, in the app and in the
+  vault (T179).** A key written is 16 round trips to Postgres, down from 18
+  (24 before 0.16), and a member added 14, down from 18: the app's append,
+  its 0.15 changes and the COMMIT go under one Sync, and so do the vault's
+  member update, its changes and the COMMIT, the append riding with the
+  decision's first write. Migration 0052 adds `app_change_strict` and
+  `change_input_strict`, which raise where `app_change` and `change_input`
+  answer null for a row that moved since it was read, so that Postgres
+  skips the COMMIT; nothing else of the schema changes, and the previous
+  release runs on it.
+
+- **A fork's key and `dev@me`'s are the vault's one call by name, as an
+  environment's.** A reveal of `market/feature/API_KEY` (a fork of dev), of
+  `market/dev@me/API_KEY`, or of either as a list of one, and the proxy's
+  `/use` on a fork's URL or a handle's stable URL made for a fork, now take
+  one call of the vault's, which finds the place (the fork; your personal
+  config of dev, or dev while you have none), decides your standing there
+  before it reads anything of the key, and resolves the key through what
+  the place inherits, its own first, then each parent's unless a nearer one
+  removed it. Before, the vault served neither by name, and the app's own
+  path read them, whose work hung on the key: a refusal there cost one call
+  or two by the key's shape (D153). Every refusal of a key there is now the
+  one `not_available` answer, in one call. A fork whose parent is archived
+  reads nothing, as before, now refused by the vault on the place alone.
+  An app of 0.15.0 asks for none of it, and an app of this release asks a
+  vault of 0.15.0 in vain: each reads them as before, mid-deploy
+  (migration 0051, additive).
+
 - **`coffre verify instance` never picks the instance for you.** It
   creates a project, an environment, a service account, grants and a secret
   and walks the whole audit log, and until now it took this machine's
@@ -61,6 +99,61 @@
   on the same server, whose login a new password would cut off. The
   refusal now says to record its id, which makes it this deployment's.
   Setup's Hyperdrive step names each config kept by its own name.
+
+- **Reads on the pages of a key, an environment and a project.** 0.15.0
+  listed 0.15's reads on the whole log and each member's page only
+  (`readsOmitted: 'path'` elsewhere). `GET /api/audit?path=`, `coffre
+  audit <path>` and MCP's `read_audit_log` now list each read at its key,
+  the key's environment and project, the fork it was read in, and through
+  a reference at its source's. Each page reads a fixed few indexes no
+  further than a page, however many forks, references or sources the
+  place has had (R48; measured in `docs/design/0.15-plan.md`, "As built:
+  T175"). A reader of some places sees the reads at places they read,
+  none at an environment their role leaves out; a read hidden from them
+  is passed over, and a page may come back short with a `next` to go on
+  from: `coffre audit` now prints it on stderr and takes it back as
+  `--before=<next>`. Migration 0050 (SQLite 0028) adds an index for each place column
+  of `log_reads` (about 280 bytes a read) and `log_read_place_days`,
+  written by triggers whoever writes the reads, 0.15.0's projector
+  included, and places the reads 0.15.0 listed: additive, safe to run
+  before the deploy. `coffre verify log` names a read missing from a
+  place's pages.
+
+- **0.15's log keeps working across a rotation of the vault's signing key.**
+  A new local vault key (the old one in `previousKeks`), or with a key
+  service a new `signingKey` (the old one in the new `previousSigningKeys`),
+  changes the key the log's checkpoints and entries are signed under. Until
+  now the checkpointer then refused its own memory ("the signer remembers a
+  pair it did not sign"), and with it reset the database's newest pair, so
+  every change failed at its seal. Now its first start under the new key
+  writes a rotation entry, past which the old key vouches for nothing,
+  carries its memory across and seals on under the new key, as 0.14 does
+  with `key.rotate`. Each entry's MAC names its key in its first 4 bytes
+  (0.15.0's tag), so that a vault still under the old key, for the moments a
+  deploy takes, writes nothing past the rotation: its uses are answered
+  `superseded` (503, `Retry-After`) and its changes refused (migration
+  0053, SQLite 0029: `log_fence.retired`, a trigger on `log_changes`,
+  `log_rotate`, and `use_credential` with its arguments unchanged). The
+  check takes a rotation under way, and refuses a pair or an entry under the
+  old key past it. A witness's settings take `previous`, the log's keys
+  under each replaced key. The audit pages' reads go on too: the projector
+  lists the old key's sealed uses after the rotation and moves on under
+  the new key, `coffre verify log` holds reads listed before it under the
+  old key, and no reader takes the old key's word for anything at or past
+  the rotation (the projector, the check, the pages' `vouch`, retention,
+  whose cut for a day that ended before the rotation is under the old key),
+  so long as the database's newest pair is the vault's: one who holds the
+  old key, deletes the rotation and signs the newest pair again under it
+  takes these readers back to before it, until the verifier's check
+  against the signer's pair, or the signer's next start, names it.
+  A rotation's
+  entry names its own number under its MAC, so that one moved counts for
+  nothing, and counts only where the key it moves the log to vouches at
+  that number, so that one planted under a key replaced since counts for
+  nothing either.
+  `runCheckpointer`'s, `keepCheckpointer`'s and the checkpointer object's
+  `seed` is now `signingKeys`, all of the vault's. Modelled first
+  (`formal/Rotation.tla`), each protection shown necessary (T168).
 
 ## 0.15.0 (2026-11-01)
 
@@ -239,6 +332,7 @@
   too. A cutover check that does not answer, as on an instance made on
   0.15 whose checkpointer is stuck, now says that coffre could not check
   its audit log, not that coffre is moving it.
+
 - **0.15's read of several keys is one vault call and one statement, behind its switch.**
   A reveal of an environment, `coffre export` and the Action's `keys:`
   opened each value by a vault call of its own, about 3.5 ms of Workers

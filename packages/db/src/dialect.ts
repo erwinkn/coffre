@@ -60,6 +60,16 @@ export async function rowsOf<Row>(db: Queryable, query: SQL): Promise<Row[]> {
   return (db as unknown as { all<R>(query: SQL): Promise<R[]> }).all<Row>(query);
 }
 
+/**
+ * `rowsOf`, its statement started now (`.then`), not once awaited: in a transaction, ahead of what is asked after it in
+ * the same task, which goes behind it in its group (postgres-js's `flush`), where an awaited one would go a microtask
+ * later. For a statement that must go first: `policyNow`, ahead of an `audited` work's first `later` write.
+ */
+export function rowsNow<Row>(db: Queryable, query: SQL): Promise<Row[]> {
+  if (engineOf(db) === 'postgres') return (db as unknown as { execute(query: SQL): PromiseLike<Row[]> }).execute(query).then((rows) => [...rows]) as Promise<Row[]>;
+  return (db as unknown as { all<R>(query: SQL): PromiseLike<R[]> }).all<Row>(query).then((rows) => rows) as Promise<Row[]>;
+}
+
 /** Insert the rows whose unique keys are free; returns how many that was. */
 export async function insertIfAbsent(db: Queryable, table: Table, rows: object[]): Promise<number> {
   return changedRows(await db.insert(table).values(rows as never).onConflictDoNothing());

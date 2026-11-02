@@ -42,5 +42,6 @@ export const {
   logTiles,
   logReads,
   logReadDays,
+  logReadPlaceDays,
   logReadsCursor,
 } = schema;

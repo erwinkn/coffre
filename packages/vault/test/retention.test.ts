@@ -10,14 +10,15 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { after, before, beforeEach, test } from 'node:test';
 
-import { leafHash, openPair, pairSigners, pairVerifiers, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
+import { leafHash, openPair, verifyInclusion, verifyLog, type PairNotes, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { Checkpointer, FenceClosed } from '../src/checkpointer.ts';
 import { logObject } from '../src/inputs.ts';
-import { DAYS_AHEAD, upkeep } from '../src/log-checkpointer.ts';
-import { authentic, logMacKey, RETENTION_OBJECT, retentionCut, type LogMacKey } from '../src/log-entry.ts';
+import { verifierKeys, type VerifierKeys } from '../src/keyring.ts';
+import { DAYS_AHEAD, logKey, openLogCheckpointer, upkeep } from '../src/log-checkpointer.ts';
+import { authentic, RETENTION_OBJECT, retentionCut, type LogMacKey } from '../src/log-entry.ts';
 import { logStore, type LogStore } from '../src/log-store.ts';
 import { checkReads, cursorMac, projectReads } from '../src/reads.ts';
 import { DAY_MS, dayOf, retain } from '../src/retention.ts';
@@ -30,6 +31,7 @@ let seed: Buffer;
 let signers: PairSigners;
 let verifiers: PairVerifiers;
 let macKey: LogMacKey;
+let keys: VerifierKeys;
 let log: ReturnType<typeof logWriter>;
 
 /**
@@ -57,9 +59,10 @@ const MIDNIGHT_GUARD_MS = 20_000;
 before(async () => {
   db = await openTestDatabase();
   seed = randomBytes(32);
-  signers = await pairSigners('coffre.test/audit', seed);
-  verifiers = await pairVerifiers({ changes: signers.changes.verifierKey, uses: signers.uses.verifierKey });
-  macKey = logMacKey(seed);
+  // The log's keys of a seed, as a host derives them, so that the upkeep's (which derives its own) are the same.
+  const key = await logKey(seed);
+  ({ signers, verifiers, mac: macKey } = key);
+  keys = { current: { origin: key.origin, verifiers, mac: macKey }, previous: [] };
   log = logWriter(ENGINE === 'sqlite' ? db.vault : db.owner, macKey);
 });
 after(() => db?.close());
@@ -133,6 +136,50 @@ async function later(cp: Checkpointer) {
   assert.ok((await cp.tick()).signed);
 }
 
+test('T168, review r3 of #444: a day whose cut is under the key the log moved on from goes, its cut and the reads\' cursor under that key taken below its rotation, never past it', async () => {
+  // The old key's log: D10 and D9's midnight sealed under it, the cut among its pairs.
+  const memory = variableMemory();
+  const raw = logStore(db.vault, { tileRange: RANGE });
+  let cursor: { through: bigint; mac: Buffer } = { through: 0n, mac: Buffer.alloc(0) };
+  // The reads' cursor, where the test puts it, MAC'd under the key it says.
+  const store: LogStore = { ...raw, readsCursor: async () => ({ through: cursor.through, pair: 0n, at: 0, mac: cursor.mac }) };
+  const old = await Checkpointer.open(raw, signers, { memory, authentic: authentic(macKey), alert: () => {}, freshMs: FRESH, now });
+  await midnight(old);
+  const cut = (await store.cutAt(MIDNIGHT))!.upto;
+  await old.close();
+  // The deploy: a new key, the old one kept. Its signer writes the rotation, then seals under the new key.
+  const fresh = randomBytes(32);
+  const cp = await openLogCheckpointer({ store, signingKeys: [fresh, seed], memory, now, freshMs: FRESH });
+  const [rotation] = await raw.rotations();
+  const until = rotation!.number;
+  assert.ok(cut < until);
+  const underNew = logWriter(ENGINE === 'sqlite' ? db.vault : db.owner, (await logKey(fresh)).mac);
+  const laterUnderNew = async () => {
+    await sleep(2 * FRESH + 50);
+    clock += 2 * FRESH + 50;
+    await underNew.change();
+    assert.ok((await cp.tick()).signed);
+  };
+  const both = await verifierKeys([fresh, seed]);
+  const underOld = (through: bigint) => ({ through, mac: cursorMac(macKey, { through, pair: 0n, at: 0 }) });
+  // With the new key alone, as retention had it before, the old key's cut is no pair of this log: the day never goes.
+  cursor = underOld(until - 1n);
+  await assert.rejects(retain(cp, store, { keepDays: 9, keys: { current: both.current, previous: [] }, now }), /no pair of this log, at or below the signer's/);
+  // With both, the cut opens under the old key, below its rotation: the change for D10 written under the new key, its
+  // pair not two freshness bounds past the cut yet.
+  assert.match((await retain(cp, store, { keepDays: 9, keys: both, now })).waiting?.reason ?? '', /not two freshness bounds past it/);
+  await laterUnderNew();
+  // The cursor under the old key at the rotation: not the vault's, as every reader takes it. Retention waits.
+  cursor = underOld(until);
+  assert.match((await retain(cp, store, { keepDays: 9, keys: both, now })).waiting?.reason ?? '', /the reads' cursor, at \d+, is not the vault's/);
+  // Below it, the projector's last move before the rotation: D10 goes.
+  cursor = underOld(until - 1n);
+  const r = await retain(cp, store, { keepDays: 9, keys: both, now });
+  assert.equal(r.waiting, null);
+  assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
+  await cp.close();
+});
+
 const exists = async (table: string) =>
   (await rows<{ found: boolean }>(db.owner, sql`SELECT to_regclass(${`public.${table}`}) IS NOT NULL AS found`))[0]!.found;
 
@@ -144,7 +191,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.ok(before.ok, before.problems.join('\n'));
 
   // The change is written and sealed, but its pair is not two freshness bounds past the cut yet: nothing is dropped.
-  const early = await retain(cp, store, { keepDays: 9, macKey, now });
+  const early = await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual(early.dropped, []);
   assert.match(early.waiting?.reason ?? '', /not two freshness bounds past it/);
   const [first] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
@@ -152,7 +199,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
 
   // Later: D10 goes, alone (D9 is not due yet), with the change written for it; D9's uses numbered below the cut stay.
   await later(cp);
-  const r = await retain(cp, store, { keepDays: 9, macKey, now });
+  const r = await retain(cp, store, { keepDays: 9, keys, now });
   assert.equal(r.waiting, null);
   assert.deepEqual(r.dropped.map((d) => d.day), [D10]);
   for (const n of d10) assert.equal(await store.locate(n), null, `${n} dropped`);
@@ -161,7 +208,7 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.deepEqual(r.detached, ENGINE === 'postgres' ? [D10] : []);
   if (ENGINE === 'postgres') {
     assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
-    assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey, now })).detached, []);
+    assert.deepEqual((await retain(cp, store, { keepDays: 9, keys, now })).detached, []);
     assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), false);
   }
   // The uses tree's leaf tiles below the cut: the range [0, 512) gone, the tile holding the cut kept, at each level.
@@ -183,10 +230,10 @@ test('a day dropped below its sealed retention change, across midnight: straggle
   assert.ok(cutUpto >= d9.at(-1)!, 'the cut, the first pair past the end of D10, holds D9\'s first uses too');
 
   // Then D9: covered by the cut already, so no second change; the stragglers go with it, and the log still verifies.
-  const next = await retain(cp, store, { keepDays: 1, macKey, now });
+  const next = await retain(cp, store, { keepDays: 1, keys, now });
   assert.deepEqual(next.dropped, [{ day: D9, change: null }]);
   for (const n of d9) assert.equal(await store.locate(n), null);
-  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
   assert.deepEqual(await store.days(), [TODAY, dayOf(clock + DAY_MS)].slice(0, ENGINE === 'postgres' ? 2 : 1));
   const again = await verify(store);
   assert.ok(again.ok, again.problems.join('\n'));
@@ -207,7 +254,6 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   // The reads' days beside the uses', as the store's upkeep makes them.
   if (ENGINE === 'postgres') await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
-  const keys = { verifiers, mac: macKey };
   const projectedAll = async () => {
     for (let run = 0; run < 100; run += 1) {
       const { through, sealed } = await projectReads(store, keys, { steps: 100 });
@@ -227,25 +273,25 @@ test("the reads' projection goes on across retention's cuts, and the whole log's
   // D10 due, but none of its reads listed yet: retention waits on the projector, which no day it has yet to read leaves
   // (review r4: a projector stopped through retention once skipped D9's stragglers below the cut, unsaid).
   await later(cp);
-  const waiting = await retain(cp, store, { keepDays: 9, macKey, now });
+  const waiting = await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual(waiting.dropped, []);
   assert.match(waiting.waiting?.reason ?? '', /the reads' projection \(through 0\) has not reached the cut/);
   // Nor once a database writer moves the cursor past the cut around the projector: by its MAC, not its number (review r7).
   const owner = ENGINE === 'sqlite' ? db.vault : db.owner;
   await run(owner, sql`UPDATE log_reads_cursor SET through = 1000000000`);
-  const moved = await retain(cp, store, { keepDays: 9, macKey, now });
+  const moved = await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual(moved.dropped, []);
   assert.match(moved.waiting?.reason ?? '', /the reads' cursor, at 1000000000, is not the vault's/);
   await run(owner, sql`UPDATE log_reads_cursor SET through = 0`);
   await projectedAll();
   assert.deepEqual(await checked(), []);
   // D10 cut, and dropped with its reads; then D9, its stragglers with it; then the log goes on past both.
-  await retain(cp, store, { keepDays: 9, macKey, now });
-  await retain(cp, store, { keepDays: 9, macKey, now });
+  await retain(cp, store, { keepDays: 9, keys, now });
+  await retain(cp, store, { keepDays: 9, keys, now });
   await projectedAll();
   assert.deepEqual(await checked(), []);
-  await retain(cp, store, { keepDays: 1, macKey, now });
-  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
   for (let i = 0; i < 30; i += 1) await log.use();
   assert.ok((await cp.tick()).signed);
   await projectedAll();
@@ -257,8 +303,8 @@ test('a dropped use put back is never sealed again', async () => {
   const { d10 } = await midnight(cp);
   const [copy] = await rows<Record<string, unknown>>(db.owner, sql`SELECT * FROM log_uses WHERE number = ${d10[0]!}`);
   await later(cp);
-  assert.deepEqual((await retain(cp, store, { keepDays: 9, macKey, now })).waiting, null);
-  await retain(cp, store, { keepDays: 9, macKey, now });
+  assert.deepEqual((await retain(cp, store, { keepDays: 9, keys, now })).waiting, null);
+  await retain(cp, store, { keepDays: 9, keys, now });
   // A writer who read it before puts it back (its day made again, on Postgres), at a fresh number: its MAC holds, and no
   // original is left for a request-ID check to find. (Beside its original, the replay's key, (at, request_id), refuses
   // it.) Stamped weeks before the floor of `at`, no tick's window reads it (BarrierChecksFloor); one that did would find
@@ -281,7 +327,7 @@ test('what a writer does below the cut after, seen: the retention change, a kept
   const { cp, store } = await open();
   const { changes } = await midnight(cp);
   await later(cp);
-  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
   assert.ok((await verify(store)).ok);
   const retention = (await store.retention())!.entry.number;
   const owner = db.owner;
@@ -324,14 +370,14 @@ test('a crash between the retention change and the drop: the next run finishes, 
       return store.dropDay(day);
     },
   });
-  await assert.rejects(retain(cp, crashing, { keepDays: 1, macKey, now }), /crash/);
+  await assert.rejects(retain(cp, crashing, { keepDays: 1, keys, now }), /crash/);
   // The change stands, sealed; the uses below it are not walked, and the log verifies meanwhile.
   assert.ok((await verify(store)).ok);
   await later(cp);
-  const r = await retain(cp, crashing, { keepDays: 1, macKey, now });
+  const r = await retain(cp, crashing, { keepDays: 1, keys, now });
   // A day a run on Postgres (one DETACH a run); SQLite deletes both at once.
   assert.deepEqual(r.dropped.map((d) => [d.day, d.change]), ENGINE === 'postgres' ? [[D10, null]] : [[D10, null], [D9, null]]);
-  for (let i = 0; i < 3; i += 1) await retain(cp, crashing, { keepDays: 1, macKey, now });
+  for (let i = 0; i < 3; i += 1) await retain(cp, crashing, { keepDays: 1, keys, now });
   for (const day of [D10, D9]) assert.ok(!(await store.days()).includes(day), `${day} dropped`);
   const [count] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_changes WHERE request_id LIKE 'retention:%'`);
   assert.equal(Number(count!.n), 1);
@@ -347,7 +393,7 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
   await reader.unsafe('BEGIN');
   await reader.unsafe('SELECT count(*) FROM log_uses');
   try {
-    const held = await retain(cp, store, { keepDays: 1, macKey, now });
+    const held = await retain(cp, store, { keepDays: 1, keys, now });
     assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
     assert.match(held.waiting?.reason ?? '', /^a reader holds the table past the lock timeout/);
     assert.deepEqual(held.detached, []);
@@ -357,10 +403,10 @@ test('a reader holding the uses past drop_day\'s lock timeout makes the run wait
     await reader.end();
   }
   // One day detached a run: D10 now, D9 the next.
-  const r = await retain(cp, store, { keepDays: 1, macKey, now });
+  const r = await retain(cp, store, { keepDays: 1, keys, now });
   assert.deepEqual(r.detached, [D10]);
   assert.equal(r.waiting, null);
-  assert.deepEqual((await retain(cp, store, { keepDays: 1, macKey, now })).detached, [D9]);
+  assert.deepEqual((await retain(cp, store, { keepDays: 1, keys, now })).detached, [D9]);
 });
 
 test("a reader holding a day's reads past drop_reads_day's lock timeout makes the run wait; the next drops them before the uses' partition, so the day is never forgotten with its reads listed (T166, review r10)", { skip: ENGINE === 'postgres' ? false : 'Postgres only: its locks' }, async () => {
@@ -368,7 +414,7 @@ test("a reader holding a day's reads past drop_reads_day's lock timeout makes th
   await run(db.owner, sql`SELECT make_reads_day(${D10}::date), make_reads_day(${D9}::date), make_reads_day(${TODAY}::date)`);
   await midnight(cp);
   await later(cp);
-  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, { verifiers, mac: macKey }, { steps: 100 }));
+  for (let through = 0n, sealed = 1n; through < sealed;) ({ through, sealed } = await projectReads(store, keys, { steps: 100 }));
   const d10 = (await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_reads WHERE at >= ${Date.parse(`${D10}T00:00:00Z`)} AND at < ${MIDNIGHT}`))[0]!.n;
   assert.equal(d10, 600);
   // A reader of D10's reads, a backup say, past the reads' drop's lock timeout: the uses' day detached, its reads kept.
@@ -376,7 +422,7 @@ test("a reader holding a day's reads past drop_reads_day's lock timeout makes th
   await reader.unsafe('BEGIN');
   await reader.unsafe(`SELECT count(*) FROM log_reads WHERE at < ${MIDNIGHT}`);
   try {
-    const held = await retain(cp, store, { keepDays: 9, macKey, now });
+    const held = await retain(cp, store, { keepDays: 9, keys, now });
     assert.deepEqual([held.waiting?.day, held.waiting?.lock], [D10, true]);
     assert.equal(await exists(`log_reads_${D10.replaceAll('-', '')}`), true);
   } finally {
@@ -385,10 +431,14 @@ test("a reader holding a day's reads past drop_reads_day's lock timeout makes th
   }
   // Found again by its uses' partition, still there detached: its reads go, then the uses'.
   assert.equal(await exists(`log_uses_${D10.replaceAll('-', '')}`), true);
-  await retain(cp, store, { keepDays: 9, macKey, now });
-  await retain(cp, store, { keepDays: 9, macKey, now });
+  await retain(cp, store, { keepDays: 9, keys, now });
+  await retain(cp, store, { keepDays: 9, keys, now });
   assert.deepEqual([await exists(`log_reads_${D10.replaceAll('-', '')}`), await exists(`log_uses_${D10.replaceAll('-', '')}`)], [false, false]);
-  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${Date.parse(`${D10}T00:00:00Z`) / DAY_MS}`))[0]!.n, 0);
+  // Its members' days of reads go with it, and its places' (T175), which the projector's writes placed.
+  const day = Date.parse(`${D10}T00:00:00Z`) / DAY_MS;
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_days WHERE day = ${day}`))[0]!.n, 0);
+  assert.equal((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day = ${day}`))[0]!.n, 0);
+  assert.ok((await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM log_read_place_days WHERE day > ${day}`))[0]!.n > 0, "the later days' places stay");
 });
 
 /**
@@ -428,7 +478,7 @@ test('review r2: two days due at once, each cut its own: a catch-up drops both, 
   // A day a run, each cut its own, each with its change; the tiles below each newest cut go as it is sealed and fresh. A
   // day left below a newer cut (a crash, an older version's run) is not proved again from tiles that may be gone.
   const runs = [];
-  for (let i = 0; i < 4; i += 1) runs.push(await retain(cp, store, { keepDays: 1, macKey, now }));
+  for (let i = 0; i < 4; i += 1) runs.push(await retain(cp, store, { keepDays: 1, keys, now }));
   assert.ok(runs.every((r) => r.waiting === null), JSON.stringify(runs.map((r) => r.waiting)));
   assert.deepEqual(runs.map((r) => r.detached), ENGINE === 'postgres' ? [[D10], [D9], [], []] : [[], [], [], []]);
   const changed = runs.flatMap((r) => r.dropped).filter((d) => d.change !== null).map((d) => d.day);
@@ -448,7 +498,7 @@ test('review r2: rows deleted to push the cut later are refused: the cut is the 
   // came before it past the end.
   const first = (await store.cutAt(MIDNIGHT))!;
   await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto = ${first.upto}`);
-  await assert.rejects(retain(cp, store, { keepDays: 1, macKey, now }), /no pair of this log, at or below the signer's \(up to \d+\), that is the first past the day's end/);
+  await assert.rejects(retain(cp, store, { keepDays: 1, keys, now }), /no pair of this log, at or below the signer's \(up to \d+\), that is the first past the day's end/);
   assert.equal((await store.retention()), null, 'no retention change');
 });
 
@@ -459,7 +509,7 @@ test('review r2: a day that waits on the same lock for a day is an alarm', { ski
   const held: LogStore = Object.assign(Object.create(store) as LogStore, { dropDay: async () => Promise.reject(Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' })) });
   const alerts: string[] = [];
   let t = clock;
-  const keep = upkeep(cp, held, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, held, { keepDays: 1, signingKeys: [seed], now: () => t, alert: (m) => alerts.push(m) });
   await keep();
   t += DAY_MS - 3_600_000;
   await keep();
@@ -479,9 +529,9 @@ test('review r3: a quiet log, whose pairs have not passed a day\'s end, waits wi
   // Three days on, today's and tomorrow's days (made ahead) are due: nothing signed past their end yet.
   let t = clock + 3 * DAY_MS;
   const alerts: string[] = [];
-  const keep = upkeep(cp, store, { keepDays: 1, seed, now: () => t, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, store, { keepDays: 1, signingKeys: [seed], now: () => t, alert: (m) => alerts.push(m) });
   await keep();
-  assert.match((await retain(cp, store, { keepDays: 1, macKey, now: () => t })).waiting?.reason ?? '', /is not past the day's end yet/);
+  assert.match((await retain(cp, store, { keepDays: 1, keys, now: () => t })).waiting?.reason ?? '', /is not past the day's end yet/);
   for (let i = 0; i < 3; i += 1) {
     t += DAY_MS;
     await keep();
@@ -493,7 +543,7 @@ test('T119, item 2: the store forgets each leaf range it drops, and makes it aga
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
-  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
   assert.equal(await exists('log_tiles_uses_0'), false);
   // A write into the range dropped (none does: a write's tiles are at the edge, above every cut) makes it again first.
   const top = cp.pair.pair.upto + 1_000_000n;
@@ -510,7 +560,7 @@ test('the upkeep makes the next days ahead and prunes the bulk cap\'s rows its w
   const old = Date.now() - 900_000 - 60_000 - 3000 - 3_600_000 - 60_000;
   await run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) VALUES ('token:a', ${randomUUID()}, ${old}), ('token:a', ${randomUUID()}, ${Date.now()})`);
   const alerts: string[] = [];
-  const keep = upkeep(cp, store, { keepDays: null, seed, now, alert: (m) => alerts.push(m) });
+  const keep = upkeep(cp, store, { keepDays: null, signingKeys: [seed], now, alert: (m) => alerts.push(m) });
   await keep();
   await keep();
   assert.deepEqual(alerts, []);
@@ -551,7 +601,7 @@ test('R48: retention\'s reads cost the same at 10k and at 1M entries: a day\'s c
   const { cp, store } = await open();
   await midnight(cp);
   await later(cp);
-  await retain(cp, store, { keepDays: 1, macKey, now });
+  await retain(cp, store, { keepDays: 1, keys, now });
   /**
    * History around it: uses from the start of the test's day (a minute back could be yesterday's, a day with no
    * partition), changes of other objects, and checkpoints, one for every hundred entries, their
@@ -604,5 +654,5 @@ test('T169, review r5: a fence closed under retention\'s consistency proof goes 
       throw new FenceClosed('this checkpointer was closed (stalled): another holds its memory');
     },
   });
-  await assert.rejects(retain(cp, fenced, { keepDays: 9, macKey, now }), (error: Error) => error instanceof FenceClosed);
+  await assert.rejects(retain(cp, fenced, { keepDays: 9, keys, now }), (error: Error) => error instanceof FenceClosed);
 });

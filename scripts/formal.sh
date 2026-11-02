@@ -102,6 +102,15 @@ REMOVALS=(
   # D150 (fallback D), W268: her standing decided from rows no key decides, before any of the key's is read.
   "Probing StandingFirst NoKeyBeforeStanding"
   "ProbingFloor StandingFirst NoKeyBeforeStanding"
+  # T165 (B2): a fork's request and `dev@me`'s, by name in the vault's one call, the chain resolved in it.
+  "ProbingFork ForksByName NoIsFixed"
+  "ProbingMine ForksByName NoIsFixed"
+  "ProbingFallback ForksByName NoIsFixed"
+  "ProbingFork ParentInDecision NoIsFixed"
+  "ProbingFork CutByPlace NoIsFixed"
+  "ProbingFork StandingFirst NoKeyBeforeStanding"
+  "ProbingMine StandingFirst NoKeyBeforeStanding"
+  "ProbingMine GateWeighsParent NoKeyBeforeStanding"
   # B2 (Batching.tla, T167): a request's several keys, one vault call and one statement, two rounds as a use by ids.
   "Batching StrongestFirst NoWaitCycle"
   "Batching CountsOwnBatch CapHolds"
@@ -429,6 +438,39 @@ REMOVALS=(
   "ReadsSeal ProjectorApart ChangeAnswered"
   "ReadsLive CursorAfterRows EveryUseProjected"
   "ReadsLive DeriveFromSealed EveryUseProjected"
+  # 0.15's log across a rotation of the vault's signing key (Rotation.tla; T168, W277). An isolate under the old key,
+  # serving on after the deploy, is refused at its write, under the lock, ordered against the rotation's entry.
+  "RotationDeploy RetiredRefused OldWritesBelowBoundary"
+  "RotationDeploy RetiredRefused LogWorks"
+  "RotationDeploy RefusedUnderLock OldWritesBelowBoundary"
+  "RotationDeploy RotateUnderLock OldWritesBelowBoundary"
+  # The signer carries its memory across, and takes the database's pair under the old key after a restore.
+  "RotationDeploy MemoryUnderPrevious LogWorks"
+  "RotationDeploy RowUnderPrevious LogWorks"
+  "RotationDeploy PendingAccepted NoFalseAlarm"
+  # Someone who holds the old key: it vouches for nothing past the rotation, in a tick or a check.
+  "RotationLeak BoundaryChecked SealedBelowBoundary"
+  "RotationLeak BoundaryChecked VerifiedSound"
+  "RotationLeak RotationProbed VerifiedSound"
+  "RotationLeak AnchorKeyHeld VerifiedSound"
+  # A config rolled back to the old key: its signer signs nothing, refused by itself or by the trigger.
+  "RotationRollback KeyNeverBack+RetiredRefused NoOldPairOverRotation"
+  # Sol's review r1 of #444: a tick sealing its window in parts leaves a pair under the new key below the rotation; a
+  # rotation's row renumbered; a pair naming a key it is not signed under; a reader whose two reads straddle the deploy.
+  "RotationChunked KeyringBound NoFalseAlarm"
+  "RotationMove NumberInRotation SealedBelowBoundary"
+  "RotationMove NumberInRotation VerifiedSound"
+  "RotationClaim SignerVerified VerifiedSound"
+  "RotationReader SnapshotRead ReaderNoFalseAlarm"
+  "RotationReader SnapshotRead ReaderSound"
+  # Muse's review r2 of #444: the fence's `retired` is a row a database writer edits; a rotation into the old key,
+  # planted past its own, must not make the signer write a second boundary.
+  "RotationFence ChainRule SealedBelowBoundary"
+  # Muse's review r3: the vault's own rotation deleted as well; the planted rotation still counts for nothing.
+  "RotationFenceGone ChainRule SealedBelowBoundary"
+  # Fable's review r6: two rotations, A to B to C, and someone who holds A and B; a rotation counts only where the key
+  # it moves the log to vouches at its number (Keyring.tla).
+  "RotationChain ChainRule KeyringSound"
 )
 
 # What a design does not protect, with every protection of the scenario on: TLC must find it broken.
@@ -466,6 +508,9 @@ EXPECTED=(
   # An Owner who releases a reserved name while a deployment still serving defines it: the UI definition saved after,
   # hidden there, serves again once that deployment is gone (Routing.tla). Release says so before it acts.
   "RoutingRelease NoRevival"
+  # The rotation entry deleted before its first seal, by someone who holds the old key, who signs a pair over its
+  # place: the rotation's window, a tick long, which no check sees (Rotation.tla).
+  "RotationWindow VerifiedSound"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
@@ -476,8 +521,9 @@ EXPECTED=(
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
 # scenarios), hotpath-bulk (the bulk cap's main scenario), hotpath-skew (its
 # slack and clock-skew scenarios), seal (Seal and Migration015),
-# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention and
-# SealRetentionCrash). A scenario in no case below is in `rest`.
+# seal-plugin (SealPlugin and SealCore) and seal-retention (SealRetention,
+# SealRetentionCrash and the key's Rotation scenarios). A scenario in no case
+# below is in `rest`.
 SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew seal seal-plugin seal-retention"
 shard_of() {
   case "$1" in
@@ -488,7 +534,7 @@ shard_of() {
     HotPathOneLive|HotPathOneStallLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;
     HotPathOne*) echo hotpath ;;
     SealPlugin|SealCore|SealStall) echo seal-plugin ;;
-    SealRetention*) echo seal-retention ;;
+    SealRetention*|Rotation*) echo seal-retention ;;
     Seal|Migration015*) echo seal ;;
     *) echo rest ;;
   esac

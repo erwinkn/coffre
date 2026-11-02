@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import type { ObjectChange, PreparedChange } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
+import { isMovedChange, type ChangeNumbers } from '@coffre/db/log';
 
 import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
 import { connectionObject, credentialObject, environmentObject, secretObject } from './objects.ts';
-import { changeInputs, isStale, newestChange, newestSealedChanges, readObject, type ChangeCall, type ReadKind } from './store.ts';
+import { isStale, laterInputs, newestChange, newestSealedChanges, readObject, type ChangeCall, type ReadKind } from './store.ts';
 
 /**
  * 0.15's change path (plan PR 4a; formal/HotPathOne.tla's change actions):
@@ -106,6 +107,8 @@ type Staged = { ref: Ref & { kind: ReadKind }; steps: Step[]; read?: Read; old?:
 export class Changes {
   readonly #keys: ChangeKeys;
   readonly #staged = new Map<string, Staged>();
+  /** The calls `commit` made, once it has: what the transaction's failure is of (`failed`). */
+  #made: readonly ChangeCall[] | null = null;
 
   constructor(keys: ChangeKeys) {
     this.#keys = keys;
@@ -161,9 +164,11 @@ export class Changes {
    * run, and apply its ops to it in turn.
    */
   async prepare(db: Queryable): Promise<void> {
-    for (const staged of this.#staged.values()) {
-      if (staged.read !== undefined) continue;
-      const read = await this.#read(db, staged.ref);
+    const unread = [...this.#staged.values()].filter((staged) => staged.read === undefined);
+    // Each object's reads asked together: one round trip for them all.
+    const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref)));
+    for (const [i, staged] of unread.entries()) {
+      const read = reads[i]!;
       if (read.logged) {
         for (const { op } of staged.steps) {
           const after = applyOp(read.now, staged.ref, op);
@@ -197,12 +202,11 @@ export class Changes {
    * Log every staged change, in the decision's transaction, once its writes
    * have run, at `at`, `written` holding the members' objects as the
    * decision read them back after its writes, if it did: the numbers of their entries, which the decision
-   * waits to see sealed before it answers (R51). Throws `NotLogged` for a
-   * row a writer put back (ChangeChecksSeal), and `Moved` for one whose
-   * seal moved since it was read (ChangeCAS), which the decision then reads
-   * again.
+   * waits to see sealed before it answers (R51), and which answer with its COMMIT, which they go with
+   * (`laterInputs`). A row a writer put back (ChangeChecksSeal), or whose seal moved since it was read
+   * (ChangeCAS), fails the transaction, which `failed` says is `NotLogged`, or `Moved`, read again.
    */
-  async commit(tx: Transaction, at: number, written: ReadonlyMap<string, Input> = new Map()): Promise<bigint[]> {
+  async commit(tx: Transaction, at: number, written: ReadonlyMap<string, Input> = new Map()): Promise<ChangeNumbers> {
     if ([...this.#staged.values()].some((staged) => staged.read === undefined)) throw new Error('changes committed before they were prepared: prepare reads each object before the writes run');
     const calls: ChangeCall[] = [];
     for (const { ref, steps, read, old } of this.#staged.values()) {
@@ -226,15 +230,20 @@ export class Changes {
         from = seal;
       });
     }
-    let numbers: (bigint | null)[];
-    try {
-      numbers = await changeInputs(tx, calls);
-    } catch (error) {
-      if (isStale(error)) throw new NotLogged(calls.length === 1 ? calls[0]!.ref : null, 'stale');
-      throw error;
-    }
-    if (numbers.some((number) => number === null)) throw new Moved();
-    return numbers as bigint[];
+    this.#made = calls;
+    return laterInputs(tx, calls);
+  }
+
+  /**
+   * What the decision's transaction failed with, as the vault hears it, once its changes went with its COMMIT
+   * (`commit`): a row that is not its object's newest change's is `NotLogged`, reported; one moved since it was read,
+   * `Moved`, read again (ChangeRereads).
+   */
+  failed(error: unknown): unknown {
+    if (this.#made === null) return error;
+    if (isStale(error)) return new NotLogged(this.#made.length === 1 ? this.#made[0]!.ref : null, 'stale');
+    if (isMovedChange(error)) return new Moved();
+    return error;
   }
 }
 

@@ -1,4 +1,5 @@
 import { hashToken, tokenKind, type TokenKind } from '@coffre/core/identity';
+import { personalOf } from '@coffre/core/schemas';
 import { newUseRequestId, USE_DEADLINE_MS, type CredentialAcceptance, type Purpose } from '@coffre/core/vault';
 
 import { authenticateRequest, refusedByKind, type AuthenticatedIdentity } from './auth.ts';
@@ -15,16 +16,21 @@ export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): Cre
 /**
  * 0.15's use by name, the vault's one call (T145, PR B; formal/Probing.tla): a request's one key, or none (`key` null:
  * the caller's standing at the place alone), at the place its path names, or the one a handle was made for (`place`
- * null). The vault answers the rows the request checks, its credential's MAC and token's hash among them, and the
- * caller as it decided them from the sealed rows it read: nothing is read, asked or kept here first.
+ * null). The place may be a fork, whose key the vault finds where the fork inherits it from, or `dev@me`, its caller's
+ * personal config of dev, or dev while they have none (T165, B2; `forks`). The vault answers the rows the request
+ * checks, its credential's MAC and token's hash among them, and the caller as it decided them from the sealed rows it
+ * read: nothing is read, asked or kept here first.
  *
  *   Ada's `coffre secrets get market/dev/API_KEY`   one vault call   its value, her standing, the rows: no statement here
  *   the same, her grant revoked                    one vault call   404 `not_available`, whatever API_KEY is or was
  *   the same, API_KEY never made, or ended         one vault call   the same 404: one answer for every refusal (D153)
+ *   the same at market/dev-ada, inherited from dev one vault call   decided at the fork and at dev, where it is held
+ *   the same at market/dev@me                      one vault call   at her personal config of dev, or dev without one
  *
- * Null where the vault serves none so (a token of another kind, a fork, a personal config, a handle of several
- * environments, SQLite's or 0.14's vault) or the token is none it knows: the request goes as ever, and is answered as
- * ever, or the vault's seals bear out no standing of the caller's. Busy, it throws as a use refused.
+ * Null where the vault serves none so (a token of another kind, a personal config by its own slug, a handle of several
+ * environments, a vault older than this app, which serves no fork, SQLite's or 0.14's vault) or the token is none it
+ * knows: the request goes as ever, and is answered as ever, or the vault's seals bear out no standing of the caller's.
+ * Busy, it throws as a use refused.
  *
  * The app checks the credential after the vault's call, on the rows it answered (`authenticateRequest`), so that the
  * named path costs one call. So the vault's "authenticated" must be the app's: whatever the app would refuse of a
@@ -64,7 +70,7 @@ export async function useByName(
   const at = Date.now();
   const answered = await runtime.vault.useNamed({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, key: asked.key, accepts: acceptance(runtime), purpose: asked.purpose,
-    requestId: newUseRequestId(), at, deadline: at + USE_DEADLINE_MS,
+    requestId: newUseRequestId(), at, deadline: at + USE_DEADLINE_MS, forks: true,
     ...(asked.unless === undefined ? {} : { unless: asked.unless }),
   });
   if (!answered.served) return null;
@@ -75,7 +81,7 @@ export async function useByName(
   // of 0.10's yet to be sealed): the credential's own check answers, as ever (401), the token sealed first.
   if (answered.route === 'credential') return null;
   const { outcome } = answered;
-  const ahead = namedAhead(runtime.db, answered.app);
+  const ahead = namedAhead(runtime.db, answered.app, { personal: asked.place !== null && personalOf(asked.place.environment) !== null });
   // The credential checked on the rows the use answered, its MAC and token's hash among them, as a request reads them,
   // its expiry at the use's `at`, as the vault judged it (one clock, review r8): of what this checks, only a forged
   // row's MAC is not decided above or by the vault (D154; the comment above).
