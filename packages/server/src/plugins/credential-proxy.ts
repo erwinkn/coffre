@@ -704,7 +704,10 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     if (credential.placeholder !== undefined) {
       const ride = riding(credential, (key) => plainKeys.has(key));
       const rule = ride.length === 1 ? ride[0] : undefined;
-      if (rule?.shape === undefined) {
+      if (rule !== undefined && rule.shape === undefined) {
+        throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form or JSON rule carries, and in ${held.environment.path} the handle rides in its ${rule.kind}() rule, which no placeholder shapes: drop the placeholder, or mark that rule's keys plain`);
+      }
+      if (rule === undefined) {
         throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form or JSON rule carries, and ${held.environment.path}'s keys that are no plain ones sit in ${ride.length} of its rules: mark the others plain, or drop the placeholder`);
       }
       placeholder = await shaped(coffre, credential, rule.keys[0]!, handle, readOf(proxy, path));
@@ -1238,19 +1241,15 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * null: 405 when no entry takes its method, on its path or on any; 403 when
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
- * (proxy-match.ts). An empty segment but a trailing one, `//`, or one of
- * `;` parameters, spaces or dots alone, is refused unless an entry of
- * methods alone takes the request: a glob counts segments, and a server may
- * read either as none. Such an entry, or no list, sends it on, as S3's keys
- * may hold `//`.
+ * (proxy-match.ts). A `*` takes no empty segment (`//`) and none of `;`
+ * parameters, spaces or dots alone, which a server may read as none; a
+ * prefix, a `**`, a trailing slash or an entry of methods alone takes them,
+ * as S3's keys may hold `//`.
  */
 function allowed(credential: Resolved, method: string, relative: string): Response | null {
   if (credential.allowed === null) return null;
   if (credential.allowed.length === 0) return failure(403, `${credential.name}'s allow list is empty: it takes no request`);
-  // An entry of methods alone that takes this one takes any path, counting no segment: the request goes, whatever the others name.
-  if (credential.allowed.some((entry) => entry.path === null && entry.methods !== null && entry.methods.has(method))) return null;
   const segments = credential.allowed.some((entry) => entry.path !== null) ? requestSegments(relative) : [];
-  if (segments === null) return failure(400, 'the path has an empty segment, //, or one a server may read as none: ; parameters, spaces or dots alone');
   const verdict = allows(credential.allowed, method, segments);
   if (verdict === 'allowed') return null;
   if (verdict === 'path') return failure(403, `${credential.name} is not for ${relative}`);
@@ -1460,6 +1459,8 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (token === null && caller === null) return null;
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return nonced(aimed, caller);
+  // An environment the URL names, which a code item may not serve: before the body is read or the gate asked, as `forward`.
+  if (path !== null && !serves(credential, path)) return nonced(notServed(credential.name, path), caller);
   const content = await carried(request, credential);
   if (content instanceof Response) return nonced(content, caller);
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what

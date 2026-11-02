@@ -151,18 +151,23 @@ export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathP
  * A request's path under the upstream (`/companies/42`, `/` for the
  * upstream itself) as the segments it is matched as, each decoded once, to
  * bytes: no UTF-8 check, case folding or normalization. The root is one
- * empty segment, as a trailing slash is. Null for an empty segment that is
- * not the last (`//`), or one that `vanishes` (`;x`, `%20`, `...`,
- * anywhere), which a glob would count as one and a server may read as none.
+ * empty segment, as a trailing slash is. An empty segment (`//`) or one
+ * that `vanishes` (`;x`, `%20`, `...`) stays as it is: only a `*` refuses
+ * one (`matches`).
  */
-export function requestSegments(relative: string): string[] | null {
-  const segments = relative.slice(1).split('/');
-  const decoded = segments.map(bytesOf);
-  for (const [at, segment] of segments.entries()) if (segment === '' ? at < segments.length - 1 : vanishes(decoded[at]!)) return null;
-  return decoded;
+export function requestSegments(relative: string): string[] {
+  return relative.slice(1).split('/').map(bytesOf);
 }
 
-/** Whether `pattern` matches the request's decoded `segments`: one pass over the pattern's own. */
+// Whether `pattern` matches the request's decoded `segments`: one pass over
+// the pattern's own. A `*` takes one segment a server reads as one, never an
+// empty one or one that `vanishes`: a server that drops `;` parameters reads
+// `/companies/;x/documents` as `/companies//documents`, or
+// `/companies/documents`, which `/companies/*/documents` does not take.
+// Anywhere else such a segment is harmless: a literal never equals one
+// (`readPattern`), and past a prefix, a `**` or a trailing slash, the path a
+// server makes of it is still inside (`/bucket/a//b`, an S3 key, under
+// `/bucket`).
 export function matches(pattern: PathPattern, segments: readonly string[]): boolean {
   if (pattern.tail === 'never') return false;
   const wanted = pattern.segments;
@@ -171,7 +176,7 @@ export function matches(pattern: PathPattern, segments: readonly string[]): bool
   for (let at = 0; at < wanted.length; at++) {
     const want = wanted[at];
     const have = segments[at]!;
-    if (want === ONE ? have === '' : have !== want) return false;
+    if (want === ONE ? vanishes(have) : have !== want) return false;
   }
   switch (pattern.tail) {
     case 'prefix':

@@ -43,7 +43,7 @@ function proxy(credential: Partial<Credential>) {
   return { reached, ask };
 }
 
-test("section 7's table: each segment decoded once and matched; a dot segment, an encoded slash, a control byte or `//` refused", async () => {
+test("section 7's table: each segment decoded once and matched; a dot segment, an encoded slash or a control byte refused, and `//` fills no `*`", async () => {
   const { reached, ask } = proxy({ allow: [{ path: '/companies/*/documents/**' }, { path: '/kyc' }] });
   assert.equal((await ask('/companies/42/documents/a%20b.pdf')).status, 200);
   // Matched as `documents`, never missed for its spelling.
@@ -52,7 +52,7 @@ test("section 7's table: each segment decoded once and matched; a dot segment, a
   for (const path of ['/kyc/..%2fadmin', '/kyc/%25252e%25252e/admin', '/kyc/..%20/admin', '/kyc/..%00/admin', '/kyc/..;/admin']) {
     assert.deepEqual(await ask(path), { status: 400, message: "the path may not climb out of the credential's upstream" }, path);
   }
-  assert.deepEqual(await ask('/companies//x'), { status: 400, message: 'the path has an empty segment, //, or one a server may read as none: ; parameters, spaces or dots alone' });
+  assert.deepEqual(await ask('/companies//documents'), { status: 403, message: 'api is not for /companies//documents' });
   // `%2e%2e` is `..` to a URL parser, which resolves it before any server code runs: the request is for /admin, outside the list.
   assert.deepEqual(await ask('/kyc/%2e%2e/admin'), { status: 403, message: 'api is not for /admin' });
   assert.equal(reached.length, 2);
@@ -67,6 +67,14 @@ test('a plain path is a prefix by segments; code\'s trailing slash takes what is
   assert.equal((await below.ask('/companies')).status, 403);
   const all = proxy({ paths: ['/'] });
   for (const path of ['', '/', '/a', '/a/b/c']) assert.equal((await all.ask(path)).status, 200, path);
+});
+
+test('past a prefix, `//` and a segment a server may read as none go on as on 0.15: an S3 key under a bucket\'s path', async () => {
+  for (const credential of [{ paths: ['/bucket'] }, { methods: ['GET'], paths: ['/bucket'] }, { allow: [{ path: '/bucket' }] }, { allow: [{ path: '/bucket/**' }] }, { paths: ['/bucket/'] }]) {
+    const { reached, ask } = proxy(credential);
+    for (const path of ['/bucket/a//b', '/bucket/%20/b', '/bucket/a//', '/bucket/;x', '/bucket/...']) assert.equal((await ask(path)).status, 200, `${JSON.stringify(credential)} ${path}`);
+    assert.deepEqual(reached, ['/v1/bucket/a//b', '/v1/bucket/%20/b', '/v1/bucket/a//', '/v1/bucket/;x', '/v1/bucket/...']);
+  }
 });
 
 test('`*` is one non-empty segment and the pattern is matched exactly; `**`, last, is the rest, none included', async () => {

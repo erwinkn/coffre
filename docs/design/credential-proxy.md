@@ -468,15 +468,16 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   non-empty segment, matched exactly (`/companies/*/documents`); `**`,
   last, is the rest, none included (`/models/**` takes `/models`). No
   regexes, no partial-segment globs (`doc*`). A pattern is decoded once,
-  as it is read. Unless an entry of methods alone takes the request, an
-  empty segment but a trailing one (`//`) is refused, and so is one of `;` parameters alone
-  (`;x`, `%3Bx`), or of spaces and dots alone (`%20`, `...`), which a
-  server that drops them, as Tomcat and Spring do the parameters and
-  Windows the trailing spaces and dots, reads as empty: `*` would count
-  it, and the server not. A pattern with such a segment matches nothing,
-  with a warning at startup. An entry of
-  methods alone counts no segment, and takes `//` as S3's keys hold it,
-  whatever the other entries name. A
+  as it is read. A `*` takes no empty segment (`//`), and none of `;`
+  parameters alone (`;x`, `%3Bx`) or of spaces and dots alone (`%20`,
+  `...`), which a server that drops them, as Tomcat and Spring do the
+  parameters and Windows the trailing spaces and dots, reads as empty or
+  none: `/companies/;x/documents` is `/companies/documents` to it, which
+  `/companies/*/documents` does not take. Anywhere else such a segment
+  goes on, as on 0.15: a literal segment is never one, and past a prefix,
+  a `**` or a trailing slash, what a server makes of it is still inside
+  (`/bucket/a//b`, an S3 key, under `/bucket`). A pattern with such a
+  segment matches nothing, with a warning at startup. A
   request no entry takes is a 405 when no entry takes its method, on its
   path or any, and a 403 otherwise; an empty list takes nothing, a 403.
   `methods` and `paths`, as before, are one entry per path, and keep what

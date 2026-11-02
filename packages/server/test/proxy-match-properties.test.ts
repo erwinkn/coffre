@@ -46,10 +46,13 @@ const coffre = {
 /** A pattern as the model reads it: its literal segments as text (`*` as null), and what may follow them. */
 type Model = { segments: (string | null)[]; tail: 'prefix' | 'below' | 'exact' | 'rest' };
 
-/** Whether the model takes a path given as its segments, each text. */
+/**
+ * Whether the model takes a path given as its segments, each text, one byte
+ * a character: a `*` any segment a server reads as one, none that `vanishes`.
+ */
 function takes(model: Model, path: readonly string[]): boolean {
   if (path.length < model.segments.length) return false;
-  if (!model.segments.every((want, at) => (want === null ? path[at] !== '' : path[at] === want))) return false;
+  if (!model.segments.every((want, at) => (want === null ? !vanishes(path[at]!) : path[at] === want))) return false;
   return model.tail === 'below' ? path.length > model.segments.length : model.tail === 'exact' ? path.length === model.segments.length : true;
 }
 
@@ -83,13 +86,23 @@ const utf8 = (text: string) => String.fromCharCode(...new TextEncoder().encode(t
 /** `%XX` as its byte, one character each. */
 const decode = (text: string) => text.replace(/%([0-9a-f]{2})/gi, (_, byte: string) => String.fromCharCode(parseInt(byte, 16)));
 
-/** Whether a segment, not empty, is empty to a server that drops `;` parameters or trailing spaces and dots, decoded however often: refused under a list. */
-function bare(segment: string): boolean {
-  if (segment === '') return false;
-  for (let view = utf8(segment); ; view = decode(view)) {
+/** Whether a segment, as bytes, is none to a server that drops `;` parameters or trailing spaces and dots, decoded however often: `''`, `;x`, `%20`, `...`. */
+function vanishes(segment: string): boolean {
+  for (let view = segment; ; view = decode(view)) {
     if (/^[ .]*$/.test(view.split(';')[0]!)) return true;
     if (decode(view) === view) return false;
   }
+}
+
+/**
+ * The paths a server may make of `segments`: as they are; each that
+ * `vanishes` empty (`/companies//documents`); and those gone, a last one
+ * left empty, a trailing slash (`/companies/documents`).
+ */
+function readings(segments: readonly string[]): string[][] {
+  const emptied = segments.map((segment) => (vanishes(segment) ? '' : segment));
+  const gone = emptied.filter((segment, at) => segment !== '' || at === emptied.length - 1);
+  return [[...segments], emptied, gone.length === 0 ? [''] : gone];
 }
 
 /** A byte as a URL may write it in a path: as it is when it needs no encoding and `raw` says so, else `%XX` in either case, or `%25XX`, encoded twice. */
@@ -147,17 +160,17 @@ test(`no encoding of a path outside the allow list reaches the upstream, and a o
   if (reached.length === 1) {
     assert.equal(answer.status, 200);
     // What the upstream got, as a server reads it decoded once, twice, until it no longer changes: the model takes each.
+    // Decoded once, twice, until it no longer changes, each segment that vanishes kept, emptied or gone: the model takes each.
     let view = reached[0]!.slice('/v1/'.length).split('/').map(decode);
-    assert.ok(!view.slice(0, -1).includes(''), `the upstream got ${reached[0]}, with an empty segment`);
-    assert.ok(!reached[0]!.slice('/v1/'.length).split('/').some(bare), `the upstream got ${reached[0]}, with a segment of ; parameters, spaces or dots alone`);
     for (let again = 0; again < 4; again++) {
-      assert.ok(inside(view), `the upstream got ${reached[0]}, which reads as /${view.join('/')}, outside ${allow.map((entry) => entry.path).join(' ')}`);
+      for (const reading of readings(view)) {
+        assert.ok(inside(reading), `the upstream got ${reached[0]}, which reads as /${reading.join('/')}, outside ${allow.map((entry) => entry.path).join(' ')}`);
+      }
       view = view.map(decode);
     }
   } else assert.notEqual(answer.status, 200);
-  if (once && path.every(safe) && !path.slice(0, -1).includes('') && !path.some(bare)) {
-    // Written once, with no `//` and no segment of `;` parameters alone, which a list refuses: the request is the path, which goes exactly when the model takes
-    // it, as the app wrote it.
+  if (once && path.every(safe)) {
+    // Written once: the request is the path, which goes exactly when the model takes it, as the app wrote it.
     assert.equal(reached.length === 1, inside(path.map(utf8)), `status ${answer.status}`);
     if (reached.length === 1) assert.equal(reached[0], `/v1/${encoded}`);
   }

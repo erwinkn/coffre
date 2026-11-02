@@ -103,7 +103,9 @@ Each file names its model and its sources in its header.
   patterns, and random encodings of random paths, sent through the proxy's
   own route, its path check and the matcher together, against a model of
   the rules: no encoding of a path the model leaves outside reaches the
-  upstream, at any number of decodings; a path written once reaches it
+  upstream, at any number of decodings, nor as a server reads it that
+  empties or drops a segment of `;` parameters, spaces or dots alone
+  (`/companies/;x/documents` as `/companies/documents`); a path written once reaches it
   exactly when the model takes it, byte for byte; and matching reads at
   most as many of the request's segments as each entry's pattern holds.
 - **The Postgres tunnel** (`packages/server/test/tunnel-properties.test.ts`,

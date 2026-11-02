@@ -72,8 +72,8 @@ test('a presigned URL is refused for a path a request would be, at every decodin
     assert.match(answer.body, /may not climb out/, path);
   }
   assert.equal((await presign('/bucket/private/k')).status, 403);
-  // A segment of `;` parameters alone, which `*` would count and Tomcat would drop.
-  assert.equal((await presign('/bucket/public/;/k')).status, 400);
+  // A segment of `;` parameters alone, past `**`: under /bucket/public/ whether Tomcat drops it or not.
+  assert.equal((await presign('/bucket/public/;/k')).status, 200);
   // Encoded deeper than anything sends, 40 KB of `%2525…`: refused, in 8 decodings, never a stack overflow.
   const deep = await presign(`/bucket/public/%${'25'.repeat(20_000)}2e/k`);
   assert.equal(deep.status, 400);
@@ -82,24 +82,26 @@ test('a presigned URL is refused for a path a request would be, at every decodin
   assert.equal((await presign(`/bucket/public/%${'25'.repeat(8)}41/k`)).status, 400, 'nine, refused');
 });
 
-test('a segment of ; parameters alone is refused where an entry names a path; a list of methods alone takes // and ;', async () => {
+test('a segment of ; parameters alone fills no `*`, which a server may read as none; a prefix and a list of methods alone take it', async () => {
   const { reached, ask } = proxy({ allow: [{ path: '/companies/*/documents' }, { path: '/kyc' }] });
   // And spaces or dots alone, which Windows drops from a segment's end: `/companies/%20/documents` is `/companies//documents` to it.
-  for (const path of ['/companies/;/documents', '/companies/;x/documents', '/companies/%3Bx/documents', '/companies/%253Bx/documents', '/kyc/;', '/companies/%20/documents', '/companies/%20%20/documents', '/companies/.../documents', '/companies/....;x/documents', '/companies/%2520/documents', '/kyc/%20']) {
+  for (const path of ['/companies//documents', '/companies/;/documents', '/companies/;x/documents', '/companies/%3Bx/documents', '/companies/%253Bx/documents', '/companies/%20/documents', '/companies/%20%20/documents', '/companies/.../documents', '/companies/....;x/documents', '/companies/%2520/documents']) {
     const answer = await ask(`/market/dev/api${path}`);
-    assert.equal(answer.status, 400, path);
-    assert.match(answer.body, /an empty segment, \/\/, or one a server may read as none: ; parameters, spaces or dots alone/, path);
+    assert.equal(answer.status, 403, path);
+    assert.match(answer.body, /api is not for/, path);
   }
   assert.equal((await ask('/market/dev/api/companies/a%20b/documents')).status, 200, 'a space inside a segment is a byte of it');
   assert.equal((await ask('/market/dev/api/companies/a;b/documents')).status, 200, 'a segment with bytes before its parameters is one');
-  assert.equal(reached.length, 2);
+  // Past a prefix: /kyc/ to a server that drops it, still under /kyc.
+  for (const path of ['/kyc/;', '/kyc/%20', '/kyc//a']) assert.equal((await ask(`/market/dev/api${path}`)).status, 200, path);
+  assert.equal(reached.length, 5);
   const methods = proxy({ methods: ['GET'] });
   for (const path of ['/bucket//key', '/bucket/;/key']) assert.equal((await methods.ask(`/market/dev/api${path}`)).status, 200, path);
   assert.equal((await methods.ask('/market/dev/api/bucket//key', { method: 'PUT' })).status, 405);
   // Beside an entry that names a path, an entry of methods alone still takes them: it counts no segment, whatever the others name.
   const mixed = proxy({ allow: [{ methods: ['GET'] }, { methods: ['POST'], path: '/x' }] });
   for (const path of ['/bucket//key', '/bucket/%20/key', '/bucket/;x/key']) assert.equal((await mixed.ask(`/market/dev/api${path}`)).status, 200, path);
-  assert.equal((await mixed.ask('/market/dev/api/bucket//key', { method: 'POST' })).status, 400, 'POST is the path entry\'s, which counts segments');
+  assert.equal((await mixed.ask('/market/dev/api/bucket//key', { method: 'POST' })).status, 405, 'POST is the path entry\'s, for /x only: GET\'s entry takes every path');
   assert.equal((await mixed.ask('/market/dev/api/x', { method: 'POST' })).status, 200);
   assert.equal(mixed.reached.length, 4);
 });
