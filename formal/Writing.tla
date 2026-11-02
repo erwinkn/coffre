@@ -8,10 +8,12 @@
 (*   key write   1. the vault's statement, as a use's (HotPathOne): under  *)
 (*                  the fence shared, every input the decision and the     *)
 (*                  app's checks stand on (the credential, the member, the *)
-(*                  policy, the environment and each one of its fork       *)
-(*                  chain, a regenerate's replaced keys), each with its    *)
-(*                  newest change, held to its row (StaleFirst), and the   *)
-(*                  request numbered. Nothing locked after it.             *)
+(*                  roles, the policy, the environment and each one of its *)
+(*                  fork chain, the parent's keys weighed: the one a       *)
+(*                  regenerate replaces, the one whose level an override   *)
+(*                  inherits), each with its newest change, held to its    *)
+(*                  row (StaleFirst), and the request numbered. Nothing    *)
+(*                  locked after it.                                       *)
 (*               2. the Worker decides on what the statement read (pure,   *)
 (*                  decide.ts), wraps the value's key and seals the app's  *)
 (*                  change from the key's object as read.                  *)
@@ -20,23 +22,25 @@
 (*                  key's change from the seal it was made from            *)
 (*                  (ChangeCAS); then, in statements after it, each input  *)
 (*                  has no change numbered after the one the vault read    *)
-(*                  (its newest in `log_changes`, not its row's column);   *)
-(*                  the commit. Any guard failing rolls it all back, and   *)
-(*                  the write asks again from 1.                           *)
+(*                  (its newest in `log_changes`, not its row's column),   *)
+(*                  the keys it writes aside (ChangeCAS holds those); the  *)
+(*                  commit. Any guard failing rolls it all back, and the   *)
+(*                  write asks again from 1.                               *)
 (*               4. the seal wait (R51), then the answer.                  *)
-(*   member add  1. the vault reads the actor's standing, the policy and   *)
-(*                  the principal's row, holding nothing (Lifecycle's      *)
-(*                  issue, IssuerCAS);                                     *)
+(*   member add  1. the vault reads the actor's standing, the roles, the   *)
+(*                  policy, the services setting, the places of the first  *)
+(*                  grants and the principal's row, holding nothing        *)
+(*                  (Lifecycle's issue, IssuerCAS);                        *)
 (*               2. the Worker decides and builds the new row, its MAC     *)
 (*                  and its seal, from the row as read;                    *)
 (*               3. one statement: the rows, the head, the fence; it goes  *)
-(*                  ahead only while the actor's object, the policy and    *)
-(*                  the principal's row are what step 1 read; otherwise it *)
-(*                  writes nothing and the vault reads again;              *)
+(*                  ahead only while everything step 1 decided on is what  *)
+(*                  it read; otherwise it writes nothing and the vault     *)
+(*                  reads again;                                           *)
 (*               4. the seal wait, then the answer.                        *)
 (*                                                                         *)
-(* Every other change (a revoke, a session's end, a policy change, an      *)
-(* archive, a demotion) is one atomic step here, as each is one statement  *)
+(* Every other change (a revoke, a session's end, a role or policy change, *)
+(* an archive, a demotion) is one atomic step here, as each is one statement  *)
 (* or one transaction under the head and the fence in the code.            *)
 (*                                                                         *)
 (* One step is one statement, or the part of one between two lock waits    *)
@@ -57,15 +61,23 @@
 (*   w1, w2   Ada writes key k at env, each from her session cA;           *)
 (*   rev      an admin takes Ada's grant at env away (her member object);  *)
 (*   end      Ada's session cA is revoked (the credential alone);          *)
-(*   pol      an Owner changes the policy: Ada's role no longer writes at  *)
-(*            env, and adding members is the Owners' alone;                *)
-(*   arc      a maintainer archives env;                                   *)
+(*   rol      an Owner redefines Ada's role (`role.define`, the roles      *)
+(*            object): it no longer writes, nor adds members;              *)
+(*   pol      an Owner changes the instance policy (its own object): what  *)
+(*            Ada's write or an admin's add needs no longer holds;         *)
+(*   arc      a maintainer archives env, or protects it (both move env's   *)
+(*            object);                                                     *)
 (*   par      a maintainer archives env's fork parent;                     *)
 (*   rep      the parent's key that Ada's regenerate replaces is written   *)
 (*            meanwhile, so what she listed is no longer what it replaces; *)
+(*   mrk      the parent's key whose level Ada's override inherits is      *)
+(*            marked sensitive: her write's level was weighed on the old;  *)
 (*   dbw      a database writer puts cA's row back, live, after its revoke;*)
 (*   bob, cy  two admins each add the service account svc;                *)
 (*   dem      an Owner demotes Bob;                                        *)
+(*   cls      an Owner closes the services setting: Bob, no admin, set up  *)
+(*            service accounts under it;                                   *)
+(*   plc      a maintainer archives the place of svc's first grant;        *)
 (*   ck       the checkpointer: each tick seals every committed number.    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
@@ -94,7 +106,9 @@ CONSTANTS
     \* (`app_change`'s CAS, ChangeCAS): another write meanwhile fails it.
     ChangeCAS,
     \* What a member add's write holds to its read (IssuerCAS): any of
-    \* "actor" (the adder's own object) and "policy". Normally both.
+    \* "actor" (the adder's own object), "roles", "policy", "settings" (the
+    \* services setting's newest entry) and "place" (each first grant's
+    \* environment). Normally all.
     AdmitHeld,
     \* ... and the principal's row is the one it read (none): the change
     \* from its object as read.
@@ -106,12 +120,16 @@ Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
 \* What each other change moves: one object, turned against the writer or
 \* the adder.
-Moves == [rev |-> "member", end |-> "cred", pol |-> "policy", arc |-> "env",
-          par |-> "parent", rep |-> "replaced", dem |-> "bob"]
-\* What a key write stands on: Ada's session, her member object, the policy,
-\* the environment, its fork parent, the key her regenerate replaces.
-Inputs == {"cred", "member", "policy", "env", "parent", "replaced"}
-Movable == Inputs \cup {"bob"}
+Moves == [rev |-> "member", end |-> "cred", rol |-> "roles", pol |-> "policy",
+          arc |-> "env", par |-> "parent", rep |-> "parentKey", mrk |-> "parentKey",
+          dem |-> "bob", cls |-> "settings", plc |-> "place"]
+\* What a key write stands on: Ada's session, her member object, the roles,
+\* the policy, the environment, its fork parent, the parent's keys weighed
+\* (the one her regenerate replaces, the one whose level she inherits).
+Inputs == {"cred", "member", "roles", "policy", "env", "parent", "parentKey"}
+\* What an add stands on besides the adder's own object.
+AddInputs == {"roles", "policy", "settings", "place"}
+Movable == Inputs \cup AddInputs \cup {"bob"}
 Objects == Movable \cup {"key", "svc"}
 \* The vault's first reads, when its reads are not one statement.
 FirstRead == {"cred"}
@@ -140,9 +158,10 @@ vars == <<ok, svc, kver, seal, putBack, next, sealedTo, head,
 \* input as she needs it.
 Allowed(s) == \A o \in Inputs : s[o]
 Now == [o \in Inputs |-> ok[o]]
-\* Whether an adder stands: while the policy lets admins add, and Bob while
-\* he is one. Cy is an admin nobody demotes.
-Stands(p) == ok["policy"] /\ (p = "cy" \/ ok["bob"])
+\* Whether an adder stands: while the roles and the policy let admins add,
+\* the setting lets Bob set up services, svc's first place is live, and Bob
+\* while he is an admin. Cy is an admin nobody demotes.
+Stands(p) == (\A o \in AddInputs : ok[o]) /\ (p = "cy" \/ ok["bob"])
 \* The seal a row stores: its newest change's, or the first, put back.
 RowSeal(o) == IF o \in putBack THEN 0 ELSE seal[o]
 \* A row the log has moved past (StaleFirst refuses it).
@@ -277,9 +296,9 @@ ADecide(p) ==
     /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* The objects an adder's standing rests on: its own (Bob's; nobody moves
-\* Cy's), and the policy.
+\* Cy's), and those of AddInputs it holds.
 Rests(p) == (IF p = "bob" /\ "actor" \in AdmitHeld THEN {"bob"} ELSE {})
-            \cup (IF "policy" \in AdmitHeld THEN {"policy"} ELSE {})
+            \cup (AdmitHeld \cap AddInputs)
 ActorHeld(p) == \A o \in Rests(p) : seal[o] = l[p].seals[o]
 PrincipalHeld(p) == ~PrincipalCAS \/ seal["svc"] = l[p].seals["svc"]
 
@@ -359,8 +378,9 @@ TypeOK ==
     /\ sealedTo <= next
 
 \* A key write commits only while every input it stands on is as the vault
-\* decided on it. A revoke, an end, a policy change, an archive (of env or
-\* of its parent) or a write of a replaced key answered (committed first)
+\* decided on it. A revoke, an end, a role or policy change, an archive or
+\* a protection (of env or of its parent), a write of a replaced key or a
+\* new level on an inherited one answered (committed first)
 \* stops every write after it, the one already decided included, and a row
 \* put back around coffre does not undo that. Changes that move a seal only:
 \* a session's expiry moves none, and is judged at the vault's clock, at
@@ -372,7 +392,10 @@ WritesStandAtCommit == \A w \in writes : w.stands
 KeyChangesFlip == \A w \in writes : w.from = w.was
 
 \* What the vault decided on is the log at the request's number: its reads
-\* are one snapshot, numbered in it. (That the replay recomputes the same
+\* are one snapshot, numbered in it. (Which ids and numbers a request
+\* stands for is bound by the Worker's MAC on its change, or on its outcome
+\* when nothing committed: the statement's own answer is not; the request
+\* here is that bound record.) (That the replay recomputes the same
 \* decision from those inputs is HotPathOne's ReplayAgrees.)
 RequestsReplay == \A r \in requests : r.live = r.replay
 

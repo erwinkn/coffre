@@ -1983,30 +1983,34 @@ its seal (R51).
 
 **The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
 session. The vault's statement reads every input her write stands on: her
-session, her member object, the policy, the environment, its fork parent and
-the parent's key a regenerate replaces, each with its newest change, held to
-its row; and numbers the request. The Worker decides on what it read. The
+session, her member object, the roles, the policy, the environment, its fork
+parent and the parent's keys weighed (the one a regenerate replaces, the one
+whose level an override inherits), each with its newest change, held to its
+row; and numbers the request. The Worker decides on what it read. The
 app's statement holds 0.14's head, takes the fence through `app_change`,
 commits the key's change from the seal it was made from, and then, in
 statements after it, checks that no input has a change after the one the
-vault read. Beside it: her grant taken away and her session revoked
-(`WritingRevoke`), the policy changed and the environment archived
-(`WritingPlace`), the parent archived and the replaced key written
+vault read, the keys it writes aside. Beside it: her grant taken away and
+her session revoked (`WritingRevoke`), her role redefined, the policy
+changed and the environment archived (`WritingPlace`), the parent archived,
+the replaced key written and the inherited key marked sensitive
 (`WritingFork`), her session revoked and its row put back, live, by a
 database writer (`WritingTamper`). Bob and Cy each add svc while Bob is
-demoted and the policy changes so that only Owners add (`WritingAdd`): a
-read, the Worker's decision, a write held to what the read decided on. Every
+demoted and the policy changes so that only Owners add (`WritingAdd`); Bob,
+no admin, sets up svc with a first grant while the roles are redefined, the
+services setting is closed and the grant's place archived (`WritingSetUp`):
+a read, the Worker's decision, a write held to what the read decided on. Every
 other change is one atomic step; the checkpointer seals whatever has
 committed at each tick.
 
 | protection | turned off, TLC finds |
 |---|---|
 | the vault's statement reads its inputs and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
-| the app's statement holds each input to the object the vault decided on (`Held={...}`, each of the six left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a policy change, an archive of the environment or of its parent, or a write of the replaced key |
+| the app's statement holds each input to the object the vault decided on (`Held={...}`, each of the seven left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a role redefined, a policy change, an archive of the environment or of its parent, a write of the replaced key, or a new level on the inherited one |
 | ... once it holds the fence (GuardsAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the guards and the write |
 | ... by the log's newest change of each, not its row's seal column (GuardOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the guard passes |
 | the key's change from the seal it was made from (ChangeCAS) | `KeyChangesFlip`: two writes from one version both commit |
-| a member add's write holds the actor's object and the policy (`AdmitHeld={...}`, each left out) | `AddsStandAtCommit`: a demoted admin's add, an add after the policy gave adding to Owners |
+| a member add's write holds what its read decided on (`AdmitHeld={...}`, each of the five left out) | `AddsStandAtCommit`: a demoted admin's add, an add after a role redefined or the policy gave adding to Owners, a set-up after the services setting closed, a first grant at a place archived meanwhile |
 | ... and the principal's row as read (PrincipalCAS) | `AddsFlip`: svc added twice |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
@@ -2016,7 +2020,14 @@ what the steps are and proves nothing more.
 
 **What it abstracts.** A seal is a counter each change moves; the vault's
 StaleFirst and `ChangeChecksSeal` (HotPathOne) are one check here, and
-SealedObjects holds the seals themselves against a forger. A guard is a
+SealedObjects holds the seals themselves against a forger. A guard compares
+the log's newest number, which only grows, so an object changed and changed
+back still fails it. The Worker holds an add's rows to their newest changes
+exactly as a write's; `WritingTamper` exercises that check on a write only.
+A request here is the record that binds it: its committed change, or the
+outcome record the Worker MACs when nothing commits; the ids the vault's
+statement resolves sit unsealed beside the request row, which proves
+nothing from them (two-trips.md, "The request and its refusals"). A guard is a
 lock-free probe of the log's newest change of its object: a `FOR SHARE`
 there would take a row after the fence, against `change_input`'s order.
 `RequestsReplay` checks that the decision's inputs are the log at the

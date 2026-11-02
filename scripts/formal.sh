@@ -400,19 +400,23 @@ REMOVALS=(
   # Its reads one statement under the fence: a change between two of them tears the request from the log at its number.
   "WritingRevoke RequestUnderFence RequestsReplay"
   # The app's guards, each input left out in turn.
-  'WritingRevoke Held={"member","policy","env","parent","replaced"} WritesStandAtCommit'
-  'WritingRevoke Held={"cred","policy","env","parent","replaced"} WritesStandAtCommit'
-  'WritingPlace Held={"cred","member","env","parent","replaced"} WritesStandAtCommit'
-  'WritingPlace Held={"cred","member","policy","parent","replaced"} WritesStandAtCommit'
-  'WritingFork Held={"cred","member","policy","env","replaced"} WritesStandAtCommit'
-  'WritingFork Held={"cred","member","policy","env","parent"} WritesStandAtCommit'
+  'WritingRevoke Held={"member","roles","policy","env","parent","parentKey"} WritesStandAtCommit'
+  'WritingRevoke Held={"cred","roles","policy","env","parent","parentKey"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","policy","env","parent","parentKey"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","roles","env","parent","parentKey"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","roles","policy","parent","parentKey"} WritesStandAtCommit'
+  'WritingFork Held={"cred","member","roles","policy","env","parentKey"} WritesStandAtCommit'
+  'WritingFork Held={"cred","member","roles","policy","env","parent"} WritesStandAtCommit'
   "WritingRevoke GuardsAfterFence WritesStandAtCommit"
   # A guard by the row's own seal column: a database writer puts a revoked session back, live.
   "WritingTamper GuardOnLog WritesStandAtCommit"
   "WritingRevoke ChangeCAS KeyChangesFlip"
-  # A member add's write, the actor's object and then the policy left out.
-  'WritingAdd AdmitHeld={"policy"} AddsStandAtCommit'
-  'WritingAdd AdmitHeld={"actor"} AddsStandAtCommit'
+  # A member add's write, each object its read decided on left out in turn.
+  'WritingAdd AdmitHeld={"roles","policy","settings","place"} AddsStandAtCommit'
+  'WritingSetUp AdmitHeld={"actor","policy","settings","place"} AddsStandAtCommit'
+  'WritingAdd AdmitHeld={"actor","roles","settings","place"} AddsStandAtCommit'
+  'WritingSetUp AdmitHeld={"actor","roles","policy","place"} AddsStandAtCommit'
+  'WritingSetUp AdmitHeld={"actor","roles","policy","settings"} AddsStandAtCommit'
   "WritingAdd PrincipalCAS AddsFlip"
   "WritingAdd WaitForSeal AnsweredSealed"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
