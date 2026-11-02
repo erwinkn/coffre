@@ -123,18 +123,62 @@ const values = {
         REDIS_URL: 'redis://127.0.0.1:6379/0',
         STRIPE_SECRET_KEY: 'sk_test_51LocalDevOnlyNotARealKey',
         JWT_SIGNING_SECRET: 'dev-signing-secret-not-for-prod',
+        // What the Proxy tab's items name, the code's (dev/deployment/app/src/coffre.ts) and those seeded below.
+        OPENAI_API_KEY: 'sk-proj-LocalDevOnlyNotARealKey',
+        OPENAI_ORG_ID: { value: 'org-LocalDevOnly', sensitivity: 'plain' },
+        AWS_ACCESS_KEY_ID: 'AKIALOCALDEVONLY0000',
+        AWS_SECRET_ACCESS_KEY: 'local-dev-only-not-a-real-aws-secret',
+        MAPS_API_KEY: 'AIzaLocalDevOnlyNotARealKey',
+        DFNS_PRIVATE_KEY: 'local-dev-only-not-a-real-pem',
+        YOUSIGN_WEBHOOK_SECRET: 'local-dev-only-yousign-secret',
     },
     prod: {
         DATABASE_URL: 'postgres://10.0.0.5:5432/market_prod',
         REDIS_URL: 'redis://10.0.0.6:6379/0',
-        STRIPE_SECRET_KEY: 'sk_live_51LocalDevOnlyNotARealKey',
+        // Sensitive: only an Owner of market routes it, and the Proxy tab says so.
+        STRIPE_SECRET_KEY: { value: 'sk_live_51LocalDevOnlyNotARealKey', sensitivity: 'sensitive' },
         JWT_SIGNING_SECRET: 'prod-signing-secret-not-for-prod',
+        OPENAI_API_KEY: 'sk-proj-LocalProdOnlyNotARealKey',
+        OPENAI_ORG_ID: { value: 'org-LocalProdOnly', sensitivity: 'plain' },
+        MAPS_API_KEY: 'AIzaLocalProdOnlyNotARealKey',
+        DFNS_PRIVATE_KEY: { value: 'local-prod-only-not-a-real-pem', sensitivity: 'sensitive' },
+        REPLICA_URL: { value: 'postgres://reader@10.0.1.5:5432/market?sslmode=disable', sensitivity: 'sensitive' },
     },
 };
 
 for (const [environment, secrets] of Object.entries(values)) {
     await patch(admin, `/api/secrets/market/${environment}`, secrets);
     console.log(`==> wrote ${Object.keys(secrets).length} secrets to market/${environment}`);
+}
+
+// The Proxy tab's own items (0.16, docs/design/proxy-ui.md), saved as an Owner saves them, beside what code defines.
+const none = { perMinute: null, perDay: null };
+const openai = (limit) => ({
+    kind: 'route', name: 'openai', upstream: 'https://api.openai.com/v1',
+    inject: [{ kind: 'header', name: 'authorization', template: 'Bearer {OPENAI_API_KEY}' }, { kind: 'header', name: 'openai-organization', template: '{OPENAI_ORG_ID}' }],
+    allow: [{ methods: ['POST'], path: '/chat/completions' }, { methods: ['POST'], path: '/responses' }, { methods: ['GET'], path: '/models/**' }],
+    limit, placeholder: null, egress: null,
+});
+const stripe = { kind: 'route', name: 'stripe', upstream: 'https://api.stripe.com', inject: [{ kind: 'header', name: 'authorization', template: 'Bearer {STRIPE_SECRET_KEY}' }], allow: [{ methods: [], path: '/v1' }], limit: none, placeholder: { kind: 'prefix', prefix: 'sk_test_' }, egress: null };
+const proxies = {
+    dev: {
+        openai: openai({ perMinute: 60, perDay: 5000 }),
+        stripe,
+        s3: {
+            kind: 'route', name: 's3', upstream: 'https://market-uploads-dev.s3.eu-west-3.amazonaws.com',
+            inject: [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }],
+            allow: [{ methods: ['GET', 'PUT'], path: '/uploads/**' }], limit: { perMinute: 300, perDay: null }, placeholder: null, egress: null,
+        },
+        yousign: { kind: 'verifier', name: 'yousign', hmac: { key: 'YOUSIGN_WEBHOOK_SECRET', encoding: 'hex', prefix: 'sha256=', maxBytes: null }, limit: none },
+    },
+    prod: {
+        openai: openai({ perMinute: 600, perDay: 200000 }),
+        stripe: { ...stripe, placeholder: { kind: 'prefix', prefix: 'sk_live_' } },
+    },
+};
+for (const [environment, items] of Object.entries(proxies)) {
+    await put(admin, `/api/projects/market/${environment}/proxy`, { seal: null, items });
+    console.log(`==> saved ${Object.keys(items).length} proxy definitions to market/${environment}`);
 }
 
 const ci = await post(admin, '/api/members/token:ci-deploy/tokens', { label: 'local', expiresInDays: 30 });

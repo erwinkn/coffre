@@ -4,6 +4,7 @@
 // binding.
 import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type AnchorNamespace, type CoffreContext, type GatesNamespace, type SocketsNamespace, type VaultEntry } from '@coffre/server/cloudflare';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
+import { credentialProxy } from '@coffre/server/plugins/credential-proxy';
 
 export type Env = {
   HYPERDRIVE: Hyperdrive;
@@ -68,7 +69,13 @@ export const coffre = createCoffre((env: Env) => {
     // verified, which it keeps outside the database, in ANCHOR; /readyz red
     // on anything it finds. Remove it, and the log is checked only when
     // someone runs `coffre verify log` (docs/deploy.md, "The audit watch").
-    plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) })],
+    // The credential proxy (docs/design/credential-proxy.md): apps run with
+    // `coffre run` reach their APIs through <PUBLIC_URL>/use, with the keys
+    // filled in, which they never hold. `editable` lets Owners write routes,
+    // signers, verifiers and databases per environment in its Proxy tab;
+    // add your own to `credentials` (and `tunnels`, `signers`, `verifiers`)
+    // to keep them in code, where they win the name in every environment.
+    plugins: [auditWatch({ anchor: durableAnchor(env.ANCHOR) }), credentialProxy({ credentials: {}, editable: true })],
     // Where plugins' WebSockets run, one object per `coffre run` and database: the
     // credential proxy's tunnel, once you add it (docs/design/credential-proxy.md).
     sockets: env.SOCKETS,

@@ -54,6 +54,7 @@ import { AppChanges, connectionRevokes, retrying, revokes } from './changes.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
 import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
+import { keeps015 } from './changes.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
 import { referencesBy, type ReferenceView } from './references.ts';
 import { tokenRows, type TokenRow } from './signin.ts';
@@ -180,6 +181,14 @@ export type OffboardingReport = {
    * nobody else reads, which leaving makes unreadable, listed for deletion.
    */
   personal: { project: string; of: string; slug: string }[];
+  /**
+   * The proxy items they saved in the Proxy tab (0.16), by project and
+   * environment, from the vault's sealed objects: each routes only while
+   * they read its keys, so removing them stops every one, and narrowing
+   * their access those whose keys it takes away, until someone who reads
+   * them saves it again (docs/design/proxy-ui.md, decision 5).
+   */
+  proxy: { project: string; environment: string; name: string; kind: string; keys: string[] }[];
 };
 
 /**
@@ -511,8 +520,10 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
   // runs the instance reaches, as a render read them) and the references they made, which need nothing of it.
   // And their reads under 0.15's log, as the vault's projection lists them (T166), which the report weighs below, and how
   // far it lists them, in one statement, so as of one moment (review r5).
-  const [everyone, known, owners, references, { reads: used, standing }] = await Promise.all([
+  // And the proxy items they saved, from the vault's objects (decision 5): each stops once they no longer read its keys.
+  const [everyone, known, owners, references, { reads: used, standing }, saved] = await Promise.all([
     directory(ctx, new Date()), reachedPlaces(ctx), declaredOwners(ctx), referencesBy(ctx.db, formatMember(member)), readsByStanding(ctx.db, [formatMember(member)]),
+    keeps015(ctx.vault).then((log) => (log ? ctx.vault.proxySavedBy({ member: formatMember(member) }) : { items: [] })),
   ]);
   const reads = await readsReported(ctx, standing);
   const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
@@ -568,6 +579,11 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     personal: known.flatMap((project) => project.environments
       .filter((environment) => environment.owner === formatMember(member))
       .map((environment) => ({ project: project.slug, of: environment.parentSlug ?? '?', slug: environment.slug }))),
+    proxy: saved.items.flatMap((item) => {
+      const project = known.find((each) => each.environments.some((environment) => environment.id === item.environmentId));
+      const environment = project?.environments.find((each) => each.id === item.environmentId);
+      return project === undefined || environment === undefined ? [] : [{ project: project.slug, environment: environment.slug, name: item.name, kind: item.kind, keys: item.keys }];
+    }),
   };
 }
 

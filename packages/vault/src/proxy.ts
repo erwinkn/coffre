@@ -77,11 +77,36 @@ export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly E
   return null;
 }
 
-/** An environment's sealed object as the tab shows it: each item without its holdings. */
+/**
+ * Why an item would not route now (decision 5), or null: each of its keys,
+ * resolved where a use finds it, must clear both for what its save froze of
+ * its editor and for that editor as they stand now, as a use decides them
+ * (section 8). The tab marks such an item `route_not_cleared`, naming the
+ * key, until someone who reads its keys saves it again. A key the place does
+ * not hold is decided at each use, and marks nothing here.
+ *
+ *   Lin saved openai; she is demoted to Viewer   ->  { key: 'OPENAI_API_KEY', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' }
+ */
+export function notCleared(item: ProxyItem, editor: Reader, keys: ReadonlyMap<string, ResolvedKey>, chain: readonly EnvironmentInput[]): NonNullable<ProxyItemView['notCleared']> | null {
+  const places = new Map(chain.map((environment) => [environment.id, environment]));
+  for (const name of item.keys) {
+    const key = keys.get(name);
+    if (key === undefined) continue;
+    const now = routeRefusal(editor, key, chain);
+    if (now !== null) return { key: name, reason: now };
+    const where = placeIn({ projectId: key.holder.projectId, environmentId: key.holder.id }, places);
+    if (!frozenAllows(item.holdings, 'secret.read', where, editor.live)) return { key: name, reason: `${name}: what its save froze of its editor does not read it in ${key.holder.slug}` };
+    if (key.nature === 'sensitive' && !frozenOwns(item.holdings, key.projectId)) return { key: name, reason: `${name} is sensitive, and its save was not an Owner's of its project` };
+  }
+  return null;
+}
+
+/** An environment's sealed object as the tab shows it: each item without its holdings, with its clearance mark (`notCleared`) where `marks` says. */
 export function proxyView(
   environment: { id: string; projectId: string },
   read: { object: ProxyInput | null; seal: Buffer | null; state: ProxyView['state'] },
   reserved: { object: ReservedInput | null; state: ProxyView['state'] },
+  marks: ReadonlyMap<string, ProxyItemView['notCleared']> | null = null,
 ): ProxyView {
   const items: ProxyItemView[] = read.state !== 'ok' || read.object === null ? [] : Object.values(read.object.items).map((item) => ({
     definition: item.definition,
@@ -90,6 +115,7 @@ export function proxyView(
     savedAt: item.savedAt,
     // Its save cleared it for its place's sensitive values: its editor owned the project.
     routesSensitive: frozenOwns(item.holdings, environment.projectId),
+    ...(marks === null ? {} : { notCleared: marks.get(item.definition.name) ?? null }),
   }));
   return {
     environmentId: environment.id,

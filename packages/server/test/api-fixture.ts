@@ -356,6 +356,7 @@ export function testVault(
     saveProxy: call('saveProxy'),
     reserveProxy: call('reserveProxy'),
     releaseProxy: call('releaseProxy'),
+    proxySavedBy: call('proxySavedBy'),
     // As the app's runtime speaks to it, through `versioned`: each call to this vault's methods as they are then, a
     // test's replacements included. The release it answers is the caller's: the vault it opens gates on its own.
     call: async (release: string, method: keyof Vault, args: readonly unknown[]) => ({ release, result: await (vault[method] as (...given: unknown[]) => Promise<unknown>)(...args) }),

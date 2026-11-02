@@ -5,6 +5,7 @@ import { QueryClient, queryOptions, type FetchQueryOptions, type QueryKey } from
 import { deriveUiCapabilities } from './capabilities.ts';
 import { memberRef, statusOf, uiResult } from './coffre.ts';
 import { isActiveAccessibleEnvironment } from './project-environments.ts';
+import { parentsOf } from './proxy.ts';
 import type { DirectoryPrincipal, GrantRow, Me, ProjectSummary } from '../shared/models';
 
 /**
@@ -50,6 +51,7 @@ export const keys = {
   projects: ['projects'],
   grants: (project: string) => ['grants', project],
   secrets: ({ project, environment }: Place) => ['secrets', project, environment],
+  proxy: ({ project, environment }: Place) => ['proxy', project, environment],
   references: (path: string) => ['references', path],
   missing: ({ project, environment }: Place) => ['missing', project, environment],
   personal: (project: string) => ['personal', project],
@@ -199,6 +201,13 @@ export const queries = {
     queryOptions({
       queryKey: keys.secrets(place),
       queryFn: () => uiResult(() => client.secrets.list(`${place.project}/${place.environment}`)),
+    }),
+
+  /** An environment's proxy definitions, the deployment's code's beside them, and what its reader may do with them (the Proxy tab). */
+  proxy: (client: CoffreClient, place: Place) =>
+    queryOptions({
+      queryKey: keys.proxy(place),
+      queryFn: () => uiResult(() => client.proxy.get(`${place.project}/${place.environment}`)),
     }),
 
   /** What an environment lacks of its siblings' keys, read or not, and what its team dismissed. */
@@ -611,6 +620,26 @@ export async function loadEnvironment(queryClient: QueryClient, client: CoffreCl
 }
 
 /**
+ * What an environment's Proxy tab reads: its keys, as its Secrets tab lists
+ * them (the templates' autocomplete, and who may route which), its proxy
+ * definitions, and those of each parent of its fork, which it inherits by
+ * name. The parents come from the project tree the shell holds, so every
+ * read is asked at once, one round trip.
+ */
+export async function loadProxy(queryClient: QueryClient, client: CoffreClient, place: Place) {
+  const found = projectOf(await queryClient.ensureQueryData(queries.projects(client)), place.project);
+  const parents = found.ok ? parentsOf(found.project.environments, place) : [];
+  await Promise.all([
+    queryClient.fetchQuery(queries.secrets(client, place)),
+    queryClient.fetchQuery(queries.proxy(client, place)),
+    ...parents.map((path) => {
+      const [project, environment] = path.split('/') as [string, string];
+      return queryClient.fetchQuery(queries.proxy(client, { project, environment }));
+    }),
+  ]);
+}
+
+/**
  * What the audit page reads: a page of the log and the verification from
  * the newest checkpoint, asked together and rendered together, so the badge
  * arrives with the page. The verification never fails the load: a check that
@@ -785,6 +814,8 @@ export const affects = {
   places: (): QueryKey[] => [keys.projects, keys.me, ['personal']],
   /** Secrets written, renamed, restored or archived: the environment, the counts, and the personal configs' key names. */
   secrets: (place: Place): QueryKey[] => [keys.secrets(place), keys.projects, ['references'], ['missing'], ['personal']],
+  /** An environment's proxy definitions saved, which its forks inherit: every Proxy tab of its project. */
+  proxy: (project: string): QueryKey[] => [['proxy', project]],
   /**
    * Someone's access in a project changed: its grants, their report, and, as
    * it may be your own, what you can see.
@@ -795,6 +826,7 @@ export const affects = {
     keys.report(member),
     keys.projects,
     keys.me,
+    ['proxy'],
   ],
   /**
    * Someone let in: the directory, and whatever was read of them before
@@ -812,7 +844,7 @@ export const affects = {
    * An instance role changed: the directory, their report, and, as it may be
    * your own, what you can see and do.
    */
-  role: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), keys.me, keys.projects],
+  role: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), keys.me, keys.projects, ['proxy']],
   /** Someone removed: the directory, their report, and every grant, which removal ends, those on every project too. */
   removal: (member: string): QueryKey[] => [keys.directory, keys.report(member), keys.memberAccess(member), ['grants'], keys.projects],
   /**
@@ -825,7 +857,7 @@ export const affects = {
    * what everyone holds may change, so the roles, what you hold, and every
    * grant and environment read with what it holds.
    */
-  roles: (): QueryKey[] => [keys.roles, keys.me, keys.projects, ['grants'], ['member-access'], ['secrets']],
+  roles: (): QueryKey[] => [keys.roles, keys.me, keys.projects, ['grants'], ['member-access'], ['secrets'], ['proxy']],
   credentials: (member: string): QueryKey[] => [keys.credentials(member)],
   bindings: (member: string): QueryKey[] => [keys.bindings(member)],
   /** Unlinking an account also ends the sessions it signed in. */

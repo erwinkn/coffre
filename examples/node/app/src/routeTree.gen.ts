@@ -23,6 +23,7 @@ import { Route as SoloLoginRouteImport } from './routes/_solo/login'
 import { Route as SoloUnregisteredRouteImport } from './routes/_solo/unregistered'
 import { Route as ApiSplatRouteImport } from './routes/api.$'
 import { Route as AuthSplatRouteImport } from './routes/auth.$'
+import { Route as UseSplatRouteImport } from './routes/use.$'
 import { Route as CoffreAccountIndexRouteImport } from './routes/_coffre/account.index'
 import { Route as CoffreAccountAppearanceRouteImport } from './routes/_coffre/account.appearance'
 import { Route as CoffreAccountAppsRouteImport } from './routes/_coffre/account.apps'
@@ -47,6 +48,7 @@ import { Route as CoffreServiceAccountsAccountActivityRouteImport } from './rout
 import { Route as CoffreUsersUserIndexRouteImport } from './routes/_coffre/users.$user.index'
 import { Route as CoffreUsersUserActivityRouteImport } from './routes/_coffre/users.$user.activity'
 import { Route as CoffreUsersUserAppsRouteImport } from './routes/_coffre/users.$user.apps'
+import { Route as CoffreProjectsProjectEnvironmentProxyRouteImport } from './routes/_coffre/projects.$project_.$environment_.proxy'
 
 const CoffreRoute = CoffreRouteImport.update({
   id: '/_coffre',
@@ -114,6 +116,11 @@ const ApiSplatRoute = ApiSplatRouteImport.update({
 const AuthSplatRoute = AuthSplatRouteImport.update({
   id: '/auth/$',
   path: '/auth/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UseSplatRoute = UseSplatRouteImport.update({
+  id: '/use/$',
+  path: '/use/$',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CoffreAccountIndexRoute = CoffreAccountIndexRouteImport.update({
@@ -246,6 +253,12 @@ const CoffreUsersUserAppsRoute = CoffreUsersUserAppsRouteImport.update({
   path: '/apps',
   getParentRoute: () => CoffreUsersUserRoute,
 } as any)
+const CoffreProjectsProjectEnvironmentProxyRoute =
+  CoffreProjectsProjectEnvironmentProxyRouteImport.update({
+    id: '/projects/$project_/$environment_/proxy',
+    path: '/projects/$project/$environment/proxy',
+    getParentRoute: () => CoffreRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof CoffreIndexRoute
@@ -260,6 +273,7 @@ export interface FileRoutesByFullPath {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/use/$': typeof UseSplatRoute
   '/account/appearance': typeof CoffreAccountAppearanceRoute
   '/account/apps': typeof CoffreAccountAppsRoute
   '/account/sessions': typeof CoffreAccountSessionsRoute
@@ -284,6 +298,7 @@ export interface FileRoutesByFullPath {
   '/projects/$project/': typeof CoffreProjectsProjectIndexRoute
   '/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
   '/users/$user/': typeof CoffreUsersUserIndexRoute
+  '/projects/$project/$environment/proxy': typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 export interface FileRoutesByTo {
   '/': typeof CoffreIndexRoute
@@ -297,6 +312,7 @@ export interface FileRoutesByTo {
   '/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/use/$': typeof UseSplatRoute
   '/account/appearance': typeof CoffreAccountAppearanceRoute
   '/account/apps': typeof CoffreAccountAppsRoute
   '/account/sessions': typeof CoffreAccountSessionsRoute
@@ -318,6 +334,7 @@ export interface FileRoutesByTo {
   '/projects/$project': typeof CoffreProjectsProjectIndexRoute
   '/service-accounts/$account': typeof CoffreServiceAccountsAccountIndexRoute
   '/users/$user': typeof CoffreUsersUserIndexRoute
+  '/projects/$project/$environment/proxy': typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -334,6 +351,7 @@ export interface FileRoutesById {
   '/_solo/unregistered': typeof SoloUnregisteredRoute
   '/api/$': typeof ApiSplatRoute
   '/auth/$': typeof AuthSplatRoute
+  '/use/$': typeof UseSplatRoute
   '/_coffre/': typeof CoffreIndexRoute
   '/_coffre/account/appearance': typeof CoffreAccountAppearanceRoute
   '/_coffre/account/apps': typeof CoffreAccountAppsRoute
@@ -359,6 +377,7 @@ export interface FileRoutesById {
   '/_coffre/projects/$project/': typeof CoffreProjectsProjectIndexRoute
   '/_coffre/service-accounts/$account/': typeof CoffreServiceAccountsAccountIndexRoute
   '/_coffre/users/$user/': typeof CoffreUsersUserIndexRoute
+  '/_coffre/projects/$project_/$environment_/proxy': typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -375,6 +394,7 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/use/$'
     | '/account/appearance'
     | '/account/apps'
     | '/account/sessions'
@@ -399,6 +419,7 @@ export interface FileRouteTypes {
     | '/projects/$project/'
     | '/service-accounts/$account/'
     | '/users/$user/'
+    | '/projects/$project/$environment/proxy'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -412,6 +433,7 @@ export interface FileRouteTypes {
     | '/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/use/$'
     | '/account/appearance'
     | '/account/apps'
     | '/account/sessions'
@@ -433,6 +455,7 @@ export interface FileRouteTypes {
     | '/projects/$project'
     | '/service-accounts/$account'
     | '/users/$user'
+    | '/projects/$project/$environment/proxy'
   id:
     | '__root__'
     | '/_coffre'
@@ -448,6 +471,7 @@ export interface FileRouteTypes {
     | '/_solo/unregistered'
     | '/api/$'
     | '/auth/$'
+    | '/use/$'
     | '/_coffre/'
     | '/_coffre/account/appearance'
     | '/_coffre/account/apps'
@@ -473,6 +497,7 @@ export interface FileRouteTypes {
     | '/_coffre/projects/$project/'
     | '/_coffre/service-accounts/$account/'
     | '/_coffre/users/$user/'
+    | '/_coffre/projects/$project_/$environment_/proxy'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -484,6 +509,7 @@ export interface RootRouteChildren {
   DotwellKnownSplatRoute: typeof DotwellKnownSplatRoute
   ApiSplatRoute: typeof ApiSplatRoute
   AuthSplatRoute: typeof AuthSplatRoute
+  UseSplatRoute: typeof UseSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -584,6 +610,13 @@ declare module '@tanstack/react-router' {
       path: '/auth/$'
       fullPath: '/auth/$'
       preLoaderRoute: typeof AuthSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/use/$': {
+      id: '/use/$'
+      path: '/use/$'
+      fullPath: '/use/$'
+      preLoaderRoute: typeof UseSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_coffre/account/': {
@@ -754,6 +787,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof CoffreUsersUserAppsRouteImport
       parentRoute: typeof CoffreUsersUserRoute
     }
+    '/_coffre/projects/$project_/$environment_/proxy': {
+      id: '/_coffre/projects/$project_/$environment_/proxy'
+      path: '/projects/$project/$environment/proxy'
+      fullPath: '/projects/$project/$environment/proxy'
+      preLoaderRoute: typeof CoffreProjectsProjectEnvironmentProxyRouteImport
+      parentRoute: typeof CoffreRoute
+    }
   }
 }
 
@@ -844,6 +884,7 @@ interface CoffreRouteChildren {
   CoffreServiceAccountsIndexRoute: typeof CoffreServiceAccountsIndexRoute
   CoffreUsersIndexRoute: typeof CoffreUsersIndexRoute
   CoffreProjectsProjectEnvironmentRoute: typeof CoffreProjectsProjectEnvironmentRoute
+  CoffreProjectsProjectEnvironmentProxyRoute: typeof CoffreProjectsProjectEnvironmentProxyRoute
 }
 
 const CoffreRouteChildren: CoffreRouteChildren = {
@@ -859,6 +900,8 @@ const CoffreRouteChildren: CoffreRouteChildren = {
   CoffreServiceAccountsIndexRoute: CoffreServiceAccountsIndexRoute,
   CoffreUsersIndexRoute: CoffreUsersIndexRoute,
   CoffreProjectsProjectEnvironmentRoute: CoffreProjectsProjectEnvironmentRoute,
+  CoffreProjectsProjectEnvironmentProxyRoute:
+    CoffreProjectsProjectEnvironmentProxyRoute,
 }
 
 const CoffreRouteWithChildren =
@@ -891,6 +934,7 @@ const rootRouteChildren: RootRouteChildren = {
   DotwellKnownSplatRoute: DotwellKnownSplatRoute,
   ApiSplatRoute: ApiSplatRoute,
   AuthSplatRoute: AuthSplatRoute,
+  UseSplatRoute: UseSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

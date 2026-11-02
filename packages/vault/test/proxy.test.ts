@@ -96,6 +96,11 @@ async function count(query: ReturnType<typeof sql>): Promise<number> {
   return Number((await rows<{ n: number | string }>(db.owner, query))[0]!.n);
 }
 
+/** A save's answer as the tab's read finds it after: the same, with each item's clearance mark, which a save leaves out (here, none). */
+function cleared(view: ProxyView): ProxyView {
+  return { ...view, items: view.items.map((item) => ({ ...item, notCleared: null })) };
+}
+
 function saved(outcome: Awaited<ReturnType<World['save']>>): ProxyView {
   assert.ok(outcome.ok, JSON.stringify(outcome));
   return outcome.view;
@@ -185,7 +190,7 @@ test('an Owner saves a route: the row holds it with its index and seal, the log 
   const view = saved(await w.save({ seal: null, items: { openai: route('openai') } }));
   assert.equal(view.state, 'ok');
   assert.deepEqual(view.items.map((each) => [each.definition.name, each.keys, each.savedBy, each.routesSensitive]), [['openai', ['OPENAI_API_KEY'], ROOT, true]]);
-  assert.deepEqual(await w.view(), view, 'what it answered is what a read finds');
+  assert.deepEqual(await w.view(), cleared(view), 'what it answered is what a read finds');
   const row = (await stored(w.dev))!;
   assert.deepEqual(Object.keys(row.items), ['openai']);
   assert.ok(row.digests.equals(indexBytes(row.items)));
@@ -310,7 +315,7 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
   refusedWith(await w.save({ actor: ADA, seal: second.seal, items: { c: route('c') }, replace: true }), 'no_grant');
   const replaced = saved(await w.save({ seal: second.seal, items: { c: route('c') }, replace: true }));
   assert.deepEqual([replaced.state, replaced.items.map((each) => each.definition.name)], ['ok', ['c']]);
-  assert.deepEqual(await w.view(), replaced);
+  assert.deepEqual(await w.view(), cleared(replaced));
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
   // The forged object's items are no items its log had: the audit removes none of them. Replaced whole again, from a
   // sound one, the audit names each item the replace dropped.

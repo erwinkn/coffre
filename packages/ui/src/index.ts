@@ -17,6 +17,7 @@ export {
   audit,
   deviceLogin,
   environment,
+  environmentProxy,
   home,
   login,
   oauthAuthorize,

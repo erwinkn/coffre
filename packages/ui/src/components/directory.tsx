@@ -496,7 +496,10 @@ function RemovalPreview({ principal, open }: { principal: DirectoryPrincipal; op
         ? `No value ${person ? 'they' : 'it'} saw is still current.`
         : `${plural(report.exposed.length, 'value')} ${person ? 'they' : 'it'} saw ${report.exposed.length === 1 ? 'is' : 'are'} still current: ${person ? 'their' : 'its'} page lists them, to rotate.`}
       {report.issuedTokens.length > 0 &&
-        ` ${plural(report.issuedTokens.length, 'bearer token')} ${person ? 'they' : 'it'} issued still ${report.issuedTokens.length === 1 ? 'works' : 'work'}.`}{' '}
+        ` ${plural(report.issuedTokens.length, 'bearer token')} ${person ? 'they' : 'it'} issued still ${report.issuedTokens.length === 1 ? 'works' : 'work'}.`}
+      {/* Each proxy item they saved routes only while they read its keys (docs/design/proxy-ui.md, decision 5). */}
+      {report.proxy.length > 0 &&
+        ` It stops ${plural(report.proxy.length, 'proxy route')} they saved, until someone who reads the keys saves ${report.proxy.length === 1 ? 'it' : 'each'} again: ${report.proxy.map((item) => `${item.project}/${item.environment} ${item.name}`).join(', ')}.`}{' '}
       {person ? 'Their' : 'Its'} past actions stay in the audit log.
     </>
   );

@@ -61,6 +61,7 @@ export const VAULT_METHODS = [
   'saveProxy',
   'reserveProxy',
   'releaseProxy',
+  'proxySavedBy',
 ] as const satisfies readonly (keyof Vault)[];
 
 export type VaultMethod = (typeof VAULT_METHODS)[number];

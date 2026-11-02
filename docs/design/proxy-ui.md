@@ -1828,6 +1828,33 @@ is fixed in this document, within PR C.
 - Tests: the page's own (save, discard, 409 review, inert fields for a
   reader), the examples' parity test, `check:docs`.
 
+**PR D as built** (W314). Where it settles what this section left open:
+- **The page's answer** (`ProxyPage`) adds, beside `editable`: `readOnly`
+  (why not, in the API's words), `code` as code's items, not names
+  (`ProxyCodeItem`: the definition in the tab's shape, `environments`, a
+  limit per service, and whether a binding carries it), `routesSensitive`
+  (the reader owns the project), `releases` (an instance Owner),
+  `useUrl` and `windowSeconds` (decision 4's window: `cacheSeconds`, or the
+  3 s deadline), and `insecureUpstreams`, so the page checks a definition
+  with the vault's own rules (`proxyDefinitionProblem`, now
+  `@coffre/core/proxy`, which a browser loads) before it asks.
+- **The `route_not_cleared` mark** is the vault's: `Vault.proxy()` decides
+  each item's keys for its frozen holdings and its editor's standing now
+  (`notCleared` in `packages/vault/src/proxy.ts`, the rule section 8 gives
+  the use), and answers `notCleared` per item. A save's answer leaves it
+  out: its reads would hold the change's locks two round trips longer
+  (`change-cost.test.ts`). PR C's use decides the same way; the two share
+  `routeRefusal`, `frozenAllows` and `frozenOwns`.
+- **The offboarding preview** reads `Vault.proxySavedBy({ member })`: the
+  rows that name the member found by their JSON, each object then held by
+  the log, so a forged row lists nothing. The member's page lists them, and
+  the Remove dialog names those it stops. A demotion stops those whose keys
+  it takes away; the page says so rather than predicting each.
+- **Forks**: the tab reads each parent's page beside its own, one round
+  trip; editing an inherited item saves the fork's own (decision 6).
+- **Egresses and networks** stay direct in the tab until PR C declares them
+  by name (PR A refuses one with 400).
+
 PR B can go in parallel with A. C needs A and B. D needs A, and C for real
 uses.
 

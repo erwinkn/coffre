@@ -399,3 +399,22 @@ test("a credential's use names its upstream's host, and the deployment's egress 
   assert.equal(use({}), 'used the credential schumann on dev.api.europ.schuman.io');
   assert.equal(use({ egress: true }), "used the credential schumann on dev.api.europ.schuman.io, through the deployment's egress");
 });
+
+test("the Proxy tab's entries (0.16): a save, item by item; code's reservation; an instance Owner's release; a refusal in words", () => {
+  const at = { project: 'market', environment: 'dev' };
+  const saved = entry({
+    action: 'proxy.save', author: 'vault', ...at,
+    metadata: { proxy: { replace: false, saved: [
+      { name: 'openai', kind: 'route', upstream: 'https://api.openai.com/v1', keys: ['OPENAI_API_KEY'], routesSensitive: [] },
+      { name: 'stripe', kind: 'route', upstream: 'https://api.stripe.com', keys: ['STRIPE_KEY'], routesSensitive: ['STRIPE_KEY'] },
+      { name: 'yousign', kind: 'verifier', keys: ['YOUSIGN_SECRET'], routesSensitive: [] },
+    ], removed: ['maps'] } },
+  });
+  assert.equal(said(saved), 'saved the proxy of market/dev: openai to api.openai.com with OPENAI_API_KEY; stripe to api.stripe.com with STRIPE_KEY, an Owner routing sensitive STRIPE_KEY; yousign with YOUSIGN_SECRET; removed maps');
+  assert.equal(said(entry({ action: 'proxy.save', decision: 'deny', reason: 'proxy_changed', ...at, metadata: { names: ['openai'] } })), 'tried to save the proxy of market/dev: another save came first');
+  assert.equal(said(entry({ action: 'proxy.save', decision: 'deny', reason: 'route_not_cleared', ...at, metadata: { names: ['stripe'] } })), 'tried to save the proxy of market/dev: its editor may not route one of its keys');
+  assert.equal(said(entry({ action: 'proxy.code', author: 'vault', actorType: 'system', actorId: 'deployment', metadata: { proxy: { reserved: ['maps', 'db'], cleared: [{ environmentId: 'e1', name: 'maps' }] } } })),
+    "reserved maps, db for the deployment's code, deleting an environment's own item of those names");
+  assert.equal(said(entry({ action: 'proxy.release', author: 'vault', metadata: { proxy: { released: 'maps' } } })), 'released maps, reserved by earlier code, for every environment');
+  assert.equal(who({ actorType: 'system', actorId: 'deployment' }), "the deployment's code");
+});

@@ -1,0 +1,189 @@
+// The Proxy tab (0.16, T186; docs/design/proxy-ui.md): what it lists, code's
+// items locked beside the environment's own and those its fork inherits; what
+// a save sends; what discarding leaves; what the review says after another
+// save came first (409); and a reader's page, every field inert. The rows'
+// state is what the sheet renders from (components/proxy-sheet.tsx).
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import type { ProxyPage, SecretKey } from '@coffre/client';
+
+import {
+  changedSince,
+  copiedInWords,
+  fieldOf,
+  itemsOf,
+  keyStanding,
+  NO_DRAFTS,
+  notClearedInWords,
+  pageState,
+  parentsOf,
+  redirects,
+  sampleCall,
+  saveOf,
+  type Drafts,
+  type ProxyDefinition,
+  type ProxyRoute,
+} from '../src/lib/proxy.ts';
+
+const DEV = { project: 'market', environment: 'dev' };
+const NONE = { perMinute: null, perDay: null };
+
+function route(name: string, keys: readonly string[] = ['OPENAI_API_KEY'], host = 'api.openai.com'): ProxyRoute {
+  return {
+    kind: 'route', name, upstream: `https://${host}/v1`,
+    inject: keys.map((key, i) => ({ kind: 'header' as const, name: i === 0 ? 'authorization' : `x-key-${i}`, template: i === 0 ? `Bearer {${key}}` : `{${key}}` })),
+    allow: null, limit: NONE, placeholder: null, egress: null,
+  };
+}
+
+function key(name: string, over: Partial<SecretKey> = {}): SecretKey {
+  return {
+    key: name, reference: null, folder: null, archived: false, version: 1, updatedAt: null, updatedBy: null, versionId: null,
+    generated: null, value: null, sensitivity: 'secret', readable: true, parent: null, ...over,
+  };
+}
+
+const KEYS = [key('OPENAI_API_KEY'), key('STRIPE_KEY', { sensitivity: 'sensitive', readable: false }), key('PARTNER_KEY', { readable: false }), key('MAPS_API_KEY')];
+
+/** A page as `GET …/proxy` answers it: Ada's, an Owner of market, unless `over` says. */
+function page(items: readonly ProxyDefinition[], over: Partial<ProxyPage> = {}): ProxyPage {
+  return {
+    environmentId: '00000000-0000-4000-8000-000000000001', seal: 'c2VhbHNlYWxzZWFsc2VhbA==', state: 'ok',
+    items: items.map((definition, i) => ({ definition, keys: [], savedBy: 'user:ada@acme.example', savedAt: 1_700_000_000_000 + i, routesSensitive: true })),
+    reserved: ['maps'], reservedState: 'ok', editable: true, readOnly: null,
+    code: [{ definition: route('maps', ['MAPS_API_KEY'], 'maps.googleapis.com'), environments: null, limitPerService: true, bound: false }],
+    routesSensitive: true, releases: true, useUrl: 'https://secrets.acme.example/use', windowSeconds: 60, insecureUpstreams: false,
+    ...over,
+  } as ProxyPage;
+}
+
+const state = (proxy: ProxyPage, drafts: Drafts = NO_DRAFTS, tried = false, keys = KEYS) => pageState({ page: proxy, place: DEV, parents: [], keys, drafts, tried });
+
+test("the list: code's items locked, the environment's own, then what its fork inherits and does not override, none whose name code takes", () => {
+  const dev = page([route('openai'), route('stripe', ['STRIPE_KEY'], 'api.stripe.com')]);
+  const fork = page([route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com'), route('maps')]);
+  const items = itemsOf(fork, { project: 'market', environment: 'dev-eu' }, [{ path: 'market/dev', page: dev }]);
+  assert.deepEqual(items.map((item) => [item.id, item.source, item.from]), [
+    ['code:maps', 'code', null],
+    ['own:openai', 'own', 'market/dev'],
+    ['from:stripe', 'inherited', 'market/dev'],
+  ]);
+  // A code item scoped elsewhere takes its name here and serves nothing.
+  const scoped = page([], { code: [{ definition: { kind: 'tunnel', name: 'replica', key: 'REPLICA_URL', hosts: ['10.0.1.5'], network: null }, environments: ['market/prod'], limitPerService: false, bound: true }] });
+  assert.deepEqual(itemsOf(scoped, DEV).map((item) => [item.id, item.serves]), [['code:replica', false]]);
+  assert.deepEqual(parentsOf([{ slug: 'dev', parent: null }, { slug: 'dev-eu', parent: 'dev' }, { slug: 'x', parent: 'dev-eu' }], { project: 'market', environment: 'x' }), ['market/dev-eu', 'market/dev']);
+});
+
+test('a save sends each changed item by name: a rename removes the old name, a deletion is null, an override is the place\'s own', () => {
+  const proxy = page([route('openai'), route('partner', ['PARTNER_KEY'], 'api.partner.example'), route('old')]);
+  const parentPage = page([route('stripe', ['OPENAI_API_KEY'], 'api.stripe.com')]);
+  const drafts: Drafts = {
+    edits: { 'own:openai': { ...route('gpt'), upstream: ' https://api.openai.com/v2 ' }, 'own:old': null, 'from:stripe': { ...route('stripe', ['OPENAI_API_KEY'], 'eu.stripe.com') }, 'new:0': route('fresh') },
+    added: [{ id: 'new:0', copiedFrom: null }],
+    resaved: [],
+  };
+  const rows = pageState({ page: proxy, place: DEV, parents: [{ path: 'market/prod', page: parentPage }], keys: KEYS, drafts, tried: true }).rows;
+  assert.deepEqual(Object.entries(saveOf(rows)).map(([name, definition]) => [name, definition === null ? null : (definition as ProxyRoute).upstream]), [
+    ['old', null],
+    ['openai', null],
+    ['gpt', 'https://api.openai.com/v2'],
+    ['stripe', 'https://eu.stripe.com/v1'],
+    ['fresh', 'https://api.openai.com/v1'],
+  ]);
+});
+
+test("a reader's page: every field inert, nothing to delete or add; a key its editor cannot read leaves the row inert, deletable", () => {
+  const reader = state(page([route('openai')], { editable: false, readOnly: { reason: 'missing_proxy_edit', message: 'editing proxy definitions takes proxy.edit here: Owners hold it' }, routesSensitive: false, releases: false }));
+  // A row's `editable` is its fieldset's: disabled, every control inert (proxy-sheet.tsx); `removable` its Delete.
+  assert.deepEqual(reader.rows.map((row) => [row.id, row.editable, row.removable]), [['code:maps', false, false], ['own:openai', false, false]]);
+  assert.equal(reader.editor.editable, false);
+  // A forged object: none of it to edit, and only an Owner of the project, who replaces it whole, saves.
+  const forged = state(page([], { state: 'tampered' }));
+  assert.deepEqual([forged.replacing, forged.editor.editable], [true, true]);
+  assert.equal(state(page([], { state: 'tampered', routesSensitive: false })).editor.editable, false);
+
+  // An Owner who cannot read PARTNER_KEY: the vault would refuse its save, so the row stays as it is, and only goes.
+  const owner = state(page([route('partner', ['PARTNER_KEY'], 'api.partner.example'), route('stripe', ['STRIPE_KEY'])]));
+  assert.deepEqual(owner.rows.filter((row) => row.item?.source === 'own').map((row) => [row.id, row.editable, row.removable]), [['own:partner', false, true], ['own:stripe', true, true]]);
+  assert.deepEqual(owner.rows.find((row) => row.id === 'own:partner')!.keys.blocked, ['PARTNER_KEY']);
+  // A sensitive key: an Owner of the project routes it, audited; anyone else may not.
+  assert.deepEqual(keyStanding(['STRIPE_KEY', 'NEW_KEY', 'OPENAI_API_KEY'], { keys: KEYS, routesSensitive: true }), { blocked: [], routed: ['STRIPE_KEY'], missing: ['NEW_KEY'] });
+  assert.deepEqual(keyStanding(['STRIPE_KEY'], { keys: KEYS, routesSensitive: false }).blocked, ['STRIPE_KEY']);
+});
+
+test("an edit's problems, once a save is tried, under the field the vault's own check names", () => {
+  const drafts: Drafts = {
+    edits: {
+      'new:0': { ...route('maps'), inject: [{ kind: 'header', name: 'authorization', template: 'Bearer ' }] },
+      'new:1': { ...route('Bad Name') },
+      'new:2': { ...route('meta'), upstream: 'https://169.254.169.254/latest', allow: [{ methods: [], path: '/a/../b' }] },
+      'new:3': route('partner', ['PARTNER_KEY']),
+    },
+    added: [0, 1, 2, 3].map((n) => ({ id: `new:${n}`, copiedFrom: null })),
+    resaved: [],
+  };
+  const untried = state(page([]), drafts, false);
+  assert.deepEqual(untried.rows.map(untried.problems), [{}, {}, {}, {}, {}]);
+  const tried = state(page([]), drafts, true);
+  const [maps, bad, meta, partner] = tried.rows.slice(1).map(tried.problems);
+  assert.match(maps!.name!, /maps is defined in this deployment's code/);
+  assert.equal(bad!.name, 'A lowercase letter, then up to 31 lowercase letters, digits or dashes.');
+  assert.equal(meta!.upstream, 'Upstream is a private, loopback or link-local address, or localhost, which no UI definition reaches');
+  assert.equal(partner!.keys, "You can't read PARTNER_KEY in market/dev, so you can't route it.");
+  assert.equal(tried.sound, false);
+  assert.deepEqual(fieldOf('openai: inject[1].template names no key: write it as {KEY}', 'openai', 'route'), { field: 'inject.1', words: 'Template names no key: write it as {KEY}' });
+  assert.deepEqual(fieldOf('openai: sigv4 sets authorization itself', 'openai', 'route'), { field: 'inject', words: 'Sigv4 sets authorization itself' });
+});
+
+test('discarding leaves the page as it was loaded; a save of nothing changed is no change', () => {
+  const proxy = page([route('openai')]);
+  const edited = state(proxy, { edits: { 'own:openai': route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com') }, added: [], resaved: [] });
+  assert.deepEqual([edited.changed, edited.counts], [1, { added: 0, updated: 1, deleted: 0 }]);
+  const discarded = state(proxy, NO_DRAFTS);
+  assert.deepEqual([discarded.changed, discarded.rows.map((row) => row.state)], [0, ['same', 'same']]);
+  // Typed back to what it was: no change at all.
+  assert.equal(state(proxy, { edits: { 'own:openai': route('openai') }, added: [], resaved: [] }).changed, 0);
+  // Saved again as it is, under its editor's standing now: a change of its own, which is how an Owner clears a route.
+  const resaved = state(proxy, { edits: {}, added: [], resaved: ['own:openai'] });
+  assert.deepEqual([resaved.changed, Object.keys(saveOf(resaved.rows))], [1, ['openai']]);
+});
+
+test('after a 409, the review says what another save changed since the page loaded', () => {
+  const loaded = page([route('openai'), route('stripe', ['STRIPE_KEY'])]);
+  const now = page([{ ...route('openai'), upstream: 'https://eu.api.openai.com/v1' }, route('s3')], {
+    items: [
+      { definition: { ...route('openai'), upstream: 'https://eu.api.openai.com/v1' }, keys: [], savedBy: 'user:lead@acme.example', savedAt: 1_800_000_000_000, routesSensitive: false },
+      { definition: route('s3'), keys: [], savedBy: 'user:lead@acme.example', savedAt: 1_800_000_000_000, routesSensitive: false },
+    ],
+  });
+  assert.deepEqual(changedSince(loaded, now), [
+    { name: 'openai', what: 'updated', by: 'user:lead@acme.example' },
+    { name: 's3', what: 'added', by: 'user:lead@acme.example' },
+    { name: 'stripe', what: 'removed', by: null },
+  ]);
+  assert.deepEqual(changedSince(loaded, loaded), []);
+});
+
+test("a copy's review names the keys it sends here and where; a change of destination opens the save's window", () => {
+  const sandbox = { ...route('schuman', ['SCHUMAN_API_KEY'], 'sandbox.schuman.example') };
+  assert.equal(copiedInWords(sandbox, { project: 'market', environment: 'prod' }, 'market/dev'), "schuman will send market/prod's SCHUMAN_API_KEY to sandbox.schuman.example (copied from market/dev).");
+  assert.equal(redirects(route('openai'), { ...route('openai'), limit: { perMinute: 5, perDay: null } }), false);
+  assert.equal(redirects(route('openai'), route('openai', ['OPENAI_API_KEY'], 'eu.api.openai.com')), true);
+  assert.equal(redirects(route('openai'), null), true);
+});
+
+test('the sample call matches as the proxy does: globs by segment, a plain path a prefix', () => {
+  const openai: ProxyRoute = { ...route('openai'), allow: [{ methods: ['POST'], path: '/chat/completions' }, { methods: ['GET'], path: '/models/**' }] };
+  assert.deepEqual(sampleCall(openai, 'GET', '/models/gpt-4'), { url: 'https://api.openai.com/v1/models/gpt-4', refusal: null });
+  assert.equal(sampleCall(openai, 'POST', '/chat/completions/x').refusal, null);
+  assert.match(sampleCall(openai, 'DELETE', '/models/gpt-4').refusal!, /^405/);
+  assert.match(sampleCall(openai, 'GET', '/files').refusal!, /^403/);
+});
+
+test("an item that would not route now says why, and who clears it", () => {
+  const item = { definition: route('gemini'), savedBy: 'user:lead@acme.example' };
+  assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' } }, DEV),
+    'gemini does not route now: lead@acme.example, who saved it, no longer reads OPENAI_API_KEY here. Someone who does saves it again.');
+  assert.equal(notClearedInWords({ ...item, notCleared: { key: 'OPENAI_API_KEY', reason: "OPENAI_API_KEY is sensitive, and its save was not an Owner's of its project" } }, DEV),
+    "gemini does not route now: OPENAI_API_KEY is sensitive, and lead@acme.example's save was not an Owner's. An Owner of market saves it again.");
+});
