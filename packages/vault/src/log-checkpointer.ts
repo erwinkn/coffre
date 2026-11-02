@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { pairSigners, pairVerifiers, type PairSigners, type PairVerifiers } from '@coffre/core/merkle';
 
+import { verifierKeys, type VerifierKeys } from './keyring.ts';
 import { Checkpointer, FenceClosed, logOrigin, type Alarm, type CheckpointStore, type Fence, type Memory, type Witness } from './checkpointer.ts';
 import { authentic, entryMac, KEY_OBJECT, logMacKey, rotationOf, rotationPayload, type LogMacKey } from './log-entry.ts';
 import type { LogStore } from './log-store.ts';
@@ -52,6 +53,8 @@ export type HostOptions = {
   tickBoundMs?: number;
   /** The most entries a tick seals in one pair (`WINDOW_MAX` otherwise): a backlog is sealed a part at a time, for the tests. */
   windowMax?: number;
+  /** How far behind its pair an entry's time may be (`FRESH_MS` otherwise), and retention's freshness bound: for the tests. */
+  freshMs?: number;
 };
 
 export async function openLogCheckpointer(options: HostOptions): Promise<Checkpointer> {
@@ -81,6 +84,7 @@ export async function openLogCheckpointer(options: HostOptions): Promise<Checkpo
     ...(options.fence === undefined ? {} : { fence: options.fence }),
     ...(options.tickBoundMs === undefined ? {} : { tickBoundMs: options.tickBoundMs }),
     ...(options.windowMax === undefined ? {} : { windowMax: options.windowMax }),
+    ...(options.freshMs === undefined ? {} : { freshMs: options.freshMs }),
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
       void Promise.resolve(options.record?.({ at: now(), message })).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));
@@ -119,9 +123,11 @@ export const daysAround = (t: number) => Array.from({ length: DAYS_AHEAD + 2 }, 
  * day waiting longer than `WAITING_ALARM_MS`. A quiet log, whose pairs do not
  * pass a day's end until something is logged, waits with no alarm.
  */
-export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: number | null; signingKey: Uint8Array; now?: () => number; alert: (message: string) => void }): () => Promise<void> {
+export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: number | null; signingKeys: readonly Uint8Array[]; now?: () => number; alert: (message: string) => void }): () => Promise<void> {
   const now = options.now ?? Date.now;
-  const macKey = logMacKey(options.signingKey);
+  // The vault's log keys, the current first, those it replaced after (retention's cut and cursor: keyring.ts). Derived
+  // once, on the first run that retains, and kept: settled values only.
+  let keys: VerifierKeys | null = null;
   let madeFor: string | null = null;
   let retained = -Infinity;
   let pruned = -Infinity;
@@ -141,7 +147,8 @@ export function upkeep(cp: Checkpointer, store: LogStore, options: { keepDays: n
       }
       if (options.keepDays !== null && t - retained >= RETAIN_EVERY_MS) {
         retained = t;
-        const run = await retain(cp, store, { keepDays: options.keepDays, macKey, now });
+        keys ??= await verifierKeys(options.signingKeys);
+        const run = await retain(cp, store, { keepDays: options.keepDays, keys, now });
         const day = run.waiting?.lock ? (run.waiting.day ?? 'the tiles') : null;
         if (day === null) waiting = null;
         else if (waiting?.day !== day) waiting = { day, since: t };

@@ -96,15 +96,24 @@
 (*                       in one statement;                                 *)
 (*   OneBoundary         the signer refuses to write a rotation from a key *)
 (*                       the log already holds a rotation from, whatever   *)
-(*                       the fence's `retired` says (Muse's review r2).    *)
+(*                       the fence's `retired` says (Muse's review r2);    *)
+(*   HeadAnchors         ... and any rotation while its head, the pair it  *)
+(*                       took from its memory and the database, is under   *)
+(*                       its own key: the log reached that key already,    *)
+(*                       whatever rotations a database writer deleted      *)
+(*                       (Muse's review r3).                               *)
 (*                                                                         *)
 (* Not modelled: two signers at once, which the hosts rule out (one Durable*)
 (* Object; one runner per memory), though the rotation's transaction reads *)
 (* the log's key again under its locks; the kinds of entries and the two   *)
-(* trees, retention, witnesses and time (Seal.tla's), the same here for    *)
-(* every key; a rotation through a third key (the code's rule is the same  *)
-(* for each; rotation.test.ts rotates A to B to C); a reader's other checks (a read's columns, the cursor's       *)
-(* place), which Reads.tla's are.                                          *)
+(* trees, witnesses and time (Seal.tla's), the same here for every key;    *)
+(* retention, whose cut and wait on the projector take the readers' bound  *)
+(* (retention.test.ts rotates under it); a rotation through a third key    *)
+(* (the code's rule is the same for each; rotation.test.ts rotates A to B  *)
+(* to C); a reader's state across calls, the projector's cursor and its    *)
+(* ranges, each held to the pair that starts it (docs/formal.md, "The      *)
+(* readers", says what that leaves to someone who holds A), and its other  *)
+(* checks (a read's columns, the cursor's place), which Reads.tla's are.   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -125,7 +134,7 @@ CONSTANTS
     EveFence,     \* BOOLEAN: Eve edits the fence's `retired` and plants a rotation into A, under A
     BoundaryChecked, RetiredRefused, RefusedUnderLock, RotateUnderLock, MemoryUnderPrevious, RowUnderPrevious,
     RotationProbed, AnchorKeyHeld, PendingAccepted, KeyNeverBack,
-    NumberInRotation, SignerVerified, KeyringBound, SnapshotRead, OneBoundary
+    NumberInRotation, SignerVerified, KeyringBound, SnapshotRead, OneBoundary, HeadAnchors
 
 Keys == {"A", "B"}
 None == "none"
@@ -306,6 +315,11 @@ Rotate ==
        \* `log_rotate` reads the fence again under its locks: the log moved on from that key already, its rotation's row
        \* gone or moved (no number to count from), and it writes no second boundary: refused, an alarm.
        ELSE IF LogKey(s.head) \in retired
+       THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
+       \* Its head under its own key (HeadAnchors): the log reached that key, so a rotation the newest says it is
+       \* still to write is not the vault's (its own deleted or moved, one into the old key planted). Refused, an alarm:
+       \* the head is the signer's own evidence, its memory's, which no database writer edits.
+       ELSE IF HeadAnchors /\ s.head.key = cfg.cur
        THEN s' = [s EXCEPT !.pc = "stuck"] /\ UNCHANGED <<seq, entries, retired, rotations>>
        \* A rotation from that key the log already holds (OneBoundary): the log was moved on from it once, and a key
        \* never comes back, so the newest rotation naming it is not the vault's. Refused, an alarm, whatever the fence

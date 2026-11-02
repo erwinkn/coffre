@@ -137,7 +137,7 @@ export async function runCheckpointer(options: {
   // Behind the checkpointer's fence: an upkeep still running once it stalled does nothing beside the next one's.
   const keep = upkeep(checkpointer, fence.store(store), {
     keepDays: options.retainDays ?? null,
-    signingKey: options.signingKeys[0]!,
+    signingKeys: options.signingKeys,
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
       void record({ at: Date.now(), message });

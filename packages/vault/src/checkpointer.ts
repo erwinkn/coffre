@@ -761,6 +761,11 @@ export class Checkpointer {
     const boundaries = new Map(rotations.map((r) => [r.from, r.number]));
     if (at !== own) {
       if (options.rotations === undefined) throw new Error(`the log is under ${at}, not this signer's key (${own}), and it cannot write the rotation`);
+      // The signer's head, from its memory or a row it opened, is under its own key already (HeadAnchors, Rotation.tla):
+      // the log reached this key, so no rotation is left to write, and a newest rotation that says otherwise is not the
+      // vault's (its own deleted or renumbered, one into an old key planted). Refused on the signer's own evidence,
+      // whatever rows a database writer removed (Muse's review r3).
+      if (head.key.origin === own) throw new Error(`the log's newest rotation says it is under ${at}, but the signer's head (up to ${head.pair.upto}) is under its own key (${own}): a rotation not the vault's, refused`);
       // The log already moved on from that key (OneBoundary, Rotation.tla): a key never comes back, so the newest
       // rotation naming it is no rotation of the vault's, and a second would let the key vouch up to it. Refused
       // whatever the fence's `retired` says, a row a database writer edits; `log_rotate_number` reading it again

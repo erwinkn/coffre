@@ -511,7 +511,10 @@ R41's: a replaced key vouches only for what came before the rotation.
   moved on from: `retired` is a row a database writer edits too, so a
   newest rotation naming such a key (planted under it, the fence emptied)
   is refused at its open, never answered with a later boundary
-  (OneBoundary). Then the checkpointer ticks, so that the rotation is
+  (OneBoundary); and none at all while its head, the pair it took from its
+  memory and the database, is under its own key: the log reached that key,
+  whatever rotation rows a database writer deleted or moved (HeadAnchors).
+  Then the checkpointer ticks, so that the rotation is
   sealed under the new key within a tick.
 - **Old isolates write nothing past it.** A use whose MAC names a retired
   key is `superseded` (the app answers 503, `Retry-After`; a newer isolate
@@ -542,8 +545,9 @@ R41's: a replaced key vouches only for what came before the rotation.
   holds a replaced key.
 - **The other readers** hold to the same rule, through one keyring
   (`keyring.ts`): the reads' projector, `coffre verify log`'s check of the
-  reads, and the vault's `vouch`, which the audit pages ask of the rows
-  they show. A replaced key vouches for a pair, an entry, a read or the
+  reads, the vault's `vouch`, which the audit pages ask of the rows
+  they show, and retention, whose cut, the first pair past a day's end, is
+  under the old key for every day that ends before the rotation. A replaced key vouches for a pair, an entry, a read or the
   cursor numbered below its rotation; one no rotation retired yet, while
   the newest pair is under it; otherwise for nothing. Each reads the
   rotations and the newest pair in one statement, and keeps no bound
@@ -562,6 +566,15 @@ R41's: a replaced key vouches only for what came before the rotation.
   the moment between the rotation and the tick right after it. What the
   old key forged before the rotation verifies like the rest, as under
   0.14 ([keys.md](../keys.md)).
+- **Below the rotation.** What the old key vouches for there, it vouches
+  for to whoever holds it: the leak's reach before the rotation, kept. The
+  projector takes a cursor under the old key below the rotation, and walks
+  a range it has yet to list held to the pair that starts it, not to the
+  newest: someone who holds the old key and writes the database can move
+  that cursor among numbers below the rotation (a stretch listed again, or
+  skipped, which the check of the reads names), or replace such a pair,
+  with uses of her own, which `coffre verify log`'s walk names (it chains
+  every pair to the newest). Nothing at or past the rotation.
 - **Seals.** A use checks an object's seal under every key the vault holds,
   the replaced ones included, whatever the change's number: one who holds
   the old key and writes the database can still seal a row the use takes,

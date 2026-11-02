@@ -2011,7 +2011,8 @@ tag), so the database can tell them apart.
   the name of a key they are not signed under, in `RotationFence` she takes
   A out of the fence's `retired` (a row of the database's, as writable as
   the floor beside it) and plants a rotation into A, under A, past A's
-  own. `RotationChunked` seals a
+  own, and in `RotationFenceGone` she deletes the vault's own rotation,
+  sealed, as well. `RotationChunked` seals a
   backlog a part at a time (`WINDOW_MAX`), so a pair under B can lie below
   the rotation.
 - **A restore** puts back a backup taken at any moment, the signer's memory
@@ -2034,6 +2035,7 @@ tag), so the database can tell them apart.
 | a pair is taken under the key its signatures hold under, never a name its notes carry (SignerVerified: `signedUnder`) | `VerifiedSound` (`RotationClaim`): Eve's pair under A over the rotation, naming B, takes the current key's rule and passes (r1) |
 | a replaced key's entries are bounded by its own rotation, whatever key the newest pair is under (KeyringBound: no fast path for a newest pair under the current key) | `NoFalseAlarm` (`RotationChunked`): a pair under B below the rotation, A's honest entries above it refused by every check (r1) |
 | the signer writes no rotation from a key the log already holds a rotation from, whatever `retired` says (OneBoundary: `Checkpointer.moved`) | `SealedBelowBoundary` (`RotationFence`): A taken out of the fence, a rotation into A planted past A's own; the signer started again moves the log on from A a second time and seals Eve's entry under A below that second boundary (Muse's review r2 of #444) |
+| ... and none while its head, the pair it took from its memory and the database, is under its own key (HeadAnchors: `Checkpointer.moved`) | `SealedBelowBoundary` (`RotationFenceGone`): as in `RotationFence`, the vault's own rotation, sealed, deleted too, so no row says the log moved on from A; the signer started again, its head under B, moves the log on from A a second time (Muse's review r3 of #444) |
 | a reader reads the rotations and the newest pair in one statement (SnapshotRead: `keyringRows`) | `ReaderNoFalseAlarm`, `ReaderSound` (`RotationReader`): the rotations read before the deploy's rotation, the newest pair after its first seal, A's history refused; or the pair read before the rotation sealed, A trusted past it (r1) |
 
 Liveness (`LogWorks`, `RotationDeploy`; weak fairness on the signer's steps
@@ -2059,15 +2061,27 @@ to C end to end); seals, which a use checks under every
 key the vault holds (see audit-tree.md, "A rotation").
 
 **The readers.** The reads' projector (Reads.tla's, which models one key),
-`coffre verify log`'s check of the reads and the vault's `vouch` take a key's
-word for pairs, entries, reads and the cursor, through the same function the
+`coffre verify log`'s check of the reads, the vault's `vouch` and
+retention's cut and its wait on the projector take a key's word for
+pairs, entries, reads and the cursor, through the same function the
 verifier's rule calls, `ringOf` (`keyringOf` reads it in one statement): a
 replaced key vouches below its rotation's number only; one no rotation
-retired yet, while the newest pair is under it; otherwise for nothing. The
-model's reader is that function read across the deploy (SnapshotRead). A
+retired yet, while the newest pair is under it; otherwise for nothing. A
 reader keeps no bound between calls: across a restore, the rotation comes
-back at another number. What each holds a read or the cursor to besides is
-Reads.tla's, and tested (`packages/vault/test/reads-rotation.test.ts`).
+back at another number. What the model checks of them is that one bound,
+read in one statement (`Reader`, SnapshotRead): a stateless call, as
+`vouch` is. The projector's state across the two keys is not modelled
+(Muse's review r3 of #444): its cursor under the old key, its ranges
+walked under the keys that vouch where each starts, each held to the pair
+that starts it, not to the newest. So someone who holds the old key and
+writes the database can, below the rotation, still do what the leak let
+her do before it: move the old key's cursor among numbers below the
+rotation (the projector lists a stretch again, or skips one, which the
+check of the reads names), or replace a pair below the rotation the
+projector has yet to list, with uses of her own (`coffre verify log`'s
+walk, which chains every pair to the newest, names it). Nothing at or
+past the rotation. Tested in `packages/vault/test/reads-rotation.test.ts`
+and, for retention, `retention.test.ts`.
 
 ## TLC
 
@@ -2149,7 +2163,7 @@ every pull request that is not a version-only bump:
     - `seal` (Seal and Migration015);
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
     - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
-      eight, about 3.5 minutes of it here);
+      ten, about 3.5 minutes of it here before the last two);
   - the rest.
 
   A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints

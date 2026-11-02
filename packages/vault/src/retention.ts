@@ -1,8 +1,9 @@
-import { leafData, openPair, proveConsistency, TREES, verifyConsistency, type Cut, type LogEntry, type StoredPair } from '@coffre/core/merkle';
+import { leafData, proveConsistency, TREES, verifyConsistency, type Cut, type LogEntry, type StoredPair } from '@coffre/core/merkle';
 
 import { FenceClosed, type Checkpointer, type CheckpointStore } from './checkpointer.ts';
-import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload, type LogMacKey } from './log-entry.ts';
-import { cursorHolds, type ReadsCursor } from './reads.ts';
+import { keyringOf, openUnder, type Keyring, type KeyringStore, type VerifierKeys } from './keyring.ts';
+import { entryMac, RETENTION_ACTOR, RETENTION_OBJECT, retentionCut, retentionPayload } from './log-entry.ts';
+import { cursorVouched, type ReadsCursor } from './reads.ts';
 
 /**
  * Retention (docs/design/0.15-plan.md, PR 7; formal/Seal.tla's retention):
@@ -83,8 +84,12 @@ export type RetentionRun = {
 type Options = {
   /** Full days of uses kept before today's: a day goes once `keepDays` days have ended after it. */
   keepDays: number;
-  /** The log's MAC key (`logMacKey`): the retention change is an entry like any. */
-  macKey: LogMacKey;
+  /**
+   * The vault's log keys (`verifierKeys`): the retention change is an entry like any, under the current key; a cut pair
+   * or the reads' cursor under a key the log moved on from counts only below its rotation, as every reader takes them
+   * (keyring.ts, T168).
+   */
+  keys: VerifierKeys;
   now?: () => number;
 };
 
@@ -93,13 +98,15 @@ type Options = {
  * retention change not sealed, a day the database refuses); returns `waiting`
  * when a day is not ready yet.
  */
-export async function retain(cp: Checkpointer, store: CheckpointStore & RetentionStore, options: Options): Promise<RetentionRun> {
+export async function retain(cp: Checkpointer, store: CheckpointStore & RetentionStore & KeyringStore, options: Options): Promise<RetentionRun> {
   if (!Number.isSafeInteger(options.keepDays) || options.keepDays < 1) throw new Error(`keepDays must be a whole number of days, at least 1, not ${options.keepDays}`);
   const now = options.now ?? Date.now;
   const run: RetentionRun = { dropped: [], detached: [], waiting: null, tiles: 0 };
+  // The keys and their bounds, read once a run, in one statement (nothing kept between runs).
+  const ring = await keyringOf(options.keys, store);
   const last = dayOf(now() - (options.keepDays + 1) * DAY_MS);
   for (const day of (await store.days()).filter((d) => d <= last)) {
-    const done = await retainDay(cp, store, day, options.macKey, now);
+    const done = await retainDay(cp, store, day, ring, now);
     if ('reason' in done) {
       run.waiting = { day, ...done };
       break;
@@ -114,7 +121,7 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
   }
   // The tiles below the newest cut, once its sealing is two freshness bounds past it, as a day goes (FreshBeforeDrop).
   const newest = await sealedCut(cp, store);
-  const projecting = newest === null ? null : await behindReads(store, options.macKey, newest.upto);
+  const projecting = newest === null ? null : await behindReads(store, ring, newest.upto);
   if (projecting !== null) run.waiting ??= { day: null, lock: false, reason: `the tiles below ${newest!.upto}: ${projecting}` };
   else if (newest !== null && cp.pair.pair.at >= newest.at + 2 * cp.freshMs) {
     const tiles = await waitingOnLock(() => store.dropTiles(newest.uses.size));
@@ -127,7 +134,7 @@ export async function retain(cp: Checkpointer, store: CheckpointStore & Retentio
 /** One day: dropped, with the change written for it if any; or why it waits. */
 type Wait = { lock: boolean; reason: string };
 
-async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, macKey: LogMacKey, now: () => number): Promise<{ change: bigint | null; detached: boolean } | Wait> {
+async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionStore, day: string, ring: Keyring, now: () => number): Promise<{ change: bigint | null; detached: boolean } | Wait> {
   const end = Date.parse(`${day}T00:00:00Z`) + DAY_MS;
   const head = cp.pair.pair;
   if (head.floor < end) return { lock: false, reason: `the signer's newest pair (up to ${head.upto}) is not past the day's end yet` };
@@ -135,7 +142,9 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   // floor at or past the end, the floor before it below: CutFirst). The rows say which pair that is, and a writer who
   // deletes some, or edits their floors, would make a later one pass for it, and every use between go unwalked.
   const row = await store.cutAt(end);
-  const cut = row === null ? null : await openPair(row.notes, cp.verifiers);
+  // Under the signer's key, or one it replaced below that key's rotation: a day that ends in the keep window after a
+  // rotation has its cut under the old key (review r3 of #444).
+  const cut = row === null ? null : (await openUnder(ring, row.notes))?.pair ?? null;
   if (row === null || cut === null || cut.upto !== row.upto || cut.floor < end || cut.prev >= end || cut.upto > head.upto) {
     throw new Error(`retention of ${day}: the database holds no pair of this log, at or below the signer's (up to ${head.upto}), that is the first past the day's end: checkpoints were deleted or replaced`);
   }
@@ -164,7 +173,7 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
     const at = now();
     const requestId = `retention:${day}`;
     const payload = retentionPayload(day, named);
-    const mac = entryMac(macKey, { tree: 'changes', row: { at, requestId, object: RETENTION_OBJECT, actor: RETENTION_ACTOR, payload, seal: null } });
+    const mac = entryMac(ring.current.mac, { tree: 'changes', row: { at, requestId, object: RETENTION_OBJECT, actor: RETENTION_ACTOR, payload, seal: null } });
     change = await store.appendRetention({ requestId, at, payload, mac });
     // Sealed in the signer's pair, witnessed or not: its proof is checked against the pair. A retry finds the change it
     // made before, whose cut is this day's (the first pair past its end) unless the rows moved: then nothing is dropped.
@@ -181,7 +190,7 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
   if (freshAt < bound) return { lock: false, reason: `the pair sealing its cut (at ${freshAt}) is not two freshness bounds past it (${bound}) yet` };
   // 4. Not before the reads' projector has read every use at or below the cut (T166): those it has yet to list would
   // otherwise never be, and the range it walks needs the tiles too.
-  const projecting = await behindReads(store, macKey, cut.upto);
+  const projecting = await behindReads(store, ring, cut.upto);
   if (projecting !== null) return { lock: false, reason: projecting };
   // 5. The day's partition: detached now, and dropped by a later run, never right after its DETACH (see above). A reader
   // holding log_uses longer than `drop_day`'s lock_timeout (a backup, say) makes it give up: the next run tries again.
@@ -199,9 +208,11 @@ async function retainDay(cp: Checkpointer, store: CheckpointStore & RetentionSto
  * (review r7). Such a cursor stops the projector too, so retention waits,
  * and alarms once it has waited long.
  */
-async function behindReads(store: RetentionStore, macKey: LogMacKey, upto: bigint): Promise<string | null> {
+async function behindReads(store: RetentionStore, ring: Keyring, upto: bigint): Promise<string | null> {
   const cursor = await store.readsCursor();
-  if (!cursorHolds(macKey, cursor)) return `the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`;
+  // Under the current key, or under one replaced while the cursor is below its rotation: the projector re-MACs it
+  // under the current key when it next moves (reads.ts).
+  if (!cursorVouched(ring, cursor)) return `the reads' cursor, at ${cursor.through}, is not the vault's: it was moved around the projector`;
   return cursor.through >= upto ? null : `the reads' projection (through ${cursor.through}) has not reached the cut (${upto}) yet`;
 }
 

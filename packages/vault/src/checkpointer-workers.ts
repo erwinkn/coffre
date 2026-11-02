@@ -190,7 +190,7 @@ export function checkpointerObject<Env>(settings: (env: Env) => CheckpointerSett
           // Behind the checkpointer's fence, as everything it does: nothing of it runs once another opens.
           this.#upkeep = upkeep(checkpointer, fence.store(store), {
             keepDays: s.retainDays ?? null,
-            signingKey: s.signingKeys[0]!,
+            signingKeys: s.signingKeys,
             alert: (message) => {
               console.warn(`coffre audit: ${message}`);
               void this.#record({ at: Date.now(), message }).catch((error: Error) => console.warn(`coffre audit: the alarm could not be kept: ${error.message}`));

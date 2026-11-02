@@ -140,7 +140,9 @@
   lists the old key's sealed uses after the rotation and moves on under
   the new key, `coffre verify log` holds reads listed before it under the
   old key, and no reader takes the old key's word for anything at or past
-  the rotation (the projector, the check, the pages' `vouch`). A rotation's
+  the rotation (the projector, the check, the pages' `vouch`, retention,
+  whose cut for a day that ended before the rotation is under the old key).
+  A rotation's
   entry names its own number under its MAC, so that one moved counts for
   nothing.
   `runCheckpointer`'s, `keepCheckpointer`'s and the checkpointer object's
