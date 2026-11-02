@@ -83,17 +83,32 @@ BEGIN
 END
 $$;
 
--- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change): the app runs it,
--- and no other function of the log; the vault and the backup never run it.
+-- But the app's own changes, sealed by the vault, which its transactions commit (0025's app_change, and 0051's
+-- app_change_strict, which raises where it answers null): the app runs them, and no other function of the log; the
+-- vault and the backup never run them. The vault's change_input_strict is the vault's alone, as change_input is.
 DO $$
+DECLARE
+    f text;
 BEGIN
-    IF NOT has_function_privilege('coffre_app', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_app', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_vault', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE')
-       OR has_function_privilege('coffre_backup', 'app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)', 'EXECUTE') THEN
-        RAISE EXCEPTION 'FAIL: app_change is not the app''s alone';
+    FOREACH f IN ARRAY ARRAY['app_change(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)',
+                             'app_change_strict(text, text, text, bigint, text, text, bytea, bytea, bytea, bytea)'] LOOP
+        IF NOT has_function_privilege('coffre_app', f, 'EXECUTE') OR has_function_privilege('coffre_vault', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the app''s alone', f;
+        END IF;
+    END LOOP;
+    FOREACH f IN ARRAY ARRAY['change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)',
+                             'change_input_strict(text, text, text, bigint, text, text, text, bytea, bytea, bytea)'] LOOP
+        IF NOT has_function_privilege('coffre_vault', f, 'EXECUTE') OR has_function_privilege('coffre_app', f, 'EXECUTE')
+           OR has_function_privilege('coffre_backup', f, 'EXECUTE') THEN
+            RAISE EXCEPTION 'FAIL: % is not the vault''s alone', f;
+        END IF;
+    END LOOP;
+    -- A committed change whose number the client could not read, the app reads again (`newestCommitted`).
+    IF NOT has_table_privilege('coffre_app', 'log_changes', 'SELECT') OR has_table_privilege('coffre_app', 'log_changes', 'INSERT') THEN
+        RAISE EXCEPTION 'FAIL: the app does not read its changes, or writes them';
     END IF;
-    RAISE NOTICE 'PASS: the app logs its own changes through app_change, and runs no other function of the log';
+    RAISE NOTICE 'PASS: the app logs its own changes through app_change and app_change_strict, and runs no other function of the log';
 END
 $$;
 

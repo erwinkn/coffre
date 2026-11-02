@@ -146,7 +146,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -832,8 +832,8 @@ class VaultService implements Vault {
       this.#reported(reports);
       // A change answers once its entries are sealed (R51; HotPathOne's CommitBeforeAnswer): the newest of them, with
       // every number below it.
-      const numbers = committed.numbers === null ? [] : await committed.numbers.answer;
-      if (numbers.length > 0) await this.#prepared.log015!.sealThrough(numbers.reduce((a, b) => (a > b ? a : b)));
+      const newest = committed.numbers === null ? null : await newestCommitted(this.#db, committed.numbers);
+      if (newest !== null) await this.#prepared.log015!.sealThrough(newest);
       return { ok: true, ...committed.result };
     } catch (thrown) {
       const caught = (staged as Changes | null)?.failed(thrown) ?? thrown;

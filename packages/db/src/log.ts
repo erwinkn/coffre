@@ -306,7 +306,8 @@ export async function appendEntries(
    * under one Sync (`later`), and what it fails with fails the transaction.
    * Its changes then go through `app_change_strict`: a row moved since it
    * was read fails the transaction too (`isMovedChange`), never answers
-   * null, and their numbers come as `later`, once the COMMIT has answered.
+   * null, and their numbers come as `later`, once the COMMIT has answered
+   * (`newestCommitted`), `changes` left empty.
    */
   { final = false }: { final?: boolean } = {},
 ): Promise<Appended & { changes: (bigint | null)[]; later: ChangeNumbers | null }> {
@@ -374,7 +375,7 @@ export async function appendEntries(
     // access) at its end: each takes the issue lock before the fence, so either order is the locks' (migration 0026).
     const statement = callsOf(changes, sql`WITH appended AS (${tx.insert(auditLog).values(rows).getSQL()}),
       moved AS (UPDATE audit_chain_head SET next_seq = ${seq}, head_hash = ${prevHash} WHERE only_row) `, final);
-    if (final) numbered = numbersOf(laterRows(tx, statement));
+    if (final) numbered = numbersOf(laterRows(tx, statement), changes);
     else numbers = numbersIn(await rowsOf(tx, statement));
   } else if (engineOf(tx) === 'postgres' && rows.length <= ROWS_AT_ONCE) {
     // The entries and the head that names the last of them, in one statement.
@@ -659,7 +660,30 @@ export async function appChanges(tx: Transaction, calls: readonly PreparedChange
  * Postgres has run it, with the transaction's COMMIT at the latest, so only what follows the transaction reads them.
  * Every one is a number: a row moved since it was read failed the transaction (`isMovedChange`).
  */
-export type ChangeNumbers = { readonly answer: Promise<bigint[]> };
+export type ChangeNumbers = { readonly answer: Promise<bigint[]>; /** The request ids of the calls that make an entry. */ readonly requests: readonly string[] };
+
+/** The calls' request ids, but those that make no entry (0.14's rows: `app_change` answers 0). */
+function requestsOf(calls: readonly { requestId: string | null }[]): string[] {
+  return calls.flatMap(({ requestId }) => (requestId === null ? [] : [requestId]));
+}
+
+/**
+ * Once the transaction that made them has committed: the newest of the changes' numbers, which a change's answer
+ * waits to see sealed (R51); null when they made no entry. Their answer; or, when the client could not read it though
+ * Postgres ran the COMMIT (a row it failed to parse, a notice handler that threw: the transaction is Postgres's to
+ * decide, postgres-js/index.ts), their entries, read again by request id: a committed write never answers failed for
+ * it, nor answers before its seal.
+ */
+export async function newestCommitted(db: Queryable, numbers: ChangeNumbers): Promise<bigint | null> {
+  const read = await numbers.answer.catch(async (unread: unknown) => {
+    if (numbers.requests.length === 0) throw unread;
+    const requests = sql.join(numbers.requests.map((request) => sql`${request}`), sql`, `);
+    const rows = await rowsOf<{ number: string | number | bigint }>(db, sql`SELECT number FROM log_changes WHERE request_id IN (${requests})`);
+    if (rows.length !== numbers.requests.length) throw unread;
+    return rows.map(({ number }) => BigInt(number));
+  });
+  return read.reduce<bigint | null>((newest, number) => (number > 0n && (newest === null || number > newest) ? number : newest), null);
+}
 
 /**
  * `appChanges` for a write that goes on without their numbers: on Postgres, asked with `later`, so that they go with
@@ -669,9 +693,9 @@ export type ChangeNumbers = { readonly answer: Promise<bigint[]> };
  * failing alike.
  */
 export async function laterChanges(tx: Transaction, calls: readonly PreparedChange[]): Promise<ChangeNumbers> {
-  if (calls.length === 0) return { answer: Promise.resolve([]) };
-  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(strictly(await appChanges(tx, calls))) };
-  return numbersOf(laterRows(tx, callsOf(calls, sql``, true)));
+  if (calls.length === 0) return { answer: Promise.resolve([]), requests: [] };
+  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(strictly(await appChanges(tx, calls))), requests: requestsOf(calls) };
+  return numbersOf(laterRows(tx, callsOf(calls, sql``, true)), calls);
 }
 
 /** Numbers that must all be: a null is a row that moved, which fails the transaction, as `app_change_strict` does. */
@@ -703,10 +727,10 @@ function numbersIn(rows: readonly Record<string, unknown>[]): (bigint | null)[] 
 }
 
 /** A strict call's numbers, as they answer. */
-function numbersOf(rows: Promise<Record<string, unknown>[]>): ChangeNumbers {
+function numbersOf(rows: Promise<Record<string, unknown>[]>, calls: readonly PreparedChange[]): ChangeNumbers {
   const answer = rows.then((read) => strictly(numbersIn(read)));
   answer.catch(() => {});
-  return { answer };
+  return { answer, requests: requestsOf(calls) };
 }
 
 /**

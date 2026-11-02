@@ -14,7 +14,7 @@ import type { CredentialColumns, ObjectChange, PreparedChange } from '@coffre/co
 import { later, tablesOf, type Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { postgresSession, type PostgresClient } from '@coffre/db/connect';
-import { appChanges, appendEntries, isMovedChange, isStaleChange, laterChanges } from '@coffre/db/log';
+import { appChanges, appendEntries, isMovedChange, isStaleChange, laterChanges, newestCommitted } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { genesisCall, loggedChange, type ChangeKeys } from '../src/changes.ts';
@@ -210,8 +210,16 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
     later(tx, tx.update(credentials).set({ revokedAt: after.revokedAt, expiresAt: after.expiresAt }).where(eq(credentials.id, after.id)));
     return laterChanges(tx, calls);
   });
-  const [first] = await (await commit(renewed, renew)).answer;
+  const numbers = await commit(renewed, renew);
+  const [first] = await numbers.answer;
   assert.ok(first !== undefined && first > 0n);
+  assert.equal(await newestCommitted(db.owner, numbers), first);
+  // Postgres ran the COMMIT, but the client could not read its answer: the entries, read again by their request ids,
+  // so the committed write still waits for its seal, and does not answer failed (review r1). None by those ids: the
+  // answer's failure stands.
+  const unread = () => Promise.reject(new Error('unread'));
+  assert.equal(await newestCommitted(db.owner, { answer: unread(), requests: numbers.requests }), first);
+  await assert.rejects(newestCommitted(db.owner, { answer: unread(), requests: [randomUUID()] }), /unread/);
   // The revoke was sealed from the seal the renewal moved: refused in Postgres, and its row with it.
   await assert.rejects(commit({ ...renewed, revokedAt: revoked.revokedAt }, revoke), (error: unknown) => isMovedChange(error) && !isStaleChange(error));
   assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');

@@ -1,8 +1,8 @@
 import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import type { BindingColumns, ConnectionColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
-import type { Transaction } from '@coffre/db';
-import { holdIssues, isMovedChange, isStaleChange, laterChanges, type ChangeNumbers } from '@coffre/db/log';
+import type { Queryable, Transaction } from '@coffre/db';
+import { holdIssues, isMovedChange, isStaleChange, laterChanges, newestCommitted, type ChangeNumbers } from '@coffre/db/log';
 
 import { authMac } from '../auth-rows.ts';
 import type { BindingRow, CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
@@ -213,10 +213,9 @@ export class AppChanges {
   }
 
   /** After the commit: once the newest change is sealed, and every one before it (R51). */
-  async sealed(): Promise<void> {
-    const numbers = this.#numbers === null ? [] : (await this.#numbers.answer).filter((number) => number > 0n);
-    if (numbers.length === 0) return;
-    const newest = numbers.reduce((a, b) => (a > b ? a : b));
+  async sealed(db: Queryable): Promise<void> {
+    const newest = this.#numbers === null ? null : await newestCommitted(db, this.#numbers);
+    if (newest === null) return;
     const outcome = await this.#vault.waitSealed!({ number: newest.toString() });
     if (!outcome.ok) throw new Error(`change ${newest} was committed but not sealed: ${outcome.refusal.message}`);
   }

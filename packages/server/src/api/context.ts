@@ -237,7 +237,7 @@ export async function audited<T>(
     }).catch((error: unknown) => {
       throw changes === null ? error : AppChanges.failed(error);
     });
-    await changes?.sealed();
+    await changes?.sealed(ctx.db);
     return result;
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;

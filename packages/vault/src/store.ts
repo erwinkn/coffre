@@ -1177,11 +1177,12 @@ export async function changeInputs(tx: Transaction, calls: readonly ChangeCall[]
  * the change. Their numbers answer once the COMMIT has. On SQLite, made in turn, a moved row failing alike.
  */
 export async function laterInputs(tx: Transaction, calls: readonly ChangeCall[]): Promise<ChangeNumbers> {
-  if (calls.length === 0) return { answer: Promise.resolve([]) };
-  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(allNumbered(await changeInputs(tx, calls))) };
+  const requests = calls.map(({ requestId }) => requestId);
+  if (calls.length === 0) return { answer: Promise.resolve([]), requests };
+  if (engineOf(tx) === 'sqlite') return { answer: Promise.resolve(allNumbered(await changeInputs(tx, calls))), requests };
   const answer = laterRows(tx, inputCalls(calls, true)).then((rows) => allNumbered(inputNumbers(rows)));
   answer.catch(() => {});
-  return { answer };
+  return { answer, requests };
 }
 
 /** `change_input`, or `change_input_strict`, once per call, in one statement. */

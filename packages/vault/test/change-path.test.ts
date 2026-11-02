@@ -11,7 +11,7 @@ import { EVERYWHERE, ROLES, type Permission } from '@coffre/core/access';
 import { later, tablesOf } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { postgresSession } from '@coffre/db/connect';
-import { forgetLogHeads, isMovedChange } from '@coffre/db/log';
+import { forgetLogHeads, isMovedChange, newestCommitted } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { Changes, genesisCall, loggedChange, NotLogged, payloadOf, type ChangeKeys } from '../src/changes.ts';
@@ -247,9 +247,12 @@ test('change_input_strict, with the COMMIT: its number answers after it; a chang
     later(tx, tx.insert(vaultMembers).values({ principal, status: 'active', role: 'viewer', mac: randomBytes(32), createdAt: Date.now(), createdBy: ROOT, statusChangedAt: Date.now(), statusChangedBy: ROOT, accessSeq: 0n }));
     return store.laterInputs(tx, [call]);
   });
-  const [number] = await (await commit(protect(true), ADA)).answer;
+  const numbers = await commit(protect(true), ADA);
+  const [number] = await numbers.answer;
   assert.ok(number !== undefined && number > 0n);
   assert.equal((await written(ADA)).length, 1, 'committed with its change');
+  // Committed, its answer unread by the client: read again by request id, through the vault's own login (review r1).
+  assert.equal(await newestCommitted(db.vault, { answer: Promise.reject(new Error('unread')), requests: numbers.requests }), number);
   // The second from the same seal: refused in Postgres, the transaction with it.
   await assert.rejects(commit(protect(false), BO), (error: unknown) => isMovedChange(error) && !store.isStale(error));
   assert.deepEqual(await written(BO), [], 'rolled back with the change');
