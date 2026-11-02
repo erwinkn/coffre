@@ -665,9 +665,8 @@ PlaceLive == \E k \in Cutovers : ~k.deleted /\ del.env = k.deleted
 \* it (`#standing`), as NewChangeRun does.
 \*
 \* The model's newest seal is the vault's: no action edits a 0.15 entry in place. The code's decisions
-\* check that, the newest change's MAC, before trusting its seal and `old`; a use does not yet (T190):
-\* it trusts the newest change's seal column, so against a writer who edits a change in place the
-\* code's use is weaker than NewUseRun.
+\* check that, the newest change's MAC, before trusting its seal and `old`, and so does a use (T190;
+\* HotPathOne.tla's ChangeMacChecked models the edit in place).
 MemberHolds ==
     LET s == SealBelow(nextSeq)
     IN /\ s.some /\ s.content = Content(row)

@@ -1005,8 +1005,8 @@ class VaultService implements Vault {
    * docs/design/two-trips.md, "Compatibility"): the member's row as 0.15's
    * log holds it (Migration015.tla's MemberHolds), not a walk back through
    * 0.14's entries, which one statement cannot make (`write_request`, PR 3).
-   * A use's check (`checkSeals`, `checkedOf`) is the same but for the
-   * newest change's MAC, which a use does not verify yet (T190):
+   * A use's check (`checkSeals`, `checkedOf`) is the same, the newest
+   * change's MAC included (T190, `changeHolds`, which this one calls too):
    *
    * - the row's seal is the vault's over its object, the row and its grants
    *   (`principalObject`): `mac` otherwise, written around the vault;

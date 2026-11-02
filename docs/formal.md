@@ -1809,10 +1809,9 @@ The cutover from 0.14 (the plan's PR 9).
   interleavings from the use's, so the use's invariants and removals cover
   them, with no action of their own. The model's newest seal is always the
   vault's: no action edits a 0.15 entry in place. The code's decisions check
-  that (the newest change's MAC, before its seal and `old` are trusted); a
-  use does not check it yet (T190): it trusts the newest change's seal
-  column, so against a writer who edits a change in place the code's use is
-  weaker than NewUseRun;
+  that (the newest change's MAC, before its seal and `old` are trusted), and
+  so does a use (T190; HotPathOne.tla's ChangeMacChecked, which models the
+  edit in place);
 - in Migration015Issue (T123), sign-ins: 0.14's `token.exchange`, which the
   trigger lets by; a 0.15 sign-in (0.14's head, then the issue lock); one
   that also revokes the account's earlier sessions (its trigger: the issue
