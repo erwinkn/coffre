@@ -686,15 +686,24 @@ function pluginContext(
     }
   };
   /**
-   * A UI route's answer refused before any value: no standing at the place, a personal config, no such item, or one a
-   * writer changed, as the proxy answers each. Null when the route was found and its keys decided (allowed or not).
+   * A UI route's answer refused before any value is opened: a personal config, no such item or one a writer changed,
+   * or a key its editor no longer routes (`route_not_cleared`, decision 5: 403 naming who must save again, as the
+   * caller may read the key and only the route may not send it). Null otherwise: allowed, or refused by the caller's
+   * own standing, which the read answers as every read does (D153). `name` is the route the vault's reading looked up.
    */
-  const routeRefusal = (answered: Extract<RouteUseOutcome, { route: 'name' }>, name: string): CoffreError | null => {
+  const routeRefusal = (answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): CoffreError | null => {
+    const name = (answered.reading === 'named' ? asked.named?.route : asked.stable) ?? '';
     if (answered.personal) {
       return new CoffreError(409, 'conflict', `${name} is defined in the UI, and a personal config serves no UI definition: name its environment${answered.place === null ? '' : `, ${answered.place.project}/${answered.place.environment.replace(/@me$/, '')}`}`, 'route_not_personal');
     }
     if (!answered.stands || answered.found === null) return null;
-    return foundRefusal(answered.found, name);
+    const missing = foundRefusal(answered.found, name);
+    if (missing !== null) return missing;
+    const { outcome } = answered;
+    if (!outcome.ok && 'code' in outcome && outcome.code === 'route_not_cleared') {
+      return new CoffreError(403, 'forbidden', `${name} is defined in the UI, and ${outcome.why ?? 'its editor no longer holds a key it sends'}: someone who reads its keys saves it again`, 'route_not_cleared');
+    }
+    return null;
   };
   /** A UI route's use: the vault's call, the read on what it decided, and the item the values go by. */
   const routeUse = async (caller: string | WorkloadUse, asked: RouteAsked): Promise<RouteUsed> => {
@@ -712,7 +721,7 @@ function pluginContext(
         const identity = used.identity as AuthenticatedIdentity;
         if (used.credential) throw new CoffreError(401, 'unauthenticated', 'that handle is unknown, expired or revoked');
         const { answered } = used;
-        const refused = routeRefusal(answered, name);
+        const refused = routeRefusal(answered, asked);
         if (refused !== null) throw refused;
         if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
         const read = await reveal(apiContext(runtime, identity), answered.place, {
@@ -731,7 +740,7 @@ function pluginContext(
       });
       if (!answered.served || answered.route === 'credential') throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
       if (answered.route === 'busy') throw refusedUse(answered.outcome);
-      const refused = routeRefusal(answered, name);
+      const refused = routeRefusal(answered, asked);
       if (refused !== null) throw refused;
       const decided = { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at };
       const read = await reveal(apiContext(runtime, made.identity), parsePath(caller.path!, [2]), {

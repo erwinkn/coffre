@@ -85,11 +85,11 @@ async function save(items: Record<string, ProxyDefinition | null>, as: CoffreCli
   await as.proxy.save('market/dev', { seal: page.seal, items });
 }
 
-/** A handle for DEV on market/dev, as `coffre run` makes one. */
-async function handle(): Promise<string> {
+/** A handle for DEV on `path`, market/dev by default, as `coffre run` makes one. */
+async function handle(path = 'market/dev'): Promise<string> {
   const session = await sessionFor(DEV);
   const api = createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${session}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
-  return (await api.handles.create({ label: 'coffre run market/dev', paths: ['market/dev'] })).token;
+  return (await api.handles.create({ label: 'coffre run market/dev', paths: [path] })).token;
 }
 
 const as = (token: string, init: RequestInit = {}): RequestInit => ({ ...init, headers: { authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) } });
@@ -135,9 +135,11 @@ test("EditorStillHolds: a route its editor saved stops once they no longer read 
   await save({ openai: uiRoute('openai', '/lin') }, lin);
   const token = await handle();
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
-  await root.access.set(`user:${LIN}`, { market: 'viewer' });
+  // A contributor uses and writes keys, never reads them: the editor no longer holds what the route sends.
+  await root.access.set(`user:${LIN}`, { market: 'contributor' });
   const stopped = await route('/use/openai/models', as(token));
   assert.equal(stopped.status, 403, await stopped.clone().text());
+  assert.equal((await stopped.json() as { reason: string }).reason, 'route_not_cleared');
   // Saved again by an Owner, unchanged: cleared as theirs.
   await save({ openai: uiRoute('openai', '/lin') });
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
@@ -165,7 +167,14 @@ test('a name no definition holds is 404; a signer saved in the UI reaches no ups
   const token = await handle();
   assert.equal((await route('/use/nothing/x', as(token))).status, 404);
   await save({ openai: uiRoute('openai', '/openai') });
-  assert.equal((await route('/use/market/dev@me/openai/models', as(token))).status, 409);
+  // A handle made for market/dev reads `/use/market/dev@me/openai/…` as the stable URL, a route `market` (section 6).
+  const stable = await route('/use/market/dev@me/openai/models', as(token));
+  assert.equal(stable.status, 404, await stable.clone().text());
+  assert.match((await stable.json() as { message: string }).message, /no credential "market"/);
+  // One made for market/dev@me reads the place, a personal config: 409 naming the base environment (decision 7).
+  const personal = await route('/use/market/dev@me/openai/models', as(await handle('market/dev@me')));
+  assert.equal(personal.status, 409, await personal.clone().text());
+  assert.match((await personal.json() as { message: string }).message, /market\/dev\b(?!@)/);
   await save({ signer: { kind: 'signer', name: 'signer', signer: { kind: 'private-key', key: 'OPENAI_API_KEY' }, limit: { perMinute: null, perDay: null } } });
   assert.equal((await route('/use/signer/x', as(token))).status, 404);
 });

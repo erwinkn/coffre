@@ -15,6 +15,7 @@ import { localVault, runCheckpointer, spoken, type SpokenVault, type VaultConfig
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
+import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { watchContext, watcherOf } from '../src/watch.ts';
 import { loadCaller, type Caller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
@@ -510,6 +511,8 @@ export function testDeps(db: Database, owners: readonly string[], extra: Partial
 export async function resetDatabase(owner: Database): Promise<void> {
   await drainBackgroundTasks();
   for (const reset of anchors) reset();
+  // The vault's log starts over, the names code reserved in it with it.
+  forgetProxyGates();
   const {
     credentials,
     deviceAuthorizations,

@@ -18,7 +18,12 @@ import type { ProxyCode } from './proxy-code.ts';
  *   first proxy request of a deploy adding `maps`    1 call: `proxy.code`, the UI `maps` items deleted, answered once sealed
  *   every request after                              no call
  */
-const GATED = new WeakMap<Vault, Set<string>>();
+let GATED = new WeakMap<Vault, Set<string>>();
+
+/** Forget every gate passed: for tests, whose vault's log starts over between cases while the vault stays. */
+export function forgetProxyGates(): void {
+  GATED = new WeakMap();
+}
 
 export async function gateProxy(vault: Vault, code: ProxyCode | null): Promise<void> {
   if (code === null) return;
