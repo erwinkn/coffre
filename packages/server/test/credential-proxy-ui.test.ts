@@ -6,22 +6,31 @@
 // the key stops their route (EditorStillHolds).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, createHmac, type Hash, type Hmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+import { SignatureV4 } from '@smithy/signature-v4';
+
 import { createClient, type CoffreClient } from '@coffre/client';
-import type { ProxyDefinition } from '@coffre/core/vault';
+import { Deploying, type ProxyDefinition, type Vault } from '@coffre/core/vault';
+
+import { sql, type SQL } from 'drizzle-orm';
 
 import { clientFor, LOG } from './api-fixture.ts';
-import { deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { TEST_ENGINE } from './db/engine.ts';
+import { db, deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
+import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { credentialProxy, header, privateKey, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
 
 const OPENAI = 'sk-openai-dev-0123456789abcdef';
 const MAPS = 'maps-key-0123456789abcdef';
 const LIN = 'lin@acme.example';
+const AWS_ID = 'AKIAREALKEY000000001';
+const AWS_SECRET = 'real/secret+access/key0123456789ABCDEFGH';
 const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 
 let upstream: Server;
@@ -90,6 +99,12 @@ async function handle(path = 'market/dev'): Promise<string> {
   const session = await sessionFor(DEV);
   const api = createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${session}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
   return (await api.handles.create({ label: 'coffre run market/dev', paths: [path] })).token;
+}
+
+/** Raw SQL as the owner, on either engine: a row changed around the vault. */
+async function run(query: SQL): Promise<void> {
+  if (TEST_ENGINE === 'sqlite') await (db.owner as unknown as { run: (q: SQL) => Promise<unknown> }).run(query);
+  else await (db.owner as unknown as { execute: (q: SQL) => Promise<unknown> }).execute(query);
 }
 
 const as = (token: string, init: RequestInit = {}): RequestInit => ({ ...init, headers: { authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) } });
@@ -177,4 +192,115 @@ test('a name no definition holds is 404; a signer saved in the UI reaches no ups
   assert.match((await personal.json() as { message: string }).message, /market\/dev\b(?!@)/);
   await save({ signer: { kind: 'signer', name: 'signer', signer: { kind: 'private-key', key: 'OPENAI_API_KEY' }, limit: { perMinute: null, perDay: null } } });
   assert.equal((await route('/use/signer/x', as(token))).status, 404);
+});
+
+test("the plan gives a UI route's key as the handle, never its value, and names its URL; one forged item answers 503 and no environment", ON_015, async () => {
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  const planned = await route('/use/market/dev', as(token));
+  assert.equal(planned.status, 200, await planned.clone().text());
+  const plan = await planned.json() as { env: Record<string, string>; credentials: Record<string, string>; left: string[] };
+  assert.equal(plan.env.OPENAI_API_KEY, token);
+  assert.equal(plan.env.MAPS_KEY, token);
+  assert.equal(plan.credentials.openai, `${ORIGIN}/use/market/dev/openai`);
+  assert.ok(!JSON.stringify(plan).includes(OPENAI));
+  // Without the tab, no UI item serves: the key is the person's to read, as any uncovered key.
+  deploy(proxyOf({ editable: false }));
+  const plain = await (await route('/use/market/dev', as(token))).json() as { env: Record<string, string>; credentials: Record<string, string> };
+  assert.equal(plain.env.OPENAI_API_KEY, OPENAI);
+  assert.equal(plain.credentials.openai, undefined);
+  // One item forged around the vault: no plan, rather than one shaped from code alone, which would hand the app its values.
+  deploy(proxyOf());
+  await run(TEST_ENGINE === 'postgres' ? sql`UPDATE proxy_definitions SET items = jsonb_set(items, '{openai,savedAt}', '1')` : sql`UPDATE proxy_definitions SET items = json_set(items, '$.openai.savedAt', 1)`);
+  const forged = await route('/use/market/dev', as(token));
+  assert.equal(forged.status, 503);
+  assert.ok(!(await forged.text()).includes(OPENAI));
+});
+
+/** SHA-256 and its HMAC, as the SDK's signer takes a hash. */
+type SourceData = string | ArrayBuffer | ArrayBufferView;
+const bytes = (data: SourceData) => (typeof data === 'string' ? data : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : new Uint8Array(data));
+class Sha256 {
+  readonly #hash: Hash | Hmac;
+  constructor(secret?: SourceData) {
+    this.#hash = secret === undefined ? createHash('sha256') : createHmac('sha256', bytes(secret));
+  }
+  update(data: SourceData): void {
+    this.#hash.update(bytes(data));
+  }
+  async digest(): Promise<Uint8Array> {
+    return new Uint8Array(this.#hash.digest());
+  }
+}
+
+test('a UI route of three keys, a header and SigV4: one use decides them all, the request signed with the real pair, the handle going nowhere', ON_015, async () => {
+  await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
+  await save({
+    s3: {
+      kind: 'route', name: 's3', upstream: `${upstreamUrl}/s3`,
+      inject: [{ kind: 'header', name: 'x-tenant-key', template: '{OPENAI_API_KEY}' }, { kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }],
+      allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+    },
+  });
+  const token = await handle();
+  const plan = await (await route('/use/market/dev', as(token))).json() as { env: Record<string, string> };
+  assert.deepEqual([plan.env.AWS_ACCESS_KEY_ID, plan.env.AWS_SECRET_ACCESS_KEY, plan.env.OPENAI_API_KEY], [token, token, token]);
+  // As the SDK signs it: the handle its access key, with any secret, which the proxy discards.
+  const signer = new SignatureV4({ credentials: { accessKeyId: token, secretAccessKey: 'placeholder' }, region: 'eu-west-3', service: 's3', sha256: Sha256, uriEscapePath: false, applyChecksum: false });
+  const target = new URL(`${ORIGIN}/use/s3/bucket/report.csv`);
+  const signed = await signer.sign({ method: 'GET', protocol: 'https:', hostname: target.hostname, path: target.pathname, headers: { host: target.host, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
+  const answer = await route('/use/s3/bucket/report.csv', { headers: signed.headers });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  const sent = reached.at(-1)!;
+  assert.equal(sent.url, '/s3/bucket/report.csv');
+  assert.equal(sent.headers['x-tenant-key'], OPENAI);
+  assert.match(String(sent.headers.authorization), new RegExp(`^AWS4-HMAC-SHA256 Credential=${AWS_ID}/`));
+  assert.match(String(sent.headers.authorization), /SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-tenant-key,/);
+  assert.ok(!JSON.stringify(sent.headers).includes(token));
+});
+
+test("a fork serves its parent's UI route, the item and its key found through the chain; the fork's own item overrides it", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ openai: uiRoute('openai', '/parent') });
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  const token = await handle('market/dev-eu');
+  const inherited = await route('/use/openai/models', as(token));
+  assert.equal(inherited.status, 200, await inherited.clone().text());
+  assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.headers.authorization], ['/parent/models', `Bearer ${OPENAI}`]);
+  const page = await root.proxy.get('market/dev-eu');
+  await root.proxy.save('market/dev-eu', { seal: page.seal, items: { openai: uiRoute('openai', '/child') } });
+  assert.equal((await route('/use/market/dev-eu/openai/models', as(token))).status, 200);
+  assert.equal(reached.at(-1)!.url, '/child/models');
+});
+
+test("the gate: a vault that cannot reserve code's names, or one on another release, answers 503 and nothing is sent or kept; the next request asks again and is served", ON_015, async () => {
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  // An isolate that has not yet passed the gate, the save's API call having passed it in this one.
+  forgetProxyGates();
+  const vault = runtime.vault as unknown as { reserveProxy: Vault['reserveProxy'] };
+  const real = vault.reserveProxy;
+  let asked = 0;
+  try {
+    vault.reserveProxy = async () => {
+      asked += 1;
+      throw new Error('the vault is down');
+    };
+    const down = await route('/use/openai/models', as(token));
+    assert.equal(down.status, 503, await down.clone().text());
+    vault.reserveProxy = async () => {
+      asked += 1;
+      throw new Deploying('9.9.9', '9.9.9');
+    };
+    const deploying = await route('/use/openai/models', as(token));
+    assert.equal(deploying.status, 503);
+    assert.equal(deploying.headers.get('retry-after'), '1');
+    assert.equal((await deploying.json() as { error: string }).error, 'deploying');
+    assert.equal(asked, 2, 'a failed gate keeps nothing: each request asks again');
+    assert.equal(reached.length, 0);
+  } finally {
+    vault.reserveProxy = real;
+  }
+  assert.equal((await route('/use/openai/models', as(token))).status, 200);
+  assert.equal(reached.length, 1);
 });

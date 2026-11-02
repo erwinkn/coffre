@@ -320,8 +320,13 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
  * code's names reserved before its first request in this isolate, every request of it, `GET /use` and the plan among
  * them, and its WebSockets: nothing it serves or shows gets past it.
  */
-async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: () => Promise<T>): Promise<T> {
-  await gateProxy(runtime.vault, proxyCodeOf([plugin]));
+async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: () => Promise<T>): Promise<T | Response> {
+  try {
+    await gateProxy(runtime.vault, proxyCodeOf([plugin]));
+  } catch (error) {
+    // Not passed: 503, `deploying` or `unavailable` with Retry-After, the plugin never asked; the next request asks again.
+    return errorResponse(error);
+  }
   return serve();
 }
 
