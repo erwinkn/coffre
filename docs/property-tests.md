@@ -102,10 +102,14 @@ Each file names its model and its sources in its header.
 - **A route's allow list** (`proxy-match-properties.test.ts`): random
   patterns, and random encodings of random paths, sent through the proxy's
   own route, its path check and the matcher together, against a model of
-  the rules: no encoding of a path the model leaves outside reaches the
-  upstream, at any number of decodings, nor as a server reads it that
-  empties or drops a segment of `;` parameters, spaces or dots alone
-  (`/companies/;x/documents` as `/companies/documents`); a path written once reaches it
+  the rules, in `allow` and in legacy `paths`: an `allow` pattern with a
+  literal a server behind may read as another (`%2561`, `a;v1`, `a.`, empty)
+  is refused at startup; no encoding of a path the model leaves outside
+  reaches the upstream, at any number of decodings, nor as a server reads
+  it that drops `;` parameters or trailing spaces and dots, or empties or
+  drops a segment of them alone (`/companies/;x/documents` as
+  `/companies/documents`), legacy paths with such literals held to the path
+  as sent, as before 0.16; a path written once reaches it
   exactly when the model takes it, byte for byte; and matching reads at
   most as many of the request's segments as each entry's pattern holds.
 - **The Postgres tunnel** (`packages/server/test/tunnel-properties.test.ts`,

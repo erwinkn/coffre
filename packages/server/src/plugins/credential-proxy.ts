@@ -2338,8 +2338,8 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
     // `allow`'s none is any, as the Proxy tab's; `methods: []`, as before 0.16, takes none.
     return given.length === 0 && !legacy ? null : new Set(given.map((method) => method.toUpperCase()));
   };
-  const path = (given: string) => {
-    const read = readPattern(given, 'code');
+  const path = (given: string, from: 'legacy' | 'code') => {
+    const read = readPattern(given, from);
     if ('problem' in read) throw new Error(`credentialProxy: ${name}'s path ${JSON.stringify(given)}: ${read.problem}`);
     if (read.warning !== undefined) console.warn(`credentialProxy: ${name}'s path ${read.warning}`);
     return read.pattern;
@@ -2349,7 +2349,7 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
     if (!Array.isArray(credential.allow)) throw new Error(`credentialProxy: ${name}'s allow is a list of { methods, path }`);
     return credential.allow.map((entry) => {
       if (typeof entry !== 'object' || entry === null || Object.keys(entry).some((option) => option !== 'methods' && option !== 'path')) throw new Error(`credentialProxy: ${name}'s allow entries are { methods, path }`);
-      const read = { methods: methods(entry.methods, false), path: entry.path === undefined ? null : path(entry.path) };
+      const read = { methods: methods(entry.methods, false), path: entry.path === undefined ? null : path(entry.path, 'code') };
       // An entry of any method on any path, `{}` or `{ methods: [] }`, would take every request, whatever the others say: say so
       // with no allow at all. Checked as read, not as spelled: legacy `methods: []` took none, and carried into an entry it would take all.
       if (read.methods === null && read.path === null) throw new Error(`credentialProxy: ${name}'s allow entry ${JSON.stringify(entry)} takes every request: give it methods or a path, or leave allow out`);
@@ -2360,10 +2360,10 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
   const taken = methods(credential.methods, true);
   if (credential.paths === undefined) return [{ methods: taken, path: null }];
   if (!Array.isArray(credential.paths)) throw new Error(`credentialProxy: ${name}'s paths are a list, ['/companies']`);
-  // A `*` in `paths` is the byte it was before 0.16, never a glob: an old path keeps what it took. `allow` takes globs.
+  // A path of `paths` matches as it did before 0.16 (`readPattern`'s `legacy`): `*` itself, never a glob, and `//` or `;x` as written.
   return credential.paths.map((given) => {
     if (typeof given === 'string' && given.includes('*')) console.warn(`credentialProxy: ${name}'s path ${given} takes * as itself, as before 0.16: allow: [{ path }] reads * and ** as globs`);
-    return { methods: taken, path: path(typeof given === 'string' ? given.replaceAll('*', '%2A') : given) };
+    return { methods: taken, path: path(given, 'legacy') };
   });
 }
 

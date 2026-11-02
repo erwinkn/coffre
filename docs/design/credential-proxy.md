@@ -474,21 +474,30 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   parameters and Windows the trailing spaces and dots, reads as empty or
   none: `/companies/;x/documents` is `/companies/documents` to it, which
   `/companies/*/documents` does not take. Anywhere else such a segment
-  goes on, as on 0.15: a literal segment is never one, and past a prefix,
-  a `**` or a trailing slash, what a server makes of it is still inside
-  (`/bucket/a//b`, an S3 key, under `/bucket`). A pattern with such a
-  segment matches nothing, with a warning at startup. A
+  goes on, as on 0.15: past a prefix, a `**` or a trailing slash, what a
+  server makes of it is still inside (`/bucket/a//b`, an S3 key, under
+  `/bucket`). A pattern's literal segment must read as itself to every
+  server behind, or the pattern is refused at startup: none empty or a dot
+  segment, none still percent-encoded once decoded (`%2561`, `%61` once
+  decoded, which a server that decodes twice reads as `a`), none with `;`
+  parameters (`a;v1`, `a` to Tomcat), none ending in a space or a dot
+  (`a.`, `a` to Windows). Matched as written, `/tenants/%2561/*` would take
+  `/tenants/%2561/x`, which such a server reads as `/tenants/a/x`, outside
+  the list. A
   request no entry takes is a 405 when no entry takes its method, on its
   path or any, and a 403 otherwise; an empty list takes nothing, a 403.
   `methods` and `paths`, as before, are one entry per path, and keep what
   they meant: `/` takes every path, `/companies/` what is below
   `/companies` and not it, a `*` is itself, never a glob (with a warning
-  at startup), and `methods: []` takes nothing. A presigned URL is held to
+  at startup), `methods: []` takes nothing, and a segment of theirs is
+  matched as written, decoded once, `//`, `;x` and `%20` included, as an S3
+  key prefix may hold them (`/bucket//prefix` takes
+  `/bucket//prefix/file`). A presigned URL is held to
   the same list, after the same refusals as a request (no segment that
   decodes, however often, to a slash, a control byte or a dot segment;
-  past 8 decodings, a segment is refused as one). A path of theirs that decodes to a
-  dot segment, a slash or nothing matched nothing before, and still does,
-  with a warning at startup.
+  past 8 decodings, a segment is refused as one). A path of `paths` with a
+  segment that decodes to a dot segment or a slash matched nothing before,
+  and still does, with a warning at startup.
 - **`environments`**, on any credential, tunnel, signer or verifier: the
   environments it serves, by full path (a bare `prod` would be every
   project's), `market/dev@me` as `market/dev`. Elsewhere its name is still

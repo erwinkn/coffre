@@ -77,6 +77,14 @@ test('past a prefix, `//` and a segment a server may read as none go on as on 0.
   }
 });
 
+test("a legacy path takes `//`, `;x`, `%20` and `...` in its own segments, as written, as on 0.15: an S3 key prefix may hold them", async () => {
+  const { reached, ask } = proxy({ paths: ['/bucket//prefix', '/b/;x', '/c/...', '/d/%20', '/e/a;v1'] });
+  const taken = ['/bucket//prefix/file', '/b/;x/k', '/c/.../k', '/d/%20/k', '/e/a;v1/k'];
+  for (const path of taken) assert.equal((await ask(path)).status, 200, path);
+  assert.deepEqual(reached, taken.map((path) => `/v1${path}`), 'as the app wrote it');
+  for (const path of ['/bucket/prefix/file', '/b/k', '/c/k', '/e/a/k']) assert.equal((await ask(path)).status, 403, path);
+});
+
 test('`*` is one non-empty segment and the pattern is matched exactly; `**`, last, is the rest, none included', async () => {
   const { ask } = proxy({ allow: [{ path: '/companies/*/documents' }, { path: '/models/**' }] });
   assert.equal((await ask('/companies/42/documents')).status, 200);
@@ -119,7 +127,7 @@ test("code's methods and paths read as one entry per path, as before 0.16: the m
   assert.equal((await proxy({}).ask('/bucket//key', 'DELETE')).status, 200);
 });
 
-test('the configuration: allow or methods and paths, `**` last, whole-segment globs, a path from /; a dead pattern warns and matches nothing', async (t) => {
+test('the configuration: allow or methods and paths, `**` last, whole-segment globs, a path from /; a dead legacy path warns and matches nothing, an allow pattern a server may read as another is refused', async (t) => {
   const make = (credential: Partial<Credential>) => () => proxy(credential);
   assert.throws(make({ allow: [{ path: '/a' }], methods: ['GET'] }), /api says which requests it takes in allow, or in methods and paths, not both/);
   assert.throws(make({ allow: [{ path: '/a/**/b' }] }), /\*\* stands for the rest of the path: last only/);
@@ -133,18 +141,32 @@ test('the configuration: allow or methods and paths, `**` last, whole-segment gl
   assert.match(String(warned.mock.calls[0]?.arguments[0]), /api's path \/kyc\/%2e%2e has "%2e%2e", a segment no request reaches the upstream with: it matches nothing/);
   assert.equal((await dead.ask('/kyc')).status, 403);
   assert.equal((await dead.ask('/ok')).status, 200);
-  // A segment no request may have, which `requestSegments` refuses: `;` parameters, spaces or dots alone, at any depth.
-  for (const path of ['/a/;x', '/a/%3Bx', '/a/%253Bx', '/a/%20', '/a/...', '/a/%2520']) {
-    warned.mock.resetCalls();
-    proxy({ allow: [{ path }] });
-    assert.match(String(warned.mock.calls[0]?.arguments[0]), /a segment no request reaches the upstream with: it matches nothing/, path);
+  // An allow pattern's literal a server behind may read as another segment: refused, since a request matching it as
+  // written would reach a path the list does not take. `/tenants/%2561/*` takes `/tenants/%2561/x`, `/tenants/a/x` to a
+  // server that decodes twice; `/a;v1/*` takes `/a;v1/x`, `/a/x` to Tomcat; `/a%20/*` and `/a./*`, `/a/x` to Windows.
+  const refusals: [string, RegExp][] = [
+    ['/tenants/%2561/*', /"%2561" is still percent-encoded once decoded/],
+    ['/a/%253Bx', /"%253Bx" is still percent-encoded once decoded/],
+    ['/a;v1/*', /"a;v1" has ; parameters/],
+    ['/a/%3Bx', /"%3Bx" has ; parameters/],
+    ['/a%20/*', /"a%20" ends in a space or a dot/],
+    ['/a./*', /"a\." ends in a space or a dot/],
+    ['/a/...', /"\.\.\." ends in a space or a dot/],
+    ['/a//b', /a segment is empty/],
+    ['/kyc/%2e%2e', /"%2e%2e" decodes to a slash, a control byte or a dot segment/],
+    ['/a/%2F', /"%2F" decodes to a slash/],
+  ];
+  for (const [path, why] of refusals) {
+    assert.throws(make({ allow: [{ path }] }), why, path);
+    assert.throws(make({ allow: [{ path }] }), /a server behind may read the path as another than the one matched/, path);
   }
 });
 
-test('a pattern from the Proxy tab takes no trailing slash, nor a segment code would only warn about', () => {
+test('a pattern from the Proxy tab takes no trailing slash, nor a segment a server may read as another, as code\'s allow', () => {
   assert.deepEqual(readPattern('/companies/', 'ui'), { problem: 'a path ends in no slash: /companies/** for everything below it' });
-  assert.match((readPattern('/a/%2F', 'ui') as { problem: string }).problem, /no empty, \. or \.\. segment, none of spaces, dots or ; parameters alone, nor one that decodes to a slash/);
-  assert.match((readPattern('/a//b', 'ui') as { problem: string }).problem, /an empty segment/);
+  assert.match((readPattern('/a/%2F', 'ui') as { problem: string }).problem, /"%2F" decodes to a slash/);
+  assert.match((readPattern('/a//b', 'ui') as { problem: string }).problem, /a segment is empty/);
+  assert.match((readPattern('/tenants/%2561/*', 'ui') as { problem: string }).problem, /still percent-encoded once decoded/);
   assert.deepEqual(readPattern('/a/*/b/**', 'ui'), { pattern: { segments: ['a', null, 'b'], tail: 'rest' } });
 });
 

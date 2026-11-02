@@ -4,6 +4,8 @@
 // proxy's own check (`climbs` in credential-proxy.ts) has refused every
 // segment that decodes, however often, to a slash, a dot segment or a
 // control byte. A pattern is decoded the same way, once, when it is read.
+// An `allow` pattern's literal segment reads as itself to every server
+// behind (`stable`), so a request that matches it is the same path to them.
 //
 //   /companies                 a plain path: a prefix by segments, /companies and /companies/42, never /companiesX
 //   /companies/                code's trailing slash, as before 0.16: /companies/ and below, not /companies
@@ -101,14 +103,33 @@ function vanishes(decoded: string): boolean {
 }
 
 /**
- * A path pattern as written, read: the pattern, or what is wrong with it.
- * `ui` is a definition saved in the Proxy tab, which takes no trailing
- * slash; `code` keeps code's trailing slash, and reads a segment that
- * decodes to a dot segment, a slash, nothing or what `vanishes` (`;x`,
- * `%20`, `...`) as matching nothing (a warning: no request with such a
- * segment reaches the upstream).
+ * Why a literal segment of an `allow` pattern, decoded once, may read as
+ * another to a server behind, or null when it reads as itself to every one.
+ * Matched as it is, `/tenants/%2561/*` would take `/tenants/%2561/x`, which a
+ * server that decodes twice reads as `/tenants/a/x`, and `/a;v1/*` would take
+ * `/a;v1/x`, which Tomcat reads as `/a/x`: neither of which the list takes.
  */
-export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathPattern; warning?: string } | { problem: string } {
+function unstable(decoded: string): string | null {
+  if (decoded === '') return 'is empty';
+  if (unsafeSegment(decoded)) return 'decodes to a slash, a control byte or a dot segment';
+  if (bytesOf(decoded) !== decoded) return 'is still percent-encoded once decoded, which a server that decodes twice reads as another segment';
+  if (decoded.includes(';')) return 'has ; parameters, which Tomcat and Spring drop';
+  if (/[ .]$/.test(decoded)) return 'ends in a space or a dot, which Windows drops';
+  return null;
+}
+
+/**
+ * A path pattern as written, read: the pattern, or what is wrong with it.
+ * `ui` is an `allow` pattern saved in the Proxy tab, which takes no trailing
+ * slash; `code` an `allow` pattern in code, which keeps code's trailing
+ * slash. Each refuses a literal segment that is not `stable`. `legacy` is a
+ * path of code's `paths`, as before 0.16: no glob, `*` itself, and each
+ * segment matched as written, decoded once, `//`, `;x` and `%20` included,
+ * as S3's key prefixes may hold them; one that decodes to a slash, a control
+ * byte or a dot segment matches nothing (a warning: no request with one
+ * reaches the upstream).
+ */
+export function readPattern(path: string, from: 'legacy' | 'code' | 'ui'): { pattern: PathPattern; warning?: string } | { problem: string } {
   if (typeof path !== 'string' || !path.startsWith('/')) return { problem: 'a path starts with /' };
   if (path === '/') return { pattern: { segments: [], tail: 'prefix' } };
   const written = path.slice(1).split('/');
@@ -122,6 +143,12 @@ export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathP
   let glob = false;
   let dead: string | null = null;
   for (const [at, segment] of written.entries()) {
+    if (from === 'legacy') {
+      const decoded = bytesOf(utf8(segment));
+      if (unsafeSegment(decoded)) dead ??= JSON.stringify(segment);
+      segments.push(decoded);
+      continue;
+    }
     if (segment === '**') {
       if (at !== written.length - 1 || tail === 'below') return { problem: '** stands for the rest of the path: last only' };
       tail = 'rest';
@@ -135,13 +162,11 @@ export function readPattern(path: string, from: 'code' | 'ui'): { pattern: PathP
     }
     if (segment.includes('*')) return { problem: `* and ** stand for whole segments, never part of one: ${JSON.stringify(segment)}` };
     const decoded = bytesOf(utf8(segment));
-    if (unsafeSegment(decoded) || vanishes(decoded)) dead ??= segment === '' ? 'an empty segment' : JSON.stringify(segment);
+    const why = unstable(decoded);
+    if (why !== null) return { problem: `${segment === '' ? 'a segment' : JSON.stringify(segment)} ${why}: a server behind may read the path as another than the one matched` };
     segments.push(decoded);
   }
-  if (dead !== null) {
-    if (from === 'ui') return { problem: `no empty, . or .. segment, none of spaces, dots or ; parameters alone, nor one that decodes to a slash: ${dead}` };
-    return { pattern: NOTHING, warning: `${path} has ${dead}, a segment no request reaches the upstream with: it matches nothing` };
-  }
+  if (dead !== null) return { pattern: NOTHING, warning: `${path} has ${dead}, a segment no request reaches the upstream with: it matches nothing` };
   // A plain path is a prefix; one with a glob is matched segment by segment, unless it ends in `**`.
   if (glob && tail === 'prefix') tail = 'exact';
   return { pattern: { segments, tail } };
@@ -164,10 +189,10 @@ export function requestSegments(relative: string): string[] {
 // empty one or one that `vanishes`: a server that drops `;` parameters reads
 // `/companies/;x/documents` as `/companies//documents`, or
 // `/companies/documents`, which `/companies/*/documents` does not take.
-// Anywhere else such a segment is harmless: a literal never equals one
-// (`readPattern`), and past a prefix, a `**` or a trailing slash, the path a
-// server makes of it is still inside (`/bucket/a//b`, an S3 key, under
-// `/bucket`).
+// Anywhere else such a segment is harmless: an `allow` literal never equals
+// one (`stable`), a legacy path's equals it as written, as before 0.16, and
+// past a prefix, a `**` or a trailing slash, the path a server makes of it is
+// still inside (`/bucket/a//b`, an S3 key, under `/bucket`).
 export function matches(pattern: PathPattern, segments: readonly string[]): boolean {
   if (pattern.tail === 'never') return false;
   const wanted = pattern.segments;

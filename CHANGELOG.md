@@ -24,8 +24,12 @@
   path is now matched decoded (`docu%6Dents` is `documents`); a `*` in an
   `allow` path takes no `//` and no segment of `;` parameters, or of
   spaces and dots, alone (`;x`, `%20`, `...`), which a server may read as
-  none; past a prefix they go on as before; a `*` in `paths` is still
-  itself, never a glob. `environments: ['market/prod']`, on any credential, tunnel,
+  none; past a prefix they go on as before. An `allow` path's own segments
+  must read as themselves to every server behind: one still encoded once
+  decoded (`%2561`), with `;` parameters (`a;v1`), ending in a space or a
+  dot, or empty, is refused at startup. In `paths`, a `*` is still itself,
+  never a glob, and `//`, `;x` or `%20` in a path is matched as written, as
+  on 0.15. `environments: ['market/prod']`, on any credential, tunnel,
   signer or verifier, serves it there alone. Redaction covers every key of
   every rule, and what each rule made of them. Two different handles in one
   request are a 400. Server only: no migration, and `/use` makes the same

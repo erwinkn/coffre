@@ -2,11 +2,16 @@
 // paths (docs/design/proxy-ui.md, section 7), through the plugin's own
 // route, the proxy's path check and the matcher together, held to a model
 // of section 7's rules written here: a plain path a prefix by segments, `*`
-// one non-empty segment, `**` the rest, code's trailing slash what is below.
+// one non-empty segment, `**` the rest, code's trailing slash what is below;
+// code's `paths`, as before 0.16, literals matched as written.
 //
+// - An `allow` pattern with a literal a server behind may read as another
+//   (`%2561`, `a;v1`, `a.`, empty) is refused at startup.
 // - No encoding of a path the model leaves outside reaches the upstream;
 //   whatever does reach it, the model takes, however many times a server
-//   behind decodes it.
+//   behind decodes it, drops its `;` parameters or its trailing spaces and
+//   dots. A legacy path with such a literal is held to what it was: the
+//   path as sent, decoded once.
 // - A path written once-encoded, any byte of it, reaches the upstream exactly
 //   when the model takes it, byte for byte as the app wrote it.
 // - Matching reads each entry's pattern once against the request: at most
@@ -64,6 +69,17 @@ function takes(model: Model, path: readonly string[]): boolean {
 const LITERALS = ['a', 'b', 'ab', 'companies', 'é', 'a b', 'x;y', "it's", '~_-', '(1)', '日本', '@', 'a+b'];
 
 /**
+ * Literals a pattern may also hold, which a server behind may read as
+ * another segment: `%61`, `a` to one that decodes twice (written `%2561`);
+ * `a;v1`, `a` to Tomcat; `a.`, `a ` and `...`, `a` and none to Windows;
+ * empty; `%2F`, a slash. `allow` refuses them; a legacy path takes them.
+ */
+const UNSTABLE = ['%61', 'a;v1', ';x', 'a.', 'a ', '...', '', '%2F', '%2e%2e'];
+
+/** Whether a literal, as text, reads as itself to every server behind: no `%XX`, `;`, trailing space or dot, slash or control byte, and some byte. */
+const stable = (text: string) => text !== '' && decode(utf8(text)) === utf8(text) && !/[;/\\\x00-\x1f\x7f]/.test(text) && !/[ .]$/.test(text);
+
+/**
  * And what only a path holds: a `%` of its own, which a server that decodes
  * twice reads as another byte (`%61` as `a`), or as a slash or a dot segment.
  */
@@ -96,13 +112,19 @@ function vanishes(segment: string): boolean {
 
 /**
  * The paths a server may make of `segments`: as they are; each that
- * `vanishes` empty (`/companies//documents`); and those gone, a last one
- * left empty, a trailing slash (`/companies/documents`).
+ * `vanishes` empty (`/companies//documents`); each with its `;` parameters
+ * and trailing spaces and dots dropped (`a;v1` as `a`); and of the last two,
+ * the empty ones gone, a last one left empty, a trailing slash
+ * (`/companies/documents`).
  */
 function readings(segments: readonly string[]): string[][] {
   const emptied = segments.map((segment) => (vanishes(segment) ? '' : segment));
-  const gone = emptied.filter((segment, at) => segment !== '' || at === emptied.length - 1);
-  return [[...segments], emptied, gone.length === 0 ? [''] : gone];
+  const stripped = segments.map((segment) => segment.split(';')[0]!.replace(/[ .]+$/, ''));
+  const gone = (path: string[]) => {
+    const kept = path.filter((segment, at) => segment !== '' || at === path.length - 1);
+    return kept.length === 0 ? [''] : kept;
+  };
+  return [[...segments], emptied, gone(emptied), stripped, gone(stripped)];
 }
 
 /** A byte as a URL may write it in a path: as it is when it needs no encoding and `raw` says so, else `%XX` in either case, or `%25XX`, encoded twice. */
@@ -116,10 +138,15 @@ function written(byte: number, how: Write): string {
   return how === 'twice' ? `%25${cased}` : `%${cased}`;
 }
 
-/** A pattern as code writes it, and as the model reads it. */
-const patterns = gs.composite((tc) => {
-  const segments = tc.draw(gs.arrays(gs.oneOf(gs.sampledFrom(LITERALS), gs.just(null)), { maxSize: 4 }));
-  const tail = tc.draw(gs.sampledFrom(['plain', 'rest', 'below'] as const));
+/** A pattern as code writes it, in `allow` or, `legacy`, in `paths`, and as the model reads it. */
+const patterns = (legacy: boolean) => gs.composite((tc) => {
+  // Often a literal a server may read as another, so that an entry with one is now and then all its own; in `paths`, a
+  // `*` is a literal too.
+  const literal = gs.oneOf(gs.sampledFrom(LITERALS), gs.sampledFrom(UNSTABLE));
+  const segments = tc.draw(gs.arrays(gs.oneOf(literal, gs.just(legacy ? '*' : null)), { maxSize: 4 }));
+  // An empty last literal is written as no segment, or a trailing slash: one between others, `//`, only.
+  if (segments.at(-1) === '') segments[segments.length - 1] = 'a';
+  const tail = tc.draw(gs.sampledFrom(legacy ? (['plain', 'below'] as const) : (['plain', 'rest', 'below'] as const)));
   const text = segments.map((segment) => {
     if (segment === null) return '*';
     // A pattern's bytes, each written raw or once-encoded: it is read decoded once.
@@ -131,11 +158,14 @@ const patterns = gs.composite((tc) => {
     segments: segments.map((segment) => (segment === null ? null : utf8(segment))),
     tail: tail === 'rest' ? 'rest' : tail === 'below' && text.length > 0 ? 'below' : glob ? 'exact' : 'prefix',
   };
-  return { path, model, segments };
+  // A legacy literal no request may have, a slash or a dot segment: the path takes nothing.
+  const dead = legacy && segments.some((segment) => segment !== null && !safe(segment));
+  return { path, model, segments, valid: legacy || segments.every((segment) => segment === null || stable(segment)), sound: segments.every((segment) => segment === null || stable(segment)), dead };
 });
 
 test(`no encoding of a path outside the allow list reaches the upstream, and a once-encoded path inside it does, byte for byte, seed ${settings.seed}`, () => hegel.testAsync(async (tc) => {
-  const allow = tc.draw(gs.arrays(patterns, { minSize: 1, maxSize: 2 }));
+  const legacy = tc.draw(gs.booleans());
+  const allow = tc.draw(gs.arrays(patterns(legacy), { minSize: 1, maxSize: 2 }));
   // The path, as text segments: an entry's own, its `*`s some literal, so that it nearly matches, alone or with more
   // after; or literals, `%`s of its own and `*` as a literal; and now and then an empty last one, a trailing slash.
   const shape = tc.draw(gs.sampledFrom(['entry', 'entry and more', 'any'] as const));
@@ -153,16 +183,33 @@ test(`no encoding of a path outside the allow list reaches the upstream, and a o
   tc.note(`allow ${allow.map((entry) => entry.path).join(' ')}, request /${encoded}`);
 
   const reached: string[] = [];
-  const plugin = credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), allow: allow.map((entry) => ({ path: entry.path })), egress: { fetch: async (url: URL) => (reached.push(url.pathname), new Response('ok')) } } } });
+  const egress = { fetch: async (url: URL) => (reached.push(url.pathname), new Response('ok')) };
+  const which = legacy ? { paths: allow.map((entry) => entry.path) } : { allow: allow.map((entry) => ({ path: entry.path })) };
+  const make = () => credentialProxy({ cacheSeconds: 0, credentials: { api: { upstream: 'https://api.example/v1', inject: header('x-api-key', '{KEY}'), ...which, egress } } });
+  if (!allow.every((entry) => entry.valid)) {
+    assert.throws(make, /a server behind may read the path as another than the one matched/);
+    return;
+  }
+  const warn = console.warn;
+  console.warn = () => undefined;
+  let plugin: ReturnType<typeof credentialProxy>;
+  try {
+    plugin = make();
+  } finally {
+    console.warn = warn;
+  }
   const answer = await plugin.routes!.fetch(new Request(`${PUBLIC}/use/market/dev/api/${encoded}`, { headers: { 'x-coffre-handle': HANDLE } }), coffre);
-  const inside = (segments: readonly string[]) => allow.some((entry) => takes(entry.model, segments));
+  const inside = (segments: readonly string[]) => allow.some((entry) => !entry.dead && takes(entry.model, segments));
 
   if (reached.length === 1) {
     assert.equal(answer.status, 200);
-    // What the upstream got, as a server reads it decoded once, twice, until it no longer changes: the model takes each.
-    // Decoded once, twice, until it no longer changes, each segment that vanishes kept, emptied or gone: the model takes each.
+    // What the upstream got, decoded once, as it was matched: the model takes it.
     let view = reached[0]!.slice('/v1/'.length).split('/').map(decode);
-    for (let again = 0; again < 4; again++) {
+    assert.ok(inside(view), `the upstream got ${reached[0]}, outside ${allow.map((entry) => entry.path).join(' ')}`);
+    // And as a server reads it decoded once, twice, until it no longer changes, each segment that vanishes kept, emptied
+    // or gone, its `;` parameters and trailing spaces and dots dropped: the model takes each, unless a legacy path's
+    // own literal is one such a server reads as another, which it takes as before 0.16.
+    for (let again = 0; again < 4 && allow.every((entry) => entry.sound); again++) {
       for (const reading of readings(view)) {
         assert.ok(inside(reading), `the upstream got ${reached[0]}, which reads as /${reading.join('/')}, outside ${allow.map((entry) => entry.path).join(' ')}`);
       }
