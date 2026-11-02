@@ -220,6 +220,13 @@ export type Row = {
   copiedFrom: string | null;
   /** An edited item another person's save removed since: saving makes it again. */
   gone: boolean;
+  /**
+   * An edited or resaved item another save changed since its edit began (a
+   * parent's, read in the background, which no 409 catches): the row keeps
+   * the definition as its editor saw it, so the review shows each field
+   * saving it would set back.
+   */
+  overtaken: boolean;
   /** How its keys stand for this editor: those they may not route, those an Owner routes (sensitive), and those the place lacks. */
   keys: KeyStanding;
 };
@@ -236,12 +243,15 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
   // An edit whose item another save removed stays, over the item that now has its name, if any: Bob deleted
   // dev-eu's own openai while Alice edited it, and dev-eu inherits dev's again; Alice's edit is the override.
   const present = new Set(items.map((item) => item.id));
-  // A resave whose item went is kept too, as it was: saving it again makes it again.
+  // A resave whose item went is kept too, even when its draft is the item as it was: saving it again makes it again.
   const orphans = Object.entries(drafts.origins).flatMap(([id, origin]) => {
     if (present.has(id)) return [];
     const draft = drafts.edits[id];
-    if (draft == null) return drafts.resaved.includes(id) && draft === undefined ? [{ id, origin, draft: origin.definition, resaved: true }] : [];
-    return sameDefinition(draft, origin.definition) ? [] : [{ id, origin, draft, resaved: false }];
+    if (draft === null) return [];
+    const definition = draft ?? origin.definition;
+    const same = sameDefinition(definition, origin.definition);
+    const resaved = drafts.resaved.includes(id);
+    return same && !resaved ? [] : [{ id, origin, draft: definition, resaved: same }];
   });
   const twin = (id: string) => (id.startsWith('own:') ? `from:${id.slice(4)}` : id.startsWith('from:') ? `own:${id.slice(5)}` : null);
   const hidden = new Set(orphans.map(({ id }) => twin(id)));
@@ -253,6 +263,7 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
     const keys = keyStanding(definitionKeys(definition), editor);
     const before = keyStanding(definitionKeys(item.definition), editor);
     const mine = editor.editable && item.source !== 'code';
+    const origin = drafts.origins[item.id];
     return {
       id: item.id,
       item,
@@ -263,17 +274,18 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
       removable: mine && item.source === 'own',
       copiedFrom: null,
       gone: false,
+      overtaken: state !== 'same' && state !== 'deleted' && origin !== undefined && !sameDefinition(origin.definition, item.definition),
       keys,
     };
   });
   for (const { id, origin, draft, resaved } of orphans) {
     const before = keyStanding(definitionKeys(origin.definition), editor);
-    rows.push({ id, item: origin, before: origin.definition, definition: draft, state: resaved ? 'resaved' : 'changed', editable: editor.editable && before.blocked.length === 0, removable: editor.editable, copiedFrom: null, gone: true, keys: keyStanding(definitionKeys(draft), editor) });
+    rows.push({ id, item: origin, before: origin.definition, definition: draft, state: resaved ? 'resaved' : 'changed', editable: editor.editable && before.blocked.length === 0, removable: editor.editable, copiedFrom: null, gone: true, overtaken: false, keys: keyStanding(definitionKeys(draft), editor) });
   }
   for (const { id, copiedFrom } of drafts.added) {
     const definition = drafts.edits[id];
     if (definition == null) continue;
-    rows.push({ id, item: null, before: null, definition, state: 'added', editable: editor.editable, removable: editor.editable, copiedFrom, gone: false, keys: keyStanding(definitionKeys(definition), editor) });
+    rows.push({ id, item: null, before: null, definition, state: 'added', editable: editor.editable, removable: editor.editable, copiedFrom, gone: false, overtaken: false, keys: keyStanding(definitionKeys(definition), editor) });
   }
   return rows;
 }
@@ -588,6 +600,8 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
   const url = `${route.upstream.replace(/\/+$/, '')}${tail}`;
   if (route.allow === null) return { url, refusal: null };
   const from = allowAs?.from ?? 'ui';
+  // `allow: []` takes no request: a 403 whatever the method, as the proxy answers it.
+  if (from !== 'legacy' && route.allow.length === 0) return { url, refusal: '403: this route takes no request' };
   const methods = (given: readonly string[]) => (allowAs?.noMethod ? new Set<string>() : given.length === 0 ? null : new Set(given));
   const entries: AllowEntry[] = [];
   for (const entry of route.allow) {
@@ -599,6 +613,28 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
   if (from === 'legacy' && route.allow.length === 0) entries.push({ methods: null, path: NOTHING });
   const answer = allows(entries, method, requestSegments(tail, from === 'legacy'));
   return { url, refusal: answer === 'allowed' ? null : answer === 'method' ? `405: no allow entry takes ${method} there` : `403: no allow entry takes ${method} ${tail}` };
+}
+
+/**
+ * The sample call's methods: the tab's seven, then any other a code item's
+ * allow list names, as code takes any HTTP method (`PROPFIND`).
+ */
+export function methodChoices(route: ProxyRoute): string[] {
+  const named: readonly string[] = (route.allow ?? []).flatMap((entry) => entry.methods);
+  return [...PROXY_METHODS, ...new Set(named.filter((method) => !(PROXY_METHODS as readonly string[]).includes(method)))];
+}
+
+/**
+ * An allow entry's methods on its menu's trigger, one width: none is any,
+ * and what does not fit is the first and a count. Code's beyond the seven
+ * show as written.
+ *
+ *   []  ->  Any      ['GET', 'POST']  ->  GET POST      ['PROPFIND']  ->  PROPFIND      four  ->  GET +3
+ */
+export function methodsLabel(methods: readonly string[]): { all: string; shown: string } {
+  const picked = [...PROXY_METHODS.filter((method) => methods.includes(method)), ...methods.filter((method) => !(PROXY_METHODS as readonly string[]).includes(method))];
+  const all = picked.join(' ');
+  return { all, shown: picked.length === 0 ? 'Any' : all.length <= 9 ? all : `${picked[0]} +${picked.length - 1}` };
 }
 
 // --- words, and code -------------------------------------------------------------------------

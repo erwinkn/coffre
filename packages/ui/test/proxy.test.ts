@@ -17,6 +17,8 @@ import {
   inheritanceOf,
   itemsOf,
   keyStanding,
+  methodChoices,
+  methodsLabel,
   NO_DRAFTS,
   notClearedInWords,
   pageState,
@@ -301,4 +303,48 @@ test("a code route's sample call matches as code does: legacy paths as written, 
   // Legacy `methods: []` took no method: the converted `methods: []` would read as any.
   const none: ProxyRoute = { ...route('files'), allow: [{ methods: [], path: '/' }] };
   assert.match(sampleCall(none, 'GET', '/x', { from: 'legacy', noMethod: true }).refusal!, /^405/);
+});
+
+test("a queued resave keeps the item as its editor saw it: a parent's change read since shows as one to review, never adopted", () => {
+  const fork = { project: 'market', environment: 'dev-eu' };
+  const parents = (host: string) => [{ path: 'market/dev', page: page([route('gemini', ['OPENAI_API_KEY'], host)]) }];
+  const seen = itemsOf(page([]), fork, parents('api.openai.com')).find((item) => item.id === 'from:gemini')!;
+  // "Save again" as the hook queues it: the definition as shown, its item as the origin.
+  const drafts = { ...NO_DRAFTS, edits: { 'from:gemini': seen.definition }, resaved: ['from:gemini'], origins: { 'from:gemini': seen } };
+  const still = pageState({ page: page([]), place: fork, parents: parents('api.openai.com'), keys: KEYS, drafts, tried: true });
+  assert.deepEqual(still.rows.filter((row) => row.id === 'from:gemini').map((row) => [row.state, row.overtaken]), [['resaved', false]]);
+  // dev's gemini now goes elsewhere, read in the background: the fork's seal is the same, so no 409 would say so.
+  const moved = pageState({ page: page([]), place: fork, parents: parents('other.example'), keys: KEYS, drafts, tried: true });
+  const row = moved.rows.find((one) => one.id === 'from:gemini')!;
+  assert.deepEqual([row.state, row.overtaken], ['changed', true]);
+  assert.deepEqual(diffOf(row.before, row.definition), [{ label: 'Upstream', before: 'https://other.example/v1', after: 'https://api.openai.com/v1' }]);
+  assert.equal((saveOf(moved.rows).gemini as ProxyRoute).upstream, 'https://api.openai.com/v1');
+});
+
+test('a resave outlives a removal even when its draft is the item as it was (an edit typed back)', () => {
+  const editor = state(page([])).editor;
+  const origin = itemsOf(page([route('gemini')]), DEV).find((item) => item.id === 'own:gemini')!;
+  const drafts = { ...NO_DRAFTS, edits: { 'own:gemini': route('gemini') }, resaved: ['own:gemini'], origins: { 'own:gemini': origin } };
+  const rows = rowsOf([], drafts, editor);
+  assert.deepEqual(rows.map((row) => [row.id, row.state, row.gone]), [['own:gemini', 'resaved', true]]);
+  assert.deepEqual(saveOf(rows), { gemini: route('gemini') });
+  // An edit typed back, never resaved, is nothing to save once its item is gone; a deletion neither.
+  assert.deepEqual(rowsOf([], { ...drafts, resaved: [] }, editor), []);
+  assert.deepEqual(rowsOf([], { ...drafts, edits: { 'own:gemini': null } }, editor), []);
+});
+
+test("code's methods beyond the tab's seven show as written, and the sample call offers them", () => {
+  const dav: ProxyRoute = { ...route('dav'), allow: [{ methods: ['PROPFIND' as 'GET'], path: '/files/**' }] };
+  assert.deepEqual(methodsLabel(['PROPFIND']), { all: 'PROPFIND', shown: 'PROPFIND' });
+  assert.deepEqual(methodsLabel([]), { all: '', shown: 'Any' });
+  assert.deepEqual(methodsLabel(['POST', 'GET', 'PUT', 'DELETE']).shown, 'GET +3');
+  assert.deepEqual(methodChoices(dav).slice(-2), ['OPTIONS', 'PROPFIND']);
+  assert.equal(sampleCall(dav, 'PROPFIND', '/files/a', { from: 'code', noMethod: false }).refusal, null);
+  assert.match(sampleCall(dav, 'GET', '/files/a', { from: 'code', noMethod: false }).refusal!, /^405/);
+});
+
+test('an empty allow list takes no request: a 403, whatever the method, as the proxy answers', () => {
+  const none: ProxyRoute = { ...route('closed'), allow: [] };
+  assert.match(sampleCall(none, 'DELETE', '/x').refusal!, /^403/);
+  assert.match(sampleCall(none, 'GET', '/x', { from: 'code', noMethod: false }).refusal!, /^403/);
 });

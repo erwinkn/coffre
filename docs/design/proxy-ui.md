@@ -1856,7 +1856,11 @@ is fixed in this document, within PR C.
 - **Edits against another save**: the page keeps the seal it began editing
   from, so a save that came since, even one a background read already
   shows, is a 409 whose review says what changed. An edit whose item that
-  save removed stays a row, made again on saving.
+  save removed stays a row, made again on saving. "Save again" queues the
+  item as its editor saw it: an inherited item, whose parent's save is no
+  409 to the fork, shows that parent's change since as fields its save
+  would set back, in the review, rather than clearing what its editor
+  never saw.
 - **The offboarding preview** reads `Vault.proxySavedBy({ member })`: the
   rows that name the member found by their JSON, each object then held by
   the log, so a forged row lists nothing. The member's page lists them, and
@@ -1873,7 +1877,9 @@ is fixed in this document, within PR C.
   (`ProxyCodeItem.allowAs`): `code`, an `allow` whose trailing slash takes
   what is below it; `legacy`, `methods` and `paths` as before 0.16, `*`
   itself, and `noMethod` where `methods: []` took none. The sample call
-  follows it.
+  follows it. Code takes any HTTP method (`PROPFIND`), the tab's own items
+  its seven: a code item's show as written, and the sample call offers
+  them. An empty allow list takes no request, a 403.
 - **As code** writes a UI item out scoped to the environment it is in
   (`environments: ['market/dev']`), as it serves now; a code item shows no
   snippet, since its binding or limit per service has no words in the tab.

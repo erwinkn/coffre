@@ -15,6 +15,7 @@ import {
   countsInWords,
   diffOf,
   KIND_LABELS,
+  methodsLabel,
   NO_DRAFTS,
   pageState,
   PROXY_METHODS,
@@ -111,10 +112,12 @@ export function useProxyEdits({ place, page, parents, keys }: { place: Place; pa
     restore: (row: Row) =>
       setDrafts((current) => {
         const { [row.id]: _, ...edits } = current.edits;
-        return { ...current, edits, resaved: current.resaved.filter((id) => id !== row.id) };
+        const { [row.id]: __, ...origins } = current.origins;
+        return { ...current, edits, origins, resaved: current.resaved.filter((id) => id !== row.id) };
       }),
     /** Save a row again as it is, under this editor's standing: how an Owner clears a route its editor no longer can (decision 5). */
-    resave: (row: Row) => edit(row, (current) => ({ ...current, resaved: [...current.resaved, row.id] })),
+    // It keeps the definition as the editor saw it: a change read since, a parent's, shows as one to review, never adopted unseen.
+    resave: (row: Row) => edit(row, (current) => ({ ...current, edits: { ...current.edits, [row.id]: current.edits[row.id] ?? row.definition }, resaved: [...current.resaved, row.id] })),
     discard: reset,
     /** Save: what is wrong shows now, under its fields; else the review. */
     save: () => {
@@ -371,12 +374,15 @@ export function KeySelect({
   );
 }
 
-/** Methods, as a menu at the start of an allow entry: none picked takes any. */
-export function MethodsMenu({ methods, disabled, onChange }: { methods: readonly ProxyMethod[]; disabled: boolean; onChange: (methods: ProxyMethod[]) => void }) {
-  const picked = PROXY_METHODS.filter((method) => methods.includes(method));
-  const all = picked.join(' ');
-  // The trigger is one width: what does not fit becomes the first method and a count.
-  const shown = picked.length === 0 ? 'Any' : all.length <= 9 ? all : `${picked[0]} +${picked.length - 1}`;
+/**
+ * Methods, as a menu at the start of an allow entry: none picked takes any.
+ * Code's item may name a method beyond the tab's seven (`PROPFIND`): it
+ * shows as written, checked, and its row takes no edits.
+ */
+export function MethodsMenu({ methods, disabled, onChange }: { methods: readonly string[]; disabled: boolean; onChange: (methods: ProxyMethod[]) => void }) {
+  const known = PROXY_METHODS.filter((method) => methods.includes(method));
+  const others = methods.filter((method) => !(PROXY_METHODS as readonly string[]).includes(method));
+  const { all, shown } = methodsLabel(methods);
   return (
     <Menu.Root>
       <Menu.Trigger className="fold-select fold-lead fold-kind fold-menu" aria-label="Methods" title={all === '' ? undefined : all} disabled={disabled}>
@@ -389,9 +395,17 @@ export function MethodsMenu({ methods, disabled, onChange }: { methods: readonly
             className="menu-item mono"
             checked={methods.includes(method)}
             closeOnClick={false}
-            onCheckedChange={(on) => onChange(on ? [...methods, method] : methods.filter((one) => one !== method))}
+            onCheckedChange={(on) => onChange(on ? [...known, method] : known.filter((one) => one !== method))}
           >
             <span className="menu-check">{methods.includes(method) && <Check size={13} />}</span>
+            {method}
+          </Menu.CheckboxItem>
+        ))}
+        {others.map((method) => (
+          <Menu.CheckboxItem key={method} className="menu-item mono" checked disabled>
+            <span className="menu-check">
+              <Check size={13} />
+            </span>
             {method}
           </Menu.CheckboxItem>
         ))}

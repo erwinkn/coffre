@@ -2420,6 +2420,8 @@ function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap
       const inject = rules.map((rule): ProxyInject => (rule.kind === 'sigv4'
         ? { kind: 'sigv4', accessKeyId: rule.accessKeyId, secretAccessKey: rule.secretAccessKey, sessionToken: rule.sessionToken ?? null, region: rule.region, service: rule.service }
         : rule.kind === 'basic' ? { kind: 'basic', user: rule.user, password: rule.password } : { kind: rule.kind, name: rule.name, template: rule.template }));
+      // Code takes any HTTP method (`PROPFIND`), the tab's own items only its seven: a code item's methods go out as code wrote
+      // them, upper-cased, and the tab reads a code item's as strings (`MethodsMenu`, the sample call), never as its seven.
       const methods = (given: readonly string[] | undefined) => (given ?? []).map((method) => method.toUpperCase() as ProxyMethod);
       const allow: ProxyAllow[] | null = credential.allow !== undefined
         ? credential.allow.map((entry) => ({ methods: methods(entry.methods), path: entry.path ?? '/' }))

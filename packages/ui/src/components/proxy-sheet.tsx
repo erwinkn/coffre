@@ -14,8 +14,8 @@ import {
   INJECT_LABELS,
   missingInWords,
   notClearedInWords,
-  PROXY_METHODS,
   routedInWords,
+  methodChoices,
   sampleCall,
   savedByInWords,
   soleKey,
@@ -134,7 +134,7 @@ function Panel({ row, edits, keys }: PanelProps) {
           </Toggletip>
         )}
         <span className="proxy-sheet-actions">
-          {row.state === 'deleted' || row.state === 'resaved' ? (
+          {row.state === 'deleted' || row.state === 'resaved' || row.overtaken ? (
             <button className="btn btn-sm" type="button" onClick={() => edits.restore(row)}>
               <RotateBack size={14} />
               {row.state === 'deleted' ? 'Keep' : 'Undo'}
@@ -192,6 +192,7 @@ function Panel({ row, edits, keys }: PanelProps) {
 function Provenance({ row, edits }: { row: Row; edits: Edits }) {
   const item = row.item;
   if (item === null) return row.copiedFrom === null ? null : <p className="proxy-provenance">Copied from {row.copiedFrom}, not saved yet.</p>;
+  if (row.overtaken) return <p className="proxy-provenance">Changed by another save since you began editing it: saving keeps it as you saw it, with your edits. The review shows each field that sets back.</p>;
   if (row.gone) return <p className="proxy-provenance">Removed by another save since you began editing it: saving makes it again, {row.state === 'resaved' ? 'as it was' : 'as you edited it'}.</p>;
   // Code's item shows locked with code's values, its lock saying where it serves (R66); only one that serves elsewhere says so here.
   if (item.source === 'code') {
@@ -605,7 +606,7 @@ function Preview({ route, allowAs, keys, useUrl }: { route: ProxyRoute; allowAs:
     <div className="proxy-preview">
       <Fold className="proxy-preview-ask">
         <select className="fold-select fold-lead mono" aria-label="Method" value={method} onChange={(event) => setMethod(event.target.value)}>
-          {PROXY_METHODS.map((one) => (
+          {methodChoices(route).map((one) => (
             <option key={one}>{one}</option>
           ))}
         </select>
