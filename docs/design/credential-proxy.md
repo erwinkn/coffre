@@ -499,7 +499,8 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   `/companies` and not it, a `*` is itself, never a glob (with a warning
   at startup), `methods: []` takes nothing, `paths: []` no path while
   its methods still answer first (`methods: ['POST'], paths: []` is a 405
-  to a GET, a 403 to a POST, a presigned URL's too), and a path of theirs is
+  to a GET, a 403 to a POST, a presigned URL's too, before its other
+  arguments are read), and a path of theirs is
   compared as written with the path as it goes, undecoded, `//`, `;x` and
   `%20` included, as an S3 key prefix may hold them (`/bucket//prefix`
   takes `/bucket//prefix/file`); another spelling is another path

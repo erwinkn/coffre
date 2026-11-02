@@ -1157,6 +1157,11 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   const inject = credential.sigv4!;
   const method = asked.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
+  // Legacy `methods` answer before the other arguments are read, as before 0.16: `methods: ['POST']` is a 405 to any presign,
+  // a malformed one included. `allow` never sets them (the two do not mix), and its methods answer with its paths, below.
+  if (credential.methods !== undefined && !credential.methods.some((taken) => taken.toUpperCase() === method)) {
+    return failure(405, credential.methods.length === 0 ? `${credential.name} takes no method` : `${credential.name} takes ${credential.methods.map((taken) => taken.toUpperCase()).join(', ')}`);
+  }
   const expiresIn = asked.expiresIn ?? 900;
   if (typeof expiresIn !== 'number' || !Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > 3600) return failure(400, 'a presigned URL lasts between a second and an hour: expiresIn, in seconds');
   // No control character either: a URL drops a tab or a line break, which could join what the checks below saw apart.

@@ -1214,9 +1214,12 @@ exact rules; this section is their reasons.
    spaces or dots alone (which Windows drops from a segment's end). Since a
    glob counts segments, `/companies/;x/documents` must not pass
    `/companies/*/documents` when the upstream reads it as
-   `/companies/documents`. Anywhere else such a segment is harmless and
-   taken: past a prefix, a `**` or a trailing slash the path the upstream
-   makes of it stays inside, and S3 keys hold `//` (`/bucket/a//b`).
+   `/companies/documents`. Past a prefix or a `**` such a segment is
+   harmless and taken: the path the upstream makes of it stays inside, and
+   S3 keys hold `//` (`/bucket/a//b`). Past a trailing slash it is taken
+   only beside another segment that survives the upstream's normalization:
+   under `allow: [{ path: '/bucket/*/' }]`, `/bucket/a/;x/k` passes and
+   `/bucket/a/;x` is a 403.
 3. **New:** each segment is percent-decoded once, to bytes, and the decoded
    segments are matched against an `allow` list. Bytes, not text: no UTF-8
    check beyond step 1's overlong refusal (a `%FF` segment is forwarded
@@ -1224,14 +1227,16 @@ exact rules; this section is their reasons.
    written precomposed and decomposed are two different segments, as they
    are to the upstream.
 4. The path goes on as the app encoded it, byte for byte. After step 1, the
-   upstream's own decoding, however often it runs, reads the segments the
-   match read.
+   upstream's own decoding, however often it runs, reads a path the `allow`
+   list still takes; it need not read the same segments (`/kyc/a%2520b`
+   is `a%20b` to the match and `a b` to a server that decodes twice, both
+   under `/kyc`).
 
 | Request | Matched as | Result |
 |---|---|---|
 | `/companies/42/documents/a%20b.pdf` | `companies`, `42`, `documents`, `a b.pdf` | matched |
 | `/companies/42/docu%6Dents` | `companies`, `42`, `documents` | matched as `documents`, not missed |
-| `/kyc/%2e%2e/admin` | | 400: a dot segment (today too) |
+| `/kyc/%2e%2e/admin` | `admin` | 403 under the example list: URL parsing resolves `%2e%2e` before the proxy sees the path, so it is `/admin`, outside `/kyc` (today too) |
 | `/kyc/..%2fadmin` | | 400: a slash once decoded (today too) |
 | `/kyc/%25252e%25252e/admin` | | 400: a dot segment three decodings down (today too) |
 | `/kyc/..%20/admin`, `/kyc/..%00/admin` | | 400: a dot segment with a blank; a control byte (today too) |
@@ -1254,8 +1259,12 @@ slash or an empty segment is refused at save. So is a literal some server
 may read as another (review round 5): one that still decodes (`%2561`,
 `a` to a server that decodes twice), one with `;` (`a;v1`, `a` to Tomcat),
 one ending in a space or a dot (`a.`, `a` to Windows). In code each is a
-startup error, or for a legacy path a warning that matches what it
-matched before. Two code forms keep their meaning: `/` matches every path,
+startup error. A legacy path keeps matching what it matched before, with
+no warning for these: `paths: ['/a;v1', '/a.', '/a%2561', '//']` start
+silently, as on 0.15. A legacy path warns at startup only when it is dead
+(it holds a segment no request reaches the upstream with, `/a/../b`), when a
+URL spells it otherwise (`/café`, `/a b`: compared as written, it matches
+nothing), or when it holds a `*`, which it takes as itself. Two code forms keep their meaning: `/` matches every path,
 and a trailing slash, `/companies/`, matches what is below `/companies`
 and not it. In `allow` that slash needs a segment below that a server
 reads as one: `/bucket/*/` takes `/bucket/a/b`, never `/bucket/a/...`,
@@ -1263,8 +1272,11 @@ which a server may read as `/bucket/a` (review round 6). The UI refuses a
 trailing slash at save and offers `/companies/**`. PR B's property tests
 (`test/proxy-match-properties.test.ts`) run every row above, and random
 encodings of paths, through the old check and the new matcher together,
-against a model of how servers behind may read them: no path outside the
-list reaches the upstream under any reading.
+against a model of how servers behind may read them: under an `allow` list,
+no path outside it reaches the upstream under any reading. Legacy `paths`
+are held to 0.15's answers instead, and the unstable literals above are
+exempt: `paths: ['/a;v1']` forwards `/a;v1/k`, which Tomcat reads as
+`/a/k`, as 0.15 did.
 
 ### The allow list
 
@@ -1318,7 +1330,12 @@ an earlier header cannot be swapped on the way.
 
 **Where the handle is.** Two sources, as today. `x-coffre-handle`, which the
 SDK's `credential(name).fetch()` sends and which fills no slot of the rule,
-is accepted on its own, whatever the definition's slots. Without it, the
+is accepted on its own for the header, query and Basic slots: the proxy
+fills them whatever they held. A form or JSON rule carrying a non-plain key
+is the exception: its field must hold the handle too, as the plan gave it
+to the app there. With
+`inject: form('secret', '{KEY}')`, `x-coffre-handle` and `secret=mine` is a
+400 (after the vault answers, before anything is sent). Without it, the
 plan gave the app the handle in place of each non-plain key, so every slot
 that carries one carries the same handle. The proxy finds it by its shape
 (`coffre_use_` and 43 characters), before the vault call, without the

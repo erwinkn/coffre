@@ -170,6 +170,16 @@ test('legacy methods answer before an empty paths, as on 0.15: a request, and a 
     assert.equal(answer.status, status, methods.join());
     assert.match(answer.body, said, methods.join());
   }
+  // Before the other arguments too, as on 0.15: a presign the methods refuse is a 405 however malformed the rest.
+  const signer = proxy({ upstream: 'https://s3.eu-west-3.amazonaws.com', inject: s3, methods: ['POST'], paths: [] });
+  for (const presign of [{ path: '/a', expiresIn: 0 }, {}, { path: 'a' }, { path: '/a', query: 'x' }, { path: '/a/../b' }]) {
+    const answer = await signer.ask('/market/dev', { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 'api', ...presign } }) });
+    assert.equal(answer.status, 405, JSON.stringify(presign));
+    assert.match(answer.body, /api takes POST/, JSON.stringify(presign));
+  }
+  // A method that is no presign's stays a 400 first, as on 0.15.
+  const put = await signer.ask('/market/dev', { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 'api', path: '/a', method: 'PUT' } }) });
+  assert.equal(put.status, 400);
 });
 
 test('a * in code\'s paths is itself, as before 0.16, with a warning: never a glob, and no path of old fails to start', async (t) => {
