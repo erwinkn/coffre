@@ -1,4 +1,4 @@
--- Proxy definitions written in the UI (0.16, T186; postgres 0055_proxy_definitions): one row per environment holds its items, their index and the vault's seal over it, kind `proxy`; one row the names the deployment's code reserved, kind `proxy-reserved`. Only the vault writes them, through its change path (`changeOnSqlite`).
+-- Proxy definitions written in the UI (0.16, T186; postgres 0056_proxy_definitions): one row per environment holds its items, their index and the vault's seal over it, kind `proxy`; one row the names the deployment's code reserved, kind `proxy-reserved`. Only the vault writes them, through its change path (`changeOnSqlite`).
 CREATE TABLE `proxy_definitions` (
 	`environment_id` text PRIMARY KEY NOT NULL,
 	`items` text NOT NULL,

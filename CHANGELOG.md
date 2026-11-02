@@ -21,7 +21,7 @@
   their holdings frozen with it. `GET`/`PUT /api/projects/<p>/<e>/proxy`
   and `PUT /api/proxy/reserved`; nothing serves them yet (PR C), and the
   page comes with PR D. `credentialProxy({ editable: true })` lets the tab
-  write. Migration 0055 adds `proxy_definitions` and `proxy_reserved`, and
+  write. Migration 0056 adds `proxy_definitions` and `proxy_reserved`, and
   `change_input` for their two kinds; the previous release runs on it.
 
 - **A page of reads costs as much on a connection's sixth call as on its

@@ -1294,7 +1294,7 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
     : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null)
     : proxied ? value === null : value !== null;
   if (valued) throw new Error(`a ${ref.kind} change ${op} carries the object it leaves exactly when change_input writes it`);
-  // ChangeChecksSeal; the proxy's rows are written whole, from the newest change's seal (0055).
+  // ChangeChecksSeal; the proxy's rows are written whole, from the newest change's seal (0056).
   const newest = await newestChange(tx, ref);
   const held = proxied ? newest?.seal ?? null : await heldSeal(tx, ref);
   if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${ref.kind} object's row is not its newest change's: stale`);
