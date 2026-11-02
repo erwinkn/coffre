@@ -209,7 +209,10 @@ row to a newest change's seal before that change's MAC holds:
   Each check is a read before the statement, which then compares the seal
   alone (ChangeCAS, ChangeChecksSeal): bytes, which SQL cannot tell from a
   forgery. `prepare` also holds the row the app read to the seal of the
-  change it checked, and answers `moved` when they differ, which is also
+  change it checked (each object's first call from it, each later call
+  from the seal the one before leaves: the calls, not the app's entries,
+  so that an entry changing nothing cannot stand in for the one that
+  writes, review r3), and answers `moved` when they differ, which is also
   what an honest write between the app's read and `prepare` makes: nothing
   is reported, and the app reads again (`ObjectMoved`, `retrying`), as it
   does when `app_change` finds a row moved. Without that, a writer would
@@ -219,12 +222,21 @@ row to a newest change's seal before that change's MAC holds:
   under an authentic entry (review Fable). With it, a writer must forge a
   change the vault has already checked, after its read and before the
   statement, and that change must be an honest one landing in that gap
-  (row and seal put back, its seal forged). Sign-in and issue read and
-  check the rows themselves, a few milliseconds before their statement,
-  and have the same gap. Closing it takes the statement holding the newest
+  (row and seal put back, its seal forged). An issue holds the credential
+  it came in on to its checked change's seal the same way, and so does a
+  sign-in its binding (review r3: without it, an ended binding put back,
+  its end's seal column forged once the vault read the end, signed a run
+  in), and both statements take that seal as a parameter: the same gap.
+  A sign-in's member is wider: `sign_in` reads the member's row itself,
+  and the vault, which never sees it, pins nothing, so a member removed,
+  its row put back and the removal's seal forged after the MAC check,
+  takes no honest change, only the timing (a writer holding the member's
+  row locked widens it to `lock_timeout`). Closing both takes the statement
+  holding the newest
   change's seal column to the seal the vault checked (a number alone is not
   enough: the forgery edits the seal in place and keeps the number), under
-  the lock: a parameter of `app_change`, `sign_in` and `issue_token`.
+  the lock: a parameter of `app_change`, `sign_in` (the member's) and
+  `issue_token`.
   T179's two-trip writes, which check their read set there (#458), take it
   on. The model checks the MAC as the code does, of the change read at
   `ChangeStart`, and its scenarios, one tamper each (`MaxTampers = 1`),
@@ -248,11 +260,13 @@ do (merkle-checkpoints.md, attacks (a) and (f)), and so does the
 whole-log verifier. That is the same boundary as `access` and every other
 reader of the log.
 
-**Out of scope here, followed up:** the decision path's reads of each
-environment's newest seal (`snapshot`, T159) still compare the column
-alone; it decides what `access` answers, not what a use opens.
-`proxyLookup` (T186) takes a level's `newest` from its caller, which must
-read it through `newestChange` once a use reads proxy definitions.
+**The decision path** (T159) holds each environment's row to its newest
+change the same way: `snapshot` and `environmentsById` read that change
+whole, in the same probe, and `#placeFault` refuses the row `tampered`
+when its MAC does not hold, before the seal comparison (review r3: an
+archived place put back, the archive's seal column forged, otherwise had
+grants on it hold, its old protection weighed and an issue on it made).
+The route use reads proxy definitions through the same check (above).
 
 ## The bulk cap
 

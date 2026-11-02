@@ -325,11 +325,13 @@ export function keptFrom(keys: SealKeys, ref: Ref & { kind: 'secret' }, changes:
  * row to its object's newest seal in SQL, which cannot check a MAC. A row
  * put back and its object's newest change's seal written to match would
  * pass that comparison, and the write would seal the rollback, a revoked
- * credential renewed live again. One statement for them all.
+ * credential renewed live again. One statement for them all; what it read,
+ * by object key, each object's newest change first.
  */
-export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonly Ref[]): Promise<void> {
+export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonly Ref[]): Promise<Map<string, CheckedChange[]>> {
   const found = await loggedChanges(db, macsOf(keys), refs);
   for (const ref of refs) if (found.get(objectKey(ref))?.[0]?.holds === false) throw new NotLogged(ref, 'tampered');
+  return found;
 }
 
 /**

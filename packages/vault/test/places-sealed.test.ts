@@ -18,6 +18,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
+import { objectKey } from '../src/inputs.ts';
 import { newestSeals, newestSealsQuery } from '../src/store.ts';
 import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
@@ -94,6 +95,18 @@ const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: 
       const [{ slug }] = await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM environments WHERE id = ${w.dev}`) as [{ slug: string }];
       await changePlace(db.owner, w.dev, { slug: `${slug}~deleted-1` });
       await run(db.owner, sql`UPDATE environments SET slug = ${slug} WHERE id = ${w.dev}`);
+    },
+    projectOf: (w) => w.project,
+  },
+  // Archived as the app archives it, a change the log holds, MAC and all; then the row as it was before, its old seal
+  // valid, and the archive's seal column made that seal (not its MAC): the seal comparison alone passes (T190, review r3).
+  'put back after its archive, the archive\'s seal column made the old one': {
+    tamper: async (w) => {
+      const [{ seal }] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM environments WHERE id = ${w.dev}`) as [{ seal: Buffer }];
+      await changePlace(db.owner, w.dev, { archived: true });
+      await run(db.owner, sql`UPDATE environments SET archived_at = NULL, seal = ${seal} WHERE id = ${w.dev}`);
+      const object = objectKey({ kind: 'environment', id: w.dev });
+      await run(db.owner, sql`UPDATE log_changes SET seal = ${seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
     },
     projectOf: (w) => w.project,
   },

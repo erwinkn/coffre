@@ -8,7 +8,7 @@ import { snapshotQuery as postgres } from './snapshot.postgres.ts';
 import { snapshotQuery as sqlite } from './snapshot.sqlite.ts';
 import { objectKey } from './inputs.ts';
 import * as store from './store.ts';
-import type { EnvironmentRow, Member, MemberLog } from './store.ts';
+import type { EnvironmentRow, Member, MemberLog, NewestColumns } from './store.ts';
 
 /**
  * What a decision reads, or `access`, in one statement: one round trip, and
@@ -148,16 +148,16 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
   return store.oneSnapshot(db, async (on) => {
     const raw = await statement(on);
     const rowless = (raw.placeIds ?? []).filter((id) => !raw.environments.some((row) => row.id === id));
-    const newest = await store.newestSeals(on, [...raw.environments.map(({ id }) => id), ...rowless].map((id) => ({ kind: 'environment' as const, id })));
+    const newest = await store.newestChanges(on, [...raw.environments.map(({ id }) => id), ...rowless].map((id) => ({ kind: 'environment' as const, id })));
     return snapshotOf(asked, raw, newest, await store.memberLogs(on, asked.principals), rowless);
   });
 }
 
 /** A snapshot from its statement's row; on SQLite, with the newest seals and the rowless places read beside it. */
-function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, Buffer | null> | null, members: Map<string, MemberLog> | null, rowless: readonly string[] = []): Snapshot {
+function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, NewestColumns> | null, members: Map<string, MemberLog> | null, rowless: readonly string[] = []): Snapshot {
   const gone = newest === null
     ? (raw.gone ?? []).map(({ id, newest: last }) => [id, hex(last)] as const)
-    : rowless.flatMap((id) => (newest.has(objectKey({ kind: 'environment', id })) ? [[id, newest.get(objectKey({ kind: 'environment', id })) ?? null] as const] : []));
+    : rowless.flatMap((id) => (newest.has(objectKey({ kind: 'environment', id })) ? [[id, store.newestRowOf(newest.get(objectKey({ kind: 'environment', id })))?.seal ?? null] as const] : []));
   return {
     at: Number(raw.at),
     members: new Map(raw.members.map((member) => [member.principal, memberOf(member)])),
@@ -176,7 +176,7 @@ function snapshotOf(asked: Asked, raw: Raw, newest: Map<string, Buffer | null> |
         sealed: store.environmentSeal(
           { id, projectId, slug, owner, parentId, protected: sealed.protected == null ? null : Boolean(sealed.protected), archived: Boolean(sealed.ownArchived), projectArchived: Boolean(sealed.projectArchived) },
           hex(sealed.seal),
-          newest === null ? hex(sealed.newest) : newest.get(objectKey({ kind: 'environment', id })) ?? null,
+          newest === null ? sealed.newest ?? null : newest.get(objectKey({ kind: 'environment', id })) ?? null,
         ),
       } : {}),
     }] as const)]),
@@ -217,8 +217,8 @@ type Raw = {
   settings?: RawEntry | null;
   environments: {
     id: string; projectId: string; slug: string; owner: string | null; parentId: string | null; deleted: boolean | number; archived: boolean | number;
-    /** With `asked.seals`: the object's own columns, the row's seal and, on Postgres, its newest change's, as hex. */
-    protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: string | null;
+    /** With `asked.seals`: the object's own columns, the row's seal, as hex, and, on Postgres, its newest change, whole (`newestChangeJson`). */
+    protected?: boolean | number | null; ownArchived?: boolean | number; projectArchived?: boolean | number; seal?: string | null; newest?: NewestColumns | null;
   }[];
   /** With `asked.seals`, on Postgres: each asked principal's row's seal and its newest change (`MemberLog`). */
   memberLogs?: {

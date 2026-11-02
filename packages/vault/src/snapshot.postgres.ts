@@ -3,6 +3,7 @@ import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { sql, type SQL } from 'drizzle-orm';
 
 import type { Asked } from './snapshot.ts';
+import { newestChangeJson } from './store.ts';
 
 /** An entry of `audit_log` aliased `e`, as JSON (`RawEntry`): whole numbers past 2^53 as text, bytes as hex. */
 const ENTRY = sql.raw(`json_build_object(
@@ -96,11 +97,11 @@ export function snapshotQuery(asked: Asked): SQL {
           'deleted', env.slug LIKE ${tomb} OR project.slug LIKE ${tomb},
           'archived', env.archived_at IS NOT NULL OR project.archived_at IS NOT NULL${seals
             ? sql`,
-          -- What 0.15's log holds the row to (T159): its object's own columns, its seal, and its newest change's, one probe
-          -- of its object's changes, newest first (log_changes_object_idx, which holds the seal).
+          -- What 0.15's log holds the row to (T159): its object's own columns, its seal, and its newest change, whole, its
+          -- MAC to check (T190, review r3), one probe of its object's changes, newest first (log_changes_object_idx).
           'protected', env.protected, 'ownArchived', env.archived_at IS NOT NULL, 'projectArchived', project.archived_at IS NOT NULL,
           'seal', encode(env.seal, 'hex'),
-          'newest', (SELECT encode(l.seal, 'hex') FROM log_changes l WHERE l.object = log_object('environment', env.id::text) ORDER BY l.number DESC LIMIT 1)`
+          'newest', ${newestChangeJson(sql`log_object('environment', env.id::text)`)}`
             : sql``})), '[]')
         FROM environments env JOIN projects project ON project.id = env.project_id
         -- One list of ids, each found by the primary key.

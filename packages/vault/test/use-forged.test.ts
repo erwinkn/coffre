@@ -121,6 +121,28 @@ test("a renewal of a credential whose row was put back over an authentic revoke:
   assert.equal(await reports(), before, 'nothing reported');
 });
 
+test("the same renewal behind an entry that changes nothing of the credential as its revoke left it: `prepare` holds the calls, not the entries, to the newest change, and answers it moved (review r3)", async () => {
+  const { w } = await used();
+  const ref: Ref = { kind: 'credential', id: w.credentialId };
+  const credential = w.objects.credential as Extract<Input, { kind: 'credential' }>;
+  const revoked = { ...credential, revoked: true };
+  await change(ref, { op: 'credential.revoke' }, revoked, async () => {});
+  const [row] = await rows<{ kind: string; scope: string | null }>(db.owner, sql`SELECT kind, scope FROM credentials WHERE id = ${w.credentialId}`);
+  const columns: CredentialColumns = { id: w.credentialId, principal: credential.principal, kind: row!.kind, scope: row!.scope, revoked: false, expiresAt: credential.expiresAt!, generation: credential.generation };
+  const { vault } = await isolate();
+  const outcome = await vault.prepare!({
+    actor: ROOT,
+    changes: [
+      // The credential as its revoke left it, its seal the newest change's: no call.
+      { kind: 'credential', id: w.credentialId, before: { columns: { ...columns, revoked: true }, seal: sealOf(SEAL, ref, revoked).toString('base64') }, after: { ...columns, revoked: true } },
+      // Then the renewal, from the row put back: the one call, from a seal that is not the newest change's.
+      { kind: 'credential', id: w.credentialId, before: { columns, seal: sealOf(SEAL, ref, credential).toString('base64') }, after: { ...columns, expiresAt: credential.expiresAt! + 60_000 } },
+    ],
+  });
+  // Held by its first entry alone, the renewal was prepared from the put-back seal, for a forged seal column to let through.
+  assert.equal(!outcome.ok && outcome.refusal.code, 'moved', JSON.stringify(outcome));
+});
+
 test("the member: their grant revoked, row and grant put back, the revoke's seal column made the old one: refused (Fable's repro)", async () => {
   const { w, id, use } = await used();
   const ref: Ref = { kind: 'principal', id: w.principal };

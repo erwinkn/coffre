@@ -69,8 +69,9 @@ export function entryMac(key: LogMacKey, entry: { tree: 'changes'; row: Omit<Cha
  */
 export function changeHolds(keys: readonly LogMacKey[], row: Omit<ChangeRow, 'number'>): boolean {
   if (row.mac.length !== MAC_BYTES) return false;
-  const key = keys.find((held) => held.tag.equals(row.mac.subarray(0, TAG_BYTES)));
-  return key !== undefined && timingSafeEqual(entryMac(key, { tree: 'changes', row }), row.mac);
+  // Every key of that tag, not the first: `logKeys` refuses twins where the checkpointer derives them, nothing here (review r3).
+  const tag = row.mac.subarray(0, TAG_BYTES);
+  return keys.some((held) => held.tag.equals(tag) && timingSafeEqual(entryMac(held, { tree: 'changes', row }), row.mac));
 }
 
 /** A change's row as the trees take it: every column in the table's order, the MAC last (`log_changes`'s own order puts it there too). */

@@ -54,13 +54,17 @@
   before any row is held to it: the use is refused `stale`, the change
   `tampered`. A route use checks the three newest changes it reads beside
   its caller's the same way: each fork level's definitions and
-  environment, and its editor's principal (`stale`). The same holds for
-  every write whose statement holds a row to its newest seal: the app's
-  changes (`prepare`, one statement more per call), a sign-in through a
-  binding (one statement more) and an issue or binding made on a
-  credential (in the read it already makes). Revokes and a binding's end
-  do not check it, so a forged log never blocks one. `prepare` also holds
-  each row the app read to the seal of the change it checked, and answers
+  environment, and its editor's principal (`stale`). A decision does so
+  for each environment it reads (`tampered`, in the probe it already
+  makes). The same holds for the writes whose statement holds a row to
+  its newest seal: the app's changes (`prepare`, one statement more per
+  call), a sign-in through a binding (one statement more) and an issue or
+  binding made on a credential (in the read it already makes). Revokes
+  and a binding's end do not check it, so a forged log never blocks one.
+  A sign-in's member row is checked, not yet pinned: a forgery timed
+  between the check and `sign_in` passes until T179 pins it
+  (sealed-inputs.md). `prepare` also holds each object's calls, from the
+  row the app read, to the seal of the change it checked, and answers
   a new refusal, `moved`, when they differ, which the app reads again as
   it does a row `app_change` finds moved (`ObjectMoved`). Migration 0059
   has `use_credential` answer each newest change's MAC'd columns (a new
