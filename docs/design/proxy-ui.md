@@ -380,20 +380,39 @@ around every call:
   release before anything else, before `#prepared()` reads the config or
   any pool opens, and on a mismatch answers `{ release: <its own> }` and
   runs nothing. On a match it runs the method and answers `{ release,
-  result }`. One function in `@coffre/vault`, `gated`, does this, and each
-  transport calls it: `VaultEntrypoint` on Workers, whose per-method
-  members become private (`#use`, `#useNamed`, `#unwrap`, and the rest),
-  so the hot path's `#behind` and `#prepared` sit behind the check like
-  `#call`; `serveVault`'s handler on Node, whose body becomes
-  `{ release, args }`; and `openLocalVault`, in process, where the two
-  sides are one bundle and cannot differ, but answers go through the same
-  envelope so its tests hold it.
-- **The app: one wrapper, made in `createRuntime`** around the
-  deployment's `config.vault` (the service binding, `connectVault`'s
-  client, or a local vault). Each method becomes `call(<release>, name,
-  args)`; an answer on another release, or with none, throws one typed
-  error, `Deploying`, and `toErrorBody` maps it, once, to 503
-  `deploying` with `Retry-After: 1`. No handler sees a mismatch.
+  result }`. The contract is in `@coffre/core/vault`, beside `Vault`:
+  `VaultEntry`, the object with that one `call`, and its answer type.
+  Each vault process gates once, at its outermost entry, and nothing
+  inside it gates again:
+  - Workers: `VaultEntrypoint.call` is the Worker's only public method.
+    Its per-method members become private (`#use`, `#useNamed`,
+    `#unwrap`, and the rest), so the hot path's `#behind` and
+    `#prepared` sit behind the check like `#call`.
+  - In process: `openLocalVault` returns a `VaultEntry` whose `call`
+    gates, then dispatches into its `METHODS`, JSON round trip included.
+    The two sides are one bundle and cannot differ, but answers go
+    through the same envelope so its tests hold it.
+  - Node: `serveVault` holds that same entry (`localVault` →
+    `openLocalVault`) and has one route, `POST /call`, whose body is
+    `{ release, method, args }` and which forwards to the entry without
+    gating again. `connectVault` returns a `VaultEntry` whose `call`
+    posts there and resolves the envelope whole. The per-method routes
+    (`POST /<method>`) go.
+
+  The Workers binding is typed `VaultEntry`, not `Vault`, in the
+  examples, `coffre init`'s templates and `createCoffre`'s config.
+- **The app: one wrapper, `versioned(entry, release)`**, which gives the
+  app back a `Vault`: each method becomes `entry.call(<release>, name,
+  args)`. An answer on another release, or with none, throws
+  `ApiError('deploying', …)` with `retryAfter: '1'` (`deploying: 503` in
+  `ERROR_STATUS`, and `errorResponse` adds the header for `deploying` as
+  it does for `unavailable`). No handler sees a mismatch. The wrapper
+  replaces `createRuntime`'s `vault` parameter on its first line, before
+  `SigninService`, `WorkloadService` and `McpService` are built from it,
+  so no service holds the raw transport. It is kept in a `WeakMap` keyed
+  by the entry it wraps: on Workers `createRuntime` runs per request, and
+  a new wrapper each time would miss `about015`'s cache (keyed by the
+  vault object) and add an `about()` call to every use.
 
 A refusal is an answer, not a thrown error: a Workers RPC error keeps
 its message but not its fields, and a Node failure would map to 500
@@ -404,9 +423,11 @@ entry. The envelope adds a string comparison, not a round trip (R44).
 That covers the one upgrade into the rule. The 0.16 vault, deployed
 first, has no public per-method entry, so a 0.15 app's calls (to `use`,
 `access`, and the rest) fail before any read, as that app fails any
-vault error, for the seconds until the app deploys; a 0.16 app in front
-of a 0.15 vault finds no `call` and fails the same way, reading no
-route, and the 0.15 vault has no proxy definitions anyway. During a
+vault error, for the seconds until the app deploys. A 0.16 app in front
+of a 0.15 vault finds no `call`: the Workers stub throws, `/call`
+answers 404, and the app fails as on any vault error (500), not with
+`deploying`, reading no route; the 0.15 vault has no proxy definitions
+anyway. Only a release that has `call` can answer `deploying`. During a
 deploy, mismatched calls wait out the seconds until both Workers match.
 Main has no per-call version today: `about()` lists capabilities (`uses`,
 `batchUses`, `sealing`), which is how 0.15 serves an app ahead of its
@@ -1421,17 +1442,22 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
 - `@coffre/core/access`: `proxy.edit`, the role editor's new rule;
   `formal/lean` updated in the same PR (AGENTS.md: a change to the access
   rules changes the Lean model).
-- The version gate (section 3, "One version at a time"): the envelope
-  `call(release, method, args)` and its answer `{ release, result }`;
-  `gated` in `@coffre/vault`, called by `VaultEntrypoint` (its per-method
-  members made private, the hot path's included), `serveVault`'s handler
-  and `openLocalVault`; the app's one wrapper in `createRuntime`, its
-  `Deploying` error mapped once in `toErrorBody` to 503 `deploying` with
-  `Retry-After: 1`. Tests, on Workers, Node and in process: a call on
-  another release refused with no statement run and no entry (counted as
-  `request-cost.test.ts` counts), for a `useNamed`, a no-argument method
-  (`about()`) and a string-argument one (`access`); an answer on another
-  release, or with none, refused by the app as 503 `deploying`.
+- The version gate (section 3, "One version at a time"): `VaultEntry`
+  and its answer `{ release, result }` in `@coffre/core/vault`; the gate
+  once per vault process, at `VaultEntrypoint.call` (its per-method
+  members made private, the hot path's included) and at
+  `openLocalVault`'s entry, which `serveVault` serves as `POST /call`;
+  `connectVault`'s `call`; the binding typed `VaultEntry` in the
+  examples and `init`'s templates; `versioned` replacing `createRuntime`'s
+  `vault` parameter, kept per entry; `deploying: 503` with
+  `Retry-After: 1` in `ERROR_STATUS` and `errorResponse`. Tests, on
+  Workers, through the real `serveVault`/`connectVault` pair, and in
+  process: a call on another release refused with no statement run and
+  no entry (counted as `request-cost.test.ts` counts), for a `useNamed`,
+  a no-argument method (`about()`) and a string-argument one (`access`);
+  an answer on another release, or with none, answered 503 `deploying`
+  with the header, asserted at the API; two runtimes over one Workers
+  binding asking `about()` once.
 - PR A and PR C ship in one release, 0.16: code's names must be reserved
   (PR C's gate) from the first UI save (PR A), or a code name served
   meanwhile hides a UI item nobody deleted.
@@ -1497,9 +1523,10 @@ is fixed in this document, within PR C.
   shared parser could read apart, saved and replayed to the same key set;
   the gate and `proxyItem` each failing, the request 503 and the next one
   asking again. Versions (section 3, "One version at a time"): an app on
-  the next release in front of this vault, and this app in front of the
-  previous release's vault, each proxy request 503 `deploying` with
-  `Retry-After: 1` and no route read or changed; both Workers rolled back
+  the next release in front of this vault, each proxy request 503
+  `deploying` with `Retry-After: 1` and no route read or changed; this
+  app in front of 0.15's vault, which has no `call`, each proxy request
+  failing with no route read or changed; both Workers rolled back
   to the previous release together, served as that release serves; rolled
   back to 0.15 and upgraded again, the UI items served, gated first.
 - `use_credential`: the proxy object(s) and the editor's principal as
