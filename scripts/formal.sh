@@ -189,6 +189,8 @@ REMOVALS=(
   "RoutingCode ClearSuperseded NoRevival"
   "RoutingCode SaveChecksReserved NoRevival"
   "RoutingCode CodeGate NoRevival"
+  # A call from an app on another release than the vault's, unrefused, reads and changes the route (Routing.tla).
+  "RoutingVersion VersionGate MismatchInert"
   # 0.15's hot path (HotPathOne.tla; W208, W211; the plan's PRs 3 to 5): one call per use, every input sealed.
   "HotPathOne UseLocks TotalOrder"
   "HotPathOne UseLocks NothingAllowedAfterAnswer"

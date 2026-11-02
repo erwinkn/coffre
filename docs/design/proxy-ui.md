@@ -6,7 +6,7 @@ code. Rules R65 and R66; the UX is prototype
 W260 and W263; draft, never merged). The model is
 [`formal/Routing.tla`](../../formal/Routing.tla), described in
 [docs/formal.md](../formal.md#routingtla). Nothing here is built.
-Section 11 records the seven decisions it needed (2026-11-02).
+Section 11 records the eight decisions it needed (2026-11-02).
 
 ## In short
 
@@ -54,6 +54,12 @@ key by whoever controls the upstream.
 7. **`proxy.edit`** is a new place permission. The Owner role holds it
    (Owners hold every permission), so by default only project and instance
    Owners edit. The role editor gets a row for it.
+8. **One version at a time.** The app and the vault Workers run one
+   release, and a deploy or a rollback moves both. Every app-to-vault call
+   carries its release; a vault on another one answers 503 `deploying`
+   before it reads anything, which the app passes on with `Retry-After: 1`.
+   No part of this design serves across two releases (section 3, decision
+   8).
 
 An example, end to end. Ada is an Owner of `market`. In `market/dev`'s
 Proxy tab she adds a route:
@@ -300,6 +306,8 @@ TLC checks:
 - **`RoutingRelease`**: an instance Owner who releases a reserved name while an older
   deployment still serving defines it, then saves it, is the one revival
   left: `EXPECTED` broken, and the release dialog says so (section 6).
+- **`MismatchInert`.** No vault call reads or changes a route while the
+  caller's release and the vault's differ (`RoutingVersion`, decision 8).
 - **`StrictlyCurrent`**, the literal reading, fails with every protection
   on. That is an `EXPECTED` gap in `scripts/formal.sh`, kept so the window
   stays documented: values decided before an edit serve out their W.
@@ -346,51 +354,54 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
              for the caller (purpose use, as today)
              for the definition's editor: frozen holdings, intersected with current ones (section 8)
            answers: the values, the definition's seal, its item digest, and its definition, never its holdings (omitted when the app's copy has that digest)
-  app      sends only if the answer carries the route's seal list and item digest (no seal or no
-             digest: 503, never "the copy's digest confirmed"); the app holds no MAC key and checks
-             presence only, while the vault checks sameness: each later round and chunk's seal list
-             against the first statement's, else `moved` (`OneVersion`)
+  app      sends by the definition the answer names (its item, or the copy whose digest it confirmed);
+             each later round and chunk's seal list must be the first statement's, which the vault
+             checks, else `moved` (`OneVersion`)
            checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the entry carries its seal and item)
            sends, before the use's deadline, to that definition's upstream
 ```
 
-An answer to a route use that carries no seal or no item digest is a
-refusal, never a confirmation. A 0.15 vault ignores the `route` field it
-does not know and answers a plain named use: values, with no item, no seal
-and no digest. Read as "the copy's digest confirmed", that answer would send
-by whatever copy the isolate holds, to its upstream, with the editor never
-decided. That happens when a vault is rolled back under warm 0.16 isolates
-(docs/deploy.md: the vault goes first), which have seen `proxies` and will
-not ask again (section 6). So the app checks presence on every answer, and
-the `proxies` bit is an early gate, not the protection.
-
-Presence is the route's, not each key's. A plain key has no entry and no
-vault answer of its own, but the route use reads the item and its seal
-whatever keys it names, so a route of plain keys only still makes its use
-(the editor decided on standing) and its answer carries the seal and the
-digest like any other. An older vault's answer to it has neither, and is a
-503 too.
+**One version at a time** (decision 8). The app and the vault Workers run
+one release, and a deploy or a rollback moves both: `pnpm run deploy` deploys
+the vault, then the app (docs/deploy.md), and Workers Builds deploys both
+on every push. No part of this design serves across two releases. Every
+app-to-vault call carries the app's release as `protocol`: the packages'
+one version (`pnpm bump`'s), which both Workers bundle, so nobody has to
+remember to bump a protocol number. The vault compares it first, in
+`#call` on Workers and in `serveVault`'s handler on Node, before it opens
+a database: on a mismatch it answers 503 `deploying`, with no read, lock,
+write or log entry, and the app answers its request 503 `deploying` with
+`Retry-After: 1`. Each answer carries the vault's release too, and the app
+refuses one on another release, or with none, the same way. That covers
+the one upgrade into the rule: the 0.16 vault, deployed first, refuses the
+0.15 app's calls, which carry no release; a 0.15 vault would ignore the
+field, but it has no proxy definitions to read or change, and the app
+sends nothing it answered. During a deploy, mismatched calls wait out the
+seconds until both Workers match. Main has no per-call version today:
+`about()` lists capabilities (`uses`, `batchUses`, `sealing`), which is
+how 0.15 serves an app ahead of its vault. The proxy adds no capability
+bit and no code for a mixed pair. TLC's `RoutingVersion` holds that a
+call on another release never reads or changes a route (below, "What
+each protection is for").
 
 **Every route use takes this one shape.** Today only a handle with exactly
 one key goes by name (`byName` in `packages/server/src/plugins.ts`); a
 handle with several keys, every workload, and `sign`/`presign` and a
 tunnel's `run` go by ids, through `reveal`, `useValues` and `useMany`,
 whose answers (`UseManyOutcome`, `Used`) carry no seal, no digest and no
-item. Built that way, a UI SigV4 route (two keys, and presign's only kind)
-under a rolled-back vault would be sent, or its URL signed, by the copy,
-with nothing for the presence check to look at. So a UI route's use never
-goes by ids. It is one call, a route use, whose contract is:
+item. A use by ids reads no route: the vault would decide the caller
+alone, never the definition or its editor, and the app would send a UI
+SigV4 route (two keys, and presign's only kind) by its own copy
+(`SentAsDecided`). So a UI route's use never goes by ids. It is one
+call, a route use, whose contract is:
 
 - **Input.** The caller, as `proxyItem` names it: a handle by its token's
   hash (`NamedUseInput`'s `tokenHash` and `accepts`), or a workload by its
   credential's id and `way` (`connection`, `binding`, `access`), as a
   batch names it today; a Cloudflare binding has no token, and is the
   second kind. Then the place, the route's name, and the map's ids when
-  it holds them; for a batch, the route replaces `items`. The input still
-  sends `key: null` beside `route`: a 0.15 vault's `useNamed` throws on a
-  missing `key`, and with `key: null` it answers a standing-only use, with
-  no item, no seal and no digest, which the presence check refuses.
+  it holds them; for a batch, the route replaces `items`.
 - **The route's keys are the item's own list.** A route's keys live in its
   inject templates (`{KEY}`), which today only a TypeScript regex in the
   proxy reads. The vault does not parse templates in SQL. At save, it
@@ -426,11 +437,11 @@ goes by ids. It is one call, a route use, whose contract is:
   no-cache path (today `coffre.useMadeFor`, which bypasses `valuesFor`), a
   workload's forward, sign with a private key (which calls `coffre.use`
   and never caches today), verify and presign, and a tunnel's dial and its
-  rechecks. It checks presence before anything else sees the answer:
-  before the value cache keeps it, before a sign or presign, and before a
-  tunnel dials. A thrown vault error, an unknown method, `served: false`
-  and a missing seal or digest are all a 503, never the by-ids fallback a
-  code route takes when `byName` returns null.
+  rechecks. It takes the definition from the answer before anything else
+  sees it: before the value cache keeps it, before a sign or presign, and
+  before a tunnel dials. A thrown vault error and `served: false` are a
+  503, never the by-ids fallback a code route takes when `byName` returns
+  null.
 
 The plan's placeholder shaping is not a route use. To copy a JWT's claims
 into its placeholder, the plan opens the key's value for the caller alone,
@@ -688,9 +699,12 @@ described, which `scripts/formal.sh` holds as a failure on every CI run.
 | `ClearSuperseded`: the `proxy.code` change that reserves a name deletes its UI item | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
 | `SaveChecksReserved`: the vault refuses a save of a reserved name | during a deploy, an Owner saves `openai` through an old isolate after the new one reserved it; the new code hides it, and it serves again when a later deployment drops the name |
 | `CodeGate`: an isolate serves no proxy request before its code's names are reserved | the same revival, through a deployment that served `openai` from code without ever reserving it |
+| `VersionGate`: the vault refuses a call on another release before it reads anything | the vault moves to the next release while an app isolate still runs the last one, and that isolate's save or use reads and changes the route (`MismatchInert`, `RoutingVersion`) |
 
-The model runs two isolates, which may run different code during a deploy,
-and a writer who can forge a body or put a row back. What it does not
+The model runs two isolates, which may run different code during a deploy
+(two configs of one release: a deploy that changes `credentialProxy` alone
+keeps the release, so the version gate does not separate them), and a
+writer who can forge a body or put a row back. What it does not
 cover: the fence's own correctness (that a use and a
 change never overlap, and the number orders them) is `HotPathOne.tla`'s, for
 any input. Here an edit is one step. One route, two hosts; its second key
@@ -712,12 +726,10 @@ A deleted row is the vault's `stale` (PR A tests it). Covers are
 cover's identity and the proxy object and editor to its inputs, which
 PR C's cover tests hold (one route here cannot share a key with another).
 The plan sends nothing, so it is below `EverySendAllowed`; PR C's plan
-tests hold that it gives handles and fails closed. Old-vault skew (section
-6, "Against an older vault") is held by PR C's tests: on a first
-upgrade no UI item exists until the vault says `proxies`, and an isolate
-gates before serving once it does. A vault rolled back under saved items,
-across two app deploys that add then drop a code name, revives that name's
-UI item (section 6): an accepted gap beside `RoutingRelease`'s. The scenarios with
+tests hold that it gives handles and fails closed. Two releases never
+serve together: `RoutingVersion` moves either Worker to another release
+and holds that a call across them reads and changes no route; that the
+gate comes before the vault's first statement is PR A's test. The scenarios with
 deploys put back no rows: a writer who puts back the item `proxy.code`
 deleted is a rollback like any other, which `SealChecked` refuses in
 `Routing`, since a deletion is a change of the object.
@@ -1042,44 +1054,16 @@ they outlive the deployment that reserved them:
   start), and most isolates find their names there and go on. The isolate
   keeps the settled answer, never the pending call (AGENTS.md, "What an
   isolate keeps").
-- **Against an older vault.** A deploy can put the 0.16 app in front of
-  its 0.15 vault for some minutes, and a 0.15 vault has no gate to call.
-  One bit decides every proxy surface: `proxies` in `about()`, which a
-  vault with 0.16's proxy calls says, as `useMany` has `batchUses`. While
-  the vault does not say it, code routes, signers, verifiers and tunnels
-  serve as in 0.15, ungated; the Proxy tab's APIs, `proxyItem`, UI routes
-  and the plan's UI items answer 503 naming the vault's release. Unlike
-  the other bits, its absence is not kept: each proxy request on an
-  isolate that has not seen it asks `about()` again, one more call per
-  proxy request for those minutes only, and the first answer that says
-  `proxies` runs the gate before that request is served. The re-ask is
-  the same at every gated entry: `fetch`, `socket`, the plan and the
-  Proxy tab's APIs. A failed `about()`, gate or `proxyItem` call is not
-  an absence: that request answers 503, gated or not yet, and the next
-  one asks again, so an error never serves code ungated. On Workers that
-  extra call is not free: `about()` goes through the vault's `#call`,
-  which waits on its isolate's checkpointer start (at most 2 s, once per
-  cold vault isolate), where a use goes on behind it (R58). It adds no
-  Postgres statement (R44, R50), and the wait is accepted for the minutes
-  of a deploy, on isolates that have not seen the bit. On a first
-  upgrade that keeps `CodeGate` whole. No UI item can exist before the vault says `proxies`,
-  since only a vault that says it saves one, so an ungated isolate serving
-  code's `maps` hides nothing. Once the vault says it, every proxy request
-  is gated first, and a gate deletes any UI `maps` saved meanwhile. Keeping
-  the absence instead, as `about015` keeps `batchUses`, would leave that
-  isolate serving code's `maps` ungated for its whole life while a
-  different deployment's tab saved a UI `maps`: the `NoRevival` run the
-  gate exists to stop. The other order, a vault newer than its app, needs
-  nothing: a 0.15 app has no tab and no UI routes.
-- **A vault rolled back under saved UI items** breaks that premise: the
-  items exist while the bit is absent. If, during that rollback, one app
-  deploy adds a code `maps` (served ungated, so never reserved, so UI
-  `maps` is never deleted) and a later one drops it, then once the vault
-  is upgraded again UI `maps` serves: the `NoRevival` run, unaudited. It
-  takes a vault-only rollback spanning two app deploys, which
-  docs/deploy.md's coupled releases do not make; it is an accepted gap
-  beside `RoutingRelease`'s, and the vault's release notes say to upgrade
-  it again before any app deploy that changes code's proxy names.
+- **One release at a time.** The gate's call is a vault call like any
+  other: from an app on another release it is 503 `deploying` before the
+  vault reads the reserved set (section 3, "One version at a time"). What
+  the gate handles is the overlap of two configs of one release, below. A
+  rollback moves both Workers. Rolled back to 0.15, the pair serves code
+  routes as 0.15 did, with no gate, and UI items stay in their rows,
+  unread; the next upgrade's first isolate gates before it serves. A code
+  name added and dropped again while on 0.15 was never reserved, so its UI
+  item serves again after that upgrade: an accepted gap, and 0.16's
+  release notes say not to change code's proxy names while rolled back.
 - If a name is missing, the same call makes a `proxy.code` change adding
   it: CAS on the reserved set's seal, and in the same transaction every UI
   item of that name, in every environment, deleted, each whole in its
@@ -1380,12 +1364,16 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
 - `@coffre/core/access`: `proxy.edit`, the role editor's new rule;
   `formal/lean` updated in the same PR (AGENTS.md: a change to the access
   rules changes the Lean model).
-- `about()`'s `proxies` bit (section 6, "Against an older vault"), said
-  by a vault with the save; without it the tab's APIs answer 503 naming
-  the vault's release. PR C widens what the bit promises (the gate,
-  `proxyItem`, route uses), so no release ships PR A without PR C: they
-  go out together in 0.16, and none of them is a release on its own or a
-  rollback target. Splitting them would need a second bit.
+- The version gate (section 3, "One version at a time"): `protocol` on
+  every call and answer of `@coffre/core/vault`, checked first in `#call`
+  and `serveVault`'s handler, 503 `deploying` with `Retry-After: 1` in the
+  app. Tests, on Workers and Node: a call on another release refused with
+  no statement run and no entry (counted as `request-cost.test.ts`
+  counts), and an answer on another release, or with none, refused by the
+  app.
+- PR A and PR C ship in one release, 0.16: code's names must be reserved
+  (PR C's gate) from the first UI save (PR A), or a code name served
+  meanwhile hides a UI item nobody deleted.
 - API: `GET` and `PUT /api/projects/<p>/environments/<e>/proxy`, the save
   answering once sealed; `PUT /api/proxy/reserved` (release, instance
   Owners only).
@@ -1417,11 +1405,11 @@ no storage.
 **PR C: the use path for UI definitions.**
 
 The route use's contract in section 3 (its input, the keys and places it
-serves, its outcome, and how the app and an older or rolled-back vault
-meet) is the target this design sets; PR C proves it buildable. It
-extends `Routing.tla` first, then writes the tests listed below: rollback
-under warm isolates, binding callers, forks, both URL readings, signing
-and presign, and the personal config's 409. A gap found while building it
+serves, and its outcome) is the target this design sets; PR C proves it
+buildable. It extends `Routing.tla` first, then writes the tests listed
+below: the version gate refusing a mixed pair and a rollback of both,
+binding callers, forks, both URL readings, signing and presign, and the
+personal config's 409. A gap found while building it
 is fixed in this document, within PR C.
 
 - Migration at the next free number: `log_uses` gains the nullable route
@@ -1430,33 +1418,29 @@ is fixed in this document, within PR C.
   cover on the route (section 4), on both engines.
 - `@coffre/core/vault`: the route use's input and outcome (section 3:
   the caller union, handles by token hash and workloads by credential id
-  and `way`; `key: null` beside the route; per-key sealed or plain values,
-  standing, `expiresAt`, the seal list, the digest and the item), and
-  `proxyItem`'s; the template key parser, shared by the vault's save and
-  the proxy's startup check. No UI route goes through
-  `reveal`, `useValues` or `useMany` by ids: one app function makes every
-  route use, for handles of any number of keys, workloads, signers,
-  verifiers, presign and tunnels, and checks presence and the one seal
-  before the cache, a signature or a dial sees the answer (section 3). The
-  `proxies` bit (section 6, "Against an older vault"), which PR A adds with
-  the save and which now also covers the gate, `proxyItem` and route uses:
-  an old vault ignores an unknown `route` field and answers with no item,
-  which would read as "the copy's digest confirmed", so without the bit
-  the app refuses UI routes (503, naming the vault's release). The app
-  asks `about()` again while the bit is absent, and never keeps that
-  absence. Seen once, the bit is kept, and an answer with no seal or no
-  item digest is still a 503 (section 3): that, not the bit, covers a
-  vault rolled back under warm isolates. Tests: a vault rolled back to
-  0.15 after the bit was seen, a UI route's use refused, never sent by the
-  copy, for a handle route of one key (the stable URL with
+  and `way`; per-key sealed or plain values, standing, `expiresAt`, the
+  seal list, the digest and the item), and `proxyItem`'s; the template key
+  parser, shared by the vault's save and the proxy's startup check. No UI
+  route goes through `reveal`, `useValues` or `useMany` by ids: one app
+  function makes every route use, for handles of any number of keys,
+  workloads, signers, verifiers, presign and tunnels, and takes the
+  definition from the answer before the cache, a signature or a dial sees
+  it (section 3). Tests: a UI route's use decided for its editor and sent
+  by the decided item, for a handle route of one key (the stable URL with
   `cacheSeconds: 0` too), of two keys (SigV4), a workload route from a
   DPoP session and from a binding, a presign, a private-key sign and a
   tunnel dial, each at a plain place and at a fork; a route of plain keys
-  only, refused the same; a route use at a fork resolving its item and
+  only, decided the same; a route use at a fork resolving its item and
   keys through the chain; a UI route at a personal config, 409
   `route_not_personal`; a template whose braces the old regex and the
-  shared parser could read apart, saved and replayed to the same key set; `about()`, the gate and `proxyItem` each failing, the request 503
-  and the next one asking again.
+  shared parser could read apart, saved and replayed to the same key set;
+  the gate and `proxyItem` each failing, the request 503 and the next one
+  asking again. Versions (section 3, "One version at a time"): an app on
+  the next release in front of this vault, and this app in front of the
+  previous release's vault, each proxy request 503 `deploying` with
+  `Retry-After: 1` and no route read or changed; both Workers rolled back
+  to the previous release together, served as that release serves; rolled
+  back to 0.15 and upgraded again, the UI items served, gated first.
 - `use_credential`: the proxy object(s) and the editor's principal as
   inputs in both shapes, in the seal cache; the named use takes a route; the vault resolves its keys by name,
   decides twice and answers with the definition.
@@ -1468,13 +1452,9 @@ is fixed in this document, within PR C.
 - First, before any code (R45, decision 5(b)): `Routing.tla` extended with
   the editor's current holdings as an input of the use's statement, an
   action that removes or demotes the editor, and a protection
-  (`EditorStillHolds`) whose removal TLC must break. In the same
-  extension, an older vault's answer (values, no seal, no item digest) and
-  a protection `SealPresent`, the app's presence check: without it TLC must
-  find the run that sends by the isolate's copy, and `scripts/formal.sh`
-  holds it as a removal (From the expert review, 3).
-- **From the expert review** (Fable 5.1 on `aee4142c`, 2026-11-02), each
-  settled in PR C against the code:
+  (`EditorStillHolds`) whose removal TLC must break.
+- **From the expert review** (Fable 5.1 on `aee4142c`, 2026-11-02), the
+  first two settled in PR C against the code:
   1. The stable reading's map key. Section 6 keys the vault isolate's map
      by the token and the URL's first three segments, which for the stable
      reading of a UI route (`/use/openai/companies/42/documents/x.pdf`)
@@ -1498,7 +1478,9 @@ is fixed in this document, within PR C.
      `/use/<a>` is always the stable reading. The plan and `compute` then
      answer 404 only after the call. Both shapes join the URL-readings
      tests.
-  3. `SealPresent` in the model (above).
+  3. `SealPresent`, a model of an older vault's answer with no seal and no
+     digest, arises only with two releases serving together. The version
+     gate (decision 8) rules that out, so it is not built.
 - Tests, one per `Routing.tla` protection, each on Postgres and SQLite: an
   edit between a use's statement and its send; an edit landing between a
   route's two keys (its second round, and a chunk boundary), answered
@@ -1539,11 +1521,7 @@ is fixed in this document, within PR C.
   field-kind handle, a UI tunnel's open, each served without a 404 first;
   a `proxyItem` refused during counts answering its outcome after the
   gate. An HMAC `prefix` edit under a warm value cache, the sign still by
-  the entry's item. A vault without `proxies`: code routes served
-  ungated, UI routes, `proxyItem`, the plan's UI items and the tab
-  refused (503); the vault upgraded mid-run, the next proxy request asks
-  `about()` again, gates, and deletes a UI item saved meanwhile under a
-  code name.
+  the entry's item.
 
 **PR D: the page.**
 - #421's Proxy tab on the API: the mock store goes, and so do the "0.16"
@@ -1594,3 +1572,12 @@ uses.
    would be `route_not_cleared`; a clear refusal beats a route that can
    never work. Reversible: a later release may define how personal values
    reach a UI route.
+8. **Versions: one at a time** (Erwin, 2026-11-02). The app and the vault
+   Workers are never served on two releases at once. Every call carries
+   the release, a mismatch is 503 `deploying` with `Retry-After: 1` before
+   the vault reads anything, and a deploy or a rollback moves both
+   Workers (section 3). Rounds 9 to 12 of review and the expert pass kept
+   finding gaps in serving an app ahead of, or behind, its vault; holding
+   requests for the seconds of a deploy is simpler than any of the fixes.
+   A finding that arises only across two releases is answered by this
+   decision.

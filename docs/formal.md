@@ -1972,7 +1972,11 @@ the kept values, W ticks at most after the decision (`cacheSeconds`, or
 the deadline). An edit is a change under the fence, one step: HotPathOne
 proves the fence for any input. A key may be marked sensitive after a
 save. Two isolates may serve at once, on different code during a deploy:
-a restart flips whether an isolate's code defines the route's name. Before
+a restart flips whether an isolate's code defines the route's name (two
+configs of one release: a deploy that changes `credentialProxy` alone).
+Releases are apart: each isolate and the vault run release 1 or 2, a
+deploy or a rollback moves one Worker at a time, and the vault refuses a
+call on another release before it reads anything (503 `deploying`). Before
 it serves, an isolate reserves its code's names in the log (a
 `proxy.code` change, deleting the UI row of a name it adds); no deploy
 drops a reservation, only an instance Owner's audited release.
@@ -1990,11 +1994,16 @@ drops a reservation, only an instance Owner's audited release.
 | the `proxy.code` change that reserves a name deletes its UI row (ClearSuperseded) | `NoRevival`: code defines the name, then drops it, and the UI row nobody saw since serves again |
 | the vault refuses a save of a reserved name (SaveChecksReserved) | `NoRevival`: during a deploy, an Owner saves the name through the old isolate after the new one reserved it; the new code hides it, and it serves again once code drops the name |
 | no proxy request before the isolate's code names are reserved (CodeGate) | `NoRevival`: the same, through a deployment that served the name from code without reserving it |
+| the vault refuses a call on another release before any read (VersionGate) | `MismatchInert`: the vault's isolate restarted on the next release, an app isolate still on the last one saves the route |
 
 - `EverySendAllowed`: every request carrying the key went to the host of a
   version the vault decided on, the newest when it decided, and cleared for
   the key's nature then.
 - `WithinWindow`: within W of that decision.
+- `MismatchInert`: no vault call reads or changes the route while the
+  caller's release and the vault's differ (proxy-ui.md, decision 8). The
+  model places the gate before every such step; that the code's check
+  comes before the vault's first statement is PR A's test.
 - `NoRevival`: no use is decided on a UI version some isolate's code
   shadowed: the newest UI version when that isolate reserved the name (its
   gate, before its first proxy request), or one it showed locked, deleted
@@ -2020,6 +2029,7 @@ drops a reservation, only an instance Owner's audited release.
 | `Routing` | one isolate; two edits (any host, either clearance), a key marked sensitive, two rows put back or forged, while uses (this caller's or another's) resolve, decide and send | 9,266,068 |
 | `RoutingCode` | two isolates, one edit, and two restarts: code defines the name, then drops it, while the other isolate serves and saves | 1,678,179 |
 | `RoutingRelease` | as `RoutingCode`, with an instance Owner's release of the reserved name (`NoRevival` left out: the `EXPECTED` gap) | 2,949,085 |
+| `RoutingVersion` | two isolates, one edit, and three moves of a Worker to the other release (a deploy and a rollback, either Worker first), while uses resolve, decide and send | 2,059,664 |
 
 **What it does not cover.** The fence itself (HotPathOne). One route,
 so the reserved set is one name's flag. The frozen holdings are one
@@ -2034,11 +2044,10 @@ key goes, are not modelled. A deleted row is the vault's `stale`,
 held by PR A's tests. Covers are `HotPathOneCovers`'s: a route use adds
 the route to a cover's identity and the proxy object and editor to its
 inputs, held by PR C's cover tests, since one route cannot share a key
-with another here. The plan sends nothing, and an app ahead of its vault
-mid-deploy serves code routes ungated only while no UI item can exist;
-PR C's tests hold both. A vault rolled back under saved UI items, across
-two app deploys that add then drop a code name, revives that item: an
-accepted gap beside `RoutingRelease`'s (design, section 6). `RoutingCode` and `RoutingRelease` put back no rows:
+with another here. The plan sends nothing, which PR C's tests hold.
+Nothing serves across two releases (design, decision 8), so the model
+has no older vault's answers: a call across releases is refused, whole.
+`RoutingCode` and `RoutingRelease` put back no rows:
 a writer who puts back the item a `proxy.code` change deleted makes a
 rollback like any other, since the deletion is a change, and `Routing`
 shows `SealChecked` refuses those.

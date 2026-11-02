@@ -54,6 +54,13 @@
 (* ghost: the UI versions some isolate's code hid, when it reserved the    *)
 (* name or showed the version locked.                                      *)
 (*                                                                         *)
+(* Releases: the app's isolates and the vault each run one (appv, vaultv). *)
+(* A deploy or a rollback moves both Workers, one after the other; every   *)
+(* call carries the app's release, and the vault refuses one on another    *)
+(* release before it reads anything (503 `deploying`, Refused). Code[i]    *)
+(* is a deployment's config, not its release: two configs of one release  *)
+(* serve together during a deploy that changes `credentialProxy` alone.    *)
+(*                                                                         *)
 (* Protections, each a constant, TRUE in the code:                         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
@@ -68,6 +75,7 @@ CONSTANTS
     MaxMarks,       \* K made sensitive (once)
     MaxDeploys,     \* isolates restarted on code that flips whether it defines `r`
     MaxReleases,    \* an instance Owner's releases of a reserved name
+    MaxMoves,       \* Workers moved to another release (a deploy or a rollback), one at a time
     Budget          \* proxy requests the isolates make
 
 CONSTANTS
@@ -105,7 +113,9 @@ CONSTANTS
     SaveChecksReserved,
     \* An isolate serves nothing of the proxy before its code's names are
     \* reserved in the log.
-    CodeGate
+    CodeGate,
+    \* The vault refuses a call whose release is not its own, before any read.
+    VersionGate
 
 None == "none"
 NoCopy == [ver |-> 0, host |-> None]
@@ -126,10 +136,15 @@ VARIABLES
     snap,       \* snap[i]: without FencedRead, what its use read before the fence
     kept,       \* kept[i]: its value cache: the version decided, the host it sends to, when, ghosts
     sent,       \* ghost: every request that went out with K
-    edits, tampers, marks, deploys, releases, left
+    edits, tampers, marks, deploys, releases, left,
+    appv,       \* appv[i]: the release isolate i runs (1 or 2)
+    vaultv,     \* the release the vault runs
+    moves,
+    mismatched  \* ghost: a vault call read or changed state across two releases
 
+gv == <<appv, vaultv, moves, mismatched>>
 vars == <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent,
-          edits, tampers, marks, deploys, releases, left>>
+          edits, tampers, marks, deploys, releases, left, appv, vaultv, moves, mismatched>>
 
 Newest == Len(defs)
 Body(v) == defs[v].host
@@ -149,6 +164,14 @@ Init ==
     /\ sent = {}
     /\ edits = 0 /\ tampers = 0 /\ marks = 0 /\ deploys = 0 /\ releases = 0
     /\ left = Budget
+    /\ appv = [i \in Iso |-> 1] /\ vaultv = 1 /\ moves = 0 /\ mismatched = FALSE
+
+\* A vault call by isolate i that reads or changes the route: with VersionGate,
+\* only on the vault's own release; the ghost records one made across two.
+Called(i) ==
+    /\ VersionGate => appv[i] = vaultv
+    /\ mismatched' = (mismatched \/ appv[i] # vaultv)
+    /\ UNCHANGED <<appv, vaultv, moves>>
 
 \* A change writes the newest version, its body with it.
 Write(d) == /\ defs' = Append(defs, d) /\ row' = [ver |-> Newest + 1, host |-> d.host]
@@ -158,6 +181,7 @@ Write(d) == /\ defs' = Append(defs, d) /\ row' = [ver |-> Newest + 1, host |-> d
 \* now. The page refuses a name its code defines; the vault, with
 \* SaveChecksReserved, a name the log reserves.
 Edit(i, h, c) ==
+    /\ Called(i)
     /\ edits < MaxEdits /\ ~code[i]
     /\ SaveChecksReserved => ~reserved
     /\ c = "secret" => nature = "secret"
@@ -167,18 +191,21 @@ Edit(i, h, c) ==
 
 \* An Owner releases the reserved name, from an isolate whose code lacks it.
 Release(i) ==
+    /\ Called(i)
     /\ releases < MaxReleases /\ reserved /\ ~code[i]
     /\ reserved' = FALSE /\ releases' = releases + 1
     /\ UNCHANGED <<now, defs, row, nature, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, marks, deploys, left>>
 
 \* K made sensitive (`coffre mark`), a change of its own.
 Mark ==
+    /\ UNCHANGED gv
     /\ marks < MaxMarks /\ nature = "secret"
     /\ nature' = "sensitive" /\ marks' = marks + 1
     /\ UNCHANGED <<now, defs, row, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, deploys, releases, left>>
 
 \* A database writer puts back a row the vault once sealed, body and seal.
 Tamper(v) ==
+    /\ UNCHANGED gv
     /\ tampers < MaxTampers /\ v \in 1..Newest
     /\ row # [ver |-> v, host |-> Body(v)]
     /\ row' = [ver |-> v, host |-> Body(v)] /\ tampers' = tampers + 1
@@ -186,6 +213,7 @@ Tamper(v) ==
 
 \* ... or changes the body under the seal it finds: the MAC no longer holds.
 Forge(h) ==
+    /\ UNCHANGED gv
     /\ tampers < MaxTampers /\ h # row.host
     /\ row' = [row EXCEPT !.host = h] /\ tampers' = tampers + 1
     /\ UNCHANGED <<now, defs, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, marks, deploys, releases, left>>
@@ -193,6 +221,7 @@ Forge(h) ==
 \* Isolate i restarts on code that defines `r`, or no longer does: no copy,
 \* no kept values, its names not yet reserved.
 Deploy(i) ==
+    /\ UNCHANGED gv
     /\ deploys < MaxDeploys
     /\ code' = [code EXCEPT ![i] = ~code[i]]
     /\ logged' = [logged EXCEPT ![i] = FALSE]
@@ -206,6 +235,7 @@ Deploy(i) ==
 \* `proxy.code` change when it adds one, which deletes the UI definition of
 \* the name it reserves (a change: the newest version, "none").
 LogCode(i) ==
+    /\ Called(i)
     /\ ~logged[i]
     /\ logged' = [logged EXCEPT ![i] = TRUE]
     /\ IF code[i] /\ ~reserved
@@ -220,10 +250,40 @@ LogCode(i) ==
 
 Serving(i) == CodeGate => logged[i]
 
+\* A deploy or a rollback, one Worker at a time: the vault, or an app isolate,
+\* which restarts on the other release (no copy, no kept values, its names
+\* not yet reserved).
+MoveVault ==
+    /\ moves < MaxMoves
+    /\ vaultv' = 3 - vaultv /\ moves' = moves + 1
+    /\ UNCHANGED <<appv, mismatched>>
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent,
+                   edits, tampers, marks, deploys, releases, left>>
+
+MoveApp(i) ==
+    /\ moves < MaxMoves
+    /\ appv' = [appv EXCEPT ![i] = 3 - appv[i]] /\ moves' = moves + 1
+    /\ logged' = [logged EXCEPT ![i] = FALSE]
+    /\ copy' = [copy EXCEPT ![i] = NoCopy]
+    /\ snap' = [snap EXCEPT ![i] = NoSnap]
+    /\ kept' = [kept EXCEPT ![i] = NoKept]
+    /\ UNCHANGED <<vaultv, mismatched>>
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, shadowed, sent, edits, tampers, marks, deploys, releases, left>>
+
+\* A proxy request whose call the vault refuses, its release not the vault's:
+\* 503 `deploying`, nothing read, locked, written or logged.
+Refused(i) ==
+    /\ left > 0 /\ appv[i] # vaultv
+    /\ left' = left - 1
+    /\ UNCHANGED gv
+    /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent,
+                   edits, tampers, marks, deploys, releases>>
+
 \* A proxy request resolves `r`, or the page shows it. Code first: the UI
 \* definition, if any, is hidden (shadowed). Else, without CopyFromVault,
 \* the isolate may fill its copy from a read of its own, no MAC checked.
 Resolve(i) ==
+    /\ UNCHANGED gv
     /\ left > 0 /\ Serving(i)
     /\ left' = left - 1
     /\ IF code[i]
@@ -235,6 +295,7 @@ Resolve(i) ==
 
 \* Without FencedRead: the use's reads take their snapshot before the fence.
 Read(i) ==
+    /\ Called(i)
     /\ ~FencedRead /\ ~code[i] /\ Serving(i) /\ snap[i] = NoSnap
     /\ snap' = [snap EXCEPT ![i] = [ver |-> row.ver, host |-> row.host, newest |-> Newest]]
     /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, kept, sent, edits, tampers, marks, deploys, releases, left>>
@@ -252,6 +313,7 @@ Read(i) ==
 \* A decision on a version code hid is a revival (the ghost, NoRevival);
 \* values decided before code hid it serve out their W, as after an edit.
 Decide(i, mine) ==
+    /\ Called(i)
     /\ left > 0 /\ ~code[i] /\ Serving(i)
     /\ FencedRead \/ snap[i] # NoSnap
     /\ LET r       == IF FencedRead THEN [ver |-> row.ver, host |-> row.host, newest |-> Newest] ELSE snap[i]
@@ -278,6 +340,7 @@ Decide(i, mine) ==
 \* Without OneVersion: a later round of the same use decides K2, on the row
 \* it reads then (fenced, checked as Decide checks). Refused, nothing is sent.
 DecideSecond(i) ==
+    /\ Called(i)
     /\ ~OneVersion /\ ~code[i] /\ Serving(i)
     /\ kept[i].ver # 0 /\ kept[i].ver2 = 0
     /\ LET v       == row.ver
@@ -292,6 +355,7 @@ DecideSecond(i) ==
 \* A request goes out with the kept values: to the kept definition's
 \* upstream, or, not bound to it, wherever the isolate's copy says now.
 Send(i) ==
+    /\ UNCHANGED gv
     /\ kept[i].ver # 0 /\ kept[i].ver2 # 0 /\ ~code[i]
     /\ KeptExpires => now < kept[i].at + W
     /\ LET h == IF BoundToDefinition \/ copy[i] = NoCopy THEN kept[i].host ELSE copy[i].host
@@ -303,6 +367,7 @@ Send(i) ==
     /\ UNCHANGED <<now, defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, edits, tampers, marks, deploys, releases, left>>
 
 Tick ==
+    /\ UNCHANGED gv
     /\ now < MaxTime
     /\ now' = now + 1
     /\ UNCHANGED <<defs, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, marks, deploys, releases, left>>
@@ -312,6 +377,8 @@ Done == now = MaxTime /\ left = 0 /\ UNCHANGED vars
 Next ==
     \/ \E i \in Iso, h \in Hosts, c \in {"secret", "sensitive"} : Edit(i, h, c)
     \/ \E i \in Iso : Release(i) \/ Deploy(i) \/ LogCode(i) \/ Resolve(i) \/ Read(i) \/ DecideSecond(i) \/ Send(i)
+    \/ \E i \in Iso : MoveApp(i) \/ Refused(i)
+    \/ MoveVault
     \/ \E i \in Iso, mine \in BOOLEAN : Decide(i, mine)
     \/ Mark
     \/ \E v \in 1..Newest : Tamper(v)
@@ -342,6 +409,10 @@ EverySendAllowed ==
 \* And within W of that decision: an edit stops the old upstream's requests
 \* W after it at the latest (a minute by default, a revocation's bound).
 WithinWindow == \A s \in sent : s.sentAt < s.at + W
+
+\* No vault call reads or changes the route across two releases: each one
+\* made while the isolate's release and the vault's differ is refused.
+MismatchInert == ~mismatched
 
 \* A UI definition that code hid is never decided on again: nobody looked
 \* at it while it was locked. (Values decided on it before code hid it
