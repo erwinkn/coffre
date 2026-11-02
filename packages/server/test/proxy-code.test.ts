@@ -19,11 +19,15 @@ test("a code route's allow list says how it matches: as code, as before 0.16, or
     modern: { upstream: 'https://api.example.com', inject, allow: [{ methods: ['GET'], path: '/files/' }] },
     legacy: { upstream: 'https://api.example.com', inject, methods: ['GET'], paths: ['/files/*'] },
     none: { upstream: 'https://api.example.com', inject, methods: [] },
+    pathless: { upstream: 'https://api.example.com', inject, methods: ['post', 'PROPFIND'], paths: [] },
   });
   assert.equal(items.open?.allowAs, null);
-  assert.deepEqual(items.modern?.allowAs, { from: 'code', noMethod: false });
-  assert.deepEqual(items.legacy?.allowAs, { from: 'legacy', noMethod: false });
+  assert.deepEqual(items.modern?.allowAs, { from: 'code', methods: null });
+  assert.deepEqual(items.legacy?.allowAs, { from: 'legacy', methods: ['GET'] });
   // `methods: []` took no method before 0.16; the tab's `methods: []` is any, so the item says so apart.
-  assert.deepEqual(items.none?.allowAs, { from: 'legacy', noMethod: true });
+  assert.deepEqual(items.none?.allowAs, { from: 'legacy', methods: [] });
   assert.deepEqual(items.none?.definition.kind === 'route' && items.none.definition.allow, [{ methods: [], path: '/' }]);
+  // `paths: []` leaves no allow entry, so its methods, which still answer first (405), live in `allowAs` alone.
+  assert.deepEqual(items.pathless?.definition.kind === 'route' && items.pathless.definition.allow, []);
+  assert.deepEqual(items.pathless?.allowAs, { from: 'legacy', methods: ['POST', 'PROPFIND'] });
 });

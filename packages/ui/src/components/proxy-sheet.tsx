@@ -50,41 +50,43 @@ export function ProxySheet({ edits, selected, onSelect, footer }: { edits: Edits
     );
   }
   return (
-    <div className="proxy-split">
-      <section className="card proxy-list" aria-label="Proxy items">
-        <ul>
-          {rows.map((one) => {
-            const faulty = Object.keys(edits.problems(one)).length > 0;
-            return (
-              <li key={one.id}>
-                <button
-                  type="button"
-                  className={`proxy-list-row${one.id === row.id ? ' is-current' : ''}${one.state === 'deleted' ? ' is-leaving' : ''}${one.item?.source === 'code' && !one.item.serves ? ' is-elsewhere' : ''}`}
-                  aria-current={one.id === row.id}
-                  onClick={() => onSelect(one.id)}
-                >
-                  <KindTag kind={one.definition.kind} />
-                  <span className="mono proxy-list-name">{one.definition.name || 'new'}</span>
-                  <span className="mono proxy-list-target">{targetOf(one.definition)}</span>
-                  <span className="proxy-list-marks">
-                    {faulty ? (
-                      <span className="dot dot-red" aria-label="Needs fixing" />
-                    ) : one.state !== 'same' ? (
-                      <span className="dot" aria-label="Changed" />
-                    ) : (
-                      one.item?.notCleared != null && <span className="dot dot-amber" aria-label="Does not route now" title="Does not route now" />
-                    )}
-                    {one.item?.source === 'code' && <Lock size={12} label={scopeInWords(one.item)} />}
-                    {one.item?.source === 'inherited' && <span className="proxy-from">{one.item.from!.split('/')[1]}</span>}
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-        <div className="proxy-list-foot">{footer}</div>
-      </section>
-      <Panel key={row.id} row={row} edits={edits} keys={edits.editor.keys} />
+    <div className="proxy-frame">
+      <div className="proxy-split">
+        <section className="card proxy-list" aria-label="Proxy items">
+          <ul>
+            {rows.map((one) => {
+              const faulty = Object.keys(edits.problems(one)).length > 0;
+              return (
+                <li key={one.id}>
+                  <button
+                    type="button"
+                    className={`proxy-list-row${one.id === row.id ? ' is-current' : ''}${one.state === 'deleted' ? ' is-leaving' : ''}${one.item?.source === 'code' && !one.item.serves ? ' is-elsewhere' : ''}`}
+                    aria-current={one.id === row.id}
+                    onClick={() => onSelect(one.id)}
+                  >
+                    <KindTag kind={one.definition.kind} />
+                    <span className="mono proxy-list-name">{one.definition.name || 'new'}</span>
+                    <span className="mono proxy-list-target">{targetOf(one.definition)}</span>
+                    <span className="proxy-list-marks">
+                      {faulty ? (
+                        <span className="dot dot-red" aria-label="Needs fixing" />
+                      ) : one.state !== 'same' ? (
+                        <span className="dot" aria-label="Changed" />
+                      ) : (
+                        one.item?.notCleared != null && <span className="dot dot-amber" aria-label="Does not route now" title="Does not route now" />
+                      )}
+                      {one.item?.source === 'code' && <Lock size={12} label={scopeInWords(one.item)} />}
+                      {one.item?.source === 'inherited' && <span className="proxy-from">{one.item.from!.split('/')[1]}</span>}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="proxy-list-foot">{footer}</div>
+        </section>
+        <Panel key={row.id} row={row} edits={edits} keys={edits.editor.keys} />
+      </div>
     </div>
   );
 }
@@ -368,7 +370,13 @@ function RouteFields({ row, route, edits, keys, disabled }: { row: Row; route: P
             {allowAs?.from === 'legacy' && (
               <p className="hint">
                 Code&apos;s <span className="mono">methods</span> and <span className="mono">paths</span>, matched as before 0.16: each path as written, <span className="mono">*</span> itself, never a glob
-                {allowAs.noMethod && <>; its <span className="mono">methods: []</span> takes no method, so every call is refused</>}.
+                {allowAs.methods?.length === 0 && <>; its <span className="mono">methods: []</span> takes no method, so every call is refused</>}
+                {route.allow?.length === 0 && (allowAs.methods?.length ?? 0) > 0 && (
+                  <>
+                    ; its <span className="mono">paths: []</span> takes no path, so every call is refused: a 405 to a method other than {allowAs.methods!.join(', ')}
+                  </>
+                )}
+                .
               </p>
             )}
           </>
@@ -380,7 +388,7 @@ function RouteFields({ row, route, edits, keys, disabled }: { row: Row; route: P
           {(route.allow ?? []).map((entry, index) => (
             <div key={index} className="proxy-row">
               <Fold invalid={edits.problems(row)[`allow.${index}`] !== undefined}>
-                {allowAs?.noMethod ? (
+                {allowAs?.methods?.length === 0 ? (
                   <span className="fold-text mono">No method</span>
                 ) : (
                   <MethodsMenu methods={entry.methods} disabled={disabled} onChange={(methods) => setAllow((route.allow ?? []).map((each, at) => (at === index ? { ...each, methods } : each)))} />
@@ -606,7 +614,7 @@ function Preview({ route, allowAs, keys, useUrl }: { route: ProxyRoute; allowAs:
     <div className="proxy-preview">
       <Fold className="proxy-preview-ask">
         <select className="fold-select fold-lead mono" aria-label="Method" value={method} onChange={(event) => setMethod(event.target.value)}>
-          {methodChoices(route).map((one) => (
+          {methodChoices(route, allowAs).map((one) => (
             <option key={one}>{one}</option>
           ))}
         </select>

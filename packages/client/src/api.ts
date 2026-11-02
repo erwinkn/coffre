@@ -2056,7 +2056,7 @@ export type Api = {
         bound: boolean;
         allowAs: null | {
           from: "code" | "legacy";
-          noMethod: boolean;
+          methods: null | string[];
         };
       }[];
       routesSensitive: boolean;
@@ -2247,7 +2247,7 @@ export type Api = {
         bound: boolean;
         allowAs: null | {
           from: "code" | "legacy";
-          noMethod: boolean;
+          methods: null | string[];
         };
       }[];
       routesSensitive: boolean;
@@ -3058,7 +3058,7 @@ export type ProxyPage = {
     bound: boolean;
     allowAs: null | {
       from: "code" | "legacy";
-      noMethod: boolean;
+      methods: null | string[];
     };
   }[];
   routesSensitive: boolean;

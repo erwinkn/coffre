@@ -26,7 +26,7 @@ import {
   type ProxyTunnel,
   type ProxyVerifier,
 } from '@coffre/core/proxy';
-import { allows, NOTHING, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
+import { allows, climbs, NOTHING, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
 import { CREDENTIAL_NAME } from '@coffre/core/workloads';
 
 export type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyKind, ProxyLimit, ProxyMethod, ProxyRoute, ProxySigner, ProxyTunnel, ProxyVerifier };
@@ -74,7 +74,7 @@ export type ProxyItem = {
   from: string | null;
 };
 
-export type AllowAs = { from: 'code' | 'legacy'; noMethod: boolean };
+export type AllowAs = { from: 'code' | 'legacy'; methods: readonly string[] | null };
 
 /** A parent of the fork, nearest first, and its page; null where the page could not be read. */
 export type ParentPage = { path: string; page: ProxyPage | null };
@@ -596,21 +596,38 @@ export const soleKey = (template: string | null) => /^\{([A-Za-z_][A-Za-z0-9_]*)
  * only `/models/*` itself does.
  */
 export function sampleCall(route: ProxyRoute, method: string, path: string, allowAs: AllowAs | null = null): { url: string; refusal: string | null } {
-  const tail = path.startsWith('/') ? path : `/${path}`;
-  const url = `${route.upstream.replace(/\/+$/, '')}${tail}`;
+  const asked = path.startsWith('/') ? path : `/${path}`;
+  // The path as the proxy reads it (`aim`): what is past `?` or `#` is no path, a segment that climbs out (`/%2e%2e/admin`)
+  // is refused before any matching, and the rest is matched as the URL holds it, encoded (`/café` is `/caf%C3%A9`).
+  const cut = asked.search(/[?#]/);
+  const [written, search] = cut === -1 ? [asked, ''] : [asked.slice(0, cut), asked.slice(cut)];
+  const rest = written.slice(1).split('/');
+  const base = route.upstream.replace(/\/+$/, '');
+  let target: URL | null = null;
+  try {
+    target = new URL(`${base}/${rest.join('/')}${search}`);
+  } catch {
+    // An upstream still being typed: the call as written, matched as given.
+  }
+  const url = target?.href ?? `${base}${asked}`;
+  if (rest.some(climbs)) return { url, refusal: '400: the path may not climb out of the upstream' };
+  const under = target === null ? '' : new URL(base).pathname.replace(/\/$/, '');
+  const tail = target === null ? written : target.pathname.slice(under.length) || '/';
   if (route.allow === null) return { url, refusal: null };
   const from = allowAs?.from ?? 'ui';
   // `allow: []` takes no request: a 403 whatever the method, as the proxy answers it.
   if (from !== 'legacy' && route.allow.length === 0) return { url, refusal: '403: this route takes no request' };
-  const methods = (given: readonly string[]) => (allowAs?.noMethod ? new Set<string>() : given.length === 0 ? null : new Set(given));
+  // Legacy entries take `methods` as code wrote them: `[]` took none, where the tab's `[]` is any.
+  const legacy = from === 'legacy' && allowAs?.methods != null ? new Set(allowAs.methods) : null;
+  const methods = (given: readonly string[]) => legacy ?? (given.length === 0 ? null : new Set(given));
   const entries: AllowEntry[] = [];
   for (const entry of route.allow) {
     const read = readPattern(entry.path, from);
     if ('problem' in read) continue;
     entries.push({ methods: methods(entry.methods), path: read.pattern });
   }
-  // Legacy `paths: []` takes no path: refused, a 403 (code answers a method its `methods` lack with a 405 first).
-  if (from === 'legacy' && route.allow.length === 0) entries.push({ methods: null, path: NOTHING });
+  // Legacy `paths: []` takes no path, but its `methods` answer first, as code's: `methods: ['POST'], paths: []` is a 405 to a GET, a 403 to a POST.
+  if (from === 'legacy' && route.allow.length === 0) entries.push({ methods: legacy, path: NOTHING });
   const answer = allows(entries, method, requestSegments(tail, from === 'legacy'));
   return { url, refusal: answer === 'allowed' ? null : answer === 'method' ? `405: no allow entry takes ${method} there` : `403: no allow entry takes ${method} ${tail}` };
 }
@@ -619,8 +636,8 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
  * The sample call's methods: the tab's seven, then any other a code item's
  * allow list names, as code takes any HTTP method (`PROPFIND`).
  */
-export function methodChoices(route: ProxyRoute): string[] {
-  const named: readonly string[] = (route.allow ?? []).flatMap((entry) => entry.methods);
+export function methodChoices(route: ProxyRoute, allowAs: AllowAs | null = null): string[] {
+  const named: readonly string[] = [...(route.allow ?? []).flatMap((entry) => entry.methods), ...(allowAs?.methods ?? [])];
   return [...PROXY_METHODS, ...new Set(named.filter((method) => !(PROXY_METHODS as readonly string[]).includes(method)))];
 }
 
@@ -885,4 +902,3 @@ export function changedSince(loaded: ProxyPage, now: ProxyPage): { name: string;
 
 /** A member as the vault names them, `user:ada@acme.example`, as a person reads it. */
 export const savedByInWords = (member: string | null) => (member === null ? 'someone' : member.replace(/^user:/, ''));
-

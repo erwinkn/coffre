@@ -2429,8 +2429,9 @@ function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap
         : credential.methods !== undefined ? [{ methods: methods(credential.methods), path: '/' }] : null;
       const { limit: limited, limitPerService } = limit(credential.limit);
       const placeholder = credential.placeholder === undefined ? null : credential.placeholder.kind === 'jwt' ? { kind: 'jwt' as const, claims: [...credential.placeholder.claims] } : { kind: 'prefix' as const, prefix: credential.placeholder.prefix };
-      // Matched as code matches it, which the tab's preview follows: `paths` as before 0.16, and `methods: []` there took none.
-      const allowAs: ProxyCodeItem['allowAs'] = credential.allow !== undefined ? { from: 'code', noMethod: false } : allow !== null ? { from: 'legacy', noMethod: credential.methods?.length === 0 } : null;
+      // Matched as code matches it, which the tab's preview follows: `paths` as before 0.16, and its `methods` as written,
+      // `[]` taking none, and still there when `paths: []` leaves no entry to hold them (`methods: ['POST'], paths: []`).
+      const allowAs: ProxyCodeItem['allowAs'] = credential.allow !== undefined ? { from: 'code', methods: null } : allow !== null ? { from: 'legacy', methods: credential.methods === undefined ? null : methods(credential.methods) } : null;
       return item({ kind: 'route', name, upstream: credential.upstream, inject, allow, limit: limited, placeholder, egress: null }, credential, limitPerService, credential.egress !== undefined, allowAs);
     }),
     ...[...signers].map(([name, signer]) => {

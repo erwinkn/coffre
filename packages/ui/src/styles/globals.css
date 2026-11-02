@@ -6042,6 +6042,12 @@ button.fold-menu {
   margin: 0;
 }
 
+/* The split is measured where it stands, not by the window: the sidebar, open or
+   folded, takes its share first. */
+.proxy-frame {
+  container-type: inline-size;
+}
+
 /* The list is one height whatever the panel beside it holds, and follows the
    page as it scrolls: its items scroll inside, and adding stays at its foot. */
 .proxy-list {
@@ -6549,4 +6555,64 @@ button.fold-menu {
 
 .proxy-list-marks .dot-amber {
   background: var(--amber);
+}
+
+/* Too narrow for the list beside the panel: the list on top, scrolling in a
+   shorter box, and the panel under it. */
+@container (width < 46rem) {
+  .proxy-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .proxy-list {
+    position: static;
+    height: auto;
+    min-height: 0;
+    max-height: 16rem;
+  }
+
+  .proxy-list-row {
+    grid-template-columns: auto minmax(0, 8.25rem) minmax(0, 1fr) auto;
+  }
+
+}
+
+/* A phone's width: each label over its field, and the fixed columns of a line
+   free to shrink, so a value keeps room beside its name. */
+@container (width < 32rem) {
+  .proxy-sheet {
+    padding: 0.875rem;
+  }
+
+  .proxy-line {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
+  }
+
+  .proxy-line-label {
+    min-height: 0;
+  }
+
+  .fold-kind {
+    flex: 0 1 7rem;
+    width: auto;
+    min-width: 4.5rem;
+  }
+
+  .fold-name {
+    flex: 0 1 6rem;
+    width: auto;
+    min-width: 4rem;
+  }
+
+  .fold-select {
+    max-width: 9rem;
+  }
+}
+
+/* The copy dialog stands over the page, so the window decides for it. */
+@media (max-width: 40rem) {
+  .proxy-copy {
+    grid-template-columns: auto auto minmax(0, 9rem) minmax(0, 1fr);
+  }
 }

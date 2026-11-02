@@ -294,15 +294,15 @@ test('a pending resave outlives another save removing its item: saving makes it 
 test("a code route's sample call matches as code does: legacy paths as written, a trailing slash, methods: [] taking none", () => {
   const legacy: ProxyRoute = { ...route('files'), allow: [{ methods: ['GET'], path: '/files/*' }] };
   // Before 0.16, `*` is itself: only `/files/*` and below, never `/files/a`.
-  assert.match(sampleCall(legacy, 'GET', '/files/a', { from: 'legacy', noMethod: false }).refusal!, /^403/);
-  assert.equal(sampleCall(legacy, 'GET', '/files/*', { from: 'legacy', noMethod: false }).refusal, null);
+  assert.match(sampleCall(legacy, 'GET', '/files/a', { from: 'legacy', methods: ['GET'] }).refusal!, /^403/);
+  assert.equal(sampleCall(legacy, 'GET', '/files/*', { from: 'legacy', methods: ['GET'] }).refusal, null);
   assert.equal(sampleCall(legacy, 'GET', '/files/a').refusal, null, "the tab's own reads it as a glob");
   // `allow` in code keeps a trailing slash: what is below it.
   const below: ProxyRoute = { ...route('files'), allow: [{ methods: [], path: '/files/' }] };
-  assert.equal(sampleCall(below, 'GET', '/files/a/b', { from: 'code', noMethod: false }).refusal, null);
+  assert.equal(sampleCall(below, 'GET', '/files/a/b', { from: 'code', methods: null }).refusal, null);
   // Legacy `methods: []` took no method: the converted `methods: []` would read as any.
   const none: ProxyRoute = { ...route('files'), allow: [{ methods: [], path: '/' }] };
-  assert.match(sampleCall(none, 'GET', '/x', { from: 'legacy', noMethod: true }).refusal!, /^405/);
+  assert.match(sampleCall(none, 'GET', '/x', { from: 'legacy', methods: [] }).refusal!, /^405/);
 });
 
 test("a queued resave keeps the item as its editor saw it: a parent's change read since shows as one to review, never adopted", () => {
@@ -339,12 +339,32 @@ test("code's methods beyond the tab's seven show as written, and the sample call
   assert.deepEqual(methodsLabel([]), { all: '', shown: 'Any' });
   assert.deepEqual(methodsLabel(['POST', 'GET', 'PUT', 'DELETE']).shown, 'GET +3');
   assert.deepEqual(methodChoices(dav).slice(-2), ['OPTIONS', 'PROPFIND']);
-  assert.equal(sampleCall(dav, 'PROPFIND', '/files/a', { from: 'code', noMethod: false }).refusal, null);
-  assert.match(sampleCall(dav, 'GET', '/files/a', { from: 'code', noMethod: false }).refusal!, /^405/);
+  assert.equal(sampleCall(dav, 'PROPFIND', '/files/a', { from: 'code', methods: null }).refusal, null);
+  assert.match(sampleCall(dav, 'GET', '/files/a', { from: 'code', methods: null }).refusal!, /^405/);
 });
 
 test('an empty allow list takes no request: a 403, whatever the method, as the proxy answers', () => {
   const none: ProxyRoute = { ...route('closed'), allow: [] };
   assert.match(sampleCall(none, 'DELETE', '/x').refusal!, /^403/);
-  assert.match(sampleCall(none, 'GET', '/x', { from: 'code', noMethod: false }).refusal!, /^403/);
+  assert.match(sampleCall(none, 'GET', '/x', { from: 'code', methods: null }).refusal!, /^403/);
+});
+
+test("legacy `paths: []` keeps its methods: they answer first, a 405, and the sample call offers them", () => {
+  const pathless: ProxyRoute = { ...route('dav'), allow: [] };
+  const allowAs = { from: 'legacy' as const, methods: ['POST', 'PROPFIND'] };
+  assert.match(sampleCall(pathless, 'GET', '/x', allowAs).refusal!, /^405/);
+  assert.match(sampleCall(pathless, 'PROPFIND', '/x', allowAs).refusal!, /^403/);
+  assert.deepEqual(methodChoices(pathless, allowAs).slice(-1), ['PROPFIND']);
+  // No `methods` at all: any method, and still no path.
+  assert.match(sampleCall(pathless, 'GET', '/x', { from: 'legacy', methods: null }).refusal!, /^403/);
+});
+
+test('a sample call reads its path as the proxy does: encoded, without its query, and refused when it climbs out', () => {
+  const cafe: ProxyRoute = { ...route('menu'), upstream: 'https://api.example.com/v1', allow: [{ methods: [], path: '/caf%C3%A9' }] };
+  assert.deepEqual(sampleCall(cafe, 'GET', '/café'), { url: 'https://api.example.com/v1/caf%C3%A9', refusal: null });
+  assert.deepEqual(sampleCall(cafe, 'GET', '/caf%C3%A9?limit=1'), { url: 'https://api.example.com/v1/caf%C3%A9?limit=1', refusal: null });
+  const open: ProxyRoute = { ...route('open'), allow: null };
+  assert.match(sampleCall(open, 'GET', '/%2e%2e/admin').refusal!, /^400/);
+  assert.match(sampleCall(open, 'GET', '/a%2fb').refusal!, /^400/);
+  assert.equal(sampleCall(open, 'GET', '/a/b').refusal, null);
 });

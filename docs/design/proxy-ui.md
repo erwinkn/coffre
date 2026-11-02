@@ -1876,10 +1876,17 @@ is fixed in this document, within PR C.
 - **Code's allow lists** keep code's matching: a code item says how
   (`ProxyCodeItem.allowAs`): `code`, an `allow` whose trailing slash takes
   what is below it; `legacy`, `methods` and `paths` as before 0.16, `*`
-  itself, and `noMethod` where `methods: []` took none. The sample call
-  follows it. Code takes any HTTP method (`PROPFIND`), the tab's own items
-  its seven: a code item's show as written, and the sample call offers
-  them. An empty allow list takes no request, a 403.
+  itself, with `methods` as code wrote them (`[]` took none), kept apart
+  since `paths: []` has no entry to carry them: `methods: ['POST'],
+  paths: []` is still a 405 to a GET. The sample call follows it, and
+  reads its path as the proxy does: encoded (`/café` is `/caf%C3%A9`), its
+  query apart, a segment that climbs out (`/%2e%2e/admin`) a 400. Code
+  takes any HTTP method (`PROPFIND`), the tab's own items its seven: a
+  code item's show as written, and the sample call offers them. An empty
+  allow list takes no request, a 403.
+- **Narrow screens**: the list stacks above the panel below 46rem of the
+  page's width (a container query, so the sidebar counts), and below 32rem
+  each label goes over its field.
 - **As code** writes a UI item out scoped to the environment it is in
   (`environments: ['market/dev']`), as it serves now; a code item shows no
   snippet, since its binding or limit per service has no words in the tab.

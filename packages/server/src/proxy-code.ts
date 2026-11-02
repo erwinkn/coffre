@@ -41,10 +41,12 @@ export type ProxyCodeItem = {
    * `code`, an `allow` in code, whose trailing slash takes what is below it
    * (`/files/`, which the tab writes `/files/**`); `legacy`, `methods` and
    * `paths` as before 0.16, each path compared as written and `*` itself,
-   * never a glob; `noMethod` where `methods: []` took no method, which the
-   * tab's `methods: []` (any) cannot say. Null: no allow list, or as the tab's.
+   * never a glob, with `methods` as code wrote them, upper-cased: null where
+   * unset (any), `[]` taking none, which the tab's `methods: []` (any) cannot
+   * say, and kept apart since `paths: []` has no allow entry to carry them.
+   * Null: no allow list, or as the tab's.
    */
-  allowAs: { from: 'code' | 'legacy'; noMethod: boolean } | null;
+  allowAs: { from: 'code' | 'legacy'; methods: string[] | null } | null;
 };
 
 const CODE = Symbol('coffre.proxy-code');
