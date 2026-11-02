@@ -81,7 +81,8 @@ export async function runCheckpointer(options: {
   /** The vault's database, or `connect`, a session of its own. */
   database?: Database;
   connect?: () => Promise<Session>;
-  seed: Uint8Array;
+  /** The vault's signing keys (`ResolvedVaultConfig.signingKeys`): the one it signs with first, then those it replaced (T168). */
+  signingKeys: readonly Uint8Array[];
   /** The memory's file. */
   memory: string;
   witnesses?: readonly Witness[];
@@ -108,7 +109,7 @@ export async function runCheckpointer(options: {
   // bounded (T169); an open past its bound fenced, so that it does nothing more once another opens.
   const checkpointer = await within(store.makeDays(daysAround(Date.now())), options.tickBoundMs ?? OPEN_BOUND_MS, 'making the next days of uses').then(() => within(openLogCheckpointer({
     store,
-    seed: options.seed,
+    signingKeys: options.signingKeys,
     memory: (options.memoryOf ?? fileMemory)(options.memory),
     witnesses: options.witnesses,
     record: (alarm) => record(alarm),
@@ -136,7 +137,7 @@ export async function runCheckpointer(options: {
   // Behind the checkpointer's fence: an upkeep still running once it stalled does nothing beside the next one's.
   const keep = upkeep(checkpointer, fence.store(store), {
     keepDays: options.retainDays ?? null,
-    seed: options.seed,
+    signingKey: options.signingKeys[0]!,
     alert: (message) => {
       console.warn(`coffre audit: ${message}`);
       void record({ at: Date.now(), message });
@@ -144,7 +145,7 @@ export async function runCheckpointer(options: {
   });
   // The reads' projection (T166), kicked after each tick and never waited on: a projection behind lags the audit pages,
   // never a seal (reads.ts).
-  const keys = await verifierKeys([options.seed]);
+  const keys = await verifierKeys(options.signingKeys);
   const projector = new Projector(store, keys, (message) => {
     console.warn(`coffre audit: ${message}`);
     void record({ at: Date.now(), message });

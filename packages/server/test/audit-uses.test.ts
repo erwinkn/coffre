@@ -71,7 +71,7 @@ beforeEach(async () => {
     const { logUses, logBulk, logCheckpoints, logTiles } = tablesOf(db.owner);
     for (const table of [logUses, logBulk, logCheckpoints, logTiles]) await db.owner.delete(table);
     const kek = randomBytes(32);
-    signer = await runCheckpointer({ database: await openVaultDatabase(), seed: derivedSigningKey(kek), memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });
+    signer = await runCheckpointer({ database: await openVaultDatabase(), signingKeys: [derivedSigningKey(kek)], memory: join(scratch, `memory-${Date.now()}`), intervalMs: 3_600_000 });
     const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: signer.sealThrough, heldOutside: signer.heldOutside });
     deps = testDeps(db.runtime, [ROOT], { vault });
   } else {

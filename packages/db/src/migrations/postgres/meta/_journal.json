@@ -362,6 +362,13 @@
     {
       "idx": 51,
       "version": "7",
+      "when": 1793611619108,
+      "tag": "0053_key_rotation",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
       "when": 1793612642819,
       "tag": "0054_reads_custom_plans",
       "breakpoints": true

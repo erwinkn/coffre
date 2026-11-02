@@ -72,7 +72,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const memory = variableMemory();
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
   const { db: vault, statements, close } = counting();
   const measured: Record<string, { statements: number; cpuMs: number }> = {};
@@ -126,7 +126,7 @@ test('review r4 (W240): more than `ABOVE_NEWEST` entries above the newest pair a
   const seed = randomBytes(32);
   const mac = logMacKey(seed);
   const memory = variableMemory();
-  const cp = await openLogCheckpointer({ store: logStore(db.vault), seed, memory });
+  const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
   await uses(100, mac);
   assert.ok((await cp.tick()).signed);

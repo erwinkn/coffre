@@ -16,7 +16,7 @@ import { logObject } from './inputs.ts';
  * with `authentic` before it seals anything. The tag is public and names
  * the key, so that once the vault's signing key rotates (T168), the
  * database can refuse an entry under a key the log moved on from, and a
- * reader knows which key to check it under.
+ * reader knows which key to check it under (`log_fence.retired`).
  */
 
 /** A change as `log_changes` holds it, `object` a uuid in lower case. */
@@ -42,6 +42,9 @@ export function logMacKey(seed: Uint8Array): LogMacKey {
     key: Buffer.from(hkdfSync('sha256', seed, new Uint8Array(0), 'coffre.log.mac.v1', 32)),
   };
 }
+
+/** The tag a MAC names: its key's. */
+export const tagOf = (mac: Uint8Array): Buffer => Buffer.from(mac.subarray(0, TAG_BYTES));
 
 /** The MAC of a tree's columns: the key's tag, then the HMAC cut to what is left of 16 bytes. */
 const mac = (key: LogMacKey, tree: LogEntry['tree'], columns: readonly LeafValue[]) =>
@@ -89,6 +92,40 @@ export const CUTOVER_OBJECT = logObject('log', 'cutover');
 
 /** Who makes the cutover's changes. */
 export const CUTOVER_ACTOR = 'system:vault';
+
+/**
+ * The log's own object for its rotations (T168; docs/design/audit-tree.md,
+ * "A rotation"): one change each time the log moves on from a signing key,
+ * the boundary past which that key vouches for nothing. Its MAC is the new
+ * key's; its payload names both keys by their logs' origins, and its own
+ * number (NumberInRotation): an entry's MAC covers every column but the
+ * number, which a database writer can change, so a rotation counts only at
+ * the number it names.
+ */
+export const KEY_OBJECT = logObject('log', 'key');
+
+export function rotationPayload(from: string, to: string, at: bigint): string {
+  return JSON.stringify({ ref: { kind: 'log', id: 'key' }, op: 'rotate', from, to, at: String(at) });
+}
+
+/**
+ * The keys a rotation moves the log between, by origin, from its entry;
+ * null for any other entry, a payload not a rotation's, or one at another
+ * number than its payload names (moved: Rotation.tla's NumberInRotation).
+ */
+export function rotationOf(entry: LogEntry): { from: string; to: string } | null {
+  if (entry.tree !== 'changes' || entry.columns[2] !== KEY_OBJECT || typeof entry.columns[4] !== 'string') return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(entry.columns[4]);
+  } catch {
+    return null;
+  }
+  const p = payload as { op?: unknown; from?: unknown; to?: unknown; at?: unknown } | null;
+  const origin = (o: unknown): o is string => typeof o === 'string' && /^coffre\.log\/[0-9a-f]{16}$/.test(o);
+  const here = typeof p?.at === 'string' && /^[1-9][0-9]{0,18}$/.test(p.at) && BigInt(p.at) === entry.number;
+  return p?.op === 'rotate' && here && origin(p.from) && origin(p.to) && p.from !== p.to ? { from: p.from, to: p.to } : null;
+}
 
 export function retentionPayload(day: string, cut: Cut): string {
   return JSON.stringify({ op: 'retention', day, cut: { upto: String(cut.upto), at: cut.at, uses: cut.uses.size, root: cut.uses.root.toString('hex') } });
