@@ -6,7 +6,7 @@ import { GATE_ROLES } from './decide.ts';
 import type { UseCall, UseRow } from './use.ts';
 
 /**
- * A use on Postgres: one call of `use_credential` (0024's, as 0051 has it), one
+ * A use on Postgres: one call of `use_credential` (0024's, as 0053 has it), one
  * statement and one round trip, its own transaction. It answers its row as
  * one JSON value (0024 says why), read back here as `UseRow`.
  */
