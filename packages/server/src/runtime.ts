@@ -1,3 +1,4 @@
+import { proxyCodeOf } from './proxy-code.ts';
 import { AccessIdentityVerifier, type AccessVerifierConfig, type IdentityVerifier } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
@@ -184,6 +185,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     personalToken: identity.personalToken,
     credentialExpiresAt: identity.credentialExpiresAt,
     rotateAfterDays: runtime.rotateAfterDays,
+    proxy: proxyCodeOf(runtime.plugins),
     ...(render === undefined ? {} : { render }),
   };
 }

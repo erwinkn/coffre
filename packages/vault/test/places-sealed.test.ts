@@ -17,9 +17,12 @@ import { count, sql } from 'drizzle-orm';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { openLocalVault as openRawVault } from '../src/local.ts';
+import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import { newestSeals, newestSealsQuery } from '../src/store.ts';
 import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
+
+/** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
+const openRawVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';

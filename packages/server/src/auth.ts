@@ -1,6 +1,6 @@
 import { ACCESS_JWT_HEADER, tokenKind, type AuthConfig, type Principal } from '@coffre/core/identity';
 import type { CredentialScope } from '@coffre/core/access';
-import type { Access, Settings } from '@coffre/core/vault';
+import { isDeploying, type Access, type Deploying, type Settings } from '@coffre/core/vault';
 
 import { accessFor, type Recalled } from './accesses.ts';
 import { callerFrom, newestPolicySeq, withRecalled, withShown, type Caller } from './api/caller.ts';
@@ -235,6 +235,9 @@ export async function authenticateRequest(
     };
     ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, recalled = null, unchecked, settings, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, ...principal } = verified);
   } catch (error) {
+    // The vault on another release, for a deploy's seconds: nothing was checked, and nobody is signed out.
+    const deploying = deployingIn(error);
+    if (deploying !== null) return errorResponse(deploying);
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
       // Logged with what failed, the database or the vault, as below.
@@ -256,6 +259,7 @@ export async function authenticateRequest(
     }
     if (policySeq === undefined) policySeq = await newestPolicySeq(runtime.db);
   } catch (error) {
+    if (deployingIn(error) !== null) return errorResponse(deployingIn(error));
     console.error('checking a credential failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
@@ -285,6 +289,7 @@ export async function authenticateRequest(
       ...(runtime.auth?.mode === 'cloudflare' ? { access: true as const } : {}),
     };
   } catch (error) {
+    if (deployingIn(error) !== null) return errorResponse(deployingIn(error));
     // Logged, so a bug of ours is not read as an outage of the vault or the database.
     console.error('checking who called failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
@@ -312,6 +317,7 @@ async function authenticateWorkload(
     session = await standingSession(request, runtime, token, sourceIp, { place: null, credential: null });
   } catch (error) {
     if (error instanceof SessionRefused) return error.response;
+    if (deployingIn(error) !== null) return errorResponse(deployingIn(error));
     console.error('checking a workload session failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
@@ -339,7 +345,20 @@ async function authenticateWorkload(
       workload: session,
     };
   } catch (error) {
+    if (deployingIn(error) !== null) return errorResponse(deployingIn(error));
     console.error('checking who called failed', { requestId, error: logged(error) });
     return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
   }
+}
+
+/**
+ * The vault's answer on another release (`Deploying`), if `error` or one of
+ * its causes is one: every catch-all of sign-in answers it as it is, 503
+ * `deploying`, never `unavailable` nor a sign-out.
+ */
+export function deployingIn(error: unknown): Deploying | null {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (isDeploying(cause)) return cause;
+  }
+  return null;
 }

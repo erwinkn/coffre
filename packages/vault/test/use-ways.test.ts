@@ -62,7 +62,7 @@ async function replayAgrees(): Promise<number> {
 function refOf(op: Op, key: string, seen: Map<string, Ref>): Ref {
   if (op.op === 'genesis') {
     const value = op.value;
-    const ref: Ref = value.kind === 'principal' ? { kind: 'principal', id: value.principal } : value.kind === 'roles' || value.kind === 'policy' ? { kind: value.kind, id: 'instance' } : { kind: value.kind, id: value.id };
+    const ref: Ref = value.kind === 'principal' ? { kind: 'principal', id: value.principal } : value.kind === 'roles' || value.kind === 'policy' || value.kind === 'proxy-reserved' ? { kind: value.kind, id: 'instance' } : { kind: value.kind, id: value.id };
     seen.set(key, ref);
   }
   return seen.get(key)!;

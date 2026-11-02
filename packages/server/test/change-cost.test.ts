@@ -9,15 +9,17 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
+import type { ProxyDefinition } from '@coffre/core/vault';
 import { createDatabase, type Client } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
+import { credentialProxy } from '../src/plugins/credential-proxy.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -47,7 +49,7 @@ type Cost = { app: number; vault: number; hot: number; calls: number; ms: number
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
-let vault: LocalVault;
+let vault: SpokenVault;
 let vaultPool: HyperdrivePool;
 let relays: { app: Relay; vault: Relay; hot: Relay };
 let appClient: PerRequest;
@@ -77,10 +79,10 @@ before(async () => {
   const relay = (url: string, side: string) => postgresProxy(url, { delayMs: RTT_MS, onSync: (sent) => void statements.push(`${side} Sync: ${sent.map(shown).join(' | ') || '(none)'}`) });
   relays = { app: await relay(TEST_RUNTIME_DATABASE_URL, 'app'), vault: await relay(TEST_VAULT_DATABASE_URL, 'vault'), hot: await relay(TEST_HOT_DATABASE_URL, 'hot') };
   vaultPool = new HyperdrivePool(relays.vault.url);
-  const opened = await localVault(
+  const opened = spoken(await localVault(
     { database: createDatabase(vaultPool), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
-  );
+  ));
   vault = opened;
   const counted = new Proxy(opened, {
     get(target, key) {
@@ -97,7 +99,8 @@ before(async () => {
   const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] });
   runtime = {
     ...createRuntime(
-      resolveConfig({ publicUrl: ORIGIN, vault: counted, auth, auditChainKey: deps.chainKey.toString('base64') }),
+      // The credential proxy, its Proxy tab writing (0.16): what a save of an environment's definitions costs.
+      resolveConfig({ publicUrl: ORIGIN, vault: entryOf(counted), auth, auditChainKey: deps.chainKey.toString('base64'), plugins: [credentialProxy({ credentials: {}, editable: true })] }),
       createDatabase(appClient.client),
       counted,
       { json: async (url) => { throw new Error(`no fetch in this test: ${url.href}`); } },
@@ -154,6 +157,12 @@ async function cost(work: () => Promise<unknown>): Promise<Cost> {
 }
 
 type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown> };
+
+/** A route sending API_KEY, which market/dev holds. */
+const ROUTE: ProxyDefinition = {
+  kind: 'route', name: 'openai', upstream: 'https://api.openai.com/v1', inject: [{ kind: 'header', name: 'authorization', template: 'Bearer {API_KEY}' }],
+  allow: [], limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+};
 
 let made = 0;
 const fresh = () => `k${(made += 1)}`;
@@ -232,6 +241,20 @@ const CASES: Case[] = [
     run: (i) => owner.members.remove(`user:leaving-${i}@acme.example`),
   },
   { name: 'token issued', run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
+  // An environment's proxy definitions (0.16, T186): its first save, and one more item on top of the page it loaded.
+  {
+    name: 'proxy definitions, first save',
+    setup: async (i) => void (await owner.environments.create(`market/routed-${i}`)),
+    run: (i) => owner.proxy.save(`market/routed-${i}`, { seal: null, items: { openai: ROUTE } }),
+  },
+  {
+    name: 'proxy definitions, an item added',
+    setup: async (i) => {
+      await owner.environments.create(`market/routes-${i}`);
+      seals.set(i, (await owner.proxy.save(`market/routes-${i}`, { seal: null, items: { openai: ROUTE } })).seal);
+    },
+    run: (i) => owner.proxy.save(`market/routes-${i}`, { seal: seals.get(i)!, items: { maps: { ...ROUTE, name: 'maps', upstream: 'https://maps.example.com' } } }),
+  },
   {
     name: 'token revoked',
     setup: async (i) => void tokens.set(i, (await owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 })).id),
@@ -239,6 +262,7 @@ const CASES: Case[] = [
   },
 ];
 const tokens = new Map<number, string>();
+const seals = new Map<number, string | null>();
 
 /**
  * Each route's round trips, as measured: the app's Syncs, the vault's, and the hot path's. A change that adds one fails
@@ -268,6 +292,8 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'member removed': { app: 10, vault: 8 },
   'token issued': { app: 4, vault: 6 },
   'token revoked': { app: 2, vault: 3 },
+  'proxy definitions, first save': { app: 2, vault: 5 },
+  'proxy definitions, an item added': { app: 2, vault: 5 },
 };
 
 test('each change route answers in exactly its budget of round trips (T179)', POSTGRES, async () => {

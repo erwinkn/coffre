@@ -48,6 +48,7 @@ const NAMED = {
   PersonalConfig: 'api/personal.ts',
   ListedReference: 'api/references.ts',
   ProjectSummary: 'api/projects.ts',
+  ProxyPage: 'api/proxy.ts',
   ReferenceView: 'api/references.ts',
   RemovedMember: 'api/members.ts',
   ImpactLine: 'api/roles.ts',

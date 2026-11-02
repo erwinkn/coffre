@@ -12,14 +12,14 @@ import { generateKeyPairSync, randomBytes, randomUUID, sign as signWith } from '
 import { github, signin } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 import { sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
@@ -72,7 +72,7 @@ let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
 let app: RecordingPool;
 let vaultPool: RecordingPool;
-let vault: LocalVault;
+let vault: SpokenVault;
 let vaultCalls = 0;
 let runtime: CoffreRuntime;
 let idToken: () => string;
@@ -114,7 +114,7 @@ before(async () => {
   // The app and the vault on pools of their own that record what they run, as a deployment's; each vault call counted.
   app = new RecordingPool(TEST_RUNTIME_DATABASE_URL);
   vaultPool = new RecordingPool(TEST_VAULT_DATABASE_URL);
-  vault = await localVault({ database: createDatabase(vaultPool.client), hotDatabase: TEST_HOT_DATABASE_URL, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  vault = spoken(await localVault({ database: createDatabase(vaultPool.client), hotDatabase: TEST_HOT_DATABASE_URL, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }));
   const counted = new Proxy(vault, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
@@ -125,7 +125,7 @@ before(async () => {
       };
     },
   });
-  runtime = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: counted, auth, auditChainKey: deps.chainKey.toString('base64') }), createDatabase(app.client), counted, transport);
+  runtime = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: entryOf(counted), auth, auditChainKey: deps.chainKey.toString('base64') }), createDatabase(app.client), counted, transport);
 });
 
 after(async () => {

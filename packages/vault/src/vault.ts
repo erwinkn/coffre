@@ -1,4 +1,4 @@
-import { EXCHANGE_SKEW_SECONDS, RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, WORKLOAD_SIGN_IN_PATH, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
+import { CREDENTIAL_NAME, EXCHANGE_SKEW_SECONDS, RunProofRefused, UPLOADED_KEYS, verifyProof, verifyRunToken, WORKLOAD_SIGN_IN_PATH, type RunProof, type WorkloadProfile } from '@coffre/core/identity';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import {
@@ -144,13 +144,25 @@ import {
   type WrapInput,
   type WrappedKey,
   VOUCHED_AT_ONCE,
+  canonicalDefinition,
+  definitionKeys,
+  proxyDefinitionProblem,
+  MAX_PARENTS,
+  MAX_PROXY_ITEMS,
+  type ClearedItem,
+  type ProxyDefinition,
+  type ProxyInput,
+  type ProxyView,
+  type ReleaseProxyInput,
+  type ReserveProxyInput,
+  type SaveProxyInput,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
+import { Changes, heldFrom, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
@@ -158,7 +170,11 @@ import { bindingObject, credentialObject } from './objects.ts';
 import { proveIn, type SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
 import type { ResolvedVaultConfig } from './config.ts';
-import { limitChange, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedObject, sealKey, type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type Ref } from './inputs.ts';
+import {
+  applyOp, canonical, limitChange, noEdits, objectKey, POLICY_REF, RESERVED_REF, ROLES_REF, sealed as sealedObject, sealKey, sealOf,
+  type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type ProxyInput as ProxyObject, type ProxyItem, type Ref, type SecretInput,
+} from './inputs.ts';
+import { frozenHoldings, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
@@ -472,6 +488,14 @@ const SETTINGS = 'settings.change';
 
 /** The action of the vault's entry that holds the instance's access policy, and changes it (`policy`). */
 const POLICY = 'policy.change';
+
+/** The actions of the vault's entries about proxy definitions written in the UI (0.16): a save, code's reservation, an Owner's release. */
+const PROXY_SAVE = 'proxy.save';
+const PROXY_CODE = 'proxy.code';
+const PROXY_RELEASE = 'proxy.release';
+
+/** Who reserves the names code defines: the deployment, through the app's own call at its gate; no person or token makes one. */
+const CODE_ACTOR = 'system:deployment';
 
 /** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
 const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
@@ -3966,6 +3990,293 @@ class VaultService implements Vault {
    * behind (`Verdict.behind`): it is checked again 50 ms later, then a
    * tick later (reviews r4, r5). A rollback is still behind then.
    */
+  // --- proxy definitions written in the UI (0.16, T186) ---------------------
+
+  /**
+   * An environment's proxy definitions, from its sealed object, and the
+   * reserved names (docs/design/proxy-ui.md, section 8, "Reading the tab"):
+   * each checked as a use would, its row against its seal and that seal its
+   * newest change's. A forged object shows as `tampered`, with no item: an
+   * Owner who edited or copied one would seal a forgery as their own. Who may
+   * read it is the app's to say: its definitions are no secret (R6). No item
+   * carries the holdings its save froze.
+   */
+  async proxy(input: ProxyInput): Promise<ProxyView> {
+    const keys = this.#log015();
+    if (!UUID.test(String(input?.projectId)) || !UUID.test(String(input?.environmentId))) throw new Error('an environment is named by its project\'s id and its own');
+    await this.#settled();
+    // The row and its newest change, read apart: a save that commits between them makes them disagree for that read
+    // alone, so a disagreement is read once more before it is shown as one. The seal shown is the one the items were
+    // checked against, which a save names.
+    const read = async <K extends 'proxy' | 'proxy-reserved'>(ref: Ref & { kind: K }) => {
+      for (let attempt = 0; ; attempt += 1) {
+        const [row, newest] = await Promise.all([store.readObject(this.#db, ref), store.newestChange(this.#db, ref)]);
+        try {
+          const held = heldFrom(keys.seals, ref, row, newest);
+          return { object: held.log === 'live' ? (held.object as Extract<Input, { kind: K }>) : null, seal: newest?.seal ?? null, state: 'ok' as const };
+        } catch (error) {
+          if (!(error instanceof NotLogged)) throw error;
+          if (attempt === 0) continue;
+          return { object: null, seal: newest?.seal ?? null, state: error.fault };
+        }
+      }
+    };
+    const [proxy, reserved] = await Promise.all([read({ kind: 'proxy', id: input.environmentId }), read(RESERVED_REF)]);
+    return proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved);
+  }
+
+  /**
+   * An environment's proxy definitions saved (`proxy.save`; docs/design/proxy-ui.md,
+   * sections 2 and 8), decided on the vault's sealed objects alone (R53): the
+   * editor's principal, the roles, the environment and its fork parents, the
+   * reserved set and each key an item sends. A person on a session of theirs,
+   * holding `proxy.edit` there; never at a personal config (decision 7), nor
+   * a reserved name. Each changed item's keys are resolved by name here,
+   * inherited and referenced ones included, and cleared for its editor, whose
+   * holdings the item freezes; a key the place does not have yet is decided
+   * at each use. The page names the seal it loaded: another change since is
+   * `proxy_changed`. A forged object is replaced whole, by an Owner of the
+   * project, or not at all.
+   */
+  saveProxy(input: SaveProxyInput): Promise<Outcome<{ view: ProxyView }>> {
+    const keys = this.#log015();
+    const { actor, projectId, environmentId } = input;
+    if (typeof actor !== 'string' || !UUID.test(String(projectId)) || !UUID.test(String(environmentId))) throw new Error('a save names its editor, and an environment by its project\'s id and its own');
+    const ref = { kind: 'proxy' as const, id: environmentId };
+    const entry = (decision: 'allow' | 'deny', detail: Record<string, unknown>, code: RefusalCode | null = null): NewEntry => ({
+      actor, action: PROXY_SAVE, decision, code, projectId, environmentId,
+      operationId: input.operationId ?? null, requestId: input.requestId ?? null,
+      metadata: JSON.stringify({ ...detail, ...traced(input) }),
+    });
+    const named = typeof input.items === 'object' && input.items !== null && !Array.isArray(input.items) ? Object.keys(input.items) : null;
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) => new Refused(refusal(code, message), [entry('deny', { names: named ?? [] }, code)]);
+    return this.#decide([actor], async (d) => {
+      const changes = d.changes!;
+      validateCorrelation(input);
+      // What it asks, before anything is read: every definition as the vault keeps it, at most MAX_PROXY_ITEMS named.
+      if (named === null || named.length > MAX_PROXY_ITEMS) throw refused('invalid', `a save names at most ${MAX_PROXY_ITEMS} items, each its definition or null`);
+      if (input.seal !== null && (typeof input.seal !== 'string' || Buffer.from(input.seal, 'base64').length !== 16)) throw refused('invalid', 'a save names the seal its page loaded, or null for none');
+      const asked = new Map<string, ProxyDefinition | null>();
+      for (const name of named) {
+        const given = input.items[name];
+        if (given === null) {
+          asked.set(name, null);
+          continue;
+        }
+        const problem = proxyDefinitionProblem(given, { insecureUpstreams: input.insecureUpstreams === true });
+        if (problem !== null) throw refused('invalid', problem);
+        const definition = canonicalDefinition(given, { insecureUpstreams: input.insecureUpstreams === true });
+        if (definition.name !== name) throw refused('invalid', `${name}: an item is filed under its own name, not ${definition.name}`);
+        asked.set(name, definition);
+      }
+      // A person, signed in as themselves (a browser's session, or `coffre login`'s): no token or handle edits a route.
+      if (input.caller !== 'person' || input.credentialScope != null || !actor.startsWith('user:')) throw refused('not_allowed', 'a person edits proxy definitions, signed in as themselves');
+      // The objects it weighs, each as its log has it (`held`: a forged one refuses it), and the newest change of the
+      // environment's proxy object, which its page must have loaded.
+      // The object it changes among them, as its log has it: a forged one only replaced whole, which reads none of it. And
+      // the keys any item asked for names, where the environment itself holds them: a fork's parents are read after.
+      const askedKeys = [...new Set([...asked.values()].flatMap((definition) => (definition === null ? [] : definitionKeys(definition))))];
+      const [member, roles, reserved, place, newest, current, own] = await Promise.all([
+        changes.held(d.tx, { kind: 'principal', id: actor }),
+        changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }),
+        changes.held(d.tx, RESERVED_REF),
+        changes.held(d.tx, { kind: 'environment', id: environmentId }),
+        store.newestChange(d.tx, ref),
+        // A replace weighs none of it: read only for the audit's `removed`, the items its log had.
+        changes.held(d.tx, ref).catch((error: unknown) => {
+          if (error instanceof NotLogged) return error;
+          throw error;
+        }),
+        store.secretsNamed(d.tx, [environmentId], askedKeys),
+      ]);
+      if (place.log !== 'live' || place.object.kind !== 'environment' || place.object.projectId !== projectId) throw refused('invalid', 'no such environment');
+      const chain = [place.object];
+      for (let parent = place.object.parentId; parent !== null && chain.length <= MAX_PARENTS; ) {
+        const held = await changes.held(d.tx, { kind: 'environment', id: parent });
+        if (held.log !== 'live' || held.object.kind !== 'environment') break;
+        chain.push(held.object);
+        parent = held.object.parentId;
+      }
+      const account = member.log === 'live' && member.object.kind === 'principal' ? member.object : null;
+      const credential: CredentialInput = { kind: 'credential', id: actor, principal: actor, caller: 'person', scope: null, expiresAt: null, revoked: false, generation: account?.generation ?? 0 };
+      const reader = readerOf(account, credential, roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits(), chain, d.at);
+      const environment = place.object;
+      const places = new Map(chain.map((each) => [each.id, each]));
+      const code = refuses(reader, 'proxy.edit', placeIn({ projectId, environmentId }, places), environment.deleted);
+      if (code !== null) throw refused(code, code === 'no_grant' || code === 'expired' ? 'editing proxy definitions takes proxy.edit there: Owners hold it' : REFUSAL_MESSAGES[code]);
+      if (environment.owner !== null) throw refused('invalid', "a personal config takes no proxy definitions of its own: they are its environment's");
+      if (environment.archived || environment.projectArchived) throw refused('not_allowed', "an archived environment's proxy definitions stay as they are");
+      if (input.replace === true && !ownsProject(reader.live, projectId)) throw refused('not_allowed', "replacing an environment's proxy definitions whole takes an Owner of its project");
+      // CAS on the object's newest change, never its row: a forged row's seal is no change anyone loaded.
+      if ((newest?.seal?.toString('base64') ?? null) !== input.seal) throw refused('proxy_changed');
+      const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
+      const taken = [...asked].find(([name, definition]) => definition !== null && names.includes(name));
+      if (taken !== undefined) throw refused('reserved', `${taken[0]} is reserved by the deployment's code: an instance Owner may release it`);
+      if (current instanceof NotLogged && input.replace !== true) {
+        throw refused('tampered', current.fault === 'stale'
+          ? "this environment's proxy definitions are not their newest change's (stale): an Owner of its project replaces them whole"
+          : "this environment's proxy definitions failed the vault's integrity check: an Owner of its project replaces them whole");
+      }
+      const logged: ProxyObject | null = !(current instanceof NotLogged) && current.log === 'live' && current.object.kind === 'proxy' ? current.object : null;
+      const before = input.replace === true ? null : logged;
+      // What changes: each item the save names is saved again, under its editor's standing now (a re-save is how an
+      // Owner clears a route an earlier editor can no longer), unless its definition, editor and standing are the ones
+      // it holds: then nothing changes and nothing is logged.
+      const holdings = frozenHoldings(reader);
+      const saved = new Map<string, ProxyDefinition | null>();
+      for (const [name, definition] of asked) {
+        const was = before?.items[name] ?? null;
+        if (definition === null ? was === null && input.replace !== true : was !== null && was.savedBy === actor && canonical(was.definition) === canonical(definition) && canonical(was.holdings) === canonical(holdings)) continue;
+        saved.set(name, definition);
+      }
+      const kept = input.replace === true ? 0 : Object.keys(before?.items ?? {}).filter((name) => !saved.has(name)).length;
+      if (kept + [...saved.values()].filter((definition) => definition !== null).length > MAX_PROXY_ITEMS) throw refused('invalid', `an environment holds at most ${MAX_PROXY_ITEMS} proxy definitions`);
+      // Each changed item's keys, resolved by name where the use will find them: the nearest place of the fork chain
+      // that holds one, its value's nature a reference's source's; and cleared for the editor.
+      const sending = [...new Set([...saved.values()].flatMap((definition) => (definition === null ? [] : definitionKeys(definition))))];
+      const resolved = await this.#proxyKeys(d.tx, changes, chain, sending, own);
+      const cleared = new Map<string, string[]>();
+      for (const key of resolved.values()) {
+        const why = routeRefusal(reader, key, chain);
+        if (why !== null) throw refused('route_not_cleared', `${why}: it cannot be routed by ${actor.slice('user:'.length)}`);
+      }
+      const items: Record<string, ProxyItem | null> = {};
+      for (const [name, definition] of saved) {
+        if (definition === null) {
+          items[name] = null;
+          continue;
+        }
+        const sent = definitionKeys(definition);
+        cleared.set(name, sent.filter((key) => resolved.get(key)?.nature === 'sensitive'));
+        items[name] = { definition, keys: sent, savedBy: actor, savedAt: d.at, holdings };
+      }
+      const op: Op = { op: 'proxy.save', items, replace: input.replace === true, loaded: input.seal };
+      const after = applyOp(before, ref, op);
+      if (after === undefined || after === null || after.kind !== 'proxy') throw refused('invalid', 'not a save the rules allow');
+      const view = proxyView({ id: environmentId, projectId }, { object: after, seal: sealOf(keys.seals[0]!, ref, after), state: 'ok' }, { object: reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object : null, state: 'ok' });
+      if (saved.size === 0 && input.replace !== true) return { view: { ...view, seal: input.seal } };
+      changes.stage(ref, op, actor);
+      // The audit page's diff: each item saved, where it sends which keys, and the sensitive ones it routes (R66).
+      d.log.push(entry('allow', {
+        proxy: {
+          replace: input.replace === true,
+          saved: [...saved].flatMap(([name, definition]) => (definition === null ? [] : [{ name, kind: definition.kind, ...(definition.kind === 'route' ? { upstream: definition.upstream } : {}), keys: definitionKeys(definition), routesSensitive: cleared.get(name) ?? [] }])),
+          removed: input.replace === true ? Object.keys(logged?.items ?? {}).filter((name) => saved.get(name) == null) : [...saved].flatMap(([name, definition]) => (definition === null ? [name] : [])),
+        },
+      }));
+      return { view };
+    });
+  }
+
+  /**
+   * Each key name's nearest holder in a fork chain, nearest first, as a use
+   * finds it (values inherit, up to three parents), its object as its log
+   * has it, and a reference's source's nature and project. A key no place
+   * holds, or one archived, is left out: decided at each use.
+   */
+  async #proxyKeys(
+    db: Queryable, changes: Changes, chain: readonly EnvironmentInput[], names: readonly string[], own: readonly { id: string; environmentId: string; key: string }[],
+  ): Promise<Map<string, ResolvedKey>> {
+    if (names.length === 0) return new Map();
+    const parents = chain.slice(1).map((environment) => environment.id);
+    const found = [...own.filter((row) => names.includes(row.key)), ...(parents.length === 0 ? [] : await store.secretsNamed(db, parents, names))];
+    const nearest = new Map<string, { id: string; holder: EnvironmentInput }>();
+    for (const holder of chain) {
+      for (const row of found) if (row.environmentId === holder.id && !nearest.has(row.key)) nearest.set(row.key, { id: row.id, holder });
+    }
+    const resolved = new Map<string, ResolvedKey>();
+    await Promise.all([...nearest].map(async ([name, { id, holder }]) => {
+      const held = await changes.held(db, { kind: 'secret', id });
+      if (held.log !== 'live' || held.object.kind !== 'secret') return;
+      let secret: SecretInput = held.object;
+      if (secret.source !== null) {
+        const source = await changes.held(db, { kind: 'secret', id: secret.source });
+        if (source.log !== 'live' || source.object.kind !== 'secret') return;
+        secret = source.object;
+      }
+      resolved.set(name, { name, holder, nature: secret.nature, projectId: secret.projectId });
+    }));
+    return resolved;
+  }
+
+  /**
+   * The names the deployment's code defines, reserved (`proxy.code`;
+   * docs/design/proxy-ui.md, section 6): each name new to the instance's set
+   * added, and each UI item of such a name deleted, in every environment, each
+   * whole in its entry, so that the log restores it. One transaction under
+   * the fence; two first isolates racing, the second finds its names in and
+   * writes nothing. An environment whose object fails its seal is passed
+   * over: it serves nothing (R64), and its item, should a writer put it back,
+   * stays shadowed by the name, which no deploy drops.
+   */
+  reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>> {
+    this.#log015();
+    const problem = reservedProblem(input?.names);
+    if (problem !== null) throw new Error(problem);
+    const wanted = [...new Set(input.names)].sort();
+    return this.#decide([], async (d) => {
+      const changes = d.changes!;
+      const reserved = await changes.held(d.tx, RESERVED_REF);
+      const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
+      const adding = wanted.filter((name) => !names.includes(name));
+      if (adding.length === 0) return { reserved: [...names], cleared: [] };
+      changes.stage(RESERVED_REF, { op: 'proxy.code', names: adding }, CODE_ACTOR);
+      const cleared: ClearedItem[] = [];
+      for (const environmentId of await store.proxiesNaming(d.tx, adding)) {
+        const ref = { kind: 'proxy' as const, id: environmentId };
+        const held = await changes.held(d.tx, ref).catch((error: unknown) => {
+          if (error instanceof NotLogged) return null;
+          throw error;
+        });
+        if (held?.log !== 'live' || held.object.kind !== 'proxy') continue;
+        const { items } = held.object;
+        const gone = Object.fromEntries(adding.filter((name) => Object.hasOwn(items, name)).map((name) => [name, items[name]!]));
+        if (Object.keys(gone).length === 0) continue;
+        changes.stage(ref, { op: 'proxy.code', names: adding, cleared: gone }, CODE_ACTOR);
+        cleared.push(...Object.keys(gone).map((name) => ({ environmentId, name })));
+      }
+      d.log.push({
+        actor: CODE_ACTOR, action: PROXY_CODE, decision: 'allow', code: null,
+        operationId: input.operationId ?? null, requestId: input.requestId ?? null,
+        metadata: JSON.stringify({ proxy: { reserved: adding, cleared } }),
+      });
+      return { reserved: [...new Set([...names, ...adding])].sort(), cleared };
+    });
+  }
+
+  /**
+   * A reserved name freed, instance-wide (`proxy.release`), by an Owner of
+   * the whole instance on a session of theirs: it frees the name in every
+   * environment of every project. Whether an older deployment still serving
+   * defines it is the app's to warn of: no code is an input of the log.
+   */
+  releaseProxy(input: ReleaseProxyInput): Promise<Outcome<{ reserved: string[] }>> {
+    this.#log015();
+    const { actor, name } = input;
+    if (typeof actor !== 'string') throw new Error('a release names who asks');
+    const entry = (decision: 'allow' | 'deny', code: RefusalCode | null = null): NewEntry => ({
+      actor, action: PROXY_RELEASE, decision, code,
+      operationId: input.operationId ?? null, requestId: input.requestId ?? null,
+      metadata: JSON.stringify({ proxy: { released: String(name) }, ...traced(input) }),
+    });
+    const refused = (code: RefusalCode, message = REFUSAL_MESSAGES[code]) => new Refused(refusal(code, message), [entry('deny', code)]);
+    return this.#decide([actor], async (d) => {
+      const changes = d.changes!;
+      validateCorrelation(input);
+      if (typeof name !== 'string' || !CREDENTIAL_NAME.test(name)) throw refused('invalid', 'a release names one reserved name');
+      if (input.caller !== 'person' || input.credentialScope != null || !actor.startsWith('user:')) throw refused('not_allowed', 'an Owner of the whole instance releases a name, signed in as themselves');
+      const [member, reserved] = await Promise.all([changes.held(d.tx, { kind: 'principal', id: actor }), changes.held(d.tx, RESERVED_REF)]);
+      const account = member.log === 'live' && member.object.kind === 'principal' ? member.object : null;
+      if (account === null || account.status !== 'active') throw refused(account === null ? 'not_a_member' : 'removed');
+      if (!ownsInstance(account)) throw refused('not_allowed', 'a released name is free in every project: only an Owner of the whole instance releases one');
+      const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
+      if (!names.includes(name)) throw refused('invalid', `${name} is not reserved`);
+      changes.stage(RESERVED_REF, { op: 'proxy.release', name }, actor);
+      d.log.push(entry('allow'));
+      return { reserved: names.filter((each) => each !== name) };
+    });
+  }
+
   /** Whether 0.15's checkpointer seals (T169): what `/readyz` asks. Under 0.14's log alone, nothing waits on one. */
   async sealing(): Promise<Sealing> {
     const log015 = this.#prepared.log015;

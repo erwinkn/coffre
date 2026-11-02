@@ -242,6 +242,21 @@ export function createClient(options: ClientOptions) {
         call('PATCH /projects/:project/:environment/dismissals', place(path), patch),
     },
 
+    /**
+     * An environment's proxy definitions written in the UI (0.16): routes,
+     * signers, verifiers and tunnels, beside code's, which win a name both
+     * use. Whoever lists the environment reads them; a person holding
+     * `proxy.edit` there saves them, naming the seal the page loaded (409
+     * `proxy_changed` if another save came since).
+     */
+    proxy: {
+      get: (path: string) => call('GET /projects/:project/:environment/proxy', place(path)),
+      save: (path: string, save: RouteInput<'PUT /projects/:project/:environment/proxy'>) =>
+        call('PUT /projects/:project/:environment/proxy', place(path), save),
+      /** A name the deployment's code reserved freed for UI definitions, in every environment. Owners of the whole instance only. */
+      release: (name: string) => call('PUT /proxy/reserved', {}, { release: name }),
+    },
+
     secrets: {
       /** Keys, versions and who changed what; never values. */
       list: (path: string) => call('GET /secrets/:project/:environment', place(path)),

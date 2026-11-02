@@ -22,6 +22,7 @@ export const PERMISSION_WORDS: Record<Permission, { label: string; note?: string
   'secret.read': { label: 'Read values', verb: 'read values', short: 'Read' },
   'secret.use': { label: 'Use values', note: 'placeholders, the proxy', verb: 'use values', short: 'Use' },
   'secret.write': { label: 'Write values', verb: 'write values', short: 'Write' },
+  'proxy.edit': { label: 'Edit proxy definitions', note: 'routes, signers, tunnels', verb: 'edit proxy definitions', short: 'Proxy' },
   'secret.archive': { label: 'Retire values', verb: 'retire values', short: 'Retire' },
   'audit.read': { label: 'Read the log', verb: 'read the log', short: 'Read' },
   'environment.manage': { label: 'Manage environments', verb: 'manage environments', short: 'Environments' },
@@ -34,6 +35,7 @@ export const GRID_PERMISSIONS: readonly Permission[] = [
   'secret.read',
   'secret.use',
   'secret.write',
+  'proxy.edit',
   'secret.archive',
   'audit.read',
   'environment.manage',
@@ -49,12 +51,12 @@ export function projectWide(permission: Permission): boolean {
  * A role card's rows, the grid's permissions in its order, each on every
  * card, so that a permission sits in the same place on all of them:
  *
- *   Values   Read  Use  Write  Retire
+ *   Values   Read  Use  Write  Proxy  Retire
  *   Log      Read
  *   Manage   Environments  Access  Project
  */
 export const CARD_ROWS: readonly { name: string; permissions: readonly Permission[] }[] = [
-  { name: 'Values', permissions: ['secret.read', 'secret.use', 'secret.write', 'secret.archive'] },
+  { name: 'Values', permissions: ['secret.read', 'secret.use', 'secret.write', 'proxy.edit', 'secret.archive'] },
   { name: 'Log', permissions: ['audit.read'] },
   { name: 'Manage', permissions: ['environment.manage', 'grant.manage', 'project.manage'] },
 ];
@@ -80,6 +82,7 @@ export type Column = 'normal' | 'protected';
  * kept true by the boxes it takes along (`definitionProblem`):
  *
  *   checking Read checks Use              unchecking Use unchecks Read
+ *   checking Proxy checks Read and Use    unchecking Read or Use unchecks Proxy
  *   checking a protected box checks its   unchecking a normal box unchecks
  *   normal one                            its protected one
  *
@@ -89,8 +92,8 @@ export function toggle(columns: Pick<RoleDefinition, 'permissions' | 'protected'
   if (column === 'protected' && projectWide(permission)) return ordered(columns);
   const normal = new Set(columns.permissions);
   const guarded = new Set(columns.protected);
-  // Reading takes using; giving up using gives up reading.
-  const along: Permission[] = on ? (permission === 'secret.read' ? ['secret.use'] : []) : permission === 'secret.use' ? ['secret.read'] : [];
+  // Editing the proxy takes reading, and reading takes using; giving up using gives up reading, and reading the proxy.
+  const along: readonly Permission[] = on ? TAKES[permission] ?? [] : TAKEN_BY[permission] ?? [];
   for (const each of [permission, ...along]) {
     if (on) {
       normal.add(each);
@@ -102,6 +105,10 @@ export function toggle(columns: Pick<RoleDefinition, 'permissions' | 'protected'
   }
   return ordered({ permissions: [...normal], protected: [...guarded] });
 }
+
+/** What checking a box checks along, and what unchecking one unchecks along: `definitionProblem`'s rules, closed. */
+const TAKES: Partial<Record<Permission, readonly Permission[]>> = { 'secret.read': ['secret.use'], 'proxy.edit': ['secret.read', 'secret.use'] };
+const TAKEN_BY: Partial<Record<Permission, readonly Permission[]>> = { 'secret.use': ['secret.read', 'proxy.edit'], 'secret.read': ['proxy.edit'] };
 
 /** Each column in catalogue order, as the vault keeps it, so that comparing two says whether they differ. */
 export function ordered(columns: Pick<RoleDefinition, 'permissions' | 'protected'>): Columns {

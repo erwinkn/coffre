@@ -34,7 +34,7 @@ import { snapshot as readSnapshot } from '../src/snapshot.ts';
 import * as store from '../src/store.ts';
 import { KekBadClaimError as ExportedBadClaim } from '../src/index.ts';
 import { openVault, prepareVault, READ_DEADLINE_MS, READ_HEAD_WAITERS, type VaultOptions } from '../src/vault.ts';
-import { openLocalVault as openRawVault } from '../src/local.ts';
+import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import {
   CONVERSION,
   cutOver,
@@ -61,6 +61,9 @@ import {
   type LocalVault,
   START_OVER,
 } from './database.ts';
+
+/** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
+const openRawVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
 
 /** Every vault here signs, and MACs its entries, with this; a vault started afresh needs it too. */
 const SIGNING_KEY = randomBytes(32);

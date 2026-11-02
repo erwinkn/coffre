@@ -14,14 +14,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { WrappedKey } from '@coffre/core/vault';
+import { RELEASE, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { isUnavailable } from '@coffre/db/dialect';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { postgresSession } from '@coffre/db/connect';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
-import { emptyDatabase, ENGINE, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, HOT_URL, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, places, rows, run, sealed, storedVersions, VAULT_URL, type TestDatabase } from './database.ts';
 import { resolveVaultConfig } from '../src/config.ts';
 import { READ_HEAD_WAITERS } from '../src/vault.ts';
 
@@ -50,8 +50,8 @@ beforeEach(async () => {
  * round trips past the login: each time a client speaks again once answered,
  * but to say goodbye (Terminate), which waits for no answer.
  */
-async function slowPostgres(ms: number): Promise<{ url: string; readonly opened: number; readonly statements: number; readonly flushes: number; readonly trips: number; close(): Promise<void> }> {
-  const target = new URL(VAULT_URL);
+async function slowPostgres(ms: number, to = VAULT_URL): Promise<{ url: string; readonly opened: number; readonly statements: number; readonly flushes: number; readonly trips: number; close(): Promise<void> }> {
+  const target = new URL(to);
   let opened = 0;
   let statements = 0;
   let flushes = 0;
@@ -103,7 +103,7 @@ async function slowPostgres(ms: number): Promise<{ url: string; readonly opened:
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as { port: number };
-  const url = new URL(VAULT_URL);
+  const url = new URL(to);
   url.port = String(address.port);
   return {
     url: url.href,
@@ -124,8 +124,10 @@ async function slowPostgres(ms: number): Promise<{ url: string; readonly opened:
 }
 
 /** A fresh isolate of the vault Worker, over the suite's database through the vault's login. */
-async function freshVault(database: string): Promise<{
+async function freshVault(database: string, hotDatabase = HOT_URL): Promise<{
   call(method: string, ...args: unknown[]): Promise<{ ok: boolean; error?: string; code?: string; result?: unknown }>;
+  /** The binding's one entry, as an app on `release` calls it: its answer, the envelope, whole. */
+  raw(release: string, method: string, args: unknown[]): Promise<{ ok: boolean; error?: string; result?: unknown }>;
   stop(): Promise<void>;
 }> {
   const key = randomBytes(32).toString('base64');
@@ -143,7 +145,7 @@ async function freshVault(database: string): Promise<{
       vars: { VAULT_KEY: key },
       hyperdrive: [
         { binding: 'VAULT_HYPERDRIVE', id: 'vault-workers-test', localConnectionString: database },
-        { binding: 'HOT_HYPERDRIVE', id: 'vault-workers-hot', localConnectionString: HOT_URL },
+        { binding: 'HOT_HYPERDRIVE', id: 'vault-workers-hot', localConnectionString: hotDatabase },
       ],
       durable_objects: { bindings: [{ name: 'CHECKPOINTER', class_name: 'CoffreCheckpointer' }] },
       migrations: [{ tag: 'v1', new_sqlite_classes: ['CoffreCheckpointer'] }],
@@ -163,8 +165,8 @@ async function freshVault(database: string): Promise<{
     rmSync(dir, { recursive: true, force: true });
     throw error;
   }
-  const call = async (method: string, ...args: unknown[]) => {
-    const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify({ method, args }), signal: AbortSignal.timeout(20_000) });
+  const post = async (body: object) => {
+    const response = await worker.fetch('/', { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(20_000) });
     const text = await response.text();
     try {
       return JSON.parse(text) as { ok: boolean; error?: string; code?: string; result?: unknown };
@@ -172,11 +174,13 @@ async function freshVault(database: string): Promise<{
       return { ok: false, error: `${response.status}: ${text}` };
     }
   };
+  const call = (method: string, ...args: unknown[]) => post({ method, args });
   // Its connection the object's own, opened here rather than inside the first call counted (a call starts it too).
   const started = await call('startCheckpointer');
   assert.ok(started.ok, started.error ?? 'the checkpointer did not start');
   return {
     call,
+    raw: (release, method, args) => post({ release, method, args }),
     async stop() {
       await worker.stop();
       rmSync(dir, { recursive: true, force: true });
@@ -188,6 +192,32 @@ function assertAllAnswered(results: { ok: boolean; error?: string }[]): void {
   const failed = results.filter((result) => !result.ok).map((result) => result.error);
   assert.deepEqual(failed, [], 'every call answered, none cancelled as hung');
 }
+
+test('through the entrypoint, a call on another release answers this release and runs nothing: no statement, no connection, the hot path\'s included', { skip, timeout: 120_000 }, async () => {
+  const database = await slowPostgres(0);
+  const hot = await slowPostgres(0, HOT_URL);
+  const vault = await freshVault(database.url, hot.url);
+  try {
+    const before = { statements: database.statements + hot.statements, opened: database.opened + hot.opened };
+    const entries = (await rows<{ n: string | number }>(db.owner, sql`SELECT count(*) AS n FROM audit_log`))[0]!.n;
+    for (const [method, args] of [['useNamed', [{ tokenHash: 'x', accepts: [], items: [] }]], ['about', []], ['access', [ROOT]], ['sealing', []]] as const) {
+      assert.deepEqual(await vault.raw('0.0.1', method, [...args] as unknown[]), { ok: true, result: { release: RELEASE } }, method);
+    }
+    assert.deepEqual({ statements: database.statements + hot.statements, opened: database.opened + hot.opened }, before, 'no statement and no connection, either login');
+    assert.equal((await rows<{ n: string | number }>(db.owner, sql`SELECT count(*) AS n FROM audit_log`))[0]!.n, entries);
+    // On its own release, it runs: the envelope carries the answer.
+    const matched = await vault.raw(RELEASE, 'access', [ROOT]);
+    assert.ok(matched.ok, matched.error ?? 'refused');
+    assert.equal((matched.result as { release: string; result: { role: string } }).result.role, 'owner');
+    assert.ok(database.statements > before.statements);
+    // A name no vault call has: a bug of the caller's, which fails it.
+    assert.equal((await vault.raw(RELEASE, 'fetch', [])).ok, false);
+  } finally {
+    await vault.stop();
+    await database.close();
+    await hot.close();
+  }
+});
 
 test('a fresh isolate answers a page load of concurrent first calls', { skip, timeout: 120_000 }, async () => {
   const database = await slowPostgres(20);

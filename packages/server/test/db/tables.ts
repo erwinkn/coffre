@@ -44,4 +44,6 @@ export const {
   logReadDays,
   logReadPlaceDays,
   logReadsCursor,
+  proxyDefinitions,
+  proxyReserved,
 } = schema;

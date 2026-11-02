@@ -1,3 +1,4 @@
+import type { ProxyCode } from '../proxy-code.ts';
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
 import type { Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
@@ -80,6 +81,8 @@ export type ApiContext = {
    * when `asCaller`.
    */
   watch?: { hooks: Watcher; context: (asCaller?: boolean) => WatchContext } | null;
+  /** What the deployment's code says of its credential proxy (`ProxyCode`): null, or left out, when it adds none. */
+  proxy?: ProxyCode | null;
   /** The page's render the request is one call of, whose calls read the instance's places once (`Render`); none for a request of its own. */
   render?: Render;
   /**

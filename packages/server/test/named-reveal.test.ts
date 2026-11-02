@@ -17,7 +17,7 @@ import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials as credentialRows, environments, logBulk, logFence, logUses, vaultGrants } from './db/tables.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
@@ -58,7 +58,7 @@ const credentials = {
  */
 function runtimeOver(vault: Vault, auth: 'github' | 'google' | 'access' = 'github', database: FixtureDeps['db'] = deps.db): CoffreRuntime {
   const config = resolveConfig({
-    publicUrl: ORIGIN, vault,
+    publicUrl: ORIGIN, vault: entryOf(vault),
     auth: auth === 'access'
       ? cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: 'coffre-aud' })
       : signin({ providers: [(auth === 'github' ? github : google)({ clientId: 'a', clientSecret: 'b' })] }),
@@ -587,7 +587,7 @@ test("a service's bearer token on a strict instance (useOnly) is refused by its 
   await root.access.set('token:strict', { 'market/dev': 'viewer' });
   const service = (await runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), 'strict', { label: 'strict', expiresInDays: 1 })).token;
   const config = resolveConfig({
-    publicUrl: ORIGIN, vault: counted(deps.vault, true), auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits(), useOnly: true } }),
+    publicUrl: ORIGIN, vault: entryOf(counted(deps.vault, true)), auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits(), useOnly: true } }),
     auditChainKey: deps.chainKey.toString('base64'),
   });
   const strict = createRuntime(config, deps.db, counted(deps.vault, true), { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });

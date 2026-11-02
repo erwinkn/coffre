@@ -1,7 +1,7 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
@@ -2350,11 +2350,7 @@ export async function secretHistory(
 
 // --- missing keys ---------------------------------------------------------------
 
-/**
- * At most how many parents stand above an environment: `prod`, `prod-eu`,
- * and `prod-eu-canary` above `prod-eu-canary-a` (docs/design/forking.md).
- */
-export const MAX_PARENTS = 3;
+export { MAX_PARENTS };
 
 /** An environment a fork inherits from, as a read needs it. */
 export type ParentRow = { id: string; slug: string; archived: boolean; deleted: boolean };

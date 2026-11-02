@@ -75,6 +75,9 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /projects/:project/:environment/version': {
     not: 'for programs that poll an environment before reading it, `coffre export --watch` first; a page has its listing, which it reloads',
   },
+  'GET /projects/:project/:environment/proxy': { inFlight: 'T186 PR D: the Proxy tab (prototype #421) on the API' },
+  'PUT /projects/:project/:environment/proxy': { inFlight: 'T186 PR D: the Proxy tab (prototype #421) on the API' },
+  'PUT /proxy/reserved': { inFlight: 'T186 PR D: the Proxy tab (prototype #421) on the API' },
   'PATCH /projects/:project/:environment/dismissals': {
     ui: [
       { does: 'an environment › Missing keys › Dismiss, Dismiss all, and Undo after either', in: 'components/missing.tsx', call: 'environments.dismiss' },

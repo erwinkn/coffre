@@ -15,7 +15,10 @@ import { createDatabase } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { openLocalVault } from '../src/local.ts';
+import { openLocalVault as openEntry, spoken } from '../src/local.ts';
+
+/** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
+const openLocalVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
 
 const [ownerUrl, vaultUrl, keysArg, grantsArg, membersArg, checkpointedArg] = process.argv.slice(2);
 if (ownerUrl === undefined || vaultUrl === undefined) throw new Error('usage: cutover-bench.ts <owner url> <vault url> [keys] [grants] [members] [checkpointed]');

@@ -2,6 +2,7 @@
 // path's Hyperdrive and its checkpointer's Durable Object, which seals each
 // change before it answers (R51). Called over a service binding to itself,
 // as the app calls it.
+import { versioned, type VaultEntry } from '@coffre/core/vault';
 import { checkpointer, checkpointerStatus, postgres, startCheckpointer, vault } from '../../src/cloudflare.ts';
 
 type Env = {
@@ -12,7 +13,7 @@ type Env = {
   CHECKPOINTER: Parameters<typeof startCheckpointer>[0];
   /** Set by a test: each start of the checkpointer's object waits this many ms first, as one far away or busy would. */
   SLOW_CHECKPOINTER?: string;
-  VAULT: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  VAULT: VaultEntry;
 };
 
 /** The object's namespace, each start of it delayed `ms`, and nothing else: a call that skipped its start meets the log before it. */
@@ -46,7 +47,7 @@ export default {
     const { method, args } = (await request.json()) as { method: string; args: unknown[] };
     try {
       if (method === 'checkpointerStatus') return Response.json({ ok: true, result: await checkpointerStatus(env.CHECKPOINTER) });
-      return Response.json({ ok: true, result: await env.VAULT[method]!(...args) });
+      return Response.json({ ok: true, result: await (versioned(env.VAULT) as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[method]!(...args) });
     } catch (error) {
       return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
     }

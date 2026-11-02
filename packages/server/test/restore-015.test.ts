@@ -23,7 +23,7 @@ import type { UseOutcome } from '@coffre/core/vault';
 import { openDatabase, postgresClient } from '@coffre/db/connect';
 import { logObject } from '@coffre/db/log';
 import { migrateDatabase } from '@coffre/db/migrate';
-import { localVault, replayStored, runCheckpointer, type LocalVault, type RunningCheckpointer } from '@coffre/vault/node';
+import { localVault, spoken, replayStored, runCheckpointer, type SpokenVault, type RunningCheckpointer } from '@coffre/vault/node';
 import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
@@ -117,7 +117,7 @@ async function checkpointerOver(database: Parameters<typeof runCheckpointer>[0][
 
 let request = 0;
 
-function use(vault: Pick<TestVault, 'use'> | LocalVault, credential: string, secretId: string): Promise<UseOutcome> {
+function use(vault: Pick<TestVault, 'use'> | SpokenVault, credential: string, secretId: string): Promise<UseOutcome> {
   const at = Date.now();
   request += 1;
   return vault.use!({ credential, secretId, place: null, purpose: 'run', requestId: String(at * 1000 + request), at, deadline: at + 3000 });
@@ -185,10 +185,10 @@ test("a 0.15 instance backed up and restored comes back on 0.15: cut over, its t
     await assert.rejects(checkpointerOver(restoredVault.db, seed, 'memory'), /lost entries the signer sealed/);
     // Given a new memory, it takes the database's newest pair, and says so.
     const fresh = await checkpointerOver(restoredVault.db, seed, 'memory-restored');
-    const again = await localVault(
+    const again = spoken(await localVault(
       { database: restoredVault.db, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], hotDatabase: urlOf(restored, 'coffre_vault_hot:local-hot-only') },
       { log: '0.15', sealThrough: fresh.sealThrough, heldOutside: fresh.heldOutside },
-    );
+    ));
     assert.deepEqual(await again.cutover!(), { ok: true, done: true });
     const trees = await again.verifyTrees!();
     assert.ok(trees.kept && trees.ok && trees.checkpoint !== null, JSON.stringify(trees));
@@ -247,7 +247,7 @@ test('a backup taken before the vault key was rotated, restored under the new ke
   await signer.stop();
   const keys = { kek: { id: 'test-kek-2', key: newKek.toString('base64') }, previousKeks: [{ id: 'test-kek-1', key: oldKek.toString('base64') }] };
   const rotated = await checkpointerOver(await openVaultDatabase(), [newSeed, oldSeed], 'rotated-memory');
-  const under = await localVault({ database: await openVaultDatabase(), ...keys, owners: [ROOT], hotDatabase: TEST_HOT_DATABASE_URL }, { log: '0.15', sealThrough: rotated.sealThrough, heldOutside: rotated.heldOutside });
+  const under = spoken(await localVault({ database: await openVaultDatabase(), ...keys, owners: [ROOT], hotDatabase: TEST_HOT_DATABASE_URL }, { log: '0.15', sealThrough: rotated.sealThrough, heldOutside: rotated.heldOutside }));
   assert.ok((await under.setAccess({ actor: `user:${ROOT}`, caller: 'person', principal: CI, changes: [{ projectId, environmentId, role: 'developer', expiresAt: null }] })).ok);
   assert.equal((await db.owner.select().from(logChanges).where(eq(logChanges.object, KEY_OBJECT))).length, 1);
 
@@ -269,10 +269,10 @@ test('a backup taken before the vault key was rotated, restored under the new ke
     const fresh = await checkpointerOver(restoredVault.db, [newSeed, oldSeed], 'rotated-memory-restored');
     const moved = await restoredOwner.db.select().from(logChanges).where(eq(logChanges.object, KEY_OBJECT));
     assert.equal(moved.length, 1);
-    const again = await localVault(
+    const again = spoken(await localVault(
       { database: restoredVault.db, ...keys, owners: [ROOT], hotDatabase: urlOf(rotatedBack, 'coffre_vault_hot:local-hot-only') },
       { log: '0.15', sealThrough: fresh.sealThrough, heldOutside: fresh.heldOutside },
-    );
+    ));
     assert.equal(opened(await use(again, token.id, key!.id), key!.id, environmentId, projectId), 'one');
     assert.ok((await again.setAccess({ actor: `user:${ROOT}`, caller: 'person', principal: CI, changes: [{ projectId, environmentId, role: 'developer', expiresAt: null }] })).ok);
     const trees = await again.verifyTrees!();

@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-Dwhw_Cc4.js
+//#region ../client/dist/src-BDQezHH4.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1486,6 +1486,19 @@ function createClient(options) {
 			version: (path) => call("GET /projects/:project/:environment/version", place$1(path)),
 			/** Dismiss missing keys (`true`) or restore them (`null`). */
 			dismiss: (path, patch) => call("PATCH /projects/:project/:environment/dismissals", place$1(path), patch)
+		},
+		/**
+		* An environment's proxy definitions written in the UI (0.16): routes,
+		* signers, verifiers and tunnels, beside code's, which win a name both
+		* use. Whoever lists the environment reads them; a person holding
+		* `proxy.edit` there saves them, naming the seal the page loaded (409
+		* `proxy_changed` if another save came since).
+		*/
+		proxy: {
+			get: (path) => call("GET /projects/:project/:environment/proxy", place$1(path)),
+			save: (path, save) => call("PUT /projects/:project/:environment/proxy", place$1(path), save),
+			/** A name the deployment's code reserved freed for UI definitions, in every environment. Owners of the whole instance only. */
+			release: (name) => call("PUT /proxy/reserved", {}, { release: name })
 		},
 		secrets: {
 			/** Keys, versions and who changed what; never values. */
@@ -1788,9 +1801,9 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-CgQTlUMz.js
+//#region ../core/dist/access-1Ji1XVkE.js
 /**
-* Who may do what: eight permissions, the seven project roles a grant names,
+* Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
 *
 * Deliberately constants and not tables or a policy language. A grant names
@@ -1804,11 +1817,16 @@ async function planImport(coffre, path, entries) {
 * person's app, the credential proxy filling it in (docs/design/credential-proxy.md).
 * Every role that reads uses too. What a person gets is the narrower of the
 * two and the key's sensitivity: a sensitive key is only ever used.
+* `proxy.edit` writes an environment's proxy definitions in the UI
+* (docs/design/proxy-ui.md, section 8): only Owners hold it as roles ship,
+* and a role that holds it reads values too, since a definition sends its
+* keys wherever its upstream says.
 */
 const PERMISSIONS = [
 	"secret.read",
 	"secret.use",
 	"secret.write",
+	"proxy.edit",
 	"secret.archive",
 	"audit.read",
 	"environment.manage",
@@ -7354,7 +7372,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-BsyIQcko.js
+//#region ../client/dist/workload-B_gSRZo-.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -15517,6 +15535,7 @@ function getCalls({ places, secrets, members, services }) {
 		"GET /projects/:project/:environment/missing": places.map((params) => ({ params })),
 		"GET /personal/:project": [...new Set(places.map((params) => params.project))].map((project) => ({ params: { project } })),
 		"GET /projects/:project/:environment/version": places.map((params) => ({ params })),
+		"GET /projects/:project/:environment/proxy": places.map((params) => ({ params })),
 		"GET /secrets/:project/:environment/:key/versions": secrets.map((params) => ({ params })),
 		"GET /members": [{ params: {} }, ...first === void 0 ? [] : [{
 			params: {},
@@ -15599,6 +15618,9 @@ const EVERY_ROUTE = {
 	"GET /personal/:project": true,
 	"GET /projects/:project/:environment/version": true,
 	"PATCH /projects/:project/:environment/dismissals": true,
+	"GET /projects/:project/:environment/proxy": true,
+	"PUT /projects/:project/:environment/proxy": true,
+	"PUT /proxy/reserved": true,
 	"GET /secrets/:project/:environment": true,
 	"PATCH /secrets/:project/:environment": true,
 	"PATCH /secrets/:project/:environment/:key": true,

@@ -7,7 +7,7 @@
 import { github, signin } from '@coffre/core/identity';
 import { checkpointer, postgres as vaultDatabase, vault, type ObjectNamespace } from '@coffre/vault/cloudflare';
 
-import { createCoffre, postgres, type SocketsNamespace, type Vault as VaultBinding } from '../../src/cloudflare.ts';
+import { createCoffre, postgres, type SocketsNamespace, type VaultEntry as VaultBinding } from '../../src/cloudflare.ts';
 import { credentialProxy, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
 
 type Env = {

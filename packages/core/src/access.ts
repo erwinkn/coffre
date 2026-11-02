@@ -1,5 +1,5 @@
 /**
- * Who may do what: eight permissions, the seven project roles a grant names,
+ * Who may do what: nine permissions, the seven project roles a grant names,
  * and the five instance roles a person holds across every project.
  *
  * Deliberately constants and not tables or a policy language. A grant names
@@ -14,11 +14,16 @@
  * person's app, the credential proxy filling it in (docs/design/credential-proxy.md).
  * Every role that reads uses too. What a person gets is the narrower of the
  * two and the key's sensitivity: a sensitive key is only ever used.
+ * `proxy.edit` writes an environment's proxy definitions in the UI
+ * (docs/design/proxy-ui.md, section 8): only Owners hold it as roles ship,
+ * and a role that holds it reads values too, since a definition sends its
+ * keys wherever its upstream says.
  */
 export const PERMISSIONS = [
   'secret.read',
   'secret.use',
   'secret.write',
+  'proxy.edit',
   'secret.archive',
   'audit.read',
   'environment.manage',
@@ -229,8 +234,8 @@ export const FIXED_ROLES = { roles: ['owner'] as readonly string[], instanceRole
 
 /**
  * What is wrong with a role's definition, or null: a name and a
- * description; known permissions, each once; reading implies using, in
- * each column; and the protected column holds no more than the other, and
+ * description; known permissions, each once; reading implies using, and
+ * editing the proxy reading, in each column; and the protected column holds no more than the other, and
  * nothing project-wide.
  */
 export function definitionProblem(definition: RoleDefinition): string | null {
@@ -242,6 +247,7 @@ export function definitionProblem(definition: RoleDefinition): string | null {
       return `a role holds permissions from ${PERMISSIONS.join(', ')}, each once`;
     }
     if (column.includes('secret.read') && !column.includes('secret.use')) return 'a role that reads values uses them too: add secret.use';
+    if (column.includes('proxy.edit') && !column.includes('secret.read')) return 'a role that edits the proxy reads values too: add secret.read';
   }
   if (definition.protected.some((permission) => PROJECT_ONLY_PERMISSIONS.includes(permission))) return 'a project-wide permission has one column: a project is never protected';
   if (definition.protected.some((permission) => !permissions.includes(permission))) return 'a role holds no more in a protected environment than in one that is not';

@@ -48,13 +48,14 @@ import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
+import { withProxyCode } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { type AllowEntry, allows, bytesOf, climbs, methodsFor, readPattern, requestSegments } from './proxy-match.ts';
+import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, methodsFor, PARAMETER_NAME, PLACEHOLDER_PREFIX, readPattern, requestSegments, SIGNATURE_PREFIX } from '@coffre/core/proxy-match';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
@@ -339,6 +340,13 @@ export type CredentialProxyOptions = {
   /** Upstreams over plain HTTP, and at private, loopback or link-local addresses: for local fakes in development, never in production. */
   insecureUpstreams?: boolean;
   /**
+   * Whether Owners, and whoever a role gives `proxy.edit`, may write this
+   * deployment's proxy definitions per environment in the UI (0.16,
+   * docs/design/proxy-ui.md): off unless set. Code's definitions win a name
+   * both use, in every environment.
+   */
+  editable?: boolean;
+  /**
    * How long a credential's values, once opened for a handle, serve its
    * next requests from this process's memory: 60 seconds unless set, 0 for
    * a read per request. Each opening is one entry in the log; a revoked
@@ -378,13 +386,6 @@ const HANDLE_LENGTH = 'coffre_use_'.length + 43;
  * message as base64url, in JSON beside the rest.
  */
 const MESSAGE_BYTES = 64 * 1024;
-/**
- * The most an `hmac()`'s `maxBytes` may say: the body read before anyone is
- * authenticated (the proxy reads a request to compute up to what the
- * longest message takes) stays a fraction of a request through a
- * credential's, and the CPU within a Worker's Free plan.
- */
-const MAX_MESSAGE_BYTES = 1024 * 1024;
 /** What `binary` decodes bytes widened to UTF-16 units with: before anything below calls it. */
 const UTF16 = new TextDecoder('utf-16le');
 /** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
@@ -446,7 +447,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const cache = new Map<string, Kept>();
   const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
   const groups = new Map<string, Group>();
-  return {
+  return withProxyCode({
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
@@ -467,7 +468,11 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
         }
       },
     },
-  };
+  }, {
+    editable: options.editable === true,
+    insecureUpstreams: options.insecureUpstreams === true,
+    names: [...new Set([...credentials.keys(), ...tunnels.keys(), ...signers.keys(), ...verifiers.keys()])].sort(),
+  });
 }
 
 /** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timers: its checks', the one its bytes stop by, and its end's. */
@@ -1222,7 +1227,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   // segment as a server reads one, decoded, with its `;` parameters dropped as Tomcat and Spring drop them (`..;`).
   // Decoded as often as it changes, up to 8 times and refused past, since a server behind another decodes twice: `%252e%252e` is `..` to it. No control
   // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
-  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, proxy-match.ts.)
+  // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, @coffre/core/proxy-match.)
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
   const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
@@ -1249,7 +1254,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
  * null: 405 when no entry takes its method, on its path or on any; 403 when
  * it is its path no entry takes, or there is no entry. `relative` is the
  * path under the upstream as it goes, each segment matched decoded once
- * against an allow list, as written against legacy paths (proxy-match.ts). A `*` takes no empty segment (`//`) and none of `;`
+ * against an allow list, as written against legacy paths (@coffre/core/proxy-match). A `*` takes no empty segment (`//`) and none of `;`
  * parameters, spaces or dots alone, which a server may read as none, nor
  * does an `allow` path's trailing slash count one as what is below it; a
  * prefix, a `**`, a trailing slash past a segment a server reads as one, or
@@ -1980,17 +1985,6 @@ function fieldsIn(request: Request, body: Uint8Array | undefined, name: string, 
 }
 
 /**
- * A field's name as some upstream's parser may read it, the same as
- * another's: up to a `[` (PHP's and qs's arrays, `refresh_token[0]`),
- * case folded (Go's JSON, `SECRET` and `ſecret`), and its letters and
- * digits alone (PHP's `.` and space, `refresh.token`). Another name alike
- * the field's is the field twice, which upstreams read differently.
- */
-function alike(name: string): string {
-  return name.split('[', 1)[0]!.toUpperCase().toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-/**
  * A form's field, as WHATWG's parser reads one: `&`-separated pairs, the
  * name up to the first `=`, `+` a space and `%XX` a byte. Filled, the pair
  * keeps its name as written and takes the value form-encoded. Scanned as
@@ -2303,8 +2297,8 @@ function checkRule(name: string, inject: Inject): Rule {
   if (typeof inject !== 'object' || inject === null || !['header', 'query', 'form', 'json', 'basic', 'sigv4'].includes(inject.kind)) {
     throw new Error(`credentialProxy: ${name}'s inject is header(…), query(…), form(…), json(…), basic(…) or sigv4(…), or a list of them`);
   }
-  if ((inject.kind === 'header' || inject.kind === 'query') && !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
-  if (inBody(inject) && !/^(?=.*[A-Za-z0-9])[A-Za-z0-9_.-]{1,128}$/.test(inject.name)) throw new Error(`credentialProxy: ${name} fills the field ${JSON.stringify(inject.name)}, which is no field name: letters, digits and _.-, a letter or digit among them, at the top of the body`);
+  if ((inject.kind === 'header' || inject.kind === 'query') && !PARAMETER_NAME.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
+  if (inBody(inject) && !FIELD_NAME.test(inject.name)) throw new Error(`credentialProxy: ${name} fills the field ${JSON.stringify(inject.name)}, which is no field name: letters, digits and _.-, a letter or digit among them, at the top of the body`);
   if (inject.kind === 'sigv4' && (!/^[a-z0-9-]{1,32}$/.test(inject.region) || !/^[a-z0-9-]{1,32}$/.test(inject.service))) throw new Error(`credentialProxy: ${name} signs for a region and a service, eu-west-3 and s3`);
   const keys = [...new Set(templatesOf(inject).flatMap((template) => [...template.matchAll(TEMPLATE_KEY)].map((match) => match[1]!)))];
   if (keys.length === 0) throw new Error(`credentialProxy: ${name}'s rule names no key: write it as {KEY}, as header('x-api-key', '{SCHUMANN_API_KEY}')`);
@@ -2415,10 +2409,10 @@ const notServed = (name: string, path: string) => failure(404, `${name} does not
 /** A placeholder as configured, checked: `jwt(…)` naming the claims it copies, or `prefix(…)`. */
 function checkPlaceholder(name: string, placeholder: Placeholder): void {
   if (placeholder.kind !== 'jwt' && placeholder.kind !== 'prefix') throw new Error(`credentialProxy: ${name}'s placeholder is jwt(…) or prefix(…)`);
-  if (placeholder.kind === 'jwt' && (!Array.isArray(placeholder.claims) || placeholder.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === 'exp'))) {
+  if (placeholder.kind === 'jwt' && (!Array.isArray(placeholder.claims) || placeholder.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === HANDLE_CLAIM))) {
     throw new Error(`credentialProxy: ${name}'s jwt() names the claims it copies from the real token, each a string; exp is the handle's end, never copied`);
   }
-  if (placeholder.kind === 'prefix' && !/^[A-Za-z0-9._~+/:=-]{1,64}$/.test(placeholder.prefix)) throw new Error(`credentialProxy: ${name}'s prefix() is up to 64 letters, digits and ._~+/:=-, sk_test_; got ${JSON.stringify(placeholder.prefix)}`);
+  if (placeholder.kind === 'prefix' && !PLACEHOLDER_PREFIX.test(placeholder.prefix)) throw new Error(`credentialProxy: ${name}'s prefix() is up to 64 letters, digits and ._~+/:=-, sk_test_; got ${JSON.stringify(placeholder.prefix)}`);
 }
 
 /**
@@ -2477,7 +2471,7 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
     if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, maxBytes, limit and environments, and signs with SHA-256 alone; got ${unknown}`);
     if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_MESSAGE_BYTES)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, 1 MiB at most`);
     if (signer.encoding !== 'hex' && signer.encoding !== 'base64' && signer.encoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() writes its signatures in hex, base64 or base64url`);
-    if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !/^[\x21-\x7e]{1,32}$/.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
+    if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !SIGNATURE_PREFIX.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
   }
   limited(name, signer.limit);
   // The app holds one value for a key, and a signer's is the handle as it is.

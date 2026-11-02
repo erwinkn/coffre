@@ -779,6 +779,7 @@ const REASONS: Record<string, string> = {
 const MISSING: Record<string, string> = {
   secret_read: 'no grant to read it',
   secret_write: 'no grant to write',
+  proxy_edit: 'no grant to edit the proxy definitions',
   secret_archive: 'no grant to archive',
   audit_read: 'no grant to read the audit log',
   environment_manage: 'no grant to manage environments',

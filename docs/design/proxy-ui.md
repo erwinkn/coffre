@@ -229,7 +229,8 @@ The object holds each item with what its save froze:
 { "items": [
   { "definition": { "kind": "route", "name": "openai", "upstream": "https://api.openai.com/v1", "inject": [ … ], "allow": [ … ] },
     "savedBy": "user:ada@acme.example", "savedAt": 1793560000000,
-    "holdings": [ { "projectId": "…", "environmentId": null, "role": "owner", "permissions": { "normal": [ … ], "protected": [ … ] }, "sensitive": true } ] }
+    "holdings": { "role": "member", "scope": { "projects": "all", "environments": "all" }, "instance": { "normal": [], "protected": [] },
+                  "grants": [ { "projectId": "…", "environmentId": null, "role": "owner", "permissions": { "normal": [ … ], "protected": [ … ] } } ] } }
 ] }
 ```
 
@@ -237,10 +238,16 @@ No answer to the app carries `holdings`: a use's, `proxyItem`'s and
 `GET …/proxy`'s carry the definition, and `route_not_cleared` names the
 editor in the vault's own message.
 
-`holdings` is the editor's grants as a service token's scope keeps them
-(`ScopeGrant` in `@coffre/core/access`: place, columns held, and `sensitive`
-where they could hand a service sensitive reads, R32). Section 8 explains
-how a use weighs it. An item the save did not change keeps its `savedBy` and
+`holdings` is the editor's standing as a service token's scope keeps it:
+their instance role, its scope and its columns, and each grant with its
+role's columns (`ScopeGrant` in `@coffre/core/access`), each as the policy
+defined it at the save, so no role widened later widens the route. It is
+their grants, not what they held at the places the save saw: a fork made
+later inherits the definition, and is decided by the grants that reach it
+(a `router` on `market/dev` reads none of `market/dev-eu`'s own keys, a
+`router` on all of `market` does). Who routes sensitive values is whoever
+those holdings make an Owner of the project (R66). Section 8 explains how a
+use weighs it. An item the save did not change keeps its `savedBy` and
 `holdings`. So Bo's edit of `maps` leaves Ada's `openai` cleared as Ada.
 
 ### Changes and audit
@@ -1537,6 +1544,60 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   refused naming who may, an inherited key the editor cannot read in the
   parent refused, a reference decided where it lives, a key not yet
   created accepted.
+
+**PR A as built** (W310). Where it settles what this section left open, or
+reads it otherwise:
+- **The routes** take the API's shape for an environment's own leaf:
+  `GET`/`PUT /api/projects/<p>/<e>/proxy`, as `…/missing` and `…/version`.
+  The page's answer adds `editable` (this caller may save here now) and
+  `code` (the names this deployment's code defines, shown locked).
+- **Frozen holdings** are the editor's standing, as section 2 has it
+  (`FrozenHoldings` in `inputs.ts`): their instance role, its scope and
+  columns, and each live grant with its role's columns. PR C decides them
+  with `frozenAllows` and `frozenOwns` (`packages/vault/src/proxy.ts`), as
+  `allows` and `ownsProject` decide over roles as they were, at any place:
+  a fork made after the save, or a key that became a reference into another
+  project, included.
+- **The object's CAS is on its newest change, not its row.** `change_input`
+  writes a `proxy` row whole from its value, moving on only from the seal
+  of the object's newest change, under the fence; it never weighs the row.
+  The vault decides each save from the object as its log has it
+  (`heldByLog`), so a forged row is never carried on, and a `tampered` or
+  `stale` one takes only a save that replaces it whole (`replace: true`),
+  by an Owner of the project. An item the save does not name keeps its
+  editor and holdings. One it names is saved again under its editor's
+  standing now, its definition unchanged included: that is how an Owner
+  clears a route its earlier editor no longer can (section 8's "must save
+  it again"). Only an item named with the same definition, by the same
+  editor, holding the same, changes nothing, and a save of only those logs
+  nothing. A replace's entry names every item it drops.
+- **Every decision also writes a vault entry** (`proxy.save`, `proxy.code`,
+  `proxy.release`): each refusal, and the audit page's diff, the sensitive
+  keys an item routes among it (R66).
+- **`proxy.code` is a vault method already** (`reserveProxy`), with no
+  route: PR C's gate calls it. An environment whose row fails its seal is
+  passed over: it serves nothing (R64), and the name stays reserved.
+- **The fork lookup** (section 2) is a pure function, `proxyLookup` in
+  `packages/vault/src/proxy.ts`, over full rows; PR C's statement reads one
+  item and the index.
+- **The version gate's helpers live in `@coffre/core/vault`**: `gated`
+  (the vault's side), `versioned` (the app's) and `Deploying`, which the
+  app's `toErrorBody` answers 503 `deploying` and sign-in's catch-alls
+  rethrow (`deployingIn`), so the vault suite speaks through the envelope
+  too (`spoken`). `CoffreConfig.vault` is a `VaultEntry`; the app's two
+  handlers wrap it before `createRuntime`, the one place a `Vault` is made
+  from the deployment's entry.
+- **A definition is saved only as the proxy would take it.** The allow
+  list's patterns are read by the proxy's own parser (`readPattern` as a
+  Proxy tab's, in `@coffre/core/proxy-match`, moved from the server), so
+  `/tenants/%2561/*`, `/a;v1/*` and `/a./*` are refused at save as code's
+  are; inject rules' names and slots are the proxy's too (`PARAMETER_NAME`,
+  `FIELD_NAME`, `alike`: query `secret` and `SECRET` are one). No allow list
+  is kept as `null`, every request, and an empty one as `[]`, none: the
+  sealed definition says which.
+- **The app's checks**: `credentialProxy({ editable })`, off by default; a
+  name code defines (409); an egress or a network, none of which code can
+  declare before PR C (400).
 
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.

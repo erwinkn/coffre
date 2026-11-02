@@ -14,6 +14,8 @@ export default defineConfig({
     // 0.15's audit trees: the tree, tiles, checkpoints, the head pair and the verifier's walk.
     merkle: 'src/audit/merkle.ts',
     pages: 'src/pages.ts',
+    // A credential proxy's allow lists and inject rules: what the proxy matches and what a saved definition must be.
+    'proxy-match': 'src/proxy-match.ts',
     // How a generated value is made, for the pages, the CLI and the server's checks.
     recipe: 'src/recipe.ts',
     schemas: 'src/schemas.ts',

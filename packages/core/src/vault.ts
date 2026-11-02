@@ -6,6 +6,9 @@ import type { CallerKind, CredentialScope, GrantPlace, InstanceRole, Policy, Rol
 export type { CallerKind } from './access.ts';
 
 export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './checkpoint.ts';
+export { Deploying, gated, isDeploying, RELEASE, VAULT_METHODS, versioned, type VaultAnswer, type VaultEntry, type VaultMethod } from './vault-entry.ts';
+export * from './proxy.ts';
+import type { ProxyDefinition } from './proxy.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 export {
   answerFrom,
@@ -395,7 +398,93 @@ export interface Vault {
    * that does not answer is said not to seal, at once.
    */
   sealing?(): Promise<Sealing>;
+
+  /**
+   * An environment's proxy definitions, written in the UI (0.16,
+   * docs/design/proxy-ui.md), and the names code reserved: what the Proxy
+   * tab shows. Read from the vault's sealed object, never the app's rows:
+   * a forged object shows as `tampered`, its items none. No item carries
+   * the holdings its save froze.
+   */
+  proxy(input: ProxyInput): Promise<ProxyView>;
+
+  /**
+   * An environment's proxy definitions changed, by a person holding
+   * `proxy.edit` there on a session of theirs (`proxy.save`): each item
+   * named added or replaced, or removed (null), the rest left as they are,
+   * or, with `replace`, every other item removed. Refused `proxy_changed`
+   * unless the object's newest change is still the one the page loaded
+   * (`seal`). Each changed item's keys are cleared for the editor, whose
+   * holdings it freezes; a reserved name is refused. Answers once sealed.
+   */
+  saveProxy(input: SaveProxyInput): Promise<Outcome<{ view: ProxyView }>>;
+
+  /**
+   * The names the deployment's code defines, reserved (`proxy.code`): each
+   * new one added to the instance's reserved set, and every UI item of
+   * that name, in every environment, deleted, each whole in its entry. The
+   * app's own call, at its gate before it serves a proxy request; no route
+   * makes one. Idempotent: names already reserved write nothing.
+   */
+  reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>>;
+
+  /**
+   * A reserved name freed, instance-wide, by an instance Owner on a session
+   * of theirs (`proxy.release`): UI items may take it again.
+   */
+  releaseProxy(input: ReleaseProxyInput): Promise<Outcome<{ reserved: string[] }>>;
 }
+
+/** Whose proxy definitions: an environment, by its project's id and its own. */
+export type ProxyInput = { projectId: string; environmentId: string };
+
+/**
+ * A UI item as the tab shows it: its definition, the keys it sends, who
+ * saved it and when, and whether its save cleared it for sensitive keys
+ * (its editor an Owner covering the place, R66), never their holdings.
+ */
+export type ProxyItemView = {
+  definition: ProxyDefinition;
+  keys: string[];
+  savedBy: string;
+  savedAt: number;
+  routesSensitive: boolean;
+};
+
+/**
+ * An environment's proxy definitions as its sealed object holds them, and
+ * the instance's reserved names. `seal` is that of the object's newest
+ * logged change, base64 (null: never changed), which a save names; a
+ * `tampered` or `stale` object holds no item to show, and takes only a
+ * save that replaces it whole.
+ */
+export type ProxyView = {
+  environmentId: string;
+  seal: string | null;
+  state: 'ok' | 'tampered' | 'stale';
+  items: ProxyItemView[];
+  reserved: string[];
+  reservedState: 'ok' | 'tampered' | 'stale';
+};
+
+export type SaveProxyInput = Correlation & Through & ProxyInput & {
+  actor: string;
+  /** The seal the page loaded (`ProxyView.seal`): refused, `proxy_changed`, if another change came since. */
+  seal: string | null;
+  /** By name: the item it is now, or null for none. */
+  items: Record<string, ProxyDefinition | null>;
+  /** Every item `items` does not name removed: an Owner's one save of a forged object. */
+  replace?: boolean;
+  /** The app's `insecureUpstreams`, which lets a definition reach a local fake. */
+  insecureUpstreams?: boolean;
+};
+
+export type ReserveProxyInput = Correlation & { names: string[] };
+
+export type ReleaseProxyInput = Correlation & Through & { actor: string; name: string };
+
+/** A UI item `proxy.code` deleted, because code reserved its name. */
+export type ClearedItem = { environmentId: string; name: string };
 
 /** Whether 0.15's checkpointer seals, and if not, why (`Vault.sealing`). */
 export type Sealing = { ok: true } | { ok: false; reason: string };
@@ -407,6 +496,13 @@ export type Sealing = { ok: true } | { ok: false; reason: string };
  * crosses Workers' RPC: the app answers 503 with Retry-After
  * (`isUnsealed`), and the change is in force.
  */
+/**
+ * At most how many parents stand above an environment: `prod`, `prod-eu`,
+ * and `prod-eu-canary` above `prod-eu-canary-a` (docs/design/forking.md).
+ * The app's reads and the vault's proxy lookups walk no further.
+ */
+export const MAX_PARENTS = 3;
+
 export const UNSEALED = 'was committed, but not sealed in time';
 
 /** Whether `error`, or one of its causes, is a change's seal that did not come in time (`UNSEALED`). */
@@ -999,6 +1095,19 @@ export type RefusalCode =
    */
   | 'wrong_kek'
   /**
+   * An environment's proxy definitions changed since the page that saves
+   * them loaded: it shows the change, and saves again on top of it.
+   */
+  | 'proxy_changed'
+  /** A name the deployment's code reserved: no UI item takes it until an instance Owner releases it. */
+  | 'reserved'
+  /**
+   * A proxy definition sends a key its editor could not route: one they
+   * cannot read, or a sensitive one when they are no Owner covering its
+   * place (R66). Someone who holds it saves the item again.
+   */
+  | 'route_not_cleared'
+  /**
    * The member's row or grants were changed outside the vault, or put back
    * from before a later change: it refuses them until an owner removes them,
    * which starts their access over from the log.
@@ -1028,6 +1137,9 @@ export const REFUSAL_MESSAGES: Record<RefusalCode, string> = {
   access_changed: 'what this member holds changed since the read was decided: try again',
   log_broken: 'the vault log does not hold from the last checkpoint',
   wrong_kek: "this vault's key does not open the data it holds",
+  proxy_changed: "this environment's proxy definitions changed since they were loaded: review the change, then save again",
+  reserved: "this name is reserved by the deployment's code",
+  route_not_cleared: 'this definition sends a key its editor may not route',
   tampered: "this member's record failed the vault's integrity check",
 };
 
