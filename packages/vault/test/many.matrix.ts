@@ -93,10 +93,11 @@ const usable = (row: Row, state: State) => {
 };
 const labelOf = (row: Row) => `${row.where} / ${row.lost} / ${row.map} / ${row.ask} / window ${row.window}`;
 const count = async (query: ReturnType<typeof sql>) => Number((await rows<{ n: number | string }>(db.owner, query))[0]!.n);
-// Each statement held back 1.2 s on Postgres, the use's deadline 3 s: a refusal decided on the first statement's rows, or
-// a sealed key not mapped on the batch by ids' first round, the second, answers in time; a third statement, or a lock
-// waited for, runs past it (`late`). forks.matrix.ts's one key holds its refusal to one statement, at 1.6 s.
-const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1200);
+// Each statement held back 1 s on Postgres, the use's deadline 3 s: a refusal decided on the first statement's rows, or
+// a sealed key not mapped on the batch by ids' first round, the second, answers in time, with a second for the rest of
+// its work (a cold isolate's first, on a loaded runner: at 1.2 s, CI's ran past it); a third statement's delays alone
+// reach the deadline (`late`). forks.matrix.ts's one key holds its refusal to one statement, at 1.6 s.
+const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1000);
 const LAPSES_MS = ENGINE === 'postgres' ? 2500 : 300;
 
 async function inPeriod(ms: number): Promise<void> {
@@ -187,6 +188,7 @@ async function cell(row: Row, states: readonly [State, State]) {
       const capRows = () => count(sql`SELECT count(*) AS n FROM log_bulk WHERE principal = ${w.principal}`);
       if (row.window === 'passed') await run(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${w.principal}`);
       const [beforeEntries, beforeCap] = [await entries(), await capRows()];
+      await measured.connect();
       measured.slow(delayOf());
       const before = measured.statements();
       const now = Date.now();

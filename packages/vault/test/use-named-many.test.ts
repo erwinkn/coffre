@@ -192,6 +192,24 @@ test('AllDecidedFirst: a key refused (a reference ended) refuses the batch at it
   assert.equal(await count('log_bulk'), 0, 'refused reads never insert');
 });
 
+test('the first key refused answers, whatever the map holds: a sealed key not mapped, before one refused on the first statement', async () => {
+  // Review r2 of T165 PR 2: cold, the sealed key was left to the batch by ids, and the reference after it, refused on the
+  // statement's rows, answered for the batch; warm, the sealed key, by its ids on the statement, did.
+  const w = await named({ caller: 'person' });
+  const id = await w.key('hidden', true);
+  const hidden = await w.nameOf(id);
+  await w.end(await w.reference('ENDED'));
+  const ask = () => many(w, [hidden, 'ENDED'], { purpose: 'run' });
+  const first = { key: hidden, code: 'sensitive' };
+  const { vault, cache } = await isolate();
+  assert.deepEqual(refused(await vault.useNamedMany!(ask())), first, 'cold');
+  // The statement resolved its name, so the map now holds its ids, which the same request passes next.
+  assert.deepEqual(cache.keyed(w.dev, hidden), { id, through: false });
+  assert.deepEqual(refused(await vault.useNamedMany!(ask())), first, 'warm');
+  assert.equal(await count('log_uses'), 0, 'neither key used');
+  assert.equal(await count('log_bulk'), 0, 'refused reads never insert');
+});
+
 test('LeaveFirst: a read that leaves sensitive values out uses none of them, naming them; the rest are used', async () => {
   const w = await named({ caller: 'person' });
   const open = await w.key('open');

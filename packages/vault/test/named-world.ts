@@ -241,9 +241,10 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
     });
     const prepared = await prepareVault(CONFIG, LOG_015);
     const vault = openVault(db.vault, prepared, hot);
-    return { vault, cache: prepared.uses, statements: () => statements, last: (): HotCall | null => null, slow: (_ms: number) => {}, end: async () => {} };
+    return { vault, cache: prepared.uses, statements: () => statements, last: (): HotCall | null => null, slow: (_ms: number) => {}, connect: async () => {}, end: async () => {} };
   }
-  const pool = new Proxy(postgresClient(HOT_URL, { max: options.connections ?? 4 }), {
+  const client = postgresClient(HOT_URL, { max: options.connections ?? 4 });
+  const pool = new Proxy(client, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key !== 'unsafe') return value;
@@ -258,7 +259,9 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   });
   const prepared = await prepareVault(CONFIG, LOG_015);
   const vault = openVault(db.vault, prepared, createDatabase(pool));
-  return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, end: () => pool.end() };
+  // `connect`: the pool's connection opened, by a statement no count or delay sees, so that a measured call's time is its own.
+  const connect = async () => { await client.unsafe('SELECT 1'); };
+  return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 
 /** A `use_credential` call as it was sent: its text and its arguments, `$1` first. */

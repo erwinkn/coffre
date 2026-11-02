@@ -417,6 +417,9 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
   return { ok: true, values };
 }
 
+/** A batch by ids' answer when not every key was allowed: the first key in order refused, or busy. */
+type ByIdsRefused = { index: number; used: Used | Allowed | Uncovered } | Extract<UseOutcome, { busy: UseBusy }>;
+
 /**
  * A batch's uses by ids (T167; formal/Batching.tla), `useMany`'s rounds: each key's use made as `use` makes it, by ids,
  * in order, in one statement (of at most `limits.batch` keys: more in statements of that many, in turn), and decided on
@@ -424,10 +427,13 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
  * (AllDecidedFirst), one more call for the keys that would take the principal's lock, which answered `decide` having
  * written and locked nothing: it takes the lock exclusive before its first key (StrongestFirst), and each key is decided
  * again on what it reads then. Every key allowed, its key yet to open; or the first key in order not allowed; or busy.
+ * `rounds: 1`, its first round alone, which locks nothing: the first key refused, or busy, or `undecided`.
  */
+async function byIds(path: UsePath, input: Pick<UseInput, 'at' | 'deadline'>, each: readonly Asked[], seals: typeof sealed): Promise<{ allowed: Allowed[] } | ByIdsRefused>;
+async function byIds(path: UsePath, input: Pick<UseInput, 'at' | 'deadline'>, each: readonly Asked[], seals: typeof sealed, rounds: 1): Promise<{ undecided: true } | ByIdsRefused>;
 async function byIds(
-  path: UsePath, input: Pick<UseInput, 'at' | 'deadline'>, each: readonly Asked[], seals: typeof sealed,
-): Promise<{ allowed: Allowed[] } | { index: number; used: Used | Allowed | Uncovered } | Extract<UseOutcome, { busy: UseBusy }>> {
+  path: UsePath, input: Pick<UseInput, 'at' | 'deadline'>, each: readonly Asked[], seals: typeof sealed, rounds: 1 | 2 = 2,
+): Promise<{ allowed: Allowed[] } | { undecided: true } | ByIdsRefused> {
   const settled: (Used | Allowed | Uncovered | undefined)[] = [];
   let pending = each.map((_, index) => index);
   for (let round = 1; pending.length > 0; round++) {
@@ -453,8 +459,10 @@ async function byIds(
     const first = settled.findIndex((one) => one !== undefined && !('again' in one) && !('allowed' in one));
     if (first >= 0) return { index: first, used: settled[first]! };
     pending = settled.flatMap((one, index) => (one !== undefined && 'again' in one ? [index] : []));
+    // Asked for its first round alone: none refused, some perhaps yet to take the lock, which it never takes.
+    if (rounds === 1) return { undecided: true };
   }
-  return { allowed: settled as Allowed[] };
+  return rounds === 1 ? { undecided: true } : { allowed: settled as Allowed[] };
 }
 
 /**
@@ -990,7 +998,18 @@ export async function useNamedMany(path: UsePath, input: NamedManyInput): Promis
     else decided.push({ refused: used });
   }
   const refusedFirst = decided.findIndex((one) => 'refused' in one);
-  if (refusedFirst >= 0) return { ...named, stands: true, keys: out, outcome: refusal(refusedFirst, (decided[refusedFirst] as { refused: Used | Allowed | Uncovered }).refused) };
+  if (refusedFirst >= 0) {
+    // A key refused on the statement's rows, with keys before it left to the batch by ids: a warm map would have decided
+    // those on the statement, so they are decided as its first round decides them, which takes no lock, and the first key
+    // refused in the request's order answers, whatever the isolate's map held (review r2 of T165 PR 2).
+    const before = decided.flatMap((one, index) => (index < refusedFirst && 'again' in one ? [{ index, asked: { ...one.asked, ...one.again } }] : []));
+    if (before.length > 0) {
+      const made = await byIds(path, input, before.map((one) => one.asked), seals, 1);
+      if ('busy' in made) return { ...named, stands: true, keys: out, outcome: made };
+      if ('index' in made) return { ...named, stands: true, keys: out, outcome: refusal(before[made.index]!.index, made.used) };
+    }
+    return { ...named, stands: true, keys: out, outcome: refusal(refusedFirst, (decided[refusedFirst] as { refused: Used | Allowed | Uncovered }).refused) };
+  }
   // Every key allowed: the rest made by the ids its row read, as a batch by ids makes them, decided again.
   const again = decided.flatMap((one, index) => ('again' in one ? [{ index, asked: { ...one.asked, ...one.again } }] : []));
   const values: (NamedValue | null)[] = decided.map((one) => ('plain' in one ? { plain: one.plain, versionId: one.versionId } : null));
