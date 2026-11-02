@@ -35,13 +35,14 @@ const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's obje
 
 let upstream: Server;
 let upstreamUrl: string;
-const reached: { method: string; url: string; headers: IncomingMessage['headers'] }[] = [];
+const reached: { method: string; url: string; headers: IncomingMessage['headers']; body: string }[] = [];
 
 before(async () => {
   upstream = createServer((request, response) => {
-    request.resume();
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.on('end', () => {
-      reached.push({ method: request.method!, url: request.url!, headers: request.headers });
+      reached.push({ method: request.method!, url: request.url!, headers: request.headers, body: Buffer.concat(chunks).toString() });
       response.writeHead(200, { 'content-type': 'application/json' }).end('{"ok":true}');
     });
   });
@@ -329,6 +330,42 @@ test("values go out within their window: a body that comes after the use's deadl
   assert.equal((await route('/use/openai/chat/completions', as(token, { method: 'POST', body: '{"model":"gpt"}' }))).status, 200);
 });
 
+test("values go out within their window however long signing takes: a SigV4 request signed after the deadline is sent with none (review r3 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
+  await save({
+    s3: {
+      kind: 'route', name: 's3', upstream: `${upstreamUrl}/s3`, inject: [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }],
+      allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+    },
+  });
+  const token = await handle();
+  const signer = new SignatureV4({ credentials: { accessKeyId: token, secretAccessKey: 'placeholder' }, region: 'eu-west-3', service: 's3', sha256: Sha256, uriEscapePath: false, applyChecksum: false });
+  const target = new URL(`${ORIGIN}/use/s3/bucket/report.csv`);
+  const signed = await signer.sign({ method: 'GET', protocol: 'https:', hostname: target.hostname, path: target.pathname, headers: { host: target.host, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' } });
+  // The proxy's own signature, its last HMAC (of the string to sign), made after the values' window closed.
+  const real = crypto.subtle.sign.bind(crypto.subtle);
+  let slowed = 0;
+  crypto.subtle.sign = (async (algorithm: AlgorithmIdentifier, key: CryptoKey, data: BufferSource) => {
+    if (new TextDecoder().decode(data as Uint8Array).startsWith('AWS4-HMAC-SHA256\n')) {
+      slowed += 1;
+      await new Promise((resolve) => setTimeout(resolve, USE_DEADLINE_MS + 500));
+    }
+    return real(algorithm, key, data);
+  }) as typeof crypto.subtle.sign;
+  try {
+    const late = await route('/use/s3/bucket/report.csv', { headers: signed.headers });
+    assert.equal(late.status, 503, await late.clone().text());
+    assert.equal((await late.json() as { reason: string }).reason, 'late');
+  } finally {
+    crypto.subtle.sign = real;
+  }
+  assert.equal(slowed, 1);
+  assert.equal(reached.length, 0);
+  // Signed in time, the same request goes.
+  assert.equal((await route('/use/s3/bucket/report.csv', { headers: signed.headers })).status, 200);
+});
+
 test("a personal config's plan: its UI items none, the plan given (review r1 of #467)", ON_015, async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   const token = await handle('market/dev@me');
@@ -407,12 +444,58 @@ for (const cacheSeconds of [60, 0]) {
   });
 }
 
+for (const cacheSeconds of [60, 0]) {
+  test(`a project named as code's credential is: its UI route's handle wherever the item takes it, the body read once, cacheSeconds ${cacheSeconds} (review r3 of #467)`, ON_015, async () => {
+    deploy(proxyOf({ cacheSeconds }));
+    await root.projects.create('maps');
+    await root.environments.create('maps/dev');
+    await root.secrets.set('maps/dev', { OPENAI_API_KEY: OPENAI });
+    await root.access.set(`user:${DEV}`, { market: 'developer', maps: 'developer' });
+    const allow = [{ methods: ['POST'], path: '/chat/completions' }, { methods: ['POST'], path: '/token' }];
+    await save({
+      openai: { ...uiRoute('openai', '/openai'), inject: [{ kind: 'header', name: 'x-openai-key', template: '{OPENAI_API_KEY}' }], allow } as ProxyDefinition,
+      login: { ...uiRoute('login', '/login'), inject: [{ kind: 'form', name: 'client_secret', template: '{OPENAI_API_KEY}' }], allow } as ProxyDefinition,
+    }, root, 'maps/dev');
+    const token = await handle('maps/dev');
+    // Code's `maps` takes its handle in x-api-key: this one is in the route's own header, which code's reading never looks at.
+    const body = '{"model":"gpt","messages":[]}';
+    const custom = await route('/use/maps/dev/openai/chat/completions', { method: 'POST', headers: { 'x-openai-key': token, 'content-type': 'application/json' }, body });
+    assert.equal(custom.status, 200, await custom.clone().text());
+    assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.headers['x-openai-key'], reached.at(-1)!.body], ['/openai/chat/completions', OPENAI, body]);
+    // Only in the body, as a form rule takes it.
+    const form = await route('/use/maps/dev/login/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `grant_type=client_credentials&client_secret=${token}` });
+    assert.equal(form.status, 200, await form.clone().text());
+    assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.body], ['/login/token', `grant_type=client_credentials&client_secret=${encodeURIComponent(OPENAI)}`]);
+    // As x-coffre-handle, with a body: code's `maps` reads the body first, with no cache, and the route sends the same bytes.
+    const coffre = await route('/use/maps/dev/openai/chat/completions', { method: 'POST', headers: { 'x-coffre-handle': token, 'content-type': 'application/json' }, body });
+    assert.equal(coffre.status, 200, await coffre.clone().text());
+    assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.headers['x-openai-key'], reached.at(-1)!.body], ['/openai/chat/completions', OPENAI, body]);
+    // A handle made for another environment is code's `maps` at /dev/openai/…, which finds no handle where it takes its key.
+    assert.equal((await route('/use/maps/dev/openai/chat/completions', { method: 'POST', headers: { 'x-openai-key': await handle() }, body })).status, 401);
+    assert.equal(reached.length, 3);
+  });
+}
+
 test('two routes reading one key with different placeholders: the plan refuses (409), as startup refuses it of code (review r2 of #467)', ON_015, async () => {
   const shaped = (name: string, prefix: string): ProxyDefinition => ({ ...uiRoute(name, `/${name}`), placeholder: { kind: 'prefix', prefix } } as ProxyDefinition);
   await save({ alpha: shaped('alpha', 'a_'), beta: shaped('beta', 'b_') });
   const planned = await route('/use/market/dev', as(await handle()));
   assert.equal(planned.status, 409, await planned.clone().text());
   assert.match((await planned.json() as { message: string }).message, /alpha and beta read OPENAI_API_KEY with different placeholders/);
+});
+
+test("a UI route shaping a code signer's key: the plan refuses (409), as startup refuses it of code's own (review r3 of #467)", ON_015, async () => {
+  await root.secrets.set('market/dev', { SIGNING_KEY: 'a signing key' });
+  await save({ tokens: { ...uiRoute('tokens', '/tokens', 'SIGNING_KEY'), placeholder: { kind: 'prefix', prefix: 'sk_test_' } } as ProxyDefinition });
+  const token = await handle();
+  const planned = await route('/use/market/dev', as(token));
+  assert.equal(planned.status, 409, await planned.clone().text());
+  assert.match((await planned.json() as { message: string }).message, /tokens and signing read SIGNING_KEY with different placeholders/);
+  // Without the placeholder, both take the handle as it is: the plan is given.
+  await save({ tokens: uiRoute('tokens', '/tokens', 'SIGNING_KEY') });
+  const plan = await route('/use/market/dev', as(token));
+  assert.equal(plan.status, 200, await plan.clone().text());
+  assert.equal((await plan.json() as { env: Record<string, string> }).env.SIGNING_KEY, token);
 });
 
 test("a UI route's upstream goes out through the runtime's public fetch, and a runtime without one sends nothing (review r2 of #467)", ON_015, async () => {

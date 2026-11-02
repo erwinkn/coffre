@@ -116,6 +116,29 @@ test("the public fetch, a UI route's upstream's on Node, dials no address that i
   assert.ok(asked >= 1);
 });
 
+test('the public fetch dials no address written as one that is not public, which Node connects to without a lookup (review r3 of #467)', async () => {
+  let asked = 0;
+  const counting: typeof publicLookup = (hostname, options, callback) => {
+    asked += 1;
+    publicLookup(hostname, options, callback);
+  };
+  const fetch = publicFetch(counting);
+  for (const host of ['240.0.0.1', '10.0.0.5', '127.0.0.1', '169.254.169.254', '100.64.0.1', '[::1]', '[::ffff:a00:5]', '[fd12:3456::1]', '[fe80::1]', '[64:ff9b::a00:5]']) {
+    await assert.rejects(
+      fetch(new URL(`https://${host}:8443/v1/models`), { method: 'GET' }),
+      (error: Error) => (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOTPUBLIC',
+      host,
+    );
+    await assert.rejects(
+      nodeTransport().json(new URL(`https://${host}/.well-known/openid-configuration`)),
+      (error: Error) => error instanceof FetchRefused && (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOTPUBLIC',
+      host,
+    );
+  }
+  // Refused before undici is asked: no lookup, no connection.
+  assert.equal(asked, 0);
+});
+
 test('the Node transport speaks plain HTTP only to loopback', async () => {
   await assert.rejects(nodeTransport().json(new URL('http://idp.acme.example/x')), /plain HTTP reaches only loopback/);
 });

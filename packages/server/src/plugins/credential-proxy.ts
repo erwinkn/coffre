@@ -631,7 +631,13 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     if (first instanceof Response) return first;
     const second = first ?? (named === undefined ? null : await found(named));
     if (second instanceof Response) return second;
-    const handle = second ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? null;
+    // Where code's credential takes no handle, a URL whose third segment may name the handle's environment's UI route:
+    // the handle wherever that route's item may take it, `x-openai-key` say, which the made-for list below then weighs
+    // (review r3 of #467).
+    const third = place[2];
+    const outside = second ?? HANDLE.exec(bearer(request) ?? '')?.[0] ?? (raw.length >= 3 && uiServes(third) ? await uiHandle(request, url) : null);
+    if (outside instanceof Response) return outside;
+    const handle = outside;
     if (handle === null) return refused ?? failure(401, `send the handle \`coffre run\` gave your app where ${stable.name} takes its key, or as x-coffre-handle`);
     // The environment the handle was made for, the URL's: null where the URL names one of the handle's instead.
     const routed = async (): Promise<string | Response | null> => {
@@ -650,14 +656,14 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     // With no cache, and a URL whose third segment names nothing of the proxy's, so that it is the stable URL whatever
     // the handle was made for, unless `<a>/<b>` is that environment: its one key in the vault's one call, which finds
     // the environment itself (T145). Anything else it serves not so, as below.
-    const third = place[2];
-    // The handle's environment named, its credential one code lacks: the environment's UI route, or none.
-    const placed = () => (uiServes(third) ? uiForward(request, coffre, proxy, raw, place, url, true, handle) : noCredential(third!));
+    // The handle's environment named, its credential one code lacks: the environment's UI route, or none. `readable`, the
+    // request with its body still to read, as code's credential left it (review r3 of #467).
+    const placed = (readable: Request) => (uiServes(third) ? uiForward(readable, coffre, proxy, raw, place, url, true, handle) : noCredential(third!));
     const direct = proxy.cacheMs === 0 && coffre.useMadeFor !== undefined && stable.keys.length === 1
       && (raw.length === 1 || (third !== undefined && !proxy.credentials.has(third) && !proxy.signers.has(third) && !proxy.verifiers.has(third)));
     if (direct) {
       const unless = [...(raw.length === 1 ? [] : [`${place[0]}/${place[1]}`]), ...proxy.generate.keys()];
-      return forward(request, coffre, proxy, { unless, routed: async () => (await routed()) ?? placed() }, stable, raw.slice(1), url.search, peeked.get(stable));
+      return forward(request, coffre, proxy, { unless, routed: async (readable) => (await routed()) ?? placed(readable) }, stable, raw.slice(1), url.search, peeked.get(stable));
     }
     const route = await routed();
     if (route instanceof Response) return route;
@@ -964,6 +970,12 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     const other = using.find((two) => two !== one && two.keys.some((key) => one.keys.includes(key)) && JSON.stringify(two.placeholder) !== JSON.stringify(one.placeholder));
     if (other !== undefined) {
       throw new CoffreError(409, 'conflict', `${one.name} and ${other.name} read ${one.keys.find((key) => other.keys.includes(key))} with different placeholders in ${held.environment.path}, and the app holds one value for it: give them the same placeholder, in the Proxy tab or the deployment's code`);
+    }
+    // And a signer's or verifier's key, whose value is the handle as it is (`checkSigner`'s rule for code's): a shaped
+    // route reading it would be given the bare handle below, and refuse it (review r3 of #467).
+    const signer = one.placeholder === undefined ? undefined : signers.find(([, two]) => one.keys.includes(two.key));
+    if (signer !== undefined) {
+      throw new CoffreError(409, 'conflict', `${one.name} and ${signer[0]} read ${signer[1].key} with different placeholders in ${held.environment.path}, and the app holds one value for it: a signer's is the handle as it is, so drop ${one.name}'s placeholder`);
     }
   }
   for (const credential of using) {
@@ -1631,13 +1643,23 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
  * The stable URL's environment, when the vault's one call finds it (`PluginContext.useMadeFor`): not one of `unless`;
  * where it finds none so, the one `routed` says, or its refusal.
  */
-type MadeFor = { unless: readonly string[]; routed: () => Promise<string | Response> };
+type MadeFor = { unless: readonly string[]; routed: (readable: Request) => Promise<string | Response> };
+
+/**
+ * The request with the body `content` read from it, to read again: a buffered body's bytes; a streamed one, or none,
+ * is still the request's own.
+ */
+function again(request: Request, content: Carried): Request {
+  if (content.body === undefined || content.streamed) return request;
+  return new Request(request.url, { method: request.method, headers: request.headers, body: content.body });
+}
 
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | MadeFor, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
   // The stable URL's environment, as `routed` finds it, once: and its refusal before any of the request's own, as when
   // the route was found first (review r2 of #412).
   let routing: Promise<string | Response> | undefined;
-  const routed = (made: MadeFor) => (routing ??= made.routed());
+  // `readable`, the request as another reading of the URL may still read it: the body this one already read, given again.
+  const routed = (made: MadeFor, readable = request) => (routing ??= made.routed(readable));
   const refuse = async (response: Response): Promise<Response> => {
     if (typeof path === 'string') return response;
     const route = await routed(path);
@@ -1684,7 +1706,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const logged = { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) };
     const made = await coffre.useMadeFor!(handle, { keys: [credential.keys[0]!], purpose: 'use', logged, unless: path.unless });
     if (made === null) {
-      const found = await routed(path);
+      const found = await routed(path, again(request, content));
       if (found instanceof Response) return found;
       route = found;
       // Not by name (a SQLite vault's, or an environment `unless` names): the environment, found, is held to the scope all the same.
@@ -1750,9 +1772,7 @@ async function sendAs(request: Request, coffre: PluginContext, credential: Resol
   }
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
-  // Values decided for a request sent within their window: one whose body came after it goes with none.
-  if (Date.now() > sendBy) return failure(503, `${credential.name}: the request's body came after its values may be sent; send it again`, 'late', '1');
-  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' }, ...(through === undefined ? {} : { through }) });
+  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' }, sendBy, ...(through === undefined ? {} : { through }) });
 }
 
 /** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */
@@ -1895,6 +1915,11 @@ type Sending = Aim & Carried & {
   payload?: string;
   /** How a credential with no egress of its own goes out, a UI route's (`PluginContext.publicFetch`): else the global fetch. */
   through?: Egress;
+  /**
+   * When the values decided for a UI route's request may last go out (epoch ms): checked as the fetch starts, after the
+   * body came and every signature was made, so a request that took longer sends none (review r1 and r3 of #467).
+   */
+  sendBy?: number;
 };
 
 /**
@@ -1976,6 +2001,8 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
 
   // A streamed body's refusal, once `scanned` stops it: the answer, whatever the upstream made of the broken request.
+  // Values decided for a request sent within their window: one whose body, digest or signature came after it goes with none.
+  if (out.sendBy !== undefined && Date.now() > out.sendBy) return failure(503, `${credential.name}: the request was ready after its values may be sent; send it again`, 'late', '1');
   const upload = streamed ? scanned(request.body!, Number(declared), secret, digest) : null;
   let upstream: Response;
   try {

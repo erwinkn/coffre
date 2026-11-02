@@ -1724,7 +1724,10 @@ before PR C. Where C2a settles what this section left open:
   time, checked just before it goes: a kept entry's `until`, or, decided
   now, the use's deadline (3 s), or `cacheSeconds` if longer. A body that
   stalls past it is 503 `late` and nothing is sent: values decided before
-  an edit or a revocation never ride a request that came after it.
+  an edit or a revocation never ride a request that came after it. The
+  check is the fetch's own first step, after the body's digest and every
+  signature (SigV4's) are made, so slow signing is late too (review r3 of
+  #467).
 - **The handle decides the reading before code's precedence.** For
   `/use/<a>/<b>` and for `/use/<a>/<b>/<a code name>/…` (`<a>` no code
   name), the handle's made-for list says whether the URL is the place's
@@ -1765,19 +1768,30 @@ before PR C. Where C2a settles what this section left open:
   keeps the global fetch, for local fakes. Code's routes are unchanged:
   their upstream is the deployment's, reviewed and deployed.
   `@coffre/server` depends on `undici` (7.30.1, Node 24's own) for it;
-  only the Node entry imports it.
+  only the Node entry imports it. Node dials an address written as one
+  (`https://240.0.0.1/x`) without asking the lookup, so `publicFetch`
+  checks such a host itself, as the lookup checks a name's answers, and
+  refuses one that is not public before undici is called (review r3 of
+  #467).
 - **A project named as code's credential is.** With code's `maps` and an
   environment `maps/dev`, `/use/maps/dev/openai/models` from a handle made
   for `maps/dev` is the place reading: its third segment is code's
   credential if code has it, else the environment's UI route `openai`
   (review r2 of #467; the opposite collision, a third segment code names,
-  was r1's).
+  was r1's). Where code's `maps` finds no handle where it takes its key,
+  the handle is looked for wherever a UI item may take it
+  (`x-openai-key`, a form field), and the made-for list decides as
+  before. Under `cacheSeconds: 0`, code's `maps` reads the body before
+  the vault's one call says the handle is `maps/dev`'s; the UI route then
+  sends those same bytes (review r3 of #467).
 - **One key, one placeholder**, across code's and the UI's routes: two
   that read `OPENAI_API_KEY` with different placeholders (`a_`, `b_`)
   would give the app one value that one of them refuses. Startup refuses
   this of code alone; the plan refuses it (409 `conflict`, naming both) of
   the routes the environment serves, code's and its UI's together (review
-  r2 of #467).
+  r2 of #467). A code signer's or verifier's key is the handle as it is,
+  so a UI route shaping it with a placeholder is refused the same way
+  (review r3 of #467).
 - **Refusals.** A key the item's editor no longer routes is 403
   `route_not_cleared`, the vault's reason naming them: the caller may
   read the key, so D153's single 404 hides nothing here. A refusal of the

@@ -1,7 +1,7 @@
 import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { LookupFunction } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 
 import { Agent, fetch as undiciFetch } from 'undici';
 
@@ -25,6 +25,11 @@ export function nodeTransport(): WorkloadTransport {
         const loopback = url.protocol === 'http:';
         if (loopback && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
           reject(new FetchRefused(url, 'plain HTTP reaches only loopback'));
+          return;
+        }
+        const literal = loopback ? null : literalRefusal(url);
+        if (literal !== null) {
+          reject(new FetchRefused(url, 'could not be fetched', { cause: literal }));
           return;
         }
         const request = (loopback ? httpRequest : httpsRequest)(
@@ -55,7 +60,27 @@ export function nodeTransport(): WorkloadTransport {
  */
 export function publicFetch(lookup: LookupFunction = publicLookup): NonNullable<WorkloadTransport['fetch']> {
   const dispatcher = new Agent({ connect: { lookup } });
-  return (url, init) => undiciFetch(url, { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher }) as unknown as Promise<Response>;
+  return async (url, init) => {
+    // Node asks no resolver for an address written as one: `lookup` never sees `https://240.0.0.1` (review r3 of #467).
+    const literal = literalRefusal(new URL(url));
+    if (literal !== null) throw new TypeError('fetch failed', { cause: literal });
+    return (await undiciFetch(url, { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher })) as unknown as Response;
+  };
+}
+
+/**
+ * Why a URL whose host is an IP address may not be dialled, or null: Node connects to an address as written, without
+ * the lookup, so the address is checked here, as the lookup checks a name's answers.
+ *
+ *   https://162.159.140.245/v1    null
+ *   https://240.0.0.1/x           ENOTPUBLIC (reserved)
+ *   https://[::ffff:a00:5]/x      ENOTPUBLIC (10.0.0.5, written as IPv6)
+ *   https://api.openai.com/v1     null: a name, checked by the lookup as the connection opens
+ */
+function literalRefusal(url: URL): Error | null {
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host) === 0 || isPublicAddress(host)) return null;
+  return Object.assign(new Error(`${host} is an address that is not public`), { code: 'ENOTPUBLIC' });
 }
 
 /** `dns.lookup`, refusing a name with any answer that is not public. */

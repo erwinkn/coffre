@@ -22,9 +22,13 @@
   isolate cannot reserve them answers 503 and the next one asks again.
   On Node, a UI route's upstream is dialled only at a public address,
   checked as each connection opens (undici, now a dependency of
-  `@coffre/server`), so a name an Owner saved cannot be pointed at the
-  server's own network later. Two routes reading one key with different
-  placeholders make the plan 409. Workloads, service bindings, signers,
+  `@coffre/server`), and an IP address written as the host is checked
+  before any connection, so a name an Owner saved cannot be pointed at
+  the server's own network later. Values go only in a request ready
+  within their window: one whose body or signature came later answers
+  503 `late` and sends nothing. Two routes reading one key with
+  different placeholders, or a UI route shaping a code signer's key, make
+  the plan 409. Workloads, service bindings, signers,
   verifiers, presign and tunnels of UI items answer 404 until PR C2b.
 
 - **The vault decides about a member from 0.15's log, not 0.14's (T179
