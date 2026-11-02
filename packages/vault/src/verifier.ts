@@ -118,6 +118,11 @@ export async function verifyTrees(db: Database, keys: VerifierKeys, options: Ver
  * newest pair's key is the one its signatures hold under (SignerVerified).
  * The rotations are read in the check's own snapshot, and only when the
  * vault holds a replaced key: a statement more for a deployment that rotated.
+ * They are not capped as the entries above the newest pair are: an honest
+ * log has one per key the vault has replaced, so only a writer planting rows
+ * of the key object grows them, and that writer can deny a check in cheaper
+ * ways; a cap would turn its slow check into a refused one, no safer (Muse's
+ * review r8).
  */
 async function underKeys(
   store: ReturnType<typeof logStore>,

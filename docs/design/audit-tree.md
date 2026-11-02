@@ -541,8 +541,8 @@ R41's: a replaced key vouches only for what came before the rotation.
   memory lost at that moment, it takes the database's newest pair, under
   the old key, alarmed as any lost memory is, and rotates as above.
 - **The verifier** takes a newest pair under a replaced key while the log
-  moves on from it: below its rotation, and not above the pair held outside
-  under the current key. Above the newest pair, a replaced key's entries
+  moves on from it: below its rotation, and not at or above the pair held
+  outside under the current key, its very place included. Above the newest pair, a replaced key's entries
   count below its own rotation, whatever key that pair is under (a backlog
   sealed in parts leaves a pair under the new key below the rotation), or,
   with no rotation yet, while the newest pair is under it. The key a pair

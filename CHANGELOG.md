@@ -141,7 +141,11 @@
   the new key, `coffre verify log` holds reads listed before it under the
   old key, and no reader takes the old key's word for anything at or past
   the rotation (the projector, the check, the pages' `vouch`, retention,
-  whose cut for a day that ended before the rotation is under the old key).
+  whose cut for a day that ended before the rotation is under the old key),
+  so long as the database's newest pair is the vault's: one who holds the
+  old key, deletes the rotation and signs the newest pair again under it
+  takes these readers back to before it, until the verifier's check
+  against the signer's pair, or the signer's next start, names it.
   A rotation's
   entry names its own number under its MAC, so that one moved counts for
   nothing, and counts only where the key it moves the log to vouches at
