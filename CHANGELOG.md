@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A change's last statements go with its COMMIT, in the app and in the
+  vault (T179).** A key written is 16 round trips to Postgres, down from 18
+  (24 before 0.16), and a member added 14, down from 18: the app's append,
+  its 0.15 changes and the COMMIT go under one Sync, and so do the vault's
+  member update, its changes and the COMMIT, the append riding with the
+  decision's first write. Migration 0052 adds `app_change_strict` and
+  `change_input_strict`, which raise where `app_change` and `change_input`
+  answer null for a row that moved since it was read, so that Postgres
+  skips the COMMIT; nothing else of the schema changes, and the previous
+  release runs on it.
+
 - **A fork's key and `dev@me`'s are the vault's one call by name, as an
   environment's.** A reveal of `market/feature/API_KEY` (a fork of dev), of
   `market/dev@me/API_KEY`, or of either as a list of one, and the proxy's

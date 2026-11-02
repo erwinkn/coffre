@@ -8,10 +8,10 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { EVERYWHERE, ROLES, type Permission } from '@coffre/core/access';
-import { tablesOf } from '@coffre/db';
+import { later, tablesOf } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { postgresSession } from '@coffre/db/connect';
-import { forgetLogHeads } from '@coffre/db/log';
+import { forgetLogHeads, isMovedChange } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { Changes, genesisCall, loggedChange, NotLogged, payloadOf, type ChangeKeys } from '../src/changes.ts';
@@ -232,6 +232,28 @@ test('change_input: a retry finds its entry, another payload under its request i
   assert.equal((await opsOf(w.keys, { kind: 'environment', id: w.prod })).length, 2);
   const [row] = await db.owner.select({ protected: tablesOf(db.owner).environments.protected }).from(tablesOf(db.owner).environments).where(eq(tablesOf(db.owner).environments.id, w.prod));
   assert.equal(row!.protected, true);
+});
+
+test('change_input_strict, with the COMMIT: its number answers after it; a change from a seal another moved fails the transaction, Postgres skipping the COMMIT, where change_input answers null (ChangeCAS, T179)', async () => {
+  const w = await world({}, configure(), { sealed: false });
+  await genesis(w.keys, { kind: 'environment', id: w.prod }, environment(w.project, w.prod, 'prod'));
+  const from = (await store.readObject(db.owner, { kind: 'environment', id: w.prod })).seal;
+  const ref = { kind: 'environment' as const, id: w.prod };
+  const protect = (on: boolean) => made(w.keys, ref, { op: 'environment.protect', protected: on }, { ...environment(w.project, w.prod, 'prod'), protected: on }, from);
+  const { vaultMembers } = tablesOf(db.vault);
+  // A write beside it, left to `later` too: it commits with the change, or not at all.
+  const written = (principal: string) => db.vault.select().from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const commit = (call: store.ChangeCall, principal: string) => db.vault.transaction(async (tx) => {
+    later(tx, tx.insert(vaultMembers).values({ principal, status: 'active', role: 'viewer', mac: randomBytes(32), createdAt: Date.now(), createdBy: ROOT, statusChangedAt: Date.now(), statusChangedBy: ROOT, accessSeq: 0n }));
+    return store.laterInputs(tx, [call]);
+  });
+  const [number] = await (await commit(protect(true), ADA)).answer;
+  assert.ok(number !== undefined && number > 0n);
+  assert.equal((await written(ADA)).length, 1, 'committed with its change');
+  // The second from the same seal: refused in Postgres, the transaction with it.
+  await assert.rejects(commit(protect(false), BO), (error: unknown) => isMovedChange(error) && !store.isStale(error));
+  assert.deepEqual(await written(BO), [], 'rolled back with the change');
+  assert.equal((await opsOf(w.keys, ref)).length, 2);
 });
 
 test('change_input refuses an op it does not take, and a payload that names another object than its arguments', async () => {

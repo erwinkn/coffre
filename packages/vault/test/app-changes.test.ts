@@ -11,10 +11,10 @@ import { deriveLogKey } from '@coffre/core/audit';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { TOMBSTONE } from '@coffre/core/schemas';
 import type { CredentialColumns, ObjectChange, PreparedChange } from '@coffre/core/vault';
-import { tablesOf, type Transaction } from '@coffre/db';
+import { later, tablesOf, type Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { postgresSession, type PostgresClient } from '@coffre/db/connect';
-import { appChanges, appendEntries, isStaleChange } from '@coffre/db/log';
+import { appChanges, appendEntries, isMovedChange, isStaleChange, laterChanges } from '@coffre/db/log';
 import { asc, eq, sql } from 'drizzle-orm';
 
 import { genesisCall, loggedChange, type ChangeKeys } from '../src/changes.ts';
@@ -194,6 +194,28 @@ test('of two changes prepared from one seal, the second does nothing; a retry fi
   // Another change under its request id.
   const forged = { ...renew[0]!, payload: renew[0]!.payload!.replace('credential.renew', 'credential.revoke') };
   await assert.rejects(db.owner.transaction((tx: Transaction) => appChanges(tx, [forged])), (error: unknown) => isUniqueViolation(error));
+  await holdsReplay(w.keys, row.id);
+});
+
+test('app_change_strict, with the COMMIT: its number answers after it; a change from a seal another moved fails the transaction, Postgres skipping the COMMIT, where app_change answers null (ChangeCAS, T179)', async () => {
+  const w = await world();
+  const row = token();
+  await write(row, await prepare(w, row), false);
+  const renewed = { ...row, expiresAt: new Date(row.expiresAt.getTime() + 60_000) };
+  const revoked = { ...row, revokedAt: new Date() };
+  const [renew, revoke] = [await prepare(w, renewed, row), await prepare(w, revoked, row)];
+  const { credentials } = tablesOf(db.owner);
+  // As `audited` commits a write: its row, then its changes, nothing awaiting either.
+  const commit = (after: Row, calls: readonly PreparedChange[]) => db.owner.transaction(async (tx: Transaction) => {
+    later(tx, tx.update(credentials).set({ revokedAt: after.revokedAt, expiresAt: after.expiresAt }).where(eq(credentials.id, after.id)));
+    return laterChanges(tx, calls);
+  });
+  const [first] = await (await commit(renewed, renew)).answer;
+  assert.ok(first !== undefined && first > 0n);
+  // The revoke was sealed from the seal the renewal moved: refused in Postgres, and its row with it.
+  await assert.rejects(commit({ ...renewed, revokedAt: revoked.revokedAt }, revoke), (error: unknown) => isMovedChange(error) && !isStaleChange(error));
+  assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');
+  assert.equal((await stored(row.id))!.expiresAt.getTime(), renewed.expiresAt.getTime());
   await holdsReplay(w.keys, row.id);
 });
 

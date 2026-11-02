@@ -226,6 +226,8 @@ export async function rotateStep(db: Database, keys: AppKeys, { rows = STEP_ROWS
     prepared?.expectRevoked(ended);
     await prepared?.commit(tx);
     return next === null ? { kind: 'sealing', from } : { kind: 'rotating', from, next, others };
+  }).catch((error: unknown) => {
+    throw AppChanges.failed(error);
   });
   await prepared?.sealed();
   if (unsigned.length > 0) {

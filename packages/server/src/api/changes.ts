@@ -2,7 +2,7 @@ import { protects } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import type { BindingColumns, ConnectionColumns, CredentialColumns, EndedBinding, EnvironmentColumns, MadeBinding, ObjectChange, PreparedChange, RequestTrace, SecretColumns, Vault, VersionColumns } from '@coffre/core/vault';
 import type { Transaction } from '@coffre/db';
-import { appChanges, holdIssues, isStaleChange } from '@coffre/db/log';
+import { holdIssues, isMovedChange, isStaleChange, laterChanges, type ChangeNumbers } from '@coffre/db/log';
 
 import { authMac } from '../auth-rows.ts';
 import type { BindingRow, CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
@@ -113,7 +113,8 @@ export class AppChanges {
   readonly #vault: Vault;
   readonly #changes: readonly ObjectChange[];
   readonly #calls: readonly PreparedChange[];
-  #numbers: bigint[] = [];
+  /** The numbers of the changes its transaction made, which answer with its COMMIT (`commit`). */
+  #numbers: ChangeNumbers | null = null;
   #dropped = false;
   #only: Set<string> | null = null;
 
@@ -182,33 +183,40 @@ export class AppChanges {
   }
 
   /**
-   * In the transaction, its rows written: each change (`app_change`), after
-   * the 0.14 entries; or, given `append`, which appends them, in its
-   * statement, one round trip less under 0.14's head (T123). `append` runs
-   * whatever this write dropped.
+   * In the transaction, its rows written, as its last statements: each
+   * change (`app_change_strict`), after the 0.14 entries; or, given
+   * `append`, which appends them, in its statement, one round trip less
+   * under 0.14's head (T123). `append` runs whatever this write dropped.
+   * Nothing awaits them: on Postgres they go with the COMMIT, under its Sync
+   * (`later`), and their numbers answer after it (`sealed`). A row moved
+   * since it was read fails the transaction, which `failed` says is
+   * `ObjectMoved`: read and prepared again (`retrying`).
    */
-  async commit(tx: Transaction, append?: (calls: readonly PreparedChange[]) => Promise<(bigint | null)[]>): Promise<void> {
+  async commit(tx: Transaction, append?: (calls: readonly PreparedChange[]) => Promise<ChangeNumbers | null>): Promise<void> {
     const only = this.#only;
     const calls = this.#dropped ? [] : only === null ? this.#calls : this.#calls.filter((call) => only.has(call.id));
     // An environment's slug moved (a rename, a deletion's tombstone): what the vault's issue compares of the policy. The
     // issue lock exclusive, its rows written and before the fence its append takes, orders the issue against it (`holdIssues`).
     if (calls.length > 0 && this.#changes.some((change) => change.kind === 'environment' && change.before !== null
-      && change.before.columns.slug !== change.after.slug && (only === null || only.has(change.id)))) await holdIssues(tx);
-    let numbers: (bigint | null)[];
-    try {
-      numbers = append === undefined ? await appChanges(tx, calls) : await append(calls);
-    } catch (error) {
-      if (isStaleChange(error)) throw new Error("an object this write changes is not its newest change's: a row was put back around coffre", { cause: error });
-      throw error;
-    }
-    if (numbers.some((number) => number === null)) throw new ObjectMoved();
-    this.#numbers = (numbers as bigint[]).filter((number) => number > 0n);
+      && change.before.columns.slug !== change.after.slug && (only === null || only.has(change.id)))) await holdIssues(tx, { awaited: false });
+    this.#numbers = append === undefined ? await laterChanges(tx, calls) : await append(calls);
+  }
+
+  /**
+   * What the transaction that committed these changes failed with, as its caller hears it: a row moved since it was
+   * read is `ObjectMoved`, read again; one that is not its object's newest change's, put back around coffre, says so.
+   */
+  static failed(error: unknown): unknown {
+    if (isMovedChange(error)) return new ObjectMoved();
+    if (isStaleChange(error)) return new Error("an object this write changes is not its newest change's: a row was put back around coffre", { cause: error });
+    return error;
   }
 
   /** After the commit: once the newest change is sealed, and every one before it (R51). */
   async sealed(): Promise<void> {
-    if (this.#numbers.length === 0) return;
-    const newest = this.#numbers.reduce((a, b) => (a > b ? a : b));
+    const numbers = this.#numbers === null ? [] : (await this.#numbers.answer).filter((number) => number > 0n);
+    if (numbers.length === 0) return;
+    const newest = numbers.reduce((a, b) => (a > b ? a : b));
     const outcome = await this.#vault.waitSealed!({ number: newest.toString() });
     if (!outcome.ok) throw new Error(`change ${newest} was committed but not sealed: ${outcome.refusal.message}`);
   }
