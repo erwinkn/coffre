@@ -21,7 +21,7 @@ import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { appendEntries, type NewEntry } from '@coffre/db/log';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
-import { localVault } from '@coffre/vault/node';
+import { localVault, spoken } from '@coffre/vault/node';
 import { desc, eq, gt, sql, type SQL } from 'drizzle-orm';
 
 import { Accesses } from '../src/accesses.ts';
@@ -230,11 +230,11 @@ before(async () => {
   await resetDatabase(db.owner);
   app = new CountingPool(testPostgresPool(TEST_RUNTIME_DATABASE_URL));
   vaultPool = new CountingPool(testPostgresPool(TEST_VAULT_DATABASE_URL));
-  const opened = await localVault({
+  const opened = spoken(await localVault({
     database: createDatabase(vaultPool.client),
     kek: { id: 'test-kek-1', key: randomBytes(32).toString('base64') },
     owners: [ROOT],
-  }, { log: '0.14' });
+  }, { log: '0.14' }));
   // Every call the app makes of the vault: on Workers, each its own invocation and connection.
   const vault = new Proxy(opened as unknown as FixtureDeps['vault'], {
     get(target, key) {

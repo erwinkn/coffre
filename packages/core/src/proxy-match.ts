@@ -1,4 +1,9 @@
-// A route's allow list (docs/design/proxy-ui.md, section 7): which methods
+// A route's allow list (docs/design/proxy-ui.md, section 7), and the names its
+// inject rules may set, shared by the credential proxy and the definitions the
+// Proxy tab saves (`@coffre/core/vault`'s `canonicalDefinition`), so that a saved
+// definition is one the proxy takes.
+//
+// The allow list: which methods
 // and paths under its upstream a request may take. A request's path is
 // matched as its segments, each percent-decoded once, to bytes, after the
 // proxy's own check (`climbs` in credential-proxy.ts) has refused every
@@ -260,4 +265,38 @@ export function allows(entries: readonly AllowEntry[] | null, method: string, se
 /** The methods an allow list takes on the path `segments` are, or on any path (null), for a 405's message. */
 export function methodsFor(entries: readonly AllowEntry[], segments: readonly string[] | null): string[] {
   return [...new Set(entries.filter((entry) => segments === null || entry.path === null || matches(entry.path, segments)).flatMap((entry) => [...(entry.methods ?? [])]))];
+}
+
+/** The name of a header or a query parameter a rule sets: an HTTP token. */
+export const PARAMETER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]+$/i;
+
+/** The name of a form's or a JSON body's field a rule fills, at the top of the body: letters, digits and _.-, a letter or digit among them. */
+export const FIELD_NAME = /^(?=.*[A-Za-z0-9])[A-Za-z0-9_.-]{1,128}$/;
+
+/** What a `prefix(…)` placeholder starts with: letters, digits and ._~+/:=-, as a key's own prefix is written (`sk_test_`). */
+export const PLACEHOLDER_PREFIX = /^[A-Za-z0-9._~+/:=-]{1,64}$/;
+
+/** The claim a `jwt(…)` placeholder never copies from the real token: its own, the handle's end. */
+export const HANDLE_CLAIM = 'exp';
+
+/** What an HMAC signature is written after, when its scheme writes one (`sha256=`): printable ASCII, no space. */
+export const SIGNATURE_PREFIX = /^[\x21-\x7e]{1,32}$/;
+
+/**
+ * The most an `hmac()`'s `maxBytes` may say: the body read before anyone is
+ * authenticated (the proxy reads a request to compute up to what the
+ * longest message takes) stays a fraction of a request through a
+ * credential's, and the CPU within a Worker's Free plan.
+ */
+export const MAX_MESSAGE_BYTES = 1024 * 1024;
+
+/**
+ * A field's name as some upstream's parser may read it, the same as
+ * another's: up to a `[` (PHP's and qs's arrays, `refresh_token[0]`),
+ * case folded (Go's JSON, `SECRET` and `ſecret`), and its letters and
+ * digits alone (PHP's `.` and space, `refresh.token`). Another name alike
+ * the field's is the field twice, which upstreams read differently.
+ */
+export function alike(name: string): string {
+  return name.split('[', 1)[0]!.toUpperCase().toLowerCase().replace(/[^a-z0-9]/g, '');
 }

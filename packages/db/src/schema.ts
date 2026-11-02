@@ -7,6 +7,7 @@ import {
   foreignKey,
   index,
   integer,
+  jsonb,
   pgTable,
   primaryKey,
   smallint,
@@ -1009,6 +1010,44 @@ export const logConfig = pgTable(
     check('log_config_name_check', sql`${table.name} IN ('policy', 'roles')`),
     check('log_config_value_check', sql`${table.value}::jsonb IS NOT NULL`),
     check('log_config_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
+ * Proxy definitions written in the UI (0.16, T186; docs/design/proxy-ui.md,
+ * section 2): each environment's, one sealed object of 0.15's log, kind
+ * `proxy`. Its items by name, each with what its save froze; the index of
+ * their digests, each item's name beside the SHA-256 of its canonical body,
+ * sorted by name, which the seal covers, so that a use reads its route's
+ * item and the index; and the vault's seal. Written only through
+ * `change_input`; the app reads it not at all.
+ */
+export const proxyDefinitions = pgTable(
+  'proxy_definitions',
+  {
+    environmentId: uuid('environment_id').primaryKey().references(() => environments.id),
+    items: jsonb().notNull(),
+    digests: bytea().notNull(),
+    seal: bytea().notNull(),
+  },
+  (table) => [
+    check('proxy_definitions_items_check', sql`jsonb_typeof(${table.items}) = 'object'`),
+    check('proxy_definitions_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/** The names the deployment's code reserved (`proxy.code`): one row, the instance's, the whole set, sealed as `proxy-reserved`. */
+export const proxyReserved = pgTable(
+  'proxy_reserved',
+  {
+    id: smallint().primaryKey(),
+    names: jsonb().notNull(),
+    seal: bytea().notNull(),
+  },
+  (table) => [
+    check('proxy_reserved_id_check', sql`${table.id} = 1`),
+    check('proxy_reserved_names_check', sql`jsonb_typeof(${table.names}) = 'array'`),
+    check('proxy_reserved_seal_check', sql`octet_length(${table.seal}) = 16`),
   ],
 );
 

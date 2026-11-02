@@ -22,12 +22,12 @@ import { github, signin } from '@coffre/core/identity';
 import type { Vault } from '@coffre/core/vault';
 import { createDatabase, type Client } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 
 import { resolveConfig } from '../../src/config.ts';
 import { pageClient } from '../../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../../src/runtime.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
+import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
 import { TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
 import { watched } from '../db/postgres-pool.ts';
@@ -71,7 +71,7 @@ class CountedPool {
 
 const db = await openTestDatabase();
 const [farApp, farVault] = await Promise.all([farPostgres(TEST_RUNTIME_DATABASE_URL, RTT), farPostgres(TEST_VAULT_DATABASE_URL, RTT)]);
-const idle: { vault: LocalVault; pool: CountedPool }[] = [];
+const idle: { vault: SpokenVault; pool: CountedPool }[] = [];
 /** The app's connections, one a request at a time, kept between requests as Hyperdrive keeps its own. */
 const connections: CountedPool[] = [];
 try {
@@ -83,7 +83,7 @@ try {
     get: (_, name: string) => async (...args: unknown[]) => {
       const instance = idle.pop() ?? await (async () => {
         const pool = new CountedPool(new HyperdrivePool(farVault.url), 'vault');
-        return { pool, vault: await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.14' }) };
+        return { pool, vault: spoken(await localVault({ database: createDatabase(pool.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] }, { log: '0.14' })) };
       })();
       instance.pool.cost = cost;
       cost.vaultCalls += 1;
@@ -95,7 +95,7 @@ try {
       }
     },
   });
-  const config = resolveConfig({ publicUrl: ORIGIN, vault: vaultFor(newCost()), auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
+  const config = resolveConfig({ publicUrl: ORIGIN, vault: entryOf(vaultFor(newCost())), auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') });
   const setup = createRuntime(config, deps.db, deps.vault, { json: async () => ({}) });
 
   // An instance of some size: DEV holds a grant in a few of its projects, among many they do not reach.

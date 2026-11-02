@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, header, type Credential } from '../src/plugins/credential-proxy.ts';
-import { allows, readPattern, requestSegments, type AllowEntry } from '../src/plugins/proxy-match.ts';
+import { allows, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
 
 const PUBLIC = 'https://coffre.example';
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;

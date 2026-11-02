@@ -909,6 +909,36 @@ export const logConfig = sqliteTable(
   ],
 );
 
+/** An environment's proxy definitions, sealed as `proxy` (schema.ts). Its items as JSON text. */
+export const proxyDefinitions = sqliteTable(
+  'proxy_definitions',
+  {
+    environmentId: text('environment_id').primaryKey().references(() => environments.id),
+    items: text({ mode: 'json' }).notNull(),
+    digests: bytes('digests').notNull(),
+    seal: bytes('seal').notNull(),
+  },
+  (table) => [
+    check('proxy_definitions_items_check', sql`json_type(${table.items}) = 'object'`),
+    check('proxy_definitions_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/** The names the deployment's code reserved, sealed as `proxy-reserved` (schema.ts). */
+export const proxyReserved = sqliteTable(
+  'proxy_reserved',
+  {
+    id: integer().primaryKey(),
+    names: text({ mode: 'json' }).notNull(),
+    seal: bytes('seal').notNull(),
+  },
+  (table) => [
+    check('proxy_reserved_id_check', sql`${table.id} = 1`),
+    check('proxy_reserved_names_check', sql`json_type(${table.names}) = 'array'`),
+    check('proxy_reserved_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
 /**
  * 0.15's log (schema.ts). SQLite has one writer, so the fence is implicit,
  * and nothing is partitioned: uses and tiles are one table each.

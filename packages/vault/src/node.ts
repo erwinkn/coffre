@@ -11,26 +11,27 @@
  * The second keeps every key out of the process that faces the network. The
  * socket is the whole of its authentication: a file only the vault's user
  * and the group it shares with the server may open, so no port to reach and
- * no shared secret to leak. Each call is one HTTP POST over it, `/<method>`
- * with the arguments as a JSON array, and refusals come back as values, as
- * from any vault; only a failure is an error.
+ * no shared secret to leak. Each call is one HTTP POST over it, `/call`,
+ * the version gate's envelope (`{ release, method, args }`), and refusals
+ * come back as values, as from any vault; only a failure is an error.
  */
 import { chmodSync, existsSync, lstatSync, rmSync } from 'node:fs';
 import { Agent, createServer, request as httpRequest, type IncomingMessage } from 'node:http';
 
-import type { Vault } from '@coffre/core/vault';
+import type { Vault, VaultAnswer, VaultEntry, VaultMethod } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOfUrl, openDatabase } from '@coffre/db/connect';
 
 import { keepCheckpointer } from './checkpointer-node.ts';
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { failureOf } from './failure.ts';
-import { METHODS, openLocalVault, type LocalVault } from './local.ts';
+import { METHODS, openLocalVault, spoken, type LocalVault, type SpokenVault } from './local.ts';
 import type { VaultOptions } from './vault.ts';
 
-export type { Vault, VaultConfig };
+export type { Vault, VaultConfig, VaultEntry };
 export * from './index.ts';
-export type { LocalVault, VaultOptions };
+export type { LocalVault, SpokenVault, VaultOptions };
+export { spoken };
 /** 0.15's checkpointer on Node (docs/design/audit-tree.md), which `localVault` runs in the vault's process. */
 export { fileMemory, keepCheckpointer, runCheckpointer, type KeptCheckpointer, type RunningCheckpointer } from './checkpointer-node.ts';
 /**
@@ -114,7 +115,6 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
   }
 }
 
-const METHOD_NAMES = new Set<string>(METHODS);
 const MAX_BODY = 8 * 1024 * 1024;
 
 export type VaultServer = { socket: string; close(): Promise<void> };
@@ -122,22 +122,27 @@ export type VaultServer = { socket: string; close(): Promise<void> };
 /**
  * The vault as a process of its own, answering on a Unix socket. The socket
  * is made `0660`: put it in a directory the server's user can reach through
- * a shared group, e.g. `/run/coffre/vault.sock`.
+ * a shared group, e.g. `/run/coffre/vault.sock`. One route, `POST /call`,
+ * whose body is `{ release, method, args }`, the version gate's envelope,
+ * answered whole: the entry it forwards to gates (`openLocalVault`), and
+ * nothing here gates again.
  */
 export async function serveVault(config: NodeVaultConfig & { socket: string }): Promise<VaultServer> {
   const vault = await localVault(config);
   const server = createServer(async (req, res) => {
-    const name = (req.url ?? '').slice(1);
     const reply = (status: number, body: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
     };
-    if (req.method !== 'POST' || !METHOD_NAMES.has(name)) return reply(404, { error: 'not a vault call' });
+    if (req.method !== 'POST' || req.url !== '/call') return reply(404, { error: 'not a vault call' });
+    let name = 'call';
     try {
-      const args = JSON.parse(await readBody(req)) as unknown;
-      if (!Array.isArray(args)) return reply(400, { error: 'the arguments must be a JSON array' });
-      const result = await (vault[name as keyof Vault] as (...args: unknown[]) => Promise<unknown>)(...args);
-      reply(200, result === undefined ? {} : { result });
+      const envelope = JSON.parse(await readBody(req)) as { release?: unknown; method?: unknown; args?: unknown } | null;
+      if (typeof envelope !== 'object' || envelope === null || !Array.isArray(envelope.args) || typeof envelope.method !== 'string' || !(METHODS as readonly string[]).includes(envelope.method)) {
+        return reply(400, { error: 'a call is { release, method, args }, its arguments a JSON array' });
+      }
+      name = envelope.method;
+      reply(200, await vault.call(String(envelope.release), envelope.method as VaultMethod, envelope.args));
     } catch (error) {
       console.error(`vault ${name} failed`, error);
       const { status, body } = failureOf(error);
@@ -173,24 +178,24 @@ export async function serveVault(config: NodeVaultConfig & { socket: string }): 
   };
 }
 
-/** The vault that `serveVault` runs, from the server's side of its socket. */
-export function connectVault(socket: string): Vault {
+/** The vault that `serveVault` runs, from the server's side of its socket: its one entry, whose answer is the envelope, whole. */
+export function connectVault(socket: string): VaultEntry {
   const agent = new Agent({ keepAlive: true });
-  const call = (name: string) => (...args: unknown[]) =>
-    new Promise<unknown>((resolve, reject) => {
-      const body = JSON.stringify(args);
+  const call = (release: string, name: VaultMethod, args: readonly unknown[]) =>
+    new Promise<VaultAnswer>((resolve, reject) => {
+      const body = JSON.stringify({ release, method: name, args });
       const req = httpRequest(
         {
           socketPath: socket,
           agent,
           method: 'POST',
-          path: `/${name}`,
+          path: '/call',
           headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
         },
         (res) => {
           readBody(res).then((text) => {
-            const payload = JSON.parse(text) as { result?: unknown; error?: string; code?: string };
-            if (res.statusCode === 200) return resolve(payload.result);
+            const payload = JSON.parse(text) as VaultAnswer & { error?: string; code?: string };
+            if (res.statusCode === 200) return resolve(payload);
             const failed = new Error(`vault ${name}: ${payload.error ?? `status ${res.statusCode}`}`);
             reject(payload.code === undefined ? failed : Object.assign(failed, { code: payload.code }));
           }, reject);
@@ -201,7 +206,7 @@ export function connectVault(socket: string): Vault {
         reject(new Error(`the vault at ${socket} is unreachable: ${error.message}`, { cause: error.code === 'ENOENT' ? Object.assign(error, { code: 'ECONNREFUSED' }) : error })));
       req.end(body);
     });
-  return Object.fromEntries(METHODS.map((name) => [name, call(name)])) as unknown as Vault;
+  return { call };
 }
 
 async function readBody(stream: IncomingMessage): Promise<string> {

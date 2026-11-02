@@ -1,6 +1,7 @@
 // The vault's entrypoint in workerd, called over a service binding to
 // itself as the app calls it: each fetch is a request of its own, so a
 // burst of them is a page load's worth of concurrent calls.
+import { versioned, type VaultEntry } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { sql } from 'drizzle-orm';
@@ -12,7 +13,7 @@ type Env = {
   HOT_HYPERDRIVE: { connectionString: string };
   CHECKPOINTER: Parameters<typeof startCheckpointer>[0];
   VAULT_KEY: string;
-  VAULT: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  VAULT: VaultEntry;
 };
 
 export const Vault = vault((env: Env) => ({
@@ -26,7 +27,15 @@ export const CoffreCheckpointer = checkpointer();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const { method, args } = (await request.json()) as { method: string; args: unknown[] };
+    const { method, args, release } = (await request.json()) as { method: string; args: unknown[]; release?: string };
+    // The binding's one entry, as an app on `release` calls it: its answer, the envelope, whole (the version gate).
+    if (release !== undefined) {
+      try {
+        return Response.json({ ok: true, result: await env.VAULT.call(release, method as never, args) });
+      } catch (error) {
+        return Response.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+      }
+    }
     // The checkpointer's object started from outside the vault, its connection opened before the calls counted, and the
     // reads' projector's beside it, which opens its own at its first alarm.
     if (method === 'startCheckpointer') {
@@ -47,7 +56,7 @@ export default {
       }
     }
     try {
-      return Response.json({ ok: true, result: await env.VAULT[method]!(...args) });
+      return Response.json({ ok: true, result: await (versioned(env.VAULT) as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[method]!(...args) });
     } catch (error) {
       // Its code too, as the app reads it on the other side of the binding (`isUnavailable`).
       const code = (error as { code?: unknown }).code;

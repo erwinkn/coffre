@@ -16,14 +16,14 @@ make about them.
 namespace Coffre
 
 inductive Permission where
-  | read | use | write | archive | auditRead | envManage | grantManage | projectManage
+  | read | use | write | proxyEdit | archive | auditRead | envManage | grantManage | projectManage
   deriving DecidableEq, Repr, Inhabited
 
 namespace Permission
 
 /-- `PERMISSIONS`, in catalogue order: `heldColumns` lists them in it. -/
 def all : List Permission :=
-  [.read, .use, .write, .archive, .auditRead, .envManage, .grantManage, .projectManage]
+  [.read, .use, .write, .proxyEdit, .archive, .auditRead, .envManage, .grantManage, .projectManage]
 
 theorem mem_all (p : Permission) : p ∈ all := by cases p <;> simp [all]
 
@@ -34,7 +34,7 @@ def projectOnly : Permission → Bool
 
 def name : Permission → String
   | .read => "secret.read" | .use => "secret.use" | .write => "secret.write"
-  | .archive => "secret.archive" | .auditRead => "audit.read"
+  | .proxyEdit => "proxy.edit" | .archive => "secret.archive" | .auditRead => "audit.read"
   | .envManage => "environment.manage" | .grantManage => "grant.manage"
   | .projectManage => "project.manage"
 

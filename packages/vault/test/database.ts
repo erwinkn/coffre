@@ -12,7 +12,7 @@ import { and, eq, sql, type SQL } from 'drizzle-orm';
 import { prepareChanges, type ChangeKeys } from '../src/changes.ts';
 import type { Sealed, SealThrough } from '../src/checkpointer.ts';
 import { sealKey } from '../src/inputs.ts';
-import { openLocalVault as openRawVault, type LocalVault as RawLocalVault } from '../src/local.ts';
+import { openLocalVault as openRawVault, spoken, type SpokenVault as RawLocalVault } from '../src/local.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { cutOver as cutOverYet } from '../src/store.ts';
 
@@ -89,7 +89,7 @@ export const nothingHeld = async (): Promise<PairNotes[]> => [];
  * (`cutOver`), as the app has it before anything else.
  */
 export async function openLocalVault(...[db, config, options, close]: Parameters<typeof openRawVault>): Promise<LocalVault> {
-  const vault = await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed, heldOutside: nothingHeld } : { log: LOG }), ...options }, close);
+  const vault = spoken(await openRawVault(db, config, { ...(LOG === '0.15' ? { log: LOG, sealThrough: sealed, heldOutside: nothingHeld } : { log: LOG }), ...options }, close));
   if (vault.cutover !== undefined && (options?.log ?? LOG) === '0.15') {
     placeKeys = { seals: config.signingKeys.map((key) => sealKey(key)), mac: logMacKey(config.signingKeys[0]!) };
     await cutOver(vault, db);
@@ -324,7 +324,7 @@ export async function emptyReads(owner: Database): Promise<void> {
 /** Everything a vault test leaves behind, gone, and the heads this process remembers forgotten. */
 export async function emptyDatabase(owner: Database): Promise<void> {
   if (ENGINE === 'postgres') await endLeftOpen(owner);
-  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, credentials, serviceBindings, consumedTokens } = tablesOf(owner);
+  const { auditLog, auditChainHead, vaultGrants, vaultMembers, vaultReleases, secrets, environments, projects, secretReferences, dismissedKeys, logChanges, logConfig, proxyDefinitions, proxyReserved, credentials, serviceBindings, consumedTokens } = tablesOf(owner);
   await owner.delete(secretReferences);
   // SQLite checks a RESTRICT foreign key row by row, so entries that point
   // at others let go of them first.
@@ -338,6 +338,8 @@ export async function emptyDatabase(owner: Database): Promise<void> {
   // 0.15's log, which only the cutover and the change path write.
   await owner.delete(logChanges);
   await owner.delete(logConfig);
+  await owner.delete(proxyDefinitions);
+  await owner.delete(proxyReserved);
   await emptyReads(owner);
   await owner.delete(vaultGrants);
   // A session a test made, for a use to name; a binding a sign-in came through, and the tokens it spent (credentials.test.ts).

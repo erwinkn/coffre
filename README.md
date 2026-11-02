@@ -396,7 +396,7 @@ only.
 | Auditor | `audit.read` | **no** |
 | Developer | `secret.read`, `secret.use`, `secret.write` | yes |
 | Admin | `audit.read`, `environment.manage`, `grant.manage`, `project.manage`; people and service accounts | **no** |
-| Owner | all eight, and what an Admin does | yes |
+| Owner | all nine, and what an Admin does | yes |
 
 A role's **scope** has two filters, Projects and Environments, each all,
 only some, or all except some. Projects are named by id, so a rename keeps
@@ -416,13 +416,15 @@ them; environments by name, so `dev` is the `dev` of every project:
 | `maintainer` | + `secret.archive`, `environment.manage` | yes |
 | `access-manager` | `grant.manage` | **no** |
 | `auditor` | `audit.read` | **no** |
-| `owner` | all eight | yes |
+| `owner` | all nine | yes |
 
 `secret.read` hands values back: a reveal, `coffre get`, the values of
 `coffre run`. `secret.use` only uses them: a person's app gets
 placeholders, which the credential proxy fills in
 ([design](docs/design/credential-proxy.md)). A Contributor adds and
-changes values without ever reading one. What a person gets is the
+changes values without ever reading one. `proxy.edit` writes an
+environment's proxy definitions in the UI; only Owners hold it as roles
+ship, and a role an Owner gives it to reads values too. What a person gets is the
 narrower of their role and the key: a sensitive key is only ever used,
 whatever the role.
 

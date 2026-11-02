@@ -30,6 +30,7 @@ export function getCalls({ places, secrets, members, services }: Subjects): GetC
     'GET /projects/:project/:environment/missing': places.map((params) => ({ params })),
     'GET /personal/:project': [...new Set(places.map((params) => params.project))].map((project) => ({ params: { project } })),
     'GET /projects/:project/:environment/version': places.map((params) => ({ params })),
+    'GET /projects/:project/:environment/proxy': places.map((params) => ({ params })),
     'GET /secrets/:project/:environment/:key/versions': secrets.map((params) => ({ params })),
     'GET /members': [
       { params: {} },
@@ -85,6 +86,9 @@ const EVERY_ROUTE: { [K in RouteKey]: true } = {
   'GET /personal/:project': true,
   'GET /projects/:project/:environment/version': true,
   'PATCH /projects/:project/:environment/dismissals': true,
+  'GET /projects/:project/:environment/proxy': true,
+  'PUT /projects/:project/:environment/proxy': true,
+  'PUT /proxy/reserved': true,
   'GET /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment/:key': true,

@@ -8,7 +8,7 @@ import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/g
 import { entryColumns, numbersIn, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
-import { objectKey, type EnvironmentInput, type Input, type Kind, type Ref } from './inputs.ts';
+import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
 import { CUTOVER_OBJECT, type ChangeRow } from './log-entry.ts';
 import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
@@ -703,6 +703,14 @@ export async function projectsOfEnvironments(db: Queryable, ids: readonly string
 /** A secret as the vault reads it to make a reference to it: where it is, its path, and its current version. */
 export type SecretPlace = { secretId: string; projectId: string; environmentId: string; path: string; currentVersionId: string | null };
 
+/** The live keys of these names in these environments, by id: what a proxy definition's save resolves its keys among (a fork chain's). */
+export async function secretsNamed(db: Queryable, environmentIds: readonly string[], names: readonly string[]): Promise<{ id: string; environmentId: string; key: string }[]> {
+  if (environmentIds.length === 0 || names.length === 0) return [];
+  const { secrets } = tablesOf(db);
+  return db.select({ id: secrets.id, environmentId: secrets.environmentId, key: secrets.key }).from(secrets)
+    .where(and(inArray(secrets.environmentId, [...environmentIds]), inArray(secrets.key, [...names]), isNull(secrets.archivedAt)));
+}
+
 export async function secretsByIds(db: Queryable, ids: readonly string[]): Promise<Map<string, SecretPlace>> {
   if (ids.length === 0) return new Map();
   const { secrets, environments, projects } = tablesOf(db);
@@ -1113,7 +1121,40 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
       // Whatever it holds: a value that is not the object fails its seal.
       return { row: configObject(row.value), seal: row.seal ?? null };
     }
+    case 'proxy': {
+      const { proxyDefinitions } = tablesOf(db);
+      const [row] = await db.select({ items: proxyDefinitions.items, digests: proxyDefinitions.digests, seal: proxyDefinitions.seal }).from(proxyDefinitions)
+        .where(eq(proxyDefinitions.environmentId, ref.id));
+      if (row === undefined) return { row: null, seal: null };
+      const value: unknown = typeof row.items === 'string' ? JSON.parse(row.items) : row.items;
+      // Items no save writes (`{"openai": null}`, a list) are no object: the row stands as one with none, and no seal,
+      // which fails it (`tampered`), before anything reads an item.
+      if (!isRecord(value) || !Object.values(value).every(isRecord)) return { row: { kind: 'proxy', id: ref.id, items: {} }, seal: Buffer.alloc(0) };
+      const items = value as Record<string, ProxyItem>;
+      // Its seal covers the index its items make; a `digests` column that is not that index is no row the vault wrote,
+      // and holds no seal (a use reads that column, PR C): `tampered`, whatever the seal says over the items.
+      const intact = indexBytes(items).equals(Buffer.from(row.digests));
+      return { row: { kind: 'proxy', id: ref.id, items }, seal: intact ? Buffer.from(row.seal) : Buffer.alloc(0) };
+    }
+    case 'proxy-reserved': {
+      const { proxyReserved } = tablesOf(db);
+      const [row] = await db.select({ names: proxyReserved.names, seal: proxyReserved.seal }).from(proxyReserved).where(eq(proxyReserved.id, 1));
+      if (row === undefined) return { row: null, seal: null };
+      const value: unknown = typeof row.names === 'string' ? JSON.parse(row.names) : row.names;
+      // Names no change writes (`null`, a list of numbers): no names and no seal, which fails it (`tampered`).
+      if (!Array.isArray(value) || !value.every((name) => typeof name === 'string')) return { row: { kind: 'proxy-reserved', names: [] }, seal: Buffer.alloc(0) };
+      return { row: { kind: 'proxy-reserved', names: value as string[] }, seal: Buffer.from(row.seal) };
+    }
   }
+}
+
+/** The environments whose proxy objects' rows hold an item of one of `names`: those a `proxy.code` reserving them changes. */
+export async function proxiesNaming(db: Queryable, names: readonly string[]): Promise<string[]> {
+  if (names.length === 0) return [];
+  const rows = engineOf(db) === 'postgres'
+    ? await rowsOf<{ id: string }>(db, sql`SELECT environment_id AS id FROM proxy_definitions WHERE items ?| ARRAY[${sql.join(names.map((name) => sql`${name}`), sql`, `)}]::text[] ORDER BY environment_id`)
+    : await rowsOf<{ id: string }>(db, sql`SELECT environment_id AS id FROM proxy_definitions WHERE EXISTS (SELECT 1 FROM json_each(items) WHERE key IN (${sql.join(names.map((name) => sql`${name}`), sql`, `)})) ORDER BY environment_id`);
+  return rows.map((row) => row.id);
 }
 
 /** The object's newest change in the log: whether it has one, and the seal it left (HotPathOne's NewestIn). */
@@ -1302,6 +1343,8 @@ const KNOWN_OPS: Record<Kind, readonly string[]> = {
   environment: ['environment.protect', 'environment.rename', 'environment.archive'],
   roles: ['role.define'],
   policy: ['bulk.limit'],
+  proxy: ['proxy.save', 'proxy.code'],
+  'proxy-reserved': ['proxy.code', 'proxy.release'],
   credential: [],
   // The app's changes alone make and end a connection (`app_change`): the change path seals 0.14's at the cutover.
   connection: [],
@@ -1325,16 +1368,19 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
   const op = (JSON.parse(call.payload) as { op?: unknown }).op;
   if (ref.kind === 'binding') throw new Error('a binding changes by the vault\'s own statements alone (`change_bindings`)');
   if (typeof op !== 'string' || (op !== 'genesis' && !KNOWN_OPS[ref.kind].includes(op))) throw new Error(`this schema knows no change ${String(op)} to a ${ref.kind}`);
+  const proxied = ref.kind === 'proxy' || ref.kind === 'proxy-reserved';
+  if (op === 'genesis' && proxied) throw new Error(`a ${ref.kind} object has no genesis`);
   const named = (JSON.parse(call.payload) as { ref?: { kind?: unknown; id?: unknown } }).ref;
   if ((op !== 'genesis' || named !== undefined) && (named?.kind !== ref.kind || named.id !== ref.id)) throw new Error(`a change names the object it is to: ${ref.kind}, ${ref.id}`);
   const value = call.value === null ? null : (JSON.parse(call.value) as Record<string, unknown>);
   const valued = ref.kind === 'environment' ? op !== 'genesis' && value === null
     : ref.kind === 'secret' ? (op === 'secret.write') === (value === null)
-    : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null) : value !== null;
+    : ref.kind === 'roles' || ref.kind === 'policy' ? (op === 'genesis') === (value !== null)
+    : proxied ? value === null : value !== null;
   if (valued) throw new Error(`a ${ref.kind} change ${op} carries the object it leaves exactly when change_input writes it`);
-  // ChangeChecksSeal.
-  const held = await heldSeal(tx, ref);
+  // ChangeChecksSeal; the proxy's rows are written whole, from the newest change's seal (0056).
   const newest = await newestChange(tx, ref);
+  const held = proxied ? newest?.seal ?? null : await heldSeal(tx, ref);
   if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${ref.kind} object's row is not its newest change's: stale`);
   // ChangeCAS.
   const from = (column: SQLWrapper) => (call.sealFrom === null ? isNull(column) : eq(column as never, call.sealFrom));
@@ -1412,6 +1458,22 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
       done = call.sealFrom === null
         ? changedRows(await tx.insert(logConfig).values({ name: ref.kind, value: JSON.stringify(config), seal: call.seal }).onConflictDoNothing())
         : changedRows(await tx.update(logConfig).set({ value: JSON.stringify(config), seal: call.seal }).where(and(eq(logConfig.name, ref.kind), eq(logConfig.seal, call.sealFrom))));
+      break;
+    }
+    case 'proxy': case 'proxy-reserved': {
+      if (!sameBytes(call.sealFrom, newest?.seal ?? null)) return null;
+      if (call.seal === null) throw new Error(`a ${ref.kind} change leaves its object`);
+      const { proxyDefinitions, proxyReserved } = tablesOf(tx);
+      if (ref.kind === 'proxy') {
+        const items = value!.items;
+        if (typeof items !== 'object' || items === null || Array.isArray(items) || typeof value!.digests !== 'string') throw new Error('a proxy object is its items and their index');
+        const row = { items, digests: Buffer.from(value!.digests, 'base64'), seal: call.seal };
+        done = changedRows(await tx.insert(proxyDefinitions).values({ environmentId: ref.id, ...row }).onConflictDoUpdate({ target: proxyDefinitions.environmentId, set: row }));
+      } else {
+        if (ref.id !== 'instance' || !Array.isArray(value!.names)) throw new Error('the reserved names are one object, the whole set');
+        const row = { names: value!.names, seal: call.seal };
+        done = changedRows(await tx.insert(proxyReserved).values({ id: 1, ...row }).onConflictDoUpdate({ target: proxyReserved.id, set: row }));
+      }
       break;
     }
   }
@@ -1703,4 +1765,9 @@ async function nextNumber(tx: Transaction): Promise<bigint> {
 
 function bytes(value: Buffer | Uint8Array | null): Buffer | null {
   return value === null ? null : Buffer.from(value);
+}
+
+/** A JSON object: not null, not a list. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

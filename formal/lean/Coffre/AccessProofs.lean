@@ -385,7 +385,7 @@ theorem builtin_valid : ∀ e ∈ builtinRoles, ValidDef e.2 := by
   intro e he q hq
   simp [builtinRoles] at he
   rcases he with h | h | h | h | h | h | h <;> subst h <;>
-    simp [Permission.all, Permission.projectOnly] at hq ⊢ <;> (try rcases hq with h | h | h | h | h) <;>
+    simp [Permission.all, Permission.projectOnly] at hq ⊢ <;> (try rcases hq with h | h | h | h | h | h) <;>
     (try subst h) <;> simp_all
 
 theorem holds_unguarded {d : Option RoleDef} {p x} {h h' : Holdings}

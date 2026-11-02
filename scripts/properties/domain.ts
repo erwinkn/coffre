@@ -14,7 +14,7 @@ import type { TestCase } from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
 
 export const PERMISSIONS = [
-  'secret.read', 'secret.use', 'secret.write', 'secret.archive',
+  'secret.read', 'secret.use', 'secret.write', 'proxy.edit', 'secret.archive',
   'audit.read', 'environment.manage', 'grant.manage', 'project.manage',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
@@ -220,12 +220,16 @@ export const projects = (options: { maxProjects?: number; maxEnvironments?: numb
   });
 });
 
-/** A role's two columns as an Owner may write them: reading implies using, and the protected column within the other, with nothing project-wide. */
+/** A role's two columns as an Owner may write them: editing the proxy implies reading, reading implies using, and the protected column within the other, with nothing project-wide. */
 export const columns = gs.composite((tc): Columns => {
   const permissions = PERMISSIONS.filter(() => tc.draw(gs.booleans()));
-  if (permissions.includes('secret.read') && !permissions.includes('secret.use')) permissions.splice(1, 0, 'secret.use');
+  const closed = (column: Permission[]) => {
+    if (column.includes('proxy.edit') && !column.includes('secret.read')) column.push('secret.read');
+    if (column.includes('secret.read') && !column.includes('secret.use')) column.push('secret.use');
+  };
+  closed(permissions);
   const guarded = permissions.filter((permission) => !PROJECT_ONLY.includes(permission) && tc.draw(gs.booleans()));
-  if (guarded.includes('secret.read') && !guarded.includes('secret.use')) guarded.push('secret.use');
+  closed(guarded);
   return { permissions: PERMISSIONS.filter((permission) => permissions.includes(permission)), protected: PERMISSIONS.filter((permission) => guarded.includes(permission)) };
 });
 

@@ -57,6 +57,11 @@
       "types": "./dist/mcp.d.ts",
       "default": "./dist/mcp.js"
     },
+    "./proxy-match": {
+      "coffre:source": "./src/proxy-match.ts",
+      "types": "./dist/proxy-match.d.ts",
+      "default": "./dist/proxy-match.js"
+    },
     "./recipe": {
       "coffre:source": "./src/recipe.ts",
       "types": "./dist/recipe.d.ts",

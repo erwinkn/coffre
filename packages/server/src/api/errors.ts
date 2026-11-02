@@ -1,4 +1,4 @@
-import { isUnsealed } from '@coffre/core/vault';
+import { isDeploying, isUnsealed } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { gaveUp, isUnavailable } from '@coffre/db/dialect';
@@ -49,6 +49,7 @@ export const ERROR_STATUS = {
   too_many_requests: 429,
   not_implemented: 501,
   unavailable: 503,
+  deploying: 503,
   migrating: 503,
   rotating: 503,
   app_key: 503,
@@ -151,8 +152,20 @@ export const UNAVAILABLE_RETRY_AFTER = '5';
  */
 export const UNSEALED_MESSAGE = 'coffre made this change, but could not seal it in its audit log in time; it will once it can. Check before you make it again';
 
+/**
+ * What a request is told while the app and the vault run two releases, for
+ * the seconds of a deploy (`Deploying`, docs/design/proxy-ui.md, section 3):
+ * the vault ran nothing, and the same request a second later is served.
+ */
+export const DEPLOYING = 'coffre is deploying a new release: try again in a second';
+
+/** How long a 503 `deploying` tells its caller to wait (`Retry-After`): a deploy moves both Workers within seconds. */
+export const DEPLOYING_RETRY_AFTER = '1';
+
 /** The status and body for anything a handler throws. */
 export function toErrorBody(error: unknown): { status: number; body: ErrorBody } {
+  // The vault on another release than this app (`versioned`): it read and wrote nothing. Not logged: a deploy's seconds.
+  if (isDeploying(error)) return { status: 503, body: { error: 'deploying', message: DEPLOYING } };
   if (error instanceof ApiError) {
     const body: ErrorBody = { error: error.code, message: error.message };
     if (error.reason !== undefined) body.reason = error.reason;

@@ -22,6 +22,10 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   'GET /personal/:project': 'read',
   'GET /projects/:project/:environment/version': 'read',
   'PATCH /projects/:project/:environment/dismissals': 'write',
+  'GET /projects/:project/:environment/proxy': 'read',
+  // Where an environment's keys go: a person's, in the Proxy tab, never a client's.
+  'PUT /projects/:project/:environment/proxy': null,
+  'PUT /proxy/reserved': null,
   'GET /secrets/:project/:environment': 'read',
   'PATCH /secrets/:project/:environment': 'write',
   'PATCH /secrets/:project/:environment/:key': 'write',

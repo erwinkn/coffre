@@ -258,6 +258,8 @@ function edited(row: Input): Input {
     case 'environment': return { ...row, deleted: !row.deleted };
     case 'roles': return { ...row, roles: { ...row.roles, viewer: { name: 'Viewer', description: '', permissions: ['secret.read', 'secret.use', 'secret.write'], protected: [] } } };
     case 'policy': return { ...row, bulk: { ...row.bulk, count: row.bulk.count + 1 } };
+    case 'proxy': return { ...row, items: {} };
+    case 'proxy-reserved': return { ...row, names: [...row.names, 'edited'] };
   }
 }
 

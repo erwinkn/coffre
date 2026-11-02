@@ -27,7 +27,7 @@ import * as gs from '@hegeldev/hegel/generators';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import type { PluginContext, UseAsked, WorkloadUse } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
-import { allows, readPattern, type AllowEntry, type PathPattern } from '../src/plugins/proxy-match.ts';
+import { allows, readPattern, type AllowEntry, type PathPattern } from '@coffre/core/proxy-match';
 
 const PUBLIC = 'https://coffre.example';
 const HANDLE = `coffre_use_${'h'.repeat(43)}`;

@@ -39,6 +39,9 @@ export const ISSUING_ROUTES: ReadonlySet<RouteKey> = new Set<RouteKey>([
   'PUT /instance-roles/:role',
   'DELETE /instance-roles/:role',
   'PUT /settings',
+  // Where a key goes is a read of it by whoever controls the upstream (docs/design/proxy-ui.md): a person's to say.
+  'PUT /projects/:project/:environment/proxy',
+  'PUT /proxy/reserved',
 ]);
 
 /** Whether a workload's session reaches a route. */
@@ -55,6 +58,9 @@ export const WORKLOAD_ROUTES: { [K in RouteKey]: boolean } = {
   'GET /personal/:project': true,
   'GET /projects/:project/:environment/version': true,
   'PATCH /projects/:project/:environment/dismissals': true,
+  'GET /projects/:project/:environment/proxy': true,
+  'PUT /projects/:project/:environment/proxy': false,
+  'PUT /proxy/reserved': false,
   'GET /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment/:key': true,

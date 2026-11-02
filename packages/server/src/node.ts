@@ -27,6 +27,7 @@
  * entry's `fetch` runs: `srvx --prod -s ../client app/dist/server/server.js`,
  * as TanStack Start documents for Node.
  */
+import { versioned } from '@coffre/core/vault';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
@@ -88,7 +89,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
   // `rotating` meanwhile, `/livez` and `/readyz` aside: a Worker's CPU limit is not Node's.
   const ready = () =>
     (runtime ??= openDatabase(config.database).then((database) => {
-      const rt = createRuntime(resolved, database.db, config.vault, nodeTransport(), undefined, processGates());
+      const rt = createRuntime(resolved, database.db, versioned(config.vault), nodeTransport(), undefined, processGates());
       void settleKey(rt);
       return rt;
     }));

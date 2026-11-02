@@ -1,7 +1,7 @@
-import { createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
-import { INSTANCE_ROLES, normalDefinition, ROLES, type CallerKind, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope } from '@coffre/core/access';
-import type { WrappedKey } from '@coffre/core/vault';
+import { INSTANCE_ROLES, normalDefinition, ROLES, type CallerKind, type Columns, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope, type ScopeGrant } from '@coffre/core/access';
+import { MAX_PROXY_ITEMS, type ProxyDefinition, type WrappedKey } from '@coffre/core/vault';
 import { logObject } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
@@ -27,6 +27,11 @@ import { MAX_BULK_WINDOW_MINUTES, type BulkLimit } from './config.ts';
  * - **roles:** the role tables, as an Owner edited them.
  * - **policy:** what the deployment set that every decision reads: the
  *   bulk cap's count and window (R52).
+ * - **proxy:** an environment's proxy definitions written in the UI (0.16,
+ *   docs/design/proxy-ui.md), each item with what its save froze. Its seal
+ *   covers the index of its items' digests, not their bodies (`proxyIndex`).
+ * - **proxy-reserved:** the names the deployment's code reserved, the
+ *   instance's whole set.
  *
  * Each object's row carries its **seal**, the vault's HMAC-SHA256 over it
  * cut to 16 bytes, and each change records the seal it leaves. A row is
@@ -184,7 +189,43 @@ export type RolesInput = {
 
 export type PolicyInput = { kind: 'policy'; bulk: BulkLimit };
 
-export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput;
+/**
+ * What a proxy definition's save froze of its editor (decision 5;
+ * docs/design/proxy-ui.md, section 8): their standing as it was, each part
+ * with what its role held then, so that no role an Owner widens later widens
+ * the route. Their instance role, its scope and its columns; and each grant,
+ * its place and role, with that role's columns (`ScopeGrant`, as a token's
+ * scope keeps them). Kept whole rather than weighed at the places the save
+ * saw, so that a fork made later, which inherits the definition, is decided
+ * as their grants reach it: a `router` on `market/dev` reads none of a fork's
+ * own keys, a `router` on all of `market` does.
+ *
+ *   Lin, Developer scoped to dev, router on market/dev
+ *     { role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } },
+ *       instance: { normal: [read, use, write], protected: [use, write] },
+ *       grants: [{ projectId: market, environmentId: dev, role: 'router', permissions: … }] }
+ *
+ * A use decides the item's keys for these, as a token's scope, intersected
+ * with what its editor holds then (PR C; `frozenAllows`, `frozenOwns`).
+ */
+export type FrozenHoldings = { role: InstanceRole; scope: Scope; instance: Columns; grants: readonly ScopeGrant[] };
+
+/** One UI item as its object holds it: its definition, the keys it sends, who saved it and when, and what that save froze of them. */
+export type ProxyItem = {
+  definition: ProxyDefinition;
+  keys: readonly string[];
+  savedBy: string;
+  savedAt: number;
+  holdings: FrozenHoldings;
+};
+
+/** An environment's proxy definitions, by name, as the UI wrote them (`proxy.save`), and as code's reservations left them (`proxy.code`). */
+export type ProxyInput = { kind: 'proxy'; id: string; items: Readonly<Record<string, ProxyItem>> };
+
+/** Every name the deployment's code ever reserved and no instance Owner released, sorted. */
+export type ReservedInput = { kind: 'proxy-reserved'; names: readonly string[] };
+
+export type Input = PrincipalInput | CredentialInput | ConnectionInput | BindingInput | SecretInput | EnvironmentInput | RolesInput | PolicyInput | ProxyInput | ReservedInput;
 export type Kind = Input['kind'];
 
 /** An object of the log: its kind and its id (the instance's own for the roles and the policy, of which there is one each). */
@@ -192,12 +233,14 @@ export type Ref = { kind: Kind; id: string };
 
 export const ROLES_REF: Ref = { kind: 'roles', id: 'instance' };
 export const POLICY_REF: Ref = { kind: 'policy', id: 'instance' };
+export const RESERVED_REF: Ref & { kind: 'proxy-reserved' } = { kind: 'proxy-reserved', id: 'instance' };
 
 export function refOf(input: Input): Ref {
   switch (input.kind) {
     case 'principal': return { kind: 'principal', id: input.principal };
     case 'roles': return ROLES_REF;
     case 'policy': return POLICY_REF;
+    case 'proxy-reserved': return RESERVED_REF;
     default: return { kind: input.kind, id: input.id };
   }
 }
@@ -261,10 +304,13 @@ export function sealedOnce(): typeof sealed {
 
 /**
  * An object as its seal covers it: a principal's grants as a set, in one
- * order whatever order the rows come back in. Everything else is kept as
- * written: a credential's scope is a list it was issued with.
+ * order whatever order the rows come back in; an environment's proxy
+ * definitions as their index (`proxyIndex`), so that a use checks the
+ * seal on its route's item and the index alone, never every item. Everything
+ * else is kept as written: a credential's scope is a list it was issued with.
  */
-function normalized(input: Input): Input {
+function normalized(input: Input): unknown {
+  if (input.kind === 'proxy') return { kind: 'proxy', id: input.id, index: proxyIndex(input.items).map(([name, digest]) => [name, digest.toString('hex')]) };
   if (input.kind !== 'principal') return input;
   const grants = input.grants.map((grant) => [grant, canonical(grant)] as const).sort(([, a], [, b]) => (a < b ? -1 : a > b ? 1 : 0));
   return { ...input, grants: grants.map(([grant]) => grant) };
@@ -280,6 +326,37 @@ export function canonical(value: unknown): string {
       ? Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).sort(([a], [b]) => (a < b ? -1 : 1)))
       : v
   ));
+}
+
+/** An item's digest: SHA-256 over its canonical encoding, which an index entry names and a use checks the item it read against. */
+export function itemDigest(item: ProxyItem): Buffer {
+  let digest = DIGESTS.get(item);
+  if (digest === undefined) DIGESTS.set(item, (digest = createHash('sha256').update(canonical(item)).digest()));
+  return digest;
+}
+
+/**
+ * Each item's digest, once per object read: a save checks the object it read, makes the next from it, seals that and
+ * writes its index, each over the same items. Items are never changed in place (`applyOp` makes new ones).
+ */
+const DIGESTS = new WeakMap<ProxyItem, Buffer>();
+
+/**
+ * The index of an environment's proxy definitions: each item's name beside
+ * its digest, sorted by name. The seal covers it, names included, so that the
+ * vault tells a route the object lacks (a fork falls back to its parent's)
+ * from one a writer deleted, whose name the index still holds.
+ */
+export function proxyIndex(items: Readonly<Record<string, ProxyItem>>): [string, Buffer][] {
+  return Object.keys(items).sort().map((name) => [name, itemDigest(items[name]!)]);
+}
+
+/** The index as its row's `digests` column holds it: each entry its name's length (a byte), its name, then its 32-byte digest. */
+export function indexBytes(items: Readonly<Record<string, ProxyItem>>): Buffer {
+  return Buffer.concat(proxyIndex(items).flatMap(([name, digest]) => {
+    const bytes = Buffer.from(name, 'utf8');
+    return [Buffer.from([bytes.length]), bytes, digest];
+  }));
 }
 
 // --- changes ------------------------------------------------------------------
@@ -328,7 +405,22 @@ export type Op =
   | { op: 'project.archive'; archived: boolean }
   | { op: 'environment.delete' }
   | { op: 'role.define'; table: 'roles' | 'instanceRoles'; role: string; definition: RoleDefinition | null }
-  | { op: 'bulk.limit'; value: PolicyInput };
+  | { op: 'bulk.limit'; value: PolicyInput }
+  /**
+   * An environment's proxy definitions saved (`proxy.save`): each item named
+   * added or replaced, whole, or removed (null), the others kept; with
+   * `replace`, none of the others. `loaded` is the seal of the object's
+   * newest change the page loaded, which the save moved on from.
+   */
+  | { op: 'proxy.save'; items: Readonly<Record<string, ProxyItem | null>>; replace: boolean; loaded: string | null }
+  /**
+   * Code reserved names (`proxy.code`): to the reserved set, the names it
+   * adds (`names`); to an environment's object, each UI item of such a name,
+   * deleted, whole (`cleared`), so that the log can restore it.
+   */
+  | { op: 'proxy.code'; names: readonly string[]; cleared?: Readonly<Record<string, ProxyItem>> }
+  /** An instance Owner freed a reserved name (`proxy.release`). */
+  | { op: 'proxy.release'; name: string };
 
 /** Every object, by its key: the rows a decision reads, as the log has them. */
 export type State = Map<string, Input>;
@@ -348,8 +440,8 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
   // The object, if it is of the kind the change is about: what every change but a create works on.
   const of = <K extends Kind>(kind: K) => (ref.kind === kind && before?.kind === kind ? (before as Extract<Input, { kind: K }>) : null);
   const created = (kind: Kind) => ref.kind === kind && before === null;
-  // The roles and the policy are one object each: a change to another of their kind does nothing.
-  if ((ref.kind === 'roles' || ref.kind === 'policy') && ref.id !== ROLES_REF.id) return undefined;
+  // The roles, the policy and the reserved names are one object each: a change to another of their kind does nothing.
+  if ((ref.kind === 'roles' || ref.kind === 'policy' || ref.kind === 'proxy-reserved') && ref.id !== ROLES_REF.id) return undefined;
   switch (op.op) {
     case 'genesis': {
       // A whole object, held to what the ops that make one hold it to.
@@ -453,7 +545,44 @@ export function applyOp(before: Input | null, ref: Ref, op: Op): Input | null | 
       return (created('policy') || of('policy') !== null) && op.value.kind === 'policy' && allowedLimit(op.value.bulk)
         ? { kind: 'policy', bulk: { count: op.value.bulk.count, windowMs: op.value.bulk.windowMs } }
         : undefined;
+    case 'proxy.save': {
+      const proxy = of('proxy');
+      if (proxy === null && !created('proxy')) return undefined;
+      const items: Record<string, ProxyItem> = Object.create(null) as Record<string, ProxyItem>;
+      if (!op.replace && proxy !== null) Object.assign(items, proxy.items);
+      for (const [name, item] of Object.entries(op.items)) {
+        // An item is filed under its own name: one moved under another is no save's.
+        if (item !== null && item.definition.name !== name) return undefined;
+        if (item === null) delete items[name];
+        else items[name] = item;
+      }
+      return Object.keys(items).length > MAX_PROXY_ITEMS ? undefined : { kind: 'proxy', id: ref.id, items: sortedItems(items) };
+    }
+    case 'proxy.code': {
+      if (ref.kind === 'proxy-reserved') {
+        const reserved = of('proxy-reserved');
+        if (reserved === null && !created('proxy-reserved')) return undefined;
+        const names = [...new Set([...(reserved?.names ?? []), ...op.names])].sort();
+        // A change that reserves nothing new is none: the gate of an isolate whose names are in already writes nothing.
+        return names.length === (reserved?.names.length ?? -1) ? undefined : { kind: 'proxy-reserved', names };
+      }
+      const proxy = of('proxy');
+      const cleared = Object.keys(op.cleared ?? {});
+      if (proxy === null || cleared.length === 0 || cleared.some((name) => !Object.hasOwn(proxy.items, name) || !op.names.includes(name))) return undefined;
+      const items = Object.fromEntries(Object.entries(proxy.items).filter(([name]) => !cleared.includes(name)));
+      return { kind: 'proxy', id: ref.id, items: sortedItems(items) };
+    }
+    case 'proxy.release': {
+      const reserved = of('proxy-reserved');
+      if (reserved === null || !reserved.names.includes(op.name)) return undefined;
+      return { kind: 'proxy-reserved', names: reserved.names.filter((name) => name !== op.name) };
+    }
   }
+}
+
+/** Items in one order, by name, whichever order their changes came in. */
+function sortedItems(items: Readonly<Record<string, ProxyItem>>): Record<string, ProxyItem> {
+  return Object.fromEntries(Object.keys(items).sort().map((name) => [name, items[name]!]));
 }
 
 /** No edits: the roles object of a log no Owner edited a role in. */

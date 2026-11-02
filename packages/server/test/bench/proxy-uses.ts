@@ -12,7 +12,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { github, signin } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
-import { localVault } from '@coffre/vault/node';
+import { localVault, spoken } from '@coffre/vault/node';
 
 import { resolveConfig } from '../../src/config.ts';
 import { checkPlugins } from '../../src/plugins.ts';
@@ -69,11 +69,11 @@ const upstream = createServer((request, response) => {
 });
 await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
 
-const local = await localVault(
+const local = spoken(await localVault(
   { database: createDatabase(vaultPool), ...(load.log === '0.15' ? { hotDatabase: createDatabase(hotPool) } : {}), kek: { id: 'test-kek-1', key: load.kek }, owners: [load.owner], bulkLimit: { count: 1_000_000, windowMinutes: 1 } },
   // This thread changes nothing but the policy at its start: the main thread's checkpointer seals it on its next tick.
   load.log === '0.15' ? { log: '0.15', sealThrough: async () => ({}) as never, heldOutside: async () => [], ...(load.names === undefined ? {} : { uses: { names: load.names } }) } : { log: '0.14' },
-);
+));
 const vault = load.unnamed !== true ? local : new Proxy(local, {
   get(target, name, receiver) {
     if (name === 'useNamedMany') return undefined;

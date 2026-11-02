@@ -379,6 +379,13 @@
       "when": 1793627266683,
       "tag": "0055_named_batch",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1793627326683,
+      "tag": "0056_proxy_definitions",
+      "breakpoints": true
     }
   ]
 }

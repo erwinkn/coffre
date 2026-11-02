@@ -34,7 +34,7 @@ import { propertySettings } from './properties.ts';
 
 // Independent specification from README's Roles tables. Do not derive these
 // tables or the scope rules from the implementation's constants/helpers.
-const permissions = ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'audit.read', 'environment.manage', 'grant.manage', 'project.manage'] as const;
+const permissions = ['secret.read', 'secret.use', 'secret.write', 'proxy.edit', 'secret.archive', 'audit.read', 'environment.manage', 'grant.manage', 'project.manage'] as const;
 const roles = ['viewer', 'contributor', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'] as const;
 const rights: Record<Role, readonly Permission[]> = {
   viewer: ['secret.read', 'secret.use'],

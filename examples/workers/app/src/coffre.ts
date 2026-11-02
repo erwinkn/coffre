@@ -2,12 +2,12 @@
 // src/server.ts, and so only on the server. The app reaches the database
 // through Hyperdrive and the keys only through the vault Worker's service
 // binding.
-import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type AnchorNamespace, type CoffreContext, type GatesNamespace, type SocketsNamespace, type Vault } from '@coffre/server/cloudflare';
+import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type AnchorNamespace, type CoffreContext, type GatesNamespace, type SocketsNamespace, type VaultEntry } from '@coffre/server/cloudflare';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 
 export type Env = {
   HYPERDRIVE: Hyperdrive;
-  VAULT: Vault;
+  VAULT: VaultEntry;
   PUBLIC_URL: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;

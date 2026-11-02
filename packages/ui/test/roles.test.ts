@@ -82,6 +82,7 @@ test("a role card shows every permission, in the grid's order, and where each is
     'secret.read': 'unprotected',
     'secret.use': 'everywhere',
     'secret.write': 'everywhere',
+    'proxy.edit': 'nowhere',
     'secret.archive': 'nowhere',
     'audit.read': 'nowhere',
     'environment.manage': 'nowhere',
@@ -92,7 +93,7 @@ test("a role card shows every permission, in the grid's order, and where each is
   const admin = INSTANCE_ROLES.admin;
   assert.deepEqual(
     GRID_PERMISSIONS.map((permission) => reachOf(grid([...admin.permissions], [...admin.protected]), permission)),
-    ['nowhere', 'nowhere', 'nowhere', 'nowhere', 'everywhere', 'everywhere', 'everywhere', 'everywhere'],
+    ['nowhere', 'nowhere', 'nowhere', 'nowhere', 'nowhere', 'everywhere', 'everywhere', 'everywhere', 'everywhere'],
   );
 });
 
