@@ -436,6 +436,13 @@ REMOVALS=(
   # The hold by value alone: a grant taken and given back passes, and the log no longer shows the read at the commit.
   "WritingABA ReadByNumber CommitsReplay"
   "WritingAdd WaitForSeal AnsweredSealed"
+  # The app's auth_mac check left out (round 6): a database writer copies a token hash onto an Owner's credential;
+  # the vault resolves the token to the Owner, its read and its hold agree, and the write or the add commits as them.
+  "WritingTamper AuthChecked CommitsAuthentic"
+  "WritingAdd AuthChecked CommitsAuthentic"
+  # The token's resolution left out of the hold: the hash copied after the app's check, before the commit.
+  'WritingTamper Unheld={"tok"} CommitsAuthentic'
+  'WritingAdd Unheld={"tok"} CommitsAuthentic'
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"

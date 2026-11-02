@@ -19,7 +19,8 @@
 (*                  request numbered. Nothing locked after it.             *)
 (*               2. the Worker decides on the read (decide.ts), wraps the  *)
 (*                  value's key and seals the app's change, the read's     *)
-(*                  digest in it.                                          *)
+(*                  digest in it; the app checks the caller's rows'        *)
+(*                  `auth_mac`, as read, in memory.                        *)
 (*               3. the app's statement: 0.14's head, the issue lock and   *)
 (*                  the fence, then the hold (`hold_inputs`: the read      *)
 (*                  again, its digest against the change's), then the      *)
@@ -28,10 +29,12 @@
 (*               4. the seal wait (R51), then the answer.                  *)
 (*   member add  1. the vault's read (no lock);                            *)
 (*               2. the Worker decides and builds the new row, its MAC     *)
-(*                  and its seal, from the read;                           *)
-(*               3. one statement: the rows, the head, the fence, the      *)
-(*                  hold, the write; a hold that fails writes nothing and  *)
-(*                  the vault reads again;                                 *)
+(*                  and its seal, from the read; the app checks the        *)
+(*                  caller's rows' `auth_mac`, as read (round 6), in       *)
+(*                  memory, and hands the add back;                        *)
+(*               3. one statement: the rows, the head, the issue lock, the *)
+(*                  fence, the hold, the write; a hold that fails writes   *)
+(*                  nothing and the vault reads again;                     *)
 (*               4. the seal wait, then the answer.                        *)
 (* Each asks again at most MaxTries times in all, then answers 409.        *)
 (*                                                                         *)
@@ -51,7 +54,10 @@
 (* in the log, moved by each change. A row stores its seal too; a database *)
 (* writer may put a row back (R64), which its column then cannot tell.     *)
 (* Names have none: a rename, a key appearing, a personal config deleted   *)
-(* moves only what a name resolves to.                                     *)
+(* moves only what a name resolves to. The caller's token hash is a name   *)
+(* too: the credential's seal does not cover it, and only the app's        *)
+(* `auth_mac` binds it to its credential (`tok`: 0 while it resolves to    *)
+(* the caller's own credential, as that MAC vouches).                      *)
 (*                                                                         *)
 (* Who is who:                                                             *)
 (*   w1, w2   Ada writes key k at env, each from her session cA;           *)
@@ -71,6 +77,10 @@
 (*            it held none (a dismissal is the same step);                 *)
 (*   del      a maintainer deletes the personal config `env@me` names;     *)
 (*   dbw      a database writer puts cA's row back, live, after its revoke;*)
+(*   sub      a database writer copies a token hash they hold onto a live  *)
+(*            Owner's credential row: the token now resolves to the Owner, *)
+(*            no seal moves, the row's `auth_mac` no longer matches        *)
+(*            (round 6's P1);                                              *)
 (*   bob, cy  two admins each add the service account svc (bob, in         *)
 (*            SetUp and Protect, no admin, sets it up with a first grant,  *)
 (*            on a whole project in Protect);                              *)
@@ -117,7 +127,10 @@ CONSTANTS
     \* The hold compares numbers as well as values. Without, values alone.
     ReadByNumber,
     \* A change answers only once its number is sealed in a checkpoint (R51).
-    WaitForSeal
+    WaitForSeal,
+    \* The app checks the caller's rows' `auth_mac`, as the vault read them,
+    \* before anything commits: a key write's step 4, an add's step 3.
+    AuthChecked
 
 Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
@@ -128,18 +141,20 @@ Moves == [rev |-> "member", end |-> "cred", rol |-> "roles", pol |-> "policy",
 \* What each rename moves: a name's resolution, no seal.
 Renames == [ren |-> "keyName", phn |-> "chain", del |-> "me",
             slg |-> "slug", nev |-> "envs", scp |-> "scope"]
+\* What a token resolves to, by its hash.
+Token == "tok"
 
 \* What a key write reads: Ada's session, her member object, the roles, the
 \* policy, the environment, its fork parent, the parent's keys weighed, the
 \* key itself; and what the key's name, the fork chain and `env@me` resolve to.
 WriteObjects == {"cred", "member", "roles", "policy", "env", "parent", "parentKey", "key"}
-WriteNames == {"keyName", "chain", "me"}
+WriteNames == {"keyName", "chain", "me", Token}
 \* What an add reads: the adder's object, the roles, the policy, the services
 \* setting, the grant's place, the project's other environments, svc's row;
 \* and what the grant's slugs, the project's set of environments and the
 \* scope's slug resolve to.
 AddObjects == {"bob", "roles", "policy", "settings", "place", "prot", "svc"}
-AddNames == {"slug", "envs", "scope"}
+AddNames == {"slug", "envs", "scope", Token}
 Movable == {"cred", "member", "roles", "policy", "env", "parent", "parentKey",
             "bob", "settings", "place", "prot"}
 Objects == Movable \cup {"key", "svc"}
@@ -198,6 +213,9 @@ AddAllowed(p, r) == /\ \A o \in AddObjects \ {"bob", "svc"} : r[o].val
                     /\ p = "cy" \/ r["bob"].val
                     /\ ~r["svc"].val
 Decide(p, r) == IF Kind(p) = "write" THEN WriteAllowed(Weighed(r)) ELSE AddAllowed(p, Weighed(r))
+\* The app's check: the caller's rows, as read, carry its MAC. A row whose
+\* token hash was copied from another fails it.
+AppChecks(r) == ~AuthChecked \/ r[Token].name = 0
 
 \* The hold: the read again, compared part by part to the one decided on,
 \* but for the parts it skips. A part is its number and its value, or (a
@@ -228,6 +246,7 @@ Init ==
                                 [] p \in Adders -> "a.read"
                                 [] p = "ck" -> "ck"
                                 [] p = "dbw" -> "tamper"
+                                [] p = "sub" -> "substitute"
                                 [] p = "bk" -> "giveback"
                                 [] p \in DOMAIN Renames -> "rename"
                                 [] OTHER -> "change"]
@@ -247,7 +266,7 @@ Again(p, from) ==
 \* A committed change, as the ghosts record it.
 Committed(p, o, stands) ==
     [p |-> p, n |-> next, stands |-> stands, replays |-> Replays(p),
-     from |-> l[p].seals[o], was |-> seal[o]]
+     from |-> l[p].seals[o], was |-> seal[o], authentic |-> names[Token] = 0]
 
 -----------------------------------------------------------------------------
 (* A key write *)
@@ -290,11 +309,11 @@ WRest(p) ==
     /\ Goto(p, "w.decide")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, tries, trips, writes, admits, answered>>
 
-\* The Worker decides on the read; allowed, it wraps and seals the change.
-\* No round trip.
+\* The Worker decides on the read; allowed, it wraps and seals the change,
+\* and the app checks the caller's rows. No round trip.
 WDecide(p) ==
     /\ pc[p] = "w.decide"
-    /\ IF Decide(p, l[p].read) THEN Goto(p, "w.app") ELSE Goto(p, "done")
+    /\ IF Decide(p, l[p].read) /\ AppChecks(l[p].read) THEN Goto(p, "w.app") ELSE Goto(p, "done")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* The write itself: the key's next version, its change numbered.
@@ -344,10 +363,13 @@ ARead(p) ==
               /\ Goto(p, "a.decide")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, tries, requests, writes, admits, answered>>
 
-\* The Worker decides on the read: the adder's standing, svc no member yet.
+\* The Worker decides on the read: the adder's standing, svc no member yet;
+\* then the app checks the adder's rows, between the vault's two calls.
+\* (The check reads only what the vault answered, so it is one step with
+\* the decision.) No round trip.
 ADecide(p) ==
     /\ pc[p] = "a.decide"
-    /\ IF Decide(p, l[p].read) THEN Goto(p, "a.write") ELSE Goto(p, "done")
+    /\ IF Decide(p, l[p].read) /\ AppChecks(l[p].read) THEN Goto(p, "a.write") ELSE Goto(p, "done")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* The write: rows, head, fence, the hold, the row, its change. One round trip.
@@ -408,6 +430,14 @@ Tamper(p) ==
     /\ Goto(p, "done")
     /\ UNCHANGED <<ok, names, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
+\* A database writer copies a token hash onto another credential: around
+\* coffre, no lock, nothing logged.
+Substitute(p) ==
+    /\ pc[p] = "substitute"
+    /\ names' = [names EXCEPT ![Token] = 1]
+    /\ Goto(p, "done")
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+
 \* A rename, a key appearing, a config deleted, a project made under an old
 \* slug: an app write under 0.14's head, which moves what a name resolves
 \* to and no seal.
@@ -427,7 +457,7 @@ Tick ==
 
 Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p)
         \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ Answer(p) \/ Change(p)
-        \/ GiveBack(p) \/ Tamper(p) \/ Rename(p)
+        \/ GiveBack(p) \/ Tamper(p) \/ Substitute(p) \/ Rename(p)
 
 Terminating ==
     /\ \A p \in Procs \ {"ck"} : pc[p] = "done"
@@ -481,6 +511,13 @@ AddsFlip == \A a \in admits : a.from = a.was
 \* read at the number its change binds: nothing changed between the read
 \* and the commit, not even and back.
 CommitsReplay == \A c \in writes \cup admits : c.replays
+
+\* A write or an add commits only for the caller its token is: the token's
+\* hash still resolves, at the commit, to the credential the app's MAC
+\* binds it to. Without it, a database writer who copies a token hash they
+\* hold onto an Owner's credential writes, or adds an Owner, as the Owner,
+\* with every change sealed and MAC'd by the vault's own keys (round 6).
+CommitsAuthentic == \A c \in writes \cup admits : c.authentic
 
 \* Every change answers only once sealed (R51).
 AnsweredSealed == \A a \in answered : a.n < sealedTo

@@ -44,6 +44,7 @@ key write    vault  one statement, as a use's                1 round trip
              vault  waitSealed                                the seal
 member add   vault  read                                      1 round trip
                     the Worker decides, builds the rows, their MACs and seals
+             app    checks the caller's auth_mac              no round trip
              vault  write, holding the read                   1 round trip
              vault  waitSealed                                the seal
 ```
@@ -167,7 +168,9 @@ that same read.**
 
 - **every object the decision weighs**, its row's decision columns and its
   newest change in `log_changes` (number, seal, MAC): the credential by
-  its token's hash and its identity, the member row and grants, the roles
+  its token's hash and its identity, each with every column its app
+  `auth_mac` covers (`auth-rows.ts`: the token's hash among them) and the
+  `auth_mac` itself, the member row and grants, the roles
   and the policy (two objects: a role's definition is `roles`, the
   instance's policy `policy`), the project, the environment and each one
   of its fork chain (an environment's protection is its own object's
@@ -401,7 +404,8 @@ today: a personal token on `PUT /members/:member` gets a committed
 `token.use` `personal_token` entry from the router (`router.ts`), so the
 front door sends it down today's path, which writes that entry. Today
 `vault.admit` trusts the `actor` the app authenticated; here nothing the
-app says names the actor.
+app says names the actor: the vault resolves Bob from the token's hash, and
+the app authenticates that resolution (step 3) before anything is written.
 
 1. **The vault's read** (`admit_read`) calls **`admit_inputs`**, the add's
    `write_inputs`, with the same discipline: the session by its token's
@@ -416,17 +420,48 @@ app says names the actor.
    its newest change (StaleFirst), decides on it alone (`#standing`,
    `#setsUp`, `givesService`), and builds svc's new row and its grants,
    their MACs and seals, and their changes from the rows as read (none),
-   the digest in each change's payload.
-3. **The vault's write** (`admit_write`), one statement: both members'
+   the digest in each change's payload. It answers the app the caller's
+   credential and identity rows as read, with their `auth_mac`, and the
+   prepared add under one MAC of the vault's own, which the vault checks
+   when the add comes back: the app carries it, and can neither change it
+   nor make one.
+3. **The app** checks the rows' `auth_mac` in memory, as a key write's
+   step 4 does, and only then hands the prepared add back. A row that
+   fails is refused as `authenticate` refuses it today, and nothing is
+   written. This is a second call of the vault's Worker (a service
+   binding), not of the database: no round trip.
+4. **The vault's write** (`admit_write`), one statement: both members'
    queue locks and rows in principal order (`lockMembers`), 0.14's head,
-   the fence; then, in a statement of its own, `admit_inputs` again, its
+   the issue lock shared, then the fence; then, in a statement of its own,
+   `admit_inputs` again, its
    digest against the changes'; then the rows, `change_input_strict`,
    COMMIT, the read stored beside the changes as a key write's request row
    keeps it. A mismatch writes nothing and answers `moved`, and the vault
    reads again: three tries in all, then 409 `changed`. svc's row is in
    the read (none): an add that committed first makes it a row, and the
    digest differs. The members' primary key backs it.
-4. `waitSealed`, then the answer.
+5. `waitSealed`, then the answer.
+
+Why step 3 (round 6). The vault holds no key of the app's, and the
+credential's seal does not cover its token's hash: only the app's
+`auth_mac` binds a token to its credential. Without the check, a database
+writer copies the hash of a CLI token they hold onto a live Owner's
+credential row, then asks to add their own account as Owner. The vault
+resolves the token to the Owner; its read and its hold agree on the
+substituted row, so the hold passes, and the vault writes a new Owner,
+sealed and MAC'd by its own keys: a forged admin the log vouches for. With
+it, the app finds the row's `auth_mac` wrong and nothing is written. The
+check and the hold meet: the columns the app checked are in the read, so a
+substitution after the check moves the digest and the hold refuses. A key
+write had this check from round 1; the add's two vault statements left the
+app out of the path, and the check with it.
+
+**The issue lock before the fence** (round 6). Until PR 6 the add still
+appends 0.14's `member.add` entry, and `audit_log_fence`, the trigger on
+that append, takes the issue lock shared. Taken after the fence, it could
+wait on a barrier holding the issue lock exclusive, which waits for the
+fence the add holds. So `admit_write` takes the issue lock shared before
+the fence, as `app_change` and `hold_inputs` do.
 
 Example (round 5). Bob, a Developer on all of `market` and no admin, sets
 up svc with a developer grant on `market` while the services setting lets
@@ -514,6 +549,8 @@ protection is a constant; turned off, TLC finds a counterexample:
 | the hold runs once the fence is held (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not the head, between the hold and the write |
 | the read's objects by the log's newest change, not the row's column (ReadOnLog) | `WritesStandAtCommit`: a revoked session's row put back, live, by a database writer |
 | by number, not value (ReadByNumber) | `CommitsReplay`: Ada's grant taken and given back; the write commits on equal values, and the log, replayed at its commit, shows the member changed after the read its change binds |
+| the app checks the caller's `auth_mac` on the rows the vault read before anything commits (AuthChecked): a key write's step 4, an add's step 3 | `CommitsAuthentic`: a database writer copies a token hash they hold onto a live Owner's credential; the vault resolves the token to the Owner, its read and hold agree, and a write or an add commits as the Owner (round 6) |
+| ... and the hold covers the columns it checked (`Unheld` = the token's resolution) | `CommitsAuthentic`: the substitution made after the app's check and before the commit |
 | a change answers once sealed (WaitForSeal, R51) | `AnsweredSealed` |
 
 Two properties hold besides: `TwoTrips` (a write or an add that committed
@@ -545,8 +582,10 @@ no round trip: it is a statement of the same Sync.
   atomic step) nor Migration015 (the head first, assumed) would see it;
 - the vault's request: the fence shared alone, as a use;
 - a member add's write: both members' queues and rows in principal order,
-  then 0.14's head, then the fence, then the hold, as `change_input` and
-  `lockMembers` lock now.
+  then 0.14's head, then the issue lock shared, then the fence, then the
+  hold, as `change_input` and `lockMembers` lock now (the issue lock before
+  the fence: while 0.14's `member.add` append stays, its trigger takes the
+  issue lock, and after the fence that could wait on a barrier).
 
 The fence is held from the hold to COMMIT: one read of the request's
 objects and names more than `app_change` holds it for now, inside the same
@@ -628,8 +667,10 @@ Each with what the key write and the first member add then cost:
    later finding reads tampered for good. After it, nothing reads these
    routes' 0.14 entries.
 5. **The member add's front door, `admit_inputs`, read, write and
-   `admit_outcome`**, the scope carried by slug, with the same regression
-   cases. Its 0.14 `member.add` entry still needs the head read before its
+   `admit_outcome`**, the scope carried by slug, the app's `auth_mac`
+   check between the read and the write (a test puts a known token's hash
+   on an Owner's credential row and expects no add), with the same
+   regression cases. Its 0.14 `member.add` entry still needs the head read before its
    MAC: read, head, write, 3 round trips (14 today).
 6. **0.16, the contraction.** The two routes stop writing 0.14's entries;
    `revoke_credential` drops the head (a migration); the app's statement

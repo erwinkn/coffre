@@ -2,7 +2,8 @@
 (***************************************************************************)
 (* The scenarios TLC checks of Writing.tla. Each review round's P1 is an   *)
 (* adversary of one of them, so each stays pinned: rounds 1 and 2 in       *)
-(* Revoke, Place and Fork, round 3 in Names, round 5 in Protect.           *)
+(* Revoke, Place and Fork, round 3 in Names, round 5 in Protect, round 6   *)
+(* in Tamper and Add.                                                      *)
 (***************************************************************************)
 EXTENDS Writing
 
@@ -27,12 +28,13 @@ ForkProcs == {"w1", "par", "rep", "mrk", "ck"}
 NamesProcs == {"w1", "ren", "phn", "del", "ck"}
 
 \* Ada writes key k while her session is revoked and a database writer puts
-\* its row back, live.
-TamperProcs == {"w1", "end", "dbw", "ck"}
+\* its row back, live, and another copies a token hash onto her credential.
+TamperProcs == {"w1", "end", "dbw", "sub", "ck"}
 
 \* Bob and Cy each add svc while an Owner demotes Bob and changes the
-\* policy so that only Owners add.
-AddProcs == {"bob", "cy", "dem", "pol", "ck"}
+\* policy so that only Owners add, and a database writer copies a token
+\* hash onto Bob's credential (round 6).
+AddProcs == {"bob", "cy", "dem", "pol", "sub", "ck"}
 
 \* Bob, no admin, sets up svc with a first grant at a place, as the services
 \* setting lets him, while an Owner redefines the roles and closes the
