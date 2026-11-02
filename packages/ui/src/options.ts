@@ -44,6 +44,7 @@ import {
   type Freshness,
 } from './lib/queries';
 import type { Permission } from './shared/models';
+import { proxyQuery, type ProxyStore } from './lib/proxy-prototype';
 import { loginSearch } from './lib/signin-errors';
 
 /**
@@ -166,6 +167,19 @@ export const environment = {
     return loadEnvironment(queryClient, coffre, params);
   },
 };
+
+/**
+ * `/projects/$project/$environment/proxy`, a prototype (W260, DO NOT
+ * MERGE): the environment's keys, as its Secrets tab reads them, and its
+ * credential-proxy definitions from the store the deployment gives
+ * (`lib/proxy-prototype.ts`), asked together.
+ */
+export const environmentProxy = (store: ProxyStore) => ({
+  loader: async ({ context, params }: Loader<{ project: string; environment: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    await Promise.all([queryClient.fetchQuery(queries.secrets(coffre, params)), queryClient.fetchQuery(proxyQuery(store, params))]);
+  },
+});
 
 /** `/audit`. */
 export const audit = {
