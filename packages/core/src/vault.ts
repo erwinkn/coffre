@@ -210,6 +210,11 @@ export interface Vault {
      */
     batchUses?: true;
     /**
+     * `true` when the vault also answers a request's several keys by name in one call (`useNamedMany`; T165, B2's PR 2).
+     * Said here, as a Worker's stub answers any method's name. Absent otherwise.
+     */
+    namedBatches?: true;
+    /**
      * `true` when the vault says whether its checkpointer seals (`sealing`; T169), which `/readyz` asks. Said here,
      * as a Worker's stub answers any method's name: of a vault older than this app, mid-deploy, readiness asks nothing.
      */
@@ -272,6 +277,15 @@ export interface Vault {
    * vault without 0.15's uses (`about().batchUses` says whether it has it).
    */
   useMany?(input: UseManyInput): Promise<UseManyOutcome>;
+
+  /**
+   * A request's several keys as it names them, one call (T165, B2's PR 2; formal/ProbingMany.tla): the caller's standing
+   * at the place decided first, from rows no key decides, and nothing of any key read without it; then the keys, its
+   * names or every key the place holds, each name resolved by the vault: a sealed value of its own by the ids the vault
+   * mapped for it when they are its name's now, else by the ids it resolved, in the batch by ids; any other key by its
+   * name as a lone named use reads it; all decided first, then used, all or nothing, as `useMany` uses them. Absent from a vault without it (`about().namedBatches` says whether it has it).
+   */
+  useNamedMany?(input: NamedManyInput): Promise<NamedManyOutcome>;
 
   /**
    * 0.15's log (docs/design/0.15-plan.md, "As built: PR 4b"): the changes
@@ -1604,6 +1618,55 @@ export type NamedUseOutcome =
     place: { project: string; environment: string } | null;
     /** The same place by its ids, as the vault's own rows read it, on either engine: where a refusal is logged. */
     at: { projectId: string; environmentId: string } | null;
+  };
+
+/**
+ * A request's several keys as it names them (`Vault.useNamedMany`): a named use's names but its key and request id, and
+ * the keys by name, in the request's order, each once; null for every key the place holds (a whole environment's read,
+ * `coffre export`), which the vault lists itself, once it has found the caller standing there.
+ */
+export type NamedManyInput = Omit<NamedUseInput, 'key' | 'requestId' | 'forks'> & {
+  keys: readonly string[] | null;
+  /**
+   * Whether the read leaves a sensitive value out, naming it, rather than use it: a person's read of an environment, or
+   * of some of its keys (`reveal`'s `sensitiveTo`). The vault then uses none, writing nothing of it, and says so
+   * (`NamedKey.left`).
+   */
+  leavesSensitive?: boolean;
+};
+
+/**
+ * One key of a named batch's answer, in the request's order: its name; its id, null for a key the place does not hold;
+ * where it is held, for a key the place inherits (a fork's parent, a personal config's dev); the app's rows of it, as a
+ * named use answers them (`app`, JSON; null on SQLite); and whether the read leaves it out, unused (`left`).
+ */
+export type NamedKey = { key: string; secretId: string | null; held: { environmentId: string; slug: string } | null; app: string | null; left: boolean };
+
+/** A key's value a named batch hands back: opened by a use, or a plain value's text, which the vault decided as any. */
+export type NamedValue = { number: string; covered: boolean; value: UsedValue } | { plain: string; versionId: string };
+
+/**
+ * A named batch's answer (`Vault.useNamedMany`). `served`, `credential` and `busy` as a named use's
+ * (`NamedUseOutcome`). Otherwise, `name`: the caller as the vault decided them, the place, by slugs and ids, and the
+ * app's rows of the credential and the place (`app`); `stands`, whether the caller stands at the place for what the
+ * request asks and its chain is whole: if not, nothing of any key was read, `keys` is empty, and `outcome` is the
+ * place's refusal (`index` null). Else every key the request covers (`keys`) and, all or nothing, each one's value in
+ * that order (null for a key not held or left out), or the first refused, by its index, logged (`number`) or not.
+ */
+export type NamedManyOutcome =
+  | { served: false }
+  | { served: true; route: 'credential'; outcome: Extract<UseOutcome, { code: UseCode }> }
+  | { served: true; route: 'busy'; outcome: Extract<UseOutcome, { busy: UseBusy }> }
+  | {
+    served: true; route: 'name'; standing: Access; app: string | null;
+    place: { project: string; environment: string } | null;
+    at: { projectId: string; environmentId: string } | null;
+    stands: boolean;
+    keys: NamedKey[];
+    outcome:
+      | { ok: true; values: (NamedValue | null)[] }
+      | { ok: false; index: number | null; code: UseCode; number: string | null }
+      | { ok: false; busy: UseBusy; retryAfter: number };
   };
 
 /**

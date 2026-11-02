@@ -267,3 +267,115 @@ test("T165: a named use at a fork, and at `dev@me`, walks the place's chain and 
     assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 1k forks, ${large[form]} at 10k`);
   }
 });
+
+test("T165 (PR 2): a named batch's first statement reads no key without standing, the same buffers whatever the place holds; and, standing, its gate's and each key's lone use's, its own the same at 1k forks and at 10k", { ...postgresOnly('the hot path'), timeout: 600_000 }, async (t) => {
+  const w = await namedWorld(db);
+  const fork = await w.fork('feature');
+  await w.grantAt(fork, 'viewer');
+  // Three keys of dev's, which the fork inherits, and one of its own.
+  const ids = [await w.key('a'), await w.key('b'), await w.key('c'), await w.key('own', false, fork)];
+  const [names] = await rows<{ token_hash: Buffer; project: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project
+    FROM credentials c, projects p WHERE c.id = ${w.credentialId} AND p.id = ${w.project}`);
+  const keys = await Promise.all(ids.map((id) => w.nameOf(id)));
+  let made = 0;
+  /** `count` projects more, each with its dev and a fork of it, three keys in each and a dismissal at the fork. */
+  const grow = async (count: number) => {
+    await run(db.owner, sql`INSERT INTO projects (id, slug, name) SELECT gen_random_uuid(), 'batched-' || (${made} + g), 'Grown' FROM generate_series(1, ${count}) g`);
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name, protected)
+      SELECT gen_random_uuid(), p.id, 'dev', 'Development', false FROM projects p WHERE p.slug LIKE 'batched-%' AND NOT EXISTS (SELECT 1 FROM environments e WHERE e.project_id = p.id)`);
+    await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name, protected, parent_id)
+      SELECT gen_random_uuid(), e.project_id, 'feature', 'Feature', false, e.id FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'batched-%' AND e.slug = 'dev' AND NOT EXISTS (SELECT 1 FROM environments f WHERE f.parent_id = e.id)`);
+    await run(db.owner, sql`INSERT INTO secrets (id, project_id, environment_id, key)
+      SELECT gen_random_uuid(), e.project_id, e.id, k FROM environments e JOIN projects p ON p.id = e.project_id CROSS JOIN unnest(${sql.param(keys.slice(0, 3))}::text[]) k
+       WHERE p.slug LIKE 'batched-%' AND NOT EXISTS (SELECT 1 FROM secrets s WHERE s.environment_id = e.id)`);
+    await run(db.owner, sql`INSERT INTO dismissed_keys (environment_id, key, dismissed_by)
+      SELECT e.id, 'REMOVED', 'grown' FROM environments e JOIN projects p ON p.id = e.project_id
+       WHERE p.slug LIKE 'batched-%' AND e.parent_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dismissed_keys d WHERE d.environment_id = e.id)`);
+    made += count;
+    await run(db.owner, sql`VACUUM ANALYZE`);
+  };
+  const client = postgresClient(HOT_URL, { max: 1 });
+  // Ended however the test ends: a client left open keeps the file running to its timeout.
+  t.after(() => client.end());
+  const roles = `'${GATE_ROLES.replaceAll("'", "''")}'::jsonb`;
+  /** The least of several runs' buffers of `call`, each with a fresh time and read MAC; `check` reads the first run's answer. */
+  const least = async (call: string, argsOf: (at: number, read: Buffer) => unknown[], check: (answer: string) => void): Promise<number> => {
+    let fewest = Infinity;
+    for (let i = 0; i < 6; i += 1) {
+      const at = Date.now();
+      const read = Buffer.concat([logMacKey(randomBytes(32)).tag, Buffer.alloc(12)]);
+      const args = argsOf(at, read) as never[];
+      if (i === 0) {
+        const [row] = await client.unsafe(`SELECT ${call}::text AS answer`, args) as unknown as { answer: string }[];
+        check(row!.answer);
+      }
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      fewest = Math.min(fewest, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+    }
+    return fewest;
+  };
+  /** A named batch's first statement by names alone (a cold isolate's), of `asked` at `environment`. */
+  const buffers = (environment: string, asked: readonly string[] | null, stands: boolean): Promise<number> => {
+    const n = asked?.length ?? 0;
+    const list = <T>(value: T) => (asked === null ? null : Array.from({ length: n }, () => value));
+    return least(`use_named_batch($1, $2, $3, false, '{}', true, '{}', ${roles}, $4, 4::smallint, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, 0::smallint, NULL, 100)`,
+      (at, read) => [names!.token_hash, names!.project, environment, String(at), String(at + 3000), read, asked === null ? null : [...asked],
+        list(null), list(null), list(null), list('0'), list(read), list(null), list(null), list(null), list(null), list(null), list(null), list(null)],
+      (answer) => {
+        const answered = JSON.parse(answer) as { gate: { n_standing: boolean | null }; rows: unknown[] };
+        assert.equal(answered.gate.n_standing, stands, answer.slice(0, 300));
+        assert.equal(answered.rows.length, stands ? (asked?.length ?? 4) : 0, 'a key read only for one who stands');
+      });
+  };
+  /** A lone named use of `key` at `environment` by names alone, as the batch makes each of its own; null, the batch's gate. */
+  const lone = (environment: string, key: string | null): Promise<number> =>
+    least(`use_credential(NULL::uuid, NULL::uuid, 0::bigint, $1::bigint, 4::smallint, NULL::uuid, $2::bytea, $3::bigint,
+        NULL::bigint, NULL::bigint, NULL::bigint, NULL::bigint, NULL::bytea, NULL::integer, NULL::bigint, $4::bytea, $5::text, $6::text, $7::text,
+        false, false, '{}'::text[], true, '{}'::text[], ${roles}, 0::smallint, NULL::text, true)`,
+      (at, read) => [String(at), read, String(at + 3000), names!.token_hash, names!.project, environment, key],
+      (answer) => assert.equal((JSON.parse(answer) as { n_standing: boolean | null }).n_standing, true, answer.slice(0, 300)));
+  // A batch is its gate and a lone named use of each key, in one statement, and its listing: the lone use's own buffers
+  // grow with its indexes' depth, which the test above holds to the use's; what the batch adds is held flat here.
+  const listedKeys = [...keys].sort();
+  const namedKeys = [keys[0]!, 'NEVER_MADE', 'REMOVED'];
+  const standing = async () => {
+    const gate = await lone('feature', null);
+    const each = async (asked: readonly string[]) => {
+      let sum = gate;
+      for (const key of asked) sum += await lone('feature', key);
+      return sum;
+    };
+    const listed = await buffers('feature', null, true);
+    const named = await buffers('feature', namedKeys, true);
+    return { listed, named, over: { listed: listed - (await each(listedKeys)), named: named - (await each(namedKeys)) } };
+  };
+  await grow(100);
+  const few = await standing();
+  await grow(900);
+  const small = await standing();
+  await grow(9_000);
+  const large = await standing();
+  console.log(JSON.stringify({ few, small, large }));
+  for (const form of ['listed', 'named'] as const) {
+    // One-sided, as above: below its crossover the planner may scan a small table whole, which costs less at 10k, not more.
+    assert.ok(large.over[form] - small.over[form] <= 4, `${form}: the batch's own ${small.over[form]} buffers at 1k forks, ${large.over[form]} at 10k`);
+    // Its lone uses' indexes one level deeper at most: nothing read row by row, which would cost hundreds more at 10k.
+    assert.ok(large[form] <= small[form] * 1.15, `${form}: ${small[form]} buffers at 1k forks, ${large[form]} at 10k`);
+  }
+  // Revoked at the fork: whatever is asked and whatever the place holds, the gate's buffers alone.
+  await w.revokeAt(fork);
+  const refused = {
+    listed: await buffers('feature', null, false),
+    held: await buffers('feature', keys, false),
+    never: await buffers('feature', ['NEVER_1', 'NEVER_2', 'NEVER_3', 'NEVER_4'], false),
+  };
+  // Forty keys more at the fork: a refusal still reads none of them.
+  await run(db.owner, sql`INSERT INTO secrets (id, project_id, environment_id, key) SELECT gen_random_uuid(), ${w.project}, ${fork}, 'MORE_' || g FROM generate_series(1, 40) g`);
+  await run(db.owner, sql`VACUUM ANALYZE`);
+  const grown = await buffers('feature', null, false);
+  console.log(JSON.stringify({ few, small, large, refused, grown }));
+  assert.ok(Math.max(refused.listed, refused.held, refused.never, grown) - Math.min(refused.listed, refused.held, refused.never, grown) <= 2,
+    `a refusal's buffers: ${JSON.stringify({ ...refused, grown })}`);
+});

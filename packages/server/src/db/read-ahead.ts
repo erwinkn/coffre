@@ -80,6 +80,29 @@ export function namedAhead(db: Queryable, app: string | null, { personal = false
   return ahead;
 }
 
+/**
+ * The rows a named batch answers (T165, B2's PR 2; `Vault.useNamedMany`): the credential and the place, as its gate's
+ * named call read them (`namedAhead`), and every key's rows, as each key's named call read them, in the order asked,
+ * none for a key the place does not hold. Null for SQLite's vault, which answers none, or a caller who does not stand
+ * at the place, of whom the vault read no key: the app reads its own rows then, as ever.
+ */
+export function namedManyAhead(db: Queryable, app: string | null, keys: readonly { app: string | null }[] | null, { personal = false }: { personal?: boolean } = {}): ReadAhead | null {
+  const ahead = namedAhead(db, app, { personal });
+  if (ahead === null || ahead.place == null) return ahead;
+  ahead.held = null;
+  // No key read: the place's rows only, and the read reads its keys itself.
+  delete ahead.secrets;
+  if (keys === null) return ahead;
+  const secrets: SecretRow[] = [];
+  for (const key of keys) {
+    if (key.app === null) return ahead;
+    const read = JSON.parse(key.app) as Answer & { now: string };
+    secrets.push(...(readAheadOf(db, read, read.now, { tokenHash: false, path: true }).secrets ?? []));
+  }
+  ahead.secrets = secrets;
+  return ahead;
+}
+
 function readAheadOf(db: Queryable, read: Answer, now: string, asked: { tokenHash: boolean; path: boolean }): ReadAhead {
   const { credentials, identities, projects, environments, secrets, secretVersions } = tablesOf(db);
   const ahead: ReadAhead = {};

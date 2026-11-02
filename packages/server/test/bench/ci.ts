@@ -24,6 +24,9 @@
 // handles (proxy-uses.ts, PR 5b): 0.14's unwrap or, with `--log 0.15`, 0.15's use. `--proxy-cache <s>` is the proxy's
 // `cacheSeconds` (0, the default here: every request opens its key); `--proxy-stable` sends each to the stable URL;
 // `--proxy-names <n>` caps 0.15's vault's map of names at n a thread, its handles picked at random (0: every request cold).
+// `--proxy-pair` gives the proxy's credential two keys, `API_KEY` and `API_SECRET` in one header: each `/use` a request of
+// several keys, the vault's named batch (T165, PR 2); `--proxy-unnamed` hides that batch from the app, as a vault older
+// than it: the app reads the keys, then uses them by ids (T167), the path before.
 // `--proxy-fork` makes every handle for ci/feature, a fork of ci/dev that inherits its `API_KEY` (T165): what a fork's
 // `/use` costs, by the vault's one call by name or, before T165, by the app's own path.
 // `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
@@ -41,7 +44,7 @@
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
-//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork]
+//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed]
 //     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -95,6 +98,8 @@ const { values } = parseArgs({
     'proxy-cache': { type: 'string', default: '0' },
     'proxy-stable': { type: 'boolean', default: false },
     'proxy-fork': { type: 'boolean', default: false },
+    'proxy-pair': { type: 'boolean', default: false },
+    'proxy-unnamed': { type: 'boolean', default: false },
     'proxy-names': { type: 'string' },
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
@@ -418,9 +423,11 @@ try {
       cacheSeconds: Number(values['proxy-cache']),
       stable: values['proxy-stable'],
       ...(values['proxy-names'] === undefined ? {} : { names: Number(values['proxy-names']) }),
+      ...(values['proxy-pair'] ? { secret: 'api-secret-value' } : {}),
+      ...(values['proxy-unnamed'] ? { unnamed: true } : {}),
     };
-    // The proxy injects `API_KEY`: ci/dev's first key under that name.
-    await root.secrets.set('ci/dev', { API_KEY: load.value });
+    // The proxy injects `API_KEY`: ci/dev's first key under that name; and `API_SECRET` beside it, `--proxy-pair`.
+    await root.secrets.set('ci/dev', { API_KEY: load.value, ...(load.secret === undefined ? {} : { API_SECRET: load.secret }) });
     // Several threads, each an app and a vault of its own, as Workers runs many isolates: one Node thread is the
     // bottleneck well below 1,000 requests a second, as the thread CPU per request below says.
     const threads = Number(values.threads);

@@ -226,7 +226,7 @@ export async function holding<T>(db: TestDatabase, lock: ReturnType<typeof sql>,
 export async function slowed(db: TestDatabase, options: { connections?: number } = {}) {
   let statements = 0;
   let delay = 0;
-  /** The last `use_credential` call sent, as postgres.js sends it: its text and arguments (Postgres only). */
+  /** The last `use_credential` call sent, or `use_named_batch`, as postgres.js sends it: its text and arguments (Postgres only). */
   let last: HotCall | null = null;
   if (ENGINE === 'sqlite') {
     const hot = new Proxy(db.vault, {
@@ -241,15 +241,16 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
     });
     const prepared = await prepareVault(CONFIG, LOG_015);
     const vault = openVault(db.vault, prepared, hot);
-    return { vault, cache: prepared.uses, statements: () => statements, last: (): HotCall | null => null, slow: (_ms: number) => {}, end: async () => {} };
+    return { vault, cache: prepared.uses, statements: () => statements, last: (): HotCall | null => null, slow: (_ms: number) => {}, connect: async () => {}, end: async () => {} };
   }
-  const pool = new Proxy(postgresClient(HOT_URL, { max: options.connections ?? 4 }), {
+  const client = postgresClient(HOT_URL, { max: options.connections ?? 4 });
+  const pool = new Proxy(client, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key !== 'unsafe') return value;
       return (...args: unknown[]) => {
         statements += 1;
-        if (typeof args[0] === 'string' && args[0].includes('use_credential')) last = { query: args[0], args: [...((args[1] ?? []) as unknown[])] };
+        if (typeof args[0] === 'string' && (args[0].includes('use_credential') || args[0].includes('use_named_batch'))) last = { query: args[0], args: [...((args[1] ?? []) as unknown[])] };
         if (delay === 0) return (value as (...a: unknown[]) => unknown).apply(target, args);
         // postgres.js's query is a lazy promise: sent once awaited, so `delay` holds it back.
         return sleep(delay).then(() => (value as (...a: unknown[]) => unknown).apply(target, args));
@@ -258,7 +259,9 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   });
   const prepared = await prepareVault(CONFIG, LOG_015);
   const vault = openVault(db.vault, prepared, createDatabase(pool));
-  return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, end: () => pool.end() };
+  // `connect`: the pool's connection opened, by a statement no count or delay sees, so that a measured call's time is its own.
+  const connect = async () => { await client.unsafe('SELECT 1'); };
+  return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 
 /** A `use_credential` call as it was sent: its text and its arguments, `$1` first. */
@@ -305,8 +308,10 @@ export async function weighed(call: HotCall | null, on?: ReturnType<typeof postg
     for (let run = 0; run < 4; run += 1) {
       const args = [...call.args];
       const now = Date.now();
-      // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline.
-      [args[3], args[7]] = [String(now), String(now + 3000)];
+      // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
+      // first, then at, purpose and deadline.
+      if (call.query.includes('use_named_batch')) [args[8], args[10]] = [String(now), String(now + 3000)];
+      else [args[3], args[7]] = [String(now), String(now + 3000)];
       const read = await client.begin(async (tx) => {
         const before = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
         const [plan] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${call.query}`, args as never[]) as unknown as { 'QUERY PLAN': { Plan: Buffers }[] }[];

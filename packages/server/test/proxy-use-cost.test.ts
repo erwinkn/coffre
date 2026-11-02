@@ -244,28 +244,32 @@ async function revealed(token: string, body: { path: string; keys?: readonly str
   return ran;
 }
 
-test("a reveal of one key is the vault's one call, as a /use is; a reveal of several is one statement for all its values, and runs no check of the credential after it (T145, T167)", POSTGRES, async () => {
-  const credential = 'select "credentials"."id", "cred';
-  const read = 'SELECT app_read( $1::bytea, $2::';
+test("a reveal of one key is the vault's one call, as a /use is; a reveal of several is one call too, which reads the place and its keys itself, and runs no check of the credential after it (T145, T165, T167)", POSTGRES, async () => {
   const use = 'SELECT use_credential( $1::uuid,';
+  const named = 'SELECT use_named_batch( $1::byte';
   const batch = 'SELECT use_batch( $1::uuid, $2::';
+  // What the app reads itself of a place's keys with no value of their own: whether a reference holds one (`valuesIn`).
+  const references = ['select "secret_references"."id",', 'select "secrets"."id", "secrets"'];
   const cases = [
     // One key, by its path or as a list of one: the vault's use by name, warm, which answers the rows the app checks.
     ['a reveal of one key', personal, { path: 'market/dev/API_KEY' }, [], [use]],
     ['a reveal of its one named key', personal, { path: 'market/dev', keys: ['API_KEY'] }, [], [use]],
     ['a reveal of one key, as a service', service, { path: 'market/dev/API_KEY' }, [], [use]],
-    // Several: the app reads, then one statement for every value, each key's use in turn (B2, `useMany`), warm (asked
-    // once before, every key in the caller's cap's set: a first ask is two, use-many.test.ts).
-    ['a reveal of an environment', personal, { path: 'market/dev' }, [credential, read, 'select "secret_references"."id",', 'select "secrets"."id", "secrets"'], [batch]],
-    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [credential, read], [batch]],
-    ['an export, as a service', service, { path: 'market/dev' }, [credential, read, 'select "secret_references"."id",', 'select "secrets"."id", "secrets"'], [batch]],
+    // Several: the vault's one call by name (T165), its gate and each key's named read in one statement, warm (asked
+    // once before, every key in the caller's cap's set). A person's read leaves sensitive values out, so its first
+    // statement passes no ids and writes nothing: its uses are a batch by ids after it, as an environment's are, whose
+    // keys the vault lists itself (use-named-many.test.ts).
+    ['a reveal of an environment', personal, { path: 'market/dev' }, references, [named, batch]],
+    ['a reveal of its named keys', personal, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [], [named, batch]],
+    ['an export, as a service', service, { path: 'market/dev' }, references, [named, batch]],
+    ['an export of named keys, as a service, mapped', service, { path: 'market/dev', keys: ['API_KEY', 'OTHER'] }, [], [named]],
   ] as const;
   // Sorted: an environment's references and keys are read at once, and recorded as each finishes.
   const sorted = (texts: readonly string[]) => [...texts].sort();
   for (const [name, token, body, app, hot] of cases) {
     const ran = await revealed(token, body);
     assert.deepEqual(sorted(shown(ran.app)), sorted(app), name);
-    assert.deepEqual(shown(ran.hot), hot, `${name}: one use, or one batch of them`);
+    assert.deepEqual(shown(ran.hot), hot, `${name}: one use, or one call of the vault's for all of them`);
     assert.deepEqual(ran.vault, [], `${name}: no vault call but the uses`);
   }
 });

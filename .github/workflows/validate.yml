@@ -113,11 +113,15 @@ jobs:
       matrix:
         # On 2026-10-30 (#431), in one run: Postgres 46 minutes (the vault's matrix 45, the server's 41, side by side),
         # SQLite 16 (the vault's; the server's 3). A quarter or a half each, about 12 minutes and 8, setup included.
+        # T165's PR 2 (2026-11-02, a host at load 50, not CI's): the server's twice as long with its pairs and whole
+        # places (SQLite 3 to 6.5 minutes, Postgres past an hour), the batches' own 21 on Postgres; Postgres in sixths.
         include:
-          - { engine: postgres, shard: 1/4 }
-          - { engine: postgres, shard: 2/4 }
-          - { engine: postgres, shard: 3/4 }
-          - { engine: postgres, shard: 4/4 }
+          - { engine: postgres, shard: 1/6 }
+          - { engine: postgres, shard: 2/6 }
+          - { engine: postgres, shard: 3/6 }
+          - { engine: postgres, shard: 4/6 }
+          - { engine: postgres, shard: 5/6 }
+          - { engine: postgres, shard: 6/6 }
           - { engine: sqlite, shard: 1/2 }
           - { engine: sqlite, shard: 2/2 }
     runs-on: ubuntu-24.04

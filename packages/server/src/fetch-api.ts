@@ -22,7 +22,7 @@ import {
   type AuthenticatedIdentity,
 } from './auth.ts';
 import { errorResponse, jsonResponse, methodNotAllowed, parseJsonBody, readLimitedBytes } from './http.ts';
-import { useByName } from './named-use.ts';
+import { useByName, useManyByName } from './named-use.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { publicProviders } from './signin.ts';
 
@@ -95,11 +95,12 @@ const RECALLING = [['reveals']];
 const NAMED_KINDS: readonly TokenKind[] = ['browser', 'cli', 'personal', 'service'];
 
 /**
- * The one key a reveal's body names, and where: its path's (`market/dev/API_KEY`, to reveal) or a list of one
- * (`market/dev`, `keys: ['API_KEY']`, as `coffre export --keys` runs it). Null for anything else, a personal config
- * included, or a body the route refuses: the request goes as ever.
+ * What a reveal's body names, and where: one key, by its path (`market/dev/API_KEY`, to reveal) or as a list of one
+ * (`market/dev`, `keys: ['API_KEY']`, as `coffre export --keys` runs it); or several (`keys` of two or more), or every
+ * key the place holds (`market/dev`, as `coffre export` runs it; `keys` null), its several keys by name (T165). Null
+ * for a body the route refuses: the request goes as ever.
  */
-function namedReveal(body: Uint8Array): { place: { project: string; environment: string }; key: string; purpose: Purpose } | null {
+function namedReveal(body: Uint8Array): { place: { project: string; environment: string }; key: string; purpose: Purpose } | { place: { project: string; environment: string }; keys: string[] | null; purpose: Purpose } | null {
   let input: unknown;
   try {
     // Decoded as the route decodes it (`readJson`).
@@ -116,10 +117,14 @@ function namedReveal(body: Uint8Array): { place: { project: string; environment:
   } catch {
     return null;
   }
-  const key = keys === undefined ? path.key : path.key === undefined && keys.length === 1 ? keys[0] : undefined;
   // `dev@me` too (T165): the vault finds its caller's personal config of dev, or dev while they have none.
-  if (key === undefined || path.environment === undefined) return null;
-  return { place: { project: path.project, environment: path.environment }, key, purpose: path.key === undefined ? 'run' : 'reveal' };
+  if (path.environment === undefined) return null;
+  const place = { project: path.project, environment: path.environment };
+  if (keys === undefined && path.key !== undefined) return { place, key: path.key, purpose: 'reveal' };
+  if (path.key !== undefined) return null;
+  // Each key once, as the read opens it once.
+  const named = keys === undefined ? null : [...new Set(keys)];
+  return named?.length === 1 ? { place, key: named[0]!, purpose: 'run' } : { place, keys: named, purpose: 'run' };
 }
 
 /**
@@ -277,7 +282,10 @@ export async function fetchApi(
       const recalled = authenticate!;
       if (asked !== null) {
         authenticate = async (token) => {
-          const used = await useByName(runtime, request, options.sourceIp, token, { kinds: NAMED_KINDS, ...asked });
+          // Several keys: a person's read leaves a sensitive value out, naming it, which the vault then uses not (`reveal`).
+          const used = 'key' in asked
+            ? await useByName(runtime, request, options.sourceIp, token, { kinds: NAMED_KINDS, ...asked })
+            : await useManyByName(runtime, request, options.sourceIp, token, { kinds: NAMED_KINDS, ...asked, leavesSensitive: tokenKind(token) !== 'service' });
           if (used === null) return recalled(token);
           named = { decided: used.decided, ahead: used.ahead };
           return used.identity;
