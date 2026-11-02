@@ -346,8 +346,9 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
              for the caller (purpose use, as today)
              for the definition's editor: frozen holdings, intersected with current ones (section 8)
            answers: the values, the definition's seal, its item digest, and its definition, never its holdings (omitted when the app's copy has that digest)
-  app      sends only if every key's answer carries a seal and an item digest, the same seal for every key
-             (no seal or no digest: 503, never "the copy's digest confirmed"; another seal: asks again)
+  app      sends only if the answer carries the route's seal list and item digest, and every sealed key's
+             entry was made under that seal (no seal or no digest: 503, never "the copy's digest confirmed";
+             another seal: asks again)
            checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the entry carries its seal and item)
            sends, before the use's deadline, to that definition's upstream
@@ -362,6 +363,35 @@ decided. That happens when a vault is rolled back under warm 0.16 isolates
 (docs/deploy.md: the vault goes first), which have seen `proxies` and will
 not ask again (section 6). So the app checks presence on every answer, and
 the `proxies` bit is an early gate, not the protection.
+
+Presence is the route's, not each key's. A plain key has no entry and no
+vault answer of its own, but the route use reads the item and its seal
+whatever keys it names, so a route of plain keys only still makes its use
+(the editor decided on standing) and its answer carries the seal and the
+digest like any other. An older vault's answer to it has neither, and is a
+503 too.
+
+**Every route use takes this one shape.** Today only a handle with exactly
+one key goes by name (`byName` in `packages/server/src/plugins.ts`); a
+handle with several keys, every workload, and `sign`/`presign` and a
+tunnel's `run` go by ids, through `reveal`, `useValues` and `useMany`,
+whose answers (`UseManyOutcome`, `Used`) carry no seal, no digest and no
+item. Built that way, a UI SigV4 route (two keys, and presign's only kind)
+under a rolled-back vault would be sent, or its URL signed, by the copy,
+with nothing for the presence check to look at. So a UI route's use never
+goes by ids. It is one call, `NamedUseInput` with the route instead of a
+key: the vault takes the route's keys from the item it reads, one or
+several, in `use_credential`, or `use_batch` with its later rounds held to
+the first round's seal (above). Its outcome carries every key's value, the
+seal list, the item digest, and the item when the isolate's copy is
+stale. Every path that consumes a UI route's values calls it through one
+app function: a handle's forward of any number of keys, a workload's
+forward, sign, verify and presign, and a tunnel's dial and its rechecks.
+That function checks presence and the one seal before anything else sees
+the answer: before the value cache keeps it, before a sign or presign, and
+before a tunnel dials. A route use that the vault cannot serve by name is
+a 503, never the by-ids fallback a code route takes when `byName` returns
+null. Code routes keep today's shapes unchanged.
 
 All of a route's keys are decided on one version, in that one statement.
 A use of several keys may need a second round today (`useMany`: a key that
@@ -636,9 +666,11 @@ cover's identity and the proxy object and editor to its inputs, which
 PR C's cover tests hold (one route here cannot share a key with another).
 The plan sends nothing, so it is below `EverySendAllowed`; PR C's plan
 tests hold that it gives handles and fails closed. Old-vault skew (section
-6, "Against an older vault") is held by PR C's tests: no UI item exists
-until the vault says `proxies`, and an isolate gates before serving
-once it does. The scenarios with
+6, "Against an older vault") is held by PR C's tests: on a first
+upgrade no UI item exists until the vault says `proxies`, and an isolate
+gates before serving once it does. A vault rolled back under saved items,
+across two app deploys that add then drop a code name, revives that name's
+UI item (section 6): an accepted gap beside `RoutingRelease`'s. The scenarios with
 deploys put back no rows: a writer who puts back the item `proxy.code`
 deleted is a rollback like any other, which `SealChecked` refuses in
 `Routing`, since a deletion is a change of the object.
@@ -653,7 +685,8 @@ use by them, because the use's entry MAC binds the key's id, which the
 isolate cannot compute before it has read it. A named call always probes
 every input's seal, never the seal cache, so that its work is the same
 whatever the key and whatever the isolate kept (D153). A route use keeps all
-of that and adds the route's name to what the request names.
+of that, names the route instead of a key, and covers all of the route's
+keys in that call (section 3), whichever path makes it.
 
 | Case | Today (0.15) | With UI definitions |
 |---|---|---|
@@ -972,8 +1005,8 @@ they outlive the deployment that reserved them:
   which waits on its isolate's checkpointer start (at most 2 s, once per
   cold vault isolate), where a use goes on behind it (R58). It adds no
   Postgres statement (R44, R50), and the wait is accepted for the minutes
-  of a deploy, on isolates that have not seen the bit. That keeps
-  `CodeGate` whole. No UI item can exist before the vault says `proxies`,
+  of a deploy, on isolates that have not seen the bit. On a first
+  upgrade that keeps `CodeGate` whole. No UI item can exist before the vault says `proxies`,
   since only a vault that says it saves one, so an ungated isolate serving
   code's `maps` hides nothing. Once the vault says it, every proxy request
   is gated first, and a gate deletes any UI `maps` saved meanwhile. Keeping
@@ -982,6 +1015,15 @@ they outlive the deployment that reserved them:
   different deployment's tab saved a UI `maps`: the `NoRevival` run the
   gate exists to stop. The other order, a vault newer than its app, needs
   nothing: a 0.15 app has no tab and no UI routes.
+- **A vault rolled back under saved UI items** breaks that premise: the
+  items exist while the bit is absent. If, during that rollback, one app
+  deploy adds a code `maps` (served ungated, so never reserved, so UI
+  `maps` is never deleted) and a later one drops it, then once the vault
+  is upgraded again UI `maps` serves: the `NoRevival` run, unaudited. It
+  takes a vault-only rollback spanning two app deploys, which
+  docs/deploy.md's coupled releases do not make; it is an accepted gap
+  beside `RoutingRelease`'s, and the vault's release notes say to upgrade
+  it again before any app deploy that changes code's proxy names.
 - If a name is missing, the same call makes a `proxy.code` change adding
   it: CAS on the reserved set's seal, and in the same transaction every UI
   item of that name, in every environment, deleted, each whole in its
@@ -1264,8 +1306,8 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
 `pnpm formal` keeps `Routing.tla` and the code in step (R45).
 
 **PR A: storage, the change path and the permission.**
-- Migration at the next free number (Postgres `0053`, SQLite `0029` on
-  `main` today, after #453, #454 and #456): `proxy_definitions`,
+- Migration at the next free number on both engines, read from `main` when
+  PR A is written (#453, #454 and #456 are taking numbers now): `proxy_definitions`,
   `proxy_reserved`, grants.
 - `@coffre/vault`: object kinds `proxy` and `proxy-reserved` (`inputs.ts`:
   their shapes, the sealed index, `applyOp` for `proxy.save`,
@@ -1318,8 +1360,13 @@ no storage.
   column, under the entry MAC; `use_credential` and `use_batch` take the
   route, read the proxy object(s) and the editor's principal, and match a
   cover on the route (section 4), on both engines.
-- `@coffre/core/vault`: `NamedUseInput` gains the route; its outcome, the
-  item, the seal list and the digest; `proxyItem`'s input and answer. The
+- `@coffre/core/vault`: `NamedUseInput` gains the route, which replaces
+  its key; its outcome, every key's value, the item, the seal list and the
+  digest; `proxyItem`'s input and answer. No UI route goes through
+  `reveal`, `useValues` or `useMany` by ids: one app function makes every
+  route use, for handles of any number of keys, workloads, signers,
+  verifiers, presign and tunnels, and checks presence and the one seal
+  before the cache, a signature or a dial sees the answer (section 3). The
   `proxies` bit (section 6, "Against an older vault"), which PR A adds with
   the save and which now also covers the gate, `proxyItem` and route uses:
   an old vault ignores an unknown `route` field and answers with no item,
@@ -1330,7 +1377,9 @@ no storage.
   item digest is still a 503 (section 3): that, not the bit, covers a
   vault rolled back under warm isolates. Tests: a vault rolled back to
   0.15 after the bit was seen, a UI route's use refused, never sent by the
-  copy; `about()`, the gate and `proxyItem` each failing, the request 503
+  copy, for a handle route of one key, of two keys (SigV4), a workload
+  route, a presign and a tunnel dial; a route of plain keys only, refused
+  the same; `about()`, the gate and `proxyItem` each failing, the request 503
   and the next one asking again.
 - `use_credential`: the proxy object(s) and the editor's principal as
   inputs in both shapes, in the seal cache; the named use takes a route; the vault resolves its keys by name,

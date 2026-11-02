@@ -2036,7 +2036,9 @@ the route to a cover's identity and the proxy object and editor to its
 inputs, held by PR C's cover tests, since one route cannot share a key
 with another here. The plan sends nothing, and an app ahead of its vault
 mid-deploy serves code routes ungated only while no UI item can exist;
-PR C's tests hold both. `RoutingCode` and `RoutingRelease` put back no rows:
+PR C's tests hold both. A vault rolled back under saved UI items, across
+two app deploys that add then drop a code name, revives that item: an
+accepted gap beside `RoutingRelease`'s (design, section 6). `RoutingCode` and `RoutingRelease` put back no rows:
 a writer who puts back the item a `proxy.code` change deleted makes a
 rollback like any other, since the deletion is a change, and `Routing`
 shows `SealChecked` refuses those.
