@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { ACCESS_JWT_HEADER, cloudflareAccess, github, signin } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 
 import { callerFrom, newestPolicySeq } from '../src/api/caller.ts';
 import { AppChanges, connectionChange } from '../src/api/changes.ts';
@@ -61,7 +61,7 @@ let deps: FixtureDeps;
 let app: RecordingPool;
 let vaultPool: RecordingPool;
 let hot: RecordingPool;
-let vault: LocalVault;
+let vault: SpokenVault;
 let upstream: Server;
 /** The deployment that signs in through coffre (the MCP connection's, the binding's), and the one behind Access. */
 let own: CoffreRuntime;
@@ -89,10 +89,10 @@ before(async () => {
   app = new RecordingPool(TEST_RUNTIME_DATABASE_URL);
   vaultPool = new RecordingPool(TEST_VAULT_DATABASE_URL);
   hot = new RecordingPool(TEST_HOT_DATABASE_URL);
-  vault = await localVault(
+  vault = spoken(await localVault(
     { database: createDatabase(vaultPool.client), hotDatabase: createDatabase(hot.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
-  );
+  ));
   const runtimeOf = (auth: ReturnType<typeof signin>) => {
     const config = resolveConfig({
       publicUrl: ORIGIN, vault, auth, auditChainKey: deps.chainKey.toString('base64'),

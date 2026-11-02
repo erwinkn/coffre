@@ -59,7 +59,7 @@ import { createDatabase, type Client } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import { derivedSigningKey } from '@coffre/vault';
-import { localVault, runCheckpointer, type LocalVault, type RunningCheckpointer } from '@coffre/vault/node';
+import { localVault, spoken, runCheckpointer, type SpokenVault, type RunningCheckpointer } from '@coffre/vault/node';
 import { sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../../src/config.ts';
@@ -68,7 +68,7 @@ import { createRuntime } from '../../src/runtime.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transport.ts';
 import { auditWatch } from '../../src/plugins/audit-watch.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
+import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
 import { farPostgres, percentile } from './far.ts';
@@ -214,7 +214,7 @@ const db = await openTestDatabase();
 const [farApp, farVault, farHot] = await Promise.all([
   farPostgres(TEST_RUNTIME_DATABASE_URL, RTT), farPostgres(TEST_VAULT_DATABASE_URL, RTT), farPostgres(TEST_HOT_DATABASE_URL, RTT),
 ]);
-const idle: { vault: LocalVault; pool: TimedPool; hot: TimedPool | null }[] = [];
+const idle: { vault: SpokenVault; pool: TimedPool; hot: TimedPool | null }[] = [];
 const checkpointerPool = postgresClient(TEST_VAULT_DATABASE_URL, { max: 4 });
 const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
 let checkpointer: RunningCheckpointer | null = null;
@@ -261,10 +261,10 @@ try {
       const instance = idle.pop() ?? await (async () => {
         const pool = new TimedPool(new HyperdrivePool(farVault.url), 'vault');
         const hot = values.log === '0.15' ? new TimedPool(new HyperdrivePool(farHot.url), 'vault') : null;
-        const vault = await localVault({
+        const vault = spoken(await localVault({
           database: createDatabase(pool.client), ...(hot === null ? {} : { hotDatabase: createDatabase(hot.client) }),
           kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT], bulkLimit: BULK,
-        }, log);
+        }, log));
         return { pool, hot, vault };
       })();
       instance.pool.cost = cost;
@@ -288,7 +288,7 @@ try {
 
   const config = resolveConfig({
     publicUrl: ORIGIN,
-    vault: vaultFor(newCost()),
+    vault: entryOf(vaultFor(newCost())),
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1_000_000, total: 1_000_000 }) } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: [auditWatch({ anchor: deps.anchor })],

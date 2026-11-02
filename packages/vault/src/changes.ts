@@ -4,7 +4,7 @@ import type { ObjectChange, PreparedChange } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isMovedChange, type ChangeNumbers } from '@coffre/db/log';
 
-import { applyOp, canonical, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { applyOp, canonical, indexBytes, objectKey, refOf, sealOf, sealed, type Input, type Op, type Ref, type SealKeys } from './inputs.ts';
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
 import { connectionObject, credentialObject, environmentObject, secretObject } from './objects.ts';
@@ -166,7 +166,7 @@ export class Changes {
   async prepare(db: Queryable): Promise<void> {
     const unread = [...this.#staged.values()].filter((staged) => staged.read === undefined);
     // Each object's reads asked together: one round trip for them all.
-    const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref)));
+    const reads = await Promise.all(unread.map((staged) => this.#read(db, staged.ref, staged.steps[0]?.op.op === 'proxy.save' && staged.steps[0].op.replace)));
     for (const [i, staged] of unread.entries()) {
       const read = reads[i]!;
       if (read.logged) {
@@ -181,7 +181,14 @@ export class Changes {
     }
   }
 
-  async #read(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Read> {
+  async #read(db: Queryable, ref: Ref & { kind: ReadKind }, whole = false): Promise<Read> {
+    // An environment's proxy definitions replaced whole (an Owner's one save of a forged object, docs/design/proxy-ui.md,
+    // section 8): from no object, whatever its row holds, moved on from its newest change's seal, which `change_input`
+    // holds it to under the fence. Nothing of the row is weighed, so nothing forged is carried on.
+    if (whole) {
+      const newest = await newestChange(db, ref);
+      return { logged: true, seal: newest?.seal ?? null, now: null, afters: [] };
+    }
     const [{ row, seal }, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
     // Before the cutover: a row, unsealed, that the log has never heard of; or the roles, whose edits 0.14's policy
     // holds until the cutover's genesis writes them (a role defined before it is 0.14's alone). Not the roles' or the
@@ -226,7 +233,7 @@ export class Changes {
         const after = afters[i]!;
         const seal = after === null ? null : sealOf(this.#keys.seals[0]!, ref, after);
         const row = { at, requestId: randomUUID(), object: objectKey(ref), actor, payload: payloadOf(ref, op, old), seal };
-        calls.push({ ref, ...row, value: writes(ref) && after !== null ? canonical(after) : null, sealFrom: from, mac: entryMac(this.#keys.mac, { tree: 'changes', row }) });
+        calls.push({ ref, ...row, value: writes(ref) && after !== null ? rowValue(after) : null, sealFrom: from, mac: entryMac(this.#keys.mac, { tree: 'changes', row }) });
         from = seal;
       });
     }
@@ -432,7 +439,18 @@ function opsBetween(before: Input | null, after: Input | null): Op[] {
  * one: its reference's end (`ended_at`, 0029).
  */
 function writes(ref: Ref): boolean {
-  return ref.kind === 'environment' || ref.kind === 'secret' || ref.kind === 'roles' || ref.kind === 'policy';
+  return ref.kind === 'environment' || ref.kind === 'secret' || ref.kind === 'roles' || ref.kind === 'policy' || ref.kind === 'proxy' || ref.kind === 'proxy-reserved';
+}
+
+/**
+ * What `change_input` writes an object's row from: the object, but an
+ * environment's proxy definitions as their row holds them, the items and
+ * their index (`digests`, base64), and the reserved names as their set.
+ */
+function rowValue(after: Input): string {
+  if (after.kind === 'proxy') return canonical({ items: after.items, digests: indexBytes(after.items).toString('base64') });
+  if (after.kind === 'proxy-reserved') return canonical({ names: after.names });
+  return canonical(after);
 }
 
 /** Two objects alike as a seal sees them (a principal's grants a set). */

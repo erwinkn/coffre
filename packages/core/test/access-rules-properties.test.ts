@@ -317,10 +317,11 @@ test(`a role an Owner may write passes the definition check and is its own norma
   assert.equal(definitionProblem(normal), null);
   const shuffled = { ...definition, permissions: [...definition.permissions].reverse(), protected: [...definition.protected].reverse() };
   assert.deepEqual(normalDefinition(shuffled), normal);
-  const broken = tc.draw(gs.sampledFrom(['read without use', 'protected beyond', 'project-wide protected', 'twice', 'unknown'] as const));
+  const broken = tc.draw(gs.sampledFrom(['read without use', 'proxy without read', 'protected beyond', 'project-wide protected', 'twice', 'unknown'] as const));
   const bad: RoleDefinition = (() => {
     switch (broken) {
       case 'read without use': return { ...definition, permissions: [...definition.permissions.filter((permission) => permission !== 'secret.use' && permission !== 'secret.read'), 'secret.read'], protected: [] };
+      case 'proxy without read': return { ...definition, permissions: [...definition.permissions.filter((permission) => permission !== 'secret.read' && permission !== 'proxy.edit'), 'proxy.edit'], protected: [] };
       case 'protected beyond': {
         const missing = domain.PERMISSIONS.find((permission) => !domain.PROJECT_ONLY.includes(permission) && !definition.permissions.includes(permission) && permission !== 'secret.read');
         return missing === undefined ? { ...definition, permissions: ['secret.use'], protected: ['secret.use', 'secret.write'] } : { ...definition, protected: [...definition.protected, missing] };

@@ -25,6 +25,10 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   // A poller's question before it reads (`coffre export --watch`): what a read would open, which the token may read.
   'GET /projects/:project/:environment/version': true,
   'PATCH /projects/:project/:environment/dismissals': true,
+  'GET /projects/:project/:environment/proxy': true,
+  // Where an environment's keys go is a person's to say, on a session of theirs, as a role is (docs/design/proxy-ui.md, section 8).
+  'PUT /projects/:project/:environment/proxy': false,
+  'PUT /proxy/reserved': false,
   'GET /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment': true,
   'PATCH /secrets/:project/:environment/:key': true,

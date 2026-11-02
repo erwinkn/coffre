@@ -2,7 +2,7 @@ import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, PERMISSIONS, protects, ty
 import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet, type WorkloadProfile } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
 import { displayName, environmentSlug, folderName, instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
-import { POLICY_REVISION } from '@coffre/core/vault';
+import { POLICY_REVISION, type ProxyDefinition } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { setAccess } from './access.ts';
@@ -38,6 +38,7 @@ import {
   type DryRunResult,
   type SetResult,
 } from './secrets.ts';
+import { proxyPage, releaseReserved, saveProxy } from './proxy.ts';
 
 /** A reveal's body, which `fetchApi` reads first for one key's (`namedReveal`). */
 export const revealInput = z.object({ path: z.string().max(400), keys: z.array(secretKey).min(1).max(2000).optional() });
@@ -362,6 +363,23 @@ export const routes = {
     action: 'secret.version',
     run: (ctx, { place }) => environmentVersion(ctx, place),
   }),
+  // An environment's proxy definitions written in the UI (0.16, docs/design/proxy-ui.md): whoever lists it reads them
+  // (R6); a person holding proxy.edit there saves them, from the seal the page loaded (409 `proxy_changed` otherwise).
+  ...route('GET /projects/:project/:environment/proxy', {
+    needs: LISTS,
+    action: 'proxy.list',
+    run: (ctx, { place }) => proxyPage(ctx, place),
+  }),
+  ...route('PUT /projects/:project/:environment/proxy', {
+    input: z.object({
+      seal: z.string().max(64).nullable(),
+      // Each definition as the vault checks it, whole (`canonicalDefinition`): the vault refuses what the rules do not allow.
+      items: z.record(z.string().max(64), z.custom<ProxyDefinition>((value) => typeof value === 'object' && value !== null && !Array.isArray(value)).nullable()),
+      replace: z.boolean().optional(),
+    }).strict(),
+    action: 'proxy.save',
+    run: (ctx, { place, input }) => saveProxy(ctx, place, input),
+  }),
   ...route('PATCH /projects/:project/:environment/dismissals', {
     // `true` dismisses a missing key, `null` restores it.
     input: z.record(secretKey, z.literal(true).nullable()),
@@ -641,6 +659,11 @@ export const routes = {
     query: roleChangeQuery,
     run: (ctx, { params, query }): Promise<RoleImpact | { role: RoleView | null }> =>
       changeRole(ctx, 'instance-role', params.role, null, roleChange(query)),
+  }),
+  // A name the deployment's code reserved freed for UI definitions again, in every environment: an Owner of the whole instance.
+  ...route('PUT /proxy/reserved', {
+    input: z.object({ release: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/) }).strict(),
+    run: (ctx, { input }) => releaseReserved(ctx, input),
   }),
   // The instance's settings: where people set up service accounts themselves.
   ...route('GET /settings', {

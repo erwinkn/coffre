@@ -24,7 +24,7 @@ import { propertySettings } from './properties.ts';
 // its scope reaches `e` at all. Materializing the list onto the scope changes
 // nothing the scope holds.
 
-const permissions = ['secret.read', 'secret.use', 'secret.write', 'secret.archive', 'audit.read', 'environment.manage', 'grant.manage', 'project.manage'] as const;
+const permissions = ['secret.read', 'secret.use', 'secret.write', 'proxy.edit', 'secret.archive', 'audit.read', 'environment.manage', 'grant.manage', 'project.manage'] as const;
 const roles = ['viewer', 'contributor', 'developer', 'maintainer', 'access-manager', 'auditor', 'owner'] as const;
 const projects = ['market', 'ops'] as const;
 const slugs = ['dev', 'prod'] as const;

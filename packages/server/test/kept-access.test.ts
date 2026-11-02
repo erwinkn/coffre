@@ -21,7 +21,7 @@ import { Accesses } from '../src/accesses.ts';
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, entryOf, contextFor, LOG, openTestDatabase, refusedIn, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -81,7 +81,7 @@ beforeEach(async () => {
   });
   const config = resolveConfig({
     publicUrl: ORIGIN,
-    vault: counted,
+    vault: entryOf(counted),
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }),
     auditChainKey: deps.chainKey.toString('base64'),
   });

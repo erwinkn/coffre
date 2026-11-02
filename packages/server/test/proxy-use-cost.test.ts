@@ -17,7 +17,7 @@ import type { AddressInfo } from 'node:net';
 import { github, signin } from '@coffre/core/identity';
 import { createDatabase } from '@coffre/db';
 import type { PostgresClient } from '@coffre/db/connect';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 import { sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../src/config.ts';
@@ -77,7 +77,7 @@ let deps: FixtureDeps;
 let app: RecordingPool;
 let vaultPool: RecordingPool;
 let hot: RecordingPool;
-let vault: LocalVault;
+let vault: SpokenVault;
 let runtime: CoffreRuntime;
 let upstream: Server;
 let handle: string;
@@ -115,10 +115,10 @@ before(async () => {
   app = new RecordingPool(TEST_RUNTIME_DATABASE_URL);
   vaultPool = new RecordingPool(TEST_VAULT_DATABASE_URL);
   hot = new RecordingPool(TEST_HOT_DATABASE_URL);
-  vault = await localVault(
+  vault = spoken(await localVault(
     { database: createDatabase(vaultPool.client), hotDatabase: createDatabase(hot.client), kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
-  );
+  ));
   const config = resolveConfig({
     publicUrl: ORIGIN, vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64'),
     plugins: [credentialProxy({ credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true, cacheSeconds: 0 })],

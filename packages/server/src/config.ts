@@ -1,5 +1,5 @@
 import { publicOrigin, type Auth, type AuthConfig } from '@coffre/core/identity';
-import type { Vault } from '@coffre/core/vault';
+import type { VaultEntry } from '@coffre/core/vault';
 
 import { checkPlugins, type CoffrePlugin } from './plugins.ts';
 
@@ -10,8 +10,13 @@ import { checkPlugins, type CoffrePlugin } from './plugins.ts';
 export type CoffreConfig = {
   /** The origin people reach coffre at, e.g. `https://secrets.acme.example`. */
   publicUrl: string;
-  /** Keys, grants and members: the vault Worker's binding, or a Node vault. */
-  vault: Vault;
+  /**
+   * Keys, grants and members: the vault Worker's binding, or a Node vault
+   * (`connectVault`, `localVault`). Its one entry, `call`, carries this
+   * app's release on every call: a vault on another one, for the seconds of
+   * a deploy, runs nothing, and the app answers 503 `deploying`.
+   */
+  vault: VaultEntry;
   /** `signin(…)`, or `cloudflareAccess(…)` behind Cloudflare Access. */
   auth: Auth;
   /**

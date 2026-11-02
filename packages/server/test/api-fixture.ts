@@ -6,12 +6,12 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
-import type { Through, UseInput, UseOutcome, Vault } from '@coffre/core/vault';
+import type { Through, UseInput, UseOutcome, Vault, VaultEntry } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
-import { localVault, runCheckpointer, type LocalVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
+import { localVault, runCheckpointer, spoken, type SpokenVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
@@ -43,7 +43,7 @@ export type FixtureDeps = {
  * and entries with everything else, and starts every one of them afresh, so
  * a suite's tests do not share them, checkpoints or bulk-limit counts.
  */
-export type TestVault = SpeakingVault<Vault> & {
+export type TestVault = SpeakingVault<Vault> & VaultEntry & {
   /** The raw KEK, and the signing key the vault derives from it, which no database may hold. */
   kek: Buffer;
   signingKey: Buffer;
@@ -268,6 +268,16 @@ export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => (
 /** No pair held outside, as a signer that never signed: what a vault with no checkpointer is verified against. */
 export const nothingHeld: NonNullable<VaultOptions['heldOutside']> = async () => [];
 
+/**
+ * `vault` as a deployment's config takes it, the version gate's one entry:
+ * each call answered on the caller's release, by the method `vault` has
+ * then. For a test's own `Vault` (a counting proxy, a fake): the vault it
+ * wraps, if any, gates on its own.
+ */
+export function entryOf(vault: Vault): VaultEntry {
+  return { call: async (release, method, args) => ({ release, result: await (vault[method] as (...given: unknown[]) => Promise<unknown>)(...args) }) };
+}
+
 export function testVault(
   owners: readonly string[],
   config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
@@ -279,10 +289,10 @@ export function testVault(
   const { kek } = keys;
   const signingKey = derivedSigningKey(kek);
   let offset = 0;
-  let current: Promise<LocalVault> | null = null;
+  let current: Promise<SpokenVault> | null = null;
   const open = async () => {
     const database = await openVaultDatabase();
-    const opened = await localVault(
+    const opened = spoken(await localVault(
       {
         database,
         kek: { id: 'test-kek-1', key: kek.toString('base64') },
@@ -292,7 +302,7 @@ export function testVault(
         ...config,
       },
       { clockOffset: () => offset, walks, ...log },
-    );
+    ));
     // Under 0.15's log, cut over from 0.14 first, as the app's door has it (cutover.ts).
     if (log.log === '0.15' && cutover !== 'app') await cutOverAtOpen(opened, database);
     const [first, ...others] = owners.map((email) => `user:${email}`);
@@ -339,6 +349,14 @@ export function testVault(
     use: call('use'),
     // And its use by name (T145, PR B): a reveal's or a handle's one key, which the vault resolves and uses in one call.
     useNamed: call('useNamed'),
+    // 0.16's proxy definitions (T186).
+    proxy: call('proxy'),
+    saveProxy: call('saveProxy'),
+    reserveProxy: call('reserveProxy'),
+    releaseProxy: call('releaseProxy'),
+    // As the app's runtime speaks to it, through `versioned`: each call to this vault's methods as they are then, a
+    // test's replacements included. The release it answers is the caller's: the vault it opens gates on its own.
+    call: async (release: string, method: keyof Vault, args: readonly unknown[]) => ({ release, result: await (vault[method] as (...given: unknown[]) => Promise<unknown>)(...args) }),
     kek,
     signingKey,
     advance: (ms: number) => void (offset += ms),

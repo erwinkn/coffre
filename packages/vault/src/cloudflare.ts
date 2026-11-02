@@ -19,29 +19,7 @@
  * Any number of isolates run it side by side: every decision locks what it
  * is about in the database, so they share one log and one bulk limit.
  */
-import type { ChangeBindingsInput, CutoverInput,
-  AdmitInput,
-  RemoveInput,
-  RevokeCredentialInput,
-  IssueTokenInput,
-  ReferenceInput,
-  EndReferencesInput,
-  PrepareInput,
-  RewrapInput,
-  SetAccessInput,
-  SetSettingsInput,
-  SignInInput,
-  ChangePolicyInput,
-  UnwrapInput,
-  NamedManyInput,
-  NamedUseInput,
-  UseManyInput,
-  UseInput,
-  Vault,
-  VerifyLogInput,
-  VouchInput,
-  WrapInput,
-} from '@coffre/core/vault';
+import { gated, type NamedManyInput, type NamedUseInput, type UseInput, type UseManyInput, type Vault, type VaultAnswer, type VaultEntry, type VaultMethod } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -51,7 +29,7 @@ import { checkpointerObject, durableHeldOutside, durableSealing, durableSealThro
 import { resolveVaultConfig, type VaultConfig } from './config.ts';
 import { openVault, prepareVault, type PreparedVault } from './vault.ts';
 
-export type { Vault, VaultConfig };
+export type { Vault, VaultConfig, VaultEntry };
 export { postgres, type PostgresDatabase } from '@coffre/db/hyperdrive';
 export * from './index.ts';
 
@@ -101,12 +79,33 @@ type Ready = { database: PostgresDatabase; hotDatabase: PostgresDatabase; checkp
 const START_AGAIN_MS = 10_000;
 
 /**
- * What the app's `VAULT` service binding calls. Each call gets a database of
- * its own, one client that its queries take turns on, since a Worker's
+ * What the app's `VAULT` service binding calls: one method, `call(release,
+ * method, args)`, the version gate (docs/design/proxy-ui.md, section 3,
+ * "One version at a time"). It compares the release before anything else,
+ * before the config is prepared or any pool opens: a call from an app on
+ * another release answers this one's and runs nothing. Each method behind
+ * it is private, the hot path's included. Each call gets a database of its
+ * own, one client that its queries take turns on, since a Worker's
  * connections belong to the call that made them; it is closed once the
  * call is done.
  */
-export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
+export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
+  async call(release: string, method: VaultMethod, args: readonly unknown[]): Promise<VaultAnswer> {
+    return gated(release, method, args, (name, given) => this.#dispatch(name, given));
+  }
+
+  #dispatch(method: VaultMethod, args: unknown[]): Promise<unknown> {
+    switch (method) {
+      case 'use': return this.#use(args[0] as UseInput);
+      case 'useMany': return this.#useMany(args[0] as UseManyInput);
+      case 'useNamed': return this.#useNamed(args[0] as NamedUseInput);
+      case 'useNamedMany': return this.#useNamedMany(args[0] as NamedManyInput);
+      case 'about': return this.#about();
+      case 'sealing': return this.#sealing();
+      default: return this.#call((vault) => (vault[method] as (...given: unknown[]) => Promise<unknown>)(...args));
+    }
+  }
+
   async #call<T>(run: (vault: Required<Vault>) => Promise<T>): Promise<T> {
     const { prepared, database } = await this.#ready();
     const pool = new HyperdrivePool(database.hyperdrive.connectionString);
@@ -122,7 +121,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
    * its deadline at the latest, so that a call answered `late` lets go of Hyperdrive by then, as its place in admission
    * lapses soon after (use.ts, `HELD_PAST_DEADLINE_MS`; T170).
    */
-  async use(input: UseInput) {
+  async #use(input: UseInput) {
     const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
@@ -134,7 +133,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 
   /** A request's several keys (T167): the same one connection, for its one statement, or two. */
-  async useMany(input: UseManyInput) {
+  async #useMany(input: UseManyInput) {
     const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
@@ -147,7 +146,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 
   /** A request's several keys as it names them (T165): the same one connection, for its one statement, or two or three. */
-  async useNamedMany(input: NamedManyInput) {
+  async #useNamedMany(input: NamedManyInput) {
     const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
@@ -160,7 +159,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
   }
 
   /** 0.15's use as the request names it: the same one connection, for its read of ids on a miss and its one use. */
-  async useNamed(input: NamedUseInput) {
+  async #useNamed(input: NamedUseInput) {
     const { prepared, hotDatabase } = this.#behind(await this.#prepared());
     const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
     try {
@@ -169,6 +168,18 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     } finally {
       this.ctx.waitUntil(pool.end(closeBy(input)));
     }
+  }
+
+  /** What the vault says of itself; its uses over the hot path's own config (`#use`), which `#call`'s vault has not. */
+  async #about() {
+    const about = await this.#call((vault) => vault.about());
+    return about.log === '0.15' ? { ...about, uses: true as const, batchUses: true as const } : about;
+  }
+
+  /** Whether the checkpointer seals (T169), asked of its object for at most 2 s; no database, and no start awaited. */
+  async #sealing() {
+    const { checkpointer: namespace } = this.#behind(await this.#prepared());
+    return durableSealing(namespace)();
   }
 
   /** The vault ready, its checkpointer started from this call first, for at most 2 s (`start`). */
@@ -209,43 +220,6 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
       ready.set(env, entry);
     }
     return entry;
-  }
-
-  async unwrap(input: UnwrapInput) { return this.#call((vault) => vault.unwrap(input)); }
-  async wrap(input: WrapInput) { return this.#call((vault) => vault.wrap(input)); }
-  async rewrap(input: RewrapInput) { return this.#call((vault) => vault.rewrap(input)); }
-  async reference(input: ReferenceInput) { return this.#call((vault) => vault.reference(input)); }
-  async endReferences(input: EndReferencesInput) { return this.#call((vault) => vault.endReferences(input)); }
-  async access(principal: string) { return this.#call((vault) => vault.access(principal)); }
-  async setAccess(input: SetAccessInput) { return this.#call((vault) => vault.setAccess(input)); }
-  async admit(input: AdmitInput) { return this.#call((vault) => vault.admit(input)); }
-  async remove(input: RemoveInput) { return this.#call((vault) => vault.remove(input)); }
-  async settings() { return this.#call((vault) => vault.settings()); }
-  async setSettings(input: SetSettingsInput) { return this.#call((vault) => vault.setSettings(input)); }
-  async policy() { return this.#call((vault) => vault.policy()); }
-  async changePolicy(input: ChangePolicyInput) { return this.#call((vault) => vault.changePolicy(input)); }
-  async checkpoint() { return this.#call((vault) => vault.checkpoint()); }
-  /** What the vault says of itself; its uses over the hot path's own config (`use`), which `#call`'s vault has not. */
-  async about() {
-    const about = await this.#call((vault) => vault.about());
-    return about.log === '0.15' ? { ...about, uses: true as const, batchUses: true as const } : about;
-  }
-  async keyChecks() { return this.#call((vault) => vault.keyChecks()); }
-  async verifyLog(input: VerifyLogInput) { return this.#call((vault) => vault.verifyLog(input)); }
-  async prepare(input: PrepareInput) { return this.#call((vault) => vault.prepare(input)); }
-  async waitSealed(input: { number: string }) { return this.#call((vault) => vault.waitSealed(input)); }
-  async signIn(input: SignInInput) { return this.#call((vault) => vault.signIn(input)); }
-  async revokeCredential(input: RevokeCredentialInput) { return this.#call((vault) => vault.revokeCredential(input)); }
-  async issueToken(input: IssueTokenInput) { return this.#call((vault) => vault.issueToken(input)); }
-  async changeBindings(input: ChangeBindingsInput) { return this.#call((vault) => vault.changeBindings(input)); }
-  async cutover(input?: CutoverInput) { return this.#call((vault) => vault.cutover(input)); }
-  async verifyTrees() { return this.#call((vault) => vault.verifyTrees()); }
-  async verifyReads(input: { from: string }) { return this.#call((vault) => vault.verifyReads(input)); }
-  async vouch(input: VouchInput) { return this.#call((vault) => vault.vouch(input)); }
-  /** Whether the checkpointer seals (T169), asked of its object for at most 2 s; no database, and no start awaited. */
-  async sealing() {
-    const { checkpointer: namespace } = this.#behind(await this.#prepared());
-    return durableSealing(namespace)();
   }
 
   /** No HTTP surface: only the app's service binding reaches the vault. */

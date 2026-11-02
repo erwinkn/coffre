@@ -58,7 +58,7 @@ export type Api = {
       environments: {
         project: string;
         environment: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
       }[];
     };
   };
@@ -70,7 +70,7 @@ export type Api = {
         name: string;
         archivedAt: string | null;
         folder: string | null;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         environments: {
           slug: string;
           name: string;
@@ -234,7 +234,7 @@ export type Api = {
   "GET /secrets/:project/:environment": {
     input: undefined;
     output: {
-      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
       keys: {
         key: string;
         reference: null | {
@@ -485,7 +485,7 @@ export type Api = {
           environment: string | null;
           role: string;
           roleName: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
           expiresAt: string | null;
         }[];
       }[];
@@ -1339,7 +1339,7 @@ export type Api = {
         environment: string | null;
         role: string;
         roleName: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         expiresAt: string | null;
       }[];
     };
@@ -1511,8 +1511,8 @@ export type Api = {
       roles: {
         name: string;
         description: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         id: string;
         builtin: boolean;
         edited: boolean;
@@ -1520,8 +1520,8 @@ export type Api = {
         default: null | {
           name: string;
           description: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         };
         assignableToEnvironment: boolean;
         grants: number;
@@ -1529,8 +1529,8 @@ export type Api = {
       instanceRoles: {
         name: string;
         description: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         id: string;
         builtin: boolean;
         edited: boolean;
@@ -1538,8 +1538,8 @@ export type Api = {
         default: null | {
           name: string;
           description: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         };
         assignableToEnvironment: boolean;
         grants: number;
@@ -1551,13 +1551,13 @@ export type Api = {
     input: {
       name: string;
       description: string;
-      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     };
     output: {
       impact: {
         change: "narrows" | "widens";
-        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
         services: number;
@@ -1571,8 +1571,8 @@ export type Api = {
       role: null | {
         name: string;
         description: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         id: string;
         builtin: boolean;
         edited: boolean;
@@ -1580,8 +1580,8 @@ export type Api = {
         default: null | {
           name: string;
           description: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         };
         assignableToEnvironment: boolean;
         grants: number;
@@ -1593,7 +1593,7 @@ export type Api = {
     output: {
       impact: {
         change: "narrows" | "widens";
-        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
         services: number;
@@ -1607,8 +1607,8 @@ export type Api = {
       role: null | {
         name: string;
         description: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         id: string;
         builtin: boolean;
         edited: boolean;
@@ -1616,8 +1616,8 @@ export type Api = {
         default: null | {
           name: string;
           description: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         };
         assignableToEnvironment: boolean;
         grants: number;
@@ -1628,13 +1628,13 @@ export type Api = {
     input: {
       name: string;
       description: string;
-      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     };
     output: {
       impact: {
         change: "narrows" | "widens";
-        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
         services: number;
@@ -1648,8 +1648,8 @@ export type Api = {
       role: null | {
         name: string;
         description: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         id: string;
         builtin: boolean;
         edited: boolean;
@@ -1657,8 +1657,8 @@ export type Api = {
         default: null | {
           name: string;
           description: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         };
         assignableToEnvironment: boolean;
         grants: number;
@@ -1670,7 +1670,7 @@ export type Api = {
     output: {
       impact: {
         change: "narrows" | "widens";
-        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+        permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
         protected: boolean;
         people: number;
         services: number;
@@ -1684,8 +1684,8 @@ export type Api = {
       role: null | {
         name: string;
         description: string;
-        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+        protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         id: string;
         builtin: boolean;
         edited: boolean;
@@ -1693,8 +1693,8 @@ export type Api = {
         default: null | {
           name: string;
           description: string;
-          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+          protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
         };
         assignableToEnvironment: boolean;
         grants: number;
@@ -1780,6 +1780,274 @@ export type Api = {
       through: string;
       listed: string;
       next: string | null;
+    };
+  };
+  "PUT /projects/:project/:environment/proxy": {
+    input: {
+      seal: string | null;
+      items: {
+        [key: string]: null | {
+          kind: "route";
+          name: string;
+          upstream: string;
+          inject: ({
+            kind: "form" | "header" | "json" | "query";
+            name: string;
+            template: string;
+          } | {
+            kind: "basic";
+            user: string;
+            password: string;
+          } | {
+            kind: "sigv4";
+            accessKeyId: string;
+            secretAccessKey: string;
+            sessionToken: string | null;
+            region: string;
+            service: string;
+          })[];
+          allow: {
+            methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+            path: string;
+          }[];
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+          placeholder: null | {
+            kind: "prefix";
+            prefix: string;
+          } | {
+            kind: "jwt";
+            claims: string[];
+          };
+          egress: string | null;
+        } | {
+          kind: "signer";
+          name: string;
+          signer: {
+            kind: "private-key";
+            key: string;
+          } | {
+            kind: "hmac";
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "verifier";
+          name: string;
+          hmac: {
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "tunnel";
+          name: string;
+          key: string;
+          hosts: string[];
+          network: string | null;
+        };
+      };
+      replace?: boolean;
+    };
+    output: {
+      environmentId: string;
+      seal: string | null;
+      state: "ok" | "stale" | "tampered";
+      items: {
+        definition: {
+          kind: "route";
+          name: string;
+          upstream: string;
+          inject: ({
+            kind: "form" | "header" | "json" | "query";
+            name: string;
+            template: string;
+          } | {
+            kind: "basic";
+            user: string;
+            password: string;
+          } | {
+            kind: "sigv4";
+            accessKeyId: string;
+            secretAccessKey: string;
+            sessionToken: string | null;
+            region: string;
+            service: string;
+          })[];
+          allow: {
+            methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+            path: string;
+          }[];
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+          placeholder: null | {
+            kind: "prefix";
+            prefix: string;
+          } | {
+            kind: "jwt";
+            claims: string[];
+          };
+          egress: string | null;
+        } | {
+          kind: "signer";
+          name: string;
+          signer: {
+            kind: "private-key";
+            key: string;
+          } | {
+            kind: "hmac";
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "verifier";
+          name: string;
+          hmac: {
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "tunnel";
+          name: string;
+          key: string;
+          hosts: string[];
+          network: string | null;
+        };
+        keys: string[];
+        savedBy: string;
+        savedAt: number;
+        routesSensitive: boolean;
+      }[];
+      reserved: string[];
+      reservedState: "ok" | "stale" | "tampered";
+      editable: boolean;
+      code: string[];
+    };
+  };
+  "GET /projects/:project/:environment/proxy": {
+    input: undefined;
+    output: {
+      environmentId: string;
+      seal: string | null;
+      state: "ok" | "stale" | "tampered";
+      items: {
+        definition: {
+          kind: "route";
+          name: string;
+          upstream: string;
+          inject: ({
+            kind: "form" | "header" | "json" | "query";
+            name: string;
+            template: string;
+          } | {
+            kind: "basic";
+            user: string;
+            password: string;
+          } | {
+            kind: "sigv4";
+            accessKeyId: string;
+            secretAccessKey: string;
+            sessionToken: string | null;
+            region: string;
+            service: string;
+          })[];
+          allow: {
+            methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+            path: string;
+          }[];
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+          placeholder: null | {
+            kind: "prefix";
+            prefix: string;
+          } | {
+            kind: "jwt";
+            claims: string[];
+          };
+          egress: string | null;
+        } | {
+          kind: "signer";
+          name: string;
+          signer: {
+            kind: "private-key";
+            key: string;
+          } | {
+            kind: "hmac";
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "verifier";
+          name: string;
+          hmac: {
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "tunnel";
+          name: string;
+          key: string;
+          hosts: string[];
+          network: string | null;
+        };
+        keys: string[];
+        savedBy: string;
+        savedAt: number;
+        routesSensitive: boolean;
+      }[];
+      reserved: string[];
+      reservedState: "ok" | "stale" | "tampered";
+      editable: boolean;
+      code: string[];
+    };
+  };
+  "PUT /proxy/reserved": {
+    input: {
+      release: string;
+    };
+    output: {
+      reserved: string[];
     };
   };
 };
@@ -2159,7 +2427,7 @@ export type Me = {
   environments: {
     project: string;
     environment: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
   }[];
 };
 
@@ -2190,7 +2458,7 @@ export type Member = {
     environment: string | null;
     role: string;
     roleName: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
   }[];
 };
@@ -2220,7 +2488,7 @@ export type MemberAccess = {
     environment: string | null;
     role: string;
     roleName: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     expiresAt: string | null;
   }[];
 };
@@ -2372,7 +2640,7 @@ export type ProjectSummary = {
   name: string;
   archivedAt: string | null;
   folder: string | null;
-  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
   environments: {
     slug: string;
     name: string;
@@ -2387,6 +2655,95 @@ export type ProjectSummary = {
     };
   }[];
   secretCount: number | null;
+};
+
+export type ProxyPage = {
+  environmentId: string;
+  seal: string | null;
+  state: "ok" | "stale" | "tampered";
+  items: {
+    definition: {
+      kind: "route";
+      name: string;
+      upstream: string;
+      inject: ({
+        kind: "form" | "header" | "json" | "query";
+        name: string;
+        template: string;
+      } | {
+        kind: "basic";
+        user: string;
+        password: string;
+      } | {
+        kind: "sigv4";
+        accessKeyId: string;
+        secretAccessKey: string;
+        sessionToken: string | null;
+        region: string;
+        service: string;
+      })[];
+      allow: {
+        methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+        path: string;
+      }[];
+      limit: {
+        perMinute: number | null;
+        perDay: number | null;
+      };
+      placeholder: null | {
+        kind: "prefix";
+        prefix: string;
+      } | {
+        kind: "jwt";
+        claims: string[];
+      };
+      egress: string | null;
+    } | {
+      kind: "signer";
+      name: string;
+      signer: {
+        kind: "private-key";
+        key: string;
+      } | {
+        kind: "hmac";
+        key: string;
+        encoding: "base64" | "base64url" | "hex";
+        prefix: string;
+        maxBytes: number | null;
+      };
+      limit: {
+        perMinute: number | null;
+        perDay: number | null;
+      };
+    } | {
+      kind: "verifier";
+      name: string;
+      hmac: {
+        key: string;
+        encoding: "base64" | "base64url" | "hex";
+        prefix: string;
+        maxBytes: number | null;
+      };
+      limit: {
+        perMinute: number | null;
+        perDay: number | null;
+      };
+    } | {
+      kind: "tunnel";
+      name: string;
+      key: string;
+      hosts: string[];
+      network: string | null;
+    };
+    keys: string[];
+    savedBy: string;
+    savedAt: number;
+    routesSensitive: boolean;
+  }[];
+  reserved: string[];
+  reservedState: "ok" | "stale" | "tampered";
+  editable: boolean;
+  code: string[];
 };
 
 export type ReferenceView = {
@@ -2409,7 +2766,7 @@ export type RemovedMember = {
 
 export type ImpactLine = {
   change: "narrows" | "widens";
-  permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+  permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
   protected: boolean;
   people: number;
   services: number;
@@ -2421,7 +2778,7 @@ export type ImpactLine = {
 export type RoleImpact = {
   impact: {
     change: "narrows" | "widens";
-    permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
+    permission: "audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write";
     protected: boolean;
     people: number;
     services: number;
@@ -2436,8 +2793,8 @@ export type RoleImpact = {
 export type RoleView = {
   name: string;
   description: string;
-  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-  protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+  permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+  protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
   id: string;
   builtin: boolean;
   edited: boolean;
@@ -2445,8 +2802,8 @@ export type RoleView = {
   default: null | {
     name: string;
     description: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
   };
   assignableToEnvironment: boolean;
   grants: number;
@@ -2456,8 +2813,8 @@ export type RolesView = {
   roles: {
     name: string;
     description: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     id: string;
     builtin: boolean;
     edited: boolean;
@@ -2465,8 +2822,8 @@ export type RolesView = {
     default: null | {
       name: string;
       description: string;
-      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     };
     assignableToEnvironment: boolean;
     grants: number;
@@ -2474,8 +2831,8 @@ export type RolesView = {
   instanceRoles: {
     name: string;
     description: string;
-    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+    protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     id: string;
     builtin: boolean;
     edited: boolean;
@@ -2483,8 +2840,8 @@ export type RolesView = {
     default: null | {
       name: string;
       description: string;
-      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
-      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      permissions: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
+      protected: ("audit.read" | "environment.manage" | "grant.manage" | "project.manage" | "proxy.edit" | "secret.archive" | "secret.read" | "secret.use" | "secret.write")[];
     };
     assignableToEnvironment: boolean;
     grants: number;

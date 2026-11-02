@@ -48,6 +48,7 @@ import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
+import { withProxyCode } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
@@ -339,6 +340,13 @@ export type CredentialProxyOptions = {
   /** Upstreams over plain HTTP, and at private, loopback or link-local addresses: for local fakes in development, never in production. */
   insecureUpstreams?: boolean;
   /**
+   * Whether Owners, and whoever a role gives `proxy.edit`, may write this
+   * deployment's proxy definitions per environment in the UI (0.16,
+   * docs/design/proxy-ui.md): off unless set. Code's definitions win a name
+   * both use, in every environment.
+   */
+  editable?: boolean;
+  /**
    * How long a credential's values, once opened for a handle, serve its
    * next requests from this process's memory: 60 seconds unless set, 0 for
    * a read per request. Each opening is one entry in the log; a revoked
@@ -446,7 +454,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const cache = new Map<string, Kept>();
   const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
   const groups = new Map<string, Group>();
-  return {
+  return withProxyCode({
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
@@ -467,7 +475,11 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
         }
       },
     },
-  };
+  }, {
+    editable: options.editable === true,
+    insecureUpstreams: options.insecureUpstreams === true,
+    names: [...new Set([...credentials.keys(), ...tunnels.keys(), ...signers.keys(), ...verifiers.keys()])].sort(),
+  });
 }
 
 /** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timers: its checks', the one its bytes stop by, and its end's. */

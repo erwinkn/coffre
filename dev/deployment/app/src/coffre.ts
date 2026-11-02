@@ -5,14 +5,14 @@
 // Every value is a local fixture; see wrangler.jsonc and .env.dev.
 import { createCoffre, durableAnchor, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
-import type { AnchorNamespace, GatesNamespace, RateLimiter, SocketsNamespace, Vault } from '@coffre/server/cloudflare';
+import type { AnchorNamespace, GatesNamespace, RateLimiter, SocketsNamespace, VaultEntry } from '@coffre/server/cloudflare';
 import { credentialProxy, postgres as tunnel } from '@coffre/server/plugins/credential-proxy';
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 
 export type Env = {
   HYPERDRIVE: { connectionString: string };
-  VAULT: Vault;
+  VAULT: VaultEntry;
   COFFRE_PUBLIC_URL: string;
   /** The dev IdP on loopback, which this Worker calls. */
   COFFRE_DEV_IDP_URL: string;

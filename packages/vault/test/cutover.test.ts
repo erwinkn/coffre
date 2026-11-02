@@ -22,13 +22,16 @@ import type { Sealed } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { CUTOVER_OBJECT, genesisCalls } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Ref } from '../src/inputs.ts';
-import { openLocalVault as openRaw } from '../src/local.ts';
+import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { bindingObject } from '../src/objects.ts';
 import * as store from '../src/store.ts';
 import { emptyDatabase, ENGINE, openLocalVault, openTestDatabase, OWNER_URL, places, postgresOnly, rows, run, sealed, nothingHeld, storedVersions, withLogUnlocked, withTriggersLifted, type TestDatabase } from './database.ts';
+
+/** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
+const openRaw = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';

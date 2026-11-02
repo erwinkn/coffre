@@ -17,7 +17,7 @@ import { genesisCall, type ChangeKeys } from '../src/changes.ts';
 import type { SealThrough } from '../src/checkpointer.ts';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { sealKey, type Input, type Ref } from '../src/inputs.ts';
-import { openLocalVault } from '../src/local.ts';
+import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import { entryMac, logMacKey, RETENTION_ACTOR, RETENTION_OBJECT, retentionPayload } from '../src/log-entry.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
@@ -28,6 +28,9 @@ import { newRequestId } from '../src/use.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { cutOver, emptyDatabase, ENGINE, openTestDatabase, places, rows, run, speaking, type TestDatabase } from './database.ts';
+
+/** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
+const openLocalVault = async (...args: Parameters<typeof openEntry>) => spoken(await openEntry(...args));
 
 const ROOT = 'user:root@acme.example';
 const ADA = 'user:ada@acme.example';

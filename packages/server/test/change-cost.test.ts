@@ -11,13 +11,13 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 import { createDatabase, type Client } from '@coffre/db';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
-import { localVault, type LocalVault } from '@coffre/vault/node';
+import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
@@ -47,7 +47,7 @@ type Cost = { app: number; vault: number; hot: number; calls: number; ms: number
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
-let vault: LocalVault;
+let vault: SpokenVault;
 let vaultPool: HyperdrivePool;
 let relays: { app: Relay; vault: Relay; hot: Relay };
 let appClient: PerRequest;
@@ -77,10 +77,10 @@ before(async () => {
   const relay = (url: string, side: string) => postgresProxy(url, { delayMs: RTT_MS, onSync: (sent) => void statements.push(`${side} Sync: ${sent.map(shown).join(' | ') || '(none)'}`) });
   relays = { app: await relay(TEST_RUNTIME_DATABASE_URL, 'app'), vault: await relay(TEST_VAULT_DATABASE_URL, 'vault'), hot: await relay(TEST_HOT_DATABASE_URL, 'hot') };
   vaultPool = new HyperdrivePool(relays.vault.url);
-  const opened = await localVault(
+  const opened = spoken(await localVault(
     { database: createDatabase(vaultPool), hotDatabase: relays.hot.url, kek: { id: 'test-kek-1', key: kek.toString('base64') }, owners: [ROOT] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
-  );
+  ));
   vault = opened;
   const counted = new Proxy(opened, {
     get(target, key) {
@@ -97,7 +97,7 @@ before(async () => {
   const auth = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] });
   runtime = {
     ...createRuntime(
-      resolveConfig({ publicUrl: ORIGIN, vault: counted, auth, auditChainKey: deps.chainKey.toString('base64') }),
+      resolveConfig({ publicUrl: ORIGIN, vault: entryOf(counted), auth, auditChainKey: deps.chainKey.toString('base64') }),
       createDatabase(appClient.client),
       counted,
       { json: async (url) => { throw new Error(`no fetch in this test: ${url.href}`); } },

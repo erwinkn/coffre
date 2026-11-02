@@ -6,6 +6,7 @@ import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { RELEASE, versioned } from '@coffre/core/vault';
 import { isUnavailable } from '@coffre/db/dialect';
 
 import { failureOf } from '../src/failure.ts';
@@ -20,12 +21,12 @@ import { openTestDatabase, sealed } from './database.ts';
 /** One call as `connectVault` makes it, on `agent`: the socket it went on. */
 function about(socket: string, agent: Agent): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const req = request({ socketPath: socket, agent, method: 'POST', path: '/about', headers: { 'content-type': 'application/json' } }, (res) => {
+    const req = request({ socketPath: socket, agent, method: 'POST', path: '/call', headers: { 'content-type': 'application/json' } }, (res) => {
       res.resume();
       res.on('end', () => (res.statusCode === 200 ? resolve(req.socket as Socket) : reject(new Error(`status ${res.statusCode}`))));
     });
     req.on('error', reject);
-    req.end('[]');
+    req.end(JSON.stringify({ release: RELEASE, method: 'about', args: [] }));
   });
 }
 
@@ -76,7 +77,7 @@ test("the vault's database not answering crosses the socket as the outage it is,
     });
     await new Promise<void>((resolve) => server.listen(socket, resolve));
     try {
-      const vault = connectVault(socket);
+      const vault = versioned(connectVault(socket));
       const busy = await vault.about().then(() => assert.fail('answered'), (error: unknown) => error);
       assert.equal(isUnavailable(busy), true);
       const bug = await vault.about().then(() => assert.fail('answered'), (error: unknown) => error);
@@ -85,7 +86,7 @@ test("the vault's database not answering crosses the socket as the outage it is,
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
     // No vault there at all, its socket file gone with it: unreachable, as a refused connection is.
-    const gone = await connectVault(join(dir, 'nobody.sock')).about().then(() => assert.fail('answered'), (error: unknown) => error);
+    const gone = await versioned(connectVault(join(dir, 'nobody.sock'))).about().then(() => assert.fail('answered'), (error: unknown) => error);
     assert.match(String((gone as Error).message), /is unreachable/);
     assert.equal(isUnavailable(gone), true);
   } finally {
