@@ -766,7 +766,7 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
   const credential = uiCredential(proxy, kept.digest, kept.definition);
   if (typeof credential === 'string') return failure(503, credential, 'unavailable', '1');
   const rest = kept.reading === 'named' ? raw.slice(3) : raw.slice(1);
-  return sendAs(request, coffre, proxy, credential, [...rest], url.search, handle, { values: kept.values, plain: kept.plain }, `${kept.path}/${credential.name}`);
+  return sendAs(request, coffre, credential, [...rest], url.search, handle, { values: kept.values, plain: kept.plain }, `${kept.path}/${credential.name}`);
 }
 
 /** The definition of an item a use decided on: the answer's, or this isolate's copy of that digest, which the answer left out. */
@@ -1676,8 +1676,7 @@ function backOf(credential: Resolved, target: URL, handle: string): [string, str
  * request takes, on that item (its upstream, allow list, body rules), and the handle the use was made on found where
  * the item takes its key, else nothing goes (a copy that let the request through only provisionally: `moved`).
  */
-async function sendAs(request: Request, coffre: PluginContext, proxy: Proxy, credential: Resolved, rest: string[], search: string, handle: string, opened: Opened, route: string): Promise<Response> {
-  void proxy;
+async function sendAs(request: Request, coffre: PluginContext, credential: Resolved, rest: string[], search: string, handle: string, opened: Opened, route: string): Promise<Response> {
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
   const { target } = aimed;

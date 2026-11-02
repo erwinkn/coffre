@@ -318,7 +318,7 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
 /**
  * A plugin's route, behind the proxy's gate when the plugin is the credential proxy (proxy-gate.ts; T186 PR C): its
  * code's names reserved before its first request in this isolate, every request of it, `GET /use` and the plan among
- * them, and its WebSockets: nothing it serves or shows gets past it.
+ * them, and its WebSockets: nothing it serves or shows gets past it. A gate that fails answers the request itself.
  */
 async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: () => Promise<T>): Promise<T | Response> {
   try {

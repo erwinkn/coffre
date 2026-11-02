@@ -1696,6 +1696,55 @@ Where C1 settles what this section left open, or reads it otherwise:
   No CHECK on it: on the partitioned table it would scan every day under
   an exclusive lock while the previous release serves.
 
+**PR C as built, the app's half for handles (C2a, W312).** C2 ships as
+two PRs: C2a, the gate and a handle's routes, with the plan; C2b,
+workloads (their counts, section 3), signers, verifiers, presign and
+tunnels of UI items, and `/use/<a>/<b>` in one call. Until C2b, a
+workload, sign, verify or tunnel naming a UI item finds none: 404, as
+before PR C. Where C2a settles what this section left open:
+- **The gate** (`proxy-gate.ts`) keeps, per isolate and vault, the code
+  names it reserved, settled answers only. A gate that fails answers the
+  request itself, before the plugin: 503 `unavailable` (`proxy_gate`,
+  `Retry-After: 1`), or `deploying` for a vault on another release, and
+  keeps nothing, so the next request asks again. The tests' database
+  reset forgets it with the log (`forgetProxyGates`).
+- **The handle on a cold isolate** is found by its shape before any item
+  says where it rides: any header (`x-api-key: <handle>`, SigV4's
+  `Credential=<handle>/…`, a Basic pair decoded), the query, then the body
+  (64 KiB). Two different handles: 400. The decided item must then find it
+  where it takes its key (`sendAs`), or nothing is sent. Bearer,
+  `x-coffre-handle` and the query alone missed SigV4 and every header
+  rule but `authorization`.
+- **Only readings whose name can be a route's.** `/use/s3/bucket/report.csv`
+  is route `s3` at `/bucket/report.csv`; `report.csv` is no route name, so
+  no place reading is offered. The vault takes a malformed name as the
+  app's bug and fails the call.
+- **A copy's refusal** stands only for the reading the vault would take:
+  the place reading where the handle's kept made-for list names `<a>/<b>`,
+  else the stable one. The place reading's copy is keyed by place and
+  route, not by handle, so another handle's copy says nothing of this
+  URL; with no list kept, the use's answer decides.
+- **Refusals.** A key the item's editor no longer routes is 403
+  `route_not_cleared`, the vault's reason naming them: the caller may
+  read the key, so D153's single 404 hides nothing here. A refusal of the
+  caller's own standing stays the read's 404 `not_available`. A handle
+  made for `market/dev` reads `/use/market/dev@me/openai` as route
+  `market` (404); one made for `market/dev@me` reads the place, and is
+  409 `route_not_personal`.
+- **The plan** makes one `proxyItem` call with no name before its
+  `expose` read. Routes the proxy can read join the covering set; the
+  keys of any other item (a signer's, verifier's or tunnel's, which C2a
+  does not serve, or a route the proxy cannot take) are the handle too,
+  and no URL is listed for them. A `tampered` or `stale` level, or an
+  item answered without its definition, is 503 and no environment. A
+  name code holds is left out; a personal config shapes nothing.
+- **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
+  map): the place URL and a stable URL of three segments or more are one
+  `use_route` statement and nothing of the app's; `/use/<a>/<b>` is the
+  handle's made-for list (`use_credential`) and then the use, one call
+  once C2b's route use can answer "the plan" for a place reading. The
+  same rows with 256 definitions in the environment as with one.
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

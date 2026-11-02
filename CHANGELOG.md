@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **The proxy serves UI routes to handles (T186, PR C2a).** Under
+  `credentialProxy({ editable: true })`, a name the deployment's code
+  lacks is looked up in the environment's Proxy tab: `GET
+  /use/openai/models` from a `coffre run` handle, or
+  `/use/market/dev/openai/models`, is the vault's one route use (two
+  for `/use/<a>/<b>` with `cacheSeconds: 0`, which may be the plan), and
+  the request goes by the item the vault decided on. Values kept for
+  `cacheSeconds` go only by the item they were decided on. The handle is
+  found by its shape in any header, the query or the body, and must sit
+  where the decided item takes its key. A route whose editor no longer
+  reads a key it sends answers 403 `route_not_cleared`; one asked for at
+  a personal config, 409 `route_not_personal`. `coffre run`'s plan gives a
+  UI route's keys as the handle, never their values, and answers 503 with
+  no environment when any of the place's items was changed around the
+  vault. Before an isolate's first proxy request, and before the Proxy
+  tab reads or writes, the names code defines are reserved in the vault
+  (`proxy.code`), which deletes UI items of those names: a request whose
+  isolate cannot reserve them answers 503 and the next one asks again.
+  Workloads, signers, verifiers, presign and tunnels of UI items answer
+  404 until PR C2b.
+
 - **The vault decides about a member from 0.15's log, not 0.14's (T179
   PR 2).** Once the cutover is written, a decision checks a member's row
   as a use does: the row's seal is the vault's over it and its newest
@@ -37,7 +58,7 @@
   (`route_not_cleared`). Every entry names its route, under its MAC, and a
   cover rides only an entry of the same route made after the route's and
   its editor's last change. `Vault.proxyItem` reads a place's items as a
-  use would, using nothing. Nothing in the app calls either yet (PR C2).
+  use would, using nothing. PR C2a's proxy calls both.
   Migration 0058 adds `log_uses.route`, a route argument to `use_covered`
   and `use_credential`, and `use_route`; the previous release runs on it.
   Where a member of the database's owner runs it, what it makes is that

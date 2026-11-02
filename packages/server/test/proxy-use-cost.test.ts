@@ -23,7 +23,9 @@ import { sql } from 'drizzle-orm';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins } from '../src/plugins.ts';
+import { proxyCodeOf } from '../src/proxy-code.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
+import type { ProxyDefinition } from '@coffre/core/vault';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
@@ -137,9 +139,9 @@ after(async () => {
 });
 
 /** A request's statements, by pool, the request run once before, so that what a process does once is done. */
-async function statements(url: string, token = handle, { warm = true } = {}): Promise<{ app: Statement[]; vault: Statement[]; hot: Statement[] }> {
+async function statements(url: string, token = handle, { warm = true, at = runtime } = {}): Promise<{ app: Statement[]; vault: Statement[]; hot: Statement[] }> {
   const use = async () => {
-    const response = await answer(new Request(url, { headers: { 'x-api-key': token } }), runtime, {} as Pages, '203.0.113.7');
+    const response = await answer(new Request(url, { headers: { 'x-api-key': token } }), at, {} as Pages, '203.0.113.7');
     assert.equal(response.status, 200, await response.clone().text());
     await response.arrayBuffer();
   };
@@ -225,6 +227,45 @@ test("a handle's /use reads as many rows and pages however the log and the insta
     assert.equal(grown[i]!.rows, rows, `${url}: ${text} answered as many rows`);
     assert.ok(grown[i]!.pages <= 2 * pages + 16, `${url}: ${text} read ${grown[i]!.pages} pages once the instance grew, ${pages} before`);
   }
+});
+
+test("a handle's /use of a UI route is the vault's one call too, at either URL, the app running nothing; it answers as many rows whether its environment holds one definition or 256 (T186 PR C, R44, R48)", POSTGRES, async () => {
+  const root = clientFor(deps, ROOT);
+  const upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`;
+  const route = (name: string): ProxyDefinition => ({
+    kind: 'route', name, upstream: upstreamUrl, inject: [{ kind: 'header', name: 'x-api-key', template: '{API_KEY}' }],
+    allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+  });
+  // The same deployment with the Proxy tab on: `api` is code's, `ui` the environment's.
+  const plugins = checkPlugins([credentialProxy({ credentials: { api: { upstream: upstreamUrl, inject: header('x-api-key', '{API_KEY}') } }, insecureUpstreams: true, cacheSeconds: 0, editable: true })]);
+  const ui = { ...runtime, plugins } satisfies CoffreRuntime;
+  deps.proxy = proxyCodeOf(plugins);
+  const save = async (items: Record<string, ProxyDefinition>) => root.proxy.save('market/dev', { seal: (await root.proxy.get('market/dev')).seal, items });
+  await save({ ui: route('ui') });
+  const measure = async () => {
+    const out: Record<string, { app: string[]; vault: string[]; hot: string[]; rows: number[] }> = {};
+    for (const url of [`${ORIGIN}/use/market/dev/ui/charges`, `${ORIGIN}/use/ui/v1/charges`, `${ORIGIN}/use/ui/charges`]) {
+      const ran = await statements(url, handle, { at: ui });
+      out[url] = { app: shown(ran.app), vault: shown(ran.vault), hot: shown(ran.hot), rows: ran.hot.map((statement) => statement.rows) };
+    }
+    return out;
+  };
+  const one = await measure();
+  const route1 = 'SELECT use_route( $1::bytea, $2:';
+  for (const [url, ran] of Object.entries(one)) {
+    assert.deepEqual(ran.app, [], `${url}: no statement of the app`);
+    assert.deepEqual(ran.vault, [], `${url}: nothing of the vault's but the use's statement`);
+  }
+  // The place's URL and a stable one of three segments or more: the route use alone, which picks the reading itself.
+  assert.deepEqual(one[`${ORIGIN}/use/market/dev/ui/charges`]!.hot, [route1]);
+  assert.deepEqual(one[`${ORIGIN}/use/ui/v1/charges`]!.hot, [route1]);
+  // Two segments, `/use/<a>/<b>`, which may be the plan: the handle's made-for list first, kept for `cacheSeconds` and
+  // so asked on each request here, then the use. One call needs a route use whose place reading is the plan, a vault
+  // change PR C2b makes (docs/design/proxy-ui.md, section 6, "URLs of one or two segments").
+  assert.deepEqual(one[`${ORIGIN}/use/ui/charges`]!.hot, ['SELECT use_credential( $1::uuid,', route1]);
+  // 255 more definitions in the environment, each its own route: the use reads its own item, as many rows.
+  await save(Object.fromEntries([['ui', route('ui')], ...Array.from({ length: 255 }, (_, i) => [`route-${i}`, route(`route-${i}`)] as const)]));
+  assert.deepEqual(await measure(), one);
 });
 
 /** A reveal's statements through the API, by pool, as `statements` takes a use's. */
