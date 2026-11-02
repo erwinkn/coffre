@@ -20,8 +20,9 @@
   set. `allow: [{ methods, path }]` says which requests a credential takes,
   each path matched segment by segment, percent-decoded once: a plain path a
   prefix, `*` one segment, `**` the rest. `methods` and `paths` keep working
-  as before, read as one entry per path; where a credential has a list, a
-  path is now matched decoded (`docu%6Dents` is `documents`); a `*` in an
+  as before, read as one entry per path and compared as written
+  (`docu%6Dents` is not `documents`); where a credential uses `allow`, a
+  path is matched decoded (`docu%6Dents` is `documents`); a `*` in an
   `allow` path takes no `//` and no segment of `;` parameters, or of
   spaces and dots, alone (`;x`, `%20`, `...`), which a server may read as
   none; past a prefix they go on as before. An `allow` path's trailing
