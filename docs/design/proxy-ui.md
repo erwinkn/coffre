@@ -346,9 +346,10 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
              for the caller (purpose use, as today)
              for the definition's editor: frozen holdings, intersected with current ones (section 8)
            answers: the values, the definition's seal, its item digest, and its definition, never its holdings (omitted when the app's copy has that digest)
-  app      sends only if the answer carries the route's seal list and item digest, and every sealed key's
-             entry was made under that seal (no seal or no digest: 503, never "the copy's digest confirmed";
-             another seal: asks again)
+  app      sends only if the answer carries the route's seal list and item digest (no seal or no
+             digest: 503, never "the copy's digest confirmed"); the app holds no MAC key and checks
+             presence only, while the vault checks sameness: each later round and chunk's seal list
+             against the first statement's, else `moved` (`OneVersion`)
            checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the entry carries its seal and item)
            sends, before the use's deadline, to that definition's upstream
@@ -379,19 +380,64 @@ whose answers (`UseManyOutcome`, `Used`) carry no seal, no digest and no
 item. Built that way, a UI SigV4 route (two keys, and presign's only kind)
 under a rolled-back vault would be sent, or its URL signed, by the copy,
 with nothing for the presence check to look at. So a UI route's use never
-goes by ids. It is one call, `NamedUseInput` with the route instead of a
-key: the vault takes the route's keys from the item it reads, one or
-several, in `use_credential`, or `use_batch` with its later rounds held to
-the first round's seal (above). Its outcome carries every key's value, the
-seal list, the item digest, and the item when the isolate's copy is
-stale. Every path that consumes a UI route's values calls it through one
-app function: a handle's forward of any number of keys, a workload's
-forward, sign, verify and presign, and a tunnel's dial and its rechecks.
-That function checks presence and the one seal before anything else sees
-the answer: before the value cache keeps it, before a sign or presign, and
-before a tunnel dials. A route use that the vault cannot serve by name is
-a 503, never the by-ids fallback a code route takes when `byName` returns
-null. Code routes keep today's shapes unchanged.
+goes by ids. It is one call, a route use, whose contract is:
+
+- **Input.** The caller, as `proxyItem` names it: a handle by its token's
+  hash (`NamedUseInput`'s `tokenHash` and `accepts`), or a workload by its
+  credential's id and `way` (`connection`, `binding`, `access`), as a
+  batch names it today; a Cloudflare binding has no token, and is the
+  second kind. Then the place, the route's name, and the map's ids when
+  it holds them; for a batch, the route replaces `items`. The input still
+  sends `key: null` beside `route`: a 0.15 vault's `useNamed` throws on a
+  missing `key`, and with `key: null` it answers a standing-only use, with
+  no item, no seal and no digest, which the presence check refuses.
+- **The route's keys are the item's own list.** A route's keys live in its
+  inject templates (`{KEY}`), which today only a TypeScript regex in the
+  proxy reads. The vault does not parse templates in SQL. At save, it
+  computes each item's key names once, with one parser in `@coffre/core`
+  that the proxy's startup validation also uses, and stores the list in
+  the canonical item, under its digest. The statement holds the map's ids
+  to that stored list, save-time clearance reads it, and replay reads it
+  from the same item. So live and replay cannot disagree on a key set
+  (R53), whatever a template's braces look like.
+- **Places.** The statement serves fork places: it finds the item through
+  the fork chain (section 2) and resolves each of the route's key names
+  through the chain too, nearest first, as values inherit. Today's named
+  resolution serves only an environment with no parent and no owner
+  (`v_live` in `0045_decide_first.sql`, `served: false` otherwise); the
+  route use lifts that for routes only. A personal config (a fork owned by
+  one person, `docs/design/forking.md`, and the proxy's `@me` reading for
+  generated keys) is not served by UI routes in 0.16: the editor's frozen
+  holdings can never read an owner-only value, so every use there would
+  be `route_not_cleared`. The route use reads the base place, never `@me`,
+  and a UI route asked for at a personal config answers 409
+  `route_not_personal`, naming the base environment. Code routes keep
+  `@me` as today.
+- **Outcome.** `NamedUseOutcome`'s `name` route, widened per key: for each
+  key its use outcome, a sealed value or a plain one (a plain key has no
+  envelope, and a route of plain keys only is still one use, below), with
+  the plain list redaction reads; the caller's standing and its credential's
+  `expiresAt`, from which the value cache takes its bound, as `valuesFor`
+  does today; the place by slugs and ids; the seal list; the item digest;
+  and the item when the isolate's copy is stale. One outcome type for
+  handles and workloads.
+- **One app function.** Every path that consumes a UI route's values calls
+  it: a handle's forward of any number of keys, the stable URL's
+  no-cache path (today `coffre.useMadeFor`, which bypasses `valuesFor`), a
+  workload's forward, sign with a private key (which calls `coffre.use`
+  and never caches today), verify and presign, and a tunnel's dial and its
+  rechecks. It checks presence before anything else sees the answer:
+  before the value cache keeps it, before a sign or presign, and before a
+  tunnel dials. A thrown vault error, an unknown method, `served: false`
+  and a missing seal or digest are all a 503, never the by-ids fallback a
+  code route takes when `byName` returns null.
+
+The plan's placeholder shaping is not a route use. To copy a JWT's claims
+into its placeholder, the plan opens the key's value for the caller alone,
+purpose `expose`, as it does for a code route. That value goes into the
+caller's own environment and never to the definition's upstream, so the
+editor is not decided there, and the plan's `proxyItem` call is what holds
+it to the vault-checked item. Code routes keep today's shapes unchanged.
 
 All of a route's keys are decided on one version, in that one statement.
 A use of several keys may need a second round today (`useMany`: a key that
@@ -578,7 +624,8 @@ take the same use, with what changes for each:
   - *`narrow` constraints* are weighed after the use's answer, on the URL
     built from the decided definition's upstream, never the copy's, just
     before the send. A constraint that refuses there sends nothing.
-  - *The use* is today's workload use with the route's name: the session is
+  - *The use* is the route use above, the session or binding named as the
+    caller (never today's `reveal` and `useMany` by ids): the session is
     the caller of the first decision, the frozen editor the second's, and
     the values are kept per session, place and route, each entry carrying
     the object seal and item they were decided on (section 4).
@@ -690,7 +737,7 @@ keys in that call (section 3), whichever path makes it.
 
 | Case | Today (0.15) | With UI definitions |
 |---|---|---|
-| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** Two more inputs of the statement, each one more row and one more probe of its newest change, inside the same call: the proxy object (the route's item and the index) and the editor's principal (decision 5); one more proxy row and probe per fork parent, up to four. The item is not sent back, because the isolate's copy has its digest |
+| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** Two more inputs of the statement, each one more row and one more probe of its newest change, inside the same call: the proxy object (the route's item and the index) and the editor's principal (decision 5); one more proxy row and probe per fork parent, up to four; at a fork, each key resolved through the chain reads one more key row and probe per level until it is found, as an inherited value's read does today, inside the same statement. The item is not sent back, because the isolate's copy has its digest |
 | Map miss: an isolate cold for that environment or URL, or a key it has not used | 2 calls | **2 calls.** The first reads both URL readings by name (section 6): up to two places' proxy rows and probes, eight through forks of three parents. It picks the reading, resolves the route's keys by name, and answers the vault with the reading, the ids, the item and its digest (a few hundred bytes to a few KB). The vault's map keeps the ids. The second makes the use, reading the chosen place only, and the app gets the definition and digest in the use's answer |
 | Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the route's item hash to another digest than the copy's and returns the new item in the same answer. Nothing is refused or retried |
 | Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
@@ -1145,6 +1192,8 @@ A route's `inject` is an ordered list. Each rule fills a header, a query
 parameter, a form or JSON field, Basic authorization, or a SigV4 signature,
 in that order. Validation, at save and at the app's startup for code:
 
+- every rule names at least one key (`{KEY}`), as code's startup check
+  requires today, so no route use is ever standing-only;
 - at most one `basic`, at most one `sigv4`, and `sigv4` last;
 - one rule per header (case-insensitive), parameter or field name;
 - no `basic` beside a rule that sets `authorization`, and no rule sets a
@@ -1224,7 +1273,8 @@ it is treated like the credential that already is one, a service token:
   rights, and `sensitive: true` at the places where they are an Owner of
   the project or the instance, as a person on no credential's scope. That is
   `readsSensitive`'s rule from R32, unchanged. It then clears each changed
-  item's keys now: it resolves them by name in the place, inherited and
+  item's keys now, the list it stores in the item (section 3): it resolves
+  them by name in the place, inherited and
   referenced keys included, and refuses the save if the frozen holdings
   would not read one, sensitive included, as the use would. A key the place
   does not have yet is accepted (a route may be saved before its key) and
@@ -1360,9 +1410,12 @@ no storage.
   column, under the entry MAC; `use_credential` and `use_batch` take the
   route, read the proxy object(s) and the editor's principal, and match a
   cover on the route (section 4), on both engines.
-- `@coffre/core/vault`: `NamedUseInput` gains the route, which replaces
-  its key; its outcome, every key's value, the item, the seal list and the
-  digest; `proxyItem`'s input and answer. No UI route goes through
+- `@coffre/core/vault`: the route use's input and outcome (section 3:
+  the caller union, handles by token hash and workloads by credential id
+  and `way`; `key: null` beside the route; per-key sealed or plain values,
+  standing, `expiresAt`, the seal list, the digest and the item), and
+  `proxyItem`'s; the template key parser, shared by the vault's save and
+  the proxy's startup check. No UI route goes through
   `reveal`, `useValues` or `useMany` by ids: one app function makes every
   route use, for handles of any number of keys, workloads, signers,
   verifiers, presign and tunnels, and checks presence and the one seal
@@ -1377,9 +1430,14 @@ no storage.
   item digest is still a 503 (section 3): that, not the bit, covers a
   vault rolled back under warm isolates. Tests: a vault rolled back to
   0.15 after the bit was seen, a UI route's use refused, never sent by the
-  copy, for a handle route of one key, of two keys (SigV4), a workload
-  route, a presign and a tunnel dial; a route of plain keys only, refused
-  the same; `about()`, the gate and `proxyItem` each failing, the request 503
+  copy, for a handle route of one key (the stable URL with
+  `cacheSeconds: 0` too), of two keys (SigV4), a workload route from a
+  DPoP session and from a binding, a presign, a private-key sign and a
+  tunnel dial, each at a plain place and at a fork; a route of plain keys
+  only, refused the same; a route use at a fork resolving its item and
+  keys through the chain; a UI route at a personal config, 409
+  `route_not_personal`; a template whose braces the old regex and the
+  shared parser could read apart, saved and replayed to the same key set; `about()`, the gate and `proxyItem` each failing, the request 503
   and the next one asking again.
 - `use_credential`: the proxy object(s) and the editor's principal as
   inputs in both shapes, in the seal cache; the named use takes a route; the vault resolves its keys by name,
