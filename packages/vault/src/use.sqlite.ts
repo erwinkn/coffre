@@ -10,7 +10,7 @@ import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
-import type { Cover, NamedAhead, NamedBatchCall, NamedBatchRows, Resolved, UseCall, UseRow } from './use.ts';
+import type { Cover, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
  * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
@@ -94,6 +94,160 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
     // Past the deadline once written, as `callBatch`'s: the whole statement rolls back.
     if (out.some((row, i) => byIds[i] && row!.state === null) && Date.now() > gate.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
     return { gate: opened, keys: calls === null ? names : null, rows: out, byIds, aheads };
+  });
+}
+
+/**
+ * `use_route` (0058) on SQLite: in one transaction, as Postgres's makes it: the reading, the gate (a handle's named call
+ * with no key, or a workload's quiet use of no key at its place), the place's chain, each level's proxy row through the
+ * first that holds the route's item, the item's editor's principal, the item's keys resolved by name, and, when the
+ * call's ids are the names' now at its reading, each key's use by them (a call with no request id only checked).
+ */
+export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRows> {
+  return (db as Database).transaction(async (tx) => {
+    const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
+    const handle = call.tokenHash !== null;
+    let madeFor: string[] | null = null;
+    let made = false;
+    if (handle && call.named !== null) {
+      const credential = await one<{ places: string | null }>(sql`SELECT places FROM credentials WHERE token_hash = ${call.tokenHash}`);
+      const mine = call.environment!.endsWith('@me');
+      const candidate = await one<{ id: string }>(sql`SELECT e.id FROM projects q JOIN environments e ON e.project_id = q.id AND e.slug = ${mine ? call.environment!.slice(0, -3) : call.environment}
+        WHERE q.slug = ${call.project} AND q.slug NOT LIKE '%~%' AND e.slug NOT LIKE '%~%'`);
+      const places = placesOf(credential?.places ?? null);
+      made = candidate !== undefined && places.some((place) => place.environmentId === candidate.id && place.personal === mine);
+      madeFor = [];
+      for (const place of places) {
+        const path = await one<{ path: string }>(sql`SELECT q.slug || '/' || e.slug AS path FROM environments e JOIN projects q ON q.id = e.project_id
+          WHERE e.id = ${place.environmentId} AND e.slug NOT LIKE '%~%' AND q.slug NOT LIKE '%~%'`);
+        if (path !== undefined) madeFor.push(`${path.path}${place.personal ? '@me' : ''}`);
+      }
+    }
+    const reading: 1 | 2 = call.use ? (handle && call.named !== null && (made || call.stable === null) ? 1 : 2) : call.project !== null ? 1 : 2;
+    const route = reading === 1 ? call.named : call.stable;
+    const rows = direct(tx);
+    const base = { requestId: '0', at: call.at, purpose: call.purpose, mac: call.mac, deadline: call.deadline };
+    const gate = handle
+      ? await useOnce(tx, {
+        ...base, credential: null, secretId: null, place: null, way: 0, principal: null,
+        names: {
+          tokenHash: call.tokenHash!, project: reading === 1 ? call.project : null, environment: reading === 1 ? call.environment : null, key: null, handle: reading === 2,
+          unless: reading === 2 && call.project !== null ? [`${call.project}/${call.environment}`] : [], accepts: call.accepts!, forks: true,
+        },
+      }, rows)
+      : await useOnce(tx, { ...base, credential: call.credential, secretId: null, place: call.place, way: call.way, principal: call.principal, route: route ?? 'every' }, rows);
+    const none = { reading, route, madeFor, place: null, project: null, personal: false, cut: false, levels: [], editor: null, keys: [], resolved: [], made: false, rows: [] };
+    if (handle ? gate.state !== 'moved' || gate.n_standing !== true || gate.n_cut !== false : gate.state !== null) return { ...none, gate, stood: false };
+    const place = handle ? gate.n_place! : call.place!;
+    const credential = handle ? gate.n_credential! : call.credential!;
+    const at = await one<{ project_id: string; parent_id: string | null; owner: string | null }>(sql`SELECT project_id, parent_id, owner FROM environments WHERE id = ${place}`);
+    if (at?.owner != null || (handle && reading === 1 && call.environment!.endsWith('@me'))) return { ...none, gate, stood: true, place, personal: true };
+    const { layers, cut } = at === undefined ? { layers: [], cut: true } : await chainOf(tx, place, at.parent_id);
+    if (cut) return { ...none, gate, stood: true, place, cut: true };
+    const levels: RouteLevelRow[] = [];
+    let serving: Record<string, unknown> | null = null;
+    let inputs = 0n;
+    // Each level's definitions through the first that serves the route (every level's, for every item), and every
+    // level's environment, which the keys resolve through whatever level serves (review r2).
+    for (const layer of layers) {
+      const looking = serving === null;
+      const row = looking ? await one<{ items: string; digests: Buffer; seal: Buffer }>(sql`SELECT items, digests, seal FROM proxy_definitions WHERE environment_id = ${layer}`) : undefined;
+      // By the column, not the text it is read as, which the alias would sort by.
+      const newest = looking ? await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
+        WHERE c.object = ${objectKey({ kind: 'proxy', id: layer })} ORDER BY c.number DESC LIMIT 1`) : undefined;
+      if (newest !== undefined && BigInt(newest.number) > inputs) inputs = BigInt(newest.number);
+      let items: unknown;
+      try {
+        items = row === undefined ? null : JSON.parse(row.items);
+      } catch {
+        items = null;
+      }
+      const record = items !== null && typeof items === 'object' && !Array.isArray(items) ? items as Record<string, unknown> : null;
+      const item = route === null ? items : record !== null && Object.hasOwn(record, route) ? record[route] ?? null : null;
+      // The level's environment, row, seal and newest change, which the vault checks the chain by, link by link.
+      const env = await one<EnvironmentRow & { parent_id: string | null }>(sql`SELECT ${ENVIRONMENT} FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${layer}`);
+      const envNewest = await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
+        WHERE c.object = ${objectKey({ kind: 'environment', id: layer })} ORDER BY c.number DESC LIMIT 1`);
+      if (envNewest !== undefined && BigInt(envNewest.number) > inputs) inputs = BigInt(envNewest.number);
+      levels.push({
+        environment: layer, row: row !== undefined, item, digests: row === undefined ? null : Buffer.from(row.digests), seal: row === undefined ? null : Buffer.from(row.seal),
+        newest: newest?.seal == null ? null : Buffer.from(newest.seal), number: newest?.number ?? null,
+        env: env === undefined ? null : {
+          project: env.project_id, slug: env.slug, owner: env.owner, parent: env.parent_id, protected: env.protected === null ? null : Boolean(env.protected),
+          archived: Boolean(env.archived), project_archived: Boolean(env.project_archived), seal: env.seal == null ? null : Buffer.from(env.seal),
+          last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal),
+        },
+      });
+      if (looking && route !== null && item !== null) serving = typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    }
+    if (serving === null) return { ...none, gate, stood: true, place, project: at!.project_id, levels };
+    let editor: EditorRow | null = null;
+    if (typeof serving.savedBy === 'string') {
+      const principal = serving.savedBy;
+      const member = await one<{ status: string; owner: number; role: string | null; scope: string | null; generation: number; seal: Buffer | null }>(sql`SELECT status, owner, role, scope, generation, seal
+        FROM vault_members WHERE principal = ${principal}`);
+      const grants = member === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx, sql`SELECT
+        coalesce(g.project_id, e.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
+        FROM vault_grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
+      const last = await one<{ number: string; seal: Buffer | null; payload: string }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal, c.payload FROM log_changes c
+        WHERE c.object = ${objectKey({ kind: 'principal', id: principal })} ORDER BY c.number DESC LIMIT 1`);
+      const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${principal}
+        AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
+      if (last !== undefined && BigInt(last.number) > inputs) inputs = BigInt(last.number);
+      const listOf = <T>(of: (grant: (typeof grants)[number]) => T) => (member === undefined || grants.length === 0 ? null : grants.map(of));
+      editor = {
+        principal, status: member?.status ?? null, owner: member === undefined ? null : Boolean(member.owner), role: member?.role ?? null, scope: member?.scope ?? null,
+        generation: member?.generation ?? null, seal: member?.seal == null ? null : Buffer.from(member.seal),
+        g_project: listOf((grant) => grant.project_id), g_environment: listOf((grant) => grant.environment_id), g_slug: listOf((grant) => grant.environment_slug),
+        g_role: listOf((grant) => grant.role), g_expires: listOf((grant) => (grant.expires_at === null ? null : String(grant.expires_at))),
+        last: last?.seal == null ? null : Buffer.from(last.seal), number: last?.number ?? null, old: last === undefined ? null : oldOf(last.payload), access: access?.seq ?? null,
+      };
+    }
+    const keys = Array.isArray(serving.keys) ? serving.keys.map(String) : [];
+    const found: (Awaited<ReturnType<typeof resolved>>)[] = [];
+    for (const key of keys) found.push(await resolved(tx, at!.project_id, layers, key));
+    const resolvedRows: ResolvedRow[] = found.map((held) => ({
+      id: held?.id ?? null, sensitive: held === null ? null : held.sensitive, secret: null, version: null,
+      held: held === null || held.holder === place ? null : { environmentId: held.holder, slug: held.slug },
+    }));
+    const chunk = Math.max(0, Math.min(keys.length - call.offset, call.limit));
+    const asked = call.keys;
+    const right = call.use && asked !== null && asked.length === chunk && chunk > 0 && call.reading === reading && call.credential === credential
+      && asked.every((one, k) => {
+        const held = found[call.offset + k] ?? null;
+        return one !== null && one.secretId === (held?.id ?? null) && one.place === (held === null || held.holder !== place ? place : null);
+      });
+    const out: (UseRow | null)[] = [];
+    if (right) {
+      // A cover rides only past every change of the route's own inputs, which `useOnce` does not read.
+      const calls: UseCall[] = asked.map((one) => {
+        const { cover, ...rest } = one!;
+        return { ...rest, credential, route, ...(cover === undefined || BigInt(cover.number) <= inputs ? {} : { cover }) };
+      });
+      const made = calls.filter((one) => one.requestId !== '');
+      const batched = made.length === 0 ? null : await Batched.read(tx, made);
+      // Each its call as the batch read it: a cover is found by the call it was read for.
+      for (const one of calls) out.push(one.requestId === '' ? null : await useOnce(tx, one, batched!));
+      await batched?.write();
+      if (out.some((row) => row !== null && row.state === null) && Date.now() > call.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
+    }
+    return { gate, reading, route, madeFor, stood: true, place, project: at!.project_id, personal: false, cut: false, levels, editor, keys, resolved: resolvedRows, made: right, rows: out };
+  });
+}
+
+/** A credential's `places`, read without throwing: each place's environment and whether it is a personal config. */
+function placesOf(places: string | null): { environmentId: string; personal: boolean }[] {
+  let parsed: unknown;
+  try {
+    parsed = places === null ? null : JSON.parse(places);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.flatMap((place: unknown) => {
+    if (typeof place !== 'object' || place === null || Array.isArray(place)) return [];
+    const { environmentId, personal } = place as { environmentId?: unknown; personal?: unknown };
+    return typeof environmentId === 'string' ? [{ environmentId, personal: personal === true }] : [];
   });
 }
 
@@ -203,7 +357,7 @@ function direct(tx: Queryable): Rows {
     others: async (principal, secret, since, count) => Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
       SELECT 1 FROM log_bulk WHERE principal = ${principal} AND secret <> ${secret} AND last > ${since} LIMIT ${count})`))!.n),
     cover: async ({ cover, ...call }) => (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
-      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place}`)) !== undefined,
+      AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place} AND route IS ${call.route ?? null}`)) !== undefined,
     use: async (call) => {
       const next = BigInt((await one<{ n: string }>(NEXT))!.n);
       await insertUses(tx, [{ number: next, call }]);
@@ -222,9 +376,9 @@ const NEXT = sql`SELECT CAST(max(coalesce((SELECT max(number) FROM log_changes),
 async function insertUses(tx: Queryable, uses: readonly { number: bigint; call: UseCall }[]): Promise<void> {
   for (let start = 0; start < uses.length; start += CHUNK) {
     const values = uses.slice(start, start + CHUNK).map(({ number, call }) =>
-      sql`(${number}, ${call.at}, ${BigInt(call.requestId)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.mac}, ${call.place})`);
+      sql`(${number}, ${call.at}, ${BigInt(call.requestId)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.mac}, ${call.place}, ${call.route ?? null})`);
     try {
-      await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ${sql.join(values, sql`, `)}`);
+      await rowsOf(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place, route) VALUES ${sql.join(values, sql`, `)}`);
     } catch (error) {
       // The unique (at, request_id), as Postgres says it.
       if (/UNIQUE constraint failed: log_uses/.test(`${String(error)} ${String((error as { cause?: unknown }).cause)}`)) throw Object.assign(new Error('a replayed use'), { code: '23505' });
@@ -293,10 +447,10 @@ class Batched implements Rows {
     const covered = calls.filter((call) => call.cover !== undefined);
     for (let start = 0; start < covered.length; start += CHUNK) {
       const some = covered.slice(start, start + CHUNK);
-      const values = some.map(({ cover, ...call }, k) => sql`(${k}, ${cover!.at}, ${BigInt(cover!.requestId)}, ${BigInt(cover!.number)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.place})`);
-      const found = new Set((await rowsOf<{ k: number }>(tx, sql`WITH v (k, at, request_id, number, credential, secret, purpose, place) AS (VALUES ${sql.join(values, sql`, `)})
+      const values = some.map(({ cover, ...call }, k) => sql`(${k}, ${cover!.at}, ${BigInt(cover!.requestId)}, ${BigInt(cover!.number)}, ${call.credential}, ${call.secretId}, ${call.purpose}, ${call.place}, ${call.route ?? null})`);
+      const found = new Set((await rowsOf<{ k: number }>(tx, sql`WITH v (k, at, request_id, number, credential, secret, purpose, place, route) AS (VALUES ${sql.join(values, sql`, `)})
         SELECT v.k FROM v JOIN log_uses u ON u.at = v.at AND u.request_id = v.request_id AND u.number = v.number AND u.credential = v.credential
-          AND u.secret = v.secret AND u.purpose = v.purpose AND u.place IS v.place`)).map((row) => Number(row.k)));
+          AND u.secret = v.secret AND u.purpose = v.purpose AND u.place IS v.place AND u.route IS v.route`)).map((row) => Number(row.k)));
       for (const [k, call] of some.entries()) if (found.has(k)) batch.#covered.add(call);
     }
     return batch;
@@ -333,7 +487,7 @@ class Batched implements Rows {
     const made = this.#numbered.get(String(BigInt(cover.number)));
     return made !== undefined && made.at === cover.at && BigInt(made.requestId) === BigInt(cover.requestId)
       && call.credential !== null && made.credential === call.credential && call.secretId !== null && made.secretId === call.secretId
-      && made.purpose === call.purpose && made.place === call.place;
+      && made.purpose === call.purpose && made.place === call.place && (made.route ?? null) === (call.route ?? null);
   }
 
   async use(call: UseCall): Promise<bigint> {
@@ -547,9 +701,10 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
       : resolved.cut || e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived))) ? 'archived' : null);
     if (namedState !== null) cached = false;
   }
-  // Named, a key the place does not hold, and a plain value: decided, never used, so neither an entry nor a cap's row
-  // (0044). A use by ids logs its request whatever it finds, as before.
-  const uses = namedState === null && (names === undefined || (s !== undefined && (v === undefined || v.plaintext === null)));
+  // Named, or a route use's (T186, 0058's `v_quiet`): a key the place does not hold, and a plain value, decided, never
+  // used, so neither an entry nor a cap's row (0044). A use by ids logs its request whatever it finds.
+  const quiet = names !== undefined || call.route != null;
+  const uses = namedState === null && (!quiet || (s !== undefined && (v === undefined || v.plaintext === null)));
 
   const last = (kind: Kind, id: string | null) => (cached ? Promise.resolve(undefined) : newestOf(kind, id));
   const [lc, lm, lr, ls, lx, ...le] = await Promise.all([

@@ -127,6 +127,10 @@ import {
   type UseInput,
   type NamedManyInput,
   type NamedManyOutcome,
+  type ProxyItemInput,
+  type ProxyItemOutcome,
+  type RouteUseInput,
+  type RouteUseOutcome,
   type NamedUseInput,
   type UseManyInput,
   type UseManyOutcome,
@@ -187,7 +191,7 @@ import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog } from './store.ts';
-import { use, UseCache, useLimits, useMany, useNamed, useNamedMany, type UseLimits, type UsePath } from './use.ts';
+import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
 
@@ -710,6 +714,16 @@ class VaultService implements Vault {
   /** A request's several keys as it names them, one call (use.ts, `useNamedMany`; T165, B2's PR 2), on the hot path's login. */
   async useNamedMany(input: NamedManyInput): Promise<NamedManyOutcome> {
     return useNamedMany(this.#usePath(), input);
+  }
+
+  /** A route use (use.ts, `useRoute`; T186 PR C): a UI definition's keys, each decided for its caller and its editor, on the hot path's login. */
+  async useRoute(input: RouteUseInput): Promise<RouteUseOutcome> {
+    return useRoute(this.#usePath(), input);
+  }
+
+  /** A place's UI definitions as a use would find them (use.ts, `proxyItem`; T186 PR C), on the hot path's login. */
+  async proxyItem(input: ProxyItemInput): Promise<ProxyItemOutcome> {
+    return proxyItem(this.#usePath(), input);
   }
 
   /** What 0.15's uses run on, every way they are asked (use.ts, `UsePath`). */
@@ -5173,8 +5187,8 @@ function vouchedEntry(entry: Exclude<VouchedEntry, { tree: 'reads' | 'cursor' }>
     return changeEntry({ number, at: entry.at, requestId: entry.requestId, object: entry.object, actor: entry.actor, payload: entry.payload, seal, mac });
   }
   if (entry.tree !== 'uses' || !/^[0-9]{1,19}$/.test(entry.requestId) || !text(entry.credential) || !text(entry.secret) || !Number.isSafeInteger(entry.purpose)
-    || (entry.place !== null && !text(entry.place))) return null;
-  return usedEntry({ number, at: entry.at, requestId: BigInt(entry.requestId), credential: entry.credential, secret: entry.secret, purpose: entry.purpose, place: entry.place, mac });
+    || (entry.place !== null && !text(entry.place)) || (entry.route != null && !text(entry.route))) return null;
+  return usedEntry({ number, at: entry.at, requestId: BigInt(entry.requestId), credential: entry.credential, secret: entry.secret, purpose: entry.purpose, place: entry.place, route: entry.route ?? null, mac });
 }
 
 /** A read as `vouch` was given it (`log_reads`, T166); null for one of no shape the projector writes. */

@@ -980,6 +980,7 @@ export const logUses = sqliteTable(
     purpose: integer().notNull(),
     mac: bytes('mac').notNull(),
     place: text(),
+    route: text(),
   },
   (table) => [
     check('log_uses_mac_check', sql`octet_length(${table.mac}) = 16`),

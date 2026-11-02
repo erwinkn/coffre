@@ -769,7 +769,8 @@ described, which `scripts/formal.sh` holds as a failure on every CI run.
 | `CopyFromVault`: the isolate's copy comes only from vault answers, never from a read of its own | a writer forges the item beside its genuine index entry, the app reads that pair, the writer puts the genuine row back; the vault checks the genuine row, sees the app's digest, omits the item, and the app sends by the forged body (section 4) |
 | `SentAsDecided`: the app sends by the definition the vault decided on (returned in the answer, or omitted because the copy has its digest), never by its own unchecked copy | the app's copy still says version 7. The vault decides on version 8, a Developer's (clearance `secret`, host `evil`), and the app sends to version 7's host, which no current definition allows |
 | `BoundToDefinition`: kept values go only to the definition they were decided under | values decided on version 7 (`good`) are served from the cache after the app re-read version 8 (`evil`). The key reaches `evil`, which the vault never decided on for them |
-| `ClearanceAtUse`: each use weighs the key's nature now against the definition's clearance | a Developer routes `K` while it is secret. An Owner marks it sensitive, and the next use sends the sensitive value to the Developer's upstream |
+| `ClearanceAtUse`: each use weighs the key's nature now against the definition's clearance | a Developer routes `K` while it is secret and is made an Owner since. An Owner marks `K` sensitive, and the next use sends the sensitive value to the upstream she saved as a Developer (`RoutingEditor`) |
+| `EditorStillHolds`: each use weighs the key against its editor's standing now, read in the same statement | Ada saves `openai` and is removed from the instance; her route keeps sending `K` to the upstream she chose (`RoutingEditor`) |
 | `KeptExpires`: kept values serve W, no longer | values sent long after their decision (`WithinWindow`) |
 | `OneVersion`: a route's keys are all decided on one version, and the app sends only answers carrying one seal | key 1 is decided on version 7 (`good`), an Owner's edit to version 8 (`evil`) commits, a later round decides key 2 on version 8, and the request carries both to `good`: key 2 goes where no version it was decided on says |
 | `ClearSuperseded`: the `proxy.code` change that reserves a name deletes its UI item | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
@@ -786,9 +787,10 @@ change never overlap, and the number orders them) is `HotPathOne.tla`'s, for
 any input. Here an edit is one step. One route, two hosts; its second key
 appears only when `OneVersion` is off, since with it on both keys share
 every decision. The frozen holdings are reduced to one clearance per
-version ("sensitive" for an Owner, "secret" otherwise). Decision 5 takes
-option (b), the frozen holdings intersected with the editor's current
-ones, which is not modelled yet: PR C extends the model first. The matching rules of section 7 are pure
+version ("sensitive" for an Owner, "secret" otherwise), and the editor's
+current standing to one clearance per editor, which a change of their
+principal moves either way (PR C, decision 5(b): `EditorStillHolds`,
+scenario `RoutingEditor`). The matching rules of section 7 are pure
 functions, which property tests hold, not TLC. That a map hit's ids are
 held to the route's names is Naming.tla's `HeldToNames`, unchanged. Renames
 are not modelled, because they cannot change what code shadows (section 6).
@@ -1598,6 +1600,101 @@ reads it otherwise:
 - **The app's checks**: `credentialProxy({ editable })`, off by default; a
   name code defines (409); an egress or a network, none of which code can
   declare before PR C (400).
+
+**PR C as built, the vault's half (C1, W312).** PR C ships as two PRs:
+C1, the model and the vault; C2, the app and the proxy on top of it.
+Where C1 settles what this section left open, or reads it otherwise:
+- **The model first.** `Routing.tla` gains two editors, the version's
+  clearance frozen from its editor's standing at the save, `Restand` (a
+  promotion, a demotion, a removal), and `EditorStillHolds`. Scenario
+  `RoutingEditor` (1,061,512 states) holds; TLC breaks `EverySendAllowed`
+  without `EditorStillHolds` (Ada removed, her route still sends), without
+  `ClearanceAtUse` (now found only with a promotion: Lin saved as a
+  Developer, made an Owner, the key marked sensitive), and without
+  `FencedRead` (the editor's principal read before the fence).
+- **One statement, `use_route` (0058),** in the shape of `use_named_batch`:
+  the gate first (a handle's named call with no key; a workload's use of no
+  key at its place, by ids, which writes nothing), then, for one who
+  stands, the chain, each level's row through the first whose `items`
+  holds the route (`items -> route`, the `digests` column, the seal, and the
+  object's newest change), the serving item's editor's principal, the
+  item's stored keys resolved by name through the chain, and, when the
+  vault's ids are the names' now at the reading it picked, each key's use
+  by ids, `use_credential` with `p_route`. Otherwise it uses nothing and
+  answers the ids: the vault's second call makes the use (2 calls on a
+  miss, whatever the map holds, `names: 0` included).
+- **The reading** is the statement's: it reads the credential's `places`
+  and the candidate environment, and answers the handle's made-for paths,
+  which the vault keeps per token (`UseCache.madeFor`) to pick the next
+  reading; the route's keys' ids are kept per place and route
+  (`UseCache.routeKeys`), never per path. A pick the statement disagrees
+  with uses nothing, and the next call is made by the statement's own.
+  The statement picks it before the fence, so that a cold session plans
+  `use_credential` before it holds the fence, then once more under it,
+  after the gate: if a rename moved it in between, it asks the gate again
+  by the new one (review r2: `/use/market/dev/openai`, dev renamed to
+  stage meanwhile, would otherwise answer `served: false` where the rule
+  now picks the stable route `market`).
+- **Quiet uses.** A route use's key that the place does not hold, or that
+  is plain, writes no entry and takes no lock (`v_quiet`, as a named call's),
+  and a plain value goes back as its text. A workload's gate is such a use
+  of no key at its place (its route named, or `every` for `proxyItem`'s
+  every item), which writes nothing.
+- **The chain is the vault's.** Each level the statement reads carries its
+  environment's row, seal and newest change's seal, and the vault checks
+  every level of the chain, whichever serves: sealed, current, the first
+  the place, each the parent of the one before, the last a root
+  (`chainFault`). A parent re-pointed around the log fails it, `tampered`
+  (review r1: a child's key would otherwise reach an unrelated
+  environment's sealed route; review r2: above the level that serves too,
+  since the keys resolve through the whole chain, so `x → eu → dev` with
+  `eu` re-pointed at `other` would send `other`'s key of the same name
+  through `x`'s own route). Levels past the serving one carry their
+  environment only, not their definitions.
+- **`OneVersion`** is held across rounds and chunks by comparing each
+  statement's levels' seals, the item's digest, the editor's newest seal,
+  and the roles' and the policy's newest seals with the first's
+  (`versionOf`; the roles and policy since review r1: the editor's decision
+  weighs them; every level's environment since review r2: the keys resolve
+  through them); any difference starts the use over, at
+  most three times, then `late`. A second round passes every key of its
+  chunk, the ones it does not make with no request id: only checked.
+  A use that starts over is made by the ids its newest statement read,
+  which every statement also leaves in the isolate's map: an edit landing
+  between two statements costs one attempt, not two (Fable's review of
+  #464). A first statement whose ids are right but whose map held a list
+  of another length (a key added past the first chunk, or one dropped from
+  the end) is a miss too, never a later chunk sent past the list's end.
+- **Covers**: `use_route` passes a key's cover to `use_credential` only past
+  the newest change of the route's levels and editor, which
+  `use_credential` does not read; `use_credential` matches the cover's
+  entry on its route too.
+- **The editor's decision** (`routeEditorRefusal`, proxy.ts) is one
+  function for the live use and the replay (`routeDecision` in
+  log-replay.ts, over the log's own objects): `routeRefusal` on the
+  editor's standing now, then `frozenAllows`/`frozenOwns` on what the save
+  froze, at the key's holder, the place protected or not as the policy is
+  now. An editor's principal row that fails its seal, or is not its
+  newest change, refuses the use `tampered` or `stale` (R64).
+- **A level's lookup on the item alone** (`routeLookup`): the index parsed
+  from `digests` (`parseIndex`) and its seal checked as the whole object's
+  (`sealedIndex`), the item hashed against its entry; an item the sealed
+  index lacks is `tampered`. Every item (`proxyItem` with no name) checks
+  each level whole (`proxyServing`), and one level that fails fails all.
+- **Cost** (`use-route-cost.test.ts`): one statement warm; 114 buffers at
+  10k entries of history, 113 at 1M; 119 with 256 definitions in the
+  environment (its index, about 11 KB, read whole), the same rows; with a
+  handle's made-for list read (a place reading), 167 at 1k environments in
+  the instance and 158 at 10k (8 to 13 more than before review r2: the
+  reading picked again under the fence, and every level's environment). That list is read a subquery per place, by
+  key: as a join, the generic plan hashed every environment (114 buffers at
+  10k, review r1). The new
+  `log_uses.route` column costs every use row its null bitmap's second
+  byte, which pads the header: measured over 100,000 rows, 126 B a row
+  without it, 134 with it null (+8 B, every use but a route's), 141 with
+  a route of six letters.
+  No CHECK on it: on the partitioned table it would scan every day under
+  an exclusive lock while the previous release serves.
 
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.

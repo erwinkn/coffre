@@ -44,6 +44,8 @@ export const VAULT_METHODS = [
   'useNamed',
   'useMany',
   'useNamedMany',
+  'useRoute',
+  'proxyItem',
   'prepare',
   'waitSealed',
   'signIn',

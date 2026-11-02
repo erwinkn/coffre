@@ -1,11 +1,12 @@
-import { useCode, useOfCode, USE_PURPOSES, USE_WAYS } from '@coffre/core/vault';
+import { MAX_PARENTS, useCode, useOfCode, USE_PURPOSES, USE_WAYS } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 
 import { bulkStep, type BulkRows } from './bulk.ts';
 import { loggedChange } from './changes.ts';
 import type { BulkLimit } from './config.ts';
 import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
-import { applyOp, objectKey, POLICY_REF, ROLES_REF, sealed, sealKey, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { applyOp, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed, sealKey, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
+import { proxyLookup, routeEditorRefusal, type ProxyLevel } from './proxy.ts';
 import { CUTOVER_OBJECT, KEY_OBJECT, RETENTION_OBJECT } from './log-entry.ts';
 import { loggedRows } from './store.ts';
 
@@ -131,10 +132,39 @@ export function replay(
       if (!LOGS_OWN.has((entry.op as { op: string }).op)) change(keys, replayed, entry);
       continue;
     }
-    const code = decideUse(keys, readUse(replayed.rows, replayed.newest, replayed.limit, replayed.bulk, entry.request), entry.request);
+    const view = readUse(replayed.rows, replayed.newest, replayed.limit, replayed.bulk, entry.request);
+    const code = decideUse(keys, view, entry.request) ?? (entry.request.route === undefined ? null : routeDecision(keys, replayed, view, entry.request));
     decided?.(entry, code);
   }
   return replayed;
+}
+
+/**
+ * A route use's second decision, replayed (T186 PR C; proxy-ui.md, section 4): the route as the place's object held it
+ * at the use's number (its nearest fork level that names it, each level's seal its newest change's, as live), then its
+ * editor, as their save froze them and as their principal stood then (`routeEditorRefusal`, the function the live use
+ * decides with). The place is the one the use resolved: the fork it read an inherited key through, or the key's own.
+ */
+function routeDecision(keys: SealKeys, replayed: Replayed, view: UseView, request: UseRequest): UseCode | null {
+  const place = request.place ?? view.secret.row?.environmentId ?? null;
+  if (place === null) return 'missing';
+  const levels: ProxyLevel[] = [];
+  for (let id: string | null = place; id !== null && levels.length <= MAX_PARENTS; ) {
+    const environment: Input | undefined = replayed.rows.get(objectKey({ kind: 'environment', id }))?.row;
+    const key = objectKey({ kind: 'proxy', id });
+    const stored = replayed.rows.get(key);
+    levels.push({
+      environmentId: id, row: stored?.row.kind === 'proxy' ? stored.row : null, seal: stored?.seal ?? null,
+      newest: replayed.newest.has(key) ? replayed.newest.get(key)! : undefined,
+    });
+    id = environment?.kind === 'environment' ? environment.parentId : null;
+  }
+  const looked = proxyLookup(keys, levels, request.route!);
+  if (!looked.served) return looked.fault ?? 'stale';
+  const editor = replayed.rows.get(objectKey({ kind: 'principal', id: looked.item.savedBy }))?.row;
+  const roles = replayed.rows.get(objectKey(ROLES_REF))?.row;
+  const why = routeEditorRefusal(looked.item, editor?.kind === 'principal' ? editor : null, roles?.kind === 'roles' ? roles : noEdits(), view, request.at, request.route!);
+  return why === null ? null : 'route_not_cleared';
 }
 
 /** The ops of the log's own changes, which change no input: a retention's (PR 7), the cutover's (PR 9), a rotation's (T168). */
@@ -179,7 +209,11 @@ export async function replayStored(db: Queryable, signingKeys: readonly Uint8Arr
   for (const row of uses) {
     const purpose = purposeOf(Number(row.purpose));
     if (purpose === null) faults.push(`${row.number}: no purpose ${row.purpose}`);
-    else entries.push({ kind: 'use', number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purpose } });
+    else {
+      // A route use's (T186): decided as a named use is, then for its route's editor (`routeDecision`).
+      const route = row.route == null ? {} : { route: row.route, plain: true as const };
+      entries.push({ kind: 'use', number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purpose, ...route } });
+    }
   }
   entries.sort((a, b) => (a.number < b.number ? -1 : a.number > b.number ? 1 : 0));
   const decided = new Map<string, UseCode | null>();

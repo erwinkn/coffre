@@ -1042,11 +1042,11 @@ export type HeldObject = { row: Input | null; seal: Buffer | null };
  */
 export async function loggedRows(db: Queryable): Promise<{
   changes: { number: string | number; at: string | number; object: string; payload: string; seal: Uint8Array | null }[];
-  uses: { number: string | number; at: string | number; credential: string; secret: string; purpose: number | string; place: string | null }[];
+  uses: { number: string | number; at: string | number; credential: string; secret: string; purpose: number | string; place: string | null; route: string | null }[];
 }> {
   return {
     changes: await rowsOf(db, sql`SELECT number, at, object, payload, seal FROM log_changes`),
-    uses: await rowsOf(db, sql`SELECT number, at, credential, secret, purpose, place FROM log_uses`),
+    uses: await rowsOf(db, sql`SELECT number, at, credential, secret, purpose, place, route FROM log_uses`),
   };
 }
 

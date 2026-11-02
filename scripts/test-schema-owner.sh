@@ -99,46 +99,95 @@ SQL
 done
 
 # A member of the owner may migrate (a managed Postgres's admin login, say): a function it makes is its own, one it
-# replaces keeps its owner, and `use_credential` runs as its owner. Hand the member 0045's and 0051's helpers, as if it
-# had made them (the owner's grant moves with each), then replay 0057 as the member, which makes `use_covered` and
-# replaces `use_credential`: its owner must still execute every function the uses call, found from their bodies (T187).
+# replaces keeps its owner, and each use function runs as its owner, its helpers (which are not SECURITY DEFINER) as
+# their caller. So the owner migrates up to 0056, and 0045's and 0051's helpers are handed to the member, as if it had
+# made them (the owner's grant moves with each). The member then runs the rest, one migration at a time, since each
+# meets the running code: 0057 makes `use_covered` and replaces `use_credential`, which stays the owner's and must be
+# granted the member's helpers (T187); 0058 makes both again, the member's now, and `use_route` (T186 PR C), while
+# 0048's `use_batch` and 0055's `use_named_batch` stay the owner's and must be granted `use_credential`. After each,
+# every use function's runner must execute every use function it calls, read from their bodies.
 docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
 CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
 SQL
 psql_owner -d postgres -c "CREATE DATABASE member"
-migrate member
+# migrate_through <database> <login> <password> [<last tag>]: drizzle's migrator over the journal up to that tag.
+migrate_through() {
+    local tree="$scratch/migrations-${4:-all}"
+    rm -rf "$tree"
+    cp -r packages/db/src/migrations/postgres "$tree"
+    node -e 'const fs = require("fs"), path = require("path"), [tree, last] = process.argv.slice(1), f = path.join(tree, "meta/_journal.json"), j = JSON.parse(fs.readFileSync(f, "utf8"));
+const cut = last ? j.entries.find((e) => e.tag === last).idx : Infinity;
+for (const e of j.entries.filter((e) => e.idx > cut)) { fs.rmSync(path.join(tree, `${e.tag}.sql`)); fs.rmSync(path.join(tree, "meta", `${String(e.idx).padStart(4, "0")}_snapshot.json`), { force: true }); }
+j.entries = j.entries.filter((e) => e.idx <= cut); fs.writeFileSync(f, JSON.stringify(j))' "$tree" "${4:-}"
+    (cd packages/db && node --conditions=coffre:source --input-type=module -e '
+        const { postgresClient } = await import("./src/postgres.ts");
+        const { createDatabase } = await import("./src/database.ts");
+        const { migrate } = await import("drizzle-orm/postgres-js/migrator");
+        const client = postgresClient(process.argv[1], { max: 1 });
+        await migrate(createDatabase(client), { migrationsFolder: process.argv[2] });
+        await client.end();
+    ' "postgresql://$2:$3@127.0.0.1:$port/$1" "$tree")
+}
+# use_grants <database> <fewest calls>: each use function's runner may execute each use function it calls.
+use_grants() {
+    psql_owner -d "$1" -v calls="$2" <<'SQL'
+SELECT set_config('use_grants.calls', :'calls', false);
+DO $$
+DECLARE
+    v_call record;
+    v_calls integer := 0;
+    v_missing text[] := '{}';
+BEGIN
+    FOR v_call IN
+        WITH RECURSIVE uses AS (
+            SELECT oid, proname, prosecdef, proowner, prosrc FROM pg_proc
+             WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'use\_%'
+        ), calls(caller, runner, callee) AS (
+            SELECT c.oid, c.proowner, e.oid FROM uses c JOIN uses e ON e.oid <> c.oid AND c.prosrc ~ ('[^a-z_]' || e.proname || '\s*\(')
+             WHERE c.prosecdef
+            UNION
+            SELECT k.caller, k.runner, e.oid FROM calls k JOIN uses c ON c.oid = k.callee AND NOT c.prosecdef
+              JOIN uses e ON e.oid <> c.oid AND c.prosrc ~ ('[^a-z_]' || e.proname || '\s*\(')
+        )
+        SELECT caller::regprocedure AS caller, pg_get_userbyid(runner) AS runner, callee::regprocedure AS callee FROM calls
+    LOOP
+        v_calls := v_calls + 1;
+        IF NOT has_function_privilege(v_call.runner, v_call.callee, 'EXECUTE') THEN
+            v_missing := v_missing || format('%s, running as %s, cannot execute %s', v_call.caller, v_call.runner, v_call.callee);
+        END IF;
+    END LOOP;
+    IF cardinality(v_missing) > 0 THEN RAISE EXCEPTION '%', array_to_string(v_missing, E';\n'); END IF;
+    IF v_calls < current_setting('use_grants.calls')::integer THEN
+        RAISE EXCEPTION 'read % calls between the use functions, fewer than they make', v_calls;
+    END IF;
+END $$;
+SQL
+}
+owners() {
+    psql_owner -d member -Atc "SELECT string_agg(proname || '=' || pg_get_userbyid(proowner), ' ' ORDER BY proname) FROM pg_proc
+        WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'use\_%'"
+}
+migrate_through member migration_owner local-owner-only 0056_proxy_definitions
 docker exec -i "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres -d member <<'SQL'
 ALTER FUNCTION use_stands(uuid, uuid, smallint, bigint, jsonb) OWNER TO migration_member;
 ALTER FUNCTION use_admits(jsonb, text) OWNER TO migration_member;
 ALTER FUNCTION use_stands_personal(uuid, uuid, bigint, jsonb) OWNER TO migration_member;
 ALTER FUNCTION use_scope_holds(uuid, uuid, text, jsonb) OWNER TO migration_member;
 SQL
-{
-    echo "DROP FUNCTION use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid);"
-    cat packages/db/src/migrations/postgres/0057_use_covered.sql
-} | docker exec -i -e PGPASSWORD=local-member-only "$container" \
-    psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U migration_member -d member
-psql_owner -d member <<'SQL'
-DO $$
-DECLARE v_missing text;
-BEGIN
-    IF (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND pg_get_userbyid(proowner) = 'migration_member'
-          AND proname IN ('use_covered', 'use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds')) <> 5 THEN
-        RAISE EXCEPTION 'the replay did not leave the use''s helpers the member''s';
-    END IF;
-    WITH RECURSIVE called (oid) AS (
-        SELECT oid FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('use_credential', 'use_batch', 'use_named_batch')
-        UNION
-        SELECT g.oid FROM called c JOIN pg_proc f ON f.oid = c.oid
-          JOIN pg_proc g ON g.pronamespace = 'public'::regnamespace AND f.prosrc ~ ('\m' || g.proname || '\s*\(')
-    )
-    SELECT string_agg(oid::regprocedure::text, ', ') INTO v_missing FROM called WHERE NOT has_function_privilege(current_user, oid, 'EXECUTE');
-    IF v_missing IS NOT NULL THEN
-        RAISE EXCEPTION 'use_credential''s owner cannot execute %', v_missing;
-    END IF;
-    PERFORM use_covered(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
-END $$;
-SQL
+migrate_through member migration_member local-member-only 0057_use_covered
+expected="use_admits=migration_member use_batch=migration_owner use_covered=migration_member use_credential=migration_owner"
+expected+=" use_named_batch=migration_owner use_scope_holds=migration_member use_stands=migration_member use_stands_personal=migration_member"
+[[ "$(owners)" == "$expected" ]] || { echo "after 0057, the use functions' owners: $(owners)" >&2; exit 1; }
+# use_batch and use_named_batch call use_credential; it calls use_covered, use_stands and use_stands_personal, and they
+# call use_admits, use_scope_holds and use_stands as its owner.
+use_grants member 7
+migrate_through member migration_member local-member-only
+expected="use_admits=migration_member use_batch=migration_owner use_covered=migration_member use_credential=migration_member"
+expected+=" use_named_batch=migration_owner use_route=migration_member use_scope_holds=migration_member use_stands=migration_member"
+expected+=" use_stands_personal=migration_member"
+[[ "$(owners)" == "$expected" ]] || { echo "after 0058, the use functions' owners: $(owners)" >&2; exit 1; }
+# use_route calls use_credential too.
+use_grants member 8
 
 # Unsafe groups must fail clearly, rather than trying a forbidden ALTER ROLE.
 for attribute in SUPERUSER REPLICATION BYPASSRLS; do
