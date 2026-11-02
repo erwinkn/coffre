@@ -120,8 +120,13 @@ takes today's.
    and no change is numbered between the read and the request. It commits
    and answers `write_inputs`' answer as it read it. One round trip, and
    nothing held after it.
-3. **The Worker** takes the answer's SHA-256, as the bytes arrived (the
-   read's **digest**), then parses it into one `WriteInputs` value and
+3. **The Worker** takes the answer's SHA-256 (the read's **digest**),
+   which `write_request` returns beside the text, computed by Postgres
+   (`sha256` of its UTF-8 bytes), and checks that the text it parses
+   hashes to it. `write_inputs` is declared `SET bytea_output = hex`, as
+   `use_credential` is, so its text is the same bytes whichever login
+   and session settings call it: the vault's request and the app's hold
+   hash one rendering. Then it parses the text into one `WriteInputs` value and
    holds each object in it to its newest change (StaleFirst: a row put
    back is refused). It refuses first everything the app would
    (AcceptedFirst, as a named use): the config's `accepts`, the token's
@@ -142,7 +147,10 @@ takes today's.
    does), and for a credential a binding issued (`created_by`
    `binding:<id>`), that binding as `findCredential` does today
    (`standingBinding`: its `auth_mac`, its principal and generation, no
-   revocation, no tombstone). Only then it encrypts: the AAD binds `project|environment|key` by
+   revocation, no tombstone). Today's `verify` also awaits an UPDATE of
+   the credential's `last_used_at`, once every five minutes per
+   credential: here it goes into the Sync below, left to `later`, so it
+   costs no round trip of its own. Only then it encrypts: the AAD binds `project|environment|key` by
    id (`envelope.ts`), which it learns from the answer. No round trip. Then
    it sends **one Sync**: BEGIN, 0.14's head `FOR UPDATE` (its first
    statement, and kept after PR 6 as a lock alone: see "Locks"), **the
@@ -368,8 +376,14 @@ statement's answer, as a use's second call writes its MAC'd row:
 It does not send the write again: a resend's hold would fail anyway, since
 the key's newest change is then our own. It reads the log back by its
 changes' ids (`newestCommitted`, as PR 2 does today): found, the write
-committed and waits for its seal; not found, it did not, and it asks again
-as a new request.
+committed and waits for its seal; not found, it asks again as a new
+request. Not found is not proof: the dropped connection's backend may
+still be working through the Sync, and commit after the read. Then the
+retry's vault read waits on that COMMIT's fence, sees the change, and
+writes a second version of the same value under a request of its own. No
+guarantee moves (each change was decided and held on its own read, and
+each is sealed), and today's path does the same; the cost is a duplicate
+version, not a lost or a wrong one.
 
 A request with neither record (the app's statement never ran, the Worker
 died) binds no ids: the log says it was asked, by that token's hash, and
@@ -436,7 +450,9 @@ the app authenticates that resolution (step 3) before anything is written.
    token's binding, as a key write's step 4 does, and only then hands the prepared add back. A row that
    fails is refused as `authenticate` refuses it today, and nothing is
    written. This is a second call of the vault's Worker (a service
-   binding), not of the database: no round trip.
+   binding), not of the database: no round trip. The add has no app
+   statement to carry `verify`'s `last_used_at` touch, so this path skips
+   it: the credential's next use or key write sets it.
 4. **The vault's write** (`admit_write`), one statement: both members'
    queue locks and rows in principal order (`lockMembers`), 0.14's head,
    the issue lock shared, then the fence; then, in a statement of its own,
