@@ -96,6 +96,11 @@ async function count(query: ReturnType<typeof sql>): Promise<number> {
   return Number((await rows<{ n: number | string }>(db.owner, query))[0]!.n);
 }
 
+/** A save's answer as the tab's read finds it after: the same, with each item's clearance mark and those of what it inherits, which a save leaves out (here, none). */
+function cleared(view: ProxyView): ProxyView {
+  return { ...view, items: view.items.map((item) => ({ ...item, notCleared: null })), inheritedNotCleared: {} };
+}
+
 function saved(outcome: Awaited<ReturnType<World['save']>>): ProxyView {
   assert.ok(outcome.ok, JSON.stringify(outcome));
   return outcome.view;
@@ -181,11 +186,11 @@ test('a save freezes its editor\'s grants, not the places it saw: a fork made la
 test('an Owner saves a route: the row holds it with its index and seal, the log a change and an entry, and the replay agrees', ON_015, async () => {
   const w = await world();
   const before = await w.view();
-  assert.deepEqual(before, { environmentId: w.dev, seal: null, state: 'ok', items: [], reserved: [], reservedState: 'ok' });
+  assert.deepEqual(before, { environmentId: w.dev, seal: null, state: 'ok', items: [], reserved: [], reservedState: 'ok', inheritedNotCleared: {} });
   const view = saved(await w.save({ seal: null, items: { openai: route('openai') } }));
   assert.equal(view.state, 'ok');
   assert.deepEqual(view.items.map((each) => [each.definition.name, each.keys, each.savedBy, each.routesSensitive]), [['openai', ['OPENAI_API_KEY'], ROOT, true]]);
-  assert.deepEqual(await w.view(), view, 'what it answered is what a read finds');
+  assert.deepEqual(await w.view(), cleared(view), 'what it answered is what a read finds');
   const row = (await stored(w.dev))!;
   assert.deepEqual(Object.keys(row.items), ['openai']);
   assert.ok(row.digests.equals(indexBytes(row.items)));
@@ -310,7 +315,7 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
   refusedWith(await w.save({ actor: ADA, seal: second.seal, items: { c: route('c') }, replace: true }), 'no_grant');
   const replaced = saved(await w.save({ seal: second.seal, items: { c: route('c') }, replace: true }));
   assert.deepEqual([replaced.state, replaced.items.map((each) => each.definition.name)], ['ok', ['c']]);
-  assert.deepEqual(await w.view(), replaced);
+  assert.deepEqual(await w.view(), cleared(replaced));
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
   // The forged object's items are no items its log had: the audit removes none of them. Replaced whole again, from a
   // sound one, the audit names each item the replace dropped.
@@ -419,7 +424,7 @@ test('items or names no change writes fail the seal like any forgery: the tab sh
   saved(await w.save({ seal: null, items: { openai: route('openai') } }, other));
   const now = (await stored(w.dev))!;
   await write(w.dev, { openai: null as unknown as ProxyItem }, now.digests);
-  assert.deepEqual(await w.view(), { environmentId: w.dev, seal: dev.seal, state: 'tampered', items: [], reserved: [], reservedState: 'ok' });
+  assert.deepEqual(await w.view(), { environmentId: w.dev, seal: dev.seal, state: 'tampered', items: [], reserved: [], reservedState: 'ok', inheritedNotCleared: {} });
   // Code reserves the name: the forged environment is left for its Owner to replace; the other's item is cleared.
   const reserved = await w.vault.reserveProxy({ names: ['openai'] });
   assert.ok(reserved.ok);

@@ -56,6 +56,23 @@
   front of this vault, or this app in front of a 0.15 vault, fails its
   calls for the seconds of the deploy.
 
+- **The Proxy tab (T186, PR D).** An environment's page has a Proxy tab
+  beside its Secrets: its credential proxy's routes, signers, verifiers and
+  databases as one list and a panel, code's items locked with code's values,
+  a fork's parents' items inherited by name, and its own edited by whoever
+  holds `proxy.edit` there, all saved at once after a review that names
+  each copied item's keys and destination and the minute the old upstream
+  may still be sent values. An item whose editor no longer reads its keys
+  is marked until someone who does saves it again, and a member's page
+  lists the items they saved, which removing them stops. A reference in
+  the Secrets list says whether you own its source's project
+  (`ownsSource`), whose Owners alone route a sensitive one. The audit page
+  says `proxy.save`, `proxy.code` and `proxy.release` in words. `coffre
+  init` writes `credentialProxy({ credentials: {}, editable: true })` and
+  the `/use` route; `coffre update` adds the tab's route file and `/use`'s,
+  and an upgraded deployment's tab writes nothing until its code says
+  `editable: true`.
+
 - **Proxy definitions per environment, stored (T186, PR A).** An
   environment's routes, signers, verifiers and tunnels written in the UI
   are one sealed object of the vault's log, which only the vault changes:

@@ -289,7 +289,8 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'environment archived': { app: 10, vault: 1 },
   'member added': { app: 8, vault: 6 },
   'access granted': { app: 3, vault: 8 },
-  'member removed': { app: 10, vault: 8 },
+  // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
+  'member removed': { app: 10, vault: 9 },
   'token issued': { app: 4, vault: 6 },
   'token revoked': { app: 2, vault: 3 },
   'proxy definitions, first save': { app: 2, vault: 5 },

@@ -248,6 +248,7 @@ export type Api = {
           endedBy: string | null;
           endedAt: string | null;
           canOpenSource: boolean;
+          ownsSource: boolean;
         };
         folder: string | null;
         archived: boolean;
@@ -598,6 +599,13 @@ export type Api = {
         of: string;
         slug: string;
       }[];
+      proxy: {
+        project: string;
+        environment: string;
+        name: string;
+        kind: string;
+        keys: string[];
+      }[];
     };
   };
   "PUT /members/:member": {
@@ -747,6 +755,13 @@ export type Api = {
           project: string;
           of: string;
           slug: string;
+        }[];
+        proxy: {
+          project: string;
+          environment: string;
+          name: string;
+          kind: string;
+          keys: string[];
         }[];
       };
     };
@@ -1944,11 +1959,111 @@ export type Api = {
         savedBy: string;
         savedAt: number;
         routesSensitive: boolean;
+        notCleared?: null | {
+          key: string;
+          reason: string;
+        };
       }[];
       reserved: string[];
       reservedState: "ok" | "stale" | "tampered";
+      inheritedNotCleared?: {
+        [key: string]: {
+          key: string;
+          reason: string;
+        };
+      };
       editable: boolean;
-      code: string[];
+      readOnly: null | {
+        reason: string;
+        message: string;
+      };
+      code: {
+        definition: {
+          kind: "route";
+          name: string;
+          upstream: string;
+          inject: ({
+            kind: "form" | "header" | "json" | "query";
+            name: string;
+            template: string;
+          } | {
+            kind: "basic";
+            user: string;
+            password: string;
+          } | {
+            kind: "sigv4";
+            accessKeyId: string;
+            secretAccessKey: string;
+            sessionToken: string | null;
+            region: string;
+            service: string;
+          })[];
+          allow: null | {
+            methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+            path: string;
+          }[];
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+          placeholder: null | {
+            kind: "prefix";
+            prefix: string;
+          } | {
+            kind: "jwt";
+            claims: string[];
+          };
+          egress: string | null;
+        } | {
+          kind: "signer";
+          name: string;
+          signer: {
+            kind: "private-key";
+            key: string;
+          } | {
+            kind: "hmac";
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "verifier";
+          name: string;
+          hmac: {
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "tunnel";
+          name: string;
+          key: string;
+          hosts: string[];
+          network: string | null;
+        };
+        environments: null | string[];
+        limitPerService: boolean;
+        bound: boolean;
+        allowAs: null | {
+          from: "code" | "legacy";
+          methods: null | string[];
+        };
+      }[];
+      routesSensitive: boolean;
+      releases: boolean;
+      useUrl: string;
+      windowSeconds: number;
+      insecureUpstreams: boolean;
     };
   };
   "GET /projects/:project/:environment/proxy": {
@@ -2035,11 +2150,111 @@ export type Api = {
         savedBy: string;
         savedAt: number;
         routesSensitive: boolean;
+        notCleared?: null | {
+          key: string;
+          reason: string;
+        };
       }[];
       reserved: string[];
       reservedState: "ok" | "stale" | "tampered";
+      inheritedNotCleared?: {
+        [key: string]: {
+          key: string;
+          reason: string;
+        };
+      };
       editable: boolean;
-      code: string[];
+      readOnly: null | {
+        reason: string;
+        message: string;
+      };
+      code: {
+        definition: {
+          kind: "route";
+          name: string;
+          upstream: string;
+          inject: ({
+            kind: "form" | "header" | "json" | "query";
+            name: string;
+            template: string;
+          } | {
+            kind: "basic";
+            user: string;
+            password: string;
+          } | {
+            kind: "sigv4";
+            accessKeyId: string;
+            secretAccessKey: string;
+            sessionToken: string | null;
+            region: string;
+            service: string;
+          })[];
+          allow: null | {
+            methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+            path: string;
+          }[];
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+          placeholder: null | {
+            kind: "prefix";
+            prefix: string;
+          } | {
+            kind: "jwt";
+            claims: string[];
+          };
+          egress: string | null;
+        } | {
+          kind: "signer";
+          name: string;
+          signer: {
+            kind: "private-key";
+            key: string;
+          } | {
+            kind: "hmac";
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "verifier";
+          name: string;
+          hmac: {
+            key: string;
+            encoding: "base64" | "base64url" | "hex";
+            prefix: string;
+            maxBytes: number | null;
+          };
+          limit: {
+            perMinute: number | null;
+            perDay: number | null;
+          };
+        } | {
+          kind: "tunnel";
+          name: string;
+          key: string;
+          hosts: string[];
+          network: string | null;
+        };
+        environments: null | string[];
+        limitPerService: boolean;
+        bound: boolean;
+        allowAs: null | {
+          from: "code" | "legacy";
+          methods: null | string[];
+        };
+      }[];
+      routesSensitive: boolean;
+      releases: boolean;
+      useUrl: string;
+      windowSeconds: number;
+      insecureUpstreams: boolean;
     };
   };
   "PUT /proxy/reserved": {
@@ -2609,6 +2824,13 @@ export type OffboardingReport = {
     of: string;
     slug: string;
   }[];
+  proxy: {
+    project: string;
+    environment: string;
+    name: string;
+    kind: string;
+    keys: string[];
+  }[];
 };
 
 export type PersonalConfig = {
@@ -2739,11 +2961,111 @@ export type ProxyPage = {
     savedBy: string;
     savedAt: number;
     routesSensitive: boolean;
+    notCleared?: null | {
+      key: string;
+      reason: string;
+    };
   }[];
   reserved: string[];
   reservedState: "ok" | "stale" | "tampered";
+  inheritedNotCleared?: {
+    [key: string]: {
+      key: string;
+      reason: string;
+    };
+  };
   editable: boolean;
-  code: string[];
+  readOnly: null | {
+    reason: string;
+    message: string;
+  };
+  code: {
+    definition: {
+      kind: "route";
+      name: string;
+      upstream: string;
+      inject: ({
+        kind: "form" | "header" | "json" | "query";
+        name: string;
+        template: string;
+      } | {
+        kind: "basic";
+        user: string;
+        password: string;
+      } | {
+        kind: "sigv4";
+        accessKeyId: string;
+        secretAccessKey: string;
+        sessionToken: string | null;
+        region: string;
+        service: string;
+      })[];
+      allow: null | {
+        methods: ("DELETE" | "GET" | "HEAD" | "OPTIONS" | "PATCH" | "POST" | "PUT")[];
+        path: string;
+      }[];
+      limit: {
+        perMinute: number | null;
+        perDay: number | null;
+      };
+      placeholder: null | {
+        kind: "prefix";
+        prefix: string;
+      } | {
+        kind: "jwt";
+        claims: string[];
+      };
+      egress: string | null;
+    } | {
+      kind: "signer";
+      name: string;
+      signer: {
+        kind: "private-key";
+        key: string;
+      } | {
+        kind: "hmac";
+        key: string;
+        encoding: "base64" | "base64url" | "hex";
+        prefix: string;
+        maxBytes: number | null;
+      };
+      limit: {
+        perMinute: number | null;
+        perDay: number | null;
+      };
+    } | {
+      kind: "verifier";
+      name: string;
+      hmac: {
+        key: string;
+        encoding: "base64" | "base64url" | "hex";
+        prefix: string;
+        maxBytes: number | null;
+      };
+      limit: {
+        perMinute: number | null;
+        perDay: number | null;
+      };
+    } | {
+      kind: "tunnel";
+      name: string;
+      key: string;
+      hosts: string[];
+      network: string | null;
+    };
+    environments: null | string[];
+    limitPerService: boolean;
+    bound: boolean;
+    allowAs: null | {
+      from: "code" | "legacy";
+      methods: null | string[];
+    };
+  }[];
+  routesSensitive: boolean;
+  releases: boolean;
+  useUrl: string;
+  windowSeconds: number;
+  insecureUpstreams: boolean;
 };
 
 export type ReferenceView = {
@@ -2869,6 +3191,7 @@ export type SecretKey = {
     endedBy: string | null;
     endedAt: string | null;
     canOpenSource: boolean;
+    ownsSource: boolean;
   };
   folder: string | null;
   archived: boolean;

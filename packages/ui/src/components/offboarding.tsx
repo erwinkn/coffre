@@ -21,6 +21,7 @@ export function PrincipalReportCards({ report }: { report: PrincipalReport }) {
       {report.status === 'removed' && <ConsiderRotating report={report} person={person} />}
       {report.issuedTokens.length > 0 && <IssuedTokens report={report} />}
       {report.references.length > 0 && <MadeReferences report={report} />}
+      {report.proxy.length > 0 && <SavedProxyItems report={report} />}
     </>
   );
 }
@@ -212,6 +213,52 @@ function MadeReferences({ report }: { report: PrincipalReport }) {
                 </td>
                 <td className="col-shrink nowrap" data-label="Made">
                   <Timestamp iso={reference.createdAt} display="relative" />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * The proxy items they saved (decision 5): each routes only while they read
+ * its keys, so removing them stops every one, and narrowing their access
+ * those whose keys it takes away, until someone who reads the keys saves it
+ * again in its Proxy tab.
+ */
+function SavedProxyItems({ report }: { report: PrincipalReport }) {
+  const removed = report.status === 'removed';
+  return (
+    <Card
+      labelledBy="saved-proxy"
+      title="Proxy routes they saved"
+      description={
+        removed
+          ? 'These stopped routing when they were removed: each sends keys they no longer read. Someone who reads its keys saves it again, in its Proxy tab, to keep it.'
+          : 'Each routes only while they read its keys. Removing them stops every one, and narrowing their access stops those whose keys it takes away, until someone who reads the keys saves it again.'
+      }
+    >
+      <div className="dt-wrap">
+        <table className="dt stacks">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Sends</th>
+            </tr>
+          </thead>
+          <tbody>
+            {report.proxy.map((item) => (
+              <tr key={`${item.project}/${item.environment}/${item.name}`}>
+                <td data-label="Item">
+                  <Link className="mono" to="/projects/$project/$environment/proxy" params={{ project: item.project, environment: item.environment }}>
+                    {item.project}/{item.environment}: {item.name}
+                  </Link>
+                </td>
+                <td className="mono" data-label="Sends">
+                  {item.keys.join(', ')}
                 </td>
               </tr>
             ))}

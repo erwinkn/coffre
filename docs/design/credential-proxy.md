@@ -519,6 +519,62 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   404 naming the environment, before anything is opened where the URL
   names it.
 
+### Definitions written in the UI (0.16)
+
+A deployment may also let its Owners write routes, signers, verifiers and
+databases per environment, in the environment's **Proxy** tab, beside its
+Secrets ([proxy-ui.md](proxy-ui.md) is the design):
+
+```ts
+plugins: [credentialProxy({ credentials: { … }, editable: true })],
+```
+
+`coffre init` writes `editable: true` from 0.16, with an empty
+`credentials`, and the `/use` route and the tab's route file
+(`app/src/routes/_coffre/projects.$project_.$environment_.proxy.tsx`). A
+deployment upgraded with `coffre update` gains the tab's route file and
+`/use`'s, and nothing else: unless its code says `editable: true`, the tab
+shows what code defines and writes nothing.
+
+What the tab shows and does:
+
+- **One list, one panel.** Every item of the environment, whatever its kind,
+  one line each; the one picked, its fields beside it, with a sample call
+  through a route (the proxy's own matcher says whether it is allowed) and
+  the item as code, to move it there.
+- **Code's items, locked.** An item `credentialProxy` defines shows with
+  code's values and a lock, and its name is code's in every environment: a
+  code item scoped with `environments: ['market/prod']` shows in
+  `market/dev` too, dimmed, saying it serves `market/prod` only, and no item
+  of `market/dev`'s own may take the name (R66).
+- **Forks inherit by name.** A fork lists its parents' items, marked with the
+  parent they come from; changing one makes the fork's own, over the
+  parent's, and deleting that reverts to the parent's.
+- **Who may change what.** Whoever lists the environment reads its
+  definitions, every field inert. `proxy.edit` (Owners, and a role an Owner
+  gives it) edits, and only what its holder reads: a route sending a key
+  they cannot read stays as it is, deletable. A sensitive key is routed by
+  an Owner of its project alone, and the save says it is audited (R66).
+- **One save, reviewed.** Edits wait on the page; Save shows each change
+  field by field, each copied item's keys and where they will go ("`schuman`
+  will send market/prod's SCHUMAN_API_KEY to sandbox.schuman.example (copied
+  from market/dev)"), and, when a destination changes, that requests already
+  decided may reach the old one for up to `cacheSeconds` (a minute unless
+  set), as a revoked handle's may. Another person's save since the page
+  loaded is a 409: the review then says what they changed, and saving again
+  is a decision.
+- **Routes that no longer route.** An item whose editor no longer reads one
+  of its keys, or one made sensitive since a save that was not an Owner's,
+  is marked: each use answers `route_not_cleared` until someone who reads
+  its keys saves it again ("Save again as you"). A member's page lists the
+  items they saved, and removing them says which it stops.
+- **Names code reserved.** A name an earlier deployment's code defined stays
+  reserved after code drops it; the tab lists it, and an Owner of the whole
+  instance releases it, instance-wide.
+
+Named egresses and networks, which a UI item would pick by name, come with
+0.16's use path for UI items; until then a UI item goes direct.
+
 ## 4. The proxy, request by request
 
 `GET /use` says the instance has a proxy, and names its credentials.

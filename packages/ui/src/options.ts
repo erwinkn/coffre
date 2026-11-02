@@ -30,6 +30,7 @@ import {
   loadMember,
   loadPrincipal,
   loadProject,
+  loadProxy,
   loadServiceDirectory,
   loadSettings,
   SETTINGS_TABS,
@@ -164,6 +165,18 @@ export const environment = {
   loader: ({ context, params }: Loader<{ project: string; environment: string }>) => {
     const { coffre, queryClient } = coffreOf(context);
     return loadEnvironment(queryClient, coffre, params);
+  },
+};
+
+/**
+ * `/projects/$project/$environment/proxy`: the environment's credential
+ * proxy, its keys as its Secrets tab lists them, and what it inherits from
+ * its fork's parents, all asked at once (`loadProxy`).
+ */
+export const environmentProxy = {
+  loader: ({ context, params }: Loader<{ project: string; environment: string }>) => {
+    const { coffre, queryClient } = coffreOf(context);
+    return loadProxy(queryClient, coffre, params);
   },
 };
 

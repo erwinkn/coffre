@@ -75,9 +75,18 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'GET /projects/:project/:environment/version': {
     not: 'for programs that poll an environment before reading it, `coffre export --watch` first; a page has its listing, which it reloads',
   },
-  'GET /projects/:project/:environment/proxy': { inFlight: 'T186 PR D: the Proxy tab (prototype #421) on the API' },
-  'PUT /projects/:project/:environment/proxy': { inFlight: 'T186 PR D: the Proxy tab (prototype #421) on the API' },
-  'PUT /proxy/reserved': { inFlight: 'T186 PR D: the Proxy tab (prototype #421) on the API' },
+  'GET /projects/:project/:environment/proxy': {
+    ui: [
+      { does: "an environment › Proxy: its items, code's locked beside its own and its parents'", in: 'lib/queries.ts', call: 'proxy.get' },
+      { does: 'the same tab › Copy from environment…: another environment’s items', in: 'components/proxy-parts.tsx', call: 'proxy.get' },
+    ],
+  },
+  'PUT /projects/:project/:environment/proxy': {
+    ui: [{ does: 'an environment › Proxy › Save, after the review of every change', in: 'components/proxy-parts.tsx', call: 'proxy.save' }],
+  },
+  'PUT /proxy/reserved': {
+    ui: [{ does: "an environment › Proxy: a name earlier code reserved › Release…, an instance Owner's", in: 'components/proxy-parts.tsx', call: 'proxy.release' }],
+  },
   'PATCH /projects/:project/:environment/dismissals': {
     ui: [
       { does: 'an environment › Missing keys › Dismiss, Dismiss all, and Undo after either', in: 'components/missing.tsx', call: 'environments.dismiss' },

@@ -72,6 +72,9 @@ export const ROUTE_FILES: Record<string, string> = {
   ...since('0.4.2', ['_coffre/account.index.tsx', '_coffre/account.sessions.tsx', '_coffre/account.apps.tsx', '_coffre/account.appearance.tsx']),
   // A person's connected apps, a tab of their page rather than a card of its Access tab.
   ...since('0.5.0', ['_coffre/users.$user.apps.tsx']),
+  // An environment's Proxy tab, beside its Secrets: the credential proxy's definitions written in the UI.
+  // and the credential proxy's own route, `/use`, which `coffre init` writes from 0.16 (`credentialProxy({ editable: true })`).
+  ...since('0.16.0', ['_coffre/projects.$project_.$environment_.proxy.tsx', 'use.$.ts']),
 };
 
 /** Route files, under `app/src/routes/`, that `release` first wrote. */

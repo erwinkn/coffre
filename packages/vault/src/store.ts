@@ -1157,6 +1157,14 @@ export async function proxiesNaming(db: Queryable, names: readonly string[]): Pr
   return rows.map((row) => row.id);
 }
 
+/** The environments whose proxy objects' rows hold an item `member` saved: candidates, each checked against its seal after. */
+export async function proxiesSavedBy(db: Queryable, member: string): Promise<string[]> {
+  const rows = engineOf(db) === 'postgres'
+    ? await rowsOf<{ id: string }>(db, sql`SELECT environment_id AS id FROM proxy_definitions WHERE EXISTS (SELECT 1 FROM jsonb_each(items) AS item WHERE item.value->>'savedBy' = ${member}) ORDER BY environment_id`)
+    : await rowsOf<{ id: string }>(db, sql`SELECT environment_id AS id FROM proxy_definitions WHERE EXISTS (SELECT 1 FROM json_each(items) WHERE json_extract(value, '$.savedBy') = ${member}) ORDER BY environment_id`);
+  return rows.map((row) => row.id);
+}
+
 /** The object's newest change in the log: whether it has one, and the seal it left (HotPathOne's NewestIn). */
 export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buffer | null } | null> {
   const { logChanges } = tablesOf(db);

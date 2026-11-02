@@ -58,10 +58,13 @@ function route(name: string, keys: readonly string[] = ['OPENAI_API_KEY'], host 
   };
 }
 
+/** Code's `stripe`, as the Proxy tab shows it locked. */
+const STRIPE = { definition: { ...route('stripe', ['STRIPE_SECRET_KEY'], 'api.stripe.com'), allow: null }, environments: ['market/prod'], limitPerService: false, bound: false, allowAs: null };
+
 beforeEach(async () => {
   await resetDatabase(db.owner);
   deps = testDeps(db.runtime, [ROOT]);
-  deps.proxy = { editable: true, insecureUpstreams: false, names: ['stripe'] };
+  deps.proxy = { editable: true, insecureUpstreams: false, names: ['stripe'], items: [STRIPE], cacheSeconds: 60 };
   const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: SIGNIN });
   deps.signin = signin;
   runtime = {
@@ -113,12 +116,17 @@ function bearer(token: string, over: CoffreRuntime = runtime): CoffreClient {
 
 test('whoever lists an environment reads its definitions, which no holdings cross; an Owner saves, a Viewer and a Developer cannot', ON_015, async () => {
   const empty = await vic.proxy.get('market/dev');
-  assert.deepEqual([empty.items, empty.seal, empty.state, empty.editable, empty.code], [[], null, 'ok', false, ['stripe']]);
-  assert.equal((await root.proxy.get('market/dev')).editable, true);
+  assert.deepEqual([empty.items, empty.seal, empty.state, empty.editable, empty.code], [[], null, 'ok', false, [STRIPE]]);
+  // What the page says of its reader: why they may not save, and that they route no sensitive key and release no name.
+  assert.deepEqual([empty.readOnly, empty.routesSensitive, empty.releases], [{ reason: 'missing_proxy_edit', message: 'editing proxy definitions takes proxy.edit here: Owners hold it' }, false, false]);
+  const owner = await root.proxy.get('market/dev');
+  assert.deepEqual([owner.editable, owner.readOnly, owner.routesSensitive, owner.releases], [true, null, true, true]);
+  assert.deepEqual([(await pat.proxy.get('market/dev')).routesSensitive, (await pat.proxy.get('market/dev')).releases], [true, false]);
   const saved = await root.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } });
   assert.deepEqual(saved.items.map((item) => [item.definition.name, item.keys, item.savedBy, item.routesSensitive]), [['openai', ['OPENAI_API_KEY'], `user:${ROOT}`, true]]);
   const read = await vic.proxy.get('market/dev');
-  assert.deepEqual(read.items, saved.items);
+  // As saved, and each item cleared: the read alone says whether it routes now.
+  assert.deepEqual(read.items, saved.items.map((item) => ({ ...item, notCleared: null })));
   assert.equal(JSON.stringify(read).includes('holdings'), false);
   assert.deepEqual(await refusal(vic.proxy.save('market/dev', { seal: saved.seal, items: { maps: route('maps', ['MAPS_KEY']) } })), { status: 403, reason: 'missing_proxy_edit', message: 'editing proxy definitions takes proxy.edit here: Owners hold it' });
   assert.equal((await refusal(ada.proxy.save('market/dev', { seal: saved.seal, items: { maps: route('maps', ['MAPS_KEY']) } }))).status, 403);
@@ -153,6 +161,50 @@ test("a role an Owner gives proxy.edit routes what its holder reads, where the u
   assert.deepEqual((JSON.parse(entry!.metadata) as { proxy: { saved: { routesSensitive: string[] }[] } }).proxy.saved[0]!.routesSensitive, ['STRIPE_SECRET_KEY']);
 });
 
+test("the tab marks an item that would not route now, until someone who reads its keys saves it again (decision 5)", ON_015, async () => {
+  await root.access.set(LIN, { 'market/dev': 'router' });
+  const saved = await lin.proxy.save('market/dev', { seal: null, items: { openai: route('openai'), maps: route('maps', ['MAPS_KEY']) } });
+  // A save's answer leaves the mark out: the tab reads it.
+  assert.deepEqual(saved.items.map((item) => item.notCleared), [undefined, undefined]);
+  const marks = async () => (await vic.proxy.get('market/dev')).items.map((item) => [item.definition.name, item.notCleared?.key ?? null]);
+  assert.deepEqual(await marks(), [['maps', null], ['openai', null]]);
+  // Lin loses her role on dev: what she saved there no longer routes the keys she no longer reads. MAPS_KEY, which dev
+  // lacks, is decided at use.
+  await root.access.set(LIN, { 'market/dev': null });
+  assert.deepEqual(await marks(), [['maps', null], ['openai', 'OPENAI_API_KEY']]);
+  assert.match((await vic.proxy.get('market/dev')).items[1]!.notCleared!.reason, /OPENAI_API_KEY: its editor does not read it in dev/);
+  // Her offboarding preview names what she saved, each stopped once she no longer reads its keys.
+  assert.deepEqual((await root.members.get(LIN)).proxy, [
+    { project: 'market', environment: 'dev', name: 'maps', kind: 'route', keys: ['MAPS_KEY'] },
+    { project: 'market', environment: 'dev', name: 'openai', kind: 'route', keys: ['OPENAI_API_KEY'] },
+  ]);
+  // An Owner saves it again, as it is, under their own standing: cleared.
+  const page = await pat.proxy.get('market/dev');
+  await pat.proxy.save('market/dev', { seal: page.seal, items: { openai: route('openai') } });
+  assert.deepEqual(await marks(), [['maps', null], ['openai', null]]);
+  assert.deepEqual((await root.members.get(LIN)).proxy.map((item) => item.name), ['maps']);
+  // The key made sensitive since a Router's save: what that save froze does not route it, even given back her role.
+  await root.access.set(LIN, { 'market/dev': 'router' });
+  const again = await lin.proxy.save('market/dev', { seal: (await lin.proxy.get('market/dev')).seal, items: { openai: route('openai') } });
+  assert.equal(again.items.find((item) => item.definition.name === 'openai')!.savedBy, LIN);
+  await root.secrets.set('market/dev', { OPENAI_API_KEY: { value: 'sk-dev-2', sensitivity: 'sensitive' } });
+  const mark = (await vic.proxy.get('market/dev')).items.find((item) => item.definition.name === 'openai')!.notCleared;
+  assert.equal(mark?.key, 'OPENAI_API_KEY');
+});
+
+test("a fork's inherited item is marked where the fork resolves its keys: its own value over its parent's", ON_015, async () => {
+  await root.access.set(LIN, { 'market/dev': 'router', 'market/dev-eu': null });
+  await lin.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } });
+  const inherited = async () => (await vic.proxy.get('market/dev-eu')).inheritedNotCleared;
+  // dev-eu inherits dev's OPENAI_API_KEY, which Lin reads: cleared in both.
+  assert.deepEqual(await inherited(), {});
+  // dev-eu sets its own, which Lin does not read: dev's item, inherited, would not route there, though it does in dev.
+  await root.secrets.set('market/dev-eu', { OPENAI_API_KEY: 'sk-eu' });
+  assert.equal((await vic.proxy.get('market/dev')).items[0]!.notCleared, null);
+  assert.equal((await inherited())?.openai?.key, 'OPENAI_API_KEY');
+  assert.match((await inherited())!.openai!.reason, /its editor does not read it in dev-eu/);
+});
+
 test("a reference is decided where it lives, its source's sensitive value only by an Owner of the source's project", ON_015, async () => {
   await root.access.set(LIN, { 'market/dev': 'router' });
   // BILLING_REF reads billing/prod's secret: her read of market/dev covers it (R20).
@@ -161,6 +213,9 @@ test("a reference is decided where it lives, its source's sensitive value only b
   assert.equal((await refusal(pat.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } }))).reason, 'route_not_cleared');
   const instance = await root.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } });
   assert.deepEqual(instance.items.map((item) => item.definition.name), ['billing', 'leak']);
+  // What the tab checks first: the Secrets list says, of each reference, whether you own its source's project.
+  const ownsSource = async (client: CoffreClient) => (await client.secrets.list('market/dev')).keys.find((one) => one.key === 'SENSITIVE_REF')!.reference!.ownsSource;
+  assert.deepEqual([await ownsSource(pat), await ownsSource(root)], [false, true]);
 });
 
 test('who may save at all: the tab writes only where the deployment says, a person on a session of theirs, never a name code defines', ON_015, async () => {
@@ -176,7 +231,7 @@ test('who may save at all: the tab writes only where the deployment says, a pers
   const ci = clientFor(deps, 'ci', 'service');
   assert.equal((await refusal(ci.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } }))).status, 403);
   // Under `editable: false`, the default: the deployment's code keeps them.
-  deps.proxy = { editable: false, insecureUpstreams: false, names: [] };
+  deps.proxy = { editable: false, insecureUpstreams: false, names: [], items: [], cacheSeconds: 60 };
   assert.equal((await root.proxy.get('market/dev')).editable, false);
   assert.deepEqual(await refusal(root.proxy.save('market/dev', { seal: null, items: { openai: route('openai') } })),
     { status: 409, reason: 'not_editable', message: "this deployment's code keeps its proxy definitions: credentialProxy({ editable: true }) lets the UI write them" });
@@ -187,7 +242,7 @@ test('who may save at all: the tab writes only where the deployment says, a pers
   assert.deepEqual(await denials('proxy.save'), ['reserved', 'invalid', 'not_a_person', 'not_editable', 'not_editable']);
   // A personal token, at the front door: refused there, before any handler.
   const token = await root.tokens.issue(`user:${ROOT}`, { label: 'agent', expiresInMinutes: 60, scope: { market: 'maintainer' } });
-  deps.proxy = { editable: true, insecureUpstreams: false, names: [] };
+  deps.proxy = { editable: true, insecureUpstreams: false, names: [], items: [], cacheSeconds: 60 };
   assert.equal((await refusal(bearer(token.token).proxy.save('market/dev', { seal: null, items: { openai: route('openai') } }))).status, 403);
   assert.deepEqual((await bearer(token.token).proxy.get('market/dev')).items, []);
 });

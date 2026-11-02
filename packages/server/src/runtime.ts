@@ -186,6 +186,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     credentialExpiresAt: identity.credentialExpiresAt,
     rotateAfterDays: runtime.rotateAfterDays,
     proxy: proxyCodeOf(runtime.plugins),
+    publicUrl: runtime.publicUrl,
     ...(render === undefined ? {} : { render }),
   };
 }

@@ -452,15 +452,26 @@ export interface Vault {
    * of theirs (`proxy.release`): UI items may take it again.
    */
   releaseProxy(input: ReleaseProxyInput): Promise<Outcome<{ reserved: string[] }>>;
+
+  /**
+   * The UI items a member saved, in every environment, from each sealed
+   * object (a forged one names none): what their offboarding preview lists,
+   * since each stops routing once they no longer read its keys (decision 5).
+   */
+  proxySavedBy(input: { member: string }): Promise<{ items: SavedProxyItem[] }>;
 }
+
+/** A UI item a member saved: where, its name and kind, and the keys it sends. */
+export type SavedProxyItem = { environmentId: string; name: string; kind: ProxyDefinition['kind']; keys: string[] };
 
 /** Whose proxy definitions: an environment, by its project's id and its own. */
 export type ProxyInput = { projectId: string; environmentId: string };
 
 /**
  * A UI item as the tab shows it: its definition, the keys it sends, who
- * saved it and when, and whether its save cleared it for sensitive keys
- * (its editor an Owner covering the place, R66), never their holdings.
+ * saved it and when, whether its save cleared it for sensitive keys (its
+ * editor an Owner covering the place, R66), and whether it routes now,
+ * never its editor's holdings.
  */
 export type ProxyItemView = {
   definition: ProxyDefinition;
@@ -468,6 +479,14 @@ export type ProxyItemView = {
   savedBy: string;
   savedAt: number;
   routesSensitive: boolean;
+  /**
+   * Why it would not route now, or null (decision 5): a key its editor no
+   * longer reads, or one its save did not clear (made sensitive since).
+   * Each use of it answers `route_not_cleared` until someone who reads its
+   * keys saves it again. The tab's read (`proxy`) says it; a save's answer
+   * leaves it out, since its reads would hold the save's locks longer.
+   */
+  notCleared?: { key: string; reason: string } | null;
 };
 
 /**
@@ -484,6 +503,13 @@ export type ProxyView = {
   items: ProxyItemView[];
   reserved: string[];
   reservedState: 'ok' | 'tampered' | 'stale';
+  /**
+   * A fork's items it inherits from its parents and would not route here
+   * now, by name (decision 5): decided where this environment's use resolves
+   * their keys, its own values over a parent's, so a parent's page's mark
+   * does not say. Only the tab's read (`proxy`) says it.
+   */
+  inheritedNotCleared?: Record<string, { key: string; reason: string }>;
 };
 
 export type SaveProxyInput = Correlation & Through & ProxyInput & {

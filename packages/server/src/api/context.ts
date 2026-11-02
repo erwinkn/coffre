@@ -83,6 +83,8 @@ export type ApiContext = {
   watch?: { hooks: Watcher; context: (asCaller?: boolean) => WatchContext } | null;
   /** What the deployment's code says of its credential proxy (`ProxyCode`): null, or left out, when it adds none. */
   proxy?: ProxyCode | null;
+  /** The instance's public URL, as its config gives it: where `/use` answers, which the Proxy tab shows. */
+  publicUrl?: string;
   /** The page's render the request is one call of, whose calls read the instance's places once (`Render`); none for a request of its own. */
   render?: Render;
   /**

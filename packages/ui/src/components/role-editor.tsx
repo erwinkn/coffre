@@ -407,7 +407,7 @@ function RoleEditor({
 
         {editable && (
           <p className="hint">
-            Reading takes using, and a protected environment holds no more than any other: the boxes keep both true.
+            Editing the proxy takes reading, reading takes using, and a protected environment holds no more than any other: the boxes keep these true.
             {instance ? ' A global role reaches every project its holder’s scope takes in.' : ''}
           </p>
         )}

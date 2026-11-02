@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { ownsInstance } from '@coffre/core/access';
+import { ownsInstance, ownsProject } from '@coffre/core/access';
 import type { ProxyDefinition, ProxyView, Refusal as VaultRefusal } from '@coffre/core/vault';
 
 import type { ResolvedPath } from '../db/queries.ts';
@@ -8,6 +8,7 @@ import { can, placeOf } from './caller.ts';
 import { denied, Refusal, through, vaultCredential, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
+import type { ProxyCodeItem } from '../proxy-code.ts';
 
 /**
  * An environment's proxy definitions written in the UI (0.16, T186;
@@ -25,10 +26,35 @@ import { formatMember } from './paths.ts';
 
 /**
  * The tab's view: the environment's items as its sealed object holds them,
- * the names code reserved, whether this caller may save here now, and the
- * names this deployment's code defines, whose rows show locked (R66).
+ * the names code reserved, whether this caller may save here now and why
+ * not, and the items this deployment's code defines, whose rows show locked
+ * with code's values (R66).
+ *
+ *   { items: [{ definition: { kind: 'route', name: 'openai', … }, savedBy: 'user:ada@acme.example', … }],
+ *     editable: false, readOnly: { reason: 'missing_proxy_edit', message: '…' },
+ *     code: [{ definition: { kind: 'route', name: 'maps', … }, environments: null, … }],
+ *     routesSensitive: false, releases: false, useUrl: 'https://secrets.acme.example/use' }
  */
-export type ProxyPage = ProxyView & { editable: boolean; code: string[] };
+export type ProxyPage = ProxyView & {
+  editable: boolean;
+  /** Why this caller may not save here now, as the page says it; null when they may. */
+  readOnly: { reason: string; message: string } | null;
+  code: ProxyCodeItem[];
+  /** Whether this caller's save routes the place's sensitive keys: an Owner of its project (R66), audited. */
+  routesSensitive: boolean;
+  /** Whether this caller releases a reserved name: an Owner of the whole instance, signed in as themselves. */
+  releases: boolean;
+  /** Where the proxy answers, `<publicUrl>/use`: each route at `/use/<name>`. */
+  useUrl: string;
+  /**
+   * How long after a save values decided before it may still reach the old
+   * upstream, in seconds: the proxy's `cacheSeconds`, or its 3 s deadline
+   * with no cache (docs/design/proxy-ui.md, decision 4). The save says so.
+   */
+  windowSeconds: number;
+  /** Whether a definition may reach plain HTTP and private addresses: the proxy's `insecureUpstreams`, for local fakes. */
+  insecureUpstreams: boolean;
+};
 
 /** A save: the seal the page loaded (null for none yet), each item changed by name, the item or null, and whether every other one goes. */
 export type ProxySave = { seal: string | null; items: Record<string, ProxyDefinition | null>; replace?: boolean };
@@ -36,7 +62,32 @@ export type ProxySave = { seal: string | null; items: Record<string, ProxyDefini
 export async function proxyPage(ctx: ApiContext, place: ResolvedPath): Promise<ProxyPage> {
   const environment = place.environment!;
   const view = await ctx.vault.proxy({ projectId: place.project.id, environmentId: environment.id });
-  return { ...view, editable: mayEdit(ctx, place) === null, code: [...(ctx.proxy?.names ?? [])] };
+  return pageOf(ctx, place, view);
+}
+
+/** The vault's view, with what the page says of this caller and this deployment's code. */
+function pageOf(ctx: ApiContext, place: ResolvedPath, view: ProxyView): ProxyPage {
+  const cannot = mayEdit(ctx, place);
+  return {
+    ...view,
+    editable: cannot === null,
+    readOnly: cannot === null ? null : { reason: cannot.reason, message: cannot.error.message },
+    code: [...(ctx.proxy?.items ?? [])],
+    routesSensitive: ownsProject(ctx.caller, place.project.id),
+    releases: mayRelease(ctx),
+    useUrl: `${(ctx.publicUrl ?? '').replace(/\/+$/, '')}/use`,
+    windowSeconds: Math.max(ctx.proxy?.cacheSeconds ?? DEFAULT_CACHE_SECONDS, USE_DEADLINE_SECONDS),
+    insecureUpstreams: ctx.proxy?.insecureUpstreams === true,
+  };
+}
+
+/** The proxy's `cacheSeconds` unless set, and the deadline a use's values are sent by (R53), the window with no cache. */
+const DEFAULT_CACHE_SECONDS = 60;
+const USE_DEADLINE_SECONDS = 3;
+
+/** Whether the caller releases a reserved name: an Owner of the whole instance, a person signed in as themselves. */
+function mayRelease(ctx: ApiContext): boolean {
+  return ctx.caller.principal.type === 'user' && ctx.caller.credentialScope === null && ownsInstance(ctx.caller);
 }
 
 /**
@@ -83,7 +134,7 @@ export async function saveProxy(ctx: ApiContext, place: ResolvedPath, input: Pro
       ...through(ctx.caller),
     });
     if (!saved.ok) throw proxyRefused(saved.refusal);
-    return { ...saved.view, editable: true, code: [...code.names] };
+    return pageOf(ctx, place, saved.view);
   });
 }
 
@@ -96,7 +147,7 @@ export async function saveProxy(ctx: ApiContext, place: ResolvedPath, input: Pro
 export async function releaseReserved(ctx: ApiContext, input: { release: string }): Promise<{ reserved: string[] }> {
   return withRefusals(ctx, async () => {
     const refused = (error: ApiError, reason: string) => new Refusal(error, denied(ctx, 'proxy.release', reason, { metadata: { name: input.release } }));
-    if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null || !ownsInstance(ctx.caller)) {
+    if (!mayRelease(ctx)) {
       throw refused(forbidden('a released name is free in every project: only an Owner of the whole instance, signed in as themselves, releases one'), 'requires_instance_owner');
     }
     if (ctx.proxy?.names.includes(input.release) === true) throw refused(conflict(`${input.release} is defined in this deployment's code: it stays reserved while code defines it`), 'defined_in_code');

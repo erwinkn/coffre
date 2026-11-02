@@ -4,6 +4,7 @@
 // (src/vault.ts), over a Unix socket.
 import { createCoffre, fileAnchor, github, githubApp, processLimits, signin, type CoffreContext } from '@coffre/server/node';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
+import { credentialProxy } from '@coffre/server/plugins/credential-proxy';
 import { connectVault } from '@coffre/vault/node';
 
 function env(name: string): string {
@@ -61,7 +62,13 @@ export const coffre = createCoffre({
   // while it was down goes unseen. More than one process wants a store
   // they share (docs/deploy.md, "The audit watch"). Remove it, and the log
   // is checked only when someone runs `coffre verify log`.
-  plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) })],
+  // The credential proxy (docs/design/credential-proxy.md): apps run with
+  // `coffre run` reach their APIs through <PUBLIC_URL>/use, with the keys
+  // filled in, which they never hold. `editable` lets Owners write routes,
+  // signers, verifiers and databases per environment in its Proxy tab; add
+  // your own to `credentials` (and `tunnels`, `signers`, `verifiers`) to
+  // keep them in code, where they win the name in every environment.
+  plugins: [auditWatch({ anchor: fileAnchor(env('AUDIT_ANCHOR')) }), credentialProxy({ credentials: {}, editable: true })],
 });
 
 // What src/server.ts hands Start with each request, for Start's types.

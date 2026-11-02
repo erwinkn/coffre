@@ -156,6 +156,8 @@ import {
   type ClearedItem,
   type ProxyDefinition,
   type ProxyInput,
+  type ProxyItemView,
+  type SavedProxyItem,
   type ProxyView,
   type ReleaseProxyInput,
   type ReserveProxyInput,
@@ -166,7 +168,7 @@ import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, heldFrom, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys } from './changes.ts';
+import { Changes, heldByLog, heldFrom, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
@@ -178,7 +180,7 @@ import {
   applyOp, canonical, limitChange, noEdits, objectKey, POLICY_REF, RESERVED_REF, ROLES_REF, sealed as sealedObject, sealKey, sealOf,
   type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type ProxyInput as ProxyObject, type ProxyItem, type Ref, type SecretInput,
 } from './inputs.ts';
-import { frozenHoldings, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
+import { frozenHoldings, notCleared, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, entryMac, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
@@ -190,7 +192,7 @@ import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
-import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog } from './store.ts';
+import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog, type ReadKind } from './store.ts';
 import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
@@ -509,6 +511,12 @@ const PROXY_RELEASE = 'proxy.release';
 
 /** Who reserves the names code defines: the deployment, through the app's own call at its gate; no person or token makes one. */
 const CODE_ACTOR = 'system:deployment';
+
+/** An object the log does not bear out, read for a display alone: as if gone, which marks or shows nothing it could vouch for. */
+function notLogged(error: unknown): Held {
+  if (error instanceof NotLogged) return { log: 'gone' };
+  throw error;
+}
 
 /** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
 const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
@@ -4137,8 +4145,32 @@ class VaultService implements Vault {
         }
       }
     };
-    const [proxy, reserved] = await Promise.all([read({ kind: 'proxy', id: input.environmentId }), read(RESERVED_REF)]);
-    return proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved);
+    const held = (ref: Ref & { kind: ReadKind }) => heldByLog(keys.seals, this.#db, ref);
+    const [proxy, reserved, chain] = await Promise.all([read({ kind: 'proxy', id: input.environmentId }), read(RESERVED_REF), this.#chain(held, input.environmentId)]);
+    // Each item that would not route now, marked: what the tab says an Owner must save again (decision 5).
+    // A fork's inherited items too, nearest parent first, each decided here: where this environment's use resolves
+    // their keys (its own value over a parent's) and for its chain, not the parent's (decision 6).
+    if (chain[0]?.projectId !== input.projectId) return proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved, new Map());
+    const lenient = (ref: Ref & { kind: ReadKind }) => held(ref).catch(notLogged);
+    const parents = await Promise.all(chain.slice(1).map((environment) => lenient({ kind: 'proxy', id: environment.id })));
+    const own = Object.values(proxy.object?.items ?? {});
+    const taken = new Set(own.map((item) => item.definition.name));
+    const inherited: ProxyItem[] = [];
+    for (const parent of parents) {
+      if (parent.log !== 'live' || parent.object.kind !== 'proxy') continue;
+      for (const item of Object.values(parent.object.items)) {
+        if (taken.has(item.definition.name)) continue;
+        taken.add(item.definition.name);
+        inherited.push(item);
+      }
+    }
+    const marks = await this.#marks(this.#db, lenient, chain, [...own, ...inherited], Date.now());
+    const view = proxyView({ id: input.environmentId, projectId: input.projectId }, proxy, reserved, marks);
+    const uncleared = Object.fromEntries(inherited.flatMap((item) => {
+      const mark = marks.get(item.definition.name);
+      return mark == null ? [] : [[item.definition.name, mark]];
+    }));
+    return { ...view, inheritedNotCleared: uncleared };
   }
 
   /**
@@ -4250,7 +4282,7 @@ class VaultService implements Vault {
       // Each changed item's keys, resolved by name where the use will find them: the nearest place of the fork chain
       // that holds one, its value's nature a reference's source's; and cleared for the editor.
       const sending = [...new Set([...saved.values()].flatMap((definition) => (definition === null ? [] : definitionKeys(definition))))];
-      const resolved = await this.#proxyKeys(d.tx, changes, chain, sending, own);
+      const resolved = await this.#proxyKeys(d.tx, (ref) => changes.held(d.tx, ref), chain, sending, own);
       const cleared = new Map<string, string[]>();
       for (const key of resolved.values()) {
         const why = routeRefusal(reader, key, chain);
@@ -4269,6 +4301,7 @@ class VaultService implements Vault {
       const op: Op = { op: 'proxy.save', items, replace: input.replace === true, loaded: input.seal };
       const after = applyOp(before, ref, op);
       if (after === undefined || after === null || after.kind !== 'proxy') throw refused('invalid', 'not a save the rules allow');
+      // No clearance marks: they take reads no change should hold its locks for. The tab reads them after (`proxy`).
       const view = proxyView({ id: environmentId, projectId }, { object: after, seal: sealOf(keys.seals[0]!, ref, after), state: 'ok' }, { object: reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object : null, state: 'ok' });
       if (saved.size === 0 && input.replace !== true) return { view: { ...view, seal: input.seal } };
       changes.stage(ref, op, actor);
@@ -4291,7 +4324,7 @@ class VaultService implements Vault {
    * holds, or one archived, is left out: decided at each use.
    */
   async #proxyKeys(
-    db: Queryable, changes: Changes, chain: readonly EnvironmentInput[], names: readonly string[], own: readonly { id: string; environmentId: string; key: string }[],
+    db: Queryable, held: (ref: Ref & { kind: 'secret' }) => Promise<Held>, chain: readonly EnvironmentInput[], names: readonly string[], own: readonly { id: string; environmentId: string; key: string }[],
   ): Promise<Map<string, ResolvedKey>> {
     if (names.length === 0) return new Map();
     const parents = chain.slice(1).map((environment) => environment.id);
@@ -4302,17 +4335,77 @@ class VaultService implements Vault {
     }
     const resolved = new Map<string, ResolvedKey>();
     await Promise.all([...nearest].map(async ([name, { id, holder }]) => {
-      const held = await changes.held(db, { kind: 'secret', id });
-      if (held.log !== 'live' || held.object.kind !== 'secret') return;
-      let secret: SecretInput = held.object;
+      const read = await held({ kind: 'secret', id });
+      if (read.log !== 'live' || read.object.kind !== 'secret') return;
+      let secret: SecretInput = read.object;
       if (secret.source !== null) {
-        const source = await changes.held(db, { kind: 'secret', id: secret.source });
+        const source = await held({ kind: 'secret', id: secret.source });
         if (source.log !== 'live' || source.object.kind !== 'secret') return;
         secret = source.object;
       }
       resolved.set(name, { name, holder, nature: secret.nature, projectId: secret.projectId });
     }));
     return resolved;
+  }
+
+  /**
+   * Each of these items, its own or inherited, that would not route now in
+   * the chain's first environment, by name, and why (`notCleared`, decision
+   * 5): its keys resolved where a use there finds
+   * them, decided for what its save froze and for its editor as they stand,
+   * from the objects `held` reads (the log's, never a row's columns). What
+   * cannot be read marks nothing: the use decides it, failing closed.
+   */
+  async #marks(
+    db: Queryable, held: (ref: Ref & { kind: ReadKind }) => Promise<Held>, chain: readonly EnvironmentInput[], items: readonly ProxyItem[], at: number,
+  ): Promise<Map<string, NonNullable<ProxyItemView['notCleared']> | null>> {
+    if (items.length === 0) return new Map();
+    const environmentId = chain[0]!.id;
+    const names = [...new Set(items.flatMap((item) => item.keys))];
+    const editors = [...new Set(items.map((item) => item.savedBy))];
+    const [roles, own, ...members] = await Promise.all([
+      held(ROLES_REF as Ref & { kind: 'roles' }),
+      store.secretsNamed(db, [environmentId], names),
+      ...editors.map((editor) => held({ kind: 'principal', id: editor })),
+    ]);
+    const policy = roles.log === 'live' && roles.object.kind === 'roles' ? roles.object : noEdits();
+    const resolved = await this.#proxyKeys(db, held, chain, names, own);
+    const readers = new Map(editors.map((editor, i) => {
+      const member = members[i]!;
+      const account = member.log === 'live' && member.object.kind === 'principal' ? member.object : null;
+      const credential: CredentialInput = { kind: 'credential', id: editor, principal: editor, caller: 'person', scope: null, expiresAt: null, revoked: false, generation: account?.generation ?? 0 };
+      return [editor, readerOf(account, credential, policy, chain, at)] as const;
+    }));
+    return new Map(items.map((item) => [item.definition.name, notCleared(item, readers.get(item.savedBy)!, resolved, chain)]));
+  }
+
+  /** An environment and the parents of its fork, nearest first, as the log has them; the first not live ends the chain. */
+  async #chain(held: (ref: Ref & { kind: 'environment' }) => Promise<Held>, environmentId: string): Promise<EnvironmentInput[]> {
+    const chain: EnvironmentInput[] = [];
+    for (let id: string | null = environmentId; id !== null && chain.length <= MAX_PARENTS; ) {
+      const read = await held({ kind: 'environment', id });
+      if (read.log !== 'live' || read.object.kind !== 'environment') break;
+      chain.push(read.object);
+      id = read.object.parentId;
+    }
+    return chain;
+  }
+
+  /**
+   * The UI items `member` saved, in every environment (decision 5's
+   * offboarding preview): the rows that name them found by their JSON, each
+   * object then held by the log, so a forged row lists nothing.
+   */
+  async proxySavedBy(input: { member: string }): Promise<{ items: SavedProxyItem[] }> {
+    const keys = this.#log015();
+    if (typeof input?.member !== 'string' || !/^(user|token):/.test(input.member)) throw new Error('a member is named user:<email> or token:<name>');
+    await this.#settled();
+    const found = await store.proxiesSavedBy(this.#db, input.member);
+    const objects = await Promise.all(found.map((id) => heldByLog(keys.seals, this.#db, { kind: 'proxy', id }).catch(notLogged)));
+    const items = objects.flatMap((held, i) => held.log !== 'live' || held.object.kind !== 'proxy' ? [] : Object.values(held.object.items)
+      .filter((item) => item.savedBy === input.member)
+      .map((item) => ({ environmentId: found[i]!, name: item.definition.name, kind: item.definition.kind, keys: [...item.keys] })));
+    return { items };
   }
 
   /**

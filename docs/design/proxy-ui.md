@@ -1828,6 +1828,71 @@ is fixed in this document, within PR C.
 - Tests: the page's own (save, discard, 409 review, inert fields for a
   reader), the examples' parity test, `check:docs`.
 
+**PR D as built** (W314). Where it settles what this section left open:
+- **The page's answer** (`ProxyPage`) adds, beside `editable`: `readOnly`
+  (why not, in the API's words), `code` as code's items, not names
+  (`ProxyCodeItem`: the definition in the tab's shape, `environments`, a
+  limit per service, and whether a binding carries it), `routesSensitive`
+  (the reader owns the project), `releases` (an instance Owner),
+  `useUrl` and `windowSeconds` (decision 4's window: `cacheSeconds`, or the
+  3 s deadline), and `insecureUpstreams`, so the page checks a definition
+  with the vault's own rules (`proxyDefinitionProblem`, now
+  `@coffre/core/proxy`, which a browser loads) before it asks.
+- **The `route_not_cleared` mark** is the vault's: `Vault.proxy()` decides
+  each item's keys for its frozen holdings and its editor's standing now
+  (`notCleared` in `packages/vault/src/proxy.ts`, the rule section 8 gives
+  the use), and answers `notCleared` per item. A save's answer leaves it
+  out: its reads would hold the change's locks two round trips longer
+  (`change-cost.test.ts`). PR C's use decides the same way; the two share
+  `routeRefusal`, `frozenAllows` and `frozenOwns`. A fork's read also
+  marks what it inherits (`inheritedNotCleared`), decided where the fork
+  resolves the keys: dev's `openai`, saved by someone who reads dev's
+  OPENAI_API_KEY, does not route in dev-eu once dev-eu sets its own value
+  they do not read, though it still routes in dev.
+- **A sensitive reference** is routed by an Owner of its source's project
+  (section 8). The Secrets list says, of each reference, whether you own
+  that project (`reference.ownsSource`, beside `canOpenSource`), so the page
+  checks each key where its value comes from, not by `routesSensitive`.
+- **Edits against another save**: the page keeps the seal it began editing
+  from, so a save that came since, even one a background read already
+  shows, is a 409 whose review says what changed. An edit whose item that
+  save removed stays a row, made again on saving. "Save again" queues the
+  item as its editor saw it: an inherited item, whose parent's save is no
+  409 to the fork, shows that parent's change since as fields its save
+  would set back, in the review, rather than clearing what its editor
+  never saw.
+- **The offboarding preview** reads `Vault.proxySavedBy({ member })`: the
+  rows that name the member found by their JSON, each object then held by
+  the log, so a forged row lists nothing. The member's page lists them, and
+  the Remove dialog names those it stops. A demotion stops those whose keys
+  it takes away; the page says so rather than predicting each.
+- **Forks**: the tab reads each parent's page beside its own, one round
+  trip; editing an inherited item, or saving it again as it is to clear
+  it, saves the fork's own (decision 6). Inheritance shows up to the
+  first parent the page cannot read (closed to the caller) or trust
+  (tampered, stale), and says so: past it, an unseen parent may override
+  what its own parents hold, and the vault refuses a use through a forged
+  object.
+- **Code's allow lists** keep code's matching: a code item says how
+  (`ProxyCodeItem.allowAs`): `code`, an `allow` whose trailing slash takes
+  what is below it; `legacy`, `methods` and `paths` as before 0.16, `*`
+  itself, with `methods` as code wrote them (`[]` took none), kept apart
+  since `paths: []` has no entry to carry them: `methods: ['POST'],
+  paths: []` is still a 405 to a GET. The sample call follows it, and
+  reads its path as the proxy does: encoded (`/café` is `/caf%C3%A9`), its
+  query apart, a segment that climbs out (`/%2e%2e/admin`) a 400. Code
+  takes any HTTP method (`PROPFIND`), the tab's own items its seven: a
+  code item's show as written, and the sample call offers them. An empty
+  allow list takes no request, a 403.
+- **Narrow screens**: the list stacks above the panel below 46rem of the
+  page's width (a container query, so the sidebar counts), and below 32rem
+  each label goes over its field.
+- **As code** writes a UI item out scoped to the environment it is in
+  (`environments: ['market/dev']`), as it serves now; a code item shows no
+  snippet, since its binding or limit per service has no words in the tab.
+- **Egresses and networks** stay direct in the tab until PR C declares them
+  by name (PR A refuses one with 400).
+
 PR B can go in parallel with A. C needs A and B. D needs A, and C for real
 uses.
 

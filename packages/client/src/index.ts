@@ -42,6 +42,7 @@ export type {
   OffboardingReport,
   PersonalConfig,
   ProjectSummary,
+  ProxyPage,
   ReferenceView,
   RemovedMember,
   RoleImpact,

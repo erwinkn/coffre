@@ -6,7 +6,7 @@
 import { createCoffre, durableAnchor, github, githubApp, oidc, postgres, signin, type CoffreContext } from '@coffre/server/cloudflare';
 
 import type { AnchorNamespace, GatesNamespace, RateLimiter, SocketsNamespace, VaultEntry } from '@coffre/server/cloudflare';
-import { credentialProxy, postgres as tunnel } from '@coffre/server/plugins/credential-proxy';
+import { credentialProxy, postgres as tunnel, privateKey, query } from '@coffre/server/plugins/credential-proxy';
 import { vaultKv } from '@coffre/server/plugins/vault-kv';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 
@@ -96,10 +96,23 @@ export const coffre = createCoffre((env: Env) => {
     auditChainKey: env.COFFRE_APP_KEY,
     // coffre as a Vault KV v2 mount, read only, at /v1 (routes/v1.$.ts): `VAULT_ADDR=http://127.0.0.1:3000
     // VAULT_TOKEN=<a service token> vault kv get secret/market/prod` (docs/design/plugins.md).
-    // The credential proxy's database tunnel at /use (routes/use.$.ts), its WebSockets in the SOCKETS Durable Object:
+    // The credential proxy at /use (routes/use.$.ts), its tunnels' WebSockets in the SOCKETS Durable Object:
     // `coffre run market/dev -- psql "$DATABASE_URL"`. Local databases are plain TCP on loopback, which only
-    // insecureUpstreams reaches.
-    plugins: [vaultKv(), credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true }), auditWatch({ anchor: durableAnchor(env.ANCHOR) })],
+    // insecureUpstreams reaches. Code defines a few items, which each environment's Proxy tab shows locked beside its
+    // own, which `editable` lets Owners write there (seeded by dev/seed.mjs).
+    plugins: [
+      vaultKv(),
+      credentialProxy({
+        credentials: {
+          maps: { upstream: 'https://maps.googleapis.com/maps/api', inject: query('key', '{MAPS_API_KEY}'), allow: [{ methods: ['GET'], path: '/geocode' }, { methods: ['GET'], path: '/place/**' }], limit: (service) => (service === 'token:ci-deploy' ? { perMinute: 60 } : undefined) },
+        },
+        tunnels: { db: tunnel('DATABASE_URL'), replica: tunnel('REPLICA_URL', { hosts: ['10.0.1.5'], environments: ['market/prod'] }) },
+        signers: { 'dfns-key': privateKey('DFNS_PRIVATE_KEY', { limit: { perMinute: 10 } }) },
+        insecureUpstreams: true,
+        editable: true,
+      }),
+      auditWatch({ anchor: durableAnchor(env.ANCHOR) }),
+    ],
     sockets: env.SOCKETS,
     gates: env.GATES,
   };

@@ -466,6 +466,30 @@ const TEMPLATES: Record<string, Template> = {
     tried: ({ entry }) => (entry.author === 'app' ? 'move to its new app key' : 'rotate its key'),
     what: () => [],
   },
+  // An environment's proxy definitions written in its Proxy tab (0.16, docs/design/proxy-ui.md): each item saved, where
+  // it sends which keys, the sensitive ones an Owner routes (R66), and those removed.
+  'proxy.save': {
+    did: 'saved the proxy of',
+    tried: 'save the proxy of',
+    what: ({ entry }) => environmentOf(entry),
+    then: ({ entry }) => proxySaved(entry),
+  },
+  // The names the deployment's code defines, reserved before it serves: each environment's own item of such a name deleted.
+  'proxy.code': {
+    did: 'reserved',
+    tried: 'reserve',
+    what: ({ entry }) => [names(proxyOf(entry).reserved) ?? 'names', " for the deployment's code"],
+    then: ({ entry }) => {
+      const cleared = Array.isArray(proxyOf(entry).cleared) ? (proxyOf(entry).cleared as unknown[]).length : 0;
+      return cleared === 0 ? [] : [`, deleting ${cleared === 1 ? "an environment's own item" : `${cleared} environments' own items`} of those names`];
+    },
+  },
+  // A name code reserved, freed in every environment by an instance Owner.
+  'proxy.release': {
+    did: 'released',
+    tried: 'release',
+    what: ({ entry }) => [text(proxyOf(entry).released) ?? text(entry.metadata.name) ?? 'a name', ', reserved by earlier code, for every environment'],
+  },
   // An MCP client a person connected, such as Claude: named as the consent page showed it.
   'mcp.connect': { did: 'connected', tried: 'connect', what: ({ entry }) => app(entry) },
   // A tool an MCP client called, by its name, and the places it named.
@@ -719,6 +743,46 @@ function versioned(entry: AuditEntry): Part[] {
   return [...place(entry), ...(entry.version === null ? [] : [`, version ${entry.version}`])];
 }
 
+/** A proxy entry's own part of its metadata (`proxy.save`, `proxy.code`, `proxy.release`). */
+function proxyOf(entry: AuditEntry): Record<string, unknown> {
+  const proxy = entry.metadata.proxy;
+  return typeof proxy === 'object' && proxy !== null && !Array.isArray(proxy) ? (proxy as Record<string, unknown>) : {};
+}
+
+/** Names, listed: "openai, maps"; null for none. */
+function names(value: unknown): string | null {
+  const listed = Array.isArray(value) ? value.filter((name): name is string => typeof name === 'string') : [];
+  return listed.length === 0 ? null : listed.join(', ');
+}
+
+/**
+ * What a save of an environment's proxy did, item by item: where each sends
+ * which keys, the sensitive ones routed, and those removed. A refusal names
+ * the items it was asked for.
+ *
+ *   ": openai to api.openai.com with OPENAI_API_KEY; stripe to api.stripe.com with STRIPE_KEY, an Owner routing sensitive STRIPE_KEY; removed maps"
+ */
+function proxySaved(entry: AuditEntry): Part[] {
+  const proxy = proxyOf(entry);
+  const saved = Array.isArray(proxy.saved) ? (proxy.saved as Record<string, unknown>[]) : [];
+  const items = saved.map((item) => {
+    const keys = names(item.keys);
+    const sensitive = names(item.routesSensitive);
+    let upstream: string | null = null;
+    try {
+      upstream = typeof item.upstream === 'string' ? new URL(item.upstream).host : null;
+    } catch {
+      upstream = text(item.upstream);
+    }
+    return `${text(item.name) ?? 'an item'}${upstream === null ? '' : ` to ${upstream}`}${keys === null ? '' : ` with ${keys}`}${sensitive === null ? '' : `, an Owner routing sensitive ${sensitive}`}`;
+  });
+  const removed = names(proxy.removed);
+  const parts = [...items, ...(removed === null ? [] : [`removed ${removed}`])];
+  if (parts.length > 0) return [`: ${parts.join('; ')}${proxy.replace === true ? ', replacing the whole set' : ''}`];
+  const asked = names(entry.metadata.names);
+  return asked === null ? [] : [` (${asked})`];
+}
+
 const TAMPERING: Record<string, string> = {
   mac: "it does not carry the vault's seal",
   stale: 'an older copy was put back',
@@ -773,6 +837,15 @@ const REASONS: Record<string, string> = {
   personal_token: 'only its person can, signed in as themselves',
   beyond_holder: 'more than they hold',
   role_granted: 'grants still name it',
+  // The Proxy tab's (0.16): the vault's refusals of a save, and the app's.
+  route_not_cleared: 'its editor may not route one of its keys',
+  proxy_changed: 'another save came first',
+  reserved: "the deployment's code takes the name",
+  not_editable: "the deployment's code keeps its proxy definitions",
+  not_a_person: 'only a person, signed in as themselves, does it',
+  route_not_personal: 'a personal config takes none of its own',
+  defined_in_code: "the deployment's code still defines it",
+  invalid: 'the definition is not one the proxy takes',
 };
 
 /** What a missing permission meant, from the app's `missing_<permission>`. */
@@ -861,6 +934,7 @@ export function who(entry: Pick<AuditEntry, 'actorType' | 'actorId'>): string | 
 }
 
 const SYSTEM: Record<string, string> = {
+  deployment: "the deployment's code",
   scheduler: 'the scheduler',
   cron: 'the scheduler',
   vault: 'the vault',

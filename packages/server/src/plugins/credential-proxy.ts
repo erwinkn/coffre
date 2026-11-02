@@ -48,7 +48,8 @@ import { constraintsAllow } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
-import { withProxyCode } from '../proxy-code.ts';
+import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod } from '@coffre/core/vault';
+import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
@@ -472,6 +473,8 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
     editable: options.editable === true,
     insecureUpstreams: options.insecureUpstreams === true,
     names: [...new Set([...credentials.keys(), ...tunnels.keys(), ...signers.keys(), ...verifiers.keys()])].sort(),
+    items: codeItems(options.credentials, tunnels, signers, verifiers),
+    cacheSeconds: cacheMs / 1000,
   });
 }
 
@@ -2396,6 +2399,51 @@ function checkScope(name: string, what: string, environments: readonly string[] 
     throw new Error(`credentialProxy: ${what} ${name}'s environments are the paths it serves, ['market/prod']: every one, unless set`);
   }
   return { environments: [...environments] };
+}
+
+/**
+ * Code's items as the Proxy tab shows them, locked (docs/design/proxy-ui.md,
+ * section 6): each in the shape of a UI definition, read from the config as
+ * written, already checked. What has no field there is said apart: a limit
+ * per service, and a binding (an egress, a network), which has no name.
+ * Legacy `methods` and `paths` read as their allow entries.
+ */
+function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap<string, Tunnel>, signers: ReadonlyMap<string, Signer>, verifiers: ReadonlyMap<string, Hmac>): ProxyCodeItem[] {
+  const scope = (item: { environments?: readonly string[] }) => (item.environments === undefined ? null : [...item.environments]);
+  const limit = (given: Limits | undefined): { limit: ProxyLimit; limitPerService: boolean } =>
+    typeof given === 'function' ? { limit: { perMinute: null, perDay: null }, limitPerService: true } : { limit: { perMinute: given?.perMinute ?? null, perDay: given?.perDay ?? null }, limitPerService: false };
+  const hmacOf = (signer: Hmac): ProxyHmac => ({ key: signer.key, encoding: signer.encoding, prefix: signer.prefix ?? '', maxBytes: signer.maxBytes ?? null });
+  const item = (definition: ProxyDefinition, from: { environments?: readonly string[] }, limitPerService = false, bound = false, allowAs: ProxyCodeItem['allowAs'] = null): ProxyCodeItem => ({ definition, environments: scope(from), limitPerService, bound, allowAs });
+  return [
+    ...Object.entries(credentials).map(([name, credential]) => {
+      const rules = (Array.isArray(credential.inject) ? credential.inject : [credential.inject]) as readonly Inject[];
+      const inject = rules.map((rule): ProxyInject => (rule.kind === 'sigv4'
+        ? { kind: 'sigv4', accessKeyId: rule.accessKeyId, secretAccessKey: rule.secretAccessKey, sessionToken: rule.sessionToken ?? null, region: rule.region, service: rule.service }
+        : rule.kind === 'basic' ? { kind: 'basic', user: rule.user, password: rule.password } : { kind: rule.kind, name: rule.name, template: rule.template }));
+      // Code takes any HTTP method (`PROPFIND`), the tab's own items only its seven: a code item's methods go out as code wrote
+      // them, upper-cased, and the tab reads a code item's as strings (`MethodsMenu`, the sample call), never as its seven.
+      const methods = (given: readonly string[] | undefined) => (given ?? []).map((method) => method.toUpperCase() as ProxyMethod);
+      const allow: ProxyAllow[] | null = credential.allow !== undefined
+        ? credential.allow.map((entry) => ({ methods: methods(entry.methods), path: entry.path ?? '/' }))
+        : credential.paths !== undefined ? credential.paths.map((path) => ({ methods: methods(credential.methods), path }))
+        : credential.methods !== undefined ? [{ methods: methods(credential.methods), path: '/' }] : null;
+      const { limit: limited, limitPerService } = limit(credential.limit);
+      const placeholder = credential.placeholder === undefined ? null : credential.placeholder.kind === 'jwt' ? { kind: 'jwt' as const, claims: [...credential.placeholder.claims] } : { kind: 'prefix' as const, prefix: credential.placeholder.prefix };
+      // Matched as code matches it, which the tab's preview follows: `paths` as before 0.16, and its `methods` as written,
+      // `[]` taking none, and still there when `paths: []` leaves no entry to hold them (`methods: ['POST'], paths: []`).
+      const allowAs: ProxyCodeItem['allowAs'] = credential.allow !== undefined ? { from: 'code', methods: null } : allow !== null ? { from: 'legacy', methods: credential.methods === undefined ? null : methods(credential.methods) } : null;
+      return item({ kind: 'route', name, upstream: credential.upstream, inject, allow, limit: limited, placeholder, egress: null }, credential, limitPerService, credential.egress !== undefined, allowAs);
+    }),
+    ...[...signers].map(([name, signer]) => {
+      const { limit: limited, limitPerService } = limit(signer.limit);
+      return item({ kind: 'signer', name, signer: signer.kind === 'hmac' ? { kind: 'hmac', ...hmacOf(signer) } : { kind: 'private-key', key: signer.key }, limit: limited }, signer, limitPerService);
+    }),
+    ...[...verifiers].map(([name, verifier]) => {
+      const { limit: limited, limitPerService } = limit(verifier.limit);
+      return item({ kind: 'verifier', name, hmac: hmacOf(verifier), limit: limited }, verifier, limitPerService);
+    }),
+    ...[...tunnels].map(([name, tunnel]) => item({ kind: 'tunnel', name, key: tunnel.key, hosts: [...(tunnel.hosts ?? [])], network: null }, tunnel, false, tunnel.connect !== undefined)),
+  ].sort((a, b) => a.definition.name.localeCompare(b.definition.name));
 }
 
 /** Whether a code item serves an environment, by its path now (a personal config, `<env>@me`, its environment's). */
