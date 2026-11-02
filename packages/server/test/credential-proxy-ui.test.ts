@@ -401,6 +401,30 @@ test('a two-segment stable URL whose handle rides only in the body: the UI route
   assert.deepEqual([reached.at(-1)!.method, reached.at(-1)!.url], ['POST', '/login/token']);
 });
 
+test("a handle escaped as its slot's own encoding allows: a query's or a form's percent escapes, a JSON string's \\u escapes, found with no other sign of it (review r7 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  const post = [{ methods: ['POST'], path: '/token' }];
+  await save({
+    search: { ...uiRoute('search', '/search'), inject: [{ kind: 'query', name: 'key', template: '{OPENAI_API_KEY}' }] } as ProxyDefinition,
+    login: { ...uiRoute('login', '/login'), inject: [{ kind: 'form', name: 'client_secret', template: '{OPENAI_API_KEY}' }], allow: post } as ProxyDefinition,
+    hook: { ...uiRoute('hook', '/hook'), inject: [{ kind: 'json', name: 'secret', template: '{OPENAI_API_KEY}' }], allow: post } as ProxyDefinition,
+  });
+  const token = await handle();
+  const escaped = token.replace('_', '%5F');
+  const query = await route(`/use/search/models/list?key=${escaped}`);
+  assert.equal(query.status, 200, await query.clone().text());
+  assert.equal(reached.at(-1)!.url, `/search/models/list?key=${encodeURIComponent(OPENAI)}`);
+  const form = await route('/use/login/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `grant_type=client_credentials&client_secret=${escaped}` });
+  assert.equal(form.status, 200, await form.clone().text());
+  assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.body], ['/login/token', `grant_type=client_credentials&client_secret=${encodeURIComponent(OPENAI)}`]);
+  const json = await route('/use/hook/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: `{"secret":"${token.replace('_', '\\u005f')}"}` });
+  assert.equal(json.status, 200, await json.clone().text());
+  assert.deepEqual([reached.at(-1)!.url, JSON.parse(reached.at(-1)!.body)], ['/hook/token', { secret: OPENAI }]);
+  // Two different handles, one escaped: still two.
+  const other = await handle();
+  assert.equal((await route(`/use/search/models/list?key=${escaped}&q=${other}`)).status, 400);
+});
+
 test("a service binding's call is never served a handle's kept values: no UI route for it before C2b, the copy unread (review r2 of #467)", ON_015, async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   const token = await handle();

@@ -1719,7 +1719,10 @@ before PR C. Where C2a settles what this section left open:
 - **The handle on a cold isolate** is found by its shape before any item
   says where it rides: any header (`x-api-key: <handle>`, SigV4's
   `Credential=<handle>/…`, a Basic pair decoded), the query, then the body
-  (64 KiB). Two different handles: 400. The decided item must then find it
+  (64 KiB). The query and the body are read as sent and as decoded, every
+  way a rule reads its slot: `?key=coffre%5Fuse_…`, a form's percent escapes
+  and a JSON string's `\u005f` find the handle `sendAs` reads there (review
+  r7 of #467). Two different handles: 400. The decided item must then find it
   where it takes its key (`sendAs`), or nothing is sent. Bearer,
   `x-coffre-handle` and the query alone missed SigV4 and every header
   rule but `authorization`.

@@ -704,7 +704,7 @@ async function uiHandle(request: Request, url: URL): Promise<string | null | Res
   const copy = request.clone();
   try {
     const bytes = await boundedBody(copy, MAX_FIELD_BODY);
-    const inside = new Set(bytes == null ? [] : LATIN1.decode(bytes).match(HANDLES) ?? []);
+    const inside = bytes == null ? new Set<string>() : handlesInBody(bytes);
     if (inside.size > 1) return failure(400, 'the request carries two different handles: a route takes one');
     return inside.values().next().value ?? null;
   } finally {
@@ -718,7 +718,9 @@ async function uiHandle(request: Request, url: URL): Promise<string | null | Res
  * item the use decides on then checks that the handle sits where it takes its key (`sendAs`).
  */
 function handlesOutside(request: Request, url: URL): Set<string> {
+  // As sent and as decoded: `?key=coffre%5Fuse_…` is the handle `handleIn` reads from `searchParams` (review r7 of #467).
   const found = new Set<string>(url.search.match(HANDLES) ?? []);
+  for (const [name, value] of url.searchParams) for (const handle of `${name}\n${value}`.match(HANDLES) ?? []) found.add(handle);
   for (const [name, value] of request.headers) {
     for (const handle of value.match(HANDLES) ?? []) found.add(handle);
     if (name !== 'authorization') continue;
@@ -731,6 +733,26 @@ function handlesOutside(request: Request, url: URL): Set<string> {
       } catch {
         // Not base64: no pair, no handle.
       }
+    }
+  }
+  return found;
+}
+
+/**
+ * The handles a body carries, read every way a form or JSON rule could read its field (review r7 of #467): the bytes as
+ * sent, the body as a form decodes it (`client_secret=coffre%5Fuse_…`), and each JSON string with its escapes undone
+ * (`"coffre\u005fuse_…"`). A body that is neither still counts as sent.
+ */
+function handlesInBody(bytes: Uint8Array): Set<string> {
+  const found = new Set<string>(LATIN1.decode(bytes).match(HANDLES) ?? []);
+  const text = new TextDecoder().decode(bytes);
+  for (const [name, value] of new URLSearchParams(text)) for (const handle of `${name}\n${value}`.match(HANDLES) ?? []) found.add(handle);
+  for (const match of text.matchAll(/"[^"\\]*(?:\\.[^"\\]*)*"/g)) {
+    if (!match[0].includes('\\')) continue;
+    try {
+      for (const handle of (JSON.parse(match[0]) as string).match(HANDLES) ?? []) found.add(handle);
+    } catch {
+      // No JSON string: its bytes counted as sent.
     }
   }
   return found;
