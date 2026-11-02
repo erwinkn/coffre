@@ -1707,7 +1707,10 @@ before PR C. Where C2a settles what this section left open:
   request itself, before the plugin: 503 `unavailable` (`proxy_gate`,
   `Retry-After: 1`), or `deploying` for a vault on another release, and
   keeps nothing, so the next request asks again. The tests' database
-  reset forgets it with the log (`forgetProxyGates`).
+  reset forgets it with the log (`forgetProxyGates`). A vault of 0.14's
+  log holds no proxy definitions and has nothing to reserve: the gate
+  passes it without a call (`keeps015`, settled per vault, whose log is
+  fixed when it is made).
 - **The handle on a cold isolate** is found by its shape before any item
   says where it rides: any header (`x-api-key: <handle>`, SigV4's
   `Credential=<handle>/…`, a Basic pair decoded), the query, then the body
@@ -1715,6 +1718,21 @@ before PR C. Where C2a settles what this section left open:
   where it takes its key (`sendAs`), or nothing is sent. Bearer,
   `x-coffre-handle` and the query alone missed SigV4 and every header
   rule but `authorization`.
+- **The send's window** (review r1 of #467). A UI route's values are
+  decided before the body is read, since on a cold isolate the item that
+  says how to carry it comes with them. So each send carries a send-by
+  time, checked just before it goes: a kept entry's `until`, or, decided
+  now, the use's deadline (3 s), or `cacheSeconds` if longer. A body that
+  stalls past it is 503 `late` and nothing is sent: values decided before
+  an edit or a revocation never ride a request that came after it.
+- **The handle decides the reading before code's precedence.** For
+  `/use/<a>/<b>` and for `/use/<a>/<b>/<a code name>/…` (`<a>` no code
+  name), the handle's made-for list says whether the URL is the place's
+  (the plan or compute; code's credential) or route `<a>` at `/<b>…`:
+  `/use/openai/models/maps` from a `market/dev` handle is UI route
+  `openai` at `/models/maps`. The handle is found outside the body or,
+  for a form or JSON route, in it. Under `cacheSeconds: 0` that list is
+  one more call; C2b's route use answers the reading itself.
 - **Only readings whose name can be a route's.** `/use/s3/bucket/report.csv`
   is route `s3` at `/bucket/report.csv`; `report.csv` is no route name, so
   no place reading is offered. The vault takes a malformed name as the
@@ -1737,7 +1755,8 @@ before PR C. Where C2a settles what this section left open:
   does not serve, or a route the proxy cannot take) are the handle too,
   and no URL is listed for them. A `tampered` or `stale` level, or an
   item answered without its definition, is 503 and no environment. A
-  name code holds is left out; a personal config shapes nothing.
+  name code holds is left out; a personal config shapes nothing (the
+  vault answers `personal` with no items, checked before the items are).
 - **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
   map): the place URL and a stable URL of three segments or more are one
   `use_route` statement and nothing of the app's; `/use/<a>/<b>` is the

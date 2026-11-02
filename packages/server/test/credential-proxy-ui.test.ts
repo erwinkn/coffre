@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { SignatureV4 } from '@smithy/signature-v4';
 
 import { createClient, type CoffreClient } from '@coffre/client';
-import { Deploying, type ProxyDefinition, type Vault } from '@coffre/core/vault';
+import { Deploying, USE_DEADLINE_MS, type ProxyDefinition, type Vault } from '@coffre/core/vault';
 
 import { sql, type SQL } from 'drizzle-orm';
 
@@ -133,7 +133,10 @@ test('an edit reaches the next use; values kept for `cacheSeconds` go only where
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
   assert.equal(reached.at(-1)!.url, '/old/models');
   await save({ openai: uiRoute('openai', '/new') });
-  // Kept (60 s by default): still the old item's upstream, never the new one with values decided on the old.
+  // Another handle on the same isolate brings the new item: the isolate's copy is now `/new`.
+  assert.equal((await route('/use/openai/models', as(await handle()))).status, 200);
+  assert.equal(reached.at(-1)!.url, '/new/models');
+  // The first handle's values, kept (60 s by default), still go by the item they were decided on, never by the newer copy.
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
   assert.equal(reached.at(-1)!.url, '/old/models');
   // An isolate that keeps nothing: each request decided on the newest version.
@@ -303,4 +306,60 @@ test("the gate: a vault that cannot reserve code's names, or one on another rele
   }
   assert.equal((await route('/use/openai/models', as(token))).status, 200);
   assert.equal(reached.length, 1);
+});
+
+test("values go out within their window: a body that comes after the use's deadline is sent with none (review r1 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  // The handle in a header, so the use is made at once; the body, read whole, comes 3.5 s later.
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"model":'));
+      await new Promise((resolve) => setTimeout(resolve, USE_DEADLINE_MS + 500));
+      controller.enqueue(new TextEncoder().encode('"gpt"}'));
+      controller.close();
+    },
+  });
+  const late = await route('/use/openai/chat/completions', as(token, { method: 'POST', body, duplex: 'half' } as RequestInit));
+  assert.equal(late.status, 503, await late.clone().text());
+  assert.equal((await late.json() as { reason: string }).reason, 'late');
+  assert.equal(reached.length, 0);
+  // In time, the same request goes.
+  assert.equal((await route('/use/openai/chat/completions', as(token, { method: 'POST', body: '{"model":"gpt"}' }))).status, 200);
+});
+
+test("a personal config's plan: its UI items none, the plan given (review r1 of #467)", ON_015, async () => {
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle('market/dev@me');
+  const planned = await route('/use/market/dev@me', as(token));
+  assert.equal(planned.status, 200, await planned.clone().text());
+  const plan = await planned.json() as { environment: string; credentials: Record<string, string> };
+  assert.equal(plan.credentials.openai, undefined);
+});
+
+test("the URL's reading decides before code's precedence: `/use/openai/models/maps` is route openai at /models/maps, code's `maps` at `openai/models` only for a handle made for it (review r1 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  const answer = await route('/use/openai/models/maps', as(token));
+  assert.equal(answer.status, 200, await answer.clone().text());
+  assert.equal(reached.at(-1)!.url, '/openai/models/maps');
+  // The place reading, a handle made for market/dev: code's `maps`, as before.
+  assert.equal((await route('/use/market/dev/maps/geocode', { headers: { 'x-api-key': token } })).status, 200);
+  assert.equal(reached.at(-1)!.url, '/maps/geocode');
+});
+
+test('a two-segment stable URL whose handle rides only in the body: the UI route, not compute (review r1 of #467)', ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({
+    login: {
+      kind: 'route', name: 'login', upstream: `${upstreamUrl}/login`, inject: [{ kind: 'form', name: 'client_secret', template: '{OPENAI_API_KEY}' }],
+      allow: [{ methods: ['POST'], path: '/token' }], limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+    },
+  });
+  const token = await handle();
+  const answer = await route('/use/login/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `grant_type=client_credentials&client_secret=${token}` });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  assert.deepEqual([reached.at(-1)!.method, reached.at(-1)!.url], ['POST', '/login/token']);
 });

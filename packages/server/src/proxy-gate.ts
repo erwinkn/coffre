@@ -1,5 +1,6 @@
 import { isDeploying, type Vault } from '@coffre/core/vault';
 
+import { keeps015 } from './api/changes.ts';
 import { ApiError } from './api/errors.ts';
 import type { ProxyCode } from './proxy-code.ts';
 
@@ -29,16 +30,18 @@ export async function gateProxy(vault: Vault, code: ProxyCode | null): Promise<v
   if (code === null) return;
   const key = code.names.join('\n');
   if (GATED.get(vault)?.has(key) === true) return;
-  let answer: Awaited<ReturnType<Vault['reserveProxy']>>;
+  let answer: Awaited<ReturnType<Vault['reserveProxy']>> | null;
   try {
-    answer = await vault.reserveProxy({ names: [...code.names] });
+    // A vault of 0.14's log holds no proxy definitions (0.15's log's objects), and makes none: nothing to reserve. Its
+    // log is fixed when it is made, so the answer is kept with the vault.
+    answer = (await keeps015(vault)) ? await vault.reserveProxy({ names: [...code.names] }) : null;
   } catch (error) {
     // A vault on another release (decision 8): 503 `deploying`, as every call answers it.
     if (isDeploying(error)) throw error;
     console.error("reserving the proxy code's names failed", { error: error instanceof Error ? error.message : String(error) });
     throw new ApiError('unavailable', "coffre cannot reserve its code's proxy names right now: ask again", 'proxy_gate', '1');
   }
-  if (!answer.ok) throw new ApiError('unavailable', `coffre cannot reserve its code's proxy names: ${answer.refusal.message}`, 'proxy_gate', '1');
+  if (answer !== null && !answer.ok) throw new ApiError('unavailable', `coffre cannot reserve its code's proxy names: ${answer.refusal.message}`, 'proxy_gate', '1');
   let gated = GATED.get(vault);
   if (gated === undefined) GATED.set(vault, (gated = new Set()));
   gated.add(key);

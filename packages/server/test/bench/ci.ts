@@ -444,7 +444,7 @@ try {
       uiUpstream = createServer((request, response) => void response.writeHead(request.headers['x-api-key'] === expected ? 200 : 403).end());
       await new Promise<void>((resolve) => uiUpstream!.listen(0, '127.0.0.1', resolve));
       load.ui = { upstream: `http://127.0.0.1:${(uiUpstream.address() as AddressInfo).port}/v1` };
-      deps.proxy = proxyCodeOf(checkPlugins([credentialProxy({ credentials: {}, editable: true })]));
+      deps.proxy = proxyCodeOf(checkPlugins([credentialProxy({ credentials: {}, editable: true, insecureUpstreams: true })]));
       const items = { api: {
         kind: 'route' as const, name: 'api', upstream: load.ui.upstream, inject: [{ kind: 'header' as const, name: 'x-api-key', template: load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}' }],
         allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
