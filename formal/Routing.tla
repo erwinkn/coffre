@@ -19,7 +19,10 @@
 (* writer with no key may put back an earlier version, body and seal       *)
 (* (Tamper), or change the body under the seal it finds (Forge): a seal is *)
 (* a MAC over the body, so the vault refuses a forged row (`tampered`),    *)
-(* always; only a row put back passes a MAC.                               *)
+(* always; only a row put back passes a MAC. With one route, the version   *)
+(* stands for the design's item digest and its sealed index entry          *)
+(* (proxy-ui.md, section 2): the copy names it, and the vault omits the    *)
+(* body when the row's item still has it.                                  *)
 (*                                                                         *)
 (* Isolates (Iso): each runs one deployment's code, which defines `r` or   *)
 (* not (code[i]); two may serve at once, during a deploy. A use, in the    *)
@@ -30,7 +33,7 @@
 (*   the vault's one call (Decide): under the fence shared, the row, its   *)
 (*   MAC, the seal of the newest change, and the key's nature, in one      *)
 (*   snapshot; it allows or refuses, and answers with the body decided on, *)
-(*   or, when the isolate's copy carries that seal, confirms the copy;     *)
+(*   or, when the isolate's copy carries that version, omits the body;     *)
 (*   the request goes out (Send): to the kept definition's upstream,       *)
 (*   while the kept values serve (`cacheSeconds`, or the use's deadline    *)
 (*   with no cache: W ticks after the decision).                           *)
@@ -74,12 +77,12 @@ CONSTANTS
     \* The row's seal must be its newest change's (`stale`).
     SealChecked,
     \* The isolate's copy comes only from the vault's answers, never from a
-    \* read of its own (the page's, or a bootstrap): so a seal it sends, and
-    \* the vault confirms, stands for a body the vault checked.
+    \* read of its own (the page's, or a bootstrap): so a digest it sends,
+    \* for which the vault omits the body, stands for a body the vault checked.
     CopyFromVault,
     \* The app sends by the definition the vault decided on (its answer's
-    \* body, or the copy it confirmed by seal), never by a copy the vault
-    \* did not confirm.
+    \* body, or the copy whose digest made it omit the body), never by a copy
+    \* the vault did not check.
     SentAsDecided,
     \* Kept values go only where the definition they were decided under says
     \* (the value cache is keyed by its seal), never where a newer copy says.
@@ -240,9 +243,9 @@ Read(i) ==
 \* or (SealChecked) its seal is not the newest change's, or it holds no
 \* definition, or (ClearanceAtUse) K is sensitive and the definition not an
 \* Owner's. Allowed, it answers with the body it decided on, unless the
-\* isolate's copy carries that seal, which it confirms. The app keeps the
-\* values with the upstream it will send them to: the answer's (or the
-\* confirmed copy's), or, without SentAsDecided, its copy's whatever it is.
+\* isolate's copy carries that version (the item digest), when it omits
+\* the body. The app keeps the values with the upstream it will send them
+\* to: the answer's (or the copy's, when the body was omitted), or, without SentAsDecided, its copy's whatever it is.
 \* The value cache is per caller, the copy per route: a use by another
 \* caller (~mine) refreshes the copy and leaves this caller's kept values.
 \* A decision on a version code hid is a revival (the ghost, NoRevival);

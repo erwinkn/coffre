@@ -1965,7 +1965,8 @@ under the seal it finds, which the MAC refuses. A use is the app's resolve
 (code first, else the isolate's copy of the definition, a seal and a
 body), the vault's one call (the row, its MAC, the newest change's seal
 and the key's nature, decided in one snapshot under the fence, answering
-with the body decided on or confirming the copy's seal), and the send of
+with the body decided on, or omitting it when the copy has its digest),
+and the send of
 the kept values, W ticks at most after the decision (`cacheSeconds`, or
 the deadline). An edit is a change under the fence, one step: HotPathOne
 proves the fence for any input. A key may be marked sensitive after a
@@ -1979,7 +1980,7 @@ drops a reservation, only an instance Owner's audited release.
 |---|---|
 | the definition read in the use's statement, after the fence (FencedRead) | `EverySendAllowed`: a use decided on the row an edit had replaced, numbered after it |
 | the row's seal is its newest change's (SealChecked) | `EverySendAllowed`: a writer puts back the old version, and a use is decided on it |
-| the isolate's copy comes only from vault answers, never a read of its own (CopyFromVault) | `EverySendAllowed`: a writer forges the body under a genuine seal, the app reads that pair, the writer puts the genuine row back; the vault confirms the seal and the app sends by the forged body |
+| the isolate's copy comes only from vault answers, never a read of its own (CopyFromVault) | `EverySendAllowed`: a writer forges the item beside its genuine digest, the app reads that pair, the writer puts the genuine row back; the vault sees the digest, omits the item, and the app sends by the forged body |
 | the app sends by the definition the vault decided on, which the call answers with (SentAsDecided) | `EverySendAllowed`: the app's own copy, older, says another host than the version decided |
 | kept values go only to the definition they were decided under (BoundToDefinition) | `EverySendAllowed`: values decided for one upstream sent to a newer one the vault never decided on for them |
 | each use weighs the key's nature now against the definition's clearance (ClearanceAtUse) | `EverySendAllowed`: a Developer's route saved while the key was secret sends it once it is sensitive |
