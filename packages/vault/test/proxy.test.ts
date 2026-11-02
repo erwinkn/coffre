@@ -237,6 +237,14 @@ test('who saves: a person holding proxy.edit, on a session; a Developer, a token
   // Protected, the role's protected column holds no proxy.edit.
   assert.ok((await w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev], protected: true } })).ok);
   refusedWith(await w.save({ actor: ADA, seal: view.seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }), 'no_grant');
+  // An Owner saving Ada's item again, unchanged, saves it under their own standing (how a route an earlier editor
+  // can no longer clear is cleared): logged, and its editor and holdings are the Owner's now.
+  const before = await count(sql`SELECT count(*) AS n FROM log_changes`);
+  const again = saved(await w.save({ seal: view.seal, items: { openai: route('openai') } }));
+  assert.deepEqual(again.items.map((each) => [each.savedBy, each.routesSensitive]), [[ROOT, true]]);
+  assert.notEqual(again.seal, view.seal);
+  assert.equal(await count(sql`SELECT count(*) AS n FROM log_changes`), before + 1);
+  assert.equal((await stored(w.dev))!.items.openai!.holdings.role, 'owner');
   // A role that edits the proxy and reads nothing is no role the rules allow.
   const unreadable = await w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'role', role: 'blind', definition: { name: 'Blind', description: '', permissions: ['proxy.edit'], protected: [] } } });
   assert.equal(unreadable.ok, false);
@@ -304,6 +312,12 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
   assert.deepEqual([replaced.state, replaced.items.map((each) => each.definition.name)], ['ok', ['c']]);
   assert.deepEqual(await w.view(), replaced);
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
+  // The forged object's items are no items its log had: the audit removes none of them. Replaced whole again, from a
+  // sound one, the audit names each item the replace dropped.
+  const audits = async () => (await rows<{ metadata: string }>(db.owner, sql`SELECT metadata FROM audit_log WHERE action = 'proxy.save' AND decision = 'allow' ORDER BY seq DESC LIMIT 1`)).map((row) => JSON.parse(row.metadata).proxy.removed);
+  assert.deepEqual(await audits(), [[]]);
+  saved(await w.save({ seal: replaced.seal, items: { d: route('d') }, replace: true }));
+  assert.deepEqual(await audits(), [['c']]);
 });
 
 test("a row planted where no change was made is stale, and its environment's first save starts from none", ON_015, async () => {
@@ -312,7 +326,7 @@ test("a row planted where no change was made is stale, and its environment's fir
   if (ENGINE === 'postgres') await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(items)}::jsonb, ${indexBytes(items)}, ${randomBytes(16)})`);
   else await run(db.owner, sql`INSERT INTO proxy_definitions (environment_id, items, digests, seal) VALUES (${w.dev}, ${JSON.stringify(items)}, ${indexBytes(items)}, ${randomBytes(16)})`);
   assert.equal((await w.view()).state, 'stale');
-  refusedWith(await w.save({ seal: null, items: { b: route('b') } }), 'tampered');
+  refusedWith(await w.save({ seal: null, items: { b: route('b') } }), 'tampered', /stale/);
   const replaced = saved(await w.save({ seal: null, items: { b: route('b') }, replace: true }));
   assert.deepEqual(replaced.items.map((each) => each.definition.name), ['b']);
 });

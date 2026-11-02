@@ -1564,8 +1564,13 @@ reads it otherwise:
   The vault decides each save from the object as its log has it
   (`heldByLog`), so a forged row is never carried on, and a `tampered` or
   `stale` one takes only a save that replaces it whole (`replace: true`),
-  by an Owner of the project. An item the save does not change keeps its
-  editor and holdings; a save that changes nothing logs nothing.
+  by an Owner of the project. An item the save does not name keeps its
+  editor and holdings. One it names is saved again under its editor's
+  standing now, its definition unchanged included: that is how an Owner
+  clears a route its earlier editor no longer can (section 8's "must save
+  it again"). Only an item named with the same definition, by the same
+  editor, holding the same, changes nothing, and a save of only those logs
+  nothing. A replace's entry names every item it drops.
 - **Every decision also writes a vault entry** (`proxy.save`, `proxy.code`,
   `proxy.release`): each refusal, and the audit page's diff, the sensitive
   keys an item routes among it (R66).

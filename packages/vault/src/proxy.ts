@@ -12,9 +12,6 @@ import { sealed, type EnvironmentInput, type FrozenHoldings, type ProxyInput, ty
  * shown. vault.ts reads the sealed objects these weigh, and logs.
  */
 
-/** The most fork parents a lookup walks, as values inherit (`MAX_PARENTS`). */
-export const MAX_PARENTS = 3;
-
 /** The most names one `proxy.code` reserves at once: far more than any deployment's code defines. */
 export const MAX_RESERVED = 1000;
 
@@ -77,11 +74,6 @@ export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly E
   return null;
 }
 
-/** Whether an item's save cleared it for its place's sensitive values: its editor owned the project. */
-export function routesSensitive(holdings: FrozenHoldings, projectId: string): boolean {
-  return frozenOwns(holdings, projectId);
-}
-
 /** An environment's sealed object as the tab shows it: each item without its holdings. */
 export function proxyView(
   environment: { id: string; projectId: string },
@@ -93,7 +85,8 @@ export function proxyView(
     keys: [...item.keys],
     savedBy: item.savedBy,
     savedAt: item.savedAt,
-    routesSensitive: routesSensitive(item.holdings, environment.projectId),
+    // Its save cleared it for its place's sensitive values: its editor owned the project.
+    routesSensitive: frozenOwns(item.holdings, environment.projectId),
   }));
   return {
     environmentId: environment.id,

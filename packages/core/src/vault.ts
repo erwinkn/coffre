@@ -496,6 +496,13 @@ export type Sealing = { ok: true } | { ok: false; reason: string };
  * crosses Workers' RPC: the app answers 503 with Retry-After
  * (`isUnsealed`), and the change is in force.
  */
+/**
+ * At most how many parents stand above an environment: `prod`, `prod-eu`,
+ * and `prod-eu-canary` above `prod-eu-canary-a` (docs/design/forking.md).
+ * The app's reads and the vault's proxy lookups walk no further.
+ */
+export const MAX_PARENTS = 3;
+
 export const UNSEALED = 'was committed, but not sealed in time';
 
 /** Whether `error`, or one of its causes, is a change's seal that did not come in time (`UNSEALED`). */

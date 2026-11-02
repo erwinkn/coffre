@@ -147,6 +147,7 @@ import {
   canonicalDefinition,
   definitionKeys,
   proxyDefinitionProblem,
+  MAX_PARENTS,
   MAX_PROXY_ITEMS,
   type ClearedItem,
   type ProxyDefinition,
@@ -173,7 +174,7 @@ import {
   applyOp, canonical, limitChange, noEdits, objectKey, POLICY_REF, RESERVED_REF, ROLES_REF, sealed as sealedObject, sealKey, sealOf,
   type CredentialInput, type EnvironmentInput, type Input, type Op, type PrincipalInput, type ProxyInput as ProxyObject, type ProxyItem, type Ref, type SecretInput,
 } from './inputs.ts';
-import { frozenHoldings, MAX_PARENTS, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
+import { frozenHoldings, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
 import { authentic, changeEntry, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
@@ -4081,7 +4082,8 @@ class VaultService implements Vault {
         changes.held(d.tx, RESERVED_REF),
         changes.held(d.tx, { kind: 'environment', id: environmentId }),
         store.newestChange(d.tx, ref),
-        input.replace === true ? null : changes.held(d.tx, ref).catch((error: unknown) => {
+        // A replace weighs none of it: read only for the audit's `removed`, the items its log had.
+        changes.held(d.tx, ref).catch((error: unknown) => {
           if (error instanceof NotLogged) return error;
           throw error;
         }),
@@ -4110,13 +4112,21 @@ class VaultService implements Vault {
       const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
       const taken = [...asked].find(([name, definition]) => definition !== null && names.includes(name));
       if (taken !== undefined) throw refused('reserved', `${taken[0]} is reserved by the deployment's code: an instance Owner may release it`);
-      if (current instanceof NotLogged) throw refused('tampered', "this environment's proxy definitions failed the vault's integrity check: an Owner of its project replaces them whole");
-      const before: ProxyObject | null = current?.log === 'live' && current.object.kind === 'proxy' ? current.object : null;
-      // What changes: an item whose definition is the one it holds keeps its save (its editor, its holdings).
+      if (current instanceof NotLogged && input.replace !== true) {
+        throw refused('tampered', current.fault === 'stale'
+          ? "this environment's proxy definitions are not their newest change's (stale): an Owner of its project replaces them whole"
+          : "this environment's proxy definitions failed the vault's integrity check: an Owner of its project replaces them whole");
+      }
+      const logged: ProxyObject | null = !(current instanceof NotLogged) && current.log === 'live' && current.object.kind === 'proxy' ? current.object : null;
+      const before = input.replace === true ? null : logged;
+      // What changes: each item the save names is saved again, under its editor's standing now (a re-save is how an
+      // Owner clears a route an earlier editor can no longer), unless its definition, editor and standing are the ones
+      // it holds: then nothing changes and nothing is logged.
+      const holdings = frozenHoldings(reader);
       const saved = new Map<string, ProxyDefinition | null>();
       for (const [name, definition] of asked) {
         const was = before?.items[name] ?? null;
-        if (definition === null ? was === null && input.replace !== true : was !== null && canonical(was.definition) === canonical(definition)) continue;
+        if (definition === null ? was === null && input.replace !== true : was !== null && was.savedBy === actor && canonical(was.definition) === canonical(definition) && canonical(was.holdings) === canonical(holdings)) continue;
         saved.set(name, definition);
       }
       const kept = input.replace === true ? 0 : Object.keys(before?.items ?? {}).filter((name) => !saved.has(name)).length;
@@ -4130,7 +4140,6 @@ class VaultService implements Vault {
         const why = routeRefusal(reader, key, chain);
         if (why !== null) throw refused('route_not_cleared', `${why}: it cannot be routed by ${actor.slice('user:'.length)}`);
       }
-      const holdings = frozenHoldings(reader);
       const items: Record<string, ProxyItem | null> = {};
       for (const [name, definition] of saved) {
         if (definition === null) {
@@ -4152,7 +4161,7 @@ class VaultService implements Vault {
         proxy: {
           replace: input.replace === true,
           saved: [...saved].flatMap(([name, definition]) => (definition === null ? [] : [{ name, kind: definition.kind, ...(definition.kind === 'route' ? { upstream: definition.upstream } : {}), keys: definitionKeys(definition), routesSensitive: cleared.get(name) ?? [] }])),
-          removed: input.replace === true ? Object.keys(before?.items ?? {}).filter((name) => !saved.has(name)) : [...saved].flatMap(([name, definition]) => (definition === null ? [name] : [])),
+          removed: input.replace === true ? Object.keys(logged?.items ?? {}).filter((name) => saved.get(name) == null) : [...saved].flatMap(([name, definition]) => (definition === null ? [name] : [])),
         },
       }));
       return { view };
