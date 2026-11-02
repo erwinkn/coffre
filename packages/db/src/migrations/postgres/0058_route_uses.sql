@@ -1266,7 +1266,9 @@ GRANT EXECUTE ON FUNCTION use_route(bytea, text, text, text, text, smallint, boo
 -- runs this migration on a database the owner migrated, what it makes here (`use_covered`, `use_credential`,
 -- `use_route`) is the member's, while 0048's `use_batch`, 0055's `use_named_batch` and 0045's and 0051's helpers stay
 -- the owner's. Without these grants every batch would fail with 42501 (the owner may not execute the member's
--- `use_credential`). As 0057 does for its own, granted by name, caller to callee (`scripts/test-schema-owner.sh`).
+-- `use_credential`). As 0057 does for its own, granted by name, caller to callee (`scripts/test-schema-owner.sh`); the
+-- helpers that run as their caller (`use_admits`, `use_scope_holds`, inside `use_stands` and `use_stands_personal`) are
+-- granted to `use_credential`'s owner, whom 0058 may have changed.
 DO $$
 DECLARE
     v_credential regprocedure := 'public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text)';
@@ -1277,6 +1279,8 @@ BEGIN
         (v_credential, 'public.use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid, text)'::regprocedure),
         (v_credential, 'public.use_stands(uuid, uuid, smallint, bigint, jsonb)'::regprocedure),
         (v_credential, 'public.use_stands_personal(uuid, uuid, bigint, jsonb)'::regprocedure),
+        (v_credential, 'public.use_admits(jsonb, text)'::regprocedure),
+        (v_credential, 'public.use_scope_holds(uuid, uuid, text, jsonb)'::regprocedure),
         ('public.use_batch(uuid, uuid[], bigint[], bigint, smallint, uuid[], bytea[], bigint, bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], boolean[], smallint, text, text)'::regprocedure, v_credential),
         ('public.use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer)'::regprocedure, v_credential),
         ('public.use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean)'::regprocedure, v_credential)
