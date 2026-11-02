@@ -386,6 +386,13 @@
       "when": 1793627326683,
       "tag": "0056_proxy_definitions",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1793643527855,
+      "tag": "0057_use_covered",
+      "breakpoints": true
     }
   ]
 }

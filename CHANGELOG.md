@@ -24,6 +24,27 @@
   write. Migration 0056 adds `proxy_definitions` and `proxy_reserved`, and
   `change_input` for their two kinds; the previous release runs on it.
 
+- **A use costs the same however many days the log keeps (T187).** The
+  hot path's statement, which Postgres plans once for any values, checked
+  a repeat use's earlier entry in `log_uses`, and such a plan names every
+  day's partition: each use locked one more relation per day kept (130
+  locks at 109 days, against 26 at 5), a connection's first call planned
+  for 60 ms instead of 37, and every day made, dropped or analyzed made
+  each connection plan again. With `retainDays` unset, days only add up:
+  at 500 days, 40 connections ran Postgres out of lock memory (`out of
+  shared memory`, `max_locks_per_transaction`), and every use failed.
+  Migration 0057 moves that check into `use_covered`, planned per call for
+  the entry's own day, so the statement names no day: 23 locks a use at
+  any age, the first call 36 ms at 109 days, and an `ANALYZE` of today's
+  partition replans nothing. A repeat use pays about 0.05 to 0.1 ms more
+  of Postgres CPU for planning its check. Additive: the previous release
+  calls the same function. Where a member of the database's owner runs
+  the migrations, rather than the owner itself, the helpers
+  `use_credential` calls (`use_covered`, and 0045's and 0051's gate:
+  `use_stands`, `use_admits`, `use_stands_personal`, `use_scope_holds`)
+  belong to that login while `use_credential` keeps its owner; 0057
+  grants that owner EXECUTE on them, which it lacked for the gate's too.
+
 - **A page of reads costs as much on a connection's sixth call as on its
   first.** `log_reads_by` and `log_reads_at`, which list a member's reads
   and a key's, an environment's or a project's, let Postgres switch to a
