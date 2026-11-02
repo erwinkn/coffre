@@ -98,6 +98,38 @@ SQL
     guarantees "$database"
 done
 
+# A member of the owner may migrate (a managed Postgres's admin login, say): a function it makes is its own, one it
+# replaces keeps its owner, and `use_credential` runs as its owner. Replay 0057 so, which makes `use_covered` and
+# replaces `use_credential`; that owner must still execute every helper the use calls (T187).
+docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
+CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
+SQL
+psql_owner -d postgres -c "CREATE DATABASE member"
+migrate member
+{
+    echo "DROP FUNCTION use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid);"
+    cat packages/db/src/migrations/postgres/0057_use_covered.sql
+} | docker exec -i -e PGPASSWORD=local-member-only "$container" \
+    psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U migration_member -d member
+psql_owner -d member <<'SQL'
+DO $$
+DECLARE v_helper regprocedure;
+BEGIN
+    IF (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = 'use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid)'::regprocedure)
+       <> 'migration_member' THEN
+        RAISE EXCEPTION 'the replay did not make use_covered as the member';
+    END IF;
+    FOREACH v_helper IN ARRAY ARRAY['use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid)',
+                                    'use_stands(uuid, uuid, smallint, bigint, jsonb)',
+                                    'use_stands_personal(uuid, uuid, bigint, jsonb)']::regprocedure[] LOOP
+        IF NOT has_function_privilege(current_user, v_helper, 'EXECUTE') THEN
+            RAISE EXCEPTION 'use_credential''s owner cannot execute %', v_helper;
+        END IF;
+    END LOOP;
+    PERFORM use_covered(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+END $$;
+SQL
+
 # Unsafe groups must fail clearly, rather than trying a forbidden ALTER ROLE.
 for attribute in SUPERUSER REPLICATION BYPASSRLS; do
     database="unsafe_${attribute,,}"

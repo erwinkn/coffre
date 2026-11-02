@@ -958,3 +958,22 @@ $$;
 REVOKE ALL ON FUNCTION use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean) FROM PUBLIC;
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean) TO coffre_vault;
+--> statement-breakpoint
+-- `use_credential` runs as its owner, which `CREATE OR REPLACE` keeps, while each helper it calls belongs to the login
+-- that made it: the same role where one owner migrates, as `coffre setup` makes it, but not where a member of the owner
+-- does (a managed Postgres's admin login, say). Its owner may then not execute what PUBLIC may not, and every use would
+-- fail. So it is granted them by name: `use_covered`, and 0045's and 0051's helpers, which had the same gap.
+DO $$
+DECLARE
+    v_owner name := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = 'public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean)'::regprocedure);
+    v_helper regprocedure;
+BEGIN
+    FOREACH v_helper IN ARRAY ARRAY['public.use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid)',
+                                    'public.use_stands(uuid, uuid, smallint, bigint, jsonb)',
+                                    'public.use_stands_personal(uuid, uuid, bigint, jsonb)']::regprocedure[] LOOP
+        IF NOT has_function_privilege(v_owner, v_helper, 'EXECUTE') THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_helper, v_owner);
+        END IF;
+    END LOOP;
+END
+$$;

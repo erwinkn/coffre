@@ -38,7 +38,11 @@
   any age, the first call 36 ms at 109 days, and an `ANALYZE` of today's
   partition replans nothing. A repeat use pays about 0.05 to 0.1 ms more
   of Postgres CPU for planning its check. Additive: the previous release
-  calls the same function.
+  calls the same function. Where a member of the database's owner runs
+  the migrations, rather than the owner itself, the helpers
+  `use_credential` calls (`use_covered`, and 0045's and 0051's) belong
+  to that login while `use_credential` keeps its owner; 0057 grants that
+  owner EXECUTE on them, which it lacked for 0045's and 0051's too.
 
 - **A page of reads costs as much on a connection's sixth call as on its
   first.** `log_reads_by` and `log_reads_at`, which list a member's reads
