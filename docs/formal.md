@@ -1981,87 +1981,97 @@ design before the code. A key write is one vault statement and one app
 statement; a member add, the vault's read and its write; each then waits for
 its seal (R51).
 
-**The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
-session. The vault's statement reads every input her write stands on: her
+**The read and its hold.** One function (`write_inputs`, `admit_inputs`)
+reads everything the decision weighs: every object with its newest change
+in the log, every name and set as resolved. The decision takes that read and
+nothing else, and the commit calls the same function again and goes ahead
+only if it answers the same. In the model that function is `Read`, which the
+vault's read and the hold both call. Its parts: for a key write, Ada's
 session, her member object, the roles, the policy, the environment, its fork
-parent and the parent's keys weighed (the one a regenerate replaces, the one
-whose level an override inherits), each with its newest change, held to its
-row; and numbers the request. The Worker decides on what it read. The
-app's statement holds 0.14's head, takes the fence through `app_change`,
-holds the names' resolution to what the vault read (a rename or a key
-appearing moves no seal), commits the key's change from the seal it was
-made from, and then, in statements after it, checks that no input has a
-change after the one the vault read, the keys it writes aside. Beside it:
-her grant taken away and her session revoked (`WritingRevoke`), her role
-redefined, the policy changed, the environment archived and the key she
-writes renamed (`WritingPlace`), the parent archived, the replaced key
-written, the inherited key marked sensitive, and the parent gaining,
-sensitive, a key it held none of at her read (`WritingFork`), her session revoked and its row put back, live, by a
-database writer (`WritingTamper`). Bob and Cy each add svc while Bob is
-demoted and the policy changes so that only Owners add (`WritingAdd`); Bob,
-no admin, sets up svc with a first grant while the roles are redefined, the
-services setting is closed and the grant's place archived (`WritingSetUp`):
-a read, the Worker's decision, a write held to what the read decided on. Every
-other change is one atomic step; the checkpointer seals whatever has
-committed at each tick.
+parent, the parent's keys weighed and the key itself, and what the key's
+name, the fork chain and `env@me` resolve to; for an add, the adder's
+object, the roles, the policy, the services setting, the grant's place, the
+project's other environments and svc's row, and what the grant's slugs,
+the project's set of environments and the scope's slug resolve to.
+
+**The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
+session; the vault's statement reads and numbers the request; the Worker
+decides on the read; the app's statement takes 0.14's head and the fence,
+holds the read and commits. Beside her: her grant taken away and her
+session revoked (`WritingRevoke`), her grant taken away and given back
+(`WritingABA`), her role redefined, the policy changed and the environment
+archived (`WritingPlace`), the fork's parent archived, the key she replaces
+written and the key she inherits marked sensitive (`WritingFork`), the key
+she writes renamed, the parent gaining it, sensitive, and her personal
+config deleted (`WritingNames`), her session revoked and its row put back,
+live, by a database writer (`WritingTamper`). Bob and Cy each add svc while
+Bob is demoted and the policy changes so that only Owners add
+(`WritingAdd`); Bob, no admin, sets up svc with a first grant while the
+roles are redefined, the services setting is closed and the grant's place
+archived (`WritingSetUp`), or on a whole project while one of its
+environments is protected, a protected fork is made in it, the project is
+renamed and another made under its slug, and the scope's project likewise
+(`WritingProtect`). Each review round's P1 is one of these adversaries:
+rounds 1 and 2 in Revoke, Place and Fork, round 3 in Names, round 5 in
+Protect. Every other change is one atomic step; the checkpointer seals
+whatever has committed at each tick. A hold that fails asks again, three
+tries in all, then gives up (409).
 
 | protection | turned off, TLC finds |
 |---|---|
-| the vault's statement reads its inputs and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
-| the app's statement holds each input to the object the vault decided on (`Held={...}`, each of the seven left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a role redefined, a policy change, an archive of the environment or of its parent, a write of the replaced key, or a new level on the inherited one |
-| ... and the names' resolution as the vault read it (NameHold) | `WritesStandAtCommit`: a write committed after its key was renamed, or after the parent gained the key it inherits |
-| ... once it holds the fence (GuardsAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the guards and the write |
-| ... by the log's newest change of each, not its row's seal column (GuardOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the guard passes |
-| the key's change from the seal it was made from (ChangeCAS) | `KeyChangesFlip`: two writes from one version both commit |
-| a member add's write holds what its read decided on (`AdmitHeld={...}`, each of the five left out) | `AddsStandAtCommit`: a demoted admin's add, an add after a role redefined or the policy gave adding to Owners, a set-up after the services setting closed, a first grant at a place archived meanwhile |
-| ... and the principal's row as read (PrincipalCAS) | `AddsFlip`: svc added twice |
+| the vault's statement reads and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
+| the commit holds the read (ReadHeld) | `WritesStandAtCommit` (Revoke, Names), `AddsStandAtCommit` (Protect) |
+| ... every part of it (`Unheld={...}`, each of 21 parts left out in turn: a read function that missed it) | the adversary that moves it: `WritesStandAtCommit` after a revoke, an end, a role redefined, a policy change, an archive of the environment or its parent, a write of the replaced key or a new level on the inherited one, a rename, the parent gaining the key, the personal config deleted; `KeyChangesFlip` without the key; `AddsStandAtCommit` after a demotion, a policy change, a role redefined, the setting closed, the place archived, an environment protected, a protected fork made, the grant's or the scope's slug moved; `AddsFlip` without svc's row |
+| the decision weighs the read and nothing else (DecideOnRead) | `WritesStandAtCommit`: the roles taken from the isolate's cache; the read and its hold agree, and the role redefined before both is missed |
+| the write's hold runs once its statement holds the fence (HoldAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the hold and the write |
+| the read's numbers from the log's newest change, not the row's seal column (ReadOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the hold passes |
+| the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its
 first try made two round trips. It follows from the steps' shape, so it says
-what the steps are and proves nothing more.
+what the steps are and proves nothing more. `EveryRequestEnds`, a liveness
+property under weak fairness, holds too: every write and add ends,
+committed or given up, within its tries.
 
 **What it abstracts.** A seal is a counter each change moves; the vault's
 StaleFirst and `ChangeChecksSeal` (HotPathOne) are one check here, and
-SealedObjects holds the seals themselves against a forger. A guard compares
-the log's newest number, which only grows, so an object changed and changed
-back still fails it. The Worker holds an add's rows to their newest changes
-exactly as a write's; `WritingTamper` exercises that check on a write only.
-A request here is the record that binds it: its committed change, or the
-outcome record the Worker MACs when nothing commits; the ids the vault's
-statement resolves sit unsealed beside the request row, which proves
-nothing from them (two-trips.md, "The request and its refusals"). A guard is a
-lock-free probe of the log's newest change of its object: a `FOR SHARE`
-there would take a row after the fence, against `change_input`'s order.
-`RequestsReplay` checks that the decision's inputs are the log at the
-request's number; that the replay recomputes the same decision from them is
-HotPathOne's `ReplayAgrees`. The decision is `decide.ts`'s, reduced to its
-inputs; which roles write where is the Lean model's. A session's expiry moves
-no seal: it is judged at the vault's clock, at the decision, as today, and
-`WritesStandAtCommit` covers the changes that move one. A new key (no row,
-no seal) is ChangeCAS from nothing: the insert's uniqueness, a second insert
-failing and asking again; here a key with seal 0. Every object exists
-from the start with seal 0, so a key that appears in the parent after the
-vault's read is not an object here at all: it is a move of `names`, which
-no guard can see and only the names' hold catches (the code's
-`hold_names`, which resolves each name in each environment of the fork
-chain to its row or to none, and its dismissals). A rename is the same
-move: a key's object holds no name. Names are app rows, unsealed, as
-today; each rename, key made or dismissal is an app write under 0.14's
-head, so the hold reads right after the head. A session's revoke takes
-the fence and not 0.14's head, as it will once 0.16 contracts 0047's head
-away; today's takes the head too, which only adds order. The locks' order
-(the head, the rows, the issue lock, the fence; the vault's rows, in
-principal order, before the head) is the code's today, which Migration015's
-`NoWaitCycle` checks; here each statement that takes the fence is one step.
-That step checks the names' hold and the guards together, which the code
-splits: the hold right after 0.14's head, the guards after the fence. The
-split is sound only because the head is held from the hold to COMMIT and
-every write that moves a name takes it first; moving the hold out from
-under the head, or a names-mover that skips the head, would open the gap
-this one step hides.
-The seal is HotPathOne's and Seal.tla's, here a tick that seals every
-committed number.
+SealedObjects holds the seals themselves against a forger. A part of the
+read is its number and its value, or what a name resolves to; the digest
+the code compares (a SHA-256 of `write_inputs`' answer) is that comparison.
+That the digest covers everything the decision weighs is the code's types,
+not the model's: `decide.ts` takes one `WriteInputs`, made only from that
+answer. `DecideOnRead` shows why that matters, and `Unheld` what each part
+of the read holds; neither proves a given `write_inputs` complete. The hold
+reads, takes no lock and writes nothing. A request here is the record that
+binds it: its committed change, or the outcome record the Worker MACs when
+nothing commits; the ids the vault's statement resolves sit unsealed beside
+the request row, which proves nothing from them (two-trips.md, "The
+request and its refusals"). `RequestsReplay` checks that the decision's
+inputs are the log at the request's number; that the replay recomputes the
+same decision from them is HotPathOne's `ReplayAgrees`. The decision is
+`decide.ts`'s, reduced to its inputs; which roles write where is the Lean
+model's. A session's expiry changes nothing in the read: it is judged at
+the vault's clock, at the decision, as today. Every object exists from the
+start with seal 0, so a key that appears in the parent, a protected fork
+made in a project or a project made under an old slug is not an object
+here: it is a move of `names`, as a rename is (a key's object holds no
+name). Names are app rows, unsealed, as today; each move of one is an app
+write under 0.14's head. A session's revoke takes the fence and not 0.14's
+head, as it will once 0.16 contracts 0047's head away; today's takes the
+head too, which only adds order. A step is one statement that takes the
+fence, so the app's statement (the head, the issue lock, the fence, the
+hold, the rows, the change) is one step: sound because the head and the
+fence are held from the hold to COMMIT and every change of what the read
+reads takes one of them. Its rows come after the fence, as `app_change`
+already updates a key's row after it; every statement that locks a key's
+row holds 0.14's head first, so this adds no wait Migration015's
+`NoWaitCycle` would have to check. An add's write takes its rows, in
+principal order, then the head, then the fence, as `change_input` does, and
+holds after them. An app and a vault of different versions are refused
+while both deploy (503 `deploying`), so the model has one version. The seal
+is HotPathOne's and Seal.tla's, here a tick that seals every committed
+number.
 
 ## TLC
 
