@@ -11,9 +11,18 @@
   page at a time, which one statement cannot do. No route makes one more
   round trip. A member whose row fails is no longer started over under
   0.15's log, a deployment's named Owner included: the start over wrote a
-  row the log could not seal. They stay refused, holding nothing, until a
-  reseal makes their row the log's again, as 0.15 already did for every
-  other change to them.
+  row the log could not seal. They stay refused, holding nothing, as 0.15
+  already did for every other change to them. No reseal ships yet (the
+  0.15 plan's PR 9), so until one does an operator recovers such a member
+  by undoing the write (their `vault_members` and `vault_grants` rows put
+  back as the log last sealed them, from a backup taken since their last
+  change) or by restoring the whole instance (`docs/restore.md`, "A member
+  refused as tampered"). A tampered service account a token is issued for
+  is refused as tampered, where it was `gone`. A member holding a grant on
+  an environment whose row a writer re-parented to another project is
+  refused whole, by decisions as by uses, where decisions used to keep
+  their other grants: the grant's project is part of what the member's
+  seal covers. Putting the environment's row back recovers them all.
 
 - **A page of reads costs as much on a connection's sixth call as on its
   first.** `log_reads_by` and `log_reads_at`, which list a member's reads

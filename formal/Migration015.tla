@@ -659,19 +659,28 @@ Accounted ==
 \* The place as the cutover sealed it: its environment's row must be its seal's, and not deleted.
 PlaceLive == \E k \in Cutovers : ~k.deleted /\ del.env = k.deleted
 
-\* One statement: the row and the newest seal; `stale` unless the row is it; the place; its number.
-\* The vault's own 0.15 decisions weigh a member by this same check (T179 PR 2: vault.ts's `#onLog`,
-\* the row's seal its object's and its newest change's, and Accounted), not 0.14's walk (Genuine14).
-\* Decisions read it under 0.14's head; reads (`#read`, `#issuerRead`, `#sweep`) take row, seal and
-\* access in one snapshot, as this action reads them together. Either only removes interleavings from
-\* this action's, so what holds of it holds of them: they need no action of their own.
+\* The member's check: its row is its newest seal's (`stale` otherwise), and 0.14's newest authentic
+\* write is accounted for. The vault's own 0.15 decisions weigh a member by this check too (T179 PR 2:
+\* vault.ts's `#onLog`), not by 0.14's walk (Genuine14), and refuse a change of a member that fails
+\* it (`#standing`), as NewChangeRun does.
+\*
+\* The model's newest seal is the vault's: no action edits a 0.15 entry in place. The code's decisions
+\* check that, the newest change's MAC, before trusting its seal and `old`; a use does not yet (T190):
+\* it trusts the newest change's seal column, so against a writer who edits a change in place the
+\* code's use is weaker than NewUseRun.
+MemberHolds ==
+    LET s == SealBelow(nextSeq)
+    IN /\ s.some /\ s.content = Content(row)
+       /\ UsesSeeOldWrites => Accounted
+       /\ OldWriteMarksRow => row.mark <= s.content.aseq
+
+\* One statement: the member's check, the place, its number. Decisions read row, seals and access
+\* in one Sync under the row's lock; reads (`#read`, `#issuerRead`, `#sweep`) in one snapshot, as this
+\* action reads them together. Either only removes interleavings from this action's, so what holds
+\* of it holds of them: they need no action of their own.
 NewUseRun(x) ==
     /\ nu[x].pc = "locked"
-    /\ LET s == SealBelow(nextSeq)
-           ok == /\ s.some /\ s.content = Content(row)
-                 /\ UsesSeeOldWrites => Accounted
-                 /\ OldWriteMarksRow => row.mark <= s.content.aseq
-                 /\ PlaceLive
+    /\ LET ok == MemberHolds /\ PlaceLive
        IN nu' = [nu EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seq = nextSeq, !.allow = ok /\ row.v,
                                              !.read = Content(row), !.seen = committed, !.truth = truth, !.deleted = del.entry]]
     /\ nextSeq' = nextSeq + 1
@@ -715,11 +724,15 @@ NewChangeLock(h) ==
 \* entry. With DualFence, also 0.14's: a mirror entry, the row naming it under 0.14's MAC, the
 \* fence advanced. Without, 0.14's MAC no longer holds over the row. One that writes no 0.14 entry
 \* (EntryLess) writes the app's row under the app's MAC, which 0.14's use reads again under the
-\* head: its fence moves, its entry does not. The commit lets the locks go.
+\* head: its fence moves, its entry does not. A member that fails its check (MemberHolds) is refused,
+\* tampered, and nothing written (`#standing`). The commit lets the locks go.
 NewChangeRun(h) ==
     /\ nc[h].pc = "locked"
     /\ IF Content(row) /= nc[h].read
        THEN /\ nc' = [nc EXCEPT ![h].pc = "idle"]
+            /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, truth, committed, ni, br, exchanged, del>>
+       ELSE IF ~MemberHolds
+       THEN /\ nc' = [nc EXCEPT ![h] = [@ EXCEPT !.pc = "idle", !.n = @ + 1]]
             /\ UNCHANGED <<oldLog, row, fence14, newLog, nextSeq, truth, committed, ni, br, exchanged, del>>
        ELSE LET mirrored == DualFence /\ ~EntryLess
                 aseq == IF mirrored THEN Len(oldLog) + 1 ELSE row.aseq

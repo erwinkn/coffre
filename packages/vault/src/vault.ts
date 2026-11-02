@@ -925,15 +925,17 @@ class VaultService implements Vault {
   /**
    * `#integrity` once 0.15's cutover is written (T179 PR 2;
    * docs/design/two-trips.md, "Compatibility"): the member's row as 0.15's
-   * log holds it, the check a use makes (`checkSeals`, `checkedOf`;
-   * Migration015.tla's NewUseRun), not a walk back through 0.14's entries,
-   * which one statement cannot make (`write_request`, PR 3):
+   * log holds it (Migration015.tla's MemberHolds), not a walk back through
+   * 0.14's entries, which one statement cannot make (`write_request`, PR 3).
+   * A use's check (`checkSeals`, `checkedOf`) is the same but for the
+   * newest change's MAC, which a use does not verify yet (T190):
    *
    * - the row's seal is the vault's over its object, the row and its grants
    *   (`principalObject`): `mac` otherwise, written around the vault;
-   * - and its object's newest change's: `stale` otherwise, put back from
-   *   before a change, or a row the log never sealed. No row is right only
-   *   while the log has no change of the member either;
+   * - and its object's newest change's, once that change's MAC holds under
+   *   one of the vault's keys (`mac` otherwise, its seal or `old` edited):
+   *   `stale` otherwise, put back from before a change. No row is right only while the log has no change of
+   *   the member either (a row the log never sealed has no seal: `mac`);
    * - and 0.14's log holds no access entry of the vault's past the one that
    *   change accounts for (its `old`; UsesSeeOldWrites): one there is a 0.14
    *   write the new log never saw, `stale`, which a seal the row passes

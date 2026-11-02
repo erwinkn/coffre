@@ -1722,14 +1722,21 @@ The cutover from 0.14 (the plan's PR 9).
 - 0.14's row (its MAC and `access_seq`) and chain;
 - an old isolate still serving 0.14 uses and writes after the deploy;
 - two 0.15 vault starts, at once or one after the other;
-- a 0.15 use and a 0.15 change. The vault's own 0.15 decisions weigh a
-  member by the use's check (NewUseRun: the row's seal its object's and its
-  newest change's, and UsesSeeOldWrites' Accounted), not 0.14's walk back
-  through its access entries (T179 PR 2, vault.ts's `#onLog`). Decisions read
-  it holding 0.14's head; reads (`#read`, `#issuerRead`, `#sweep`) take the
-  row, its seals and its access in one snapshot, as NewUseRun reads them
-  together. Either only removes interleavings from the use's, so the use's
-  invariants and removals cover them, with no action of their own;
+- a 0.15 use and a 0.15 change, both checking the member (MemberHolds: the
+  row's seal its object's and its newest change's, and UsesSeeOldWrites'
+  Accounted); a change of a member that fails it is refused and writes
+  nothing. The vault's own 0.15 decisions weigh a member by this check, not
+  by 0.14's walk back through its access entries (T179 PR 2, vault.ts's
+  `#onLog`). Decisions read the row, its seals and its access in one Sync
+  under the row's lock; reads (`#read`, `#issuerRead`, `#sweep`) in one
+  snapshot, as NewUseRun reads them together. Either only removes
+  interleavings from the use's, so the use's invariants and removals cover
+  them, with no action of their own. The model's newest seal is always the
+  vault's: no action edits a 0.15 entry in place. The code's decisions check
+  that (the newest change's MAC, before its seal and `old` are trusted); a
+  use does not check it yet (T190): it trusts the newest change's seal
+  column, so against a writer who edits a change in place the code's use is
+  weaker than NewUseRun;
 - in Migration015Issue (T123), sign-ins: 0.14's `token.exchange`, which the
   trigger lets by; a 0.15 sign-in (0.14's head, then the issue lock); one
   that also revokes the account's earlier sessions (its trigger: the issue

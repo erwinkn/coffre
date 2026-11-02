@@ -369,6 +369,23 @@ its trees verified, a token's use serving the value it served at the
 backup, a change sealed on top; the wrong vault key refused; and a backup
 from before a rotation restored under the new key.
 
+### A member refused as tampered
+
+On 0.15's log, a member whose row is not the one the log last sealed
+(written around the vault, or put back from before a change) is refused
+everything, as tampered: no use, no change, and no start over, a
+deployment's named Owner included (T179 PR 2). The reseal that would make
+such a row the log's again is not built yet (the 0.15 plan's PR 9). Until
+it is, there are two ways back:
+
+- **Undo the write.** Put the member's `vault_members` row and their
+  `vault_grants` rows back exactly as the log last sealed them, from any
+  backup taken after their newest change (0.15's log names it: the newest
+  `log_changes` entry of their object). The vault checks the row against
+  that change's seal, so the copy must be byte for byte; deleting the row
+  does not help, since the change still names it.
+- **Restore the instance** from such a backup, as above.
+
 ## If the vault key is wrong
 
 The vault's configuration names the vault key `kek`, and the keys it
