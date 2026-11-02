@@ -34,6 +34,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
+import { blocksApart, weigh, weighingSession, WORLD_TABLES, type Weighed } from '../../../scripts/matrix-weigh.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute } from '../src/plugins.ts';
@@ -193,6 +194,20 @@ async function relay(at: string): Promise<{
 /** A statement as a Bind sent it: the text it was prepared from, and its arguments, `$1` first (text, bytes or null). */
 type HotCall = { query: string; args: (string | Buffer | null)[] };
 
+/** A key's name no world of the matrix makes. */
+const NEVER_MADE = 'NEVER_MADE_BY_ANY_WORLD';
+
+/**
+ * A named call's twin: the same request, of a key its world never made (`p_key`, the 19th argument). It reads all the
+ * world's own rows the call does, and no key's.
+ */
+function twinOf(call: HotCall): HotCall {
+  if (typeof call.args[18] !== 'string') throw new Error('a named call names its key, the 19th argument');
+  const args = [...call.args];
+  args[18] = NEVER_MADE;
+  return { query: call.query, args };
+}
+
 /** A Bind message's statement, by name, and its arguments: text as text, binary as its bytes, null as null. */
 function bindOf(body: Buffer): { statement: string; args: (string | Buffer | null)[] } {
   let at = body.indexOf(0) + 1;
@@ -218,51 +233,11 @@ function bindOf(body: Buffer): { statement: string; args: (string | Buffer | nul
 }
 
 /**
- * The shared buffers a `use_credential` call reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a
- * transaction rolled back, on the hot login: the statement's own work, which its count does not show (Fable's review and
- * review r12 of D153: a form an isolate's history chose). Its time and deadline are now's; whatever it would write is
- * rolled back. Null on SQLite, or for no call.
- */
-async function bufferedBy(call: HotCall | undefined): Promise<number | null> {
-  if (!POSTGRES || call === undefined) return null;
-  const client = postgresClient(hotDatabaseUrl(), { max: 1 });
-  try {
-    let least = Infinity;
-    for (let run = 0; run < 3; run += 1) {
-      const args = [...call.args];
-      const now = Date.now();
-      // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline.
-      [args[3], args[7]] = [String(now), String(now + 3000)];
-      const plan = await client.begin(async (tx) => {
-        const [explained] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${call.query}`, args as never[]) as unknown as { 'QUERY PLAN': { Plan: Buffers }[] }[];
-        throw new RolledBack(explained!['QUERY PLAN'][0]!.Plan);
-      }).then(() => null, (error: unknown) => {
-        if (error instanceof RolledBack) return error.plan;
-        throw error;
-      });
-      least = Math.min(least, plan!['Shared Hit Blocks'] + plan!['Shared Read Blocks']);
-    }
-    return least;
-  } finally {
-    await client.end();
-  }
-}
-
-type Buffers = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number };
-
-class RolledBack extends Error {
-  readonly plan: Buffers;
-
-  constructor(plan: Buffers) {
-    super('rolled back');
-    this.plan = plan;
-  }
-}
-
-/**
- * How many more shared buffers one refusal may read than another it is held alike to: a run's noise (a page split, a
- * heap page a world's rows spilled to). A key's own rows read before the standing was decided cost 30 to 90 more (W259:
- * 42 to 136 a refusal), a form chosen by the isolate's history 10 to 34 (Fable's review, review r12 of D153).
+ * How many more shared buffers one refusal may read beyond its twin's (`twinOf`) than another it is held alike to does
+ * beyond its own; the blocks of the key's own relations are held exactly alike. Weighed beside a twin of its own world,
+ * a refusal of no key reads nothing beyond it (T194). A key's own rows read before the standing was decided cost 30
+ * to 90 more (W259: 42 to 136 a refusal; T194, the standing check removed: 45 to 58), a form chosen by the isolate's
+ * history 10 to 34 (Fable's review, review r12 of D153).
  */
 const BUFFER_SLACK = 6;
 
@@ -563,24 +538,52 @@ test(`through the app, a person is answered alike for every key they may not hav
         // of (R6), never what their asking before left (`histories`, below).
         if (POSTGRES && row.admission === 'as asked') {
           // The statistics as the row's cells left them, and none changing while they are weighed (autovacuum is off,
-          // `before`): every cell's statements planned on the same.
+          // `before`): every cell's statements planned on the same. Each cell is a world of its own, whose own rows its
+          // setup wrote over a few times: their tables vacuumed, the key's own relations not (`WORLD_TABLES`).
           await rowsOf(db.owner, sql`ANALYZE`);
-          for (const via of ['api', 'proxy'] as const) {
-            const cached = refused.filter((a) => a.sent[via] !== undefined && a.sent[via]!.args[11] !== null);
-            if (cached.length > 0) differing.push(`${label}: ${via}, the cached form for ${cached.map((a) => a.key).join(', ')}`);
-            // Standing: the form alone here. The app runs no statement of its own on this path, and the vault's
-            // matrix holds each refusal's buffers to the same request's from an isolate with no history.
-            // Standing at the place (a fork's, its parent's grant gone, T165, included): a key's shape may show in its cost,
-            // a key they may know of (R6). Only a caller standing nowhere there is held to reading no key.
-            if (row.lost === 'they stand' || row.lost === 'parent revoked') continue;
-            const read: { key: Key; buffers: number }[] = [];
-            for (const a of refused) {
-              const buffers = await bufferedBy(a.sent[via]);
-              if (buffers !== null) read.push({ key: a.key, buffers });
+          await rowsOf(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
+          // One session for the row's refusals and their twins, every call weighed on the same plans (`weighingSession`).
+          const session = weighingSession(hotDatabaseUrl());
+          try {
+            for (const via of ['api', 'proxy'] as const) {
+              const cached = refused.filter((a) => a.sent[via] !== undefined && a.sent[via]!.args[11] !== null);
+              if (cached.length > 0) differing.push(`${label}: ${via}, the cached form for ${cached.map((a) => a.key).join(', ')}`);
+              // Standing: the form alone here. The app runs no statement of its own on this path, and the vault's
+              // matrix holds each refusal's buffers to the same request's from an isolate with no history.
+              // Standing at the place (a fork's, its parent's grant gone, T165, included): a key's shape may show in its cost,
+              // a key they may know of (R6). Only a caller standing nowhere there is held to reading no key.
+              if (row.lost === 'they stand' || row.lost === 'parent revoked') continue;
+              // No standing: no key read (W268, NoKeyBeforeStanding). Each refusal weighed beside its twin, the same
+              // request of a key its world never made (`twinOf`): what a world's own rows cost (its credential's, its
+              // place's, its grants', wherever on their pages they fell) is the twin's too, so what is left, beyond, is
+              // the key's (T194: weighed alone, refusals of no key read up to 8 buffers apart, all of them in
+              // `credentials` and `environments`, as each world's rows fell in the heap). Each fetches as many blocks of
+              // the key's own relations as its twin, and as every other key's; and reads beyond its twin alike for every
+              // key, held, gone, a reference in any state, or never made (BUFFER_SLACK).
+              const read: { key: Key; warm: Weighed; twin: Weighed; beyond: number }[] = [];
+              for (const a of refused) {
+                const sent = a.sent[via];
+                if (sent === undefined) continue;
+                const [warm, twin] = [await weigh(session, sent), await weigh(session, twinOf(sent))];
+                read.push({ key: a.key, warm, twin, beyond: warm.buffers - twin.buffers });
+              }
+              if (read.length === 0) continue;
+              for (const r of read) {
+                if (r.warm.keyBlocks !== r.twin.keyBlocks) differing.push(`${label}: ${via}, ${r.key}, blocks of the key's tables ${r.warm.keyBlocks} beside ${r.twin.keyBlocks} for a key its world never made`);
+              }
+              if (new Set(read.map((r) => r.warm.keyBlocks)).size > 1) differing.push(`${label}: ${via}, blocks of the key's tables ${read.map((r) => `${r.key} ${r.warm.keyBlocks}`).join(', ')}`);
+              const fewest = read.reduce((a, r) => (r.beyond < a.beyond ? r : a));
+              const most = read.reduce((a, r) => (r.beyond > a.beyond ? r : a));
+              widest = Math.max(widest, most.beyond - fewest.beyond);
+              if (most.beyond - fewest.beyond > BUFFER_SLACK) {
+                // What the spread is made of: the relations the most read beyond its twin more of than the fewest did.
+                const beyond = (r: typeof most) => Object.fromEntries([...new Set([...Object.keys(r.warm.blocks), ...Object.keys(r.twin.blocks)])]
+                  .map((name) => [name, (r.warm.blocks[name] ?? 0) - (r.twin.blocks[name] ?? 0)]));
+                differing.push(`${label}: ${via}, buffers beyond a key never made ${read.map((r) => `${r.key} ${r.beyond}`).join(', ')}; blocks apart (${fewest.key}/${most.key}): ${blocksApart(beyond(fewest), beyond(most)).join(', ')}`);
+              }
             }
-            const spread = read.length === 0 ? 0 : Math.max(...read.map((r) => r.buffers)) - Math.min(...read.map((r) => r.buffers));
-            widest = Math.max(widest, spread);
-            if (spread > BUFFER_SLACK) differing.push(`${label}: ${via}, buffers ${read.map((r) => `${r.key} ${r.buffers}`).join(', ')}`);
+          } finally {
+            await session.end();
           }
         }
         // Several keys, standing nowhere there: every cell alike, byte for byte, in as many vault calls and statements,
@@ -600,7 +603,7 @@ test(`through the app, a person is answered alike for every key they may not hav
   } finally {
     await holder?.end();
   }
-  if (POSTGRES) console.log(`the widest spread of buffers within a row's refusals: ${widest}`);
+  if (POSTGRES) console.log(`the widest spread of buffers within a row's refusals, beyond their world's key never made, no standing: ${widest}`);
   assert.deepEqual(differing, []);
   if (POSTGRES) assert.ok(attributed >= ROWS.length * KEYS.length, `the hot path's statements counted to their requests: ${attributed}`);
 });

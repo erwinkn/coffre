@@ -32,6 +32,7 @@ import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
+import { WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
@@ -357,12 +358,9 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
     // read hundreds of buffers above the rest (CI, W268). The key's relations as they are: vacuumed, their all-visible
     // pages would let a probe skip the heap and hide work of a key's history (review r4 of W268).
     await run(db.owner, sql`ANALYZE`);
-    // Each cell is a world of its own, whose place, credential and account rows its setup wrote over a few times: the dead
-    // versions it left cost a heap page or two more, whatever the key (a row of no key read spread 74 to 81, all of it in
-    // `environments`). Those tables are vacuumed; the key's own relations are not. What a key's work reads of them (a
-    // reference's source's environment, a personal config's parent) takes columns no index holds, a heap fetch that no
-    // all-visible page spares (review r6 of W268).
-    await run(db.owner, sql`VACUUM environments, projects, credentials, identities, vault_members, vault_grants, log_config, log_fence`);
+    // Each cell is a world of its own, whose own rows its setup wrote over a few times: their tables vacuumed, the key's
+    // own relations not (`WORLD_TABLES`).
+    await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
     // One session for them all, so that every call is weighed on the same plans (`weighingSession`).
     const session = weighingSession();
     try {

@@ -14,6 +14,7 @@ import type { Input, Op } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
+import { weigh, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
 
@@ -266,100 +267,33 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 
-/** A `use_credential` call as it was sent: its text and its arguments, `$1` first. */
-export type HotCall = { query: string; args: unknown[] };
+export { keyBlocksOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
 
 /**
  * The shared buffers `call` reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled
  * back, on the hot login: what the statement's own work costs inside, which its calls and the statements counted do not
- * show (Fable's review and review r12 of D153: a form of the statement an isolate's history chose). Its time and deadline
- * are now's, so that it is not refused `late`; whatever it would write is rolled back. Null on SQLite, or for no call.
- * `on`: a session to weigh it in, whose plans, made once, weigh every call it is given alike (a session of its own
- * makes them anew, on the statistics of the moment: W268 saw one call of a row read hundreds of buffers more).
+ * show (Fable's review and review r12 of D153: a form of the statement an isolate's history chose). Null on SQLite, or
+ * for no call. `on`: a session to weigh it in, whose plans, made once, weigh every call it is given alike (a session of
+ * its own makes them anew, on the statistics of the moment: W268 saw one call of a row read hundreds of buffers more).
  */
-export async function bufferedBy(call: HotCall | null, on?: ReturnType<typeof postgresClient>): Promise<number | null> {
+export async function bufferedBy(call: HotCall | null, on?: WeighingSession): Promise<number | null> {
   return (await weighed(call, on))?.buffers ?? null;
 }
 
-/**
- * The relations a key's own work reads, and nothing else a refusal reads does: its row, its version, a reference, its
- * source, its row of the cap's, an entry a cover names, each with its indexes; and the index a key's object's newest
- * change is probed in, which a refusal's other probes (its credential's, principal's, roles', places') take one path
- * each through, whatever the key. A call that reads no key (W268, NoKeyBeforeStanding) fetches as many blocks of
- * them for every key: its probes by a key it never looked up are by none, which a B-tree answers reading nothing.
- */
-const KEY_TABLES = ['secrets', 'secret_versions', 'secret_references', 'log_bulk', 'log_uses'];
-const KEY_INDEXES = ['log_changes_object_idx'];
-
-/** What a weighed call read: its shared buffers, of them the blocks `KEY_TABLES` and `KEY_INDEXES` gave, and every relation's blocks. */
-export type Weighed = { buffers: number; keyBlocks: number; blocks: Record<string, number> };
-
-/**
- * `bufferedBy`'s buffers, of them the key's relations' blocks, and each relation's: a call's own, the counters' change
- * across its EXPLAIN in its transaction (`pg_stat_get_xact_blocks_fetched` answers what the backend has not yet flushed,
- * runs and calls before included). After a run unweighed, which plans what this session had not; then the run of the
- * fewest buffers of a few.
- */
-export async function weighed(call: HotCall | null, on?: ReturnType<typeof postgresClient>): Promise<Weighed | null> {
+/** `weigh`'s buffers, of them the key's relations' blocks, and each relation's (`scripts/matrix-weigh.ts`); null on SQLite, or for no call. */
+export async function weighed(call: HotCall | null, on?: WeighingSession): Promise<Weighed | null> {
   if (ENGINE !== 'postgres' || call === null) return null;
-  const client = on ?? postgresClient(HOT_URL, { max: 1 });
-  const counters = `SELECT c.relname AS name, pg_stat_get_xact_blocks_fetched(c.oid)::int AS n FROM pg_class c
-    WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'i', 'p')`;
+  const session = on ?? weighingSession();
   try {
-    let least: Weighed | null = null;
-    for (let run = 0; run < 4; run += 1) {
-      const args = [...call.args];
-      const now = Date.now();
-      // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
-      // first, then at, purpose and deadline.
-      if (call.query.includes('use_named_batch')) [args[8], args[10]] = [String(now), String(now + 3000)];
-      else [args[3], args[7]] = [String(now), String(now + 3000)];
-      const read = await client.begin(async (tx) => {
-        const before = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
-        const [plan] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${call.query}`, args as never[]) as unknown as { 'QUERY PLAN': { Plan: Buffers }[] }[];
-        const after = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
-        const was = new Map(before.map((row) => [row.name, row.n]));
-        const blocks = Object.fromEntries(after.map((row) => [row.name, row.n - (was.get(row.name) ?? 0)]).filter(([, n]) => n !== 0));
-        throw new RolledBack({ plan: plan!['QUERY PLAN'][0]!.Plan, blocks });
-      }).then(() => null, (error: unknown) => {
-        if (error instanceof RolledBack) return error.read;
-        throw error;
-      });
-      if (run === 0) continue;
-      const buffers = read!.plan['Shared Hit Blocks'] + read!.plan['Shared Read Blocks'];
-      if (least !== null && least.buffers <= buffers) continue;
-      least = { buffers, keyBlocks: keyBlocksOf(read!.blocks), blocks: read!.blocks };
-    }
-    return least;
+    return await weigh(session, call);
   } finally {
-    if (on === undefined) await client.end();
+    if (on === undefined) await session.end();
   }
 }
-
-/**
- * The blocks of the key's relations among a call's: `KEY_TABLES`, their indexes and partitions (named for their table),
- * `KEY_INDEXES`; but those of the tables `except` names.
- */
-export function keyBlocksOf(blocks: Record<string, number>, except: readonly string[] = []): number {
-  const of = (name: string, table: string) => name === table || name.startsWith(`${table}_`);
-  return Object.entries(blocks).reduce((sum, [name, n]) =>
-    sum + ((KEY_INDEXES.includes(name) || KEY_TABLES.some((table) => of(name, table))) && !except.some((table) => of(name, table)) ? n : 0), 0);
-}
-
-type Buffers = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number };
 
 /** A session of the hot login's to weigh calls in alike (`bufferedBy`): its plans made once, by the first. */
-export function weighingSession(): ReturnType<typeof postgresClient> {
-  return postgresClient(HOT_URL, { max: 1 });
-}
-
-class RolledBack extends Error {
-  readonly read: { plan: Buffers; blocks: Record<string, number> };
-
-  constructor(read: { plan: Buffers; blocks: Record<string, number> }) {
-    super('rolled back');
-    this.read = read;
-  }
+export function weighingSession(): WeighingSession {
+  return weighingSessionAt(HOT_URL);
 }
 
 /** The principal's lock (0022: 1668244066, hashtext(principal)), which a key entering the cap's set takes. */
