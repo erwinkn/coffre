@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { ownsProject, readsSensitive, useOnly, type Permission } from '@coffre/core/access';
-import type { Envelope } from '@coffre/core/envelope';
+import { encrypt, type Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
 import { isTombstone } from '@coffre/core/schemas';
 import { handsBack, type HolderRef, type SecretColumns, type SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
+import { lockLogHeadRead } from '@coffre/db/log';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
@@ -15,6 +16,7 @@ import {
   insert,
   insertIfAbsent,
   lock,
+  heldWrites,
   recipeRow,
   referenceRows,
   resolvePath,
@@ -41,7 +43,8 @@ import { can, lists, permissionsAt, placeOf, type Caller } from './caller.ts';
 import { protectedFor, unprotects } from './roles.ts';
 import { AppChanges, ObjectMoved, retrying, secretChange, uses015, versionColumns, writtenSecret } from './changes.ts';
 import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refusal, unlogged, vaultRefusal, wayIn, withRefusals, type ApiContext, type EntryFields } from './context.ts';
-import type { AuditEntry } from '../db/audit.ts';
+import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
+import type { Written, WriteTry } from '../write-ahead.ts';
 import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
 import { ApiError, badRequest, conflict, forbidden, notAvailable, notFound, UnloggedRefusal, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
@@ -691,6 +694,12 @@ export async function setSecrets(
   /** Run under the log's head, before anything is written, by a caller whose patch holds what it read elsewhere: a fork's copy. */
   stillSo?: (tx: Transaction) => Promise<void>,
 ): Promise<SetResult> {
+  // Decided by the vault on one read already, for the patch as the front door read it (`writeAhead`, T179 PR 3):
+  // committed holding that read, or, where the vault no longer serves it, as below.
+  if (ctx.written !== undefined && stillSo === undefined) {
+    const held = await heldWrite(ctx, place, patch, ctx.written);
+    if (held !== null) return held;
+  }
   const environment = requireLive(place);
   const keysIn = Object.keys(patch);
   const problem = generationProblem(patch);
@@ -970,6 +979,90 @@ export async function setSecrets(
     });
   });
   return result;
+}
+
+/**
+ * A key write the vault decided on one read (T179 PR 3; docs/design/two-trips.md, "A key write", step 4;
+ * formal/Writing.tla's WApp and WCommit): each value encrypted under its data key, bound to its key's ids as the
+ * vault's read found or made them; then one transaction of two round trips:
+ *
+ *   BEGIN, 0.14's head FOR UPDATE and its read                    the entries' MAC needs the head first
+ *   hold_inputs: the issue lock, the fence, the vault's read      `coffre_moved` unless it reads as decided
+ *   the new keys' rows, the versions, each key's current version
+ *   the credential's last use, if due (`verify` left it here)
+ *   0.14's entries, and each key's change (`app_change_strict`)  then COMMIT                    one Sync
+ *
+ * then the seal wait (R51). A hold that fails, or a new key another write made first, rolls it all back, and the
+ * write is asked of the vault again, a request of its own: three tries in all, then 409 `changed`. Null where the
+ * vault no longer serves it: the write goes down today's path.
+ */
+async function heldWrite(ctx: ApiContext, place: ResolvedPath, patch: Record<string, SecretValue | null>, written: Written): Promise<SetResult | null> {
+  const environment = requireLive(place);
+  const recipes = recipesOf(patch);
+  for (let tries = 1; ; tries += 1) {
+    const tried = written.current;
+    if (tried === null) return null;
+    try {
+      return await heldOnce(ctx, place, environment, patch, recipes, written, tried);
+    } catch (error) {
+      if (!(error instanceof ObjectMoved) || tries >= 3) throw error;
+      const again = await written.again();
+      // Its credential no longer the caller's: as the credential's own check answers it (today's path would go on with
+      // the caller the first try checked, revoked since).
+      if (again === 'credential') throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
+      if (typeof again === 'string') return null;
+    }
+  }
+}
+
+async function heldOnce(
+  ctx: ApiContext, place: ResolvedPath, environment: Environment, patch: Record<string, SecretValue | null>, recipes: Map<string, VersionRecipe>,
+  written: Written, tried: WriteTry,
+): Promise<SetResult> {
+  const { answer, deks, operationId, versionIds } = tried;
+  const { names } = written.asked;
+  if (answer.keys.length !== names.length || answer.keys.some((key, i) => key.name !== names[i])) throw new Error("the vault answers a write's keys in the order they were asked");
+  const items = answer.keys.map((key, i) => {
+    const value = patch[key.name];
+    const text = typeof value === 'string' ? value : value !== null && typeof value === 'object' && 'value' in value ? value.value : null;
+    if (text === null) throw new Error(`${key.name} is no value to write`);
+    const level: Sensitivity = key.sensitive ? 'sensitive' : 'secret';
+    const secret = { ...secretRef(place, environment, { id: key.id, key: key.name }, key.version), sensitive: key.sensitive };
+    const sealed = encrypt(Buffer.from(text, 'utf8'), secret, deks[i]!);
+    const envelope: Envelope = {
+      ...sealed, kekProvider: key.wrapped.kekProvider, kekId: key.wrapped.kekId, kekVersion: key.wrapped.kekVersion, wrappedDek: Buffer.from(key.wrapped.bytes, 'base64'),
+    };
+    return { key, level, envelope, versionId: versionIds[i]!, recipe: recipes.get(key.name) ?? null };
+  });
+  for (const dek of deks) dek.fill(0);
+  const changes = AppChanges.of(ctx.vault, answer.changes);
+  const keys: Record<string, SetOutcome> = {};
+  const touched = written.touched;
+  await ctx.db.transaction(async (tx) => {
+    // 0.14's head first, read: what its entries' MAC chains from (two-trips.md, "Locks": head, issue lock, fence, hold, rows).
+    const locked = await lockLogHeadRead(tx, appLogKey(ctx.chainKey));
+    heldWrites(tx, {
+      hold: { tokenHash: written.tokenHash, project: written.asked.project, environment: written.asked.environment, keys: names, digest: Buffer.from(answer.digest, 'hex') },
+      made: items.filter(({ key }) => key.created).map(({ key }) => ({ id: key.id, ...environment, key: key.name })),
+      versions: items.map(({ key, envelope, versionId, recipe, level }) => ({
+        id: versionId, secretId: key.id, version: key.version, ...envelope, createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: null, sensitive: level === 'sensitive',
+      })),
+      touched,
+    });
+    const log = items.map(({ key, level, recipe }) => {
+      keys[key.name] = { version: key.version, sensitivity: level };
+      return allowed(ctx, 'secret.write', {
+        ...environment, secretId: key.id, operationId, relatedSeq: key.seq,
+        metadata: { key: key.name, version: key.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, key.created ? null : level) },
+      });
+    });
+    await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, true, { final: true, locked })).later);
+  }).catch((error: unknown) => {
+    // A new key another write made first, by its name: the vault's read is no longer this write's.
+    throw isUniqueViolation(error) ? new ObjectMoved() : changes.failed(error);
+  });
+  await changes.sealed(ctx.db);
+  return { operationId, keys };
 }
 
 /**

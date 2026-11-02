@@ -482,6 +482,11 @@ REMOVALS=(
   # writer takes no lock, and copies the hash after the hold, before the COMMIT.
   "WritingTamper ActorFromRead CommitsAuthentic"
   "WritingAdd ActorFromRead CommitsAuthentic"
+  # The newest change's MAC left unchecked (T190): a database writer puts a revoked session's row, or a demoted
+  # adder's, back and writes its seal into the log's newest change of it; row and log agree, and only that change's
+  # MAC says the vault never wrote it.
+  "WritingForge ChangeMacChecked WritesStandAtCommit"
+  "WritingForge ChangeMacChecked AddsStandAtCommit"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"

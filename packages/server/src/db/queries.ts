@@ -4,7 +4,7 @@ import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
-import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { logObject, newestSeqQuery, newestVaultSeq, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
@@ -2985,3 +2985,32 @@ export async function auditActionCounts(
     )
     .groupBy(auditLog.action);
 }
+
+/**
+ * A key write's writes, held to the vault's read (T179 PR 3; `heldWrite` in api/secrets.ts), each left to `later`, so
+ * that they go with what its transaction asks next, its COMMIT at the latest, under one Sync: the hold first
+ * (`hold_inputs`, migration 0060: the issue lock and the fence, then the vault's read again, `coffre_moved` unless it
+ * reads as decided), then each new key's row, the versions, each key's current version, and its credential's last
+ * use, when `verify` left it to the request. Postgres only, as the vault's read is.
+ */
+export function heldWrites(
+  tx: Transaction,
+  write: {
+    hold: { tokenHash: Buffer; project: string; environment: string; keys: readonly string[]; digest: Buffer };
+    made: readonly { id: string; projectId: string; environmentId: string; key: string }[];
+    versions: readonly NewRow<typeof schema.secretVersions>[];
+    touched: { credential: string; at: Date; ip: string | null } | null;
+  },
+): void {
+  const { secrets, secretVersions, credentials } = tablesOf(tx);
+  const { hold } = write;
+  later(tx, sql`SELECT hold_inputs(${hold.tokenHash}::bytea, ${hold.project}::text, ${hold.environment}::text, ${sql.param([...hold.keys])}::text[], ${hold.digest}::bytea)`);
+  if (write.made.length > 0) later(tx, tx.insert(secrets).values([...write.made]));
+  if (write.versions.length > 0) later(tx, tx.insert(secretVersions).values([...write.versions]));
+  const now = new Date();
+  for (const version of write.versions) {
+    later(tx, tx.update(secrets).set({ currentVersionId: version.id!, currentVersion: version.version, updatedAt: now }).where(eq(secrets.id, version.secretId)));
+  }
+  if (write.touched !== null) later(tx, tx.update(credentials).set({ lastUsedAt: write.touched.at, lastUsedIp: write.touched.ip }).where(eq(credentials.id, write.touched.credential)));
+}
+

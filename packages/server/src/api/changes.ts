@@ -38,9 +38,11 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-const keeping = new WeakMap<Vault, { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean }>();
+type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean };
 
-async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean }> {
+const keeping = new WeakMap<Vault, Kept>();
+
+async function about015(vault: Vault): Promise<Kept> {
   const known = keeping.get(vault);
   if (known !== undefined) return known;
   const about = await vault.about();
@@ -54,6 +56,7 @@ async function about015(vault: Vault): Promise<{ log: boolean; uses: boolean; ba
     credentials: log && about.credentials === true && vault.signIn !== undefined && vault.revokeCredential !== undefined,
     issues: log && about.issues === true && vault.issueToken !== undefined,
     binds: log && about.binds === true && vault.changeBindings !== undefined,
+    writes: log && about.writes === true && vault.writeKeys !== undefined,
   };
   keeping.set(vault, kept);
   return kept;
@@ -86,6 +89,11 @@ export async function vaultMakesCredentials(vault: Vault): Promise<boolean> {
 /** Whether the vault issues tokens itself too, in one call (`issueToken`; T149, PR 2). A boolean, as `vaultMakesCredentials` says why. */
 export async function vaultIssuesTokens(vault: Vault): Promise<boolean> {
   return (await about015(vault)).issues;
+}
+
+/** Whether the vault decides a key write on one read of its own (`writeKeys`, T179 PR 3): the app's key write then makes five round trips. */
+export async function vaultWrites(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).writes;
 }
 
 /** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */
@@ -156,6 +164,14 @@ export class AppChanges {
     if (!outcome.ok && outcome.refusal.code === 'moved') throw new ObjectMoved();
     if (!outcome.ok) throw vaultRefused(outcome.refusal);
     return new AppChanges(vault, changes, outcome.changes);
+  }
+
+  /**
+   * Changes the vault prepared with its own decision (`Vault.writeKeys`, T179 PR 3), from the objects its read held:
+   * nothing asked of it again.
+   */
+  static of(vault: Vault, calls: readonly PreparedChange[]): AppChanges {
+    return new AppChanges(vault, [], calls);
   }
 
   /**

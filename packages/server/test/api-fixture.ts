@@ -339,6 +339,7 @@ export function testVault(
     keyChecks: call('keyChecks'),
     verifyLog: call('verifyLog'),
     prepare: call('prepare'),
+    writeKeys: call('writeKeys'),
     waitSealed: call('waitSealed'),
     signIn: call('signIn'),
     revokeCredential: call('revokeCredential'),

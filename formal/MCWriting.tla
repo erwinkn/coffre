@@ -3,7 +3,7 @@
 (* The scenarios TLC checks of Writing.tla. Each review round's P1 is an   *)
 (* adversary of one of them, so each stays pinned: rounds 1 and 2 in       *)
 (* Revoke, Place and Fork, round 3 in Names, round 5 in Protect, round 6   *)
-(* in Tamper and Add.                                                      *)
+(* in Tamper and Add, T190's forged seal in Forge.                         *)
 (***************************************************************************)
 EXTENDS Writing
 
@@ -30,6 +30,11 @@ NamesProcs == {"w1", "ren", "phn", "del", "ck"}
 \* Ada writes key k while her session is revoked and a database writer puts
 \* its row back, live, and another copies a token hash onto her credential.
 TamperProcs == {"w1", "end", "dbw", "sub", "ck"}
+
+\* Ada writes key k while her session is revoked and a database writer puts
+\* its row back and writes its seal into the revoke's change (T190); Bob
+\* adds svc while he is demoted and his row put back the same way.
+ForgeProcs == {"w1", "bob", "end", "dem", "fsg", "ck"}
 
 \* Bob and Cy each add svc while an Owner demotes Bob and changes the
 \* policy so that only Owners add, and a database writer copies a token

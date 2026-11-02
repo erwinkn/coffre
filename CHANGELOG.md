@@ -56,6 +56,30 @@
   credential's JSON rule as for a UI route's handle. It now reads each
   character once.
 
+- **A key write makes five round trips, not sixteen (T179 PR 3).** On
+  Postgres with 0.15's log, `PATCH /secrets/<project>/<env>` of values
+  (given or generated), at an environment of its own, by a session, a CLI
+  login, a personal or a service token, is served before the router: the
+  vault reads everything its decision weighs in one statement under the
+  fence (`write_request`, migration 0060), decides on that read alone,
+  checking each object's newest change's MAC and seal first, wraps the
+  keys and prepares the changes; the app checks the caller's rows on what
+  it answered and commits in one transaction of two round trips, which
+  holds that same read again under the fence before it writes
+  (`hold_inputs`): a revoke, a rename, an archive or another write that
+  commits in between makes the write ask again, three tries in all, then
+  409 `changed`. Five keys cost the same five round trips as one (twenty
+  before). A write stands at its commit, not only at its decision: today a
+  write the vault allowed before a revoke could commit after it. A
+  session revoked and its row put back whole is refused 401 on this path,
+  where the rest of the API takes it on its MAC alone. Everything else
+  writes as before: a reference, an archive, a marking, a plain or
+  sensitive value asked for, a dry run, a fork or `dev@me`, a binding's or
+  a workload's token, SQLite, a key service's vault, and every refusal,
+  which that path answers and logs as before, after the vault's one call.
+  0.14's entries are still written; 0.16 drops them, and the write to two
+  round trips (docs/design/two-trips.md, "As built: PR 3").
+
 - **A use and a change trust a newest change's seal only once its MAC
   holds (T190).** A database writer could put back a revoked member's row
   with its old seal, write that seal into the revoke's entry in

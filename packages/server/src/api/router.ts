@@ -38,7 +38,7 @@ export const API_BODY_BYTES = 1024 * 1024;
  * value count (`MAX_BODY_NODES`); this bounds the top-level maps that would
  * otherwise drive a costly per-entry union before any key cap applied.
  */
-const MAX_BODY_KEYS = 2000;
+export const MAX_BODY_KEYS = 2000;
 
 type AnyRoute = Route<string, z.ZodType | undefined, unknown, z.ZodType | undefined>;
 
@@ -64,7 +64,7 @@ const compiled: Compiled[] = Object.entries(routes).map(([key, def]) => {
 });
 
 /** What each named segment may hold. */
-const PARAMS: Record<string, z.ZodType<string>> = {
+export const PARAMS: Record<string, z.ZodType<string>> = {
   project: slug,
   // A slug, or `<slug>@me` for the caller's personal config of it.
   environment: environmentPath,
@@ -131,6 +131,10 @@ async function locate(
   query: unknown,
 ): Promise<ResolvedPath | null> {
   if (params.project === undefined) return null;
+  // A key write the vault decided on its read: the place as that read found it, standing and its own (`writeAhead`).
+  const written = ctx.written?.place;
+  if (written != null && written.environment !== null && params.key === undefined
+    && params.project === ctx.written!.asked.project && params.environment === ctx.written!.asked.environment) return written;
   const path = { project: params.project, environment: params.environment, key: params.key };
   const last = params.key !== undefined ? 'key' : params.environment !== undefined ? 'environment' : 'project';
   let place = await placeAt(ctx, path, { owner: ownerOf(ctx) });

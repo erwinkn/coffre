@@ -176,6 +176,13 @@ const sensitiveValue = z.object({
 /** The key's current value, kept, made stricter: as strict already is no change, and looser is refused (409). */
 const marked = z.object({ sensitivity }).strict();
 
+/** A patch of an environment's keys (`PATCH /secrets/:project/:environment`): what its route parses, and the key write's front door before it (write-ahead.ts). */
+export const secretPatch = z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())
+  .superRefine((patch, issues) => {
+    const problem = generationProblem(patch);
+    if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
+  });
+
 /** A role by id: one that ships, or one an Owner made; whether the instance defines it, the handler and the vault say. */
 const role = roleId;
 /** A role's definition, both columns (docs/design/roles.md): the vault checks it whole (`definitionProblem`). */
@@ -400,11 +407,7 @@ export const routes = {
     // generated; `{ "value", "sensitivity": "sensitive" }` one and who sees it (`{ "value", "plain": true }`,
     // as 0.9 said plain); `{ "sensitivity": "sensitive" }` the key's value as it is, made stricter;
     // `{ "ref": "market/prod/KEY" }` makes the key a reference to that secret.
-    input: z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())
-      .superRefine((patch, issues) => {
-        const problem = generationProblem(patch);
-        if (problem !== null) issues.addIssue({ code: 'custom', message: problem });
-      }),
+    input: secretPatch,
     // `?dryRun=1` answers what the patch would do and writes nothing. Any
     // other query is refused, not ignored: a mistyped flag must not write.
     query: dryRunFlag,

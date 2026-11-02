@@ -414,6 +414,13 @@
       "when": 1793679605999,
       "tag": "0060_route_gate",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1793694196447,
+      "tag": "0061_write_inputs",
+      "breakpoints": true
     }
   ]
 }

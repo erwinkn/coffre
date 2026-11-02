@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import type { ObjectChange, PreparedChange } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
@@ -368,7 +368,16 @@ export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonl
  *   that seal, which `app_change` holds to the log's newest sealed one. A
  *   key its log never held is 0.14's, before the cutover: logged nothing.
  */
-export function prepareChanges(keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[], kept: ReadonlyMap<string, { object: Input; seal: Buffer } | null>): PreparedChange[] {
+export function prepareChanges(
+  keys: ChangeKeys, at: number, actor: string, changes: readonly ObjectChange[], kept: ReadonlyMap<string, { object: Input; seal: Buffer } | null>,
+  /**
+   * A key write's request, decided on one read (T179 PR 3, write.ts): each change carries it in its payload, under the
+   * vault's MAC, its number, the credential and identity it was decided for, and the read's digest (`inputs`), which
+   * `app_change_strict` holds to the read its transaction held (`hold_inputs`); and each change's request id is derived
+   * from the request's number and the change's object, so that one write's two keys never share one.
+   */
+  request?: WriteRequest,
+): PreparedChange[] {
   const prepared: PreparedChange[] = [];
   for (const change of changes) {
     const { kind, id, before } = change;
@@ -404,7 +413,10 @@ export function prepareChanges(keys: ChangeKeys, at: number, actor: string, chan
       if (next === undefined) throw new Error(`${op.op} does nothing to the ${kind} ${id}: the app's write and its change disagree`);
       // A key deleted leaves no object, and no seal: its row's is null, as a use reads it (decide.ts, checkSeals).
       const seal = next === null ? null : sealOf(keys.seals[0]!, ref, next);
-      const row = { at, requestId: randomUUID(), object, actor, payload: payloadOf(ref, op), seal };
+      const row = {
+        at, requestId: request === undefined ? randomUUID() : writeRequestId(request.number, object), object, actor,
+        payload: payloadOf(ref, op, undefined, request === undefined ? undefined : requestPart(request)), seal,
+      };
       const mac = entryMac(keys.mac, { tree: 'changes', row });
       prepared.push({
         kind, id, ...row, seal: seal?.toString('base64') ?? null, sealFrom: from?.toString('base64') ?? null, mac: mac.toString('base64'),
@@ -521,8 +533,30 @@ function sameObject(key: Buffer, ref: Ref, a: Input | null, b: Input | null): bo
  * Canonical JSON, so that a retry sends the same bytes (`change_input`
  * finds its entry by request id and payload).
  */
-export function payloadOf(ref: Ref, op: Op, old?: bigint): string {
-  return canonical({ ...op, ref: { kind: ref.kind, id: ref.id }, ...(old === undefined ? {} : { old: old.toString() }) });
+export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: WriteRequestPart; inputs: string }): string {
+  return canonical({ ...op, ref: { kind: ref.kind, id: ref.id }, ...(old === undefined ? {} : { old: old.toString() }), ...(extra ?? {}) });
+}
+
+/** A key write's request, as its changes carry it (`prepareChanges`). */
+export type WriteRequest = { number: bigint; credential: string; identity: string | null; inputs: string };
+
+/** What a change's payload says of its request: its number, and the credential and identity it was decided for. */
+type WriteRequestPart = { number: string; credential: string; identity: string | null };
+
+function requestPart(request: WriteRequest): { request: WriteRequestPart; inputs: string } {
+  return { request: { number: request.number.toString(), credential: request.credential, identity: request.identity }, inputs: request.inputs };
+}
+
+/**
+ * A key write's change's request id: a UUID made of the request's number and the change's object (as a version 5's
+ * bits are set, from SHA-256), so that each change of one request has its own, and the same one each time it is made.
+ */
+export function writeRequestId(number: bigint, object: string): string {
+  const hash = createHash('sha256').update(`coffre.write.v1\0${number}\0${object}`, 'utf8').digest();
+  hash[6] = (hash[6]! & 0x0f) | 0x50;
+  hash[8] = (hash[8]! & 0x3f) | 0x80;
+  const hex = hash.subarray(0, 16).toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
@@ -533,8 +567,9 @@ export function payloadOf(ref: Ref, op: Op, old?: bigint): string {
  */
 export function loggedChange(row: { number: bigint; at: number; object: string; payload: string; seal: Buffer | null }): LoggedChange | null {
   // What a change records besides its op, which the replay leaves: the 0.14 entry it accounts for, and a sign-in's, a revoke's, an issue's or a binding's own (credentials.ts).
-  const { ref: named, old: _, signIn: _signIn, revoke: _revoke, issue: _issue, bind: _bind, unbind: _unbind, ...op } = JSON.parse(row.payload) as Op & {
-    ref?: Ref; old?: string; signIn?: unknown; revoke?: unknown; issue?: unknown; bind?: unknown; unbind?: unknown;
+  // And a key write's request and the digest of the read it was decided on (T179 PR 3, `prepareChanges`).
+  const { ref: named, old: _, signIn: _signIn, revoke: _revoke, issue: _issue, bind: _bind, unbind: _unbind, request: _request, inputs: _inputs, ...op } = JSON.parse(row.payload) as Op & {
+    ref?: Ref; old?: string; signIn?: unknown; revoke?: unknown; issue?: unknown; bind?: unknown; unbind?: unknown; request?: unknown; inputs?: unknown;
   };
   const ref = named ?? (op.op === 'genesis' ? refOf(op.value) : undefined);
   if (ref === undefined || objectKey(ref) !== row.object) return null;

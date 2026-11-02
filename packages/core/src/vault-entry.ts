@@ -47,6 +47,7 @@ export const VAULT_METHODS = [
   'useRoute',
   'proxyItem',
   'prepare',
+  'writeKeys',
   'waitSealed',
   'signIn',
   'revokeCredential',

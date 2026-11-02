@@ -1,6 +1,7 @@
 # A change in two round trips (T179)
 
-Status: design and model (formal/Writing.tla). The routes follow it in later PRs.
+Status: design and model (formal/Writing.tla). The key write's path is built (PR 3, below, "As built: PR 3"); the
+member add and the contraction follow.
 
 R57 wants a change answered in under 200 ms in 0.16. Erwin's target (2026-11-02):
 **a key write and a member add each make at most two database round trips on the
@@ -126,9 +127,13 @@ takes today's.
    hashes to it. `write_inputs` is declared `SET bytea_output = hex`, as
    `use_credential` is, so its text is the same bytes whichever login
    and session settings call it: the vault's request and the app's hold
-   hash one rendering. Then it parses the text into one `WriteInputs` value and
-   holds each object in it to its newest change (StaleFirst: a row put
-   back is refused). It refuses first everything the app would
+   hash one rendering. Then it parses the text into one `WriteInputs` value,
+   holds each object's newest change in it to its MAC (`changeHolds`, T190:
+   a database writer can write any seal into that change's column, not a
+   MAC over it; one that fails is refused `tampered`), and only then holds
+   each object to that change's seal (StaleFirst: a row put back is
+   refused). The read carries each newest change's every column for this,
+   as `memberLogs` does, so the check costs no round trip. It refuses first everything the app would
    (AcceptedFirst, as a named use): the config's `accepts`, the token's
    kind, an ended or expired session, an earlier generation, all at the
    vault's clock. It builds the caller's `Reader` from `WriteInputs`
@@ -436,8 +441,9 @@ the app authenticates that resolution (step 3) before anything is written.
    the scope's projects by slug. Each object with its newest change, each
    name and set as resolved. No lock, nothing written (Lifecycle's issue,
    statement 1).
-2. **The Worker** takes the digest, parses `AdmitInputs`, holds each row to
-   its newest change (StaleFirst), decides on it alone (`#standing`,
+2. **The Worker** takes the digest, parses `AdmitInputs`, holds each newest
+   change to its MAC (`changeHolds`, T190, as a key write's step 3) and each
+   row to its newest change's seal (StaleFirst), decides on it alone (`#standing`,
    `#setsUp`, `givesService`), and builds svc's new row and its grants,
    their MACs and seals, and their changes from the rows as read (none),
    the digest in each change's payload. It answers the app the caller's
@@ -584,6 +590,7 @@ protection is a constant; turned off, TLC finds a counterexample:
 | by number, not value (ReadByNumber) | `CommitsReplay`: Ada's grant taken and given back; the write commits on equal values, and the log, replayed at its commit, shows the member changed after the read its change binds |
 | the app checks the caller's `auth_mac` on the rows the vault read before anything commits (AuthChecked): a key write's step 4, an add's step 3 | `CommitsAuthentic`: a database writer copies a token hash they hold onto a live Owner's credential; the vault resolves the token to the Owner, its read and hold agree, and a write or an add commits as the Owner (round 6) |
 | the change's actor is the checked read's, by id under the vault's MAC; nothing after the check resolves the token again (ActorFromRead) | `CommitsAuthentic`: a database writer, who takes no lock, copies the hash onto the Owner's row after the hold and before the COMMIT (round 7). The model splits the hold from the write's rows and COMMIT for this: nothing that takes the head or the fence comes between, a database writer may |
+| the Worker holds each newest change it read to its MAC before StaleFirst weighs its seal (ChangeMacChecked, T190) | `WritesStandAtCommit`, `AddsStandAtCommit`: a revoked session's row, or a demoted adder's, put back with its seal written into the log's newest change of it; row and log agree, the hold agrees, and the write or the add commits |
 | a change answers once sealed (WaitForSeal, R51) | `AnsweredSealed` |
 
 Two properties hold besides: `TwoTrips` (a write or an add that committed
@@ -695,7 +702,8 @@ Each with what the key write and the first member add then cost:
    `hold_inputs` flat as the log grows, and a regression case per
    adversary of formal/Writing.tla's scenarios (each review round's P1
    among them), each failing with its part of the read left out.
-   Key write: 1 + 2 + 2 = 5 round trips (16 today).
+   Key write: 1 + 2 + 2 = 5 round trips (16 today). Built: see "As built:
+   PR 3" below, for what it serves and what it leaves to later PRs.
 4. **The audit pages, the offboarding report and the members' watermark
    read the log**: writes, their refusals and member changes, place
    filters included; and `memberAccess`, `missingMembers` and
@@ -727,3 +735,56 @@ Each with what the key write and the first member add then cost:
 
 Each PR that changes what a statement reads or holds changes
 formal/Writing.tla in the same PR.
+
+## As built: PR 3
+
+The key write's path, on Postgres (`write_inputs`, `write_request` and `hold_inputs`, migration 0060; the vault's
+`writeKeys`, packages/vault/src/write.ts; the app's front door, packages/server/src/write-ahead.ts, and its held
+statement, `heldWrite` in api/secrets.ts). `change-cost.test.ts` holds a key write, one key or five, new or not, to
+`{ app: 2, vault: 3 }` (16 and 20 before):
+
+```
+vault  write_request: the fence shared, then the read, app_read's rows and the number       1
+       the Worker: each newest change's MAC, each row's seal, the decision; wraps, prepares
+       0.14's key.wrap entries: BEGIN + the head | the append + COMMIT                    2
+app    the rows' auth_mac, in memory; each value encrypted
+       BEGIN + 0.14's head and its read                                                   1
+       hold_inputs | the rows | the versions | 0.14's entries + the changes | COMMIT     1
+vault  waitSealed                                                                         the seal
+```
+
+What it serves, and what keeps today's path, `served: false` (the app writes as before, which answers and logs it):
+
+- **The patch**: values, given or generated (no key pair), saying nothing of who sees them. Not a marking, a
+  reference, an archive, a plain or sensitive value asked for, a dry run.
+- **The place**: an environment of its own. Not a fork, nor `dev@me` (PR 3b: `write_inputs` reads the fork chain,
+  its parents' keys and the personal config by its owner, as round 1 and 4 have it). Not an archived or deleted one.
+- **The keys**: none yet, or a live value of the place's own, secret or sensitive. Not an archived key, a
+  reference, a plain value (its object binds its text, which the read leaves out), or a regenerate whose version
+  moved since it was listed.
+- **The caller**: a session, a CLI login, a personal or a service token, its config accepting it, not ended at the
+  vault's clock. Not a token a trust binding issued (its binding is the app's to check, a read of its own), a
+  workload's, a handle's, an MCP connection's or Cloudflare Access's.
+- **The vault**: 0.15's log, cut over, on Postgres, its key-encryption key in memory (`about().writes`). SQLite's
+  writes keep today's path: one transaction, with no round trip to save.
+
+What it does not build yet, and why that is sound meanwhile:
+
+- **No request row, no outcome record.** The statement numbers the request from `log_number`, in the read's own
+  statement under the fence (RequestUnderFence), and each change carries that number, the credential and identity
+  it was decided for and the read's digest in its payload, under the vault's MAC. The stored read and the outcome
+  record (`write_outcome`) are for the replay of a decision and for the audit pages' refusals, which read 0.14's
+  entries until PR 4 and PR 6. So every refusal, a vault's, a seal's or a MAC's, goes down today's path, which
+  refuses and logs it as now: a refusal costs today's trips, and the vault's `writeKeys` call before them.
+- **A caller's credential not as its log has it is refused, never sent down today's path** (`forged`, 401): a
+  session revoked and its row put back whole carries its `auth_mac`, which `findCredential` alone would take. So
+  the two-trip write refuses it where today's path would not, on both engines (reported with T179 PR 3).
+- **A retry that finds the credential ended answers 401** rather than going down today's path, which would go on
+  with the caller the first try checked.
+
+The regressions (packages/server/test/write-held.test.ts) make each adversary of Writing.tla between the vault's read
+and the app's hold, through the real front door: a revoke, an end, a rename, a key appearing sensitive, an archive, a
+second write, a grant taken and given back, a hold that keeps failing (409 after three tries), a forged seal
+(WritingForge), a row put back (dbw), a token hash moved (sub); and one that the read's digest moves with each.
+packages/vault/test/write-cost.test.ts holds both statements' buffers flat from 10k entries to 1M.
+

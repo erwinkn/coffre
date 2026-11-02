@@ -274,9 +274,12 @@ const seals = new Map<number, string | null>();
  * A fork prepares twice. The pin that would fold it into the write is T179's (sealed-inputs.md).
  */
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
-  'key set, one': { app: 13, vault: 4 },
-  'key set, existing': { app: 13, vault: 4 },
-  'key set, five': { app: 17, vault: 4 },
+  // A key write decided on one read (T179 PR 3; docs/design/two-trips.md): the vault's statement, 0.14's `key.wrap`
+  // entries (the head, then the append: until 0.16 stops them), and the app's two, the head and then everything with
+  // the COMMIT, however many keys. 0.16's contraction makes it { app: 1, vault: 1 } (PR 6).
+  'key set, one': { app: 2, vault: 3 },
+  'key set, existing': { app: 2, vault: 3 },
+  'key set, five': { app: 2, vault: 3 },
   'key archived': { app: 12, vault: 2 },
   'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },

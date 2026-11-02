@@ -2239,7 +2239,10 @@ written and the key she inherits marked sensitive (`WritingFork`), the key
 she writes renamed, the parent gaining it, sensitive, and her personal
 config deleted (`WritingNames`), her session revoked and its row put back,
 live, by a database writer, and a token hash copied onto her credential by
-another (`WritingTamper`). Bob and Cy each add svc while Bob is demoted,
+another (`WritingTamper`), her session revoked and its row put back by a
+database writer who also writes the row's seal into the revoke's change in
+the log, and Bob's row put back so after his demotion while he adds svc
+(`WritingForge`, T190). Bob and Cy each add svc while Bob is demoted,
 the policy changes so that only Owners add, and a database writer copies a
 token hash onto Bob's credential (`WritingAdd`); Bob, no admin, sets up svc with a first grant while the
 roles are redefined, the services setting is closed and the grant's place
@@ -2248,7 +2251,7 @@ environments is protected, a protected fork is made in it, the project is
 renamed and another made under its slug, and the scope's project likewise
 (`WritingProtect`). Each review round's P1 is one of these adversaries:
 rounds 1 and 2 in Revoke, Place and Fork, round 3 in Names, round 5 in
-Protect, rounds 6 and 7 in Tamper and Add. Every other change is one atomic step; the checkpointer seals
+Protect, rounds 6 and 7 in Tamper and Add, T190's in Forge. Every other change is one atomic step; the checkpointer seals
 whatever has committed at each tick. A hold that fails asks again, three
 tries in all, then gives up (409).
 
@@ -2263,6 +2266,7 @@ tries in all, then gives up (409).
 | the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
 | the app checks the caller's `auth_mac` on the rows as read (AuthChecked) | `CommitsAuthentic` (Tamper, Add): a token hash copied onto an Owner's credential; the vault resolves the token to the Owner, read and hold agree, and the write or the add commits as the Owner (round 6) |
 | the change's actor is the checked read's, bound by id; nothing after the check resolves the token again (ActorFromRead) | `CommitsAuthentic` (Tamper, Add): the hash copied onto the Owner's row after the hold and before the COMMIT, which the hold, already passed, cannot see (round 7) |
+| the Worker holds each object's newest change in the read to its MAC (`changeHolds`) before StaleFirst weighs its seal (ChangeMacChecked, T190) | `WritesStandAtCommit`, `AddsStandAtCommit` (Forge): a revoked session's row, or a demoted adder's, put back with its seal written into the log's newest change of it; row and log agree, the read and its hold agree, and the write or the add commits on a standing the log's MAC'd changes deny |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its
