@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { encrypt, freshDek } from '@coffre/core/envelope';
 import type { NamedUseInput } from '@coffre/core/vault';
-import { createDatabase, tablesOf } from '@coffre/db';
+import { createDatabase, tablesOf, type Queryable } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
@@ -115,9 +115,11 @@ export async function namedWorld(db: TestDatabase, options: Parameters<typeof wo
   /** `key` removed in `environment`, a fork's (a dismissal, which no seal covers): what it inherits of that name, gone there. */
   const dismiss = (environment: string, key: string) => db.owner.insert(tablesOf(db.owner).dismissedKeys).values({ environmentId: environment, key, dismissedBy: ROOT });
   /** An environment renamed `slug`, as the app renames one: a change to its object. */
-  const rename = async (id: string, slug: string) => {
+  /** `during`, if given, runs in the rename's transaction once it holds the fence (Postgres), before it writes. */
+  const rename = async (id: string, slug: string, during?: (tx: Queryable) => Promise<void>) => {
     const object = { ...environments.get(id)!, slug };
     await change({ kind: 'environment', id }, { op: 'environment.rename', slug }, object, async (tx, value) => {
+      await during?.(tx);
       await run(tx, sql`UPDATE environments SET slug = ${slug} WHERE id = ${id}`);
       await seal('environments', 'id', id)(tx, value);
     });

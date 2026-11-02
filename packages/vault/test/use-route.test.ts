@@ -448,6 +448,66 @@ test("the chain is the vault's: a fork's parent re-pointed around the log at ano
   assert.ok(!grafted.outcome.ok);
 });
 
+test("the chain is the vault's above the level that serves too: a fork's own route never sends a key a re-pointed ancestor grafts on (review r2 of #464)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('real');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // dev-eu-x → dev-eu → dev; dev-eu-x defines `openai` itself, sending the key it inherits from dev.
+  const eu = await w.fork('dev-eu');
+  const x = await w.fork('dev-eu-x', eu);
+  await w.grantAt(x, 'developer');
+  await w.save({ openai: { definition: route('openai', [name], 'good.example'), editor: ada } }, x);
+  // `other`, an environment of the project where the caller is a Developer too, holds a key of the same name: only the
+  // chain stands between it and dev-eu-x's upstream.
+  const other = await w.environment('other');
+  await w.grantAt(other, 'developer');
+  const stolen = await w.key('stolen', false, other);
+  await run(db.owner, sql`UPDATE secrets SET key = ${name} WHERE id = ${stolen}`);
+  const { vault } = await isolate();
+  const atFork = () => w.askRoute('openai', { named: { place: { project: w.slug, environment: 'dev-eu-x' }, route: 'openai' } });
+  assert.deepEqual(values(await vault.useRoute(atFork())), { [name]: 'real' });
+  // dev-eu's parent re-pointed at `other` around the log: dev-eu-x's own item still serves, and the key would resolve
+  // through the forged link to `other`'s.
+  await run(db.owner, sql`UPDATE environments SET parent_id = ${other} WHERE id = ${eu}`);
+  const grafted = answered(await vault.useRoute(atFork()));
+  assert.deepEqual(grafted.outcome, { ok: false, index: null, code: 'tampered', number: null });
+  assert.deepEqual(grafted.keys, []);
+});
+
+test("the reading is picked again under the fence: a rename landing between the pick and the gate serves the reading the rows pick then (review r2 of #464)", { skip: ENGINE !== 'postgres' ? 'a rename held between the statement\'s first reads and its fence' : false }, async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // `/use/<project>/dev/openai`: the place reading's route `openai` at dev, or the stable reading's route `<project>`.
+  await w.save({
+    openai: { definition: route('openai', [name], 'named.example'), editor: ada },
+    [w.slug]: { definition: route(w.slug, [name], 'stable.example'), editor: ada },
+  });
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const { vault } = await isolate();
+  const both = () => w.askRoute('openai', { stable: w.slug });
+  const placed = answered(await vault.useRoute(both()));
+  assert.equal(placed.reading, 'named');
+  // dev renamed while the use waits on the fence the rename holds, the place reading picked before it: no `<project>/dev` then.
+  let raced!: Promise<RouteUseOutcome>;
+  await w.rename(w.dev, 'stage', async (tx) => {
+    raced = vault.useRoute(both());
+    for (let i = 0; ; i++) {
+      const [waiting] = await rows<{ n: number }>(tx, sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668244070 AND NOT granted`);
+      if (waiting!.n > 0) break;
+      assert.ok(i < 200, 'the use never waited on the fence');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  });
+  const answer = answered(await raced);
+  assert.equal(answer.reading, 'stable', JSON.stringify(answer.outcome));
+  assert.ok(answer.found !== null && answer.found.found, JSON.stringify(answer.found));
+  assert.equal(answer.found.item.name, w.slug);
+  assert.deepEqual(values(answer), { [name]: 'sk' });
+});
+
 test("OneVersion holds the roles too: a role edit landing between a use's rounds decides the editor again on the roles after it (review r1 of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {
   const w = await routeWorld(db);
   const a = await w.key('a');

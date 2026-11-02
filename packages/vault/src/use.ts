@@ -1676,18 +1676,22 @@ function levelsOf(rows: RouteRows): RouteLevel[] {
 /** What every statement of one use must read alike (`OneVersion`): the levels' seals, the item, and its editor's newest change. */
 function versionOf(rows: RouteRows, found: RouteFound): string {
   const seal = (value: Buffer | null | undefined) => value?.toString('base64') ?? null;
-  // The roles and the policy too, which the editor's decision weighs as the first statement read them (review r1).
-  return JSON.stringify([found.seals, found.found ? found.item.digest : null, seal(rows.editor?.last), seal(rows.gate.r_last), seal(rows.gate.p_last)]);
+  // The roles and the policy too, which the editor's decision weighs as the first statement read them (review r1), and
+  // every level's environment, which the keys resolve through (review r2).
+  return JSON.stringify([
+    found.seals, found.found ? found.item.digest : null, seal(rows.editor?.last), seal(rows.gate.r_last), seal(rows.gate.p_last),
+    rows.levels.map((level) => [level.environment, seal(level.env?.last)]),
+  ]);
 }
 
 /**
- * Why the chain a statement read is not the vault's (review r1 of #464): each level's environment sealed and its
- * object's newest change, the first the place itself, and each the parent of the one before it, through `upto` (the
- * level that serves, or every level read). A parent re-pointed, or a level planted, around the log, would graft another
- * environment's definitions onto this place's keys.
+ * Why the chain a statement read is not the vault's (reviews r1 and r2 of #464): each level's environment sealed and its
+ * object's newest change, the first the place itself, each the parent of the one before it, and the last a root. Every
+ * level, whichever serves the route: the keys resolve through the whole chain, so a parent re-pointed, or a level
+ * planted, around the log, above the level that serves would still graft another environment's keys onto its route.
  */
-function chainFault(path: UsePath, rows: RouteRows, servedAt: number | null): 'tampered' | 'stale' | null {
-  const levels = servedAt === null ? rows.levels : rows.levels.slice(0, servedAt + 1);
+function chainFault(path: UsePath, rows: RouteRows): 'tampered' | 'stale' | null {
+  const levels = rows.levels;
   for (const [i, level] of levels.entries()) {
     const env = level.env;
     if (env === null) return 'stale';
@@ -1697,9 +1701,9 @@ function chainFault(path: UsePath, rows: RouteRows, servedAt: number | null): 't
     if (!sealedBy(path.sealKeys, { kind: 'environment', id: level.environment }, object, env.seal)) return 'tampered';
     if (env.seal === null || env.last === null || !env.seal.equals(env.last)) return 'stale';
     if (i === 0 && level.environment !== rows.place) return 'tampered';
-    // Linked to the next level read; the last of a lookup that served none, to none, unless the chain ran past its length.
+    // Linked to the next level read; the last to none, unless the chain ran past its length (which the statement cuts).
     const next = levels[i + 1];
-    if (next !== undefined ? object.parentId !== next.environment : servedAt === null && object.parentId !== null && levels.length <= MAX_PARENTS) return 'tampered';
+    if (next !== undefined ? object.parentId !== next.environment : object.parentId !== null && levels.length <= MAX_PARENTS) return 'tampered';
   }
   return null;
 }
@@ -1775,7 +1779,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     if (rows.personal) return { ...answer, stands: true, personal: true, found: null, keys: [], outcome: { ok: false, index: null, code: 'personal', number: null } };
     if (rows.cut) return { ...answer, stands: false, personal: false, found: null, keys: [], outcome: { ok: false, index: null, code: 'archived', number: null } };
     const looked = routeLookup(path.sealKeys, levelsOf(rows), rows.route!);
-    const linked = chainFault(path, rows, looked.served ? looked.level : null);
+    const linked = chainFault(path, rows);
     if (linked !== null) {
       const found: RouteFound = { found: false, fault: linked, seals: looked.seals };
       return { ...answer, stands: true, personal: false, found, keys: [], outcome: { ok: false, index: null, code: linked, number: null } };
@@ -1811,7 +1815,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
       if ('busy' in more) return busyFor(more);
       const lookedAgain = routeLookup(path.sealKeys, levelsOf(more.rows), rows.route!);
       if (!more.rows.made || !lookedAgain.served || versionOf(more.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version
-        || !lookedAgain.digest.equals(looked.digest) || chainFault(path, more.rows, lookedAgain.level) !== null) {
+        || !lookedAgain.digest.equals(looked.digest) || chainFault(path, more.rows) !== null) {
         moved = true;
         break;
       }
@@ -1835,7 +1839,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
         const round = await routeStatement(path, ask, guess, { offset, asked: second.slice(offset, offset + chunk), lock });
         if ('busy' in round) return busyFor(round);
         const lookedAgain = routeLookup(path.sealKeys, levelsOf(round.rows), rows.route!);
-        if (!round.rows.made || !lookedAgain.served || !lookedAgain.digest.equals(looked.digest) || chainFault(path, round.rows, lookedAgain.level) !== null
+        if (!round.rows.made || !lookedAgain.served || !lookedAgain.digest.equals(looked.digest) || chainFault(path, round.rows) !== null
           || versionOf(round.rows, { found: true, level: lookedAgain.level, seals: lookedAgain.seals, item: found.item }) !== version) {
           moved = true;
           break;
@@ -1965,14 +1969,14 @@ export async function proxyItem(path: UsePath, input: ProxyItemInput): Promise<P
   if (rows.cut) return { ok: false, code: 'archived' };
   if (input.name !== null) {
     const looked = routeLookup(path.sealKeys, levelsOf(rows), input.name);
-    const linked = chainFault(path, rows, looked.served ? looked.level : null);
+    const linked = chainFault(path, rows);
     if (linked !== null) return { ok: true, personal: false, fault: linked, seals: looked.seals, item: null, items: null, place };
     if (!looked.served) return { ok: true, personal: false, fault: looked.fault, seals: looked.seals, item: null, items: null, place };
     const item: DecidedItem & { level: number } = { name: input.name, digest: looked.digest.toString('base64'), definition: looked.item.definition, level: looked.level };
     return { ok: true, personal: false, fault: null, seals: looked.seals, item, items: null, place };
   }
   const served = proxyServing(path.sealKeys, levelsOf(rows));
-  const linked = chainFault(path, rows, null);
+  const linked = chainFault(path, rows);
   if (linked !== null) return { ok: true, personal: false, fault: linked, seals: served.seals, item: null, items: null, place };
   if (!served.ok) return { ok: true, personal: false, fault: served.fault, seals: served.seals, item: null, items: null, place };
   return {

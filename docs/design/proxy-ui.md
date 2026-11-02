@@ -1629,6 +1629,12 @@ Where C1 settles what this section left open, or reads it otherwise:
   reading; the route's keys' ids are kept per place and route
   (`UseCache.routeKeys`), never per path. A pick the statement disagrees
   with uses nothing, and the next call is made by the statement's own.
+  The statement picks it before the fence, so that a cold session plans
+  `use_credential` before it holds the fence, then once more under it,
+  after the gate: if a rename moved it in between, it asks the gate again
+  by the new one (review r2: `/use/market/dev/openai`, dev renamed to
+  stage meanwhile, would otherwise answer `served: false` where the rule
+  now picks the stable route `market`).
 - **Quiet uses.** A route use's key that the place does not hold, or that
   is plain, writes no entry and takes no lock (`v_quiet`, as a named call's),
   and a plain value goes back as its text. A workload's gate is such a use
@@ -1636,15 +1642,21 @@ Where C1 settles what this section left open, or reads it otherwise:
   every item), which writes nothing.
 - **The chain is the vault's.** Each level the statement reads carries its
   environment's row, seal and newest change's seal, and the vault checks
-  every level through the one that serves: sealed, current, the first the
-  place, each the parent of the one before (`chainFault`). A parent
-  re-pointed around the log fails it, `tampered` (review r1: a child's key
-  would otherwise reach an unrelated environment's sealed route).
+  every level of the chain, whichever serves: sealed, current, the first
+  the place, each the parent of the one before, the last a root
+  (`chainFault`). A parent re-pointed around the log fails it, `tampered`
+  (review r1: a child's key would otherwise reach an unrelated
+  environment's sealed route; review r2: above the level that serves too,
+  since the keys resolve through the whole chain, so `x → eu → dev` with
+  `eu` re-pointed at `other` would send `other`'s key of the same name
+  through `x`'s own route). Levels past the serving one carry their
+  environment only, not their definitions.
 - **`OneVersion`** is held across rounds and chunks by comparing each
   statement's levels' seals, the item's digest, the editor's newest seal,
   and the roles' and the policy's newest seals with the first's
   (`versionOf`; the roles and policy since review r1: the editor's decision
-  weighs them); any difference starts the use over, at
+  weighs them; every level's environment since review r2: the keys resolve
+  through them); any difference starts the use over, at
   most three times, then `late`. A second round passes every key of its
   chunk, the ones it does not make with no request id: only checked.
 - **Covers**: `use_route` passes a key's cover to `use_credential` only past
@@ -1663,11 +1675,12 @@ Where C1 settles what this section left open, or reads it otherwise:
   (`sealedIndex`), the item hashed against its entry; an item the sealed
   index lacks is `tampered`. Every item (`proxyItem` with no name) checks
   each level whole (`proxyServing`), and one level that fails fails all.
-- **Cost** (`use-route-cost.test.ts`): one statement warm; 106 buffers at
-  10k entries of history, 105 at 1M; 111 with 256 definitions in the
+- **Cost** (`use-route-cost.test.ts`): one statement warm; 114 buffers at
+  10k entries of history, 113 at 1M; 119 with 256 definitions in the
   environment (its index, about 11 KB, read whole), the same rows; with a
-  handle's made-for list read (a place reading), 154 at 1k environments in
-  the instance and 145 at 10k. That list is read a subquery per place, by
+  handle's made-for list read (a place reading), 167 at 1k environments in
+  the instance and 158 at 10k (8 to 13 more than before review r2: the
+  reading picked again under the fence, and every level's environment). That list is read a subquery per place, by
   key: as a join, the generic plan hashed every environment (114 buffers at
   10k, review r1). The new
   `log_uses.route` column costs every use row its null bitmap's second

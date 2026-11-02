@@ -147,11 +147,14 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     const levels: RouteLevelRow[] = [];
     let serving: Record<string, unknown> | null = null;
     let inputs = 0n;
+    // Each level's definitions through the first that serves the route (every level's, for every item), and every
+    // level's environment, which the keys resolve through whatever level serves (review r2).
     for (const layer of layers) {
-      const row = await one<{ items: string; digests: Buffer; seal: Buffer }>(sql`SELECT items, digests, seal FROM proxy_definitions WHERE environment_id = ${layer}`);
+      const looking = serving === null;
+      const row = looking ? await one<{ items: string; digests: Buffer; seal: Buffer }>(sql`SELECT items, digests, seal FROM proxy_definitions WHERE environment_id = ${layer}`) : undefined;
       // By the column, not the text it is read as, which the alias would sort by.
-      const newest = await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
-        WHERE c.object = ${objectKey({ kind: 'proxy', id: layer })} ORDER BY c.number DESC LIMIT 1`);
+      const newest = looking ? await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
+        WHERE c.object = ${objectKey({ kind: 'proxy', id: layer })} ORDER BY c.number DESC LIMIT 1`) : undefined;
       if (newest !== undefined && BigInt(newest.number) > inputs) inputs = BigInt(newest.number);
       let items: unknown;
       try {
@@ -175,10 +178,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
           last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal),
         },
       });
-      if (route !== null && item !== null) {
-        serving = item !== null && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
-        break;
-      }
+      if (looking && route !== null && item !== null) serving = typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
     }
     if (serving === null) return { ...none, gate, stood: true, place, project: at!.project_id, levels };
     let editor: EditorRow | null = null;
