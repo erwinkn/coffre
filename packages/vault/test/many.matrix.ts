@@ -1,7 +1,7 @@
 // A request's several keys by name (T165, B2's PR 2; migration 0055; formal/ProbingMany.tla): what forks.matrix.ts
 // holds of one key, for a batch of two, mixed. The vault's one call decides the caller's standing at the place first,
-// from rows no key decides, then reads each key as a lone named use does, the request's names or every key the place
-// holds, decides them all, and only then makes the rest by ids.
+// from rows no key decides, then resolves each key's name, the request's names or every key the place holds, decides
+// them all, and only then makes the rest by ids.
 //
 // A row is the place (dev; a fork; a fork of a fork; the caller's personal config of dev; dev, for `dev@me` while they
 // have none), how they lost their standing or not (their grant at the place revoked, or ended, which no change records;
@@ -14,7 +14,8 @@
 // one statement, nothing written, and the same blocks of the key's relations read, none of any key's (GateBeforeKeys,
 // CutByPlace, NoKeyBeforeStanding): on Postgres with every cell's principal's lock held and every statement slow, so
 // that a lock waited for, or a statement more, shows. Standing there, a batch with a key they may not have is refused
-// in its first statement, entering nothing in the cap's set and waiting for no lock (DecideAllFirst); one whose every
+// before any lock (in its first statement, or a sealed key not mapped, its batch by ids' first round), entering nothing
+// in the cap's set and waiting for no lock (DecideAllFirst); one whose every
 // key they may have, or the place does not hold, hands back exactly those they may have, or is busy on the lock.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -92,7 +93,10 @@ const usable = (row: Row, state: State) => {
 };
 const labelOf = (row: Row) => `${row.where} / ${row.lost} / ${row.map} / ${row.ask} / window ${row.window}`;
 const count = async (query: ReturnType<typeof sql>) => Number((await rows<{ n: number | string }>(db.owner, query))[0]!.n);
-const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1600);
+// Each statement held back 1.2 s on Postgres, the use's deadline 3 s: a refusal decided on the first statement's rows, or
+// a sealed key not mapped on the batch by ids' first round, the second, answers in time; a third statement, or a lock
+// waited for, runs past it (`late`). forks.matrix.ts's one key holds its refusal to one statement, at 1.6 s.
+const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1200);
 const LAPSES_MS = ENGINE === 'postgres' ? 2500 : 300;
 
 async function inPeriod(ms: number): Promise<void> {
@@ -252,8 +256,10 @@ test(`several keys by name, mixed: no batch tells what a caller may not have, in
         continue;
       }
       if (refused) {
-        // DecideAllFirst: refused in the first statement, no lock waited for, nothing entered in the cap's set.
-        if (r.code === 'ok' || r.code.startsWith('busy') || r.calls !== 1 || r.capRows !== 0) differing.push(`${label}: ${said(r)}, ${r.capRows} rows of the cap's, a key refused`);
+        // DecideAllFirst: refused before any call takes a lock, none waited for (Postgres holds theirs), nothing entered
+        // in the cap's set: on the first statement's rows, or, a sealed key the isolate had not mapped, which that
+        // statement only resolves, on the batch by ids' first round, its second.
+        if (r.code === 'ok' || r.code.startsWith('busy') || r.calls > 2 || r.capRows !== 0) differing.push(`${label}: ${said(r)}, ${r.capRows} rows of the cap's, a key refused`);
         continue;
       }
       // Every key theirs, or not held: exactly those theirs, or busy on the lock another call holds.

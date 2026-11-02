@@ -793,11 +793,13 @@ export async function useNamed(path: UsePath, input: NamedUseInput): Promise<Nam
  * A request's several keys as it names them (T165, B2's PR 2; formal/ProbingMany.tla; migration 0055,
  * `use_named_batch`): one call, whose first statement decides the caller's standing at the place first, from rows no key
  * decides (GateBeforeKeys), and reads nothing of any key without it: no standing, a chain cut, and the request is the
- * place's refusal, whatever the keys are or were. For one who stands, the same statement reads each key as a lone
- * named use reads it (`useNamed`), the request's names, or every key the place holds, which it lists itself: with the
- * ids this isolate maps it to, if any, a key whose row of the cap's is fresh is used at once; otherwise the call writes
- * and locks nothing. The vault decides every key on those rows (DecideAllFirst); then, only once it allowed every one,
- * makes the rest as `useMany` makes a batch by ids, and opens them all. All or nothing: every value, or the first key
+ * place's refusal, whatever the keys are or were. For one who stands, the same statement resolves each key's name, the
+ * request's names, or every key the place holds, which it lists itself. A sealed value of its own goes by the ids this
+ * isolate maps it to when they are the name's now (a key whose row of the cap's is fresh, used at once), else is only
+ * resolved, its ids handed back; any other key (a plain value, a reference, one not held) is read as a lone named use
+ * reads it (`useNamed`). The statement writes nothing else and locks nothing. The vault decides those keys on its rows
+ * (DecideAllFirst), then the rest as `useMany` makes a batch by ids, the resolved keys decided on its first round, and
+ * opens them all. All or nothing: every value, or the first key
  * refused, or busy.
  *
  * A read that leaves out a sensitive value, naming it (`leavesSensitive`: a person's), passes no ids in its first
@@ -857,27 +859,33 @@ export async function useNamedMany(path: UsePath, input: NamedManyInput): Promis
     // The first statement: the gate, then the request's first keys, or the place's, listed.
     const first = keys === null ? null : keys.slice(0, limit).map(callFor);
     const read = await namedBatchOf(path.db)(path.db, gate.call, first, limit);
-    const listed = keys ?? read.keys ?? [];
+    // None listed (a refused gate, or a chain cut since it read it) is never a place that holds no key.
+    const listed = keys ?? read.keys;
     const rows = [...read.rows];
     const byIds = [...read.byIds];
     const aheads = [...read.aheads];
     // A place of more keys than a statement reads: the rest by their names, in statements of that many, each its gate.
-    for (let start = rows.length; read.rows.length > 0 && start < listed.length; start += limit) {
+    for (let start = rows.length; listed !== null && read.rows.length > 0 && start < listed.length; start += limit) {
       sends();
       const more = await namedBatchOf(path.db)(path.db, gate.call, listed.slice(start, start + limit).map(callFor), limit);
-      if (more.rows.length === 0) return { gate: more.gate, listed: [], rows: [], byIds: [], aheads: [] };
+      if (more.rows.length === 0) return { gate: more.gate, listed: null, rows: [], byIds: [], aheads: [] };
       rows.push(...more.rows);
       byIds.push(...more.byIds);
       aheads.push(...more.aheads);
     }
-    return { gate: read.gate, listed: read.rows.length === 0 ? [] : listed, rows, byIds, aheads };
+    return { gate: read.gate, listed, rows, byIds, aheads };
   }, async (read, starts) => {
     const forgedOf = forgedOnce(path, starts);
     const gateForged = await forgedOf(read.gate, undefined);
     const forged: boolean[] = [];
     for (const [i, row] of read.rows.entries()) {
+      // None for a key the statement left to the batch by ids, which judges its own rows.
+      if (row === null) {
+        forged.push(false);
+        continue;
+      }
       // A use by ids judged on the seals its call passed, as `byIds`' are; a named call's, on every seal it read.
-      const known = read.byIds[i] === true && !row.probed ? keyReady.get(read.listed[i]!)?.made.known : undefined;
+      const known = read.byIds[i] === true && !row.probed ? keyReady.get(read.listed![i]!)?.made.known : undefined;
       forged.push(await forgedOf(row, known));
     }
     return { ...read, gateForged, forged };
@@ -908,14 +916,34 @@ export async function useNamedMany(path: UsePath, input: NamedManyInput): Promis
     app: gateRow.app == null ? null : JSON.stringify(gateRow.app),
     place: input.place ?? mapped(gateRow)?.slugs ?? null, at: placeOf(checked, gateRow),
   };
-  if (!stands || answered.rows.length !== answered.listed.length) {
-    return { ...named, stands: false, keys: [], outcome: { ok: false, index: null, code: gateCode ?? 'stale', number: null } };
+  // A gate she stands at but keys not all read (the chain cut, or the place gone, since it read them, around the log):
+  // `stale`, as rows written around coffre are, never a place that holds none (review r1 of T165 PR 2).
+  if (!stands || answered.listed === null || answered.rows.length !== answered.listed.length) {
+    return { ...named, stands: false, keys: [], outcome: { ok: false, index: null, code: stands ? 'stale' : gateCode ?? 'stale', number: null } };
   }
   // Each key, decided on the rows its named call read, every one before any other call (DecideAllFirst).
   const out: NamedKey[] = [];
   const decided: ({ none: true } | { plain: string; versionId: string } | { again: Ids; asked: Asked } | { allowed: Allowed } | { refused: Used | Allowed | Uncovered })[] = [];
+  const placed = mapped(gateRow);
   for (const [i, key] of answered.listed.entries()) {
-    const row = answered.rows[i]!;
+    const row = answered.rows[i] ?? null;
+    if (row === null) {
+      // A sealed key of its own the isolate had not mapped, its name resolved by the statement and no call made of it:
+      // decided next, by its ids, with the rest, as a batch by ids decides its first round (`byIds`), before any key
+      // takes a lock or enters the cap's set. Its named call would read the place, standing and chain again, for each key.
+      const ahead = answered.aheads[i];
+      if (ahead == null) throw new Error("a named batch's key had neither a row nor its ids");
+      const one = keyAsked.get(key) ?? { ...asked, ...none, requestId: newUseRequestId() };
+      const left = leaves && ahead.sensitive === true;
+      out.push({
+        key, secretId: ahead.id, held: ahead.held, left,
+        app: gateRow.app == null ? null : JSON.stringify({ ...(gateRow.app as Record<string, unknown>), secrets: [{ secret: ahead.secret, version: ahead.version }] }),
+      });
+      if (placed !== null) cache.key(placed.environment, key, { id: ahead.id, through: ahead.held !== null });
+      if (left) decided.push({ none: true });
+      else decided.push({ again: { credential: gateRow.n_credential!, secretId: ahead.id, place: ahead.held === null ? null : gateRow.n_place, way: one.way ?? 'credential', principal: null }, asked: one });
+      continue;
+    }
     if (answered.byIds[i] === true) {
       // By its ids: a key with a sealed value of its own, its name's now, decided as a batch by ids decides its first round.
       const { made } = keyReady.get(key)!;
@@ -1019,14 +1047,19 @@ function namedBatchOf(db: Queryable): (db: Queryable, gate: UseCall, calls: read
 /** A named batch's key: its name, and its call, by its name alone or by the ids the isolate maps it to. */
 export type NamedBatchCall = { key: string; call: UseCall };
 
-/** The app's rows of a key a named batch used by its ids: its row and its version's, as `to_json` writes them, and where it is held, inherited. */
-export type NamedAhead = { secret: unknown; version: unknown; held: { environmentId: string; slug: string } | null };
+/**
+ * A key of a named batch with a sealed value of its own, as the statement resolved its name: its id, whether that value
+ * is sensitive, where it is held, inherited, and the app's rows of it, its row and its version's, as `to_json` writes
+ * them (none on SQLite, where the app reads its own).
+ */
+export type NamedAhead = { id: string; sensitive: boolean; secret: unknown; version: unknown; held: { environmentId: string; slug: string } | null };
 
 /**
- * What `use_named_batch` answers: the gate's row, the names it listed (none named), each key's row, in order, whether
- * each was its use by ids, and, for those, the app's rows of it.
+ * What `use_named_batch` answers: the gate's row, the names it listed (none named), each key's row, in order (none for
+ * a sealed key of its own the statement did not use, left to the batch by ids), whether each was its use by ids, and,
+ * for each sealed key of its own, what the statement resolved of it (`NamedAhead`).
  */
-export type NamedBatchRows = { gate: UseRow; keys: string[] | null; rows: UseRow[]; byIds: boolean[]; aheads: (NamedAhead | null)[] };
+export type NamedBatchRows = { gate: UseRow; keys: string[] | null; rows: (UseRow | null)[]; byIds: boolean[]; aheads: (NamedAhead | null)[] };
 
 /**
  * The ids and slugs a named call read, kept in the isolate's map for the request's names and its key: never a key it

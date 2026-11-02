@@ -84,11 +84,11 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
     ${first?.call.way ?? 0}::smallint, ${first?.call.principal ?? null}::text,
     ${limit}::integer
   )::text AS uses`);
-  type Read = { gate: Record<string, unknown>; keys: string[] | null; rows: Record<string, unknown>[]; by_ids: boolean[]; aheads: (NamedAhead | null)[] };
+  type Read = { gate: Record<string, unknown>; keys: string[] | null; rows: (Record<string, unknown> | null)[]; by_ids: boolean[]; aheads: (NamedAhead | null)[] };
   let read = JSON.parse(row!.uses) as Read;
   // Read again exactly if any row has a whole number `JSON.parse` could not read (`rowOf` says why).
-  if (inexact(read.gate) || read.rows.some(inexact)) read = exactly(row!.uses) as Read;
-  return { gate: rowFrom(read.gate), keys: read.keys, rows: read.rows.map(rowFrom), byIds: read.by_ids, aheads: read.aheads };
+  if (inexact(read.gate) || read.rows.some((one) => one !== null && inexact(one))) read = exactly(row!.uses) as Read;
+  return { gate: rowFrom(read.gate), keys: read.keys, rows: read.rows.map((one) => (one === null ? null : rowFrom(one))), byIds: read.by_ids, aheads: read.aheads };
 }
 
 /** `use_batch`'s JSON array, each element as `rowOf` reads one, the array read again exactly if any needs it. */

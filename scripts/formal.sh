@@ -125,6 +125,8 @@ REMOVALS=(
   "ProbingMany DecideAllFirst NoLockForNo"
   "ProbingMany DecideAllFirst RefusedEntersNothing"
   "ProbingMany OneCall OneVaultCall"
+  "ProbingManyFork IdsChecked OnlyUsable"
+  "ProbingManyMine IdsChecked OnlyUsable"
   # B2 (Batching.tla, T167): a request's several keys, one vault call and one statement, two rounds as a use by ids.
   "Batching StrongestFirst NoWaitCycle"
   "Batching CountsOwnBatch CapHolds"

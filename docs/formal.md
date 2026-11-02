@@ -723,18 +723,27 @@ gone, or deleted; in the other none is ever made. Example, Ada revoked at
 one statement, the place's 403, and nothing of either key read, whatever
 dev holds (`SameAnswer`, `NoKeyBeforeStanding`). Once she stands there, key
 names are hers to know (R6); what holds then is the batch's own discipline:
-one vault call whatever the keys (`OneVaultCall`), no lock waited for and
-nothing entered in the cap's set by a refused batch (`NoLockForNo`,
-`RefusedEntersNothing`), no value she may not have (`OnlyUsable`), no key
+one vault call whatever the keys (`OneVaultCall`), no lock waited for by a
+refused batch and nothing entered in the cap's set by one refused before
+the batch by ids' rounds (`NoLockForNo`, `RefusedEntersNothing`; refused at
+the cap in those rounds, the keys before the one over it count, as lone
+uses would), no value she may not have (`OnlyUsable`), no key
 the read leaves out used (`LeftOutUnused`), and the app's own path's answer
 (`AnsweredAsApp`). The code is `useNamedMany` and `use_named_batch`
 (migration 0055): its first statement is the gate (`use_credential` with no
-key), then, for one who stands and a chain not cut, each key: by the ids
-the isolate's map holds, when the statement finds they are its name's now
-and its value is sealed (a use by ids, as `use_batch` makes one; Naming.tla
-holds such ids to their names), else by a lone named call by its name; the
-vault decides every key on those rows, hands a plain value back at once,
-and makes the keys left in Batching.tla's batch by ids. `ProbingMany`,
+key), then, for one who stands and a chain not cut, every key's name
+resolved through the place's layers in one query, and each key: one with a
+sealed value of its own by the ids the isolate's map holds, when they are
+the ones the statement found (a use by ids, as `use_batch` makes one;
+`IdsChecked`, which `ProbingManyFork` and `ProbingManyMine` show
+necessary), or, its ids not mapped, resolved only, no call made; any other
+key (a plain value, a reference, a key not held) by a lone named call by
+its name. The vault decides those keys on those rows, hands a plain value
+back at once, and makes the rest in Batching.tla's batch by ids, the
+resolved keys decided on its first round, which takes no lock: a named
+call per key would read the place, her standing and the chain again for
+each, five times a use by ids (T165 PR 2's CI: 1,001 keys on SQLite ran
+past the 3 s deadline). `ProbingMany`,
 `ProbingManyFork`, `ProbingManyMine` and `ProbingManyFallback` check it at
 each place.
 
@@ -745,8 +754,9 @@ each place.
 | A fork whose chain is cut reads nothing: refused on the place alone (`n_cut`) | the fork's own key handed back on 0.15.0's rules (`OnlyUsable`, `CutReadsNothing`, `ProbingManyFork`) |
 | A key the place inherits is decided on her standing where it is held too (`decideChecked`, R8) | a parent's value she does not read handed back (`OnlyUsable`, `ProbingManyFork`, `ProbingManyMine`) |
 | A read that leaves sensitive values out makes its first statement by names alone, and the vault leaves them out, unused (`leavesSensitive`) | a sensitive key the map holds used, logged, and the read refused with it (`LeftOutUnused`, `AnsweredAsApp`, `ProbingMany`) |
-| No key takes the principal's lock or enters the cap's set before the vault has decided every key on the first statement's rows (DecideAllFirst) | a refused batch waits for the lock, and enters keys (`NoLockForNo`, `RefusedEntersNothing`, `ProbingMany`) |
+| No key takes the principal's lock or enters the cap's set before the vault has decided every key (DecideAllFirst): on the first statement's rows, or, resolved only there, on the batch by ids' first round | a refused batch waits for the lock, and enters keys (`NoLockForNo`, `RefusedEntersNothing`, `ProbingMany`) |
 | The keys go in one call | one named call a key (`OneVaultCall`, `ProbingMany`) |
+| A key goes by the ids the map holds only when they are the ones the statement resolves its name to now (`v_by`: the gate's credential, the key, through the place for one inherited; its value sealed) | a key the fork removed since, its parent's ids still mapped, used through the fork and handed back (`OnlyUsable`, `ProbingManyFork`, `ProbingManyMine`) |
 
 The tests hold the code to it: `packages/vault/test/use-named-many.test.ts`
 (both engines; on Postgres, the statements each form costs), the generated
@@ -774,7 +784,7 @@ batch's buffers its gate's and its keys' lone uses', its own 16 flat from
 | `UsedAsNamed` | Every use the log records is of the key the request named, as the use read it |
 | `NoWaitCycle` (Batching) | No two batches of one principal's each wait for the principal's lock the other holds |
 | `NoLockForRefused` | A batch holds, or waits for, the principal's lock only in its second call, once every one of its keys was allowed on its first call's rows |
-| `RefusedEntersNothing` | A batch refused on its first call's rows enters no key in the cap's set |
+| `RefusedEntersNothing` | A batch refused on its first call's rows enters no key in the cap's set (ProbingMany: refused before its batch by ids' second round) |
 | `AllOrNothing` | A batch hands back every one of its values, each allowed, or none |
 | `OneVaultCall` (ProbingMany) | A request of several keys, or of every key a place holds, is one vault call, whatever the keys |
 | `CutReadsNothing` (ProbingMany) | A batch at a fork whose chain is cut reads no key |

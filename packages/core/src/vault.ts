@@ -281,9 +281,9 @@ export interface Vault {
   /**
    * A request's several keys as it names them, one call (T165, B2's PR 2; formal/ProbingMany.tla): the caller's standing
    * at the place decided first, from rows no key decides, and nothing of any key read without it; then the keys, its
-   * names or every key the place holds, each by the ids the vault mapped for it when they are its name's now and its
-   * value is sealed, else by its name as a lone named use reads it, all decided first, then used, all or nothing, as
-   * `useMany` uses them. Absent from a vault without it (`about().namedBatches` says whether it has it).
+   * names or every key the place holds, each name resolved by the vault: a sealed value of its own by the ids the vault
+   * mapped for it when they are its name's now, else by the ids it resolved, in the batch by ids; any other key by its
+   * name as a lone named use reads it; all decided first, then used, all or nothing, as `useMany` uses them. Absent from a vault without it (`about().namedBatches` says whether it has it).
    */
   useNamedMany?(input: NamedManyInput): Promise<NamedManyOutcome>;
 

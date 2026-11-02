@@ -95,7 +95,7 @@ export async function useByName(
  * A request's several keys by name, the vault's one call (T165, B2's PR 2; formal/ProbingMany.tla): its keys (`keys`),
  * or every key the place holds (null), at the place its path names, an environment, a fork or `dev@me`. The vault decides
  * the caller's standing there first, from rows no key decides, and reads nothing of any key without it; for one who
- * stands, it reads each key as a lone named use does, decides them all, then uses them, all or nothing. It answers the
+ * stands, it resolves each key's name, decides them all, then uses them, all or nothing. It answers the
  * rows the request checks, the credential's, the place's and each key's, and the caller as it decided them: nothing is
  * read, asked or kept here first, and the read decides on those rows (`reveal`).
  *

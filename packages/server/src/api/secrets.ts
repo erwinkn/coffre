@@ -1949,7 +1949,8 @@ export async function reveal(
  *   (`unknown_environment`), a credential's (401), a busy one (503), the bulk cap's, or a read to ask again (`changed`);
  *   and a read that goes on without the key, which the environment does not hold. The vault's own refusal there is in
  *   its log already, and the app writes no copy; one it decided before writing anything, the app logs
- *   (`UnloggedRefusal`). Its work is still the app's own path's, which B2 brings to the vault's one call.
+ *   (`UnloggedRefusal`). Its work is the app's own path's: B2 brings it to the vault's one call where the vault says
+ *   `namedBatches` (`useManyByName`).
  *
  * Every other read, a use allowed, a list of keys and a whole environment's included, is answered as ever.
  */

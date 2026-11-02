@@ -44,10 +44,12 @@
 (*   a chain not cut, the keys: the request's names, or every key the      *)
 (*   place holds, listed through its layers; each key by the ids the map   *)
 (*   holds, when they are its name's now and its value sealed (a use by    *)
-(*   ids, `use_batch`'s), else its named call by its name alone; the vault *)
-(*   decides every key on those rows, a plain value handed back at once;   *)
-(*   statements 2 and 3, only once every key is allowed: the batch by ids  *)
-(*   of the keys left (Batching.tla's two rounds).                         *)
+(*   ids, `use_batch`'s); a sealed key it does not hold, resolved only,    *)
+(*   its ids found; any other key by its named call; the vault decides     *)
+(*   those keys on those rows, a plain value handed back at once;          *)
+(*   statements 2 and 3, only once those are allowed: the batch by ids of  *)
+(*   the keys left (Batching.tla's two rounds), the resolved ones decided  *)
+(*   on its first, which takes no lock.                                    *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, Sequences, TLC
 
@@ -91,7 +93,15 @@ CONSTANTS
     \* row takes the lock in the first statement.
     DecideAllFirst,
     \* The keys go in one vault call. Off, the app makes one named call a key.
-    OneCall
+    OneCall,
+    \* A key goes by the ids the isolate maps it to only when they are its
+    \* name's now: the statement resolves the name through the place's
+    \* layers and uses those ids only if they are the ones it finds (the
+    \* gate's credential, the key, through the place for one inherited) and
+    \* its value is sealed (0055, `v_by`). Off, the map's ids are used as
+    \* they are: a key a nearer layer removed since, its parent's ids still
+    \* mapped, is used by them through the place, and goes back.
+    IdsChecked
 
 Keys == {"k1", "k2"}
 \* The request's order: a refused batch answers its first key refused.
@@ -195,13 +205,25 @@ AppPath(r, ask, busy, contended, p) ==
        ELSE IF locking /= {} /\ contended THEN Out(R("busy", 1, 2, TRUE, "keys"), {}, {}, {}, {})
        ELSE Out(R("values", 1, IF locking = {} THEN 1 ELSE 2, locking /= {}, "keys"), given, locking, {k \in Asked(r, ask) : Held(r, k) /\ LeftOut(r, k, p)}, given)
 
+\* A use by the ids of the key the place's parent holds, made through the place: decided where that key is held.
+DecidesAtParent(r, k, p) ==
+    /\ KeyOf(r)[k] \in Valued
+    /\ ~(p = "read" /\ KeyOf(r)[k] = "sensitive")
+    /\ Stands(p)
+    /\ IF Where = "fork" THEN p \in grantedParent ELSE p \in granted
+    /\ ~cut
+
 \* The request as the code makes it: `warm`, the keys whose ids the isolate's map holds.
 Named(r, ask, warm, busy, contended, p) ==
     LET held == {k \in Asked(r, ask) : Held(r, k)}
         leftOut == {k \in held : LeftOut(r, k, p)}
+        \* Ids the map holds that are no longer the name's (IdsChecked off): a key named that a nearer layer removed
+        \* since, the parent's ids still mapped, which the first statement uses as they are.
+        stale == IF IdsChecked \/ ask /= "list" \/ (LeaveFirst /\ p = "read") THEN {}
+                 ELSE {k \in warm : LayerOf(r)[k] = "removed" /\ KeyOf(r)[k] \in Valued}
         \* What the vault decides key by key: every key held but those the read leaves out, unless it uses those too.
-        candidates == IF LeaveFirst THEN held \ leftOut ELSE held
-        refused == {k \in candidates : ~Decides(r, k, p)}
+        candidates == (IF LeaveFirst THEN held \ leftOut ELSE held) \cup stale
+        refused == {k \in candidates : ~(IF k \in stale THEN DecidesAtParent(r, k, p) ELSE Decides(r, k, p))}
         \* The first statement's keys by ids: none for a read that leaves keys out (LeaveFirst), else those mapped.
         byIds == IF LeaveFirst /\ p = "read" THEN {} ELSE warm \cap candidates
         \* Used in the first statement: by ids, its row of the cap's fresh, as a lone named use is.
@@ -210,6 +232,11 @@ Named(r, ask, warm, busy, contended, p) ==
         rushed == IF DecideAllFirst THEN {} ELSE {k \in byIds : ~FreshOf(r)[k]}
         \* The keys the batch by ids makes after, and whether it takes the lock for some.
         rest == candidates \ (once \cup rushed)
+        \* Decided on the first statement's rows: a key by its ids, or one by its name, its value no sealed one of its
+        \* own (a plain value, a value gone); a sealed key the map does not hold is only resolved there, its ids found,
+        \* and decided on the batch by ids' first round, the second statement, before any lock (a key's named call
+        \* would read her standing and the chain again, key by key: T165 PR 2's CI, 1,001 keys past the deadline).
+        first == byIds \cup {k \in candidates : KeyOf(r)[k] \notin {"sealed", "sensitive"}}
         locking == {k \in candidates : ~FreshOf(r)[k]}
         stmts == 1 + (IF rest = {} THEN 0 ELSE 1) + (IF {k \in rest : ~FreshOf(r)[k]} = {} THEN 0 ELSE 1)
         calls == IF OneCall THEN 1 ELSE Cardinality(IF ask = "list" THEN Keys ELSE held)
@@ -221,10 +248,11 @@ Named(r, ask, warm, busy, contended, p) ==
        \* Without the gate first, each key's named call refuses her on her standing there, its name read.
        ELSE IF ~Stands(p) THEN Out(R("forbidden", calls, 1, FALSE, work), {}, {}, {}, {})
        ELSE IF cut /\ CutByPlace THEN Out(R("cut", calls, 1, FALSE, work), {}, {}, {}, {})
-       \* A key refused: the batch is, after its first statement, having made only what that statement made.
+       \* A key refused: the batch is, after the statement that decided it (the first, or the batch by ids' first
+       \* round), having made only what the first statement made (the round's uses are of keys in the set already).
        ELSE IF refused /= {} THEN
             IF rushed /= {} /\ contended THEN Out(R("busy", calls, 1, TRUE, work), once, {}, leftOut, {})
-            ELSE Out(R("refused", calls, 1, rushed /= {}, work), once \cup rushed, rushed, leftOut, {})
+            ELSE Out(R("refused", calls, IF refused \cap first /= {} THEN 1 ELSE 2, rushed /= {}, work), once \cup rushed, rushed, leftOut, {})
        \* Every key allowed: the rest by ids, its principal's lock taken for those entering the set.
        ELSE IF locking /= {} /\ contended THEN Out(R("busy", calls, stmts, TRUE, work), once, {}, leftOut, {})
        ELSE Out(R("values", calls, stmts, locking /= {}, work), candidates, locking, IF LeaveFirst THEN leftOut ELSE {}, candidates)

@@ -1,8 +1,8 @@
 // A request's several keys as it names them (T165, B2's PR 2; migration 0055, `use_named_batch`;
 // formal/ProbingMany.tla), on both engines: the vault's one call decides the caller's standing at the place first, from
-// rows no key decides, and reads nothing of any key without it; for one who stands, it reads each key as a lone named
-// use does, the request's names or every key the place holds, decides them all on those rows, and only then makes the
-// rest by ids, as a batch does (Batching.tla). Each case is named for what the model holds of it.
+// rows no key decides, and reads nothing of any key without it; for one who stands, it resolves each key's name, the
+// request's names or every key the place holds, decides them all (a sealed key not mapped on the batch by ids' first
+// round), and only then makes the rest by ids, as a batch does (Batching.tla). Each case is named for what the model holds of it.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -13,7 +13,7 @@ import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { openVault, prepareVault } from '../src/vault.ts';
-import { ENGINE, HOT_URL, openTestDatabase, postgresOnly, rows, type TestDatabase } from './database.ts';
+import { ENGINE, HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { CONFIG, emptyLog, isolate, LOG_015, onePeriod, useDatabases, world } from './use-world.ts';
 
@@ -126,6 +126,34 @@ test("a key mapped is used by its ids only while they are its name's now, its va
   assert.equal(await count('log_uses'), logged, 'a plain value mapped: by its name all the same');
 });
 
+test("a key mapped, deleted and made again sealed under its name: the map's ids are not the name's now, the new key's value goes back, its use logged under its own id (IdsChecked)", async () => {
+  const w = await named();
+  const old = await w.key('old');
+  const name = await w.nameOf(old);
+  const { vault, cache } = await isolate();
+  assert.deepEqual(values(await vault.useNamedMany!(many(w, [name]))), { [name]: 'old' });
+  assert.deepEqual(cache.keyed(w.dev, name), { id: old, through: false });
+  await w.remove(old);
+  const made = await w.key('new');
+  await run(db.owner, sql`UPDATE secrets SET key = ${name} WHERE id = ${made}`);
+  const answer = await vault.useNamedMany!(many(w, [name]));
+  assert.deepEqual(values(answer), { [name]: 'new' });
+  assert.equal(byName(answer).keys[0]!.secretId, made);
+  assert.deepEqual(cache.keyed(w.dev, name), { id: made, through: false }, 'the map moved to the new key');
+  const secrets = (await rows<{ secret: string }>(db.owner, sql`SELECT secret FROM log_uses`)).map((row) => row.secret);
+  assert.ok(secrets.includes(made) && secrets.filter((id) => id === old).length === 1, 'the new key used under its id; the old one only the once it was');
+});
+
+test("a live reference in a batch: its source's value, decided by its name on the first statement, used with the rest", async () => {
+  const w = await named();
+  const own = await w.key('own');
+  const ref = await w.reference('LIVE_REF');
+  const { vault } = await isolate();
+  const name = await w.nameOf(own);
+  assert.deepEqual(values(await vault.useNamedMany!(many(w, [name, 'LIVE_REF']))), { [name]: 'own', LIVE_REF: 'source of LIVE_REF' });
+  assert.deepEqual(values(await vault.useNamedMany!(many(w, null))), { [name]: 'own', LIVE_REF: 'source of LIVE_REF', [await w.nameOf(ref.source)]: 'source of LIVE_REF' });
+});
+
 test('every key the place holds, listed by the vault, sorted by name', async () => {
   const w = await named();
   const made = [await w.key('x'), await w.key('y'), await w.key('z')];
@@ -160,7 +188,7 @@ test('AllDecidedFirst: a key refused (a reference ended) refuses the batch at it
   const { vault } = await isolate();
   const answer = await vault.useNamedMany!(many(w, [await w.nameOf(held), 'ENDED']));
   assert.deepEqual(refused(answer), { key: 'ENDED', code: 'ended' });
-  assert.equal(await count('log_uses'), 0, 'every key decided on the first statement, which wrote nothing');
+  assert.equal(await count('log_uses'), 0, 'the reference refused on the first statement, which wrote nothing, the sealed key only resolved there');
   assert.equal(await count('log_bulk'), 0, 'refused reads never insert');
 });
 
@@ -273,4 +301,67 @@ test('a place of more keys than a statement reads is read in statements of that 
   const vault = openVault(db.vault, prepared, ENGINE === 'postgres' ? await db.hot() : db.vault);
   assert.equal(Object.keys(values(await vault.useNamedMany!(many(w, null)))).length, 5);
   assert.equal(Object.keys(values(await vault.useNamedMany!(many(w, await Promise.all(made.map((id) => w.nameOf(id))))))).length, 5);
+});
+
+/**
+ * `use_named_batch`'s answer when the chain is cut after its gate read it whole, by a write around the log between the
+ * two (each command its own snapshot): the gate's row as it was, no names listed, no key read. Here the `cut`-th call's
+ * answer is rewritten to it, its gate's row untouched, since no test can stop a function between two of its commands.
+ */
+async function cutAfterGate(cut: number, options: { batch?: number } = {}) {
+  let calls: number | null = null;
+  const client = postgresClient(HOT_URL, { max: 2 });
+  const asCut = (text: string) => {
+    // The gate's object, its end found by its braces outside strings, then the rest as `v_cut` answers it.
+    const start = text.indexOf('{', 1);
+    let depth = 0;
+    let quoted = false;
+    for (let i = start; i < text.length; i += 1) {
+      const c = text[i]!;
+      if (quoted) { if (c === '\\') i += 1; else if (c === '"') quoted = false; continue; }
+      if (c === '"') quoted = true;
+      else if (c === '{') depth += 1;
+      else if (c === '}' && --depth === 0) return `${text.slice(0, i + 1)}, "keys" : null, "rows" : [], "by_ids" : [], "aheads" : []}`;
+    }
+    throw new Error('no gate in a named batch');
+  };
+  const pool = new Proxy(client, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        const sent = (value as (...a: unknown[]) => PromiseLike<{ uses?: string }[]>).apply(target, args);
+        if (typeof args[0] !== 'string' || !args[0].includes('use_named_batch') || calls === null || ++calls !== cut) return sent;
+        return Promise.resolve(sent).then((answer) => {
+          answer[0]!.uses = asCut(answer[0]!.uses!);
+          return answer;
+        });
+      };
+    },
+  });
+  const prepared = await prepareVault(CONFIG, { ...LOG_015, ...(options.batch === undefined ? {} : { uses: { batch: options.batch } }) });
+  const vault = openVault(db.vault, prepared, createDatabase(pool));
+  return { vault, arm: () => { calls = 0; }, close: () => client.end() };
+}
+
+test('CutByPlace, the chain cut after the gate read it (around the log): refused `stale`, never an empty place read', postgresOnly('a function\'s commands, each its snapshot'), async () => {
+  const w = await named();
+  const names: string[] = [];
+  for (let i = 0; i < 3; i += 1) names.push(await w.nameOf(await w.key(`v${i}`)));
+  for (const [keys, cut, batch] of [[names, 1, undefined], [null, 1, undefined], [null, 2, 2], [names, 2, 2]] as const) {
+    const isolate = await cutAfterGate(cut, { batch });
+    try {
+      // The isolate's first call waits for the cutover: made at a place that is none, before the rewrite is armed.
+      assert.equal((await isolate.vault.useNamedMany!(many(w, ['X'], { place: { project: 'none', environment: 'none' } }))).served, false);
+      isolate.arm();
+      const answer = byName(await isolate.vault.useNamedMany!(many(w, keys)));
+      const asked = `${keys === null ? 'every key' : 'by names'}, cut on statement ${cut}`;
+      assert.equal(answer.stands, false, asked);
+      assert.deepEqual(refused(answer), { key: null, code: 'stale' }, asked);
+      assert.equal(await count('log_uses'), 0, asked);
+      assert.equal(await count('log_bulk'), 0, asked);
+    } finally {
+      await isolate.close();
+    }
+  }
 });

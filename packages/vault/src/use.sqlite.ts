@@ -48,8 +48,9 @@ export async function callBatch(db: Queryable, calls: readonly UseCall[], _lock:
 /**
  * `use_named_batch` (0055) on SQLite: in one transaction, the gate's named call with no key, then, for one who stands
  * there, its chain whole, each key as Postgres's makes it: the keys `calls` name, or, `calls` null, every key the place
- * holds (`listed`), at most `limit`; a key by the ids its call has when they are its name's now and its value is sealed
- * (a use by ids, `callUse`'s), else by its name alone.
+ * holds (`listed`), at most `limit`; a key with a sealed value of its own by the ids its call has when they are its
+ * name's now (a use by ids, on rows read for them all as `callBatch` reads them), or else by none, left to the vault's
+ * batch by ids; any other key by its name alone.
  */
 export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readonly NamedBatchCall[] | null, limit: number): Promise<NamedBatchRows> {
   if (gate.names === undefined || gate.credential !== null || gate.names.key !== null) throw new Error("a named batch's gate reads by its names alone, with no key");
@@ -61,22 +62,37 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
     const place = opened.n_place!;
     const [at] = await rowsOf<{ project_id: string; parent_id: string | null }>(tx, sql`SELECT project_id, parent_id FROM environments WHERE id = ${place}`);
     const { layers, cut } = at === undefined ? { layers: [], cut: true } : await chainOf(tx, place, at.parent_id);
-    if (cut) return { ...none, keys: calls === null ? [] : null };
+    // Cut: no names listed, as for a refused gate, never the empty list of a place that holds no key.
+    if (cut) return none;
     const names = calls === null ? await listed(tx, at!.project_id, layers) : calls.map(({ key }) => key);
-    const out: UseRow[] = [];
-    const byIds: boolean[] = [];
-    const aheads: (NamedAhead | null)[] = [];
-    for (const [i, key] of names.slice(0, limit).entries()) {
+    const asked = names.slice(0, limit);
+    // Each key's name first, then: a sealed key of its own, by the ids its call has when they are the name's now, on
+    // rows read for all those keys at once (`Batched`, as `callBatch` reads them), or, without them, no call, left to
+    // the vault's batch by ids (its row null); any other key by its name alone, which writes nothing.
+    const found: (Awaited<ReturnType<typeof resolved>>)[] = [];
+    for (const key of asked) found.push(await resolved(tx, at!.project_id, layers, key));
+    const byIds = asked.map((_, i) => {
+      const held = found[i]!;
       const call = calls?.[i]?.call;
-      const held = call === undefined || call.names !== undefined ? null : await resolved(tx, at!.project_id, layers, key);
-      const by = held !== null && held.sealed && call!.credential === opened.n_credential && call!.secretId === held.id
-        && call!.place === (held.holder === place ? null : place);
-      out.push(await useOnce(tx, by ? call! : { ...gate, names: { ...gate.names!, key } }, rows));
-      byIds.push(by);
-      aheads.push(by ? { secret: null, version: null, held: held!.holder === place ? null : { environmentId: held!.holder, slug: held!.slug } } : null);
+      return held !== null && held.sealed && call !== undefined && call.names === undefined && call.credential === opened.n_credential
+        && call.secretId === held.id && call.place === (held.holder === place ? null : place);
+    });
+    const used = calls === null ? [] : calls.filter((_, i) => byIds[i]).map(({ call }) => call);
+    const batched = used.length === 0 ? null : await Batched.read(tx, used);
+    const out: (UseRow | null)[] = [];
+    const aheads: (NamedAhead | null)[] = [];
+    for (const [i, key] of asked.entries()) {
+      const held = found[i]!;
+      if (byIds[i]) out.push(await useOnce(tx, calls![i]!.call, batched!));
+      else if (held?.sealed === true) out.push(null);
+      else out.push(await useOnce(tx, { ...gate, names: { ...gate.names!, key } }, rows));
+      aheads.push(held?.sealed !== true ? null : {
+        id: held.id, sensitive: held.sensitive, secret: null, version: null, held: held.holder === place ? null : { environmentId: held.holder, slug: held.slug },
+      });
     }
+    await batched?.write();
     // Past the deadline once written, as `callBatch`'s: the whole statement rolls back.
-    if (out.some((row, i) => byIds[i] && row.state === null) && Date.now() > gate.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
+    if (out.some((row, i) => byIds[i] && row!.state === null) && Date.now() > gate.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
     return { gate: opened, keys: calls === null ? names : null, rows: out, byIds, aheads };
   });
 }
@@ -85,13 +101,13 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
  * The key `key` names through `layers` (0051): the nearest layer that holds it live, or but the last that removed it;
  * none, removed or held nowhere. With where it is held, and whether its value is a sealed one of its own.
  */
-async function resolved(tx: Queryable, project: string, layers: readonly string[], key: string): Promise<{ id: string; holder: string; slug: string; sealed: boolean } | null> {
+async function resolved(tx: Queryable, project: string, layers: readonly string[], key: string): Promise<{ id: string; holder: string; slug: string; sealed: boolean; sensitive: boolean } | null> {
   for (const [depth, layer] of layers.entries()) {
-    const [held] = await rowsOf<{ id: string; slug: string; sealed: number }>(tx, sql`SELECT s.id, e.slug,
-        (s.current_version_id IS NOT NULL AND v.plaintext IS NULL) AS sealed
+    const [held] = await rowsOf<{ id: string; slug: string; sealed: number; sensitive: number | null }>(tx, sql`SELECT s.id, e.slug,
+        (v.id IS NOT NULL AND v.plaintext IS NULL) AS sealed, v.sensitive
       FROM secrets s JOIN environments e ON e.id = s.environment_id LEFT JOIN secret_versions v ON v.id = s.current_version_id
       WHERE s.project_id = ${project} AND s.environment_id = ${layer} AND s.key = ${key} AND s.archived_at IS NULL LIMIT 1`);
-    if (held !== undefined) return { id: held.id, holder: layer, slug: held.slug, sealed: Boolean(held.sealed) };
+    if (held !== undefined) return { id: held.id, holder: layer, slug: held.slug, sealed: Boolean(held.sealed), sensitive: Boolean(held.sensitive) };
     if (depth < layers.length - 1) {
       const [removed] = await rowsOf<{ one: number }>(tx, sql`SELECT 1 AS one FROM dismissed_keys WHERE environment_id = ${layer} AND key = ${key} AND restored_at IS NULL LIMIT 1`);
       if (removed !== undefined) return null;
