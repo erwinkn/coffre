@@ -17,9 +17,9 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { bodyDigest, createProof, generateProofKey, thumbprint } from '@coffre/client/dpop';
 import { generateToken, github, hashToken, signin, tokenHint, type Gate } from '@coffre/core/identity';
 import { createDatabase, type Client } from '@coffre/db';
-import type { PostgresClient } from '@coffre/db/connect';
+import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { HyperdrivePool } from '@coffre/db/hyperdrive';
-import { appendEntries } from '@coffre/db/log';
+import { appendEntries, type NewEntry } from '@coffre/db/log';
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
 import { localVault } from '@coffre/vault/node';
 import { desc, eq, gt, sql, type SQL } from 'drizzle-orm';
@@ -138,6 +138,37 @@ function shown(plan: Plan, depth = 0): string {
   return [node, ...(plan.Plans ?? []).map((child) => shown(child, depth + 1))].join('\n');
 }
 
+/**
+ * A page's statements held to the budget `small` measured, call after call on one connection (W308): every SELECT
+ * `run` sends, twelve times over on a connection of the app's login opened for it, `makeDay` making a day of reads
+ * before the ninth. The first call reads the catalog the connection plans with, as `work` leaves aside; each after it
+ * reads what a request does. A statement of PL/pgSQL is planned for each call's values five times, then Postgres
+ * weighs a plan for any values, which spans every day's partition; and a day made has a plan it keeps made again.
+ * `log_reads_by` and `log_reads_at` asked for one (migration 0054): 22,000 to 30,000 pages at a hundred days, on the
+ * sixth call, where a call reads 19 to 35.
+ */
+async function callAfterCall(name: string, run: () => Promise<unknown>, small: readonly { text: string; pages: number | null }[], makeDay: () => Promise<unknown>) {
+  app.recorded = [];
+  await run();
+  const statements = [...app.recorded].filter((statement) => /^\s*(select|with)\b/i.test(statement.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  app.recorded = null;
+  assert.deepEqual(statements.map(({ text }) => text.replace(/\s+/g, ' ').slice(0, 80)), small.map(({ text }) => text), `${name} ran other statements`);
+  const one = postgresClient(TEST_RUNTIME_DATABASE_URL, { max: 1, connect_timeout: 5, connection: { statement_timeout: 10_000 } });
+  try {
+    for (let call = 1; call <= 12; call += 1) {
+      if (call === 9) await makeDay();
+      for (const [i, statement] of statements.entries()) {
+        const [row] = await one.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, statement.values as never[]);
+        const [{ Plan: plan }] = (row as unknown as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
+        const [pages, before] = [plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], small[i]!.pages!];
+        if (call > 1) assert.ok(pages <= 2 * before + 16, `${name}, call ${call} on one connection: ${small[i]!.text} read ${pages} pages, ${before} measured:\n${shown(plan)}`);
+      }
+    }
+  } finally {
+    await one.end();
+  }
+}
+
 /** What a request ran: statements and rows on the app's connection and on the vault's, and how many calls the vault answered, each a connection of its own on Workers. */
 type Cost = { app: Count; vault: Count; vaultCalls: number };
 
@@ -173,8 +204,8 @@ let beatAnyway: () => Promise<boolean>;
 /** The vault's checkpoint, asked outside a beat. */
 let signLog: () => Promise<{ ok: boolean }>;
 let ready: () => Promise<{ ok: boolean }>;
-/** `count` entries of the app's appended at once, as many requests would write them. */
-let append: (count: number) => Promise<void>;
+/** `count` entries of the app's appended at once, as many requests would write them: reads, or the `i`-th as `entry` makes it. */
+let append: (count: number, entry?: (i: number) => NewEntry) => Promise<void>;
 /** A page's server render, as Owner or viewer, on a connection of its own, as on Workers; and the round trips its connections took. */
 let environmentPage: (as: Persona) => Promise<void>;
 let projectPage: (as: Persona) => Promise<void>;
@@ -221,9 +252,9 @@ before(async () => {
   signLog = () => vault.checkpoint();
   beatAnyway = () => writeAuditHeartbeat(base.db, base.chainKey, vault, base.anchor, { warn: () => undefined });
   ready = () => auditReadiness(base.db, vault, base.chainKey, base.anchor);
-  append = async (count) => {
-    for (let left = count; left > 0; left -= 1000) {
-      const entries = Array.from({ length: Math.min(1000, left) }, () => ({ actor: 'system:load', action: 'secret.read', decision: 'allow' as const, metadata: '{}' }));
+  append = async (count, entry = () => ({ actor: 'system:load', action: 'secret.read', decision: 'allow', metadata: '{}' })) => {
+    for (let done = 0; done < count; done += 1000) {
+      const entries = Array.from({ length: Math.min(1000, count - done) }, (_, i) => entry(done + i));
       await db.owner.transaction((tx) => appendEntries(tx, appLogKey(base.chainKey), entries));
     }
   };
@@ -1366,6 +1397,18 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   }
 });
 
+/**
+ * `count` CI runs' sign-ins and as many personal tokens made, as 0.14's log records them, each of a credential of its
+ * own: the history an audit page's `originsOf` asks about each credential the page shows. With a handful of them the
+ * planner may walk them all by `audit_log_action_idx` (23 pages) rather than probe `audit_log_exchange_idx` and
+ * `audit_log_token_create_idx` once a credential (100, for 50), and which it picks follows ANALYZE's sample of a long log
+ * holding a few: a page measured once each way read as if the reads had grown it (W308). Thousands of them, as an
+ * instance holds, and it probes, at every step.
+ */
+const signIns = (count: number) => append(2 * count, (i): NewEntry => i % 2 === 0
+  ? { actor: 'token:ci-deploy', action: 'token.exchange', decision: 'allow', metadata: JSON.stringify({ credentialId: randomUUID(), run: { repository: 'acme/app', ref: 'refs/heads/main' } }) }
+  : { actor: 'user:other@acme.example', action: 'token.create', decision: 'allow', metadata: JSON.stringify({ targetCredentialId: randomUUID(), kind: 'personal', label: `laptop-${i}` }) });
+
 test("the audit pages' reads, each a use of 0.15's log as the vault's projector lists it, read as many pages however many other reads the log holds (T166)", POSTGRES, async () => {
   const counted = createDatabase(app.client);
   const ADA = 'user:ada@acme.example';
@@ -1454,7 +1497,15 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await db.owner.execute(sql`VACUUM (ANALYZE) log_reads`);
     await db.owner.execute(sql`ANALYZE`);
   };
+  // A day of reads made past the last, each time: what a connection's plans are made again for (W308).
+  let made = AHEAD + 1;
+  const makeDay = async () => {
+    made += 1;
+    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + CAST(${made} AS integer))`);
+  };
   try {
+    // The credentials' history the pages ask about: 5,000 sign-ins and as many tokens made, none Ada's.
+    await signIns(5_000);
     // Today's: 20,000 reads by another member, a tenth in forks and a twentieth through references; and Ada's 2,000 of
     // her keys through the day.
     await plant(18_000, OTHER, 12 * 3_600_000, 2_000);
@@ -1480,6 +1531,8 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await plant(100_000, ADA, 20 * 3_600_000, 300, { own: true });
     await settle();
     flat(small, await pages(), ['every read', "a member's reads", 'how far the reads are listed', 'through the API, the whole log', "through the API, a member's page"]);
+    // And as many on a connection's sixth call and after, and once a day is made (W308).
+    for (const name of ["a member's reads", "through the API, a member's page"]) await callAfterCall(name, reads[name]!, small[name]!, makeDay);
     // And they read what was planted: full pages, Ada's hers alone, her report each of her keys once.
     const page = (filter: Parameters<typeof readsPage>[1]) => readsPage(counted, filter).then(({ rows }) => rows);
     assert.equal((await page({ limit: 100 })).length, 100);
@@ -1491,7 +1544,7 @@ test("the audit pages' reads, each a use of 0.15's log as the vault's projector 
     await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 5000000`);
     await db.owner.execute(sql`DELETE FROM log_read_days`);
     // The days made ahead, but those the migration made the uses of, which `drop_reads_day` keeps while the log does.
-    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${AHEAD + 1}) d`);
+    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(1, ${made}) d`);
   }
 });
 
@@ -1588,7 +1641,15 @@ test("a place's page of reads, a key's, an environment's or a project's, reads a
     return read;
   };
   const shown = async (at: { kind: 'secret' | 'environment' | 'project'; id: string }, limit = 100) => (await readsPage(counted, { at, limit })).rows;
+  // A day of reads made past the last, each time: what a connection's plans are made again for (W308).
+  let made = AHEAD + 1;
+  const makeDay = async () => {
+    made += 1;
+    await db.owner.execute(sql`SELECT make_reads_day(CAST(${day(now)} AS date) + CAST(${made} AS integer))`);
+  };
   try {
+    // The credentials' history the pages ask about: 5,000 sign-ins and as many tokens made, none at the place.
+    await signIns(5_000);
     // Today's: 18,000 reads of others anywhere; Ada's 2,000 of the place's keys over ten hours, a quarter in the fork and
     // a quarter through references held anywhere in market; and its one key, read once a day for a month.
     await plant(18_000, OTHER, 12 * 3_600_000, 2_000, elsewhere);
@@ -1624,6 +1685,8 @@ test("a place's page of reads, a key's, an environment's or a project's, reads a
     await settle();
     flat(small, record("a key's own history", await measure()), "a key's own history");
     console.log(JSON.stringify(steps));
+    // And as many on a connection's sixth call and after, and once a day is made (W308).
+    for (const name of ["a key's reads", "an environment's reads", "a project's reads", "through the API, a key's page"]) await callAfterCall(name, pages[name]!, small[name]!, makeDay);
     // And they read what was planted: each page its place's reads alone, full where it has a page of them.
     const first = await shown({ kind: 'secret', id: keys[0]! });
     assert.ok(first.length === 100 && first.every((read) => read.secret === keys[0] || read.source === keys[0]));
@@ -1638,6 +1701,6 @@ test("a place's page of reads, a key's, an environment's or a project's, reads a
   } finally {
     await db.owner.execute(sql`DELETE FROM log_reads WHERE number > 20000000`);
     await db.owner.execute(sql`DELETE FROM log_read_place_days`);
-    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(CAST(${-PAST - 1} AS integer), CAST(${AHEAD + 1} AS integer)) d`);
+    await db.owner.execute(sql`SELECT drop_reads_day(CAST(${day(now)} AS date) + d) FROM generate_series(CAST(${-PAST - 1} AS integer), CAST(${made} AS integer)) d`);
   }
 });
