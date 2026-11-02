@@ -1803,7 +1803,11 @@ export async function reveal(
       operationId,
       metadata: path.key === undefined ? {} : { key: path.key },
     });
-    const read = await readableValues(ctx.db, place, environment, path.key, ahead?.secrets);
+    // Decided by the vault's one call by name, a fork's or a personal config's one key: its rows, no layer read again (T165).
+    // Its path's key, the proxy's one, or a list of one (`only`, whose key the environment may not hold: left out then).
+    const single = one ?? (only?.length === 1 ? only[0]! : null);
+    const usedByName = decided !== undefined && single !== null && ahead?.held !== undefined && ahead.secrets !== undefined ? { key: single, held: ahead.held } : undefined;
+    const read = await readableValues(ctx.db, place, environment, path.key, ahead?.secrets, usedByName);
     const named = { id: environment.environmentId, path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone

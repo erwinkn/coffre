@@ -35,7 +35,7 @@ import { shardOf } from '../../../scripts/matrix-shard.ts';
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
-import { holding, keyBlocksOf, namedWorld, principalLock, slowed, weighed, weighingSession, type HotCall, type Weighed } from './named-world.ts';
+import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, weighed, weighingSession, type HotCall, type Weighed } from './named-world.ts';
 import { change, emptyLog, seal, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
@@ -215,6 +215,7 @@ async function cell(row: Row, key: Key) {
   if (row.place === 'its seal replaced') await w.forge(named);
   return {
     key,
+    principal: w.principal,
     /** The request, its principal's lock held and every statement slow: its answer, its calls, what it wrote. */
     measure: async () => {
       setMap(row, { w, cache: measured.cache, name, elsewhere, elsewhereKey, gone, otherCredential });
@@ -227,7 +228,8 @@ async function cell(row: Row, key: Key) {
       const at = Date.now();
       const request = ask(purpose, row.admission === 'past its deadline' ? { at: at - 4000, deadline: at - 1000 } : { at, deadline: at + 3000 });
       const work = () => measured.vault.useNamed!(request);
-      const answer = ENGINE === 'postgres' ? await holding(db, principalLock(w.principal), work) : await work();
+      // Its principal's lock is held by another connection meanwhile, the batch's every one on one (`principalLocks`).
+      const answer = await work();
       measured.slow(0);
       // Its own last call, if it made one: one answered before any (busy at its deadline) weighs nothing.
       const last = measured.statements() > before ? measured.last() : null;
@@ -244,10 +246,17 @@ async function cell(row: Row, key: Key) {
         coldAnswer: null as { code: string; route: string } | null,
       };
       await measured.end();
-      // Its twin, on the same world, from an isolate with no history (no map, seals or covers): standing, the same
-      // request, whose call must read what this one does; without standing, a request for a key this world never made, its
-      // world's own baseline, which a refusal of no key read costs exactly as (each cell is a world of its own, whose rows
-      // sit where theirs fell: CI read 3 or 4 blocks more of `projects` and `credentials` in one world than another).
+      return result;
+    },
+    /**
+     * Its twin, on the same world, from an isolate with no history (no map, seals or covers): standing, the same
+     * request, whose call must read what this one does; without standing, a request for a key this world never made, its
+     * world's own baseline, which a refusal of no key read costs exactly as (each cell is a world of its own, whose rows
+     * sit where theirs fell: CI read 3 or 4 blocks more of `projects` and `credentials` in one world than another). Asked
+     * once the principal's lock is let go (review r3 of #453): a twin waiting on it too would answer busy as its cell
+     * does, and hide a lock every key's refusal took.
+     */
+    twin: async (result: { coldAnswer: { code: string; route: string } | null; cold: HotCall | null }): Promise<void> => {
       if (!usable(row, key)) {
         const fresh = await slowed(db, { connections: 1 });
         const now = Date.now();
@@ -257,7 +266,6 @@ async function cell(row: Row, key: Key) {
         result.cold = fresh.statements() > 0 ? fresh.last() : null;
         await fresh.end();
       }
-      return result;
     },
   };
 }
@@ -276,7 +284,7 @@ function setMap(row: Row, at: {
   });
   const set = (place: string, key: string | null, credential?: string) => {
     cache.name(`${w.tokenHash.toString('base64')}\n${w.slug}\ndev`, ids(place, credential));
-    cache.key(place, name, key);
+    cache.key(place, name, key === null ? null : { id: key, through: false });
   };
   switch (row.map) {
     case 'another place': case 'an archived place': return set(at.elsewhere!, at.elsewhereKey);
@@ -439,7 +447,8 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   const phases = [ROWS.filter((row) => !floor(row)), ROWS.filter(floor)];
   for (const phase of phases) {
     const inTurn = ENGINE !== 'postgres';
-    // Three rows at a time: each cell holds connections of its own, and nine of them a row stay within Postgres's 100.
+    // Three rows at a time: each cell holds a connection of its own (its hot path's), and the batch one more, its
+    // principals' locks, within Postgres's 100 beside the other matrices' processes.
     for (let i = 0; i < phase.length; i += 3) {
       const batch = phase.slice(i, i + 3);
       /** The floor of `at` past the requests `row` makes from now, while `work` runs: a batch's rows share their admission but in turn. */
@@ -461,6 +470,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
             const made = await cell(row, key);
             results.push({ key, ...(await past(row, async () => {
               const result = await made.measure();
+              await made.twin(result);
               await weigh([result]);
               return result;
             })) });
@@ -473,7 +483,12 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       await inPeriod(30_000);
       const cells = await each(batch, async (row) => ({ row, cells: await each(KEYS, (key) => cell(row, key)) }));
       const measured = await past(batch[0]!, async () => {
-        const answered = await each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, ...(await c.measure()) })) }));
+        // Every cell's principal's lock held by another connection while the cells are asked: all of the batch's on one, a
+        // connection a cell being 30 of Postgres's 100, beside the other matrices' processes (#453, 53300 in CI).
+        // Their twins after, the locks let go.
+        const askAll = () => each(cells, async ({ row, cells: keys }) => ({ row, results: await each(keys, async (c) => ({ key: c.key, twin: c.twin, ...(await c.measure()) })) }));
+        const answered = ENGINE === 'postgres' ? await holding(db, principalLocks(cells.flatMap(({ cells: keys }) => keys.map((c) => c.principal))), askAll) : await askAll();
+        await each(answered.flatMap(({ results }) => results), (r) => r.twin(r));
         await weigh(answered.flatMap(({ results }) => results));
         return answered;
       });

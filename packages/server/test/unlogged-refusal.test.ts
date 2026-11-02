@@ -50,8 +50,9 @@ for (const [what, ask, purpose] of [
   });
 }
 
-// A read of one key that is no use by name (a fork's, inheriting a reference its parent holds): the app's path, its
-// refusal answered as the one `no`, and logged as the use was, at the holder's place and key (review r5 of D153).
+// A read of one key at a fork, inheriting a reference its parent holds: the vault's one call by name (T165), its refusal
+// answered as the one `no`, and logged where the key is held, at the holder's place and key (review r5 of D153), as a
+// use by ids would be, with the named request's path and key.
 test("a fork's read of a reference its parent holds, refused before its principal's lock, is logged at the holder's place and key (review r5 of D153)", { skip }, async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/holder');
@@ -65,8 +66,8 @@ test("a fork's read of a reference its parent holds, refused before its principa
   const added = (await refusals()).slice(denied);
   assert.equal(added.length, 1, 'one entry of the request');
   assert.deepEqual(
-    [added[0]!.environmentId, added[0]!.secretId, added[0]!.metadata.reason, added[0]!.metadata.purpose],
-    [link!.environmentId, link!.id, 'tampered', 'reveal'],
+    [added[0]!.environmentId, added[0]!.secretId, added[0]!.metadata.reason, added[0]!.metadata.key],
+    [link!.environmentId, link!.id, 'tampered', 'LINK'],
   );
   assert.equal((await usesLogged(db.owner)).length, logged, "nothing in the vault's log: refused before anything was written");
 });

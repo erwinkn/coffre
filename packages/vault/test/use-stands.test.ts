@@ -53,6 +53,10 @@ function caller(seed: number) {
   const slug = pick(['dev', 'prod', 'qa']);
   const person = chance(0.6);
   const principal = `${person ? 'user' : 'token'}:${randomUUID()}`;
+  // The place (T165): an environment of its own; a fork of the sibling, weighed as any (R18); or a personal config of
+  // the sibling, its owner's while they read or use it, mostly the caller's, weighed with it (`use_stands_personal`).
+  const kind = pick(['own', 'own', 'fork', 'personal'] as const);
+  const owner = kind !== 'personal' ? null : person && chance(0.85) ? principal : `user:${randomUUID()}`;
   const definition = () => ({ name: 'Edited', description: '', permissions: subset(SECRET_PERMISSIONS), protected: subset(SECRET_PERMISSIONS) });
   const edits = chance(0.5)
     ? JSON.stringify({
@@ -102,7 +106,7 @@ function caller(seed: number) {
   ]);
   const expires = at + pick([-1000, 0, 1, 120_000, 120_000, 120_000]);
   return {
-    at, project, other, place, sibling, slug, protected: pick([null, false, true]), principal, edits, member, generation, memberGeneration, grants,
+    at, project, other, place, sibling, slug, protected: pick([null, false, true]), siblingProtected: pick([null, false, true]), kind, owner, principal, edits, member, generation, memberGeneration, grants,
     credential: {
       id: randomUUID(), revoked: chance(0.06), expires, notAfter: chance(0.2) ? expires + pick([-2000, 5000]) : null,
       scope: typeof credentialScope === 'function' ? credentialScope() : credentialScope, kind: person ? pick(['browser', 'cli', 'personal', 'handle']) : pick(['service', 'workload']),
@@ -124,17 +128,20 @@ function ruled(c: Caller): string | null {
     { principal: c.principal, status: c.member.status, generation: c.memberGeneration, ...memberStanding({ owner: c.member.owner === true, role: c.member.role, scope: c.member.scope }) },
     c.grants.map((grant) => ({ projectId: projectOf(grant), environmentId: grant.environment, environmentSlug: null, role: grant.role, expiresAt: grant.expires })),
   );
-  const environment = environmentObject({ id: c.place, projectId: c.project, slug: c.slug, owner: null, parentId: null, protected: c.protected, archived: false, projectArchived: false });
+  const environment = environmentObject({
+    id: c.place, projectId: c.project, slug: c.slug, owner: c.owner, parentId: c.kind === 'own' ? null : c.sibling, protected: c.protected, archived: false, projectArchived: false,
+  });
+  const sibling = environmentObject({ id: c.sibling, projectId: c.project, slug: 'sibling', owner: null, parentId: null, protected: c.siblingProtected, archived: false, projectArchived: false });
   const roles = c.edits === null ? noEdits() : configObject(c.edits) as RolesInput;
-  return namedStanding(principal, credential, roles, environment, { purpose: c.purpose, at: c.at });
+  return namedStanding(principal, credential, roles, environment, { purpose: c.purpose, at: c.at }, c.kind === 'personal' ? [sibling] : []);
 }
 
 const CASES = 3000;
 
-test(`the named statement's gate stands a caller exactly where the vault's rule does, on ${CASES} generated callers (W268; Probing.tla, StandingFirst)`, { ...postgresOnly('use_stands is a Postgres function'), timeout: 600_000 }, async () => {
+test(`the named statement's gate stands a caller exactly where the vault's rule does, on ${CASES} generated callers, at an environment, a fork or a personal config (W268, T165; Probing.tla, StandingFirst, GateWeighsParent)`, { ...postgresOnly('use_stands is a Postgres function'), timeout: 600_000 }, async () => {
   const client = postgresClient(OWNER_URL, { max: 1 });
   const differing: string[] = [];
-  const tally = { stands: 0, refused: new Map<string, number>() };
+  const tally = { stands: 0, personal: 0, refused: new Map<string, number>() };
   try {
     for (let seed = 1; seed <= CASES; seed += 1) {
       const c = caller(seed);
@@ -142,7 +149,9 @@ test(`the named statement's gate stands a caller exactly where the vault's rule 
       const stands = await client.begin(async (tx) => {
         const q = (text: string, params: unknown[] = []) => tx.unsafe(text, params as never[]);
         await q(`INSERT INTO projects (id, slug, name) VALUES ($1, $2, 'p'), ($3, $4, 'o')`, [c.project, `p-${c.project}`, c.other, `o-${c.other}`]);
-        await q(`INSERT INTO environments (id, project_id, slug, name, protected) VALUES ($1, $2, $3, 'e', $4), ($5, $2, 'sibling', 's', NULL)`, [c.place, c.project, c.slug, c.protected, c.sibling]);
+        await q(`INSERT INTO environments (id, project_id, slug, name, protected) VALUES ($1, $2, 'sibling', 's', $3)`, [c.sibling, c.project, c.siblingProtected]);
+        await q(`INSERT INTO environments (id, project_id, slug, name, protected, parent_id, owner) VALUES ($1, $2, $3, 'e', $4, $5, $6)`,
+          [c.place, c.project, c.slug, c.protected, c.kind === 'own' ? null : c.sibling, c.owner]);
         {
           await q(`INSERT INTO vault_members (principal, status, owner, generation, created_at, created_by, status_changed_at, status_changed_by, access_seq, mac, role, scope)
                    VALUES ($1, $2, $3, $4, 0, 'test', 0, 'test', 0, $7, $5, $6)`, [c.principal, c.member.status, c.member.owner, c.memberGeneration, c.member.role, c.member.scope, Buffer.alloc(32)]);
@@ -158,7 +167,9 @@ test(`the named statement's gate stands a caller exactly where the vault's rule 
           c.credential.id, c.credential.kind, createHash('sha256').update(c.credential.id).digest(), c.generation, c.principal, new Date(c.credential.expires),
           c.credential.notAfter === null ? null : new Date(c.credential.notAfter), c.credential.revoked ? new Date(c.at - 5000) : null, c.credential.scope, Buffer.alloc(32),
         ]);
-        const [row] = await q('SELECT use_stands($1::uuid, $2::uuid, $3::smallint, $4::bigint, $5::jsonb) AS stands', [c.credential.id, c.place, purposeCode(c), String(c.at), GATE_ROLES]) as unknown as { stands: boolean }[];
+        const [row] = await (c.kind === 'personal'
+          ? q('SELECT use_stands_personal($1::uuid, $2::uuid, $3::bigint, $4::jsonb) AS stands', [c.credential.id, c.place, String(c.at), GATE_ROLES])
+          : q('SELECT use_stands($1::uuid, $2::uuid, $3::smallint, $4::bigint, $5::jsonb) AS stands', [c.credential.id, c.place, purposeCode(c), String(c.at), GATE_ROLES])) as unknown as { stands: boolean }[];
         throw new RolledBack(row!.stands);
       }).then(() => null as never, (error: unknown) => {
         if (error instanceof RolledBack) return error.stands;
@@ -172,15 +183,17 @@ test(`the named statement's gate stands a caller exactly where the vault's rule 
       }
       if (expected === null) tally.stands += 1;
       else tally.refused.set(expected, (tally.refused.get(expected) ?? 0) + 1);
+      if (expected === null && c.kind === 'personal') tally.personal += 1;
     }
   } finally {
     await client.end();
   }
-  console.log(`of ${CASES} callers, ${tally.stands} stand; refused: ${JSON.stringify(Object.fromEntries(tally.refused))}`);
+  console.log(`of ${CASES} callers, ${tally.stands} stand (${tally.personal} at a personal config); refused: ${JSON.stringify(Object.fromEntries(tally.refused))}`);
   assert.deepEqual(differing.slice(0, 5), []);
   // The generated callers stand, and are refused for each reason the gate must weigh, often enough to mean something.
-  assert.ok(tally.stands >= CASES / 10, `${tally.stands} of ${CASES} stand`);
-  for (const code of ['credential', 'no_grant', 'expired', 'removed']) assert.ok((tally.refused.get(code) ?? 0) >= CASES / 100, `${code}: ${tally.refused.get(code) ?? 0}`);
+  assert.ok(tally.stands >= CASES / 12, `${tally.stands} of ${CASES} stand`);
+  assert.ok(tally.personal >= CASES / 100, `${tally.personal} of ${CASES} stand at a personal config`);
+  for (const code of ['credential', 'no_grant', 'expired', 'removed', 'personal']) assert.ok((tally.refused.get(code) ?? 0) >= CASES / 100, `${code}: ${tally.refused.get(code) ?? 0}`);
 });
 
 class RolledBack extends Error {
