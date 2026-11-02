@@ -19,12 +19,12 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { clientFor, LOG } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { db, deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { bindingRoute, checkPlugins } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
-import { credentialProxy, header, privateKey, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, header, privateKey, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
 
 const OPENAI = 'sk-openai-dev-0123456789abcdef';
 const MAPS = 'maps-key-0123456789abcdef';
@@ -475,6 +475,63 @@ for (const cacheSeconds of [60, 0]) {
     assert.equal(reached.length, 3);
   });
 }
+
+test("a code credential's refusal of the body leaves it whole for the UI route the handle's place reading takes, with no cache (review r4 of #467)", ON_015, async () => {
+  // Code's `maps` takes its key in a form's field: a JSON body is no form, and its refusal reads the body.
+  deploy(proxyOf({ cacheSeconds: 0, credentials: { maps: { upstream: `${upstreamUrl}/maps`, inject: form('key', '{MAPS_KEY}') } } }));
+  await root.projects.create('maps');
+  await root.environments.create('maps/dev');
+  await root.secrets.set('maps/dev', { OPENAI_API_KEY: OPENAI });
+  await root.access.set(`user:${DEV}`, { market: 'developer', maps: 'developer' });
+  await save({ openai: uiRoute('openai', '/openai') }, root, 'maps/dev');
+  const token = await handle('maps/dev');
+  const body = '{"model":"gpt","messages":[]}';
+  const answer = await route('/use/maps/dev/openai/chat/completions', { method: 'POST', headers: { 'x-coffre-handle': token, 'content-type': 'application/json' }, body });
+  assert.equal(answer.status, 200, await answer.clone().text());
+  assert.deepEqual([reached.at(-1)!.url, reached.at(-1)!.headers.authorization, reached.at(-1)!.body], ['/openai/chat/completions', `Bearer ${OPENAI}`, body]);
+});
+
+test("values kept for a stable route serve every path under it: one use within cacheSeconds, whatever the URL's third segment, never the place reading's URL (review r4 of #467)", ON_015, async () => {
+  // `market` too, named as the handle's project is: its stable copy must not answer `/use/market/dev/…`.
+  await save({ openai: uiRoute('openai', '/openai'), market: uiRoute('market', '/market') });
+  const token = await handle();
+  const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
+  const real = vault.useRoute;
+  let uses = 0;
+  try {
+    vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
+      uses += 1;
+      return real.apply(runtime.vault, args);
+    }) as Vault['useRoute'];
+    for (const model of ['gpt-a', 'gpt-b', 'gpt-c']) {
+      const answer = await route(`/use/openai/models/${model}`, as(token));
+      assert.equal(answer.status, 200, await answer.clone().text());
+      assert.equal(reached.at(-1)!.url, `/openai/models/${model}`);
+    }
+    assert.equal(uses, 1);
+    // Route market's stable copy, kept for `/use/market/models/x`, whose `<a>/<b>` is no environment of the handle's.
+    assert.equal((await route('/use/market/models/x', as(token))).status, 200);
+    assert.equal(reached.at(-1)!.url, '/market/models/x');
+    assert.equal(uses, 2);
+    // `market/dev` is the handle's environment: the place reading of route openai, which that copy never answers.
+    assert.equal((await route('/use/market/dev/openai/models/gpt-a', as(token))).status, 200);
+    assert.equal(reached.at(-1)!.url, '/openai/models/gpt-a');
+    assert.equal(uses, 3);
+  } finally {
+    vault.useRoute = real;
+  }
+});
+
+test("a route of plain keys alone: the app's credential.use entry names the route the vault's reading took, not the URL's third segment (review r4 of #467)", ON_015, async () => {
+  await root.secrets.set('market/dev', { OPENAI_ORG: { value: 'org-acme', sensitivity: 'plain' } });
+  await save({ openai: uiRoute('openai', '/openai', 'OPENAI_ORG') });
+  const token = await handle();
+  const answer = await route('/use/openai/models/gpt', as(token));
+  assert.equal(answer.status, 200, await answer.clone().text());
+  assert.equal(reached.at(-1)!.headers.authorization, 'Bearer org-acme');
+  const used = (await entries('credential.use')).filter((entry) => entry.metadata.ui === true);
+  assert.deepEqual(used.map((entry) => entry.metadata.credential), ['openai']);
+});
 
 test('two routes reading one key with different placeholders: the plan refuses (409), as startup refuses it of code (review r2 of #467)', ON_015, async () => {
   const shaped = (name: string, prefix: string): ProxyDefinition => ({ ...uiRoute(name, `/${name}`), placeholder: { kind: 'prefix', prefix } } as ProxyDefinition);

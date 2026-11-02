@@ -1783,7 +1783,21 @@ before PR C. Where C2a settles what this section left open:
   (`x-openai-key`, a form field), and the made-for list decides as
   before. Under `cacheSeconds: 0`, code's `maps` reads the body before
   the vault's one call says the handle is `maps/dev`'s; the UI route then
-  sends those same bytes (review r3 of #467).
+  sends those same bytes (review r3 of #467). Code's reading reads a copy
+  of the request, so the body stays whole for the UI route even where code
+  refuses it: a JSON body that code's form rule calls no form still
+  reaches route `openai` (review r4 of #467).
+- **Values are kept by the reading the vault took, never by the URL**, as
+  section 3 keys them (caller, place and route). A `market/dev` handle's
+  `/use/openai/models/gpt-a` and `/use/openai/models/gpt-b` are both the
+  stable reading of `openai`: one use, then one kept copy for every path
+  under it within `cacheSeconds`. That copy never answers a URL whose
+  `<a>/<b>` is the handle's environment (`/use/market/dev/openai/…`),
+  which section 6 reads as the place; a stable answer means a handle of
+  one environment, so that is the only such `<a>/<b>`. The app's
+  `credential.use` entry, which a route of plain keys alone keeps, names
+  the route of that reading too (`openai`, never `gpt-a`) (review r4 of
+  #467).
 - **One key, one placeholder**, across code's and the UI's routes: two
   that read `OPENAI_API_KEY` with different placeholders (`a_`, `b_`)
   would give the app one value that one of them refuses. Startup refuses

@@ -9,7 +9,9 @@
   `/use/market/dev/openai/models`, is the vault's one route use (two
   for `/use/<a>/<b>` with `cacheSeconds: 0`, which may be the plan), and
   the request goes by the item the vault decided on. Values kept for
-  `cacheSeconds` go only by the item they were decided on. The handle is
+  `cacheSeconds` go only by the item they were decided on, and serve every
+  path under the route: `/use/openai/models/a` and `/models/b` are one
+  use. The handle is
   found by its shape in any header, the query or the body, and must sit
   where the decided item takes its key. A route whose editor no longer
   reads a key it sends answers 403 `route_not_cleared`; one asked for at

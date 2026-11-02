@@ -178,7 +178,7 @@ export type PluginContext = {
    * and the item they were decided on (its definition left out where `digests` names its digest: the copy's), which
    * the proxy sends by, never by a copy of its own. Refused: a `CoffreError` (404 no such item, 409 a personal config,
    * 403 a key its editor may not route, 503 an item a writer changed). The app's `credential.use` entry records it, with
-   * `logged`, as `use`'s does.
+   * `logged`, as `use`'s does, under the name of the route the vault's reading took (review r4 of #467).
    */
   useRoute?(caller: string | WorkloadUse, asked: RouteAsked): Promise<RouteUsed>;
   /**
@@ -704,6 +704,8 @@ function pluginContext(
       throw new CoffreError(error.status, error.code, error.message, error.reason, error.retryAfter);
     }
   };
+  /** The route the vault's reading looked up: `/use/openai/models/gpt`'s stable reading is `openai`, never `gpt`. */
+  const readName = (answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): string => (answered.reading === 'named' ? asked.named?.route : asked.stable) ?? '';
   /**
    * A UI route's answer refused before any value is opened: a personal config, no such item or one a writer changed,
    * or a key its editor no longer routes (`route_not_cleared`, decision 5: 403 naming who must save again, as the
@@ -711,7 +713,7 @@ function pluginContext(
    * own standing, which the read answers as every read does (D153). `name` is the route the vault's reading looked up.
    */
   const routeRefusal = (answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): CoffreError | null => {
-    const name = (answered.reading === 'named' ? asked.named?.route : asked.stable) ?? '';
+    const name = readName(answered, asked);
     if (answered.personal) {
       return new CoffreError(409, 'conflict', `${name} is defined in the UI, and a personal config serves no UI definition: name its environment${answered.place === null ? '' : `, ${answered.place.project}/${answered.place.environment.replace(/@me$/, '')}`}`, 'route_not_personal');
     }
@@ -744,7 +746,7 @@ function pluginContext(
         if (refused !== null) throw refused;
         if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
         const read = await reveal(apiContext(runtime, identity), answered.place, {
-          purpose: 'use', keys: answered.keys.map((key) => key.key), logged: asked.logged, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
+          purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
         });
         return routeUsed(answered, read, identity.credentialExpiresAt!);
       }
@@ -763,7 +765,7 @@ function pluginContext(
       if (refused !== null) throw refused;
       const decided = { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at };
       const read = await reveal(apiContext(runtime, made.identity), parsePath(caller.path!, [2]), {
-        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: asked.logged, only: true, environmentId: caller.place, decided,
+        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, environmentId: caller.place, decided,
       });
       return routeUsed(answered, read, made.expiresAt);
     } catch (error) {

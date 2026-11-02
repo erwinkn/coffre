@@ -524,7 +524,8 @@ type Proxy = {
  * This isolate's UI definitions (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3 and 4): each item a vault answer
  * brought, by its digest, and read as a code credential is (`resolve`), once; the digest each reading last answered,
  * and when (the copy, which only saves the item's bytes: CopyFromVault); and the values each caller's use opened, by
- * caller and URL, each kept with the item it was decided on, which a cache hit sends by (BoundToDefinition). Settled
+ * caller and the reading the vault took (`keptAt`), each kept with the item it was decided on, which a cache hit sends by
+ * (BoundToDefinition). Settled
  * values only, bounded.
  */
 type UiState = {
@@ -656,14 +657,14 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     // With no cache, and a URL whose third segment names nothing of the proxy's, so that it is the stable URL whatever
     // the handle was made for, unless `<a>/<b>` is that environment: its one key in the vault's one call, which finds
     // the environment itself (T145). Anything else it serves not so, as below.
-    // The handle's environment named, its credential one code lacks: the environment's UI route, or none. `readable`, the
-    // request with its body still to read, as code's credential left it (review r3 of #467).
-    const placed = (readable: Request) => (uiServes(third) ? uiForward(readable, coffre, proxy, raw, place, url, true, handle) : noCredential(third!));
+    // The handle's environment named, its credential one code lacks: the environment's UI route, or none. Its body still
+    // to read: code's credential read a copy (reviews r3 and r4 of #467).
+    const placed = () => (uiServes(third) ? uiForward(request, coffre, proxy, raw, place, url, true, handle) : noCredential(third!));
     const direct = proxy.cacheMs === 0 && coffre.useMadeFor !== undefined && stable.keys.length === 1
       && (raw.length === 1 || (third !== undefined && !proxy.credentials.has(third) && !proxy.signers.has(third) && !proxy.verifiers.has(third)));
     if (direct) {
       const unless = [...(raw.length === 1 ? [] : [`${place[0]}/${place[1]}`]), ...proxy.generate.keys()];
-      return forward(request, coffre, proxy, { unless, routed: async (readable) => (await routed()) ?? placed(readable) }, stable, raw.slice(1), url.search, peeked.get(stable));
+      return forward(request, coffre, proxy, { unless, routed: async () => (await routed()) ?? placed() }, stable, raw.slice(1), url.search, peeked.get(stable));
     }
     const route = await routed();
     if (route instanceof Response) return route;
@@ -763,16 +764,11 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
     if (coffre.publicFetch === undefined) return failure(503, `${named?.route ?? stable}: this runtime has no fetch that checks where an upstream resolves, which a route saved in the Proxy tab is sent through`, 'unavailable', '60');
     through = { fetch: coffre.publicFetch };
   }
-  const at = `${handle}\n${named === null ? stable : `${named.path}/${named.route}`}`;
   const now = Date.now();
   // When the values may be sent by at the latest: kept, until they lapse; decided now, within the use's deadline, as
   // the vault decided them for a request sent then. A body that comes later is sent with none (P1, review r1 of #467).
   let sendBy: number;
-  let kept = proxy.ui.kept.get(at);
-  if (kept !== undefined && kept.until <= now) {
-    proxy.ui.kept.delete(at);
-    kept = undefined;
-  }
+  let kept = keptFor(proxy, handle, named, stable, now);
   if (kept === undefined) {
     // The copies this isolate holds for either reading, by digest: the answer leaves out an item that is one of them.
     const readings = [...(named === null ? [] : [`n\n${named.path}\n${named.route}`]), ...(stable === null ? [] : [`s\n${handle}\n${stable}`])];
@@ -800,12 +796,12 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
       const last = proxy.ui.last.get(key);
       return last === undefined || !proxy.ui.items.has(last.digest) ? [] : [last.digest];
     });
-    const used = await coffre.useRoute!(handle, { named, stable, digests, logged: { credential: named?.route ?? stable, ui: true } });
+    const used = await coffre.useRoute!(handle, { named, stable, digests, logged: { ui: true } });
     const definition = itemOf(proxy, used.item);
     if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
     remember(proxy.ui.last, used.reading === 'named' ? readings[0]! : `s\n${handle}\n${stable!}`, { digest: used.item.digest, confirmed: now });
     kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) };
-    if (proxy.cacheMs > 0) remember(proxy.ui.kept, at, kept);
+    if (proxy.cacheMs > 0) remember(proxy.ui.kept, keptAt(handle, used.reading === 'named' ? { named: named! } : { stable: stable! }), kept);
     sendBy = Math.min(now + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
   } else {
     sendBy = kept.until;
@@ -818,6 +814,35 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
   if (typeof credential === 'string') return failure(503, credential, 'unavailable', '1');
   const rest = kept.reading === 'named' ? raw.slice(3) : raw.slice(1);
   return sendAs(request, coffre, credential, [...rest], url.search, handle, { values: kept.values, plain: kept.plain }, `${kept.path}/${credential.name}`, sendBy, through);
+}
+
+/**
+ * Where a handle's kept values are, by the reading the vault took, never by the URL: the place reading's by place and
+ * route, the stable one's by route, so every path under a route finds them (review r4 of #467).
+ */
+function keptAt(handle: string, reading: { named: { path: string; route: string } } | { stable: string }): string {
+  return 'named' in reading ? `${handle}\nn\n${reading.named.path}/${reading.named.route}` : `${handle}\ns\n${reading.stable}`;
+}
+
+/**
+ * The values this handle's use kept for the reading the vault would take of this URL (section 6's table), unlapsed:
+ * the place reading's where it has them; else the stable one's, which only a handle of one environment has (several
+ * get 409), and which stands for every URL whose `<a>/<b>` is not that environment, the place reading's there.
+ *
+ *   market/dev's handle, kept stable `openai`   /use/openai/models/gpt-a, /use/openai/models/gpt-b: that one copy
+ *                                               /use/market/dev/openai/models: not it (the place reading)
+ */
+function keptFor(proxy: Proxy, handle: string, named: { path: string; route: string } | null, stable: string | null, now: number): UiKept | undefined {
+  const fresh = (at: string): UiKept | undefined => {
+    const kept = proxy.ui.kept.get(at);
+    if (kept === undefined || kept.until > now) return kept;
+    proxy.ui.kept.delete(at);
+    return undefined;
+  };
+  const place = named === null ? undefined : fresh(keptAt(handle, { named }));
+  if (place !== undefined) return place;
+  const copy = stable === null ? undefined : fresh(keptAt(handle, { stable }));
+  return copy !== undefined && copy.path !== named?.path ? copy : undefined;
 }
 
 /** The definition of an item a use decided on: the answer's, or this isolate's copy of that digest, which the answer left out. */
@@ -1643,23 +1668,17 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
  * The stable URL's environment, when the vault's one call finds it (`PluginContext.useMadeFor`): not one of `unless`;
  * where it finds none so, the one `routed` says, or its refusal.
  */
-type MadeFor = { unless: readonly string[]; routed: (readable: Request) => Promise<string | Response> };
-
-/**
- * The request with the body `content` read from it, to read again: a buffered body's bytes; a streamed one, or none,
- * is still the request's own.
- */
-function again(request: Request, content: Carried): Request {
-  if (content.body === undefined || content.streamed) return request;
-  return new Request(request.url, { method: request.method, headers: request.headers, body: content.body });
-}
+type MadeFor = { unless: readonly string[]; routed: () => Promise<string | Response> };
 
 async function forward(request: Request, coffre: PluginContext, proxy: Proxy, path: string | MadeFor, credential: Resolved, rest: string[], search: string, peeked?: Fillable): Promise<Response> {
   // The stable URL's environment, as `routed` finds it, once: and its refusal before any of the request's own, as when
   // the route was found first (review r2 of #412).
   let routing: Promise<string | Response> | undefined;
-  // `readable`, the request as another reading of the URL may still read it: the body this one already read, given again.
-  const routed = (made: MadeFor, readable = request) => (routing ??= made.routed(readable));
+  const routed = (made: MadeFor) => (routing ??= made.routed());
+  // The body as this credential reads it: under the stable URL, from a copy, so that the request is whole for another
+  // reading of the URL, whatever this one made of its body, a refusal's included (review r4 of #467). A streamed body
+  // is read from neither: `send` streams the request's own.
+  const body = <T>(reading: (from: Request) => Promise<T>): Promise<T> => (typeof path === 'string' ? reading(request) : fromCopy(request, reading));
   const refuse = async (response: Response): Promise<Response> => {
     if (typeof path === 'string') return response;
     const route = await routed(path);
@@ -1683,7 +1702,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (typeof path === 'string' && !serves(credential, path)) return notServed(credential.name, path);
   const { target } = aimed;
   // A form or JSON rule's handle is in the body's field: the body read whole first, and the fields found.
-  const early = peeked ?? (credential.body.length > 0 ? await read(() => fillable(request, credential)) : null);
+  const early = peeked ?? (credential.body.length > 0 ? await read(() => body((from) => fillable(from, credential))) : null);
   if (early instanceof Response) return refuse(early);
   const fields = early?.fields ?? null;
   const handle = handleIn(request, credential, target, fields?.values);
@@ -1694,7 +1713,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // (`e30` is `{}`: the proxy reads no claim).
   const back = backOf(credential, target, handle);
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
-  const content = early?.content ?? (await read(() => carried(request, credential)));
+  const content = early?.content ?? (await read(() => body((from) => carried(from, credential))));
   if (content instanceof Response) return refuse(content);
   const through = { host: target.host };
   let route: string;
@@ -1706,7 +1725,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const logged = { credential: credential.name, ...through, ...(credential.egress === undefined ? {} : { egress: true }) };
     const made = await coffre.useMadeFor!(handle, { keys: [credential.keys[0]!], purpose: 'use', logged, unless: path.unless });
     if (made === null) {
-      const found = await routed(path, again(request, content));
+      const found = await routed(path);
       if (found instanceof Response) return found;
       route = found;
       // Not by name (a SQLite vault's, or an environment `unless` names): the environment, found, is held to the scope all the same.
@@ -2496,9 +2515,14 @@ async function fillable(request: Request, credential: Resolved): Promise<Fillabl
  */
 async function peekField(request: Request, credential: Resolved): Promise<Fillable | Response | null> {
   if (credential.body.length === 0) return null;
+  return fromCopy(request, (copy) => fillable(copy, credential));
+}
+
+/** What `reading` makes of a copy of the request, whose own body is left unread. */
+async function fromCopy<T>(request: Request, reading: (copy: Request) => Promise<T>): Promise<T> {
   const copy = request.clone();
   try {
-    return await fillable(copy, credential);
+    return await reading(copy);
   } finally {
     // A copy left unread would keep every byte the request's own body is read for: cancelled, and not waited for, as `boundedBody` does.
     if (!copy.bodyUsed) void copy.body?.cancel().catch(() => undefined);
