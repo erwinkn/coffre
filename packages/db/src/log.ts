@@ -676,9 +676,11 @@ function requestsOf(calls: readonly { requestId: string | null }[]): string[] {
  */
 export async function newestCommitted(db: Queryable, numbers: ChangeNumbers): Promise<bigint | null> {
   const read = await numbers.answer.catch(async (unread: unknown) => {
-    if (numbers.requests.length === 0) throw unread;
+    // No call made an entry (0.14's rows, each answering 0): committed, there is no seal to wait for (review r2).
+    if (numbers.requests.length === 0) return [];
     const requests = sql.join(numbers.requests.map((request) => sql`${request}`), sql`, `);
-    const rows = await rowsOf<{ number: string | number | bigint }>(db, sql`SELECT number FROM log_changes WHERE request_id IN (${requests})`);
+    const rows = await rowsOf<{ number: string | number | bigint }>(db, sql`SELECT number FROM log_changes WHERE request_id IN (${requests})`)
+      .catch((reread: unknown) => { throw new Error('the changes\' numbers could not be read, nor read again by request id', { cause: new AggregateError([unread, reread]) }); });
     if (rows.length !== numbers.requests.length) throw unread;
     return rows.map(({ number }) => BigInt(number));
   });

@@ -220,6 +220,8 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   const unread = () => Promise.reject(new Error('unread'));
   assert.equal(await newestCommitted(db.owner, { answer: unread(), requests: numbers.requests }), first);
   await assert.rejects(newestCommitted(db.owner, { answer: unread(), requests: [randomUUID()] }), /unread/);
+  // Calls that made no entry (0.14's rows), committed: nothing to wait for, and no failure (review r2).
+  assert.equal(await newestCommitted(db.owner, { answer: unread(), requests: [] }), null);
   // The revoke was sealed from the seal the renewal moved: refused in Postgres, and its row with it.
   await assert.rejects(commit({ ...renewed, revokedAt: revoked.revokedAt }, revoke), (error: unknown) => isMovedChange(error) && !isStaleChange(error));
   assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');

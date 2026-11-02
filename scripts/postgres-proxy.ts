@@ -38,8 +38,10 @@ export async function postgresProxy(database: string, { delayMs = 0, onSync }: {
     // What the client sent of a message not yet whole; the startup message, first, has no type.
     let unread = Buffer.alloc(0);
     let started = false;
-    // The statements of the Sync being written, for `onSync`.
+    // The statements of the Sync being written, for `onSync`; the named statements parsed, by name, for a Bind.
     let group: string[] = [];
+    let parsed = new Set<string>();
+    const named = new Map<string, string>();
     client.on('data', (chunk: Buffer) => {
       if (answered) trips += 1;
       answered = false;
@@ -51,14 +53,26 @@ export async function postgresProxy(database: string, { delayMs = 0, onSync }: {
         const length = head + unread.readUInt32BE(head);
         if (unread.length < length) break;
         if (started && onSync !== undefined) {
-          // Parse ('P': its name, then its text) and simple Query ('Q': its text), each a C string.
-          if (unread[0] === 0x50) group.push(cString(unread, cString(unread, 5).end + 1).text);
+          // Parse ('P': its name, then its text) and simple Query ('Q': its text), each a C string; a Bind ('B': its
+          // portal, then its statement) of a statement parsed under an earlier Sync, that statement's text.
+          if (unread[0] === 0x50) {
+            const name = cString(unread, 5);
+            const { text } = cString(unread, name.end + 1);
+            if (name.text !== '') named.set(name.text, text);
+            parsed.add(name.text);
+            group.push(text);
+          }
+          if (unread[0] === 0x42) {
+            const statement = cString(unread, cString(unread, 5).end + 1).text;
+            if (!parsed.has(statement)) group.push(named.get(statement) ?? `(prepared ${statement})`);
+          }
           if (unread[0] === 0x51) group.push(cString(unread, 5).text);
         }
         if (started && (unread[0] === 0x53 || unread[0] === 0x51)) { // 'S', 'Q'
           syncs += 1;
           onSync?.(group);
           group = [];
+          parsed = new Set();
         }
         started = true;
         unread = unread.subarray(length);
