@@ -55,7 +55,7 @@ import { database, tunnel as tunnelPostgres, type Database } from './postgres-tu
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, methodsFor, PARAMETER_NAME, readPattern, requestSegments } from '@coffre/core/proxy-match';
+import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, methodsFor, PARAMETER_NAME, PLACEHOLDER_PREFIX, readPattern, requestSegments, SIGNATURE_PREFIX } from '@coffre/core/proxy-match';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
@@ -386,13 +386,6 @@ const HANDLE_LENGTH = 'coffre_use_'.length + 43;
  * message as base64url, in JSON beside the rest.
  */
 const MESSAGE_BYTES = 64 * 1024;
-/**
- * The most an `hmac()`'s `maxBytes` may say: the body read before anyone is
- * authenticated (the proxy reads a request to compute up to what the
- * longest message takes) stays a fraction of a request through a
- * credential's, and the CPU within a Worker's Free plan.
- */
-const MAX_MESSAGE_BYTES = 1024 * 1024;
 /** What `binary` decodes bytes widened to UTF-16 units with: before anything below calls it. */
 const UTF16 = new TextDecoder('utf-16le');
 /** What heads a JWT placeholder: no signature, which the third part, the handle, takes the place of. */
@@ -2416,10 +2409,10 @@ const notServed = (name: string, path: string) => failure(404, `${name} does not
 /** A placeholder as configured, checked: `jwt(…)` naming the claims it copies, or `prefix(…)`. */
 function checkPlaceholder(name: string, placeholder: Placeholder): void {
   if (placeholder.kind !== 'jwt' && placeholder.kind !== 'prefix') throw new Error(`credentialProxy: ${name}'s placeholder is jwt(…) or prefix(…)`);
-  if (placeholder.kind === 'jwt' && (!Array.isArray(placeholder.claims) || placeholder.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === 'exp'))) {
+  if (placeholder.kind === 'jwt' && (!Array.isArray(placeholder.claims) || placeholder.claims.some((claim) => typeof claim !== 'string' || claim === '' || claim === HANDLE_CLAIM))) {
     throw new Error(`credentialProxy: ${name}'s jwt() names the claims it copies from the real token, each a string; exp is the handle's end, never copied`);
   }
-  if (placeholder.kind === 'prefix' && !/^[A-Za-z0-9._~+/:=-]{1,64}$/.test(placeholder.prefix)) throw new Error(`credentialProxy: ${name}'s prefix() is up to 64 letters, digits and ._~+/:=-, sk_test_; got ${JSON.stringify(placeholder.prefix)}`);
+  if (placeholder.kind === 'prefix' && !PLACEHOLDER_PREFIX.test(placeholder.prefix)) throw new Error(`credentialProxy: ${name}'s prefix() is up to 64 letters, digits and ._~+/:=-, sk_test_; got ${JSON.stringify(placeholder.prefix)}`);
 }
 
 /**
@@ -2478,7 +2471,7 @@ function checkSigner(name: string, signer: Signer, credentials: Map<string, Reso
     if (unknown !== undefined) throw new Error(`credentialProxy: ${what} ${name}'s hmac() takes encoding, prefix, maxBytes, limit and environments, and signs with SHA-256 alone; got ${unknown}`);
     if (signer.maxBytes !== undefined && !(Number.isInteger(signer.maxBytes) && signer.maxBytes >= 1 && signer.maxBytes <= MAX_MESSAGE_BYTES)) throw new Error(`credentialProxy: ${what} ${name}'s maxBytes is a whole number of bytes, 1 MiB at most`);
     if (signer.encoding !== 'hex' && signer.encoding !== 'base64' && signer.encoding !== 'base64url') throw new Error(`credentialProxy: ${what} ${name}'s hmac() writes its signatures in hex, base64 or base64url`);
-    if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !/^[\x21-\x7e]{1,32}$/.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
+    if (signer.prefix !== undefined && (typeof signer.prefix !== 'string' || !SIGNATURE_PREFIX.test(signer.prefix))) throw new Error(`credentialProxy: ${what} ${name}'s prefix is up to 32 printable characters, sha256=`);
   }
   limited(name, signer.limit);
   // The app holds one value for a key, and a signer's is the handle as it is.

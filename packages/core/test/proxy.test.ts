@@ -79,8 +79,23 @@ test('what no UI definition may be: each refused with its reason', () => {
     ['a placeholder with no rule to shape', { ...ROUTE, inject: [{ kind: 'basic', user: '{A}', password: '{B}' }], placeholder: { kind: 'prefix', prefix: 'sk_' } }, /placeholder shapes/],
     ['a tunnel to a private host', { kind: 'tunnel', name: 'db', key: 'DB_URL', hosts: ['10.0.1.5'], network: null }, /private/],
     ['a key name with a dash', { kind: 'signer', name: 's', signer: { kind: 'private-key', key: 'MY-KEY' } }, /names a key/],
+    // What `credentialProxy` refuses (`checkPlaceholder`, `checkSigner`), refused at save too (r3).
+    ['a prefix with a space', { ...ROUTE, placeholder: { kind: 'prefix', prefix: 'bad prefix' } }, /placeholder\.prefix is up to 64/],
+    ['a jwt copying exp', { ...ROUTE, placeholder: { kind: 'jwt', claims: ['sub', 'exp'] } }, /never names exp/],
+    ['a signer reading past 1 MiB', { kind: 'signer', name: 's', signer: { kind: 'hmac', key: 'S', encoding: 'hex', maxBytes: 1024 * 1024 + 1 } }, /1 MiB at most/],
+    ['a verifier prefix with a space', { kind: 'verifier', name: 'v', hmac: { key: 'S', encoding: 'hex', prefix: 'has space' } }, /32 printable/],
+    ['a verifier prefix past 32', { kind: 'verifier', name: 'v', hmac: { key: 'S', encoding: 'hex', prefix: 'x'.repeat(33) } }, /32 printable/],
   ];
   for (const [what, value, reason] of cases) assert.match(proxyDefinitionProblem(value) ?? 'accepted', reason, what);
+  // The edges the proxy takes stay taken; no prefix is kept as ''.
+  for (const value of [
+    { ...ROUTE, placeholder: { kind: 'prefix', prefix: 'sk_test_' } },
+    { ...ROUTE, placeholder: { kind: 'jwt', claims: ['sub', 'iss'] } },
+    { kind: 'signer', name: 's', signer: { kind: 'hmac', key: 'S', encoding: 'hex', maxBytes: 1024 * 1024 } },
+    { kind: 'verifier', name: 'v', hmac: { key: 'S', encoding: 'hex', prefix: 'sha256=' } },
+  ]) assert.equal(proxyDefinitionProblem(value), null, JSON.stringify(value));
+  const bare = canonicalDefinition({ kind: 'verifier', name: 'v', hmac: { key: 'S', encoding: 'hex' } });
+  assert.equal(bare.kind === 'verifier' && bare.hmac.prefix, '');
 });
 
 test('insecureUpstreams lets a local fake in; a network code declares lets a tunnel reach its private hosts', () => {

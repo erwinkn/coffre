@@ -1,5 +1,5 @@
 import { CREDENTIAL_NAME } from './identity/workloads.ts';
-import { alike, FIELD_NAME, PARAMETER_NAME, readPattern } from './proxy-match.ts';
+import { alike, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, PARAMETER_NAME, PLACEHOLDER_PREFIX, readPattern, SIGNATURE_PREFIX } from './proxy-match.ts';
 
 /**
  * Proxy definitions written in the UI, per environment (0.16, T186;
@@ -307,11 +307,14 @@ function placeholderOf(value: unknown, name: string): ProxyPlaceholder {
   const placeholder = record(value, `${name}: placeholder`);
   if (placeholder.kind === 'prefix') {
     only(placeholder, ['kind', 'prefix'], `${name}: placeholder`);
-    return { kind: 'prefix', prefix: text(placeholder.prefix, `${name}: placeholder.prefix`, 64) };
+    // As the proxy takes it (`checkPlaceholder`): a prefix the handle follows, in a key's own alphabet.
+    if (typeof placeholder.prefix !== 'string' || !PLACEHOLDER_PREFIX.test(placeholder.prefix)) problem(`${name}: placeholder.prefix is up to 64 letters, digits and ._~+/:=-, sk_test_`);
+    return { kind: 'prefix', prefix: placeholder.prefix };
   }
   if (placeholder.kind === 'jwt') {
     only(placeholder, ['kind', 'claims'], `${name}: placeholder`);
     const claims = list(placeholder.claims ?? [], `${name}: placeholder.claims`, 0, 16).map((claim, i) => text(claim, `${name}: placeholder.claims[${i}]`, 128));
+    if (claims.includes(HANDLE_CLAIM)) problem(`${name}: placeholder.claims never names ${HANDLE_CLAIM}, the handle's own end`);
     return { kind: 'jwt', claims };
   }
   problem(`${name}: a placeholder is a 'prefix' or a 'jwt'`);
@@ -334,8 +337,11 @@ function hmacOf(hmac: Record<string, unknown>, what: string, also: readonly stri
   only(hmac, [...also, 'key', 'encoding', 'prefix', 'maxBytes'], what);
   if (hmac.encoding !== 'hex' && hmac.encoding !== 'base64' && hmac.encoding !== 'base64url') problem(`${what}.encoding is hex, base64 or base64url`);
   const maxBytes = hmac.maxBytes ?? null;
-  if (maxBytes !== null && (typeof maxBytes !== 'number' || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 16 * 1024 * 1024)) problem(`${what}.maxBytes is a whole number of bytes, 1 to 16 MiB, or none`);
-  return { key: keyName(hmac.key, `${what}.key`), encoding: hmac.encoding, prefix: text(hmac.prefix ?? '', `${what}.prefix`, 64, 0), maxBytes: maxBytes as number | null };
+  // As the proxy takes them (`checkSigner`): 1 MiB at most, a prefix of printable ASCII; none is '' here, as it is stored.
+  if (maxBytes !== null && (typeof maxBytes !== 'number' || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_MESSAGE_BYTES)) problem(`${what}.maxBytes is a whole number of bytes, 1 MiB at most, or none`);
+  const prefix = hmac.prefix ?? '';
+  if (prefix !== '' && (typeof prefix !== 'string' || !SIGNATURE_PREFIX.test(prefix))) problem(`${what}.prefix is up to 32 printable characters with no space, sha256=, or none`);
+  return { key: keyName(hmac.key, `${what}.key`), encoding: hmac.encoding, prefix: prefix as string, maxBytes: maxBytes as number | null };
 }
 
 function transportName(value: unknown, what: string): string | null {

@@ -273,6 +273,23 @@ export const PARAMETER_NAME = /^[!#$%&'*+.^_`|~0-9a-z-]+$/i;
 /** The name of a form's or a JSON body's field a rule fills, at the top of the body: letters, digits and _.-, a letter or digit among them. */
 export const FIELD_NAME = /^(?=.*[A-Za-z0-9])[A-Za-z0-9_.-]{1,128}$/;
 
+/** What a `prefix(…)` placeholder starts with: letters, digits and ._~+/:=-, as a key's own prefix is written (`sk_test_`). */
+export const PLACEHOLDER_PREFIX = /^[A-Za-z0-9._~+/:=-]{1,64}$/;
+
+/** The claim a `jwt(…)` placeholder never copies from the real token: its own, the handle's end. */
+export const HANDLE_CLAIM = 'exp';
+
+/** What an HMAC signature is written after, when its scheme writes one (`sha256=`): printable ASCII, no space. */
+export const SIGNATURE_PREFIX = /^[\x21-\x7e]{1,32}$/;
+
+/**
+ * The most an `hmac()`'s `maxBytes` may say: the body read before anyone is
+ * authenticated (the proxy reads a request to compute up to what the
+ * longest message takes) stays a fraction of a request through a
+ * credential's, and the CPU within a Worker's Free plan.
+ */
+export const MAX_MESSAGE_BYTES = 1024 * 1024;
+
 /**
  * A field's name as some upstream's parser may read it, the same as
  * another's: up to a `[` (PHP's and qs's arrays, `refresh_token[0]`),
