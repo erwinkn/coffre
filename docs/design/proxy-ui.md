@@ -769,7 +769,8 @@ described, which `scripts/formal.sh` holds as a failure on every CI run.
 | `CopyFromVault`: the isolate's copy comes only from vault answers, never from a read of its own | a writer forges the item beside its genuine index entry, the app reads that pair, the writer puts the genuine row back; the vault checks the genuine row, sees the app's digest, omits the item, and the app sends by the forged body (section 4) |
 | `SentAsDecided`: the app sends by the definition the vault decided on (returned in the answer, or omitted because the copy has its digest), never by its own unchecked copy | the app's copy still says version 7. The vault decides on version 8, a Developer's (clearance `secret`, host `evil`), and the app sends to version 7's host, which no current definition allows |
 | `BoundToDefinition`: kept values go only to the definition they were decided under | values decided on version 7 (`good`) are served from the cache after the app re-read version 8 (`evil`). The key reaches `evil`, which the vault never decided on for them |
-| `ClearanceAtUse`: each use weighs the key's nature now against the definition's clearance | a Developer routes `K` while it is secret. An Owner marks it sensitive, and the next use sends the sensitive value to the Developer's upstream |
+| `ClearanceAtUse`: each use weighs the key's nature now against the definition's clearance | a Developer routes `K` while it is secret and is made an Owner since. An Owner marks `K` sensitive, and the next use sends the sensitive value to the upstream she saved as a Developer (`RoutingEditor`) |
+| `EditorStillHolds`: each use weighs the key against its editor's standing now, read in the same statement | Ada saves `openai` and is removed from the instance; her route keeps sending `K` to the upstream she chose (`RoutingEditor`) |
 | `KeptExpires`: kept values serve W, no longer | values sent long after their decision (`WithinWindow`) |
 | `OneVersion`: a route's keys are all decided on one version, and the app sends only answers carrying one seal | key 1 is decided on version 7 (`good`), an Owner's edit to version 8 (`evil`) commits, a later round decides key 2 on version 8, and the request carries both to `good`: key 2 goes where no version it was decided on says |
 | `ClearSuperseded`: the `proxy.code` change that reserves a name deletes its UI item | code defines `openai` for a while, then drops it, and the stale UI `openai`, unseen for months, serves again (`NoRevival`) |
@@ -786,9 +787,10 @@ change never overlap, and the number orders them) is `HotPathOne.tla`'s, for
 any input. Here an edit is one step. One route, two hosts; its second key
 appears only when `OneVersion` is off, since with it on both keys share
 every decision. The frozen holdings are reduced to one clearance per
-version ("sensitive" for an Owner, "secret" otherwise). Decision 5 takes
-option (b), the frozen holdings intersected with the editor's current
-ones, which is not modelled yet: PR C extends the model first. The matching rules of section 7 are pure
+version ("sensitive" for an Owner, "secret" otherwise), and the editor's
+current standing to one clearance per editor, which a change of their
+principal moves either way (PR C, decision 5(b): `EditorStillHolds`,
+scenario `RoutingEditor`). The matching rules of section 7 are pure
 functions, which property tests hold, not TLC. That a map hit's ids are
 held to the route's names is Naming.tla's `HeldToNames`, unchanged. Renames
 are not modelled, because they cannot change what code shadows (section 6).

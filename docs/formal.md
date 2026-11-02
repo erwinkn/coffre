@@ -2316,7 +2316,13 @@ and the send of
 the kept values, W ticks at most after the decision (`cacheSeconds`, or
 the deadline). An edit is a change under the fence, one step: HotPathOne
 proves the fence for any input. A key may be marked sensitive after a
-save. Two isolates may serve at once, on different code during a deploy:
+save. Two editors save: Ada, an Owner covering the place, and Lin, who
+reads secrets; a save freezes its editor's standing as the version's
+clearance, and that standing may change after, a change of the editor's
+principal (Lin made an Owner, Ada demoted, either removed). The use's
+statement reads the editor's principal in the same snapshot as the row,
+and decides the key for the frozen clearance intersected with the
+editor's standing then (proxy-ui.md, decision 5(b)). Two isolates may serve at once, on different code during a deploy:
 a restart flips whether an isolate's code defines the route's name (two
 configs of one release: a deploy that changes `credentialProxy` alone).
 Releases are apart: each isolate and the vault run release 1 or 2, a
@@ -2333,7 +2339,8 @@ drops a reservation, only an instance Owner's audited release.
 | the isolate's copy comes only from vault answers, never a read of its own (CopyFromVault) | `EverySendAllowed`: a writer forges the item beside its genuine digest, the app reads that pair, the writer puts the genuine row back; the vault sees the digest, omits the item, and the app sends by the forged body |
 | the app sends by the definition the vault decided on, which the call answers with (SentAsDecided) | `EverySendAllowed`: the app's own copy, older, says another host than the version decided |
 | kept values go only to the definition they were decided under (BoundToDefinition) | `EverySendAllowed`: values decided for one upstream sent to a newer one the vault never decided on for them |
-| each use weighs the key's nature now against the definition's clearance (ClearanceAtUse) | `EverySendAllowed`: a Developer's route saved while the key was secret sends it once it is sensitive |
+| each use weighs the key's nature now against the definition's clearance (ClearanceAtUse) | `EverySendAllowed`, in `RoutingEditor`: Lin's route saved while the key was secret, Lin made an Owner since, sends the key once it is sensitive: her standing now reads it, what her save froze does not |
+| each use weighs the key's nature now against its editor's standing now, read in its snapshot (EditorStillHolds) | `EverySendAllowed`, in `RoutingEditor`: Ada removed after her save, and her route still sends the key |
 | kept values serve W, no longer (KeptExpires) | `WithinWindow` |
 | a route's keys decided on one version: a later round of the use must find the same seal, and the app sends only answers carrying one (OneVersion) | `EverySendAllowed`: the first key decided on the `good` version, an Owner's edit to `evil`, the second key decided on it in a later round, and the request carries both to `good` |
 | the `proxy.code` change that reserves a name deletes its UI row (ClearSuperseded) | `NoRevival`: code defines the name, then drops it, and the UI row nobody saw since serves again |
@@ -2342,8 +2349,11 @@ drops a reservation, only an instance Owner's audited release.
 | the vault refuses a call on another release before any read (VersionGate) | `MismatchInert`: the vault's isolate restarted on the next release, an app isolate still on the last one saves the route |
 
 - `EverySendAllowed`: every request carrying the key went to the host of a
-  version the vault decided on, the newest when it decided, and cleared for
-  the key's nature then.
+  version the vault decided on, the newest when it decided, cleared for
+  the key's nature then, and whose editor still read the key by their
+  standing then. In `RoutingEditor`, `FencedRead` off breaks it too: the
+  use reads the editor's principal before the fence, Ada is removed, and
+  the use is decided on her standing as it was.
 - `WithinWindow`: within W of that decision.
 - `MismatchInert`: no vault call reads or changes the route while the
   caller's release and the vault's differ (proxy-ui.md, decision 8). The
@@ -2371,15 +2381,17 @@ drops a reservation, only an instance Owner's audited release.
 
 | Scenario | What | Distinct states |
 |---|---|---|
-| `Routing` | one isolate; two edits (any host, either clearance), a key marked sensitive, two rows put back or forged, while uses (this caller's or another's) resolve, decide and send | 9,266,068 |
+| `Routing` | one isolate; two edits (any host, either editor), a key marked sensitive, two rows put back or forged, while uses (this caller's or another's) resolve, decide and send | 9,266,068 |
+| `RoutingEditor` | one isolate; one edit (any host, either editor), two changes of an editor's standing (promoted, demoted or removed), a key marked sensitive, while uses resolve, decide and send | 1,061,512 |
 | `RoutingCode` | two isolates, one edit, and two restarts: code defines the name, then drops it, while the other isolate serves and saves | 1,678,179 |
 | `RoutingRelease` | as `RoutingCode`, with an instance Owner's release of the reserved name (`NoRevival` left out: the `EXPECTED` gap) | 2,949,085 |
 | `RoutingVersion` | two isolates, one edit, and three moves of a Worker to the other release (a deploy and a rollback, either Worker first), while uses resolve, decide and send | 2,059,664 |
 
 **What it does not cover.** The fence itself (HotPathOne). One route,
 so the reserved set is one name's flag. The frozen holdings are one
-clearance per version, frozen at save (option (a) of proxy-ui.md's
-decision 5, which takes (b): PR C extends the model to it first); the decisions over grants, forks and references are the vault's own,
+clearance per version, frozen at save, and each editor's standing now is
+one clearance too (decision 5(b), which T186 PR C modelled before its
+code); the decisions over grants, forks and references are the vault's own,
 held by its tests and Lean. The path rules and the allow list are pure
 functions, held by property tests. A row is one body per version, so an
 item moved under another name, or deleted from a fork (the sealed
