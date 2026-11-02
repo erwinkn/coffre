@@ -1,5 +1,5 @@
 {
-  "id": "4d081db6-d0f3-4176-906f-1af00612b8b1",
+  "id": "7601bbce-33a0-4e7c-b774-465628b3b923",
   "prevId": "820f909d-471d-431a-bbfc-e9cca6e2448d",
   "version": "7",
   "dialect": "postgresql",
@@ -206,9 +206,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_environment_idx": {
           "name": "audit_log_environment_idx",
@@ -227,9 +227,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_secret_idx": {
           "name": "audit_log_secret_idx",
@@ -248,9 +248,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_actor_idx": {
           "name": "audit_log_actor_idx",
@@ -269,9 +269,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_operation_idx": {
           "name": "audit_log_operation_idx",
@@ -290,9 +290,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_action_idx": {
           "name": "audit_log_action_idx",
@@ -317,9 +317,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_releases_idx": {
           "name": "audit_log_releases_idx",
@@ -356,9 +356,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_subject_idx": {
           "name": "audit_log_subject_idx",
@@ -383,33 +383,33 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "audit_log_unbind_idx": {
           "name": "audit_log_unbind_idx",
           "columns": [
             {
               "expression": "((\"metadata\")::jsonb ->> 'bindingId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.unbind' AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_freeze_idx": {
           "name": "audit_log_freeze_idx",
           "columns": [
             {
               "expression": "((\"metadata\")::jsonb ->> 'target')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {
@@ -420,58 +420,58 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" IN ('workload.freeze', 'workload.unfreeze') AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_supersede_idx": {
           "name": "audit_log_supersede_idx",
           "columns": [
             {
               "expression": "((\"metadata\")::jsonb ->> 'enrollmentId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'enrollment.supersede' AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_exchange_idx": {
           "name": "audit_log_exchange_idx",
           "columns": [
             {
               "expression": "((\"metadata\")::jsonb ->> 'credentialId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.exchange' AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_token_create_idx": {
           "name": "audit_log_token_create_idx",
           "columns": [
             {
               "expression": "((\"metadata\")::jsonb ->> 'targetCredentialId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"audit_log\".\"author\" = 'app' AND \"audit_log\".\"action\" = 'token.create' AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_reference_end_idx": {
           "name": "audit_log_reference_end_idx",
@@ -484,18 +484,18 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"audit_log\".\"author\" = 'vault' AND \"audit_log\".\"action\" = 'reference.end' AND \"audit_log\".\"decision\" = 'allow'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_also_project_idx": {
           "name": "audit_log_also_project_idx",
           "columns": [
             {
               "expression": "(((\"metadata\")::jsonb -> 'also') ->> 'projectId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {
@@ -506,18 +506,18 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_also_environment_idx": {
           "name": "audit_log_also_environment_idx",
           "columns": [
             {
               "expression": "(((\"metadata\")::jsonb -> 'also') ->> 'environmentId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {
@@ -528,18 +528,18 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "audit_log_also_secret_idx": {
           "name": "audit_log_also_secret_idx",
           "columns": [
             {
               "expression": "(((\"metadata\")::jsonb -> 'also') ->> 'secretId')",
-              "isExpression": true,
               "asc": true,
+              "isExpression": true,
               "nulls": "last"
             },
             {
@@ -550,77 +550,77 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "((\"audit_log\".\"metadata\")::jsonb -> 'also') IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "audit_log_project_id_fkey": {
           "name": "audit_log_project_id_fkey",
           "tableFrom": "audit_log",
+          "tableTo": "projects",
           "columnsFrom": [
             "project_id"
           ],
-          "tableTo": "projects",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "audit_log_environment_id_fkey": {
           "name": "audit_log_environment_id_fkey",
           "tableFrom": "audit_log",
+          "tableTo": "environments",
           "columnsFrom": [
             "environment_id"
           ],
-          "tableTo": "environments",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "audit_log_secret_id_fkey": {
           "name": "audit_log_secret_id_fkey",
           "tableFrom": "audit_log",
+          "tableTo": "secrets",
           "columnsFrom": [
             "secret_id"
           ],
-          "tableTo": "secrets",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "audit_log_secret_version_id_fkey": {
           "name": "audit_log_secret_version_id_fkey",
           "tableFrom": "audit_log",
+          "tableTo": "secret_versions",
           "columnsFrom": [
             "secret_version_id"
           ],
-          "tableTo": "secret_versions",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "audit_log_related_seq_fkey": {
           "name": "audit_log_related_seq_fkey",
           "tableFrom": "audit_log",
+          "tableTo": "audit_log",
           "columnsFrom": [
             "related_seq"
           ],
-          "tableTo": "audit_log",
           "columnsTo": [
             "seq"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -909,9 +909,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "credentials_live_idx": {
           "name": "credentials_live_idx",
@@ -930,10 +930,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"credentials\".\"revoked_at\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "credentials_issued_by_idx": {
           "name": "credentials_issued_by_idx",
@@ -958,9 +958,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "credentials_enrollment_roots_idx": {
           "name": "credentials_enrollment_roots_idx",
@@ -979,65 +979,65 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"credentials\".\"kind\" = 'workload' AND \"credentials\".\"ancestors\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "credentials_principal_fkey": {
           "name": "credentials_principal_fkey",
           "tableFrom": "credentials",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
-          "tableTo": "vault_members",
           "columnsTo": [
             "principal"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "credentials_identity_id_fkey": {
           "name": "credentials_identity_id_fkey",
           "tableFrom": "credentials",
+          "tableTo": "identities",
           "columnsFrom": [
             "identity_id",
             "principal",
             "generation"
           ],
-          "tableTo": "identities",
           "columnsTo": [
             "id",
             "principal",
             "generation"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "credentials_enrollment_id_fkey": {
           "name": "credentials_enrollment_id_fkey",
           "tableFrom": "credentials",
+          "tableTo": "enrollments",
           "columnsFrom": [
             "enrollment_id"
           ],
-          "tableTo": "enrollments",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "credentials_token_hash_key": {
           "name": "credentials_token_hash_key",
+          "nullsNotDistinct": false,
           "columns": [
             "token_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1164,32 +1164,32 @@
         "device_authorizations_principal_fkey": {
           "name": "device_authorizations_principal_fkey",
           "tableFrom": "device_authorizations",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
-          "tableTo": "vault_members",
           "columnsTo": [
             "principal"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "device_authorizations_device_code_hash_key": {
           "name": "device_authorizations_device_code_hash_key",
+          "nullsNotDistinct": false,
           "columns": [
             "device_code_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "device_authorizations_user_code_key": {
           "name": "device_authorizations_user_code_key",
+          "nullsNotDistinct": false,
           "columns": [
             "user_code"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1256,15 +1256,15 @@
         "dismissed_keys_environment_id_fkey": {
           "name": "dismissed_keys_environment_id_fkey",
           "tableFrom": "dismissed_keys",
+          "tableTo": "environments",
           "columnsFrom": [
             "environment_id"
           ],
-          "tableTo": "environments",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -1370,34 +1370,34 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "enrollments_binding_id_fkey": {
           "name": "enrollments_binding_id_fkey",
           "tableFrom": "enrollments",
+          "tableTo": "service_bindings",
           "columnsFrom": [
             "binding_id"
           ],
-          "tableTo": "service_bindings",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "enrollments_code_hash_key": {
           "name": "enrollments_code_hash_key",
+          "nullsNotDistinct": false,
           "columns": [
             "code_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1502,10 +1502,10 @@
             }
           ],
           "isUnique": true,
-          "with": {},
-          "method": "btree",
           "where": "strpos(\"environments\".\"slug\", '~') = 0",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "environments_parent_idx": {
           "name": "environments_parent_idx",
@@ -1518,58 +1518,58 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "environments_project_id_fkey": {
           "name": "environments_project_id_fkey",
           "tableFrom": "environments",
+          "tableTo": "projects",
           "columnsFrom": [
             "project_id"
           ],
-          "tableTo": "projects",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "environments_parent_in_project": {
           "name": "environments_parent_in_project",
           "tableFrom": "environments",
+          "tableTo": "environments",
           "columnsFrom": [
             "parent_id",
             "project_id"
           ],
-          "tableTo": "environments",
           "columnsTo": [
             "id",
             "project_id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "environments_project_id_slug_key": {
           "name": "environments_project_id_slug_key",
+          "nullsNotDistinct": false,
           "columns": [
             "project_id",
             "slug"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "environments_project_scoped": {
           "name": "environments_project_scoped",
+          "nullsNotDistinct": false,
           "columns": [
             "id",
             "project_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1683,8 +1683,8 @@
           "primaryKey": false,
           "notNull": false,
           "generated": {
-            "type": "stored",
-            "as": "CASE WHEN revoked_at IS NULL THEN subject END"
+            "as": "CASE WHEN revoked_at IS NULL THEN subject END",
+            "type": "stored"
           }
         }
       },
@@ -1712,9 +1712,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "identities_principal_idx": {
           "name": "identities_principal_idx",
@@ -1733,36 +1733,36 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "identities_principal_fkey": {
           "name": "identities_principal_fkey",
           "tableFrom": "identities",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
-          "tableTo": "vault_members",
           "columnsTo": [
             "principal"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "identities_member_generation_key": {
           "name": "identities_member_generation_key",
+          "nullsNotDistinct": false,
           "columns": [
             "id",
             "principal",
             "generation"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -1892,9 +1892,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "log_changes_sign_in_idx": {
           "name": "log_changes_sign_in_idx",
@@ -1913,10 +1913,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "strpos(\"log_changes\".\"payload\", '\"signIn\":{') > 0",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "log_changes_sign_in_actor_idx": {
           "name": "log_changes_sign_in_actor_idx",
@@ -1941,10 +1941,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "strpos(\"log_changes\".\"payload\", '\"signIn\":{') > 0",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "log_changes_issue_revoke_idx": {
           "name": "log_changes_issue_revoke_idx",
@@ -1963,10 +1963,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "((strpos(\"log_changes\".\"payload\", '{\"caller\":\"') = 1 AND strpos(\"log_changes\".\"payload\", '\"issue\":{\"by\":\"') > 0) OR (strpos(\"log_changes\".\"payload\", '{\"op\":\"credential.revoke\",') = 1 AND strpos(\"log_changes\".\"payload\", '\"reason\":\"revoke\"') > 0) OR (strpos(\"log_changes\".\"payload\", '{\"op\":\"credential.revoke\",') = 1 AND strpos(\"log_changes\".\"payload\", '\"reason\":\"sign_out\"') > 0))",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "log_changes_issue_revoke_actor_idx": {
           "name": "log_changes_issue_revoke_actor_idx",
@@ -1991,10 +1991,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "((strpos(\"log_changes\".\"payload\", '{\"caller\":\"') = 1 AND strpos(\"log_changes\".\"payload\", '\"issue\":{\"by\":\"') > 0) OR (strpos(\"log_changes\".\"payload\", '{\"op\":\"credential.revoke\",') = 1 AND strpos(\"log_changes\".\"payload\", '\"reason\":\"revoke\"') > 0) OR (strpos(\"log_changes\".\"payload\", '{\"op\":\"credential.revoke\",') = 1 AND strpos(\"log_changes\".\"payload\", '\"reason\":\"sign_out\"') > 0))",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2002,10 +2002,10 @@
       "uniqueConstraints": {
         "log_changes_request_id_key": {
           "name": "log_changes_request_id_key",
+          "nullsNotDistinct": false,
           "columns": [
             "request_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -2098,9 +2098,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2179,6 +2179,13 @@
           "type": "bigint",
           "primaryKey": false,
           "notNull": true
+        },
+        "retired": {
+          "name": "retired",
+          "type": "bytea[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -2256,9 +2263,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2383,9 +2390,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "log_reads_principal_idx": {
           "name": "log_reads_principal_idx",
@@ -2410,9 +2417,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "log_reads_secret_idx": {
           "name": "log_reads_secret_idx",
@@ -2437,9 +2444,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "log_reads_environment_idx": {
           "name": "log_reads_environment_idx",
@@ -2464,9 +2471,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "log_reads_project_idx": {
           "name": "log_reads_project_idx",
@@ -2491,9 +2498,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "log_reads_place_idx": {
           "name": "log_reads_place_idx",
@@ -2518,10 +2525,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"log_reads\".\"place\" IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "log_reads_source_idx": {
           "name": "log_reads_source_idx",
@@ -2546,10 +2553,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"log_reads\".\"source\" IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "log_reads_source_environment_idx": {
           "name": "log_reads_source_environment_idx",
@@ -2574,10 +2581,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"log_reads\".\"source_environment\" IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "log_reads_source_project_idx": {
           "name": "log_reads_source_project_idx",
@@ -2602,10 +2609,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"log_reads\".\"source_project\" IS NOT NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2807,9 +2814,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2915,25 +2922,25 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"mcp_approvals\".\"reported_at\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "mcp_approvals_connection_fkey": {
           "name": "mcp_approvals_connection_fkey",
           "tableFrom": "mcp_approvals",
+          "tableTo": "mcp_connections",
           "columnsFrom": [
             "connection_id"
           ],
-          "tableTo": "mcp_connections",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3105,9 +3112,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "mcp_connections_live_idx": {
           "name": "mcp_connections_live_idx",
@@ -3126,42 +3133,42 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"mcp_connections\".\"revoked_at\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "mcp_connections_principal_fkey": {
           "name": "mcp_connections_principal_fkey",
           "tableFrom": "mcp_connections",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
-          "tableTo": "vault_members",
           "columnsTo": [
             "principal"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "mcp_connections_code_hash_key": {
           "name": "mcp_connections_code_hash_key",
+          "nullsNotDistinct": false,
           "columns": [
             "code_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "mcp_connections_refresh_hash_key": {
           "name": "mcp_connections_refresh_hash_key",
+          "nullsNotDistinct": false,
           "columns": [
             "refresh_hash"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -3307,10 +3314,10 @@
       "uniqueConstraints": {
         "projects_slug_key": {
           "name": "projects_slug_key",
+          "nullsNotDistinct": false,
           "columns": [
             "slug"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -3416,9 +3423,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "secret_references_source_idx": {
           "name": "secret_references_source_idx",
@@ -3431,9 +3438,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "secret_references_project_idx": {
           "name": "secret_references_project_idx",
@@ -3446,9 +3453,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "secret_references_source_project_idx": {
           "name": "secret_references_source_project_idx",
@@ -3461,9 +3468,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "secret_references_created_by_idx": {
           "name": "secret_references_created_by_idx",
@@ -3476,60 +3483,60 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "secret_references_secret_id_fkey": {
           "name": "secret_references_secret_id_fkey",
           "tableFrom": "secret_references",
+          "tableTo": "secrets",
           "columnsFrom": [
             "secret_id"
           ],
-          "tableTo": "secrets",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "secret_references_source_secret_id_fkey": {
           "name": "secret_references_source_secret_id_fkey",
           "tableFrom": "secret_references",
+          "tableTo": "secrets",
           "columnsFrom": [
             "source_secret_id"
           ],
-          "tableTo": "secrets",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "secret_references_created_seq_fkey": {
           "name": "secret_references_created_seq_fkey",
           "tableFrom": "secret_references",
+          "tableTo": "audit_log",
           "columnsFrom": [
             "created_seq"
           ],
-          "tableTo": "audit_log",
           "columnsTo": [
             "seq"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "secret_references_created_seq_key": {
           "name": "secret_references_created_seq_key",
+          "nullsNotDistinct": false,
           "columns": [
             "created_seq"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -3670,35 +3677,35 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "secret_versions_secret_id_fkey": {
           "name": "secret_versions_secret_id_fkey",
           "tableFrom": "secret_versions",
+          "tableTo": "secrets",
           "columnsFrom": [
             "secret_id"
           ],
-          "tableTo": "secrets",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "secret_versions_secret_id_version_key": {
           "name": "secret_versions_secret_id_version_key",
+          "nullsNotDistinct": false,
           "columns": [
             "secret_id",
             "version"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -3817,9 +3824,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "secrets_live_idx": {
           "name": "secrets_live_idx",
@@ -3832,78 +3839,78 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"secrets\".\"archived_at\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "secrets_current_version_id_secret_versions_id_fk": {
           "name": "secrets_current_version_id_secret_versions_id_fk",
           "tableFrom": "secrets",
+          "tableTo": "secret_versions",
           "columnsFrom": [
             "current_version_id"
           ],
-          "tableTo": "secret_versions",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "secrets_project_id_fkey": {
           "name": "secrets_project_id_fkey",
           "tableFrom": "secrets",
+          "tableTo": "projects",
           "columnsFrom": [
             "project_id"
           ],
-          "tableTo": "projects",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "secrets_environment_id_fkey": {
           "name": "secrets_environment_id_fkey",
           "tableFrom": "secrets",
+          "tableTo": "environments",
           "columnsFrom": [
             "environment_id"
           ],
-          "tableTo": "environments",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "secrets_environment_in_project": {
           "name": "secrets_environment_in_project",
           "tableFrom": "secrets",
+          "tableTo": "environments",
           "columnsFrom": [
             "environment_id",
             "project_id"
           ],
-          "tableTo": "environments",
           "columnsTo": [
             "id",
             "project_id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "secrets_project_id_environment_id_key_key": {
           "name": "secrets_project_id_environment_id_key_key",
+          "nullsNotDistinct": false,
           "columns": [
             "project_id",
             "environment_id",
             "key"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -4061,9 +4068,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "service_bindings_live_idx": {
           "name": "service_bindings_live_idx",
@@ -4100,25 +4107,25 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"service_bindings\".\"revoked_at\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "service_bindings_principal_fkey": {
           "name": "service_bindings_principal_fkey",
           "tableFrom": "service_bindings",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
-          "tableTo": "vault_members",
           "columnsTo": [
             "principal"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4209,78 +4216,78 @@
             }
           ],
           "isUnique": true,
-          "with": {},
-          "method": "btree",
           "where": "\"vault_grants\".\"project_id\" IS NULL AND \"vault_grants\".\"environment_id\" IS NULL AND \"vault_grants\".\"environment_slug\" IS NULL",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "vault_grants_principal_fkey": {
           "name": "vault_grants_principal_fkey",
           "tableFrom": "vault_grants",
+          "tableTo": "vault_members",
           "columnsFrom": [
             "principal"
           ],
-          "tableTo": "vault_members",
           "columnsTo": [
             "principal"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "vault_grants_project_id_fkey": {
           "name": "vault_grants_project_id_fkey",
           "tableFrom": "vault_grants",
+          "tableTo": "projects",
           "columnsFrom": [
             "project_id"
           ],
-          "tableTo": "projects",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "vault_grants_environment_id_fkey": {
           "name": "vault_grants_environment_id_fkey",
           "tableFrom": "vault_grants",
+          "tableTo": "environments",
           "columnsFrom": [
             "environment_id"
           ],
-          "tableTo": "environments",
           "columnsTo": [
             "id"
           ],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "vault_grants_on_project": {
           "name": "vault_grants_on_project",
+          "nullsNotDistinct": false,
           "columns": [
             "principal",
             "project_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "vault_grants_on_environment": {
           "name": "vault_grants_on_environment",
+          "nullsNotDistinct": false,
           "columns": [
             "principal",
             "environment_id"
-          ],
-          "nullsNotDistinct": false
+          ]
         },
         "vault_grants_on_environment_slug": {
           "name": "vault_grants_on_environment_slug",
+          "nullsNotDistinct": false,
           "columns": [
             "principal",
             "environment_slug"
-          ],
-          "nullsNotDistinct": false
+          ]
         }
       },
       "policies": {},
@@ -4464,10 +4471,10 @@
   },
   "enums": {},
   "schemas": {},
-  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
+  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

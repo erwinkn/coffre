@@ -104,7 +104,7 @@ export async function localVault(config: NodeVaultConfig, options: VaultOptions 
       // the vault's. On SQLite, the vault's one: two to one file wait on each other's writes.
       const url = typeof config.database === 'string' && engineOfUrl(config.database) === 'postgres' ? config.database : null;
       const where = url === null ? { database: db } : { connect: () => openDatabase(url, { max: 2 }) };
-      const kept = (checkpointer = await keepCheckpointer({ ...where, seed: resolved.signingKeys[0]!, memory: config.checkpointer!.memory }));
+      const kept = (checkpointer = await keepCheckpointer({ ...where, signingKeys: resolved.signingKeys, memory: config.checkpointer!.memory }));
       options = { ...options, sealThrough: kept.sealThrough, heldOutside: kept.heldOutside, sealing: kept.sealing };
     }
     return await openLocalVault(db, resolved, { ...options, uses }, close, hot);

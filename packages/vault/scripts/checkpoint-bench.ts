@@ -78,7 +78,7 @@ const dir = dirArg ?? mkdtempSync(join(tmpdir(), 'coffre-checkpoint-bench-'));
 const memoryFile = join(dir, `memory-${process.pid}`);
 const vaultPool = postgresClient(vaultUrl, { max: 1 });
 const database = createDatabase(vaultPool);
-const cp = await openLogCheckpointer({ store: logStore(database), seed, memory: fileMemory(memoryFile) });
+const cp = await openLogCheckpointer({ store: logStore(database), signingKeys: [seed], memory: fileMemory(memoryFile) });
 
 const loader = fork(new URL(import.meta.url), [ownerUrl, vaultUrl, String(rate), String(seconds)], {
   env: { ...process.env, BENCH_LOADER: '1', BENCH_SEED: seed.toString('hex') },
