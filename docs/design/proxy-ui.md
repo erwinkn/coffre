@@ -6,7 +6,7 @@ code. Rules R65 and R66; the UX is prototype
 W260 and W263; draft, never merged). The model is
 [`formal/Routing.tla`](../../formal/Routing.tla), described in
 [docs/formal.md](../formal.md#routingtla). Nothing here is built.
-Section 11 records the six decisions it needed (2026-11-02).
+Section 11 records the seven decisions it needed (2026-11-02).
 
 ## In short
 
@@ -411,8 +411,8 @@ goes by ids. It is one call, a route use, whose contract is:
   holdings can never read an owner-only value, so every use there would
   be `route_not_cleared`. The route use reads the base place, never `@me`,
   and a UI route asked for at a personal config answers 409
-  `route_not_personal`, naming the base environment. Code routes keep
-  `@me` as today.
+  `route_not_personal`, naming the base environment (decision 7). Code
+  routes keep `@me` as today.
 - **Outcome.** `NamedUseOutcome`'s `name` route, widened per key: for each
   key its use outcome, a sealed value or a plain one (a plain key has no
   envelope, and a route of plain keys only is still one use, below), with
@@ -1406,6 +1406,15 @@ no storage.
   verified), redaction of every key's forms.
 
 **PR C: the use path for UI definitions.**
+
+The route use's contract in section 3 (its input, the keys and places it
+serves, its outcome, and how the app and an older or rolled-back vault
+meet) is the target this design sets; PR C proves it buildable. It
+extends `Routing.tla` first, then writes the tests listed below: rollback
+under warm isolates, binding callers, forks, both URL readings, signing
+and presign, and the personal config's 409. A gap found while building it
+is fixed in this document, within PR C.
+
 - Migration at the next free number: `log_uses` gains the nullable route
   column, under the entry MAC; `use_credential` and `use_batch` take the
   route, read the proxy object(s) and the editor's principal, and match a
@@ -1538,3 +1547,11 @@ uses.
 6. **Forks: (a)**, definitions inherit by name through the chain of
    parents, as values do; a fork's own item overrides, and removing it
    says "revert to dev's".
+7. **Personal configs: refused in 0.16.** A UI route asked for at a
+   personal config (`<env>@me`) answers 409 `route_not_personal`, naming
+   the base environment; code routes keep `@me` as today. A UI route's
+   use is cleared by its editor's frozen holdings, and no editor can ever
+   read another person's owner-only values (R8, R20), so every such use
+   would be `route_not_cleared`; a clear refusal beats a route that can
+   never work. Reversible: a later release may define how personal values
+   reach a UI route.
