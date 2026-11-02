@@ -144,7 +144,7 @@ function shown(plan: Plan, depth = 0): string {
  * before the ninth. The first call reads the catalog the connection plans with, as `work` leaves aside; each after it
  * reads what a request does. A statement of PL/pgSQL is planned for each call's values five times, then Postgres
  * weighs a plan for any values, which spans every day's partition; and a day made has a plan it keeps made again.
- * `log_reads_by` and `log_reads_at` asked for one (migration 0054): 22,000 to 30,000 pages at a hundred days, on the
+ * `log_reads_by` and `log_reads_at` asked for one (migration 0054): 23,000 to 30,000 pages at a hundred days, on the
  * sixth call, where a call reads 19 to 35.
  */
 async function callAfterCall(name: string, run: () => Promise<unknown>, small: readonly { text: string; pages: number | null }[], makeDay: () => Promise<unknown>) {
