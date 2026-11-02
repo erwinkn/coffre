@@ -271,6 +271,9 @@ Commit(p) ==
     /\ writes' = writes \cup {[p |-> p, n |-> next, stands |-> Allowed(Now) /\ names = l[p].names, from |-> l[p].seals["key"], was |-> seal["key"]]}
 
 \* The app's statement, guards after the fence: one atomic step. One round trip.
+\* The code splits it: the names' hold right after 0.14's head, the guards after
+\* the fence. One step here is sound only while the head is held from the hold
+\* to COMMIT and every write that moves a name takes the head first.
 WApp(p) ==
     /\ pc[p] = "w.app"
     /\ head = None

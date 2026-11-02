@@ -2054,6 +2054,12 @@ away; today's takes the head too, which only adds order. The locks' order
 (the head, the rows, the issue lock, the fence; the vault's rows, in
 principal order, before the head) is the code's today, which Migration015's
 `NoWaitCycle` checks; here each statement that takes the fence is one step.
+That step checks the names' hold and the guards together, which the code
+splits: the hold right after 0.14's head, the guards after the fence. The
+split is sound only because the head is held from the hold to COMMIT and
+every write that moves a name takes it first; moving the hold out from
+under the head, or a names-mover that skips the head, would open the gap
+this one step hides.
 The seal is HotPathOne's and Seal.tla's, here a tick that seals every
 committed number.
 

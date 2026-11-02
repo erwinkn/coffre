@@ -228,10 +228,17 @@ that does not exist yet has no object at all. So no guard sees either:
 
 Today each of these is caught by the reads under the head (`regenerated`,
 `levelsAt`, `checkEnvironment`). Here the resolution is **one SQL function,
-`write_names(project, environment, keys)`**: the project and environment
-by slug, its fork chain, and for each key and each environment of the
-chain the row the name resolves to (its id, current version, archived or
-not, a reference or not) or none, and whether a dismissal stands. The
+`write_names(principal, project, environment, keys)`**: the project and
+environment by slug, its fork chain, and for each key and each environment
+of the chain the row the name resolves to (its id, its current version's
+id and number, archived or not, a reference or not) or none, and whether a
+dismissal stands. It takes the caller's principal because `dev@me` is
+relative to the caller: it names the caller's personal config of dev, by
+its parent and owner, as 0051's `resolveRead` does. A write resolves it
+differently from a use there: a use with no personal config reads dev, but
+a write must never land on dev for it. With no personal config,
+`write_names` answers *not served* and the write takes today's path, which
+makes the config (the scope above). The
 vault's statement calls it and answers its result as canonical JSON. The
 app's statement calls it again, as its second statement, right after the
 head, and raises `CF001` when the result differs from the vault's
@@ -255,9 +262,11 @@ id, so a rename does not move a value to another key.
 
 ### The request and its refusals
 
-The statement records the request, not its outcome (R53), as a use does: a
-row per key, beside `log_uses` (its table or `log_uses` with a write
-purpose, PR 3's choice), numbered from `log_number`. The Worker can only
+The statement records the request, not its outcome (R53), as a use does:
+one row per request, naming all its keys, numbered from `log_number`, in a
+table of its own beside `log_uses`. Not `log_uses` itself: its row names
+one key (`secret`), and `(at, request_id)` is unique there, so a row per
+key under the request's one id would collide. The Worker can only
 MAC what it knows before the call, and it does not know the ids: it has the
 token's hash, not the credential. So the row's MAC covers the request id,
 the Worker's clock, the token's hash, and the path and keys **by name, as
@@ -270,13 +279,18 @@ statement's answer, as a use's second call writes its MAC'd row:
 - allowed and committed: **the change** in `log_changes`, under the same
   request id. Its MAC (the vault's, made by `prepareChanges`) covers every
   column but the change's own number (`log-entry.ts`), so what it binds
-  must sit in one: the key's id is its `object`; the request's one id, the
-  same for every change of the patch (today `prepareChanges` mints one per
-  change), its `request_id`; and the request's number, the credential's
-  id and the identity's ride its payload, as `request`, which
-  `loggedChange` leaves beside `old` (today's `actor` names the principal
-  alone, and a session and an API token of one person carry different
-  scopes). No extra trip;
+  must sit in one: the key's id is its `object`; the request's id and
+  number, the credential's id and the identity's ride its payload, as
+  `request`, which `loggedChange` leaves beside `old` (today's `actor`
+  names the principal alone, and a session and an API token of one person
+  carry different scopes). Each change keeps a `request_id` of its own:
+  the column is unique and is `app_change`'s idempotency key, which
+  refuses a second change under one id (0046, "request % names another
+  change"), so one id for the whole patch would abort every write of two
+  keys. Each change's id is derived from the request's id and the key's
+  (a UUIDv5), not minted at random as `prepareChanges` does today, so
+  that a write asked again after a lost COMMIT resends the same ids and
+  lands once. No extra trip;
 - refused, or not done for any other reason (out of time, the key service
   failing): **an outcome record**, the request id, its number, the ids it
   resolved, each object's newest change, the names' resolution and the refusal's code, MAC'd by the
@@ -312,12 +326,16 @@ or grant change on an existing member (`member.role`, the last-Owner
 checks), a caller through a way in with no token, a dry run.
 
 **The front door** is the write's: served before `authenticate` and the
-router, the app reads the token's kind from the token and refuses on that
-alone (a personal token never reaches an access route: refused, as the
-router refuses it today), checks the origin and the body, and calls the
+router, the app reads the token's kind from the token, checks the origin
+and the body, and calls the
 vault with the token's hash, the config's `accepts`, svc, its role and its
 grants by place name. The vault resolves Bob from the token's hash and
-refuses first what the app would (AcceptedFirst). Today `vault.admit`
+refuses first what the app would (AcceptedFirst). Like the write's, the
+front door answers no refusal of its own that writes a denial today: a
+personal token on `PUT /members/:member` gets a committed `token.use`
+`personal_token` entry from the router (`router.ts`), so the front door
+sends it down today's path, which writes that entry, and a refusal by kind
+never skips its record. Today `vault.admit`
 trusts the `actor` the app authenticated; here nothing the app says names
 the actor.
 
@@ -325,7 +343,9 @@ the actor.
    and grants, the roles and the policy, the services setting (its newest
    `settings.change`), svc's row if any, and each place a first grant
    names, by slug, with its environment's object; each with its newest
-   change. No lock, nothing written (Lifecycle's issue, statement 1).
+   change. A whole-project grant also weighs the project's protected
+   environments (`givesService`, `protectedWithin`): those are listed in
+   the policy (`protectedIn`), an object the read holds already. No lock, nothing written (Lifecycle's issue, statement 1).
 2. **The Worker** holds each row to its newest change (StaleFirst, as a
    write's), decides (`#standing`, `#setsUp`), and builds svc's new row and
    its grants, their MACs and seals, and their changes, from the rows as
@@ -336,7 +356,11 @@ the actor.
    locks and rows in principal order (`lockMembers`), 0.14's head, the
    fence; it goes ahead only while everything step 1 decided on is what it
    read (IssuerCAS): Bob's object, the roles, the policy, no `settings.change`
-   after the one read, each first grant's environment, and svc's row
+   after the one read, each first grant's place by its slugs, resolved
+   again under the head as the write's `hold_names` resolves (a project
+   renamed and another made under its old slug moves a whole-project
+   grant's place, which no object seals), each first grant's environment
+   object, and svc's row
    (none: for a first add, the members' primary key, a second insert
    failing). The rows, `change_input_strict`, COMMIT. Otherwise it writes
    nothing, answers `moved`, and the vault reads again.
