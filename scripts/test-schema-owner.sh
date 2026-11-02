@@ -104,7 +104,8 @@ done
 # made them (the owner's grant moves with each). The member then runs the rest, one migration at a time, since each
 # meets the running code: 0057 makes `use_covered` and replaces `use_credential`, which stays the owner's and must be
 # granted the member's helpers (T187); 0058 makes both again, the member's now, and `use_route` (T186 PR C), while
-# 0048's `use_batch` and 0055's `use_named_batch` stay the owner's and must be granted `use_credential`. After each,
+# 0048's `use_batch` and 0055's `use_named_batch` stay the owner's and must be granted `use_credential`; 0059 replaces
+# `use_credential` and `use_route` (T190), which keep their owner, and adds an attribute to `use_row`. After each,
 # every use function's runner must execute every use function it calls, read from their bodies.
 docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
 CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
@@ -181,12 +182,15 @@ expected+=" use_named_batch=migration_owner use_scope_holds=migration_member use
 # use_batch and use_named_batch call use_credential; it calls use_covered, use_stands and use_stands_personal, and they
 # call use_admits, use_scope_holds and use_stands as its owner.
 use_grants member 7
-migrate_through member migration_member local-member-only
+migrate_through member migration_member local-member-only 0058_route_uses
 expected="use_admits=migration_member use_batch=migration_owner use_covered=migration_member use_credential=migration_member"
 expected+=" use_named_batch=migration_owner use_route=migration_member use_scope_holds=migration_member use_stands=migration_member"
 expected+=" use_stands_personal=migration_member"
 [[ "$(owners)" == "$expected" ]] || { echo "after 0058, the use functions' owners: $(owners)" >&2; exit 1; }
 # use_route calls use_credential too.
+use_grants member 8
+migrate_through member migration_member local-member-only
+[[ "$(owners)" == "$expected" ]] || { echo "after 0059, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
 
 # Unsafe groups must fail clearly, rather than trying a forbidden ALTER ROLE.

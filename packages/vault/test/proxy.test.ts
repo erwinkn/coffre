@@ -23,6 +23,7 @@ import { openLocalVault as openEntry } from '../src/local.ts';
 import { replayStored } from '../src/log-replay.ts';
 import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel } from '../src/proxy.ts';
 import type { Reader } from '../src/decide.ts';
+import { logMacKey } from '../src/log-entry.ts';
 import { newestChange, readObject } from '../src/store.ts';
 import { emptyDatabase, ENGINE, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
 
@@ -346,7 +347,7 @@ test('a lookup walks the fork chain nearest first: a fork of a fork is served by
   saved(await w.save({ seal: null, items: { openai: route('openai'), maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }));
   const levels = async (chain: readonly string[]): Promise<ProxyLevel[]> => Promise.all(chain.map(async (environmentId) => {
     const ref = { kind: 'proxy' as const, id: environmentId };
-    const [{ row, seal }, newest] = await Promise.all([readObject(db.vault, ref), newestChange(db.vault, ref)]);
+    const [{ row, seal }, newest] = await Promise.all([readObject(db.vault, ref), newestChange(db.vault, ref, w.config.signingKeys.map(logMacKey))]);
     return { environmentId, row: row as ProxyInput | null, seal, newest: newest === null ? undefined : newest.seal };
   }));
   const served = proxyLookup(w.keys, await levels([grandchild, child, w.dev]), 'openai');

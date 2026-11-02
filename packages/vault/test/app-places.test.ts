@@ -18,7 +18,7 @@ import { sql } from 'drizzle-orm';
 import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
-import { grants, member, newestSealedChanges, newestSealedQuery } from '../src/store.ts';
+import { grants, loggedChanges, loggedChangesQuery, member } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
@@ -42,7 +42,7 @@ class Moved extends Error {}
 /** The app's changes sealed (`Vault.prepare`): an unarchive's against what its key's log last sealed. */
 async function prepared(changes: ObjectChange[]) {
   const restored = changes.flatMap((change) => (change.kind === 'secret' && change.restores === true ? [{ kind: 'secret' as const, id: change.id }] : []));
-  return prepareChanges(KEYS, Date.now(), ROOT, changes, await keptObjects(KEYS.seals, db.owner, restored));
+  return prepareChanges(KEYS, Date.now(), ROOT, changes, await keptObjects(KEYS, db.owner, restored));
 }
 
 /** The app's write: its changes sealed before (`prepare`), then its rows and the changes in one transaction, as `audited` commits them. */
@@ -456,11 +456,11 @@ async function history(object: string, count: number): Promise<void> {
     SELECT ${from} + n, 0, ${object} || '-' || (${from} + n), ${object}, 'system:x', '{"op":"x"}', CASE WHEN n < ${count} THEN ${randomBytes(16)} END, ${randomBytes(16)} FROM g`);
 }
 
-test("what an unarchive restores is read with one probe of each key's changes, however long their history: never a walk of it (T134, R48)", { timeout: 600_000 }, async () => {
+test("what an unarchive restores is read with two probes of each key's changes, however long their history: never a walk of it (T134, R48)", { timeout: 600_000 }, async () => {
   const refs: Ref[] = [{ kind: 'secret', id: randomUUID() }, { kind: 'secret', id: randomUUID() }];
   const cost = async (): Promise<number | string> => {
-    if (ENGINE === 'sqlite') return (await sqlitePlan(newestSealedQuery(refs))).join('; ');
-    const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${newestSealedQuery(refs)}`);
+    if (ENGINE === 'sqlite') return (await sqlitePlan(loggedChangesQuery(refs, refs))).join('; ');
+    const [row] = await rows<Record<string, unknown>>(db.owner, sql`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${loggedChangesQuery(refs, refs)}`);
     const json = Object.values(row!)[0];
     const plan = (typeof json === 'string' ? JSON.parse(json) : json) as { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[];
     return plan[0]!.Plan['Shared Hit Blocks'] + plan[0]!.Plan['Shared Read Blocks'];
@@ -468,9 +468,9 @@ test("what an unarchive restores is read with one probe of each key's changes, h
   const grown = async (count: number) => {
     for (const ref of refs) await history(objectKey(ref), count);
     if (ENGINE === 'postgres') await run(db.owner, sql`VACUUM ANALYZE log_changes`);
-    const found = await newestSealedChanges(db.owner, refs);
-    // Each key's newest sealed change, the one just below its archive.
-    for (const ref of refs) assert.ok(found.get(objectKey(ref))?.seal !== undefined, 'found');
+    const found = await loggedChanges(db.owner, [KEYS.mac], refs, refs);
+    // Each key's archive, its newest change, and the sealed one just below it (their MACs are random here: none holds).
+    for (const ref of refs) assert.deepEqual(found.get(objectKey(ref))?.map((change) => change.seal !== null), [false, true], 'found');
     return cost();
   };
   const small = await grown(1_000);
@@ -480,7 +480,8 @@ test("what an unarchive restores is read with one probe of each key's changes, h
     assert.ok(!/\bSCAN\b/.test(String(large)) && /log_changes_object_idx/.test(String(large)) && /SEARCH c USING INTEGER PRIMARY KEY/.test(String(large)), String(large));
     return;
   }
-  assert.ok(Number(large) - Number(small) <= 4, `${small} buffers at 1k changes a key, ${large} at 100k`);
+  // Four probes (each key's newest change and the one before it, T190), each and its row a B-tree level deeper at most.
+  assert.ok(Number(large) - Number(small) <= 8, `${small} buffers at 1k changes a key, ${large} at 100k`);
 });
 
 test("a key the log never held, archived (0.14's alone, before the cutover): its unarchive logs nothing, as any of 0.14's rows (T134)", async () => {

@@ -1483,7 +1483,9 @@ W208's one call per use, with W211's round 2 and review r1, in one module
 - **The model also covers:**
   - per-isolate covers and the seal cache;
   - Postgres crashes and restores;
-  - a database writer who puts back earlier, validly sealed rows;
+  - a database writer who puts back earlier, validly sealed rows, and
+    (`LogTampers`, T190) writes such a row's seal into its input's newest
+    change, whose MAC then no longer holds;
   - the checkpointer's barrier and the floor of `at`;
   - the deadline, with Hyperdrive holding calls;
   - the bulk cap, its count from a sealed policy input; a key entering
@@ -1514,6 +1516,9 @@ Each scenario switches on what it needs. `Inputs` is any set, and `Unsealed`
 | covers see a change to any input; and need their entry (CoverExists) | `RepeatsAreTheirCover`, `DurableBeforeRelease` |
 | a change's CAS on its object's seal (ChangeCAS) | `EachChangeFlips` |
 | a change refuses a base row that is not its object's newest change (ChangeChecksSeal): a CAS alone passes a row a writer put back, and the change would re-seal the rollback | `EachChangeFlips`, `ReplaySound` |
+| a use holds a row to the seal its newest change records only once that change's MAC holds (ChangeMacChecked, T190; `HotPathOneForged`): a writer who puts a revoked row back and writes its seal into the revoke's entry is otherwise served | `ReplaySound` |
+| the seal cache keeps only seals whose changes' MACs held (CacheVerified): a forged one kept would be trusted, unprobed, by the next use | `ReplaySound` |
+| a change checks the MAC of the newest change it holds its base row to (ChangeChecksMac): without it, the change seals the writer's row under a new, authentic entry, the revoke undone for good | `EachChangeFlips` |
 | the deadline checked in Postgres; the Worker's answer at it | `NoLateWork`, `ReleaseByDeadline` |
 | new and stale keys under the principal's lock; refresh on use; covers only while fresh; the refresh's and the deadline's slack | `BulkCapHolds`, `BulkReplayAgrees` |
 | a key moved on takes the principal's lock too, shared (RefreshLocks): without it, a key entering the set misses a move numbered before it, and the replay counts a key live did not | `BulkReplayAgrees` |

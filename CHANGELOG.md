@@ -45,12 +45,35 @@
   credential's JSON rule as for a UI route's handle. It now reads each
   character once.
 
+- **A use and a change trust a newest change's seal only once its MAC
+  holds (T190).** A database writer could put back a revoked member's row
+  with its old seal, write that seal into the revoke's entry in
+  `log_changes`, and `/use` served the value (0.15.0), while `access` said
+  tampered; the next change to the member then sealed the put-back row as
+  the log's. Each input's newest change is now checked against its MAC
+  before any row is held to it: the use is refused `stale`, the change
+  `tampered`. A route use checks the three newest changes it reads beside
+  its caller's the same way: each fork level's definitions and
+  environment, and its editor's principal (`stale`). The same holds for
+  every write whose statement holds a row to its newest seal: the app's
+  changes (`prepare`, one statement more per call), a sign-in through a
+  binding (one statement more) and an issue or binding made on a
+  credential (in the read it already makes). Revokes and a binding's end
+  do not check it, so a forged log never blocks one. `prepare` also holds
+  each row the app read to the seal of the change it checked, and answers
+  a new refusal, `moved`, when they differ, which the app reads again as
+  it does a row `app_change` finds moved (`ObjectMoved`). Migration 0059
+  has `use_credential` answer each newest change's MAC'd columns (a new
+  `use_row` attribute, `changes`) and `use_route` its own three; the
+  previous release runs on it. An entry deleted or replayed whole is still
+  the checkpoints' to catch.
+
 - **The vault decides about a member from 0.15's log, not 0.14's (T179
   PR 2).** Once the cutover is written, a decision checks a member's row
   as a use does: the row's seal is the vault's over it and its newest
   change's, and 0.14's log holds no genuine access entry about them past
   the one that change accounts for. It also checks that change's MAC,
-  which a use does not check yet (T190). It reads that with the decision's own
+  as a use now does (T190). It reads that with the decision's own
   statement, where it used to walk back through 0.14's access entries a
   page at a time, which one statement cannot do. No route makes one more
   round trip. A member whose row fails is no longer started over under

@@ -13,8 +13,8 @@ import { engineOf } from '@coffre/db/dialect';
 import { USE_DEADLINE_MS } from './bulk.ts';
 import type { BulkLimit } from './config.ts';
 import { checkSeals, credentialEnded, decideChecked, readerOf, standingRefusal, useEnvironments, type CheckedView, type Read, type UseCode, type UseRequest, type UseView, type Way, type WayInput } from './decide.ts';
-import { noEdits, objectKey, sealed as sealedBy, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type PrincipalInput, type ProxyItem, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
-import { entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './log-entry.ts';
+import { noEdits, objectKey, POLICY_REF, ROLES_REF, sealed as sealedBy, sealedOnce, type EnvironmentInput, type Input, type InputGrant, type PolicyInput, type PrincipalInput, type ProxyItem, type RolesInput, type SealKeys, type sealed } from './inputs.ts';
+import { changeHolds, entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { proxyServing, routeEditorRefusal, routeLookup, type RouteLevel } from './proxy.ts';
@@ -267,20 +267,22 @@ export type RouteCall = {
  */
 export type RouteLevelRow = {
   environment: string; row: boolean; item: unknown; digests: Buffer | null; seal: Buffer | null; newest: Buffer | null; number: string | null;
+  /** Its definitions' newest change's MAC'd columns, which the vault checks `newest` by (T190): null for none read. */
+  change: ChangeColumns | null;
   env: LevelEnvironment | null;
 };
 
 /** A level's environment as `use_route` read it: its columns, its seal, and its object's newest change's seal. */
 export type LevelEnvironment = {
   project: string; slug: string; owner: string | null; parent: string | null; protected: boolean | null; archived: boolean; project_archived: boolean;
-  seal: Buffer | null; last: Buffer | null;
+  seal: Buffer | null; last: Buffer | null; change: ChangeColumns | null;
 };
 
 /** The editor's principal as `use_route` read it: their member row, grants and seal, and their object's newest change. */
 export type EditorRow = {
   principal: string; status: string | null; owner: boolean | null; role: string | null; scope: string | null; generation: number | null; seal: Buffer | null;
   g_project: (string | null)[] | null; g_environment: (string | null)[] | null; g_slug: (string | null)[] | null; g_role: string[] | null; g_expires: (string | null)[] | null;
-  last: Buffer | null; number: string | null; old: string | null; access: string | null;
+  last: Buffer | null; number: string | null; old: string | null; access: string | null; change: ChangeColumns | null;
 };
 
 /** A route's key as `use_route` resolved its name: its id (null: the place holds none), and the app's rows of it. */
@@ -353,7 +355,19 @@ export type UseRow = {
   n_cut: boolean | null;
   /** A Cloudflare binding's row, which a use through it read whole, its object (T147): as `to_json` writes it. */
   w_row: Record<string, unknown> | null;
+  /**
+   * What each newest change a probe read carries besides its object and its seal (the input's `*_last`): the columns
+   * its MAC covers, and the MAC, which the vault checks before it holds a row to that seal (T190, `lastsHeld`). An
+   * input whose probe found no change has none. Null when the call probed nothing (the cached forms).
+   */
+  changes: Partial<Record<Probed, ChangeColumns>> | null;
 } & Slot<'e1'> & Slot<'e2'> & Slot<'e3'> & Slot<'e4'>;
+
+/** The inputs whose newest changes a probe reads: the way in, the principal, the roles, the policy, the key, its source, the places. */
+type Probed = 'c' | 'm' | 'r' | 'p' | 's' | 'x' | (typeof SLOTS)[number];
+
+/** A newest change's columns but its number, object and seal, in `log_changes`' order: its time, request, actor and payload; then its MAC. */
+export type ChangeColumns = [at: number, requestId: string, actor: string, payload: string, mac: Buffer];
 
 type Slot<N extends string> = {
   [K in `${N}_id` | `${N}_project` | `${N}_slug` | `${N}_owner` | `${N}_parent`]: string | null;
@@ -364,13 +378,15 @@ const SLOTS = ['e1', 'e2', 'e3', 'e4'] as const;
 /**
  * What a use needs of its vault: its database, the keys it checks seals
  * with, the log's MAC key (`logMacKey`, the change path's and the
- * checkpointer's: one key, the tree under the MAC, KindInMac), its key
- * registry, and its isolate's cache.
+ * checkpointer's: one key, the tree under the MAC, KindInMac) and every
+ * one it holds, its key registry, and its isolate's cache.
  */
 export type UsePath = {
   db: Queryable;
   sealKeys: SealKeys;
   macKey: LogMacKey;
+  /** The MAC keys of every signing key the vault holds, `macKey`'s first: what a newest change's MAC is checked under (T190). */
+  macKeys: readonly LogMacKey[];
   keks: KekRegistry;
   cache: UseCache;
   /**
@@ -699,7 +715,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
       ? { credential: input.credential!, secretId: input.secretId, place: input.place, way, principal: input.principal ?? null, ...(input.route === undefined ? {} : { route: input.route }) }
       : { credential: row.n_credential!, secretId: row.n_secret, place: row.n_secret === null || inherited(row) ? row.n_place : null, way, principal: null };
     const named: UseRequest = { ...request, credential: ids.credential, secretId: ids.secretId ?? '', place: ids.place };
-    const view = viewOf(row, named, row.probed ? undefined : known);
+    const view = viewOf(path.macKeys, row, named, row.probed ? undefined : known);
     if (view.changed) cache.seals.delete(key);
     const checked = checkedOf(path.sealKeys, view.view, named, view.accounted || forged, made.seals);
     const code = decidedOn(checked, named, row) ?? (names !== undefined && readsArchived(row) ? 'archived' : null);
@@ -715,18 +731,24 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
     }
     return { again: ids, row, checked };
   }
-  const view = viewOf(row, request, row.probed ? undefined : known);
+  const view = viewOf(path.macKeys, row, request, row.probed ? undefined : known);
   // An input whose row names another object than the cache's seal is of: `stale`, and the next use probes.
   if (view.changed) cache.seals.delete(key);
   const checked = checkedOf(path.sealKeys, view.view, request, view.accounted || forged, made.seals);
   const code = decidedOn(checked, request, row);
   // The seals a probe read, kept for the next use's cached form: by ids alone. A named call never runs the cached form
-  // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12).
-  if (row.probed && row.newest !== null && !view.changed && names === undefined && input.route === undefined) {
+  // (above), which an earlier use's seals would choose for a key held and never for one not (Fable's review, r12). Only
+  // seals whose changes' MACs held (CacheVerified, T190): one kept unchecked, every use would trust while the log's
+  // newest change stays the same, probing nothing. Kept, they need no check again: they are the isolate's own memory,
+  // which no database writer reaches, and a change since moves the log's newest change, which sends the next use back
+  // to its probes (CacheSameChange).
+  if (row.probed && row.newest !== null && !view.changed && view.held && names === undefined && input.route === undefined) {
     cache.keep(cache.seals, key, {
       newest: row.newest, newestMac: row.newest_mac!, inputs: row.inputs, ids: view.ids,
-      cap: { count: Number(row.cap_count), windowMs: Number(row.cap_window) }, last: lastsOf(row),
+      cap: { count: Number(row.cap_count), windowMs: Number(row.cap_window) }, last: view.last,
     });
+  } else if (row.probed && !view.held) {
+    cache.seals.delete(key);
   }
   if (row.covered !== null && code !== null) {
     // Refused on a cover (its credential's end, say): by ids, the request is logged as an entry of its own. By name, it
@@ -1337,13 +1359,16 @@ function lastsOf(row: UseRow): Lasts {
  * principal's newest 0.14 access entry is one the new log accounts for
  * (UsesSeeOldWrites).
  */
-export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): { view: UseView; ids: Identities; changed: boolean; accounted: boolean } {
+export function viewOf(
+  macKeys: readonly LogMacKey[], row: UseRow, request: UseRequest, known?: CachedSeals,
+): { view: UseView; ids: Identities; changed: boolean; accounted: boolean; last: Lasts; held: boolean } {
   const ids: Identities = {
     c: request.credential, m: row.c_principal, s: request.secretId, x: row.s_source,
     e1: row.e1_id, e2: row.e2_id, e3: row.e3_id, e4: row.e4_id,
   };
   const moved = (Object.keys(ids) as (keyof Identities)[]).filter((input) => known !== undefined && known.ids[input] !== ids[input]);
-  const cached = known?.last ?? lastsOf(row);
+  const probed = known === undefined ? lastsHeld(macKeys, row, request, ids) : null;
+  const cached = known?.last ?? probed!.last;
   // No seal is equal to none: an input moved is current to nothing.
   const last = (input: keyof Identities): Buffer | null => (moved.includes(input) ? UNKNOWN : cached[input]);
   const read = <T extends Input>(object: T | null, seal: Buffer | null, newest: Buffer | null): Read<T> => ({ row: object, seal, newest });
@@ -1388,10 +1413,65 @@ export function viewOf(row: UseRow, request: UseRequest, known?: CachedSeals): {
   // UsesSeeOldWrites: 0.14's newest access entry about the principal, at or below the one its newest change accounts for.
   const old = cached.mOld;
   const accounted = row.m_access === null || (old !== null && BigInt(row.m_access) <= BigInt(old));
-  return { view, ids, changed: moved.length > 0, accounted };
+  return { view, ids, changed: moved.length > 0, accounted, last: cached, held: probed?.held ?? true };
 }
 
+/** A seal equal to none: the newest seal of an input moved, or of one whose newest change's MAC does not hold. */
 const UNKNOWN = Buffer.alloc(0);
+
+/** The roles' and the policy's keys in the log: one object each, the instance's. */
+const ROLES_OBJECT = objectKey(ROLES_REF);
+const POLICY_OBJECT = objectKey(POLICY_REF);
+
+/**
+ * The newest seals a probe read, each held to its change's MAC first (T190; HotPathOne.tla, ChangeMacChecked): the
+ * change the statement found newest of the input's object, its columns as the call answered them (`changes`) and the
+ * seal it records (`*_last`), under any key the vault holds (`changeHolds`). A seal whose change does not hold is
+ * none the vault wrote there: a database writer's, the seal of a row it put back written into the newest change's
+ * column, or the change's payload edited (the 0.14 entry a principal's accounts for, `mOld`). That input's newest is
+ * then a seal equal to none (`UNKNOWN`), and its row, whatever it is, `stale`: refused as `access` refuses it, nothing
+ * opened. The object is the input's own, by the ids the view reads (the roles' and the policy's, the instance's), so a
+ * change of another object, authentic as it may be, holds for no input it is not of. `held`: every one held, so that
+ * the isolate may keep them (CacheVerified).
+ */
+function lastsHeld(macKeys: readonly LogMacKey[], row: UseRow, request: UseRequest, ids: Identities): { last: Lasts; held: boolean } {
+  const last = lastsOf(row);
+  const changes = row.changes ?? {};
+  let held = true;
+  const way = request.way ?? 'credential';
+  const objects: Record<Probed, () => string | null> = {
+    c: () => (way === 'access' || ids.c === null ? null : objectKey({ kind: way, id: ids.c })),
+    m: () => (ids.m === null ? null : objectKey({ kind: 'principal', id: ids.m })),
+    r: () => ROLES_OBJECT,
+    p: () => POLICY_OBJECT,
+    s: () => (ids.s === null || ids.s === '' ? null : objectKey({ kind: 'secret', id: ids.s })),
+    x: () => (ids.x === null ? null : objectKey({ kind: 'secret', id: ids.x })),
+    e1: () => (ids.e1 === null ? null : objectKey({ kind: 'environment', id: ids.e1 })),
+    e2: () => (ids.e2 === null ? null : objectKey({ kind: 'environment', id: ids.e2 })),
+    e3: () => (ids.e3 === null ? null : objectKey({ kind: 'environment', id: ids.e3 })),
+    e4: () => (ids.e4 === null ? null : objectKey({ kind: 'environment', id: ids.e4 })),
+  };
+  for (const input of Object.keys(objects) as Probed[]) {
+    if (!newestHolds(macKeys, objects[input](), last[input], changes[input])) {
+      held = false;
+      if (input === 'm') last.mOld = null;
+      last[input] = UNKNOWN;
+    }
+  }
+  return { last, held };
+}
+
+/**
+ * Whether a newest change a call read is the vault's (T190): its MAC holds over the columns the call answered, its
+ * object and the seal the call read with it. No change and no seal: the object has none in the log (never made, or a
+ * probe the call does not take), nothing to hold. A seal with no change, or a change of no object, holds nothing.
+ */
+function newestHolds(macKeys: readonly LogMacKey[], object: string | null, seal: Buffer | null, change: ChangeColumns | null | undefined): boolean {
+  if (change == null) return seal === null;
+  if (object === null) return false;
+  const [at, requestId, actor, payload, mac] = change;
+  return changeHolds(macKeys, { at: Number(at), requestId, object, actor, payload, seal, mac });
+}
 
 /**
  * The way in's object, from its row's columns as the call read them (T147): a credential's or a connection's, its
@@ -1663,6 +1743,9 @@ function editorOf(path: UsePath, rows: RouteRows, forged: boolean): { principal:
   const valid = principal === null ? editor.seal === null : sealedBy(path.sealKeys, ref, principal, editor.seal);
   const current = principal === null ? editor.last === null : editor.seal !== null && editor.last !== null && editor.seal.equals(editor.last);
   if (!valid) return { fault: 'tampered' };
+  // Its newest change's seal trusted only once that change's MAC holds, as a caller's (ChangeMacChecked, T190): a writer
+  // could put back a removed editor's row and write its old seal into the removal's entry, and the route would serve.
+  if (!newestHolds(path.macKeys, objectKey(ref), editor.last, editor.change)) return { fault: 'stale' };
   // As a caller's (UsesSeeOldWrites): current only while 0.14's newest access entry about them is one the log accounts for, or forged.
   const accounted = editor.access === null || (editor.old !== null && BigInt(editor.access) <= BigInt(editor.old)) || forged;
   if (!current || !accounted) return { fault: 'stale' };
@@ -1687,7 +1770,8 @@ function versionOf(rows: RouteRows, found: RouteFound): string {
 
 /**
  * Why the chain a statement read is not the vault's (reviews r1 and r2 of #464): each level's environment sealed and its
- * object's newest change, the first the place itself, each the parent of the one before it, and the last a root. Every
+ * object's newest change, and both its and its definitions' newest changes the vault's by their MACs (T190), the first
+ * the place itself, each the parent of the one before it, and the last a root. Every
  * level, whichever serves the route: the keys resolve through the whole chain, so a parent re-pointed, or a level
  * planted, around the log, above the level that serves would still graft another environment's keys onto its route.
  */
@@ -1700,6 +1784,10 @@ function chainFault(path: UsePath, rows: RouteRows): 'tampered' | 'stale' | null
       id: level.environment, projectId: env.project, slug: env.slug, owner: env.owner, parentId: env.parent, protected: env.protected, archived: env.archived, projectArchived: env.project_archived,
     });
     if (!sealedBy(path.sealKeys, { kind: 'environment', id: level.environment }, object, env.seal)) return 'tampered';
+    // The environment's and the definitions' newest changes, each trusted only once its MAC holds (ChangeMacChecked,
+    // T190): a writer could put back an old row with its seal and write that seal into the newest change's entry.
+    if (!newestHolds(path.macKeys, objectKey({ kind: 'environment', id: level.environment }), env.last, env.change)) return 'stale';
+    if (!newestHolds(path.macKeys, objectKey({ kind: 'proxy', id: level.environment }), level.newest, level.change)) return 'stale';
     if (env.seal === null || env.last === null || !env.seal.equals(env.last)) return 'stale';
     if (i === 0 && level.environment !== rows.place) return 'tampered';
     // Linked to the next level read; the last to none, unless the chain ran past its length (which the statement cuts).

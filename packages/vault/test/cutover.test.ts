@@ -356,7 +356,7 @@ test('a key archived before the cutover gets its object and its delete, so its u
   const [row] = await db.owner.select({ seal: secrets.seal, archivedAt: secrets.archivedAt }).from(secrets).where(eq(secrets.id, key.secretId));
   assert.ok(row!.seal === null && row!.archivedAt !== null);
   // What an unarchive restores: the object its rows make, unarchived, as the genesis sealed it.
-  const kept = (await keptObjects(w.config.signingKeys.map(sealKey), db.owner, [ref])).get(objectKey(ref));
+  const kept = (await keptObjects({ seals: w.config.signingKeys.map(sealKey), mac: logMacKey(w.config.signingKeys[0]!) }, db.owner, [ref])).get(objectKey(ref));
   const { row: asRows } = await store.readObject(db.owner, ref, { archived: true });
   assert.deepEqual(kept?.object, asRows);
 });

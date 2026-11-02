@@ -251,6 +251,11 @@ REMOVALS=(
   "HotPathOneCAS ChangeCAS EachChangeFlips"
   # A change on a row a writer put back: without the check of the base row against the newest change, it re-seals the rollback.
   "HotPathOneSeals ChangeChecksSeal EachChangeFlips"
+  # A writer who also writes a put-back row's seal into its newest change (T190): without the MAC check, a use serves it;
+  # without keeping only checked seals, the cache serves it to the next; without the change path's, a change seals it.
+  "HotPathOneForged ChangeMacChecked ReplaySound"
+  "HotPathOneForged CacheVerified ReplaySound"
+  "HotPathOneForged ChangeChecksMac EachChangeFlips"
   "HotPathOneRestore ChangeChecksSeal EachChangeFlips"
   "HotPathOneRestore ChangeChecksSeal ReplaySound"
   # A writer who lowers the floor of `at`: without the barrier's check, a use lands where no checkpoint reads.

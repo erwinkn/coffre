@@ -168,20 +168,27 @@ function freshSignIn(values: unknown[]): unknown[] {
   return next;
 }
 
-test("a CI run's sign-in is one app statement and one vault call, one statement there: no 0.14 head, no 0.14 entry (T149)", POSTGRES, async () => {
+test("a CI run's sign-in is one app statement and one vault call, two statements there: no 0.14 head, no 0.14 entry (T149, T190)", POSTGRES, async () => {
   const ran = await statements();
   assert.deepEqual(shown(ran.app), ['select "service_bindings"."i'], "its service's bindings on the issuer, with whether the token was spent");
-  assert.deepEqual(shown(ran.vault), ['/* writes */ SELECT sign_in('], 'the sign-in, in one statement');
+  // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate:
+  // the vault reads those changes first and checks their MACs (T190, R64), one statement more; then the sign-in, in one.
+  assert.deepEqual(shown(ran.vault), ['SELECT c.number, c.at, c.req', '/* writes */ SELECT sign_in('], 'the newest changes, then the sign-in');
   assert.equal(ran.vaultCalls, 1);
 });
 
 test("a sign-in's statements read as many rows and pages however many credentials its binding issued, tokens were spent, and the logs grow (R48)", POSTGRES, async () => {
   const measure = async () => {
     const ran = await statements();
-    return [
+    const measured = [
       ...await Promise.all(ran.app.map(async (statement) => ({ text: shown([statement])[0]!, rows: statement.rows, pages: await app.pages(statement) }))),
-      ...await Promise.all(ran.vault.map(async (statement) => ({ text: shown([statement])[0]!, rows: statement.rows, pages: await vaultPool.pages(statement, freshSignIn) }))),
     ];
+    // One at a time, as the call runs them: measured side by side, the two skewed each other's counts (`sign_in` 141 pages, not 79).
+    for (const statement of ran.vault) {
+      const text = shown([statement])[0]!;
+      measured.push({ text, rows: statement.rows, pages: await vaultPool.pages(statement, text.startsWith('/* writes */') ? freshSignIn : undefined) });
+    }
+    return measured;
   };
   const before = await measure();
   // Twenty thousand expired credentials the binding issued, long ago; as many tokens spent; 0.14's log a hundred times as

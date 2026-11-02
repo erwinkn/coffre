@@ -311,7 +311,7 @@ test('a deleted environment\'s object holds its slug before the tombstone: the c
   assert.equal(row.slug, slug, 'its tombstone kept');
   // The use path's mapping of the row (objects.ts) is the object sealed: authentic, and its newest change's.
   assert.deepEqual(row.seal ?? null, sealOf(w.keys.seals[0]!, ref, object(row)));
-  assert.deepEqual(row.seal ?? null, (await store.newestChange(db.owner, ref))?.seal ?? null);
+  assert.deepEqual(row.seal ?? null, (await store.newestChange(db.owner, ref, [w.keys.mac]))?.seal ?? null);
 });
 
 test('a change of the app\'s waits for every use in flight, and the uses after it for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {

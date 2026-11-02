@@ -11,7 +11,7 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { IssueTokenInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
-import { asc, count, eq, sql } from 'drizzle-orm';
+import { asc, count, desc, eq, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { objectKey } from '../src/inputs.ts';
@@ -265,6 +265,27 @@ test('a handle is made on a personal token only within its end, and not once it 
   assert.ok(revoked.ok);
   const outcome = await w.vault.issueToken!(handle(Date.now() + 1_800_000));
   assert.equal(!outcome.ok && outcome.refused, 'ended');
+});
+
+test("a revoked token a writer put back, its revoke's seal column written to match, makes no handle: that change's MAC does not hold (T190)", async () => {
+  const w = await world();
+  const token = personal(w, ROOT, null, Date.now() + 3_600_000);
+  assert.ok((await w.vault.issueToken!(token)).ok);
+  const { credentials, logChanges } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, token.credential.id));
+  const revoked = await w.vault.revokeCredential!({
+    actor: ROOT, before: { columns: { id: row!.id, principal: row!.principal, kind: row!.kind, scope: row!.scope, revoked: false, expiresAt: row!.expiresAt.getTime(), generation: row!.generation }, seal: Buffer.from(row!.seal!).toString('base64') },
+    authMacFrom: Buffer.from(row!.authMac).toString('base64'), authMac: randomBytes(32).toString('base64'), revokedAt: Date.now(), revokedBy: 'root@acme.example', reason: 'revoke', via: null, policy: null,
+  });
+  assert.ok(revoked.ok);
+  // The writer: the row as it was before its revoke, and the revoke's seal column made that row's seal (not its MAC).
+  await db.owner.update(credentials).set({ revokedAt: null, seal: row!.seal, authMac: row!.authMac }).where(eq(credentials.id, row!.id));
+  const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: row!.id }))).orderBy(desc(logChanges.number)).limit(1);
+  await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, newest!.number));
+  const issued = await credentialRows();
+  const outcome = await w.vault.issueToken!(handleOf(w, token.credential.id, Date.now() + 1_800_000, onViewerToken));
+  assert.equal(!outcome.ok && outcome.refused, 'ended', JSON.stringify(outcome));
+  assert.equal(await credentialRows(), issued, 'nothing issued');
 });
 
 test('an account not at the generation named, or removed, gets no token; a policy moved since, or a retired app key, refuses it', async () => {

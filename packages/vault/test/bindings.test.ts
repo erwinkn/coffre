@@ -12,7 +12,7 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { ChangeBindingsInput, CredentialColumns, MadeBinding, SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
-import { asc, eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { loggedChange, type ChangeKeys } from '../src/changes.ts';
@@ -144,6 +144,22 @@ test("a binding the Owner makes is a change of the log, its row the object it se
   assert.deepEqual((JSON.parse(row!.payload) as { bind: unknown }).bind, { by: ROOT, via: null, label: 'deploys', replaces: [] });
   assert.equal((await read(made.id)).seal, Buffer.from(row!.seal!).toString('base64'), "the row carries its object's seal");
   assert.ok((await signIn(w, made.id)).outcome.ok);
+});
+
+test("a binding ended, put back by a writer with its end's seal column written to match, signs nobody in: that change's MAC does not hold (T190)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const { credentials, logChanges, serviceBindings } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  // The writer: the row as it was before its end, and the end's seal column made that row's seal (not its MAC).
+  await db.owner.update(serviceBindings).set({ revokedAt: null, seal: row!.seal, authMac: row!.authMac }).where(eq(serviceBindings.id, made.id));
+  const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: made.id }))).orderBy(desc(logChanges.number)).limit(1);
+  await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, newest!.number));
+  const signedIn = (await db.owner.select().from(credentials)).length;
+  assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
+  assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
 });
 
 test("only an Owner of its project gives a binding's runs sensitive reads (R32); a service account gives none; nothing written", async () => {

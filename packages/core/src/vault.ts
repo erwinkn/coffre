@@ -1153,6 +1153,13 @@ export type RefusalCode =
    */
   | 'route_not_cleared'
   /**
+   * An object the app is about to change is not, as it read it, its newest
+   * change's (`prepare`, T190): another write came between, or a row was
+   * put back. Nothing is logged; the app reads its rows again, as it does
+   * when `app_change` finds a row moved.
+   */
+  | 'moved'
+  /**
    * The member's row or grants were changed outside the vault, or put back
    * from before a later change: it refuses them until an owner removes them,
    * which starts their access over from the log.
@@ -1185,6 +1192,7 @@ export const REFUSAL_MESSAGES: Record<RefusalCode, string> = {
   proxy_changed: "this environment's proxy definitions changed since they were loaded: review the change, then save again",
   reserved: "this name is reserved by the deployment's code",
   route_not_cleared: 'this definition sends a key its editor may not route',
+  moved: 'what this changes was changed while it ran: try again',
   tampered: "this member's record failed the vault's integrity check",
 };
 
