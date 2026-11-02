@@ -48,6 +48,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
     from 0.14.
   - [`formal/Reads.tla`](../formal/Reads.tla): the projection of the uses
     that the audit pages read ([below](#readstla)).
+- [`formal/Writing.tla`](../formal/Writing.tla) holds a change in two round
+  trips (T179, [below](#writingtla)), the design 0.16's change routes follow.
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -1971,6 +1973,47 @@ reads' first, is `retention.test.ts`'s); and who sees which rows
   transaction, FromChecked its `p_from` (SQLite's write the same, in its
   transaction), the days the reads need made in the same call. ProjectorApart is the `reads` object on Workers and an
   unawaited kick on Node.
+
+### Writing.tla
+
+A change in two round trips (T179; [two-trips.md](design/two-trips.md)), the
+design before the code. A key write is one vault statement and one app
+statement; a member add, the vault's read and its write; each then waits for
+its seal (R51).
+
+**The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
+session. The vault's statement reads her session, her member object, the
+policy, the place and the key, each with its seal, and numbers the request;
+the Worker decides on what it read; the app's statement holds 0.14's head,
+takes the fence through `app_change`, checks under it that each input is
+still the object the vault read, and commits the key's change from the seal
+it was made from. Beside it: her grant taken away and her session revoked
+(`WritingRevoke`), the place protected and archived (`WritingPlace`). Bob and
+Cy each add svc while Bob is demoted (`WritingAdd`): a read, the Worker's
+decision, a write held to what the read decided on. Every other change is one
+atomic step; the checkpointer seals whatever has committed at each tick.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the vault's statement reads and numbers the request under the fence shared (RequestUnderFence) | `RequestsReplay`: a change numbered between its read and its number, the replay deciding otherwise |
+| the app's statement holds the session, the member, the policy and the place to the objects the vault decided on (`Held={...}`, each left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a protection or an archive |
+| ... once it holds the fence (GuardsAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the guards and the write |
+| the key's change from the seal it was made from (ChangeCAS) | `KeyChangesFlip`: two writes from one version both commit |
+| a member add's write holds the actor's object and the policy (AdmitCAS) | `AddsStandAtCommit` |
+| ... and the principal's row as read (PrincipalCAS) | `AddsFlip`: svc added twice |
+| a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
+
+`TwoTrips` holds in every scenario: a write or an add that commits at its
+first try made two round trips.
+
+**What it abstracts.** A seal is a counter each change moves: no database
+writer (HotPathOne's `ChangeChecksSeal` and SealedObjects hold seals against
+one). The decision is `decide.ts`'s, reduced to its inputs; which roles write
+where is the Lean model's. The locks' order (the head, the rows, the issue
+lock, the fence; the vault's rows before the head) is the code's today, which
+Migration015's `NoWaitCycle` checks; here each statement that takes the fence
+is one step. The seal is HotPathOne's and Seal.tla's, here a tick that seals
+every committed number.
 
 ## TLC
 

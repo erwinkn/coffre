@@ -395,6 +395,18 @@ REMOVALS=(
   "LifecycleCompromised AudienceSealed SignInsOnValidTokens"
   # A binding of fetched keys, whose tokens the app verifies: the vault still takes only one it sealed.
   "LifecycleFetched BindingSealed SignInsOnValidTokens"
+  # A change in two round trips (Writing.tla, T179): a key write as one vault statement and one app statement, a
+  # member add as the vault's read and its write.
+  "WritingRevoke RequestUnderFence RequestsReplay"
+  'WritingRevoke Held={"member","policy","env"} WritesStandAtCommit'
+  'WritingRevoke Held={"cred","policy","env"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","env"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","policy"} WritesStandAtCommit'
+  "WritingRevoke GuardsAfterFence WritesStandAtCommit"
+  "WritingRevoke ChangeCAS KeyChangesFlip"
+  "WritingAdd AdmitCAS AddsStandAtCommit"
+  "WritingAdd PrincipalCAS AddsFlip"
+  "WritingAdd WaitForSeal AnsweredSealed"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"
