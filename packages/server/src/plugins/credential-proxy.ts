@@ -945,9 +945,12 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // The place's UI items, before the read that picks what the app is given: their keys are the handle too. Asked of the
   // environment; the read below says whether it reads the person's personal config instead (`generate`'s `@me`), which
-  // serves none, and then they are dropped: decided on the read's own answer, so no config made between the two calls
-  // gets the base environment's routes (review r5 of #467).
-  let ui = await uiPlanItems(coffre, proxy, handle, path);
+  // serves none: decided on the read's own answer, so no config made between the two calls gets the base environment's
+  // routes (review r5 of #467). On each attempt's answer: a read the vault retries (`AccessChanged`) may resolve the base
+  // environment after a personal config, deleted between the two, and its items are the base's again (review r6).
+  const items = await uiPlanItems(coffre, proxy, handle, path);
+  const none = { routes: [], held: new Set<string>() };
+  let ui = items;
   // The credentials the environment holds every key of, of those that serve it, code's and the UI's routes: their keys
   // are placeholders, whoever may read them.
   const covering = (keys: readonly string[]) => [...[...proxy.credentials.values()].filter((credential) => serves(credential, path)), ...ui.routes]
@@ -968,7 +971,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     keys: (environment, rows) => {
       resolved = rows;
       personal = environment.personal;
-      if (personal) ui = { routes: [], held: new Set() };
+      ui = personal ? none : items;
       const using = covering(rows.map((row) => row.key));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...tunnels.map(([, tunnel]) => tunnel.key), ...signers.map(([, signer]) => signer.key), ...ui.held]);
       // What the proxy fills in itself, a tunnel's URL or a signer's or verifier's handle, never the value the environment holds; and a

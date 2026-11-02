@@ -1830,7 +1830,11 @@ before PR C. Where C2a settles what this section left open:
   the person has a value of their own there: the read's answer says so,
   and the base environment's items are then dropped, so the plan gives
   their own `OPENAI_API_KEY`, never a handle and route `openai`'s URL,
-  which would send the base key (review r5 of #467). A UI route's JWT
+  which would send the base key (review r5 of #467). Decided on each
+  attempt's answer: a read the app retries (`AccessChanged`) that first
+  resolved the personal config and then, the config deleted between the
+  two, the base environment gives the base's items again, the handle and
+  the URL, never the base key (review r6). A UI route's JWT
   placeholder copies claims through an `expose` read (section 3): a
   Contributor's plan, or anyone's on a sensitive key, is 403
   `placeholder_unread`, nothing of it opened.

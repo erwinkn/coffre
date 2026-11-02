@@ -627,6 +627,39 @@ test("a generated environment's plan read from the person's personal config: no 
   assert.equal(plan.env.OPENAI_API_KEY, MINE);
 });
 
+test("a plan read the vault retries: a first attempt that read the personal config, the retry the base environment, whose UI items shape it again (review r6 of #467)", ON_015, async () => {
+  // `use` retries a read whose kept answer changed (`AccessChanged`), and the pick runs again on the retry's answer. A
+  // personal config deleted between the two: the first attempt resolved market/dev@me, the retry market/dev. Each plan
+  // read below plays that first attempt to the proxy's pick before the vault's own, on the same rows.
+  const plugin = proxyOf({ generate: { 'market/dev': 'all' } });
+  const fetch = plugin.routes!.fetch;
+  let replayed = 0;
+  plugin.routes!.fetch = (request, coffre) => fetch(request, {
+    ...coffre,
+    use: (handle, asked) => {
+      const pick = asked.keys;
+      if (asked.logged.plan !== true || typeof pick !== 'function') return coffre.use(handle, asked);
+      return coffre.use(handle, { ...asked, keys: (environment, rows) => {
+        replayed += 1;
+        pick({ ...environment, path: `${environment.path}@me`, personal: true }, rows);
+        return pick(environment, rows);
+      } });
+    },
+  });
+  deploy(plugin);
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  const planned = await route('/use/market/dev', as(token));
+  assert.equal(planned.status, 200, await planned.clone().text());
+  assert.equal(replayed, 1);
+  const plan = await planned.json() as { environment: string; env: Record<string, string>; credentials: Record<string, string> };
+  assert.equal(plan.environment, 'market/dev');
+  // The base environment's route covers the key: the handle and its URL, never the value.
+  assert.equal(plan.env.OPENAI_API_KEY, token);
+  assert.equal(plan.credentials.openai, `${ORIGIN}/use/market/dev/openai`);
+  assert.ok(!JSON.stringify(plan).includes(OPENAI));
+});
+
 test("0.14's log too: an editable proxy's plan is code's, the vault asked for no UI item (review r5 of #467)", async () => {
   const token = await handle();
   const planned = await route('/use/market/dev', as(token));
