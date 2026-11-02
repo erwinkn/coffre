@@ -51,7 +51,8 @@ import { isUnavailable } from '@coffre/db/dialect';
 import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod } from '@coffre/core/vault';
 import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { TEMPLATE_KEY as SHARED_TEMPLATE_KEY, type DecidedItem, type ProxyDefinition, type ProxyRoute } from '@coffre/core/vault';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
@@ -360,8 +361,11 @@ export type CredentialProxyOptions = {
 
 const NAME = /^[a-z][a-z0-9-]{0,31}$/;
 const KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
-/** A key a rule's template names, `{SCHUMANN_API_KEY}`. */
-const TEMPLATE_KEY = /\{([A-Za-z_][A-Za-z0-9_]{0,127})\}/g;
+/**
+ * A key a rule's template names, `{SCHUMANN_API_KEY}`: core's one reading of templates, which the vault's save stores
+ * beside each UI item, so that the proxy's startup check, a UI route's use and the log's replay read one key list.
+ */
+const TEMPLATE_KEY = SHARED_TEMPLATE_KEY;
 /** A handle, wherever the app put it: alone, or inside a header the upstream's own scheme frames. */
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
 const HANDLES = new RegExp(HANDLE.source, 'g');
@@ -448,13 +452,15 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const cache = new Map<string, Kept>();
   const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
   const groups = new Map<string, Group>();
+  const editable = options.editable === true;
+  const ui: UiState = { items: new Map(), last: new Map(), kept: new Map() };
   return withProxyCode({
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
       fetch: async (request, coffre) => {
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
+          return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles, editable, ui });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
@@ -462,7 +468,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
       },
       socket: async (request, coffre) => {
         try {
-          return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles });
+          return await open(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles, editable, ui });
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
@@ -509,7 +515,29 @@ type Proxy = {
   cache: Map<string, Kept>;
   /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). A workload's are its statement's to say. */
   handles: Map<string, { paths: readonly (string | null)[] | null; until: number }>;
+  /** Whether the environments' UI definitions serve the names code lacks (`editable`), and this isolate's copies of them. */
+  editable: boolean;
+  ui: UiState;
 };
+
+/**
+ * This isolate's UI definitions (0.16, T186 PR C; docs/design/proxy-ui.md, sections 3 and 4): each item a vault answer
+ * brought, by its digest, and read as a code credential is (`resolve`), once; the digest each reading last answered,
+ * and when (the copy, which only saves the item's bytes: CopyFromVault); and the values each caller's use opened, by
+ * caller and URL, each kept with the item it was decided on, which a cache hit sends by (BoundToDefinition). Settled
+ * values only, bounded.
+ */
+type UiState = {
+  items: Map<string, { definition: ProxyDefinition; resolved: Resolved | string | null }>;
+  last: Map<string, { digest: string; confirmed: number }>;
+  kept: Map<string, UiKept>;
+};
+
+/** A UI use's values, kept: until when, the item they were decided on (its digest), the reading and the place it was at. */
+type UiKept = Opened & { until: number; digest: string; definition: ProxyDefinition; reading: RouteUsed['reading']; path: string };
+
+/** The most of each that an isolate keeps: past it, a map starts over. */
+const UI_KEPT = 10_000;
 
 /** A credential's values, opened, and which keys of it are plain, no secret: what the answer's redaction leaves as it is. */
 type Opened = { values: Record<string, string>; plain: readonly string[] };
@@ -564,6 +592,18 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (stable !== undefined || named !== undefined) {
     const used = await workloadForward(request, coffre, proxy, stable !== undefined ? null : `${place[0]}/${place[1]}`, (stable ?? named)!, raw.slice(stable !== undefined ? 1 : 3), url.search);
     if (used !== null) return used;
+  }
+  // A name code lacks, of a handle's request: the environment's UI definitions, under `editable` (T186 PR C). Code wins
+  // a name it holds (R66): only a URL whose name code lacks gets here, its readings as section 6's table says.
+  if (proxy.editable && coffre.useRoute !== undefined && stable === undefined && sessionToken(request) === null) {
+    const coded = (name: string | undefined) => name !== undefined && (proxy.credentials.has(name) || proxy.signers.has(name) || proxy.verifiers.has(name) || proxy.tunnels.has(name));
+    if (raw.length === 1 || (raw.length >= 3 && !coded(place[2]))) return uiForward(request, coffre, proxy, raw, place, url);
+    if (raw.length === 2) {
+      // `/use/<a>/<b>`: the plan or compute when the handle was made for `<a>/<b>`; otherwise route `<a>` at `/<b>`.
+      const handle = handleOutside(request, url);
+      const paths = handle === null ? null : await madeFor(coffre, proxy, handle);
+      if (handle !== null && !(paths ?? []).includes(`${place[0]}/${place[1]}`)) return uiForward(request, coffre, proxy, raw, place, url);
+    }
   }
   // A form or JSON rule's body, as the stable URL read it to find the handle: what the route then sends, read once.
   const peeked = new Map<Resolved, Fillable>();
@@ -624,6 +664,135 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   if (credential === undefined && proxy.verifiers.has(place[2]!)) return failure(404, `${place[2]} is a verifier, which reaches no upstream: credential(${JSON.stringify(place[2])}).verify(message, signature)`);
   if (credential === undefined) return noCredential(place[2]!);
   return forward(request, coffre, proxy, `${place[0]}/${place[1]}`, credential, raw.slice(3), url.search, peeked.get(credential));
+}
+
+/** A handle a request carries outside its body: its bearer token, `x-coffre-handle`, or a query parameter's value. */
+function handleOutside(request: Request, url: URL): string | null {
+  return HANDLE.exec(bearer(request) ?? '')?.[0] ?? HANDLE.exec(request.headers.get('x-coffre-handle') ?? '')?.[0] ?? HANDLE.exec(url.search)?.[0] ?? null;
+}
+
+/**
+ * A UI route's request, a handle's (T186 PR C; docs/design/proxy-ui.md, sections 3 and 6): the handle found by the
+ * bearer, `x-coffre-handle` or the query, else by its shape in the body (read from a copy, 64 KiB at most), before
+ * anything else, as no definition is needed for it; then the route use, the vault's one call, which reads the URL both
+ * ways and answers the values with the item they were decided on (SentAsDecided); or the values this caller's use kept
+ * for this URL, with the item they were decided on (BoundToDefinition). Every check a code credential's request takes
+ * runs on that item, the target rebuilt from its upstream, and the handle must sit where it takes its key.
+ *
+ *   Bo's handle, `GET /use/openai/models`, openai saved in market/dev's Proxy tab   the vault's call, then api.openai.com/v1/models
+ *   the same within cacheSeconds, an Owner having pointed openai elsewhere since      no call: api.openai.com still, its values' item
+ */
+async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, raw: readonly string[], place: readonly string[], url: URL): Promise<Response> {
+  const named = raw.length >= 3 ? { path: `${place[0]}/${place[1]}`, route: place[2]! } : null;
+  const stable = place[0]!;
+  let handle = handleOutside(request, url);
+  if (handle === null && request.body !== null && request.method !== 'GET' && request.method !== 'HEAD') {
+    const copy = request.clone();
+    try {
+      const bytes = await boundedBody(copy, MAX_FIELD_BODY);
+      handle = bytes == null ? null : HANDLE.exec(LATIN1.decode(bytes))?.[0] ?? null;
+    } finally {
+      if (!copy.bodyUsed) void copy.body?.cancel().catch(() => undefined);
+    }
+  }
+  if (handle === null) return failure(401, `send the handle \`coffre run\` gave your app where ${named?.route ?? stable} takes its key, or as x-coffre-handle`);
+  const at = `${handle}\n${named === null ? stable : `${named.path}/${named.route}`}`;
+  const now = Date.now();
+  let kept = proxy.ui.kept.get(at);
+  if (kept !== undefined && kept.until <= now) {
+    proxy.ui.kept.delete(at);
+    kept = undefined;
+  }
+  if (kept === undefined) {
+    // The copies this isolate holds for either reading, by digest: the answer leaves out an item that is one of them.
+    const readings = [...(named === null ? [] : [`n\n${named.path}\n${named.route}`]), `s\n${handle}\n${stable}`];
+    // What a copy confirmed within `cacheSeconds` refuses (its upstream, path and method) stands, no call made; an older
+    // copy's refusal does not: the use's answer decides (docs/design/proxy-ui.md, section 3, "The app's checks").
+    for (const [i, key] of readings.entries()) {
+      const last = proxy.ui.last.get(key);
+      const copy = last === undefined ? undefined : proxy.ui.items.get(last.digest);
+      if (last === undefined || copy === undefined || copy.definition.kind !== 'route' || now - last.confirmed >= proxy.cacheMs) continue;
+      const read = uiCredential(proxy, last.digest, copy.definition);
+      if (typeof read === 'string') break;
+      const aimed = aim(request, read, raw.slice(i === 0 && named !== null ? 3 : 1), url.search);
+      if (aimed instanceof Response) return aimed;
+      break;
+    }
+    const digests = readings.flatMap((key) => {
+      const last = proxy.ui.last.get(key);
+      return last === undefined || !proxy.ui.items.has(last.digest) ? [] : [last.digest];
+    });
+    const used = await coffre.useRoute!(handle, { named, stable, digests, logged: { credential: named?.route ?? stable, ui: true } });
+    const definition = itemOf(proxy, used.item);
+    if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+    remember(proxy.ui.last, used.reading === 'named' ? readings[0]! : `s\n${handle}\n${stable}`, { digest: used.item.digest, confirmed: now });
+    kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) };
+    if (proxy.cacheMs > 0) remember(proxy.ui.kept, at, kept);
+  }
+  if (kept.definition.kind !== 'route') {
+    const kind = kept.definition.kind;
+    return failure(404, `${kept.definition.name} is a ${kind}, which reaches no upstream${kind === 'tunnel' ? ': `coffre run` tunnels to it' : `: credential(${JSON.stringify(kept.definition.name)}).${kind === 'signer' ? 'sign(message)' : 'verify(message, signature)'}`}`);
+  }
+  const credential = uiCredential(proxy, kept.digest, kept.definition);
+  if (typeof credential === 'string') return failure(503, credential, 'unavailable', '1');
+  const rest = kept.reading === 'named' ? raw.slice(3) : raw.slice(1);
+  return sendAs(request, coffre, proxy, credential, [...rest], url.search, handle, { values: kept.values, plain: kept.plain }, `${kept.path}/${credential.name}`);
+}
+
+/** The definition of an item a use decided on: the answer's, or this isolate's copy of that digest, which the answer left out. */
+function itemOf(proxy: Proxy, item: DecidedItem): ProxyDefinition | null {
+  if (item.definition !== null) {
+    remember(proxy.ui.items, item.digest, { definition: item.definition, resolved: null });
+    return item.definition;
+  }
+  return proxy.ui.items.get(item.digest)?.definition ?? null;
+}
+
+/**
+ * A UI route's definition as the proxy reads a code credential (`resolve`), once per digest: its rules, allow list and
+ * placeholder as code would write them. An egress is a binding only code declares, none yet (PR C keeps them for
+ * later): a route naming one answers 503, never a direct fetch in its place.
+ */
+function uiCredential(proxy: Proxy, digest: string, definition: ProxyRoute): Resolved | string {
+  const held = proxy.ui.items.get(digest);
+  if (held?.resolved != null) return held.resolved;
+  let resolved: Resolved | string;
+  if (definition.egress !== null) {
+    resolved = `${definition.name} leaves through the egress ${definition.egress}, which this deployment's code does not declare`;
+  } else {
+    try {
+      resolved = resolve(definition.name, credentialOf(definition), proxy.insecure);
+    } catch (error) {
+      resolved = `${definition.name}: its definition is not one this proxy takes (${(error as Error).message})`;
+    }
+  }
+  remember(proxy.ui.items, digest, { definition, resolved });
+  return resolved;
+}
+
+/** A UI route, written as code writes a credential: the same rules, allow list, placeholder and limit. */
+function credentialOf(route: ProxyRoute): Credential {
+  const inject = route.inject.map((rule): Inject => {
+    switch (rule.kind) {
+      case 'basic': return basic(rule.user, rule.password);
+      case 'sigv4': return sigv4({ accessKeyId: rule.accessKeyId, secretAccessKey: rule.secretAccessKey, ...(rule.sessionToken === null ? {} : { sessionToken: rule.sessionToken }), region: rule.region, service: rule.service });
+      case 'header': return header(rule.name, rule.template);
+      default: return { kind: rule.kind, name: rule.name, template: rule.template };
+    }
+  });
+  const limit: Limit = { ...(route.limit.perMinute === null ? {} : { perMinute: route.limit.perMinute }), ...(route.limit.perDay === null ? {} : { perDay: route.limit.perDay }) };
+  return {
+    upstream: route.upstream, inject,
+    ...(route.allow === null ? {} : { allow: route.allow.map((entry) => ({ ...(entry.methods.length === 0 ? {} : { methods: entry.methods }), path: entry.path })) }),
+    ...(route.placeholder === null ? {} : { placeholder: route.placeholder.kind === 'jwt' ? jwt({ claims: route.placeholder.claims }) : prefix(route.placeholder.prefix) }),
+    ...(Object.keys(limit).length === 0 ? {} : { limit }),
+  };
+}
+
+/** `map` holding `value` at `key`, a map starting over past `UI_KEPT` entries. */
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  if (map.size >= UI_KEPT && !map.has(key)) map.clear();
+  map.set(key, value);
 }
 
 /** A credential the URL names that the deployment's proxy has not. */
@@ -1365,13 +1534,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // Each query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
   // under the upstream gives back. Otherwise the placeholder's shape around the handle, which the proxy reads as the app's own
   // (`e30` is `{}`: the proxy reads no claim).
-  const back = credential.rules.flatMap((rule): [string, string][] => {
-    if (rule.kind !== 'query') return [];
-    const given = target.searchParams.get(rule.name);
-    if (given !== null && handleOf(rule, given) === handle) return [[rule.name, given]];
-    const placeholder = credential.placeholder;
-    return [[rule.name, placeholder === undefined || rule.shape === undefined ? handle : render(rule.template, { [rule.keys[0]!]: placeholder.kind === 'prefix' ? `${placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` })]];
-  });
+  const back = backOf(credential, target, handle);
   // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
   const content = early?.content ?? (await read(() => carried(request, credential)));
   if (content instanceof Response) return refuse(content);
@@ -1410,6 +1573,49 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
   // with an environment of the handle's would name that environment, and another credential (`/use/schumann/dev/maps/…`).
   return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}/${credential.name}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
+}
+
+/**
+ * Each query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
+ * under the upstream gives back. Otherwise the placeholder's shape around the handle, which the proxy reads as the app's
+ * own (`e30` is `{}`: the proxy reads no claim).
+ */
+function backOf(credential: Resolved, target: URL, handle: string): [string, string][] {
+  return credential.rules.flatMap((rule): [string, string][] => {
+    if (rule.kind !== 'query') return [];
+    const given = target.searchParams.get(rule.name);
+    if (given !== null && handleOf(rule, given) === handle) return [[rule.name, given]];
+    const placeholder = credential.placeholder;
+    return [[rule.name, placeholder === undefined || rule.shape === undefined ? handle : render(rule.template, { [rule.keys[0]!]: placeholder.kind === 'prefix' ? `${placeholder.prefix}${handle}` : `${UNSIGNED}.e30.${handle}` })]];
+  });
+}
+
+/**
+ * A UI route's request sent, by the item its values were decided on (T186 PR C): every check a code credential's
+ * request takes, on that item (its upstream, allow list, body rules), and the handle the use was made on found where
+ * the item takes its key, else nothing goes (a copy that let the request through only provisionally: `moved`).
+ */
+async function sendAs(request: Request, coffre: PluginContext, proxy: Proxy, credential: Resolved, rest: string[], search: string, handle: string, opened: Opened, route: string): Promise<Response> {
+  void proxy;
+  const aimed = aim(request, credential, rest, search);
+  if (aimed instanceof Response) return aimed;
+  const { target } = aimed;
+  const early = credential.body.length > 0 ? await fillable(request, credential) : null;
+  if (early instanceof Response) return early;
+  const fields = early?.fields ?? null;
+  const found = handleIn(request, credential, target, fields?.values);
+  if (found instanceof Response) return found;
+  if (found !== handle) return failure(400, `send the handle where ${credential.name} takes its key, or as x-coffre-handle`);
+  const back = backOf(credential, target, handle);
+  const content = early?.content ?? (await carried(request, credential));
+  if (content instanceof Response) return content;
+  if (fields !== null) {
+    const ride = riding(credential, (key) => opened.plain.includes(key));
+    if (credential.body.some((rule, at) => ride.includes(rule) && handleOf(rule, fields.values[at]!) !== handle)) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
+  }
+  const headers = new Headers();
+  for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
+  return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' } });
 }
 
 /** Whether a header of the app's goes on upstream: none about one hop, nor any that would tell the upstream about coffre's caller. */

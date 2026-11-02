@@ -9,6 +9,7 @@ import { denied, Refusal, through, vaultCredential, withRefusals, type ApiContex
 import { ApiError, badRequest, conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 import type { ProxyCodeItem } from '../proxy-code.ts';
+import { gateProxy } from '../proxy-gate.ts';
 
 /**
  * An environment's proxy definitions written in the UI (0.16, T186;
@@ -61,6 +62,8 @@ export type ProxySave = { seal: string | null; items: Record<string, ProxyDefini
 
 export async function proxyPage(ctx: ApiContext, place: ResolvedPath): Promise<ProxyPage> {
   const environment = place.environment!;
+  // Code's names reserved first (the gate), so that the page never shows a UI item code shadows (CodeGate).
+  await gateProxy(ctx.vault, ctx.proxy ?? null);
   const view = await ctx.vault.proxy({ projectId: place.project.id, environmentId: environment.id });
   return pageOf(ctx, place, view);
 }
@@ -107,6 +110,7 @@ function mayEdit(ctx: ApiContext, place: ResolvedPath): { error: ApiError; reaso
 export async function saveProxy(ctx: ApiContext, place: ResolvedPath, input: ProxySave): Promise<ProxyPage> {
   const environment = place.environment!;
   const where = { projectId: place.project.id, environmentId: environment.id };
+  await gateProxy(ctx.vault, ctx.proxy ?? null);
   return withRefusals(ctx, async () => {
     const refused = (error: ApiError, reason: string, metadata: Record<string, unknown> = {}) =>
       new Refusal(error, denied(ctx, 'proxy.save', reason, { ...where, metadata: { names: Object.keys(input.items), ...metadata } }));
@@ -145,6 +149,7 @@ export async function saveProxy(ctx: ApiContext, place: ResolvedPath, input: Pro
  * the page says so before it asks.
  */
 export async function releaseReserved(ctx: ApiContext, input: { release: string }): Promise<{ reserved: string[] }> {
+  await gateProxy(ctx.vault, ctx.proxy ?? null);
   return withRefusals(ctx, async () => {
     const refused = (error: ApiError, reason: string) => new Refusal(error, denied(ctx, 'proxy.release', reason, { metadata: { name: input.release } }));
     if (!mayRelease(ctx)) {
