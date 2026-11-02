@@ -56,8 +56,8 @@ key by whoever controls the upstream.
    Owners edit. The role editor gets a row for it.
 8. **One version at a time.** The app and the vault Workers run one
    release, and a deploy or a rollback moves both. Every app-to-vault call
-   carries its release; a vault on another one answers 503 `deploying`
-   before it reads anything, which the app passes on with `Retry-After: 1`.
+   carries its release; a vault on another one refuses it before it reads
+   anything, and the app answers 503 `deploying` with `Retry-After: 1`.
    No part of this design serves across two releases (section 3, decision
    8).
 
@@ -365,25 +365,54 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
 **One version at a time** (decision 8). The app and the vault Workers run
 one release, and a deploy or a rollback moves both: `pnpm run deploy` deploys
 the vault, then the app (docs/deploy.md), and Workers Builds deploys both
-on every push. No part of this design serves across two releases. Every
-app-to-vault call carries the app's release as `protocol`: the packages'
-one version (`pnpm bump`'s), which both Workers bundle, so nobody has to
-remember to bump a protocol number. The vault compares it first, in
-`#call` on Workers and in `serveVault`'s handler on Node, before it opens
-a database: on a mismatch it answers 503 `deploying`, with no read, lock,
-write or log entry, and the app answers its request 503 `deploying` with
-`Retry-After: 1`. Each answer carries the vault's release too, and the app
-refuses one on another release, or with none, the same way. That covers
-the one upgrade into the rule: the 0.16 vault, deployed first, refuses the
-0.15 app's calls, which carry no release; a 0.15 vault would ignore the
-field, but it has no proxy definitions to read or change, and the app
-sends nothing it answered. During a deploy, mismatched calls wait out the
-seconds until both Workers match. Main has no per-call version today:
-`about()` lists capabilities (`uses`, `batchUses`, `sealing`), which is
-how 0.15 serves an app ahead of its vault. The proxy adds no capability
-bit and no code for a mixed pair. TLC's `RoutingVersion` holds that a
-call on another release never reads or changes a route (below, "What
-each protection is for").
+on every push. No part of this design serves across two releases. The
+release is the packages' one version, read from `@coffre/core`'s
+`package.json` (a JSON import both Workers bundle), so `pnpm bump` moves
+it and nobody bumps a protocol number by hand.
+
+The check has one funnel on each side, so that no call, the hot path's
+included, goes around it. Many of `Vault`'s methods take no input
+(`about()`, `settings()`, `checkpoint()`) or a bare string (`access`),
+so the release does not ride in their inputs; it rides in an envelope
+around every call:
+
+- **The vault: one entry, `call(release, method, args)`.** It compares the
+  release before anything else, before `#prepared()` reads the config or
+  any pool opens, and on a mismatch answers `{ release: <its own> }` and
+  runs nothing. On a match it runs the method and answers `{ release,
+  result }`. One function in `@coffre/vault`, `gated`, does this, and each
+  transport calls it: `VaultEntrypoint` on Workers, whose per-method
+  members become private (`#use`, `#useNamed`, `#unwrap`, and the rest),
+  so the hot path's `#behind` and `#prepared` sit behind the check like
+  `#call`; `serveVault`'s handler on Node, whose body becomes
+  `{ release, args }`; and `openLocalVault`, in process, where the two
+  sides are one bundle and cannot differ, but answers go through the same
+  envelope so its tests hold it.
+- **The app: one wrapper, made in `createRuntime`** around the
+  deployment's `config.vault` (the service binding, `connectVault`'s
+  client, or a local vault). Each method becomes `call(<release>, name,
+  args)`; an answer on another release, or with none, throws one typed
+  error, `Deploying`, and `toErrorBody` maps it, once, to 503
+  `deploying` with `Retry-After: 1`. No handler sees a mismatch.
+
+A refusal is an answer, not a thrown error: a Workers RPC error keeps
+its message but not its fields, and a Node failure would map to 500
+(`failureOf`), so neither could say `deploying` reliably. What the tests
+hold is per call: a mismatched call runs no statement and writes no
+entry. The envelope adds a string comparison, not a round trip (R44).
+
+That covers the one upgrade into the rule. The 0.16 vault, deployed
+first, has no public per-method entry, so a 0.15 app's calls (to `use`,
+`access`, and the rest) fail before any read, as that app fails any
+vault error, for the seconds until the app deploys; a 0.16 app in front
+of a 0.15 vault finds no `call` and fails the same way, reading no
+route, and the 0.15 vault has no proxy definitions anyway. During a
+deploy, mismatched calls wait out the seconds until both Workers match.
+Main has no per-call version today: `about()` lists capabilities (`uses`,
+`batchUses`, `sealing`), which is how 0.15 serves an app ahead of its
+vault. The proxy adds no capability bit and no code for a mixed pair.
+TLC's `RoutingVersion` holds that a call on another release never reads
+or changes a route (below, "What each protection is for").
 
 **Every route use takes this one shape.** Today only a handle with exactly
 one key goes by name (`byName` in `packages/server/src/plugins.ts`); a
@@ -400,8 +429,13 @@ call, a route use, whose contract is:
   hash (`NamedUseInput`'s `tokenHash` and `accepts`), or a workload by its
   credential's id and `way` (`connection`, `binding`, `access`), as a
   batch names it today; a Cloudflare binding has no token, and is the
-  second kind. Then the place, the route's name, and the map's ids when
-  it holds them; for a batch, the route replaces `items`.
+  second kind. Then both readings of the URL, the place reading and the
+  stable one (section 6), on a hit too, since the statement answers
+  `moved` when the rule would now pick the other; with the map's ids for
+  the reading it picked, when it holds them. A workload has no token,
+  so no made-for list: its hit keys on the requested place's id (not the
+  fork ancestor that serves the item) and the route's name. For a batch,
+  the route replaces `items`.
 - **The route's keys are the item's own list.** A route's keys live in its
   inject templates (`{KEY}`), which today only a TypeScript regex in the
   proxy reads. The vault does not parse templates in SQL. At save, it
@@ -729,7 +763,11 @@ The plan sends nothing, so it is below `EverySendAllowed`; PR C's plan
 tests hold that it gives handles and fails closed. Two releases never
 serve together: `RoutingVersion` moves either Worker to another release
 and holds that a call across them reads and changes no route; that the
-gate comes before the vault's first statement is PR A's test. The scenarios with
+gate comes before the vault's first statement is PR A's test. Its moves
+keep each isolate's code config (`MaxDeploys = 0`), where a real upgrade
+restarts an isolate on the new release and a new `credentialProxy` at
+once; the restart resets `logged` either way, so the gate runs again
+before it serves, but no scenario composes the two. The scenarios with
 deploys put back no rows: a writer who puts back the item `proxy.code`
 deleted is a rollback like any other, which `SealChecked` refuses in
 `Routing`, since a deletion is a change of the object.
@@ -976,7 +1014,11 @@ Concretely, for `/use/market/dev/openai/chat`:
   made-for list is among the caller's rows it reads anyway) or the route no
   longer names those keys. Then the isolate reads again, as on a miss.
 
-**URLs of one or two segments** take the same table. `/use/<a>` is
+**URLs of one or two segments** take the same table, for UI names only.
+When `<a>` is a code credential's name, the URL alone decides, as today
+(`serve` in `credential-proxy.ts`), for handles and workloads alike: code
+wins (R66), so a project slug equal to a code credential's name changes
+nothing that works now. `/use/<a>` is
 always the stable reading of route `<a>`. `/use/<a>/<b>` is the place
 reading, the plan (`GET`) or `compute` (`POST`), only when `<a>/<b>` is an
 environment the handle or session was made for; otherwise it is the stable
@@ -984,7 +1026,11 @@ reading of route `<a>` at path `/<b>`. So `GET /use/openai/models` from a
 `market/dev` handle is a GET of route `openai` at `/models`, and `GET
 /use/market/dev` from it is the plan. The plan and `compute` answer 404
 only after the call has decided the reading, never from code's maps
-alone.
+alone. With no made-for list kept (`cacheSeconds: 0`, or a cold isolate),
+the route use decides: the app sends both readings, the statement picks
+one from the caller's rows, and an answer for the place reading carries
+no values, after which the plan or `compute` goes on as section 4 counts
+it (the plan's `proxyItem`).
 
 So a `/use` costs what section 4 counts, whatever the URL, and the
 statement adds the second reading's rows only on a miss. A kept `madeFor`
@@ -1375,13 +1421,17 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
 - `@coffre/core/access`: `proxy.edit`, the role editor's new rule;
   `formal/lean` updated in the same PR (AGENTS.md: a change to the access
   rules changes the Lean model).
-- The version gate (section 3, "One version at a time"): `protocol` on
-  every call and answer of `@coffre/core/vault`, checked first in `#call`
-  and `serveVault`'s handler, 503 `deploying` with `Retry-After: 1` in the
-  app. Tests, on Workers and Node: a call on another release refused with
-  no statement run and no entry (counted as `request-cost.test.ts`
-  counts), and an answer on another release, or with none, refused by the
-  app.
+- The version gate (section 3, "One version at a time"): the envelope
+  `call(release, method, args)` and its answer `{ release, result }`;
+  `gated` in `@coffre/vault`, called by `VaultEntrypoint` (its per-method
+  members made private, the hot path's included), `serveVault`'s handler
+  and `openLocalVault`; the app's one wrapper in `createRuntime`, its
+  `Deploying` error mapped once in `toErrorBody` to 503 `deploying` with
+  `Retry-After: 1`. Tests, on Workers, Node and in process: a call on
+  another release refused with no statement run and no entry (counted as
+  `request-cost.test.ts` counts), for a `useNamed`, a no-argument method
+  (`about()`) and a string-argument one (`access`); an answer on another
+  release, or with none, refused by the app as 503 `deploying`.
 - PR A and PR C ship in one release, 0.16: code's names must be reserved
   (PR C's gate) from the first UI save (PR A), or a code name served
   meanwhile hides a UI item nobody deleted.

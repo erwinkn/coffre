@@ -2047,6 +2047,10 @@ inputs, held by PR C's cover tests, since one route cannot share a key
 with another here. The plan sends nothing, which PR C's tests hold.
 Nothing serves across two releases (design, decision 8), so the model
 has no older vault's answers: a call across releases is refused, whole.
+`RoutingVersion`'s moves keep each isolate's code config (`MaxDeploys =
+0`); a real upgrade changes the release and `credentialProxy` in one
+restart, which resets `logged` as either alone does, so the gate runs
+again before the isolate serves, but no scenario composes the two.
 `RoutingCode` and `RoutingRelease` put back no rows:
 a writer who puts back the item a `proxy.code` change deleted makes a
 rollback like any other, since the deletion is a change, and `Routing`
