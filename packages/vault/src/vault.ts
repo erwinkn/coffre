@@ -4130,7 +4130,7 @@ class VaultService implements Vault {
         const why = routeRefusal(reader, key, chain);
         if (why !== null) throw refused('route_not_cleared', `${why}: it cannot be routed by ${actor.slice('user:'.length)}`);
       }
-      const holdings = frozenHoldings(reader, chain, [...resolved.values()].map((key) => key.projectId));
+      const holdings = frozenHoldings(reader);
       const items: Record<string, ProxyItem | null> = {};
       for (const [name, definition] of saved) {
         if (definition === null) {

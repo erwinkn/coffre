@@ -1042,18 +1042,24 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
       const [row] = await db.select({ items: proxyDefinitions.items, digests: proxyDefinitions.digests, seal: proxyDefinitions.seal }).from(proxyDefinitions)
         .where(eq(proxyDefinitions.environmentId, ref.id));
       if (row === undefined) return { row: null, seal: null };
-      const items = (typeof row.items === 'string' ? JSON.parse(row.items) : row.items) as Record<string, ProxyItem>;
+      const value: unknown = typeof row.items === 'string' ? JSON.parse(row.items) : row.items;
+      // Items no save writes (`{"openai": null}`, a list) are no object: the row stands as one with none, and no seal,
+      // which fails it (`tampered`), before anything reads an item.
+      if (!isRecord(value) || !Object.values(value).every(isRecord)) return { row: { kind: 'proxy', id: ref.id, items: {} }, seal: Buffer.alloc(0) };
+      const items = value as Record<string, ProxyItem>;
       // Its seal covers the index its items make; a `digests` column that is not that index is no row the vault wrote,
       // and holds no seal (a use reads that column, PR C): `tampered`, whatever the seal says over the items.
-      const intact = typeof items === 'object' && items !== null && !Array.isArray(items) && indexBytes(items).equals(Buffer.from(row.digests));
+      const intact = indexBytes(items).equals(Buffer.from(row.digests));
       return { row: { kind: 'proxy', id: ref.id, items }, seal: intact ? Buffer.from(row.seal) : Buffer.alloc(0) };
     }
     case 'proxy-reserved': {
       const { proxyReserved } = tablesOf(db);
       const [row] = await db.select({ names: proxyReserved.names, seal: proxyReserved.seal }).from(proxyReserved).where(eq(proxyReserved.id, 1));
       if (row === undefined) return { row: null, seal: null };
-      const names = (typeof row.names === 'string' ? JSON.parse(row.names) : row.names) as string[];
-      return { row: { kind: 'proxy-reserved', names }, seal: Buffer.from(row.seal) };
+      const value: unknown = typeof row.names === 'string' ? JSON.parse(row.names) : row.names;
+      // Names no change writes (`null`, a list of numbers): no names and no seal, which fails it (`tampered`).
+      if (!Array.isArray(value) || !value.every((name) => typeof name === 'string')) return { row: { kind: 'proxy-reserved', names: [] }, seal: Buffer.alloc(0) };
+      return { row: { kind: 'proxy-reserved', names: value as string[] }, seal: Buffer.from(row.seal) };
     }
   }
 }
@@ -1675,4 +1681,9 @@ async function nextNumber(tx: Transaction): Promise<bigint> {
 
 function bytes(value: Buffer | Uint8Array | null): Buffer | null {
   return value === null ? null : Buffer.from(value);
+}
+
+/** A JSON object: not null, not a list. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

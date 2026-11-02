@@ -1,9 +1,9 @@
-import { heldColumns, ownsProject, type Columns } from '@coffre/core/access';
+import { covers, DEFAULT_POLICY, holds, inScope, issuedGrant, ownsProject, scopeDefinition, type Columns, type Holdings, type Permission, type Place, type RoleDefinition } from '@coffre/core/access';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
 import type { ProxyItemView, ProxyView } from '@coffre/core/vault';
 
 import { placeIn, refuses, type Reader } from './decide.ts';
-import { sealed, type EnvironmentInput, type FrozenGrant, type ProxyInput, type ProxyItem, type ReservedInput, type SealKeys, type SecretInput } from './inputs.ts';
+import { sealed, type EnvironmentInput, type FrozenHoldings, type ProxyInput, type ProxyItem, type ReservedInput, type SealKeys, type SecretInput } from './inputs.ts';
 
 /**
  * The pure part of the proxy's decisions (0.16, T186;
@@ -22,26 +22,43 @@ export const MAX_RESERVED = 1000;
 export type ResolvedKey = { name: string; holder: EnvironmentInput; nature: SecretInput['nature']; projectId: string };
 
 /**
- * What a save freezes of its editor (decision 5): at the environment and
- * each fork parent above it, what they hold there in each column
- * (`heldColumns`) and whether they own its project (R66); at each project a
- * reference's source is in, only whether they own it, for its sensitive
- * values. A use weighs the item's keys for these, intersected with what its
- * editor holds then (PR C).
+ * What a save freezes of its editor (decision 5): their instance role, its
+ * scope and what it holds, and each live grant with what its role holds,
+ * each as the policy defines it now (`FrozenHoldings`). A use weighs the
+ * item's keys for these wherever the item serves, a fork made later
+ * included, intersected with what its editor holds then (PR C).
  */
-export function frozenHoldings(reader: Reader, chain: readonly EnvironmentInput[], sourceProjects: readonly string[]): FrozenGrant[] {
-  const places = new Map(chain.map((environment) => [environment.id, environment]));
-  const grants: FrozenGrant[] = chain.map((environment) => ({
-    projectId: environment.projectId,
-    environmentId: environment.id,
-    permissions: heldColumns(reader.live, placeIn({ projectId: environment.projectId, environmentId: environment.id }, places)),
-    sensitive: ownsProject(reader.live, environment.projectId),
-  }));
-  const none: Columns = { normal: [], protected: [] };
-  for (const projectId of new Set(sourceProjects)) {
-    if (!grants.some((grant) => grant.projectId === projectId)) grants.push({ projectId, environmentId: null, permissions: none, sensitive: ownsProject(reader.live, projectId) });
-  }
-  return grants;
+export function frozenHoldings(reader: Reader): FrozenHoldings {
+  const { live } = reader;
+  const policy = live.policy ?? DEFAULT_POLICY;
+  const role = Object.hasOwn(policy.instanceRoles, live.role) ? policy.instanceRoles[live.role] : undefined;
+  return {
+    role: live.role,
+    scope: live.scope,
+    instance: { normal: [...(role?.permissions ?? [])], protected: [...(role?.protected ?? [])] },
+    grants: live.grants.map((grant) => issuedGrant(grant, policy)),
+  };
+}
+
+/**
+ * Whether what a save froze holds `permission` at `place`, as `allows`
+ * decides for a holder whose roles are what they were then: the instance
+ * role inside its scope, and each grant that covers the place. `holder`
+ * says whether the place is protected now, as the policy has it. A fork
+ * made after the save is decided by the grants that reach it:
+ *
+ *   saved by Lin, router on market/dev      market/dev-eu: nothing
+ *   saved by Ada, router on market          market/dev-eu: read, use
+ */
+export function frozenAllows(frozen: FrozenHoldings, permission: Permission, place: Place, holder: Pick<Holdings, 'policy' | 'service'>): boolean {
+  const asRole = (columns: Columns): RoleDefinition => ({ name: '', description: '', permissions: columns.normal, protected: columns.protected });
+  if (inScope(frozen.scope, place) && holds(asRole(frozen.instance), permission, place, holder)) return true;
+  return frozen.grants.some((grant) => covers(grant, place) && holds(scopeDefinition(grant), permission, place, holder));
+}
+
+/** Whether what a save froze owns `projectId` (`ownsProject`): who alone routes its sensitive values (R66). Owner is a fixed role. */
+export function frozenOwns(frozen: FrozenHoldings, projectId: string): boolean {
+  return (frozen.role === 'owner' && inScope(frozen.scope, { projectId })) || frozen.grants.some((grant) => grant.role === 'owner' && covers(grant, { projectId }));
 }
 
 /**
@@ -61,8 +78,8 @@ export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly E
 }
 
 /** Whether an item's save cleared it for its place's sensitive values: its editor owned the project. */
-export function routesSensitive(holdings: readonly FrozenGrant[], projectId: string): boolean {
-  return holdings.some((grant) => grant.sensitive && grant.projectId === projectId);
+export function routesSensitive(holdings: FrozenHoldings, projectId: string): boolean {
+  return frozenOwns(holdings, projectId);
 }
 
 /** An environment's sealed object as the tab shows it: each item without its holdings. */

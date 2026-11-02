@@ -9,6 +9,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { DEFAULT_POLICY, type Holdings, type Scope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProxyInput } from '@coffre/core/vault';
 import { createDatabase, tablesOf } from '@coffre/db';
@@ -16,14 +17,16 @@ import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { applyOp, indexBytes, sealKey, sealOf, type ProxyInput, type ProxyItem, type Ref } from '../src/inputs.ts';
+import { applyOp, indexBytes, sealKey, sealOf, type FrozenHoldings, type ProxyInput, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { openLocalVault as openEntry } from '../src/local.ts';
 import { replayStored } from '../src/log-replay.ts';
-import { proxyLookup, type ProxyLevel } from '../src/proxy.ts';
+import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel } from '../src/proxy.ts';
+import type { Reader } from '../src/decide.ts';
 import { newestChange, readObject } from '../src/store.ts';
 import { emptyDatabase, ENGINE, LOG, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
+const NOBODY: FrozenHoldings = { role: 'member', scope: { projects: 'all', environments: 'all' }, instance: { normal: [], protected: [] }, grants: [] };
 const ADA = 'user:ada@acme.example';
 const CI = 'token:ci';
 const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
@@ -109,7 +112,7 @@ function refusedWith(outcome: Awaited<ReturnType<World['save']>>, code: string, 
 // --- the object and its seal, pure ----------------------------------------------------------------------------------
 
 function item(definition: ProxyDefinition): ProxyItem {
-  return { definition, keys: ['OPENAI_API_KEY'], savedBy: ROOT, savedAt: 1, holdings: [] };
+  return { definition, keys: ['OPENAI_API_KEY'], savedBy: ROOT, savedAt: 1, holdings: NOBODY };
 }
 
 test('the seal covers the index, names included: a forged body, a body moved under another name and a forged index all fail it', () => {
@@ -144,6 +147,35 @@ test('a save applies to the object as the log has it: each item named added, rep
   assert.equal(applyOp({ kind: 'proxy-reserved', names: ['maps'] }, reserved, { op: 'proxy.release', name: 'other' }), undefined);
 });
 
+test('a save freezes its editor\'s grants, not the places it saw: a fork made later is decided by the grants that reach it', () => {
+  const market = randomUUID();
+  const [dev, devEu] = [randomUUID(), randomUUID()];
+  const reader = (live: Omit<Holdings, 'policy'>): Reader => ({ status: 'active', live: { ...live, policy: DEFAULT_POLICY }, all: { ...live, policy: DEFAULT_POLICY } });
+  const anywhere: Scope = { projects: { only: [] }, environments: 'all' };
+  // Lin: a Developer of market/dev alone. Ada: a Developer of all of market. At dev, both read.
+  const lin = frozenHoldings(reader({ role: 'member', scope: anywhere, grants: [{ projectId: market, environmentId: dev, role: 'developer' }] }));
+  const ada = frozenHoldings(reader({ role: 'member', scope: anywhere, grants: [{ projectId: market, environmentId: null, role: 'developer' }] }));
+  const at = (environmentId: string, slug: string) => ({ projectId: market, environmentId, environmentSlug: slug });
+  const person = { policy: DEFAULT_POLICY };
+  assert.equal(frozenAllows(lin, 'secret.read', at(dev, 'dev'), person), true);
+  assert.equal(frozenAllows(ada, 'secret.read', at(dev, 'dev'), person), true);
+  // market/dev-eu, forked from dev after both saved: a key of its own reads for Ada's grant, never Lin's.
+  assert.equal(frozenAllows(lin, 'secret.read', at(devEu, 'dev-eu'), person), false);
+  assert.equal(frozenAllows(ada, 'secret.read', at(devEu, 'dev-eu'), person), true);
+  // The role's columns as they were: an Owner widening developer later widens neither.
+  const wider = { policy: { ...DEFAULT_POLICY, roles: { ...DEFAULT_POLICY.roles, developer: { ...DEFAULT_POLICY.roles.developer, permissions: [...DEFAULT_POLICY.roles.developer.permissions, 'proxy.edit' as const] } } } };
+  assert.equal(frozenAllows(ada, 'proxy.edit', at(dev, 'dev'), wider), false);
+  // Protected now: the protected column decides, as for anyone.
+  assert.equal(frozenAllows(ada, 'secret.read', at(dev, 'dev'), { policy: { ...DEFAULT_POLICY, protected: [dev] } }), false);
+  // An instance role inside its scope: a Developer scoped to dev reads every dev, never dev-eu; an Owner owns.
+  const scoped = frozenHoldings(reader({ role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } }, grants: [] }));
+  assert.equal(frozenAllows(scoped, 'secret.read', at(dev, 'dev'), person), true);
+  assert.equal(frozenAllows(scoped, 'secret.read', at(devEu, 'dev-eu'), person), false);
+  assert.equal(frozenOwns(scoped, market), false);
+  assert.equal(frozenOwns(frozenHoldings(reader({ role: 'member', scope: anywhere, grants: [{ projectId: market, environmentId: null, role: 'owner' }] })), market), true);
+  assert.equal(frozenOwns(frozenHoldings(reader({ role: 'owner', scope: { projects: 'all', environments: 'all' }, grants: [] })), market), true);
+});
+
 // --- a save ----------------------------------------------------------------------------------------------------------
 
 test('an Owner saves a route: the row holds it with its index and seal, the log a change and an entry, and the replay agrees', ON_015, async () => {
@@ -158,9 +190,10 @@ test('an Owner saves a route: the row holds it with its index and seal, the log 
   assert.deepEqual(Object.keys(row.items), ['openai']);
   assert.ok(row.digests.equals(indexBytes(row.items)));
   assert.equal(row.seal.toString('base64'), view.seal);
-  // The editor's holdings, frozen with the item, never answered: what they held here, and that they own the project.
-  assert.deepEqual(row.items.openai!.holdings.map(({ projectId, environmentId, sensitive }) => ({ projectId, environmentId, sensitive })), [{ projectId: w.project, environmentId: w.dev, sensitive: true }]);
-  assert.ok(row.items.openai!.holdings[0]!.permissions.normal.includes('proxy.edit'));
+  // The editor's standing, frozen with the item, never answered: the instance's Owner, on every project.
+  const { holdings } = row.items.openai!;
+  assert.deepEqual([holdings.role, holdings.scope, holdings.grants], ['owner', { projects: 'all', environments: 'all' }, []]);
+  assert.ok(holdings.instance.normal.includes('proxy.edit'));
   assert.equal(JSON.stringify(view).includes('holdings'), false);
   assert.equal(await count(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'proxy.save' AND decision = 'allow'`), 1);
   const [entry] = await rows<{ metadata: string }>(db.owner, sql`SELECT metadata FROM audit_log WHERE action = 'proxy.save'`);
@@ -248,6 +281,8 @@ test('a row a writer edits, moves an item in, puts back or deletes shows tampere
       await write(w.dev, items, indexBytes(items));
     }, 'tampered'],
     ['an item deleted, its index entry left', () => write(w.dev, { b: now.items.b! }, now.digests), 'tampered'],
+    ['an item made null, which no save writes', () => write(w.dev, { ...now.items, a: null as unknown as ProxyItem }, now.digests), 'tampered'],
+    ['an item made a string', () => write(w.dev, { ...now.items, a: 'evil' as unknown as ProxyItem }, now.digests), 'tampered'],
     ['last save\'s row put back', () => write(w.dev, genuine.items, genuine.digests, genuine.seal), 'stale'],
     ['the row deleted', () => run(db.owner, sql`DELETE FROM proxy_definitions WHERE environment_id = ${w.dev}`), 'stale'],
   ];
@@ -361,6 +396,26 @@ test('the reserved set forged around the vault refuses every save: fail closed (
   assert.equal((await w.view()).reservedState, 'tampered');
   const outcome = await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } });
   assert.equal(outcome.ok, false);
+});
+
+test('items or names no change writes fail the seal like any forgery: the tab shows tampered, and code\'s reservation passes them by', ON_015, async () => {
+  const w = await world();
+  const other = await newEnvironment(db.owner, w.project);
+  const dev = saved(await w.save({ seal: null, items: { openai: route('openai') } }));
+  saved(await w.save({ seal: null, items: { openai: route('openai') } }, other));
+  const now = (await stored(w.dev))!;
+  await write(w.dev, { openai: null as unknown as ProxyItem }, now.digests);
+  assert.deepEqual(await w.view(), { environmentId: w.dev, seal: dev.seal, state: 'tampered', items: [], reserved: [], reservedState: 'ok' });
+  // Code reserves the name: the forged environment is left for its Owner to replace; the other's item is cleared.
+  const reserved = await w.vault.reserveProxy({ names: ['openai'] });
+  assert.ok(reserved.ok);
+  assert.deepEqual(reserved.cleared.map((each) => each.environmentId), [other]);
+  // A reserved set whose names are no names: tampered, and every save refused.
+  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_reserved SET names = '[1]'::jsonb`);
+  else await run(db.owner, sql`UPDATE proxy_reserved SET names = '[1]'`);
+  const forged = await w.view(other);
+  assert.deepEqual([forged.state, forged.reservedState], ['ok', 'tampered']);
+  assert.equal((await w.save({ seal: forged.seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }, other)).ok, false);
 });
 
 // --- the version gate (section 3, "One version at a time") ----------------------------------------------------------

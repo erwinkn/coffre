@@ -1,6 +1,6 @@
 import { createHash, createHmac, hkdfSync, timingSafeEqual } from 'node:crypto';
 
-import { INSTANCE_ROLES, normalDefinition, ROLES, type CallerKind, type Columns, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope } from '@coffre/core/access';
+import { INSTANCE_ROLES, normalDefinition, ROLES, type CallerKind, type Columns, type CredentialScope, type InstanceRole, type RoleDefinition, type Scope, type ScopeGrant } from '@coffre/core/access';
 import { MAX_PROXY_ITEMS, type ProxyDefinition, type WrappedKey } from '@coffre/core/vault';
 import { logObject } from '@coffre/db/log';
 
@@ -191,14 +191,24 @@ export type PolicyInput = { kind: 'policy'; bulk: BulkLimit };
 
 /**
  * What a proxy definition's save froze of its editor (decision 5;
- * docs/design/proxy-ui.md, section 8), at each place its keys resolve in:
- * the environment and each fork parent above it, what they held there in
- * each column (`heldColumns`), and whether they own its project, who alone
- * route its sensitive values (R66); and each project a reference's source is
- * in, whether they own it. A use decides the item's keys for these, as a
- * token's scope, intersected with what its editor holds then (PR C).
+ * docs/design/proxy-ui.md, section 8): their standing as it was, each part
+ * with what its role held then, so that no role an Owner widens later widens
+ * the route. Their instance role, its scope and its columns; and each grant,
+ * its place and role, with that role's columns (`ScopeGrant`, as a token's
+ * scope keeps them). Kept whole rather than weighed at the places the save
+ * saw, so that a fork made later, which inherits the definition, is decided
+ * as their grants reach it: a `router` on `market/dev` reads none of a fork's
+ * own keys, a `router` on all of `market` does.
+ *
+ *   Lin, Developer scoped to dev, router on market/dev
+ *     { role: 'developer', scope: { projects: 'all', environments: { only: ['dev'] } },
+ *       instance: { normal: [read, use, write], protected: [use, write] },
+ *       grants: [{ projectId: market, environmentId: dev, role: 'router', permissions: … }] }
+ *
+ * A use decides the item's keys for these, as a token's scope, intersected
+ * with what its editor holds then (PR C; `frozenAllows`, `frozenOwns`).
  */
-export type FrozenGrant = { projectId: string; environmentId: string | null; permissions: Columns; sensitive: boolean };
+export type FrozenHoldings = { role: InstanceRole; scope: Scope; instance: Columns; grants: readonly ScopeGrant[] };
 
 /** One UI item as its object holds it: its definition, the keys it sends, who saved it and when, and what that save froze of them. */
 export type ProxyItem = {
@@ -206,7 +216,7 @@ export type ProxyItem = {
   keys: readonly string[];
   savedBy: string;
   savedAt: number;
-  holdings: readonly FrozenGrant[];
+  holdings: FrozenHoldings;
 };
 
 /** An environment's proxy definitions, by name, as the UI wrote them (`proxy.save`), and as code's reservations left them (`proxy.code`). */

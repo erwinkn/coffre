@@ -229,7 +229,8 @@ The object holds each item with what its save froze:
 { "items": [
   { "definition": { "kind": "route", "name": "openai", "upstream": "https://api.openai.com/v1", "inject": [ … ], "allow": [ … ] },
     "savedBy": "user:ada@acme.example", "savedAt": 1793560000000,
-    "holdings": [ { "projectId": "…", "environmentId": null, "role": "owner", "permissions": { "normal": [ … ], "protected": [ … ] }, "sensitive": true } ] }
+    "holdings": { "role": "member", "scope": { "projects": "all", "environments": "all" }, "instance": { "normal": [], "protected": [] },
+                  "grants": [ { "projectId": "…", "environmentId": null, "role": "owner", "permissions": { "normal": [ … ], "protected": [ … ] } } ] } }
 ] }
 ```
 
@@ -237,10 +238,16 @@ No answer to the app carries `holdings`: a use's, `proxyItem`'s and
 `GET …/proxy`'s carry the definition, and `route_not_cleared` names the
 editor in the vault's own message.
 
-`holdings` is the editor's grants as a service token's scope keeps them
-(`ScopeGrant` in `@coffre/core/access`: place, columns held, and `sensitive`
-where they could hand a service sensitive reads, R32). Section 8 explains
-how a use weighs it. An item the save did not change keeps its `savedBy` and
+`holdings` is the editor's standing as a service token's scope keeps it:
+their instance role, its scope and its columns, and each grant with its
+role's columns (`ScopeGrant` in `@coffre/core/access`), each as the policy
+defined it at the save, so no role widened later widens the route. It is
+their grants, not what they held at the places the save saw: a fork made
+later inherits the definition, and is decided by the grants that reach it
+(a `router` on `market/dev` reads none of `market/dev-eu`'s own keys, a
+`router` on all of `market` does). Who routes sensitive values is whoever
+those holdings make an Owner of the project (R66). Section 8 explains how a
+use weighs it. An item the save did not change keeps its `savedBy` and
 `holdings`. So Bo's edit of `maps` leaves Ada's `openai` cleared as Ada.
 
 ### Changes and audit
@@ -1544,14 +1551,13 @@ reads it otherwise:
   `GET`/`PUT /api/projects/<p>/<e>/proxy`, as `…/missing` and `…/version`.
   The page's answer adds `editable` (this caller may save here now) and
   `code` (the names this deployment's code defines, shown locked).
-- **Frozen holdings** are kept per place, not per grant: what the editor
-  holds in each column (`heldColumns`) at the environment and each fork
-  parent above it, and whether they own its project; and, for each project
-  a reference's source is in, whether they own it. An instance role has no
-  grant to freeze, and these are the only places an item's keys resolve
-  (`FrozenGrant` in `inputs.ts`). A reference made later into a project
-  the save did not see routes nothing sensitive until the item is saved
-  again.
+- **Frozen holdings** are the editor's standing, as section 2 has it
+  (`FrozenHoldings` in `inputs.ts`): their instance role, its scope and
+  columns, and each live grant with its role's columns. PR C decides them
+  with `frozenAllows` and `frozenOwns` (`packages/vault/src/proxy.ts`), as
+  `allows` and `ownsProject` decide over roles as they were, at any place:
+  a fork made after the save, or a key that became a reference into another
+  project, included.
 - **The object's CAS is on its newest change, not its row.** `change_input`
   writes a `proxy` row whole from its value, moving on only from the seal
   of the object's newest change, under the fence; it never weighs the row.
