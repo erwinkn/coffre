@@ -112,10 +112,13 @@ test('T187: a use reads and locks the same at a handful of days and at a hundred
     for (let i = 0; i < 12; i += 1) {
       assert.equal(b[i]!.locks, a[i]!.locks, `${login}, call ${i + 1}: ${a[i]!.locks} locks at ${few.days} days, ${b[i]!.locks} at ${many.days}`);
     }
-    // Buffers past the first call, the replanning one included: the same, but for an index page split now and then
-    // (eight or so, use-cost.test.ts).
+    // Buffers past the first call: the same, but for an index page split now and then (eight or so, use-cost.test.ts).
+    // A call that plans again (after a day is made, or the sixth on the vault's login) also rebuilds `log_uses`'
+    // partition descriptor, about five pages a hundred days: one a ten days more is its own, the 5,800 before 0057 not.
+    const steady = Math.min(...a.slice(1).map((c) => c.buffers));
     for (let i = 1; i < 12; i += 1) {
-      assert.ok(b[i]!.buffers - a[i]!.buffers <= 10, `${login}, call ${i + 1}: ${a[i]!.buffers} buffers at ${few.days} days, ${b[i]!.buffers} at ${many.days}`);
+      const margin = 10 + (a[i]!.buffers > steady ? Math.ceil((many.days - few.days) / 10) : 0);
+      assert.ok(b[i]!.buffers - a[i]!.buffers <= margin, `${login}, call ${i + 1}: ${a[i]!.buffers} buffers at ${few.days} days, ${b[i]!.buffers} at ${many.days}`);
     }
     // The first call plans every statement, and learns `log_uses`' partitions, a few catalog pages a day, once a
     // connection and once a day is made: 400 buffers more at a hundred days, where it read 5,800 more before 0057.

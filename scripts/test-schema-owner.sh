@@ -99,13 +99,20 @@ SQL
 done
 
 # A member of the owner may migrate (a managed Postgres's admin login, say): a function it makes is its own, one it
-# replaces keeps its owner, and `use_credential` runs as its owner. Replay 0057 so, which makes `use_covered` and
-# replaces `use_credential`; that owner must still execute every helper the use calls (T187).
+# replaces keeps its owner, and `use_credential` runs as its owner. Hand the member 0045's and 0051's helpers, as if it
+# had made them (the owner's grant moves with each), then replay 0057 as the member, which makes `use_covered` and
+# replaces `use_credential`: its owner must still execute every function the uses call, found from their bodies (T187).
 docker exec -i "$container" psql -X -v ON_ERROR_STOP=1 -U postgres <<'SQL'
 CREATE ROLE migration_member LOGIN INHERIT IN ROLE migration_owner PASSWORD 'local-member-only';
 SQL
 psql_owner -d postgres -c "CREATE DATABASE member"
 migrate member
+docker exec -i "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres -d member <<'SQL'
+ALTER FUNCTION use_stands(uuid, uuid, smallint, bigint, jsonb) OWNER TO migration_member;
+ALTER FUNCTION use_admits(jsonb, text) OWNER TO migration_member;
+ALTER FUNCTION use_stands_personal(uuid, uuid, bigint, jsonb) OWNER TO migration_member;
+ALTER FUNCTION use_scope_holds(uuid, uuid, text, jsonb) OWNER TO migration_member;
+SQL
 {
     echo "DROP FUNCTION use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid);"
     cat packages/db/src/migrations/postgres/0057_use_covered.sql
@@ -113,19 +120,22 @@ migrate member
     psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -U migration_member -d member
 psql_owner -d member <<'SQL'
 DO $$
-DECLARE v_helper regprocedure;
+DECLARE v_missing text;
 BEGIN
-    IF (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = 'use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid)'::regprocedure)
-       <> 'migration_member' THEN
-        RAISE EXCEPTION 'the replay did not make use_covered as the member';
+    IF (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND pg_get_userbyid(proowner) = 'migration_member'
+          AND proname IN ('use_covered', 'use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds')) <> 5 THEN
+        RAISE EXCEPTION 'the replay did not leave the use''s helpers the member''s';
     END IF;
-    FOREACH v_helper IN ARRAY ARRAY['use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid)',
-                                    'use_stands(uuid, uuid, smallint, bigint, jsonb)',
-                                    'use_stands_personal(uuid, uuid, bigint, jsonb)']::regprocedure[] LOOP
-        IF NOT has_function_privilege(current_user, v_helper, 'EXECUTE') THEN
-            RAISE EXCEPTION 'use_credential''s owner cannot execute %', v_helper;
-        END IF;
-    END LOOP;
+    WITH RECURSIVE called (oid) AS (
+        SELECT oid FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('use_credential', 'use_batch', 'use_named_batch')
+        UNION
+        SELECT g.oid FROM called c JOIN pg_proc f ON f.oid = c.oid
+          JOIN pg_proc g ON g.pronamespace = 'public'::regnamespace AND f.prosrc ~ ('\m' || g.proname || '\s*\(')
+    )
+    SELECT string_agg(oid::regprocedure::text, ', ') INTO v_missing FROM called WHERE NOT has_function_privilege(current_user, oid, 'EXECUTE');
+    IF v_missing IS NOT NULL THEN
+        RAISE EXCEPTION 'use_credential''s owner cannot execute %', v_missing;
+    END IF;
     PERFORM use_covered(NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 END $$;
 SQL

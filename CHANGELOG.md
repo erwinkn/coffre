@@ -40,9 +40,10 @@
   of Postgres CPU for planning its check. Additive: the previous release
   calls the same function. Where a member of the database's owner runs
   the migrations, rather than the owner itself, the helpers
-  `use_credential` calls (`use_covered`, and 0045's and 0051's) belong
-  to that login while `use_credential` keeps its owner; 0057 grants that
-  owner EXECUTE on them, which it lacked for 0045's and 0051's too.
+  `use_credential` calls (`use_covered`, and 0045's and 0051's gate:
+  `use_stands`, `use_admits`, `use_stands_personal`, `use_scope_holds`)
+  belong to that login while `use_credential` keeps its owner; 0057
+  grants that owner EXECUTE on them, which it lacked for the gate's too.
 
 - **A page of reads costs as much on a connection's sixth call as on its
   first.** `log_reads_by` and `log_reads_at`, which list a member's reads
