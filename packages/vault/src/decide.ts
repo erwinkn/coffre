@@ -236,6 +236,12 @@ export type UseRequest = {
    * alike (review r1 of D153).
    */
   plain?: true;
+  /**
+   * A route use's (T186; docs/design/proxy-ui.md, section 4): the UI route it was of, which its entry names. Decided for
+   * the caller as any use, then for the route's editor (proxy.ts, `editorRefusal`), on the route as the place's object
+   * held it at the use's number. A route use hands a plain value back as a named one does, logging no entry of it.
+   */
+  route?: string;
 };
 
 export type { UseCode };

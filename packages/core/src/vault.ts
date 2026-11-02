@@ -291,6 +291,25 @@ export interface Vault {
   useNamedMany?(input: NamedManyInput): Promise<NamedManyOutcome>;
 
   /**
+   * A route use (0.16, T186; docs/design/proxy-ui.md, sections 3 and 4; formal/Routing.tla): the use of a definition
+   * written in the UI, by its name, and of every key it sends, in one call (two on a map miss). The vault finds the
+   * route at the place (a handle's URL read the way section 6's table says, or a workload's place), checks the item
+   * sealed and current through the fork chain, and decides each of its keys twice: for the caller, as a use, and for
+   * the item's editor, as what their save froze intersected with what they hold now. It answers the definition it
+   * decided on (left out when the app's copy has its digest), its digest, the levels' seals and every key's value, all
+   * or nothing. No route a UI item defines is ever used by ids: the app sends by the definition this answers.
+   */
+  useRoute(input: RouteUseInput): Promise<RouteUseOutcome>;
+
+  /**
+   * A place's UI definitions as a use would find them, deciding no use, opening no value and writing no entry
+   * (docs/design/proxy-ui.md, section 3, "`coffre.proxyItem`"): the caller checked as a use checks them, then the item
+   * of `name`, or, with none, every item the place serves (the plan's call), and the names the chain serves. A route's
+   * keys are resolved by name, and the isolate's map keeps their ids, so that the use that follows is a map hit.
+   */
+  proxyItem(input: ProxyItemInput): Promise<ProxyItemOutcome>;
+
+  /**
    * 0.15's log (docs/design/0.15-plan.md, "As built: PR 4b"): the changes
    * the app is about to write to objects its own rows hold (credentials,
    * keys, environments), each sealed, as entries the app's transaction
@@ -522,7 +541,7 @@ export type VouchInput = { entries: VouchedEntry[] };
 
 export type VouchedEntry =
   | { tree: 'changes'; number: string; at: number; requestId: string; object: string; actor: string; payload: string; seal: string | null; mac: string }
-  | { tree: 'uses'; number: string; at: number; requestId: string; credential: string; secret: string; purpose: number; place: string | null; mac: string }
+  | { tree: 'uses'; number: string; at: number; requestId: string; credential: string; secret: string; purpose: number; place: string | null; route?: string | null; mac: string }
   /** A read as the projector wrote it (`log_reads`, T166): its MAC covers its number too. */
   | {
     tree: 'reads'; number: string; at: number; credential: string; purpose: number; principal: string; secret: string; environment: string; project: string;
@@ -1779,6 +1798,105 @@ export type NamedManyOutcome =
       | { ok: true; values: (NamedValue | null)[] }
       | { ok: false; index: number | null; code: UseCode; number: string | null }
       | { ok: false; busy: UseBusy; retryAfter: number };
+  };
+
+/**
+ * Who makes a route use (docs/design/proxy-ui.md, section 3): a handle, by its token's hash, with what the app's config
+ * accepts of a credential (`NamedUseInput`'s); or a workload, by its way in's id, as a batch names it (a session's
+ * credential, a connection, a Cloudflare binding, or behind Access the account), at the place its session reaches, by id.
+ */
+export type RouteCaller =
+  | { kind: 'handle'; tokenHash: string; accepts: CredentialAcceptance }
+  | { kind: 'workload'; credential: string; way?: UseWay; place: string };
+
+/**
+ * A route use as the request names it (`Vault.useRoute`). A handle's URL may be read two ways (section 6): `named`, the
+ * place reading `/use/<project>/<environment>/<route>/…`, taken when the handle was made for that environment; `stable`,
+ * the stable reading `/use/<route>/…`, at the handle's one environment. A workload names its route as `stable`, at its
+ * place. `digests`: the items the app's isolate holds copies of, by digest, base64: the answer leaves out the item it
+ * decided on when its digest is one of them, and the app sends by that copy.
+ */
+export type RouteUseInput = {
+  caller: RouteCaller;
+  named: { place: { project: string; environment: string }; route: string } | null;
+  stable: string | null;
+  digests: readonly string[];
+  purpose: 'use';
+  at: number;
+  deadline: number;
+};
+
+/** A UI item as a use decided on it: its digest, base64, and its definition, or null where the app's copy has that digest. */
+export type DecidedItem = { name: string; digest: string; definition: ProxyDefinition | null };
+
+/**
+ * What a route use found of the route at its place (`RouteUseOutcome`): its item, at the fork level that serves it (0,
+ * the place), with the seals of every level the lookup checked, nearest first (`''` for a level with no object), which
+ * every round of one use must read again (`OneVersion`); or none (`fault` null: no level defines it, the app's 404), or a
+ * level a writer changed (`tampered`, `stale`), which serves nothing.
+ */
+export type RouteFound =
+  | { found: true; item: DecidedItem; level: number; seals: string[] }
+  | { found: false; fault: 'tampered' | 'stale' | null; seals: string[] };
+
+/**
+ * A route use's answer. `served: false`, a handle's place the vault serves not by name (none, archived, a handle of
+ * several environments at the stable reading), which the app answers as its code routes would. `credential` and
+ * `busy` as a named use's. Otherwise `name`: the caller as the vault decided them, the place, by slugs and ids, the
+ * reading it took, and the app's rows (`app`); `stands`, whether the caller stands at the place and its chain is whole
+ * (if not, nothing of the route was read, and `outcome` is the place's refusal); `personal`, a personal config, which
+ * serves no UI route (decision 7: 409 `route_not_personal`, nothing of the route read); `route`, what the place's
+ * definitions say of it; `keys`, the route's keys in the order its item names them, each resolved; and, all or nothing,
+ * each one's value, or the first refused, by its index (`route_not_cleared`: its editor's decision, `why` naming them),
+ * or busy.
+ */
+export type RouteUseOutcome =
+  | { served: false }
+  | { served: true; route: 'credential'; outcome: Extract<UseOutcome, { code: UseCode }> }
+  | { served: true; route: 'busy'; outcome: Extract<UseOutcome, { busy: UseBusy }> }
+  | {
+    served: true; route: 'name'; standing: Access; app: string | null;
+    place: { project: string; environment: string } | null;
+    at: { projectId: string; environmentId: string } | null;
+    reading: 'named' | 'stable';
+    stands: boolean;
+    personal: boolean;
+    found: RouteFound | null;
+    keys: NamedKey[];
+    /** When the credential the caller came in on ends: what bounds the values' cache (ms since the epoch; null: never). */
+    expiresAt: number | null;
+    outcome:
+      | { ok: true; values: (NamedValue | null)[] }
+      | { ok: false; index: number | null; code: UseCode; number: string | null; why?: string }
+      | { ok: false; busy: UseBusy; retryAfter: number };
+  };
+
+/**
+ * `Vault.proxyItem`'s question: who asks (a handle at the place it names, or its own with `place` null; a workload at
+ * its place's id), and which item, or every one (`name` null).
+ */
+export type ProxyItemInput = {
+  caller: RouteCaller;
+  place: { project: string; environment: string } | null;
+  name: string | null;
+  at: number;
+  deadline: number;
+};
+
+/**
+ * `Vault.proxyItem`'s answer: the caller refused, by the use's code (`credential` for one no credential bears out), or
+ * busy; or the place's items as a use finds them: `item`, the one named (null for none there), or `items`, every one the
+ * chain serves, each with the level that serves it; `seals`, the levels checked, nearest first; `fault`, a level a writer
+ * changed, which serves nothing (the plan answers 503). `personal`: a personal config, which serves no UI item.
+ */
+export type ProxyItemOutcome =
+  | { ok: false; code: UseCode | 'credential'; busy?: undefined }
+  | { ok: false; busy: UseBusy; retryAfter: number }
+  | {
+    ok: true; personal: boolean; fault: 'tampered' | 'stale' | null; seals: string[];
+    item: (DecidedItem & { level: number }) | null;
+    items: (DecidedItem & { level: number })[] | null;
+    place: { projectId: string; environmentId: string } | null;
   };
 
 /**

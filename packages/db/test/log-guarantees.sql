@@ -93,7 +93,7 @@ BEGIN
                WHERE proname = 'use_covered' AND pronamespace = 'public'::regnamespace) THEN
         RAISE EXCEPTION 'FAIL: a use''s cover may be probed by a plan for any values';
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('use_credential', 'use_batch', 'use_named_batch') AND pronamespace = 'public'::regnamespace
+    IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('use_credential', 'use_batch', 'use_named_batch', 'use_route') AND pronamespace = 'public'::regnamespace
                  AND prosrc ~* '(FROM|JOIN)\s+public\.log_uses\M') THEN
         RAISE EXCEPTION 'FAIL: a use function reads log_uses in a statement the hot login plans for any values';
     END IF;

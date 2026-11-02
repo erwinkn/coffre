@@ -19,7 +19,7 @@
  * Any number of isolates run it side by side: every decision locks what it
  * is about in the database, so they share one log and one bulk limit.
  */
-import { gated, type NamedManyInput, type NamedUseInput, type UseInput, type UseManyInput, type Vault, type VaultAnswer, type VaultEntry, type VaultMethod } from '@coffre/core/vault';
+import { gated, type NamedManyInput, type NamedUseInput, type ProxyItemInput, type RouteUseInput, type UseInput, type UseManyInput, type Vault, type VaultAnswer, type VaultEntry, type VaultMethod } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -100,6 +100,8 @@ export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
       case 'useMany': return this.#useMany(args[0] as UseManyInput);
       case 'useNamed': return this.#useNamed(args[0] as NamedUseInput);
       case 'useNamedMany': return this.#useNamedMany(args[0] as NamedManyInput);
+      case 'useRoute': return this.#hot(args[0] as RouteUseInput, (vault, input) => vault.useRoute(input));
+      case 'proxyItem': return this.#hot(args[0] as ProxyItemInput, (vault, input) => vault.proxyItem(input));
       case 'about': return this.#about();
       case 'sealing': return this.#sealing();
       default: return this.#call((vault) => (vault[method] as (...given: unknown[]) => Promise<unknown>)(...args));
@@ -140,6 +142,22 @@ export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
     try {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).useMany!(input);
+    } finally {
+      this.ctx.waitUntil(pool.end(closeBy(input)));
+    }
+  }
+
+  /**
+   * A route use, or `proxyItem`'s read (T186 PR C): the hot path's one connection, for its statements (one; two on a map
+   * miss; more for a second round or a route of many keys), closed by the call's deadline at the latest, as a use's.
+   */
+  async #hot<T extends { deadline: number }, R>(input: T, run: (vault: Required<Vault>, input: T) => Promise<R>): Promise<R> {
+    const { prepared, hotDatabase } = this.#behind(await this.#prepared());
+    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
+    const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
+    try {
+      const hot = createDatabase(pool);
+      return await run(openVault(hot, prepared, hot), input);
     } finally {
       this.ctx.waitUntil(pool.end(closeBy(input)));
     }

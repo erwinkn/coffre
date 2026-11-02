@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **The vault uses a UI definition's keys, as its route (T186, PR C1).**
+  `Vault.useRoute` finds a route, signer, verifier or tunnel written in the
+  UI by its name at the place (a handle's URL read the place way or the
+  stable way, or a workload's place), through the fork chain, its seal
+  checked against its object's newest change, and uses every key it sends
+  in one statement on a warm map (two on a miss): each key decided for the
+  caller, as any use, and for the item's editor, what their save froze
+  intersected with what they hold now, so an editor demoted or removed, or
+  a key made sensitive under a Developer's route, stops it
+  (`route_not_cleared`). Every entry names its route, under its MAC, and a
+  cover rides only an entry of the same route made after the route's and
+  its editor's last change. `Vault.proxyItem` reads a place's items as a
+  use would, using nothing. Nothing in the app calls either yet (PR C2).
+  Migration 0058 adds `log_uses.route`, a route argument to `use_covered`
+  and `use_credential`, and `use_route`; the previous release runs on it.
+  Where a member of the database's owner runs it, what it makes is that
+  login's while `use_batch` and `use_named_batch` stay the owner's, so it
+  grants each use function's owner EXECUTE on those it calls (and
+  `use_credential`'s owner the helpers that run as it), as 0057 does:
+  without that, every batch would fail with 42501.
+
 - **The app and the vault run one release at a time.** Every call between
   them goes through one envelope, `call(release, method, args)`, the
   `VAULT` binding's only method, and the Node vault's only route (`POST

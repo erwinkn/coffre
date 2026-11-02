@@ -208,7 +208,10 @@ REMOVALS=(
   "Routing CopyFromVault EverySendAllowed"
   "Routing SentAsDecided EverySendAllowed"
   "Routing BoundToDefinition EverySendAllowed"
-  "Routing ClearanceAtUse EverySendAllowed"
+  # Decision 5(b): the frozen clearance against the key's nature now, and the editor's standing now (RoutingEditor).
+  "RoutingEditor ClearanceAtUse EverySendAllowed"
+  "RoutingEditor EditorStillHolds EverySendAllowed"
+  "RoutingEditor FencedRead EverySendAllowed"
   "Routing KeptExpires WithinWindow"
   "Routing OneVersion EverySendAllowed"
   "RoutingCode ClearSuperseded NoRevival"

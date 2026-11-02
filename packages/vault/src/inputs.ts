@@ -351,6 +351,37 @@ export function proxyIndex(items: Readonly<Record<string, ProxyItem>>): [string,
   return Object.keys(items).sort().map((name) => [name, itemDigest(items[name]!)]);
 }
 
+/**
+ * The index a row's `digests` column holds (`indexBytes`), read back: each entry's name and digest, in order; null for
+ * bytes no index is (a writer's), which a use takes as no seal (`tampered`).
+ */
+export function parseIndex(bytes: Uint8Array): [string, Buffer][] | null {
+  const index: [string, Buffer][] = [];
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  for (let at = 0; at < buffer.length; ) {
+    const length = buffer[at]!;
+    const end = at + 1 + length + 32;
+    if (length === 0 || end > buffer.length) return null;
+    const name = buffer.toString('utf8', at + 1, at + 1 + length);
+    // Sorted, each once, as `proxyIndex` writes it: anything else is no index the vault wrote.
+    if (index.length > 0 && !(index.at(-1)![0] < name)) return null;
+    index.push([name, Buffer.from(buffer.subarray(at + 1 + length, end))]);
+    at = end;
+  }
+  return index;
+}
+
+/**
+ * Whether `seal` is the vault's over an environment's proxy object as its index reads (`proxyIndex`): what a use checks,
+ * having read its route's item and the index, never every item (docs/design/proxy-ui.md, section 2). The same seal as
+ * `sealed` gives the whole object, whose seal covers that index.
+ */
+export function sealedIndex(keys: SealKeys, id: string, index: readonly (readonly [string, Buffer])[], seal: Buffer | null): boolean {
+  if (seal === null || seal.length !== SEAL_BYTES) return false;
+  const body = canonical({ kind: 'proxy', id, index: index.map(([name, digest]) => [name, digest.toString('hex')]) });
+  return keys.some((key) => timingSafeEqual(createHmac('sha256', key).update(`coffre.seal.v1\0proxy\0${id}\0`).update(body).digest().subarray(0, SEAL_BYTES), seal));
+}
+
 /** The index as its row's `digests` column holds it: each entry its name's length (a byte), its name, then its 32-byte digest. */
 export function indexBytes(items: Readonly<Record<string, ProxyItem>>): Buffer {
   return Buffer.concat(proxyIndex(items).flatMap(([name, digest]) => {
