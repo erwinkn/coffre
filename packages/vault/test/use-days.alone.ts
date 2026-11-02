@@ -4,6 +4,14 @@
 // of `log_uses` named every day's partition until 0057: planning it read thousands of buffers more at a hundred days,
 // and every use locked each day (26 locks a use at 5 days, 130 at 109, measured), past the 16 a backend takes without
 // the shared lock table.
+//
+// It runs alone, after the suite (scripts/test-suite.sh, T196): it holds each call to the same work as the same call
+// at the other age, and a call that plans everything again, as a first call does, reads and locks what a first call
+// does. A commit of thousands of catalog changes anywhere in the cluster, another test's migration in its own database,
+// overflows Postgres's invalidation queue, 4,096 messages every database shares, and makes every backend's next call
+// such a call (`cache state reset`): beside the suite, the hot login's sixth call at 106 days once read 3,728 buffers
+// and took 86 locks, where it read 24 and took 35 (CI, #468). One such commit from another database before that call
+// does the same at either age (86 locks at 5 days and at 106, 3,363 buffers and 3,764): no use's own plan.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
