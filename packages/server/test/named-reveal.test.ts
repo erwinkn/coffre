@@ -699,6 +699,23 @@ test("at a fork, every refusal of a key is one answer in one vault call: one inh
   await clientFor(deps, ROOT).access.set(`user:${FORKER}`, { 'market/feature': 'developer' });
 });
 
+test("a list naming one key twice is that key's list of one: the same answer, the same call, the same entries, refused or not (review of T165 PR 2)", async () => {
+  await fork();
+  const token = await personalToken(FORKER, { 'market/feature': 'developer' });
+  const answer = async (keys: readonly string[]) => {
+    calls.length = 0;
+    const since = await newest();
+    const { status, body: { operationId: _, ...body } } = await reveal(token, { path: 'market/feature', keys });
+    return { status, body, calls: [...calls], entries: await entriesSince(since) };
+  };
+  // Its own, dev's that they do not read, a key never made.
+  for (const key of ['OWN', 'API_KEY', 'NEVER_MADE']) {
+    const once = await answer([key]);
+    assert.deepEqual(await answer([key, key]), once, key);
+  }
+  assert.equal((await answer(['API_KEY', 'API_KEY'])).status, 404, "dev's, refused as every key is");
+});
+
 test("the proxy's use of a key a fork inherits, on the fork's URL and at a handle's stable URL, is the vault's one call by name (T165)", async () => {
   await fork();
   const handle = (await runtime.signin!.issueHandle({ ...(await contextFor(deps, DEV)), personalToken: null }, { label: 'run', expiresInMinutes: 60, paths: ['market/feature'] })).token;

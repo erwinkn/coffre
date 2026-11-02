@@ -315,7 +315,7 @@ before(async () => {
     deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   }
   // Each call the app makes of the vault, by name: its sequence says the route a request took (`routeOf`).
-  for (const method of ['useNamed', 'use', 'access', 'unwrap'] as const) {
+  for (const method of ['useNamed', 'useNamedMany', 'use', 'useMany', 'access', 'unwrap'] as const) {
     const call = deps.vault[method] as ((...args: unknown[]) => Promise<unknown>) | undefined;
     if (call !== undefined) {
       (deps.vault as unknown as Record<string, unknown>)[method] = (...args: unknown[]) => {
@@ -328,7 +328,14 @@ before(async () => {
   }
   const config = resolveConfig({
     publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64'),
-    plugins: [credentialProxy({ credentials: { api: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}'), egress } }, cacheSeconds: 0 })],
+    plugins: [credentialProxy({
+      credentials: {
+        api: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}'), egress },
+        // Two keys, the proxy's several by name (T165): API_KEY, and OTHER, which no cell makes.
+        pair: { upstream: 'https://api.example', inject: header('x-api-key', '{API_KEY}:{OTHER}'), egress },
+      },
+      cacheSeconds: 0,
+    })],
   });
   runtime = createRuntime(config, deps.db, deps.vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
   runtime.plugins = checkPlugins(config.plugins);
@@ -344,10 +351,10 @@ after(async () => {
   await app?.close();
 });
 
-/** `POST /api/reveals` of a path with a bearer token: its status and body, as sent. */
-async function reveal(token: string, path: string): Promise<{ status: number; body: string }> {
+/** `POST /api/reveals` of a path with a bearer token, some keys of it, if any: its status and body, as sent. */
+async function reveal(token: string, path: string, keys?: readonly string[]): Promise<{ status: number; body: string }> {
   const response = await fetchApi(new Request(`${ORIGIN}/api/reveals`, {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path }),
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path, ...(keys === undefined ? {} : { keys }) }),
   }), runtime, { sourceIp: null });
   return { status: response.status, body: await response.text() };
 }
@@ -399,6 +406,8 @@ async function cell(row: Row, key: Key) {
   const held = `${place}/API_KEY`;
   // A person's `dev@me` is the proxy's only where the deployment generates values for dev: by the API alone.
   const url = row.where === 'mine' ? null : `/use/${row.where === 'fork' ? fork : place}/api/v1/thing`;
+  // The proxy's credential of two keys, which the vault reads by name in one call (T165).
+  const pairUrl = row.where === 'mine' ? null : `/use/${row.where === 'fork' ? fork : place}/pair/v1/thing`;
   // Used before: through another token of theirs, while they stood, whose use leaves the key fresh in their set.
   if (USED.has(key)) {
     const other = (await runtime.signin!.issuePersonalToken(context, { label: 'other', expiresInMinutes: 60, scope: grants })).token;
@@ -457,10 +466,17 @@ async function cell(row: Row, key: Key) {
       WHERE secret_id IN (SELECT s.id FROM secrets s JOIN environments e ON e.id = s.environment_id JOIN projects p ON p.id = e.project_id
         WHERE p.slug = ${project} AND s.key = 'API_KEY')`);
   }
-  return { key, person, token, handle, path, url };
+  return { key, person, token, handle, path, url, asks, pairUrl };
 }
 
-test(`through the app, a person is answered alike for every key they may not have, in ${ROWS.length} rows, by the API and the proxy (T158, D153)`, { timeout: 3_600_000 }, async () => {
+/**
+ * Whether a row's several-key requests are held alike too (T165, B2's PR 2): where they stand nowhere at the place,
+ * their grant there or their token revoked. Standing, a request of several keys says which the place holds, leaves out
+ * or refuses, keys they may know of (R6), and use-named-many.test.ts holds its yes.
+ */
+const manyAlike = (row: Row) => row.lost === 'revoked' || row.lost === 'token revoked';
+
+test(`through the app, a person is answered alike for every key they may not have, in ${ROWS.length} rows, by the API and the proxy (T158, D153)`, { timeout: 7_200_000 }, async () => {
   const differing: string[] = [];
   // The hot path's statements counted to their requests, over the run: none would mean the relay read no Bind's
   // request, and every cell would be alike for nothing.
@@ -477,7 +493,7 @@ test(`through the app, a person is answered alike for every key they may not hav
         for (const key of KEYS) cells.push(await cell(row, key));
         if (row.window === 'passed') for (const c of cells) await rowsOf(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${`user:${c.person}`}`);
         if (row.admission === 'past the floor') await db.owner.update(logFence).set({ atFloor: Date.now() + 60_000 });
-        const answers: { key: Key; api: unknown; proxy: unknown; work: unknown; sent: { api: HotCall | undefined; proxy: HotCall | undefined } }[] = [];
+        const answers: { key: Key; api: unknown; proxy: unknown; work: unknown; sent: { api: HotCall | undefined; proxy: HotCall | undefined }; many: unknown }[] = [];
         try {
           for (const c of cells) {
             let release!: () => void;
@@ -504,9 +520,24 @@ test(`through the app, a person is answered alike for every key they may not hav
               };
               const api = await measured(() => reveal(c.token, c.path));
               const proxy = await measured(() => (c.url === null ? Promise.resolve(null) : proxied(c.url, c.handle)));
+              // Several keys (T165): two by name, every key of the place, and the proxy's credential of two, each the
+              // vault's one call by name, its statements on the hot path all counted (they bind no use's request id).
+              const several = async <T>(ask: () => Promise<T>) => {
+                const [calls, own, sent] = [vaultCalls.length, appStatements(), POSTGRES ? hot!.statements() : 0];
+                const answer = await ask();
+                await drainBackgroundTasks();
+                return { answer, work: [vaultCalls.slice(calls), POSTGRES ? hot!.statements() - sent : 0, appStatements() - own] };
+              };
+              const many = manyAlike(row)
+                ? {
+                  list: await several(() => reveal(c.token, c.asks, ['API_KEY', 'OTHER'])),
+                  whole: await several(() => reveal(c.token, c.asks)),
+                  pair: await several(() => (c.pairUrl === null ? Promise.resolve(null) : proxied(c.pairUrl, c.handle))),
+                }
+                : null;
               answers.push({
                 key: c.key, api: api.answer, proxy: proxy.answer, work: { api: [api.calls, api.statements, api.app], proxy: [proxy.calls, proxy.statements, proxy.app] },
-                sent: { api: api.sent, proxy: proxy.sent },
+                sent: { api: api.sent, proxy: proxy.sent }, many,
               });
             } finally {
               hot?.delay(0);
@@ -550,6 +581,14 @@ test(`through the app, a person is answered alike for every key they may not hav
             const spread = read.length === 0 ? 0 : Math.max(...read.map((r) => r.buffers)) - Math.min(...read.map((r) => r.buffers));
             widest = Math.max(widest, spread);
             if (spread > BUFFER_SLACK) differing.push(`${label}: ${via}, buffers ${read.map((r) => `${r.key} ${r.buffers}`).join(', ')}`);
+          }
+        }
+        // Several keys, standing nowhere there: every cell alike, byte for byte, in as many vault calls and statements,
+        // whatever API_KEY is or was (formal/ProbingMany.tla, SameAnswer). Asked past the floor, busy alike.
+        if (manyAlike(row)) {
+          const [one] = answers;
+          if (answers.some((a) => JSON.stringify(a.many) !== JSON.stringify(one!.many))) {
+            differing.push(`${label}: several keys, ${answers.map((a) => `${a.key} ${JSON.stringify(a.many)}`).join(' | ')}`);
           }
         }
         // As asked, never a 503: no lock waited for, no statement more than the deadline holds.

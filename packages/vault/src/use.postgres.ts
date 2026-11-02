@@ -3,7 +3,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { GATE_ROLES } from './decide.ts';
-import type { UseCall, UseRow } from './use.ts';
+import type { NamedAhead, NamedBatchCall, NamedBatchRows, UseCall, UseRow } from './use.ts';
 
 /**
  * A use on Postgres: one call of `use_credential` (0024's, as 0053 has it), one
@@ -54,6 +54,41 @@ export async function callBatch(db: Queryable, calls: readonly UseCall[], lock: 
     ${first.way}::smallint, ${first.principal}::text, ${lock}::text
   )::text AS uses`);
   return rowsOfBatch(row!.uses);
+}
+
+/**
+ * A request's several keys by name on Postgres (T165, B2's PR 2): one call of `use_named_batch` (0055), one statement
+ * and one round trip, its own transaction: the gate's named call with no key, then, for one who stands there, each key,
+ * the keys `calls` name or, `calls` null, every key the place holds, at most `limit`: a key by its ids when its call has
+ * them (a use by ids, which the statement makes only when they are its name's now, its value sealed), else by its name
+ * alone. It answers the gate's row, the names it listed, each key's row, whether each was by ids, and their app rows.
+ */
+export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readonly NamedBatchCall[] | null, limit: number): Promise<NamedBatchRows> {
+  const names = gate.names;
+  if (names === undefined || gate.credential !== null || names.key !== null) throw new Error("a named batch's gate reads by its names alone, with no key");
+  const [first] = calls ?? [];
+  if (calls !== null && (first === undefined || calls.length > limit || calls.some(({ key, call }) => key === '' || call.at !== gate.at || call.purpose !== gate.purpose || call.deadline !== gate.deadline
+    || call.way !== first.call.way || call.principal !== first.call.principal || (call.names === undefined ? call.credential === null : call.names.key !== key || call.credential !== null)))) {
+    throw new Error("a named batch's keys are one request's, each by its name alone or by its ids, at most its limit");
+  }
+  const list = <T>(of: (call: UseCall) => T) => (calls === null ? null : sql.param(calls.map(({ call }) => of(call))));
+  const [row] = await rowsOf<{ uses: string }>(db, sql`SELECT use_named_batch(
+    ${names.tokenHash}::bytea, ${names.project}::text, ${names.environment}::text, ${names.handle}::boolean, ${sql.param([...names.unless])}::text[],
+    ${names.accepts.signin}::boolean, ${sql.param([...names.accepts.issuers])}::text[], ${GATE_ROLES}::jsonb,
+    ${String(gate.at)}::bigint, ${gate.purpose}::smallint, ${String(gate.deadline)}::bigint, ${gate.mac}::bytea,
+    ${calls === null ? null : sql.param(calls.map(({ key }) => key))}::text[], ${list((call) => call.credential)}::uuid[], ${list((call) => call.secretId)}::uuid[], ${list((call) => call.place)}::uuid[],
+    ${list((call) => call.requestId)}::bigint[], ${list((call) => call.mac)}::bytea[],
+    ${list((call) => call.cover?.number ?? null)}::bigint[], ${list((call) => (call.cover === undefined ? null : String(call.cover.at)))}::bigint[], ${list((call) => call.cover?.requestId ?? null)}::bigint[],
+    ${list((call) => call.known?.newest ?? null)}::bigint[], ${list((call) => call.known?.newestMac ?? null)}::bytea[],
+    ${list((call) => call.known?.cap.count ?? null)}::integer[], ${list((call) => (call.known === undefined ? null : String(call.known.cap.windowMs)))}::bigint[],
+    ${first?.call.way ?? 0}::smallint, ${first?.call.principal ?? null}::text,
+    ${limit}::integer
+  )::text AS uses`);
+  type Read = { gate: Record<string, unknown>; keys: string[] | null; rows: (Record<string, unknown> | null)[]; by_ids: boolean[]; aheads: (NamedAhead | null)[] };
+  let read = JSON.parse(row!.uses) as Read;
+  // Read again exactly if any row has a whole number `JSON.parse` could not read (`rowOf` says why).
+  if (inexact(read.gate) || read.rows.some((one) => one !== null && inexact(one))) read = exactly(row!.uses) as Read;
+  return { gate: rowFrom(read.gate), keys: read.keys, rows: read.rows.map((one) => (one === null ? null : rowFrom(one))), byIds: read.by_ids, aheads: read.aheads };
 }
 
 /** `use_batch`'s JSON array, each element as `rowOf` reads one, the array read again exactly if any needs it. */

@@ -89,6 +89,28 @@
   vault of 0.15.0 in vain: each reads them as before, mid-deploy
   (migration 0051, additive).
 
+- **A read of several keys is the vault's one call by name too.** `coffre
+  export market/dev`, `coffre export --keys A,B`, a reveal of a list of
+  keys, and the proxy's credential of two keys (`{API_KEY}:{API_SECRET}`),
+  at an environment, a fork or `dev@me`, now start with one statement of
+  the vault's: it decides your standing at the place first, from rows no
+  key decides, and only then lists or reads the keys, resolving every name
+  in one query: a key goes by the ids the vault has mapped for it when the
+  statement finds they are its name's now, else on to the batch by ids
+  with the ids it found (a plain value or a reference, by its name).
+  Before, the app read the place and every key
+  it holds (`app_read`, or a fork's layers) before deciding your standing:
+  a refusal's work hung on what the place holds. Now a refusal is one
+  statement that reads no key, the same buffers whatever the place holds.
+  A yes is one round trip where it was two: the proxy's two-key `/use` at
+  1,000 a second answers in 30 ms at p50 (50 before), for about 0.9 ms more
+  of Postgres CPU a request, the gate's; a whole environment costs what the
+  batch by ids of its keys does. The values are used all or nothing as
+  before (the batch by ids, T167), and a person's read still leaves
+  sensitive values out, now without using them. Mid-deploy, an app of
+  0.15.0 never asks for it, and this app asking a vault without it reads
+  as before (migration 0055, additive).
+
 - **`coffre verify instance` never picks the instance for you.** It
   creates a project, an environment, a service account, grants and a secret
   and walks the whole audit log, and until now it took this machine's

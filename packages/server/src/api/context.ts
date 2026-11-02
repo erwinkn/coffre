@@ -11,7 +11,7 @@ import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, UnloggedRefusal, vaultRefused } from './errors.ts';
-import type { Asking, Decided } from './keys.ts';
+import type { Asking, Decided, DecidedMany } from './keys.ts';
 import { formatMember } from './paths.ts';
 import type { Render } from './render.ts';
 import type { PersonalToken, SigninService } from './signin.ts';
@@ -86,7 +86,7 @@ export type ApiContext = {
    * The use of the request's one key the vault made already, by name, and the rows it answered (`useByName`, T145): a
    * reveal of that key reads and opens nothing again.
    */
-  named?: { decided: Decided; ahead: ReadAhead | null };
+  named?: { decided: Decided | DecidedMany; ahead: ReadAhead | null };
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */

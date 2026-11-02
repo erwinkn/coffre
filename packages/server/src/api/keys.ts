@@ -4,6 +4,8 @@ import {
   USE_DEADLINE_MS,
   USE_METADATA_LENGTH,
   useRefusalMessage,
+  type NamedKey,
+  type NamedManyOutcome,
   type NamedUseOutcome,
   type Purpose,
   type Refusal,
@@ -117,9 +119,9 @@ export async function openValues(
    * The use of this request's one key the vault made already, by name (`Vault.useNamed`, T145): nothing is opened
    * again, and its outcome is the value's, a plain one's text included, which the vault decided as any.
    */
-  decided?: Decided,
+  decided?: Decided | DecidedMany,
 ): Promise<Keyed<string> & { used?: true; stood?: true }> {
-  if (decided !== undefined) return decidedValues(decided, items);
+  if (decided !== undefined) return 'keys' in decided ? decidedMany(decided, items, asking.purpose) : decidedValues(decided, items);
   const sealed = items.filter((item) => !plain(item));
   if (sealed.length === 0) return { ok: true, values: items.map((item) => item.plaintext!) };
   const { way, ...asked } = asking;
@@ -314,6 +316,51 @@ function decidedValues({ secretId, outcome }: Decided, items: readonly OpenItem[
   });
   // A plain value's use the vault decided writes no entry: the app's records it, as when it handed one back itself.
   return { ok: true, values, stood: true, ...('plain' in outcome ? {} : { used: true as const }) };
+}
+
+/**
+ * A request's several keys the vault decided already, by name (`Vault.useNamedMany`, T165, B2's PR 2): each key it
+ * covered, with its id and where it is held; whether the caller stands at the place, its chain whole; and, all or
+ * nothing, each key's value, or the first refused, or busy. The read decides on the rows the vault answered, and opens
+ * nothing again.
+ */
+export type DecidedMany = {
+  keys: NamedKey[]; stands: boolean;
+  outcome: Extract<NamedManyOutcome, { route: 'name' }>['outcome'];
+  at: Extract<NamedManyOutcome, { route: 'name' }>['at'];
+};
+
+/**
+ * The values of a read of several keys the vault decided already, by name: each item's as the vault handed it back,
+ * found by its key's id (a reference's own, a key a fork inherits by its parent's), of the version the app read; a
+ * refusal as `useValues` answers it, logged by the app where the vault wrote nothing of it. A value the vault did not
+ * hand back for an item the read opens, or of another version, was changed between the vault's read and the app's
+ * (SQLite's app reads its own rows): 409, to ask again.
+ */
+function decidedMany({ keys, outcome }: DecidedMany, items: readonly OpenItem[], purpose: Purpose): Keyed<string> & { used?: true; stood: true } {
+  if (!outcome.ok) {
+    if ('busy' in outcome) throw refusedUse(outcome);
+    const refused = { ok: false as const, code: outcome.code, number: outcome.number };
+    const id = outcome.index === null ? null : keys[outcome.index]!.secretId;
+    const item = items.find((one) => (one.holder ?? one.secret.secretId) === id);
+    // The place's refusal, which the app's own checks refuse first, or a key the read does not open: refused all the same.
+    if (item === undefined) throw refusedUse(refused);
+    throw refusedItem(refused, item, purpose);
+  }
+  const at = new Map(keys.flatMap((key, i) => (key.secretId === null ? [] : [[key.secretId, outcome.values[i] ?? null] as const])));
+  let sealed = false;
+  const values = items.map((item) => {
+    const value = at.get(item.holder ?? item.secret.secretId) ?? null;
+    if (value === null) throw changed();
+    if ('plain' in value) {
+      if (value.versionId !== item.secretVersionId) throw changed();
+      return value.plain;
+    }
+    sealed = true;
+    return valueOf(value.value, item);
+  });
+  // Each sealed value's use is the vault's entry; a plain one's, decided, writes none: the app's records it.
+  return { ok: true, values, stood: true, ...(sealed ? { used: true as const } : {}) };
 }
 
 /** A key this read names, written or removed while it ran: 409, to ask again. */

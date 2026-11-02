@@ -3,9 +3,9 @@ import { personalOf } from '@coffre/core/schemas';
 import { newUseRequestId, USE_DEADLINE_MS, type CredentialAcceptance, type Purpose } from '@coffre/core/vault';
 
 import { authenticateRequest, refusedByKind, type AuthenticatedIdentity } from './auth.ts';
-import { uses015 } from './api/changes.ts';
-import { refusedUse, type Decided } from './api/keys.ts';
-import { namedAhead, type ReadAhead } from './db/read-ahead.ts';
+import { namesMany, uses015 } from './api/changes.ts';
+import { refusedUse, type Decided, type DecidedMany } from './api/keys.ts';
+import { namedAhead, namedManyAhead, type ReadAhead } from './db/read-ahead.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** What the deployment's config accepts of a credential, as the named call carries it (`NamedUseInput.accepts`). */
@@ -89,4 +89,47 @@ export async function useByName(
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
   });
   return { identity, ahead, decided: { secretId: answered.secretId, outcome, at: answered.at }, place: answered.place };
+}
+
+/**
+ * A request's several keys by name, the vault's one call (T165, B2's PR 2; formal/ProbingMany.tla): its keys (`keys`),
+ * or every key the place holds (null), at the place its path names, an environment, a fork or `dev@me`. The vault decides
+ * the caller's standing there first, from rows no key decides, and reads nothing of any key without it; for one who
+ * stands, it resolves each key's name, decides them all, then uses them, all or nothing. It answers the
+ * rows the request checks, the credential's, the place's and each key's, and the caller as it decided them: nothing is
+ * read, asked or kept here first, and the read decides on those rows (`reveal`).
+ *
+ *   Ada's `coffre export market/dev`, 9 keys     one vault call   the 9 values, her standing, every key's rows
+ *   the same, her grant revoked                  one vault call   403 on the place: no key listed or read, whatever dev holds
+ *   the same at market/dev-ada, 2 of dev's       one vault call   each decided at the fork, dev's at dev too
+ *
+ * `leavesSensitive`: the read leaves out a sensitive value, naming it (a person's read), which the vault then uses not.
+ * Null where the vault serves none so, as `useByName` (a vault older than this app among them): the request goes as ever.
+ */
+export async function useManyByName(
+  runtime: CoffreRuntime,
+  request: Request,
+  sourceIp: string | null,
+  token: string,
+  asked: { kinds: readonly TokenKind[]; place: { project: string; environment: string }; keys: readonly string[] | null; purpose: Purpose; leavesSensitive: boolean },
+): Promise<{ identity: AuthenticatedIdentity | Response; ahead: ReadAhead | null; decided: DecidedMany; place: { project: string; environment: string } | null } | null> {
+  const kind = tokenKind(token);
+  if (kind === null || !asked.kinds.includes(kind) || runtime.vault.useNamedMany === undefined || !(await namesMany(runtime.vault))) return null;
+  // Refused on its kind alone: by the credential's own check, as ever, nothing asked of the vault (`useByName`).
+  if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
+  const at = Date.now();
+  const answered = await runtime.vault.useNamedMany({
+    tokenHash: hashToken(token).toString('base64'), place: asked.place, keys: asked.keys, accepts: acceptance(runtime), purpose: asked.purpose,
+    at, deadline: at + USE_DEADLINE_MS, ...(asked.leavesSensitive ? { leavesSensitive: true } : {}),
+  });
+  if (!answered.served) return null;
+  if (answered.route === 'busy') throw refusedUse(answered.outcome);
+  if (answered.route === 'credential') return null;
+  const personal = personalOf(asked.place.environment) !== null;
+  // Every key's rows, the caller standing there and its chain whole; the credential's and the place's only, otherwise.
+  const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal });
+  const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
+    handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
+  });
+  return { identity, ahead, decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, place: answered.place };
 }

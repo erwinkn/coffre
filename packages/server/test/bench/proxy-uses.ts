@@ -48,6 +48,10 @@ export type ProxyLoad = {
    * default, and the handles in turn: every request warm.
    */
   names?: number;
+  /** The credential's two keys, `API_KEY` and `API_SECRET` (`value` and `secret`), in one header: a request's several keys, the vault's named batch (T165, PR 2). */
+  secret?: string;
+  /** The vault's named batch hidden from the app (`about().namedBatches`), as a vault older than the app: several keys read by the app, then used by ids (T167). */
+  unnamed?: boolean;
 };
 
 const load = workerData as ProxyLoad;
@@ -60,23 +64,34 @@ await Promise.all(pools.flatMap((pool, i) => Array.from({ length: sizes[i]! }, (
 const [appPool, vaultPool, hotPool] = pools as [ReturnType<typeof postgresClient>, ReturnType<typeof postgresClient>, ReturnType<typeof postgresClient>];
 
 const upstream = createServer((request, response) => {
-  response.writeHead(request.headers['x-api-key'] === load.value ? 200 : 403);
+  response.writeHead(request.headers['x-api-key'] === (load.secret === undefined ? load.value : `${load.value}:${load.secret}`) ? 200 : 403);
   response.end();
 });
 await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
 
-const vault = await localVault(
+const local = await localVault(
   { database: createDatabase(vaultPool), ...(load.log === '0.15' ? { hotDatabase: createDatabase(hotPool) } : {}), kek: { id: 'test-kek-1', key: load.kek }, owners: [load.owner], bulkLimit: { count: 1_000_000, windowMinutes: 1 } },
   // This thread changes nothing but the policy at its start: the main thread's checkpointer seals it on its next tick.
   load.log === '0.15' ? { log: '0.15', sealThrough: async () => ({}) as never, heldOutside: async () => [], ...(load.names === undefined ? {} : { uses: { names: load.names } }) } : { log: '0.14' },
 );
+const vault = load.unnamed !== true ? local : new Proxy(local, {
+  get(target, name, receiver) {
+    if (name === 'useNamedMany') return undefined;
+    const field = Reflect.get(target, name, receiver) as unknown;
+    if (name !== 'about' || typeof field !== 'function') return typeof field === 'function' ? (field as (...a: unknown[]) => unknown).bind(target) : field;
+    return async (...args: unknown[]) => {
+      const { namedBatches: _, ...rest } = await (field as (...a: unknown[]) => Promise<Record<string, unknown>>).apply(target, args);
+      return rest;
+    };
+  },
+});
 const config = resolveConfig({
   publicUrl: load.origin,
   vault,
   auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }),
   auditChainKey: load.chainKey,
   plugins: [credentialProxy({
-    credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', '{API_KEY}') } },
+    credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}') } },
     insecureUpstreams: true,
     cacheSeconds: load.cacheSeconds,
   })],
