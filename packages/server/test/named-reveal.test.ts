@@ -644,7 +644,9 @@ test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a
     assert.deepEqual(calls, ['useNamed'], `${JSON.stringify(body)}: the vault's one call, by name`);
   }
   // Its key read from the vault's rows, by its path or a list of one alike: no layer of the fork read again, which would
-  // be a snapshot transaction of the app's more (review r3 of #453; `readableValues`).
+  // be a snapshot transaction of the app's more (reviews r3 and r4 of #453; `readableValues`). On Postgres, where the
+  // vault's rows come with the read ahead, the fork's key opens what dev's own does, a place with no layer to read; on
+  // SQLite, which reads no rows ahead, both forms read the fork's layers, alike.
   let transactions = 0;
   const watching = runtimeOver(counted(deps.vault, true), 'github', new Proxy(deps.db, {
     get(target, key) {
@@ -663,7 +665,9 @@ test("a fork's key, its own or one it inherits, and `dev@me`'s, by its path or a
     assert.deepEqual(read.body.values, { API_KEY: DEV_KEY }, JSON.stringify(body));
     return transactions;
   };
-  assert.equal(await opened({ path: 'market/feature', keys: ['API_KEY'] }), await opened({ path: 'market/feature/API_KEY' }), 'a list of one opens what its path does');
+  const byPath = await opened({ path: 'market/feature/API_KEY' });
+  assert.equal(await opened({ path: 'market/feature', keys: ['API_KEY'] }), byPath, 'a list of one opens what its path does');
+  if (TEST_ENGINE === 'postgres') assert.equal(byPath, await opened({ path: 'market/dev/API_KEY' }), "a fork's key opens what dev's own does");
   // Another person's `dev@me`, who has no personal config: dev, read as dev, by name.
   const root = clientFor(deps, ROOT);
   await root.members.add('user:fallback@acme.example');
