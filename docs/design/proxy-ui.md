@@ -401,22 +401,57 @@ isolate). One rule covers every path:
   else, keeps that 404 for a name code lacks until the call, made for a
   workload once the proof is verified and the caller stands, for a handle
   with the handle.
-- **`coffre.proxyItem(caller, place, name)`** is a new context method: a
-  vault call that checks its caller as a use would (the handle's row, or
-  the session that stood), reads the place's sealed proxy rows as a use's
-  statement does, fork chain included (for a handle's stable URL, its one
-  environment, as section 6's readings say), and answers the item's
-  definition, its digest, the object seal and the place's index of names
-  and digests. It decides no use, opens no value and writes no entry. A
-  caller the vault refuses gets that refusal and refreshes nothing, which
-  costs what a bogus handle's use costs today. The app keeps the index, so
-  a name absent from an index confirmed within `cacheSeconds` is 404 with
-  no call. It cannot be `coffre.use`, whose caller is the session a
-  workload is still standing up.
+- **`coffre.proxyItem(caller, place, name)`** is a new context method,
+  used only under `editable: true` (under `false` a name code lacks is 404
+  at once): a vault call that checks its caller as a use would (the
+  handle's row, or the session's principal), reads the place's sealed
+  proxy rows as a use's statement does, and answers in the shape a use
+  sees. That is: the item and its digest; the seal list of the levels it
+  checked, nearest first (section 2); the serving index, every name the
+  chain serves with the level that serves it, so a parent-only route is
+  found in it; and, for a stable URL, the reading and place it chose
+  (section 6), under which the app keys its copy. It also resolves the
+  item's keys by name, and the vault isolate's map keeps their ids as a
+  miss's first call does, so the use that follows is a map hit. With no
+  name it answers every item the place serves (the plan's call, section
+  6). It decides no use, opens no value and writes no entry. A caller the
+  vault refuses gets that refusal and refreshes nothing, which costs what
+  a bogus handle's use costs today. The app keeps the serving index, so a
+  name absent from one confirmed within `cacheSeconds` is 404 with no call.
+  It cannot be `coffre.use`, whose caller is the session a workload is
+  still standing up.
+- **When it is called, by whom.** Two sites, apart. *Counts:* a
+  workload's limit on a cold copy (below) is read inside `standingSession`
+  or `bindingWorkload`, after the proof and every clause are verified and
+  the place is resolved, before `gate.admit`: the caller is the session
+  row's principal at that place, and the `jti` is not spent yet. If the
+  call is refused, or finds no such name, or finds it `tampered`, the
+  counts are `[]` and the outcome is kept: the gate then admits or refuses
+  as it does today, and an admitted request answers that outcome, never a
+  raw error out of `standingSession`. *Refusal refresh:* after the caller
+  stands and, for a workload, after the gate has counted the request.
+- **Where a UI name enters.** Today each entry point finds a name in
+  code's maps and answers 404 before anything else: `serve` tries a
+  workload only for a code credential, an environment URL 404s a name code
+  lacks, a stable URL peeks for a field handle only in known credentials,
+  and a tunnel's `open` 404s before any caller. For a name code lacks,
+  under `editable: true`, each takes one order. `serve` and `compute`:
+  a session-shaped request (DPoP, a binding) stands its workload first,
+  with its counts as above; otherwise the handle is found by the bearer,
+  `x-coffre-handle` or the query, and else by its shape in the body read
+  whole (within today's body limit), and the decided item's `fieldIn`
+  must find it there after the answer, or 503 `moved`. Then the copy, or
+  `proxyItem`, and a 404 only after that. `open`: the caller from the
+  socket's handshake as today, then the copy or `proxyItem`, then 404. A
+  stable URL's place is known only once its caller stands, which is why
+  the caller comes first on every path.
 - **What that costs.** Refreshes go by place and name, not by request:
   refused traffic costs at most one call per route per `cacheSeconds` per
-  isolate (a workload's counted by its gate first), and unknown names at
-  most one per place. A widening edit (an Owner adds `POST /responses/**`
+  isolate, and unknown names at most one per place. An app isolate with
+  no copy of a route costs nothing more on a handle's path (its use,
+  carrying no digest, gets the item in its answer) and one `proxyItem`
+  call on a workload's, sign's or verify's (its counts), once per isolate
+  per route; section 4 counts it. A widening edit (an Owner adds `POST /responses/**`
   to `openai`) takes effect on every path within `cacheSeconds`, as a
   limit edit does, and no warm isolate refuses it for good.
 
@@ -442,7 +477,7 @@ take the same use, with what changes for each:
     `(principal, place) => Promise<GateCounts>`, which those two call once
     they have the place, before `gate.admit`. On a warm isolate it reads
     the copy. On a cold one it calls `coffre.proxyItem` (above), as the
-    session that stood. The use's own call follows the gate, so a cold request still costs 2 calls, now one
+    session's principal. The use's own call follows the gate, so a cold request still costs 2 calls, now one
     before the gate and one after. Sign, verify and presign take their
     counts the same way. After an edit
     to a limit, an isolate counts against the old one until its next use
@@ -499,7 +534,11 @@ take the same use, with what changes for each:
   covering the place (section 8). Signing alone never hands the key out, so
   that is stricter than it needs to be; it keeps one rule for every kind,
   and Erwin may loosen it for signers later. A signer's `limit` is counted
-  as a route's (above).
+  as a route's (above). On a value-cache hit, an HMAC sign or verify takes
+  its parameters (`encoding`, `prefix`, the algorithm) from the entry's
+  item, never the copy: a copy refreshed to version 8 with a new `prefix`
+  must not wrap a secret decided on version 7 (`BoundToDefinition`, as
+  for a route's send).
 - **Tunnels.** A named use of the database item; the tunnel dials the
   decided item's hosts, checked as section 5 says, and the session keeps
   that item's digest. Today's recheck, every `recheckSeconds`, is a plain
@@ -591,6 +630,7 @@ of that and adds the route's name to what the request names.
 | Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the route's item hash to another digest than the copy's and returns the new item in the same answer. Nothing is refused or retried |
 | Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
 | Cache hit | 0 calls | **0 calls** |
+| An app isolate with no copy of the route, the vault's map warm | 1 call | **1 call** for a handle (the answer carries the item); **2, once per app isolate per route**, for a workload, a sign or a verify: `proxyItem` for the counts before the gate, then the use, a map hit |
 | A code route | as today | as today. The app names the keys, and no `proxy` row is read |
 | An isolate's first proxy request | as above | **1 more call, once per isolate**, `editable: false` included: its gate (section 6), a vault call that reads the reserved set. When the isolate's code adds a name, that call makes a `proxy.code` change and answers once it is sealed, about half a second; that happens once per deploy that adds a name |
 
@@ -604,6 +644,22 @@ routes that name the same key with different editors' holdings replay
 apart. The route's two decisions use the place the use resolved (the
 handle's environment, or the one the URL names), and the route as that
 place's object holds it, or its nearest fork ancestor's, by name (decision 6).
+
+**A cover is per route.** 0.15 lets a repeat of a use ride the entry of
+the one before it (a cover) for up to a minute, writing nothing, when it
+is the same credential, key, place and purpose and no input of that entry
+changed since (the isolate's `coverKey` in `use.ts`, the statement's
+`is_covered` in `0045_decide_first.sql`). A route use adds two things to
+that. The route's name is part of a cover's identity on both sides: the
+isolate's key, and the statement's match on the entry's new column. And
+the proxy object (each fork level the lookup checked) and the editor's
+principal join the inputs whose newest change a cover must postdate. With
+routes `a` (Ada's, upstream `good`) and `b` (Lin's, upstream `evil`) both
+sending `{K}`, a use of `b` a second after one of `a` writes its own entry,
+which replay decides under Lin's holdings; and the first use after an
+edit of the route, or after its editor is demoted, writes its own entry
+too. Without this, the log would credit `b`'s use to `a`'s entry, and R53
+would break exactly where this section claims it holds.
 
 **A map hit holds the ids to the definition.** The second call of a miss, and
 every hit, carries the ids the map holds. The statement checks that the
@@ -724,7 +780,8 @@ deploy. That calls for two checks code upstreams never needed:
 ## 6. Code definitions and UI definitions together
 
 **Code wins, by name, and the row shows locked** (R66). The app resolves a
-name in code first, then in the environment's UI definitions. The page shows
+name in code first, then in the environment's UI definitions, on each
+entry point in the order section 3 gives. The page shows
 the code item once, locked, with code's values and no banner. A UI item of
 that name is neither shown nor served.
 
@@ -781,10 +838,28 @@ So a `/use` costs what section 4 counts, whatever the URL, and the
 statement adds the second reading's rows only on a miss. A kept `madeFor`
 still saves the question when present. `GET /use`, which
 answers with no credential, keeps listing code names only, so it reveals
-nothing of an environment's own. The plan (`GET /use/<p>/<e>`) lists the
-environment's UI routes beside code's, by name, from the place's index as
-the vault answered it (a `proxyItem` call with no name, as the plan's
-caller): display only, never a copy.
+nothing of an environment's own.
+
+**The plan shapes UI items as it shapes code's.** The plan
+(`GET /use/<p>/<e>`, what `coffre run` builds the app's environment from)
+is more than a list. Today it gives the handle in place of every key a
+code credential covers, whoever may read it, and keeps the real value
+from the app; it names the credentials, signers and tunnels, and gives
+each tunnel's key the listener's URL. All of that comes from the items'
+contents (their keys, kind and `placeholder`), which a list of names does
+not carry. So the plan first makes one `coffre.proxyItem` call with no
+name, as its caller: the vault answers every item the place serves, fork
+chain included, checked as a use's statement checks them. The plan then
+takes the covering set, the signers' and tunnels' keys and each
+placeholder's shape from code and those items together, before its
+`expose` use picks the keys whose values the app gets. Example: UI route
+`openai` in `market/dev` sending `{OPENAI_API_KEY}`, a secret its holder
+reads. Without the items, the key looks uncovered and the app's
+environment gets the real value; with them it gets the handle, as a code
+route's key does. Those items shape the plan only: they are never kept as
+a sending copy (`CopyFromVault` holds of the use's answers, and nothing
+here sends). A workload's plan does the same for its credential and
+tunnel lists. One more call per plan, which runs once per `coffre run`.
 
 **Scoping code items** (R66): `environments: ['market/prod']` on any code
 item, by full path, because the config is instance-wide and a bare `prod`
@@ -1118,7 +1193,10 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   `proxy.code` and `proxy.release`; `log-replay.ts`); the vault method that
   decides a save (proxy.edit on its sealed rows, the reserved set, frozen
   holdings, each changed item's keys resolved and cleared, CAS, at most
-  256 items).
+  256 items). The vault resolves the keys' names itself, in the save
+  decision's reads of the place, its fork parents and each reference's
+  source; the app sends names only, so an old or buggy app cannot
+  under-clear a save.
 - `@coffre/core/access`: `proxy.edit`, the role editor's new rule;
   `formal/lean` updated in the same PR (AGENTS.md: a change to the access
   rules changes the Lean model).
@@ -1133,7 +1211,10 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   grandparent's item, the last item removed (an empty index, the row
   kept), `GET …/proxy` showing a forged row as `tampered` and never
   answering holdings, a save refused under `editable: false`, the backup login reads it
-  (`test:schema`), Lean cases.
+  (`test:schema`), Lean cases. Section 8's save-time rows: a sensitive key
+  refused naming who may, an inherited key the editor cannot read in the
+  parent refused, a reference decided where it lives, a key not yet
+  created accepted.
 
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
@@ -1148,12 +1229,22 @@ no storage.
   verified), redaction of every key's forms.
 
 **PR C: the use path for UI definitions.**
+- Migration at the next free number: `log_uses` gains the nullable route
+  column, under the entry MAC; `use_credential` and `use_batch` take the
+  route, read the proxy object(s) and the editor's principal, and match a
+  cover on the route (section 4), on both engines.
+- `@coffre/core/vault`: `NamedUseInput` gains the route; its outcome, the
+  item, the seal list and the digest; `proxyItem`'s input and answer. A
+  `routeUses` bit in `about()`, as `useMany` has `batchUses`: an old vault
+  ignores an unknown `route` field and answers with no item, which would
+  read as "the copy's digest confirmed", so the app refuses UI routes (503,
+  naming the vault's release) until its vault says `routeUses`.
 - `use_credential`: the proxy object(s) and the editor's principal as
   inputs in both shapes, in the seal cache; the named use takes a route; the vault resolves its keys by name,
   decides twice and answers with the definition.
 - The proxy: UI routes, signers, verifiers and tunnels; the value cache keyed
   by the definition's seal; the send before the deadline; the plan
-  (`GET /use/<p>/<e>`) listing UI routes; `proxy.code` with its gate;
+  (`GET /use/<p>/<e>`) shaping UI routes as code's (section 6); `proxy.code` with its gate;
   `coffre.proxyItem` and the provisional checks on every path (section 3).
 - First, before any code (R45, decision 5(b)): `Routing.tla` extended with
   the editor's current holdings as an input of the use's statement, an
@@ -1188,6 +1279,15 @@ no storage.
   (statements and rows flat as the log grows and as an environment gains
   definitions), the `/use` bench against 0.15.1 (no regression, R44),
   conformance for both examples.
+  Covers: the same key used through two UI routes within a minute, and a
+  repeat right after a proxy edit and right after an editor's demotion,
+  each writing its own entry, replay agreeing. The plan: a UI route's key
+  given as the handle, never its value, in a handle's plan and a
+  workload's. Cold entry: a stable-URL workload forward, a stable
+  field-kind handle, a UI tunnel's open, each served without a 404 first;
+  a `proxyItem` refused during counts answering its outcome after the
+  gate. An HMAC `prefix` edit under a warm value cache, the sign still by
+  the entry's item. A vault without `routeUses`, UI routes refused.
 
 **PR D: the page.**
 - #421's Proxy tab on the API: the mock store goes, and so do the "0.16"
