@@ -956,24 +956,35 @@ Concretely, for `/use/market/dev/openai/chat`:
   places' proxy rows (up to eight through forks), picks the reading by the table,
   and answers the vault with it, the place's id, the route's key ids, the
   item and its digest.
-- **The vault isolate's map** (0.15's) keys that answer by the token and
-  the URL's first three segments (`market`, `dev`, `openai`), and holds
-  the reading, the place id and the key ids. The app isolate keeps the
-  definition and its digest, from the use's answer, as its copy. For the
-  stable reading those three segments are the route and the start of the
-  upstream path (`/use/openai/chat/completions`), so each new path would
-  be a miss, two calls under `cacheSeconds: 0` where today's stable URL
-  takes one. PR C keys the map otherwise before building it (section 10,
-  "From the expert review", 1).
-- **On a map hit**, the call names the reading the map holds, with its ids.
+- **The vault isolate's map** (0.15's) keeps two things, neither keyed by
+  the path. Per token: the handle's made-for list, which the miss's
+  statement reads among the caller's rows anyway and answers with (as
+  today's stable URL is kept by token alone, `use.ts`). Per place id and
+  route name: the route's key ids, beside today's per-key ids
+  (`cache.keyed`). A later request picks its reading from the token's
+  list, by the table, whatever its path, and finds the ids by the chosen
+  place and route. So `/use/openai/companies/42/documents/x.pdf` and
+  `/use/openai/models` from one `market/dev` handle are both map hits
+  after the first, one call each under `cacheSeconds: 0`, as today's
+  stable URL is (Fable 5.1's review, `aee4142c`: keying by the URL's
+  first three segments would have made each new path a miss). The app
+  isolate keeps the definition and its digest, from the use's answer, as
+  its copy.
+- **On a map hit**, the call names the reading the map picked, with its ids.
   The statement reads that place only, and answers `moved`, writing
   nothing, if the rule would now pick the other reading (the handle's
   made-for list is among the caller's rows it reads anyway) or the route no
   longer names those keys. Then the isolate reads again, as on a miss.
 
-URLs of one or two segments (`/use/openai`, `/use/openai/models`) are
-not in the table yet, and today mean the 404 or the plan and `compute`;
-PR C states their rule (section 10, "From the expert review", 2).
+**URLs of one or two segments** take the same table. `/use/<a>` is
+always the stable reading of route `<a>`. `/use/<a>/<b>` is the place
+reading, the plan (`GET`) or `compute` (`POST`), only when `<a>/<b>` is an
+environment the handle or session was made for; otherwise it is the stable
+reading of route `<a>` at path `/<b>`. So `GET /use/openai/models` from a
+`market/dev` handle is a GET of route `openai` at `/models`, and `GET
+/use/market/dev` from it is the plan. The plan and `compute` answer 404
+only after the call has decided the reading, never from code's maps
+alone.
 
 So a `/use` costs what section 4 counts, whatever the URL, and the
 statement adds the second reading's rows only on a miss. A kept `madeFor`
@@ -1453,31 +1464,15 @@ is fixed in this document, within PR C.
   the editor's current holdings as an input of the use's statement, an
   action that removes or demotes the editor, and a protection
   (`EditorStillHolds`) whose removal TLC must break.
-- **From the expert review** (Fable 5.1 on `aee4142c`, 2026-11-02), the
-  first two settled in PR C against the code:
-  1. The stable reading's map key. Section 6 keys the vault isolate's map
-     by the token and the URL's first three segments, which for the stable
-     reading of a UI route (`/use/openai/companies/42/documents/x.pdf`)
-     include the upstream path: every new path a miss, two calls under
-     `cacheSeconds: 0`, against today's one (`use.ts` keys the stable URL
-     by token alone; `direct` in `credential-proxy.ts` gives it one call
-     with no cache). The likely fix: a miss's answer carries the handle's
-     made-for list (the statement reads the handle's places already),
-     kept per token beside `Resolved`; route ids are kept per environment
-     and route name; the reading is then picked locally for any path, and
-     the statement's `moved` on a changed reading stays the guard. PR C's
+- **From the expert review** (Fable 5.1 on `aee4142c`, 2026-11-02):
+  1. The stable reading's map key: settled in section 6 (the made-for list
+     per token, route ids per place and route, never the path). PR C's
      `/use` bench gains a row: a no-cache stable UI route over distinct
-     paths, one call each (R44).
-  2. URLs of one or two segments. `GET /use/<a>/<b>` is the plan and
-     `POST` is `compute` today, and fewer than three segments 404 unless
-     `<a>` is a code credential. With UI names, `GET /use/openai/models`
-     from a `market/dev` handle is either a plan for project `openai` or a
-     GET of route `openai` at `/models`. The likely rule mirrors the table:
-     the place reading only when `<a>/<b>` is an environment the handle or
-     session was made for, otherwise the stable reading of route `<a>`;
-     `/use/<a>` is always the stable reading. The plan and `compute` then
-     answer 404 only after the call. Both shapes join the URL-readings
-     tests.
+     paths, one call each (R44); and a test that a changed made-for list
+     answers `moved` on a hit, then serves.
+  2. URLs of one or two segments: settled in section 6. Both shapes join
+     the URL-readings tests, `GET /use/openai/models` and `GET
+     /use/market/dev` from one handle included.
   3. `SealPresent`, a model of an older vault's answer with no seal and no
      digest, arises only with two releases serving together. The version
      gate (decision 8) rules that out, so it is not built.
