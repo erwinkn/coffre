@@ -9,6 +9,13 @@
 //
 //   node --conditions=coffre:source packages/vault/scripts/bench-use.ts --owner <url> --hot <url> --container <name> \
 //     [--seed] [--history 10000] [--form probing|cached|reference|mixed] [--rate 1000] [--seconds 20] [--pool 40]
+//     [--json --cover] [--days 106] [--analyze 2000]
+//
+// `--cover` (with `--json`): a cached use rides its pair's last entry, as an isolate's cover does (the repeat a hot
+// key's uses mostly are), and every call is the vault's decided one (`p_decided`), so that a key's bulk row moving on
+// in a new period takes its lock in the same call. `--days`: the log keeps that many days before today, each its
+// partition, as retention keeps them (T187). `--analyze`: today's partition analyzed every that many ms during the
+// run, as autovacuum does a day that grows, each invalidating the plans that name it.
 //
 // The rig: Postgres 16 in Docker held to 2 vCPU and 2 GB, with pg_stat_statements
 // (track=all). `--seed` makes the instance and its genesis changes, sealed as the
@@ -30,6 +37,7 @@ const { values: args } = parseArgs({
     form: { type: 'string', default: 'mixed' }, rate: { type: 'string', default: '1000' }, seconds: { type: 'string', default: '20' },
     pool: { type: 'string', default: '40' }, pairs: { type: 'string', default: '1000' }, json: { type: 'boolean', default: false }, parse: { type: 'boolean', default: false },
     probing: { type: 'string', default: '0.27' }, function: { type: 'string', default: 'use_credential' },
+    cover: { type: 'boolean', default: false }, days: { type: 'string', default: '0' }, analyze: { type: 'string', default: '0' },
   },
 });
 const owner = postgresClient(args.owner!, { max: 4 });
@@ -193,22 +201,35 @@ async function run(): Promise<void> {
   // Every column, as a typed row; or the JSON as the vault reads it, one text column (use.postgres.ts).
   const text = legacy
     ? `SELECT * FROM use_credential_0022($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9)`
-    : args.json
+    : args.json && args.cover
+      ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, $12, $13, $14, $8, $9, $10, $11, p_decided => true)::text AS r`
+      : args.json
       ? `SELECT ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11)::text AS r`
       : `SELECT * FROM ${args.function}($1, $2, $3, $4, 4::smallint, $5, $6, $7, NULL, NULL, NULL, $8, $9, $10, $11)`;
+  // Each pair's last entry, its cover (`--cover`).
+  const covers = new Map<Pair, { number: string; at: number; request: string }>();
   const call = async (pair: Pair, cached: boolean): Promise<{ rows: Record<string, unknown>[] }> => {
     const at = Date.now();
+    const request = (randomBytes(8).readBigUInt64BE() >> 1n).toString();
+    const cover = cached && args.cover ? covers.get(pair) : undefined;
     const values = [
-      pair.credential, pair.secret, (randomBytes(8).readBigUInt64BE() >> 1n).toString(), String(at), pair.place, randomBytes(16), String(at + 3000),
+      pair.credential, pair.secret, request, String(at), pair.place, randomBytes(16), String(at + 3000),
       cached ? newest!.number : null, cached ? newest!.mac : null, cached ? 1000 : null, cached ? '900000' : null,
-    ].slice(0, legacy ? 9 : 11);
+      ...(args.json && args.cover ? [cover?.number ?? null, cover === undefined ? null : String(cover.at), cover?.request ?? null] : []),
+    ].slice(0, legacy ? 9 : args.json && args.cover ? 14 : 11);
     const rows = [...await hot.unsafe(text, values as never[])] as Record<string, unknown>[];
-    return { rows: args.json ? [rowOf(rows[0]!.r as string) as unknown as Record<string, unknown>] : rows };
+    if (!args.json) return { rows };
+    const row = rowOf(rows[0]!.r as string) as unknown as Record<string, unknown>;
+    if (row.number !== null && row.number !== undefined) covers.set(pair, { number: String(row.number), at, request });
+    return { rows: [row] };
   };
   // Every connection's plans made, and every key's bulk row written, before the measured run.
   await Promise.all(Array.from({ length: Number(args.pool) * 2 }, (_, i) => call(asked[i % asked.length]!, false)));
   for (let i = 0; i < asked.length; i += 20) await Promise.all(asked.slice(i, i + 20).map((pair) => call(pair, false)));
   await q('SELECT pg_stat_statements_reset()');
+  // Autovacuum's ANALYZE of the day the uses grow (`--analyze`).
+  const today = (await q<{ name: string }>(`SELECT 'log_uses_' || to_char(now() AT TIME ZONE 'UTC', 'YYYYMMDD') AS name`))[0]!.name;
+  const analyzing = Number(args.analyze) > 0 ? setInterval(() => void q(`ANALYZE ${today}`), Number(args.analyze)) : undefined;
   const before = cgroupUsec(args.container!);
   const client = process.cpuUsage();
   const since = new Date();
@@ -216,6 +237,7 @@ async function run(): Promise<void> {
   let sent = 0;
   let done = 0;
   let failed = 0;
+  let rode = 0;
   const latencies: number[] = [];
   const inflight = new Set<Promise<void>>();
   while (Date.now() - started < seconds * 1000) {
@@ -223,7 +245,7 @@ async function run(): Promise<void> {
     for (; sent < due; sent += 1) {
       const t0 = performance.now();
       const p = call(asked[Math.floor(Math.random() * asked.length)]!, Math.random() >= probingShare).then(
-        (result) => { if (result.rows[0]?.state !== null) failed += 1; done += 1; latencies.push(performance.now() - t0); },
+        (result) => { if (result.rows[0]?.state !== null) failed += 1; if (result.rows[0]?.covered != null) rode += 1; done += 1; latencies.push(performance.now() - t0); },
         () => { failed += 1; },
       ).finally(() => inflight.delete(p));
       inflight.add(p);
@@ -231,6 +253,7 @@ async function run(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 2));
   }
   await Promise.all(inflight);
+  clearInterval(analyzing);
   const elapsed = (Date.now() - started) / 1000;
   const usec = cgroupUsec(args.container!) - before;
   const spent = process.cpuUsage(client);
@@ -242,9 +265,10 @@ async function run(): Promise<void> {
   const pct = (p: number) => latencies[Math.floor((latencies.length - 1) * p)]?.toFixed(2);
   const history = Number((await q<{ n: string }>('SELECT count(*) AS n FROM log_uses'))[0]!.n);
   console.log(JSON.stringify({
-    form, function: args.function, driver: 'postgres.js', json: args.json, history, rate, served: Math.round(done / elapsed), failed,
+    form, function: args.function, driver: 'postgres.js', json: args.json, history, rate, served: Math.round(done / elapsed), failed, rode,
     backends: Number(backends!.n), cpuMsPerUse: Number((usec / 1000 / done).toFixed(3)), clientMsPerUse: Number(((spent.user + spent.system) / 1000 / done).toFixed(3)), buffersPerUse: Number((Number(stats!.blocks) / Number(stats!.calls)).toFixed(1)),
-    serverMsPerUse: Number((Number(stats!.ms) / Number(stats!.calls)).toFixed(3)), p50: pct(0.5), p99: pct(0.99),
+    serverMsPerUse: Number((Number(stats!.ms) / Number(stats!.calls)).toFixed(3)), p50: pct(0.5), p99: pct(0.99), cover: args.cover,
+    days: Number((await q<{ n: string }>(`SELECT count(*) AS n FROM pg_inherits WHERE inhparent = 'log_uses'::regclass`))[0]!.n), analyze: Number(args.analyze),
   }));
   await hot.end();
 }
@@ -282,6 +306,7 @@ if (args.parse) {
   process.exit(0);
 }
 if (args.seed) await seed();
+for (let d = 1; d <= Number(args.days); d += 1) await q(`SELECT make_day((now() AT TIME ZONE 'UTC')::date - $1::integer)`, [d]);
 await grow(Number(args.history));
 await run();
 await owner.end();

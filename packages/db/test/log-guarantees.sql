@@ -82,6 +82,25 @@ BEGIN
 END
 $$;
 
+-- A use names no day of the log (0057, R48, T187): the hot login plans its statements once for any values, and such a
+-- plan of `log_uses` names, and locks at every use, each day's partition. Its cover's probe is `use_covered`'s, planned
+-- each call for its own values; the use functions only insert into `log_uses`.
+DO $$
+BEGIN
+    -- By its name, whatever its arguments: a release that changes them must not leave the pin on an overload no use calls.
+    IF (SELECT count(*) FROM pg_proc WHERE proname = 'use_covered' AND pronamespace = 'public'::regnamespace) <> 1
+       OR NOT (SELECT 'plan_cache_mode=force_custom_plan' = ANY (coalesce(proconfig, '{}')) FROM pg_proc
+               WHERE proname = 'use_covered' AND pronamespace = 'public'::regnamespace) THEN
+        RAISE EXCEPTION 'FAIL: a use''s cover may be probed by a plan for any values';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('use_credential', 'use_batch', 'use_named_batch') AND pronamespace = 'public'::regnamespace
+                 AND prosrc ~* '(FROM|JOIN)\s+public\.log_uses\M') THEN
+        RAISE EXCEPTION 'FAIL: a use function reads log_uses in a statement the hot login plans for any values';
+    END IF;
+    RAISE NOTICE 'PASS: a use names no day of the log';
+END
+$$;
+
 -- Retention's functions (0027): the vault's alone, each holding it to what a sealed retention change cuts.
 DO $$
 DECLARE
@@ -205,9 +224,9 @@ BEGIN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot holds what the vault does not, or not what it does';
     END IF;
     -- W268's gate and its helpers run inside use_credential, as its owner: no login calls them itself (a personal
-    -- config's, 0051's, too).
+    -- config's, 0051's, and the cover's probe, 0057's, too).
     IF EXISTS (SELECT 1 FROM pg_proc p CROSS JOIN (VALUES ('coffre_app'), ('coffre_vault'), ('coffre_vault_hot'), ('coffre_backup')) AS login (name)
-                WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds') AND p.pronamespace = 'public'::regnamespace
+                WHERE p.proname IN ('use_stands', 'use_admits', 'use_stands_personal', 'use_scope_holds', 'use_covered') AND p.pronamespace = 'public'::regnamespace
                   AND has_function_privilege(login.name, p.oid, 'EXECUTE')) THEN
         RAISE EXCEPTION 'FAIL: a login may call the named use''s gate itself';
     END IF;
