@@ -1196,7 +1196,10 @@ they outlive the deployment that reserved them:
 ### The path
 
 The request's path below the route, `/use/<name>/<rest>`, goes through
-today's refusals unchanged, and only then is matched:
+today's refusals unchanged, and only then is matched. As built in PR B,
+after nine review rounds: [credential-proxy.md](credential-proxy.md),
+section 3, "Several rules, an allow list, and environments", holds the
+exact rules; this section is their reasons.
 
 1. **Today's check, kept whole** (`aim`'s `climbs` in `credential-proxy.ts`).
    Each raw segment is decoded as often as decoding changes it, because a
@@ -1206,10 +1209,16 @@ today's refusals unchanged, and only then is matched:
    old decoder), or if it is a dot segment: `.` or `..`, with trailing blanks
    (`..%20`) and with its `;` parameters dropped, as Tomcat and Spring drop
    them (`..;x`).
-2. **New:** an empty segment other than a trailing one (`//`) is refused,
-   since a glob counts segments.
+2. **New:** a `*` takes no empty segment (`//`), nor one a server may read
+   as none: `;` parameters alone (`;x`, which Tomcat and Spring drop),
+   spaces or dots alone (which Windows drops from a segment's end). Since a
+   glob counts segments, `/companies/;x/documents` must not pass
+   `/companies/*/documents` when the upstream reads it as
+   `/companies/documents`. Anywhere else such a segment is harmless and
+   taken: past a prefix, a `**` or a trailing slash the path the upstream
+   makes of it stays inside, and S3 keys hold `//` (`/bucket/a//b`).
 3. **New:** each segment is percent-decoded once, to bytes, and the decoded
-   segments are matched against the allow list. Bytes, not text: no UTF-8
+   segments are matched against an `allow` list. Bytes, not text: no UTF-8
    check beyond step 1's overlong refusal (a `%FF` segment is forwarded
    today and still is), no case folding, no Unicode normalization. `Café`
    written precomposed and decomposed are two different segments, as they
@@ -1227,32 +1236,44 @@ today's refusals unchanged, and only then is matched:
 | `/kyc/%25252e%25252e/admin` | | 400: a dot segment three decodings down (today too) |
 | `/kyc/..%20/admin`, `/kyc/..%00/admin` | | 400: a dot segment with a blank; a control byte (today too) |
 | `/kyc/..;/admin` | | 400: a dot segment with parameters (today too) |
-| `/companies//x` | | 400: an empty segment (new) |
+| `/companies//documents`, `/companies/;x/documents` under `/companies/*/documents` | | 403: a `*` takes neither (new) |
+| `/bucket/a//b` under `/bucket` or `/bucket/**` | `bucket`, `a`, ``, `b` | matched (under `/bucket`, as today) |
 
-What is new is only the matching: today `paths` is compared with the encoded
-path. Globs need the decoded one: `*` must see `a b.pdf`, and a literal
-`documents` must not miss `docu%6Dents`.
+What is new is only the matching, and only for `allow`: globs need the
+decoded path, since `*` must see `a b.pdf` and a literal `documents` must
+not miss `docu%6Dents`. Legacy `paths` keep today's comparison with the
+encoded path, unchanged: `paths: ['/files/%61']` takes `/files/%61/x` and
+never `/files/a/x`, as on 0.15. Decoding them too would have widened
+existing configs, which review round 8 caught.
 
-**Patterns are decoded too, once.** A pattern's segments are percent-decoded
-when it is read: at save for the UI, at startup for code. So today's
-`paths: ['/companies/a%20b']` becomes the segment `a b` and still matches
-`/companies/a%20b`. It does not match `/companies/a%2520b`, which decodes
-once to `a%20b`, a different segment. A pattern that decodes to a dot segment, a slash or an empty
-segment is refused at save. In code it is a startup warning and matches
-nothing, which is what it matches today, since step 1 refuses every
-request it could have matched. Two code forms keep today's meaning, as
-special cases: `/` is the prefix of no segments and matches every path,
-and one trailing slash, `/companies/`, matches what it matches today:
-`/companies/` and everything below it, not `/companies` itself. The UI
-refuses a trailing slash at save and offers `/companies/**`. PR B's property tests run every
-row above, and random encodings of paths outside a pattern, through the
-old check and the new matcher together.
+**`allow` patterns are decoded too, once,** when read: at save for the UI,
+at startup for code. `/companies/a%20b` becomes the segment `a b` and
+matches `/companies/a%20b`, not `/companies/a%2520b`, which decodes once to
+`a%20b`, a different segment. A pattern that decodes to a dot segment, a
+slash or an empty segment is refused at save. So is a literal some server
+may read as another (review round 5): one that still decodes (`%2561`,
+`a` to a server that decodes twice), one with `;` (`a;v1`, `a` to Tomcat),
+one ending in a space or a dot (`a.`, `a` to Windows). In code each is a
+startup error, or for a legacy path a warning that matches what it
+matched before. Two code forms keep their meaning: `/` matches every path,
+and a trailing slash, `/companies/`, matches what is below `/companies`
+and not it. In `allow` that slash needs a segment below that a server
+reads as one: `/bucket/*/` takes `/bucket/a/b`, never `/bucket/a/...`,
+which a server may read as `/bucket/a` (review round 6). The UI refuses a
+trailing slash at save and offers `/companies/**`. PR B's property tests
+(`test/proxy-match-properties.test.ts`) run every row above, and random
+encodings of paths, through the old check and the new matcher together,
+against a model of how servers behind may read them: no path outside the
+list reaches the upstream under any reading.
 
 ### The allow list
 
 A route holds entries `{ methods, path }`. A request is allowed when any
 entry allows it: its method is in `methods` (empty means any), and its path
-matches. With no entries, every method on every path is allowed, as today.
+matches. With no allow list, every method on every path is allowed, as
+today; an empty one takes nothing (403). An entry of any method on any
+path, `{}` or `{ methods: [] }`, is refused: it would take every request,
+whatever the others say.
 
 - A plain path is a **prefix by segments**: `/companies` matches
   `/companies` and `/companies/42`, never `/companiesX`. That is today's
@@ -1269,7 +1290,11 @@ matches. With no entries, every method on every path is allowed, as today.
   entries, methods from the fixed list.
 
 Code definitions take the same `allow` shape. `methods` and `paths` stay
-accepted and are read as one entry: `{ methods, path }` for each path.
+accepted, with their 0.15 meaning, as one entry `{ methods, path }` for
+each path: `*` is itself, never a glob (a startup warning says so),
+`methods: []` takes no method, and `paths: []` no path, its methods still
+answering first: `methods: ['POST'], paths: []` is a 405 to a GET and a 403
+to a POST (review round 9).
 
 ### Several inject rules
 
