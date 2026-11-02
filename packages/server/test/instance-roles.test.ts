@@ -8,7 +8,7 @@ import { and, asc, eq } from 'drizzle-orm';
 import { listMembers } from '../src/api/members.ts';
 import { memberAccess } from '../src/db/queries.ts';
 import { auditLog, vaultMembers } from './db/tables.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, START_OVER_014, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 // A person's instance role and its scope, which project grants add to:
 // docs/design/instance-roles.md.
@@ -214,6 +214,8 @@ test('the last Owner of the whole instance stays one: 409, saying what to do fir
   await db.owner.update(vaultMembers).set({ generation: 7 }).where(eq(vaultMembers.principal, `user:${ROOT}`));
   await assert.rejects(ada.members.remove(ADA), last);
   await assert.rejects(ada.members.add(ADA, { role: 'admin' }), last);
+  // Under 0.15's log nothing starts Root over (START_OVER_014): Ada stays the last Owner until a reseal.
+  if (START_OVER_014 !== false) return;
   // Root's next request makes them an Owner again, started over: then Ada may step down.
   assert.equal((await root.me()).instanceRole, 'owner');
   assert.equal((await ada.members.add(ADA, { role: 'admin' })).instanceRole, 'admin');

@@ -168,7 +168,7 @@ import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
-import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member } from './store.ts';
+import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog } from './store.ts';
 import { use, UseCache, useLimits, useMany, useNamed, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
@@ -427,6 +427,9 @@ const KEY_CHECK_SAMPLE = 3;
 
 /** The vault's first entry under a new key, which the keys it replaced count only before (`#settle`). */
 const KEY_ROTATE = 'key.rotate';
+
+/** Why a tampered member is not started over under 0.15's log (`#startOver`). */
+const START_OVER_015 = "this member's record failed the vault's integrity check, and 0.15's log changes no member whose row it does not hold: a reseal makes it the log's again";
 
 /** A new member row, before the decision seals it (`#seal`). */
 const UNSEALED = { accessSeq: 0n, mac: Buffer.alloc(32) };
@@ -726,7 +729,7 @@ class VaultService implements Vault {
       ...rest,
       principals,
       head,
-      seals: this.#checksPlaces(),
+      seals: this.#checksSeals(),
       // A read waits for the head in one of a few places in line, or is refused at once.
       ...(reading ? { waiters: READ_HEAD_WAITERS } : {}),
       ...(released === undefined ? {} : { released: { ...released, windowMs: this.#config.bulkLimit.windowMs, clockOffsetMs: this.#prepared.options.clockOffset(), cap: this.#config.bulkLimit.count } }),
@@ -884,17 +887,24 @@ class VaultService implements Vault {
 
   /**
    * Whether `row`, with these grants, is the row the vault last wrote: its
-   * MAC holds, and it names the newest access entry the log has about the
+   * MAC holds, and it is the newest the log says. Before 0.15's cutover,
+   * 0.14's log says it: the row names the newest access entry about the
    * member. A genuine row put back from before a later change passes the
    * first and fails the second. Entries in the vault's name that fail their
    * MAC are passed over, and reported: otherwise whoever can insert a row
-   * could lock any member out.
+   * could lock any member out. Once the cutover is written, 0.15's log says
+   * it, as a use checks it (`#onLog`). `logs`, each member's as read with
+   * the rows (`#sweep`, `#rotate`), else the snapshot's, else read here.
    */
-  async #integrity(db: Queryable, principal: string, row: Member | undefined, grants: readonly GrantRow[], reports: NewEntry[], reads?: Snapshot): Promise<Fault | null> {
+  async #integrity(
+    db: Queryable, principal: string, row: Member | undefined, grants: readonly GrantRow[], reports: NewEntry[], reads?: Snapshot,
+    logs?: ReadonlyMap<string, MemberLog>,
+  ): Promise<Fault | null> {
     if (row !== undefined && !this.#sealed(row, grants)) {
       this.#report(reports, principal, 'mac', row.mac.toString('hex'));
       return 'mac';
     }
+    if (this.#checksSeals()) return this.#onLog(db, principal, row, grants, reports, reads, logs);
     const newest = await this.#newestAccess(db, principal, reports, reads);
     // No row, and no entry of the vault's own: someone never admitted. No
     // row, but one: one deleted, unless it was admitted since the row was
@@ -907,11 +917,67 @@ class VaultService implements Vault {
   }
 
   /**
-   * Whether the vault checks the environment rows it decides on against
-   * 0.15's log (T159): under it, once its cutover is written, which seals
-   * every row. Every read of them asks their seals then (`seals`).
+   * `#integrity` once 0.15's cutover is written (T179 PR 2;
+   * docs/design/two-trips.md, "Compatibility"): the member's row as 0.15's
+   * log holds it, the check a use makes (`checkSeals`, `checkedOf`;
+   * Migration015.tla's NewUseRun), not a walk back through 0.14's entries,
+   * which one statement cannot make (`write_request`, PR 3):
+   *
+   * - the row's seal is the vault's over its object, the row and its grants
+   *   (`principalObject`): `mac` otherwise, written around the vault;
+   * - and its object's newest change's: `stale` otherwise, put back from
+   *   before a change, or a row the log never sealed. No row is right only
+   *   while the log has no change of the member either;
+   * - and 0.14's log holds no access entry of the vault's past the one that
+   *   change accounts for (its `old`; UsesSeeOldWrites): one there is a 0.14
+   *   write the new log never saw, `stale`, which a seal the row passes
+   *   could hide. The newest is read unchecked with the rest; only past
+   *   `old` is it checked, and the forged passed over and reported, as
+   *   before.
+   *
+   * The 0.4 MAC (`#sealed`) is checked first still: it covers columns the
+   * object does not (`created_by`, `status_changed_by`).
    */
-  #checksPlaces(): boolean {
+  async #onLog(
+    db: Queryable, principal: string, row: Member | undefined, grants: readonly GrantRow[], reports: NewEntry[], reads?: Snapshot,
+    logs?: ReadonlyMap<string, MemberLog>,
+  ): Promise<Fault | null> {
+    const log = logs?.get(principal) ?? reads?.memberLogs.get(principal) ?? (await store.memberLogs(db, [principal])).get(principal)!;
+    const { newest } = log;
+    if (row === undefined) {
+      if (newest !== null) {
+        // Deleted outright, unless another decision admitted them since the row was read.
+        if ((await store.member(db, principal)) !== undefined) throw new Retry();
+        this.#report(reports, principal, 'stale', 'log:none');
+        return 'stale';
+      }
+    } else {
+      if (!sealedObject(this.#prepared.log015!.seals, memberRef(principal), principalObject(row, grants), log.seal)) {
+        this.#report(reports, principal, 'mac', 'log:seal');
+        return 'mac';
+      }
+      if (newest === null || newest.seal === null || log.seal === null || !newest.seal.equals(log.seal)) {
+        this.#report(reports, principal, 'stale', 'log:newest');
+        return 'stale';
+      }
+    }
+    const old = newest?.old ?? null;
+    const seen = reads !== undefined && reads.grants.has(principal) ? reads.newestAccess.get(principal)?.seq ?? null : log.access;
+    if (seen === undefined) throw new Error("a member's log read without their newest access entry");
+    if (seen === null || (old !== null && seen <= old)) return null;
+    const authentic = await this.#newestAccess(db, principal, reports, reads);
+    if (authentic === 'none' || authentic === 'forged' || (authentic !== 'unreached' && old !== null && authentic.seq <= old)) return null;
+    this.#report(reports, principal, 'stale', `log:old<${typeof authentic === 'string' ? authentic : authentic.seq}`);
+    return 'stale';
+  }
+
+  /**
+   * Whether the vault checks the rows it decides on against 0.15's log: the
+   * environments' (T159) and the members' (T179 PR 2, `#onLog`), under it,
+   * once its cutover is written, which seals every row. Every read of them
+   * asks their seals then (`seals`).
+   */
+  #checksSeals(): boolean {
     const { log015, cutover, marked } = this.#prepared;
     return log015 !== null && (cutover || marked);
   }
@@ -950,7 +1016,7 @@ class VaultService implements Vault {
    * Each row from `rows` when there, else read, with its seals.
    */
   async #heldGrants(db: Queryable, grants: readonly GrantRow[], reports: NewEntry[], rows?: ReadonlyMap<string, EnvironmentRow>): Promise<GrantRow[]> {
-    if (!this.#checksPlaces()) return [...grants];
+    if (!this.#checksSeals()) return [...grants];
     const ids = [...new Set(grants.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId])))];
     const missing = ids.filter((id) => !rows?.has(id));
     const read = missing.length === 0 ? new Map<string, EnvironmentRow>() : await store.environmentsById(db, missing, { seals: true });
@@ -1282,10 +1348,12 @@ class VaultService implements Vault {
       const [newest] = await store.vaultPage(tx, undefined, 1);
       if (newest?.keyId !== from || (await store.allMembers(tx)).length !== rows.size) throw new Retry();
       const held = await store.grants(tx);
+      // Once 0.15's log holds the rows, each one's seals, all in one read (`#onLog`).
+      const logs = this.#checksSeals() ? await store.memberLogs(tx, [...rows.keys()]) : undefined;
       for (const row of rows.values()) {
         const grants = held.filter((grant) => grant.principal === row.principal);
         // A row that fails is reported, and left under the key it was sealed with, which fails it from now on.
-        if ((await this.#integrity(tx, row.principal, row, grants, reports)) === null) {
+        if ((await this.#integrity(tx, row.principal, row, grants, reports, undefined, logs)) === null) {
           await store.updateMember(tx, row.principal, { mac: memberMac(this.#prepared.rowKey, row, grants) });
         }
       }
@@ -1352,7 +1420,7 @@ class VaultService implements Vault {
     // Settled first, as a decision is: a new process learns here whether the log is cut over, and so whether a fork's row
     // is held to its seal (review r1).
     await this.#settled();
-    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])), { seals: this.#checksPlaces() });
+    const forks = await store.environmentsById(this.#db, throughs.flatMap((through) => (through === null ? [] : [through])), { seals: this.#checksSeals() });
     // A fork whose row is not as 0.15's log holds it is no place to read through (T159), reported.
     const forkReports: NewEntry[] = [];
     for (const [id, fork] of forks) if (this.#placeFault(id, fork, forkReports) !== null) forks.delete(id);
@@ -1906,7 +1974,7 @@ class VaultService implements Vault {
       const environments = await store.environmentsById(d.tx, items.flatMap((item) => {
         const source = sources.get(item.source.secretId);
         return source === undefined ? [item.holder.environmentId] : [item.holder.environmentId, source.environmentId];
-      }), { seals: this.#checksPlaces() });
+      }), { seals: this.#checksSeals() });
       // Each as 0.15's log holds its row (T159).
       this.#placesHold(environments, environments.keys(), d.reports);
       const codes = items.map((item): RefusalCode | null => {
@@ -1988,7 +2056,7 @@ class VaultService implements Vault {
       // Under the log's head: two ends of one reference at once, the second finds the first; and the actor's standing stands.
       const actor = through(await this.#standing(d.tx, principal, d.members.get(principal), d.at, d.reports, d.reads), input);
       // Ending is allowed in a deleted place: deleting one ends the references into and out of it.
-      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId), { seals: this.#checksPlaces() });
+      const environments = await store.environmentsById(d.tx, seals.map((seal) => seal.holder.environmentId), { seals: this.#checksSeals() });
       // Each as 0.15's log holds its row (T159).
       this.#placesHold(environments, environments.keys(), d.reports);
       // Who may end each: write where it is held; for a break, managing the source's project's access too; abandoning,
@@ -2184,7 +2252,8 @@ class VaultService implements Vault {
     const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
     if (subject.status === 'active' && ownsInstance(subject.live)) return false;
     const tampered = subject.status === 'tampered';
-    if (tampered && (await this.#logged(d.tx, principal)) === undefined) return false;
+    // Under 0.15's log, no start over (`#startOver`): reported, and left as it is until a reseal.
+    if (tampered && (this.#checksSeals() || (await this.#logged(d.tx, principal)) === undefined)) return false;
     const correlation = { operationId: randomUUID() };
     const owner = { role: 'owner' as const, scope: EVERYWHERE };
     d.grants.set(principal, [...subject.stored]);
@@ -2277,7 +2346,7 @@ class VaultService implements Vault {
   /** `access`, as the rows are now. */
   async #read(principal: string, superseded: string | null): Promise<Access> {
     const read = async (db: Queryable, reports: NewEntry[]) => {
-      const reads = await snapshot(db, { principals: [principal], members: true, seals: this.#checksPlaces() });
+      const reads = await snapshot(db, { principals: [principal], members: true, seals: this.#checksSeals() });
       const [row, held, at] = [reads.members.get(principal), reads.grants.get(principal)!, this.#at(reads)];
       const fault = await this.#integrity(db, principal, row, held, reports, reads);
       // Their grants but those on a place whose row is not as 0.15's log holds it, which hold nothing (T159).
@@ -2314,6 +2383,12 @@ class VaultService implements Vault {
   async #sweep(db: Queryable, reports: NewEntry[]): Promise<void> {
     const rows = await store.allMembers(db);
     const held = await store.grants(db);
+    if (this.#checksSeals()) {
+      // Once 0.15's log holds the rows: each one's seals and newest access entry in one read, as `#onLog` checks them.
+      const logs = await store.memberLogs(db, rows.map((row) => row.principal));
+      for (const row of rows) await this.#integrity(db, row.principal, row, held.filter((grant) => grant.principal === row.principal), reports, undefined, logs);
+      return;
+    }
     const newest = await store.newestAccessEntries(db);
     for (const row of rows) {
       const grants = held.filter((grant) => grant.principal === row.principal);
@@ -2370,7 +2445,7 @@ class VaultService implements Vault {
         }
       }
       const named = changes.flatMap((change) => (change.environmentId === null ? [] : [change.environmentId]));
-      const known = await store.places(d.tx, changes.map((change) => change.projectId!), named, { seals: this.#checksPlaces() });
+      const known = await store.places(d.tx, changes.map((change) => change.projectId!), named, { seals: this.#checksSeals() });
       // Each environment by its project and slug as 0.15's log holds its row (T159): what a grant there is weighed on.
       this.#placesHold(known.environments, named, d.reports);
       const where: Place[] = changes.map(({ projectId, environmentId, role }) => {
@@ -2564,7 +2639,7 @@ class VaultService implements Vault {
    */
   async #livePlaces(d: Decision): Promise<Awaited<ReturnType<typeof store.liveProjects>>> {
     const projects = await store.liveProjects(d.tx);
-    if (!this.#checksPlaces()) return projects;
+    if (!this.#checksSeals()) return projects;
     const rows = await store.environmentsById(d.tx, 'all', { seals: true });
     const held = [...rows].filter(([id, row]) => this.#placeFault(id, row, d.reports) === null && !row.deleted);
     return projects.map((project) => ({
@@ -2693,8 +2768,8 @@ class VaultService implements Vault {
     const ids = subject.stored.flatMap((grant) => (grant.environmentId === null ? [] : [grant.environmentId]));
     // The decision's own read of them, their grants' places among it once 0.15's log is cut over (`asked.seals`); else read.
     const missing = ids.filter((id) => !reads.environments.has(id));
-    const slugs = missing.length === 0 ? reads.environments : new Map([...reads.environments, ...await store.environmentsById(db, missing, { seals: this.#checksPlaces() })]);
-    if (this.#checksPlaces() && ids.some((id) => !slugs.has(id))) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);
+    const slugs = missing.length === 0 ? reads.environments : new Map([...reads.environments, ...await store.environmentsById(db, missing, { seals: this.#checksSeals() })]);
+    if (this.#checksSeals() && ids.some((id) => !slugs.has(id))) throw new Refused(refusal('tampered', TAMPERED_PLACE), []);
     this.#placesHold(slugs, ids, reports);
     return {
       grants: subject.live.grants.map((grant) => ({
@@ -2766,7 +2841,7 @@ class VaultService implements Vault {
     if (edits === null) return { policy: CLOSED_POLICY, edits: NO_EDITS, readable: false, seq: null };
     const rows = entry === reads?.newestPolicy
       ? reads.environments
-      : await store.environmentsById(db, edits.protected.map((place) => place.environmentId), { seals: this.#checksPlaces() });
+      : await store.environmentsById(db, edits.protected.map((place) => place.environmentId), { seals: this.#checksSeals() });
     return { policy: this.#livePolicy(rows, edits, at, reports), edits, readable: true, seq: (entry as StoredEntry).seq };
   }
 
@@ -2857,7 +2932,7 @@ class VaultService implements Vault {
         if (!(await store.projectLive(d.tx, change.projectId))) throw refused('invalid', 'no such project');
         at.projectId = change.projectId;
         // Each a live environment of the project, or none yet: a fork's id, protected before its row is written.
-        const found = await store.environmentsById(d.tx, change.environmentIds, { seals: this.#checksPlaces() });
+        const found = await store.environmentsById(d.tx, change.environmentIds, { seals: this.#checksSeals() });
         // Each as 0.15's log holds its row (T159, review r1): its project and whether it was deleted decide what changes, and
         // a tombstone set around the log would keep a protection's end from its object. One the log has never held (no
         // seal, no change) is 0.14's alone, which the change path takes as such.
@@ -2890,7 +2965,7 @@ class VaultService implements Vault {
       }
       // The policy now, and the newest change, which it is as of: this one's, when it changed anything.
       const answer = {
-        policy: this.#livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId), { seals: this.#checksPlaces() }), next, d.at, d.reports),
+        policy: this.#livePolicy(await store.environmentsById(d.tx, next.protected.map((place) => place.environmentId), { seals: this.#checksSeals() }), next, d.at, d.reports),
         seq: newest === null ? null : Number(newest),
       };
       if (!readable || JSON.stringify(next) !== JSON.stringify(edits)) {
@@ -2942,6 +3017,11 @@ class VaultService implements Vault {
    * and their generation moves past both the row's and the log's, so no
    * session or token from any earlier membership comes back with a row put
    * back. Admitted again, they start from nothing, as any removed member.
+   *
+   * Under 0.15's log, refused: the log changes no member whose row it does
+   * not hold (`Changes`), and a row rewritten here without a change of its
+   * own would fail every check of it after (`#onLog`). The member holds
+   * nothing meanwhile; a reseal makes their row the log's again (plan PR 9).
    */
   async #startOver(
     d: Decision,
@@ -2952,6 +3032,7 @@ class VaultService implements Vault {
     correlation: Correlation,
     refused: (code: RefusalCode, message?: string) => Refused,
   ): Promise<{ revoked: Grant[]; generation: number }> {
+    if (this.#checksSeals()) throw refused('tampered', START_OVER_015);
     const logged = await this.#logged(d.tx, principal);
     if (logged === undefined) throw refused('not_a_member', 'the log never admitted them: their row was written around the vault');
     const generation = Math.max(row?.generation ?? 0, logged.generation) + 1;
@@ -3811,7 +3892,7 @@ class VaultService implements Vault {
     const reports: NewEntry[] = [];
     // The members, their grants, the policy, the setting and the places in one statement; the credential beside it.
     const [reads, via] = await Promise.all([
-      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds, seals: this.#checksPlaces() }),
+      snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds, seals: this.#checksSeals() }),
       input.via === null ? Promise.resolve(null) : store.issuingCredential(this.#db, input.via),
     ]);
     // The settings from the snapshot's newest entry; the pages before it read only when it fails its check.

@@ -70,10 +70,16 @@ type World = Awaited<ReturnType<typeof world>>;
  * What a writer does to `dev` around the log, its seal kept, and the project it names after: moved to `elsewhere`;
  * renamed; or deleted by the app (a change of its object), then its tombstone cleared.
  */
-const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: (w: World) => string }> = {
+/**
+ * `regrants`: the tamper moves what the grants on `dev` read as (an environment's grant reads its project from the
+ * environment's row), so the object of every member holding one is not the one their seal covers: such a member is
+ * refused whole, by the vault's decisions as by their uses (T179 PR 2, `#onLog`), and reported, not only the place.
+ */
+const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: (w: World) => string; regrants?: true }> = {
   're-parented': {
     tamper: (w) => run(db.owner, sql`UPDATE environments SET project_id = ${w.elsewhere} WHERE id = ${w.dev}`),
     projectOf: (w) => w.elsewhere,
+    regrants: true,
   },
   renamed: {
     tamper: (w) => run(db.owner, sql`UPDATE environments SET slug = 'renamed' WHERE id = ${w.dev}`),
@@ -119,13 +125,17 @@ async function issueOn(vault: LocalVault, input: IssueTokenInput): Promise<Issue
   return { ...input, policy: { seq: newest === undefined ? null : String(newest.seq), protected: Object.values(policy!.protectedIn).flat() } };
 }
 
-for (const [how, { tamper, projectOf }] of Object.entries(TAMPERS)) {
+for (const [how, { tamper, projectOf, regrants }] of Object.entries(TAMPERS)) {
   test(`access: a grant on a place ${how} around the log holds nothing, and the member keeps the rest`, async () => {
     const w = await world();
     const before = await w.vault.access(ADA);
     assert.deepEqual(before.grants.map((grant) => grant.environmentId).sort(), [w.dev, w.prod].sort());
     await tamper(w);
     const access = await w.vault.access(ADA);
+    if (regrants) {
+      assert.deepEqual([access.status, access.grants], ['tampered', []]);
+      return;
+    }
     assert.equal(access.status, 'active', 'their own row is the log\'s');
     assert.deepEqual(access.grants.map(({ projectId, environmentId }) => ({ projectId, environmentId })), [{ projectId: w.project, environmentId: w.prod }]);
     assert.deepEqual(await placeReports(), ['mac'], 'reported once, the place\'s, no member\'s');
@@ -143,6 +153,13 @@ for (const [how, { tamper, projectOf }] of Object.entries(TAMPERS)) {
     await tamper(w);
     // The answer the app keeps is the one a decision makes of her now: the same grants hold in both.
     const kept = await w.vault.access(ADA);
+    if (regrants) {
+      // Refused: the answer kept is a tampered member's, which a read never opens on.
+      assert.equal(kept.status, 'tampered');
+      const read = await w.vault.unwrap({ principal: ADA, caller: 'person', purpose: 'reveal', accessRevision: kept.revision, items });
+      assert.equal(read.ok, false);
+      return;
+    }
     assert.deepEqual(await w.vault.unwrap({ principal: ADA, caller: 'person', purpose: 'reveal', accessRevision: kept.revision, items }), { ok: true, keys: [key], accessRevision: kept.revision });
   });
 
@@ -196,7 +213,14 @@ for (const [how, { tamper, projectOf }] of Object.entries(TAMPERS)) {
     assert.ok((await w.vault.issueToken!(await issueOn(w.vault, issue(MAYA, atProd)))).ok, 'Maya manages CI');
     await tamper(w);
     const none = await credentialRows();
-    assert.deepEqual(await w.vault.issueToken!(await issueOn(w.vault, issue(MAYA, atProd))), { ok: false, refused: 'refused', why: TAMPERED_PLACE });
+    const issued = await w.vault.issueToken!(await issueOn(w.vault, issue(MAYA, atProd)));
+    if (regrants) {
+      // CI's own object no longer its seal's: refused before any place is weighed, as the account the issue is to.
+      assert.equal(!issued.ok && issued.refused, 'gone');
+      assert.equal(await credentialRows(), none);
+      return;
+    }
+    assert.deepEqual(issued, { ok: false, refused: 'refused', why: TAMPERED_PLACE });
     assert.equal(await credentialRows(), none);
     const given = await w.vault.setAccess({ actor: MAYA, caller: 'person', principal: CI, changes: [{ projectId: w.project, environmentId: w.prod, role: null, expiresAt: null }] });
     assert.deepEqual(!given.ok && given.refusal, { code: 'tampered', message: TAMPERED_PLACE });

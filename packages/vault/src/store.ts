@@ -409,6 +409,71 @@ export function newestSealsQuery(refs: readonly Ref[]): SQL {
     JOIN log_changes c ON c.object = k.value AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.value)`;
 }
 
+/**
+ * A member's row as 0.15's log holds it to (T179 PR 2): the row's own
+ * seal, and its object's newest change, with the 0.14 access entry that
+ * change accounts for (`old`, `Changes.cite`), or null for none. `seal` is
+ * null for a member with no row, or a row the log never sealed.
+ */
+export type MemberLog = {
+  seal: Buffer | null;
+  newest: { seal: Buffer | null; old: bigint | null } | null;
+  /** Read by `memberLogs` alone (a snapshot has its own, `newestAccess`): the vault's newest allowed access entry about the member, unchecked. */
+  access?: bigint | null;
+};
+
+/** The columns `memberLogs` reads, as the drivers answer them. */
+type MemberLogColumns = {
+  principal: string; seal: Buffer | Uint8Array | null; number: string | number | bigint | null; newest: Buffer | Uint8Array | null; old: string | number | bigint | null;
+  access?: string | number | bigint | null;
+};
+
+/** A member's `MemberLog` from its columns: `newest` from the change's number, which only a change has. */
+export function memberLogOf(row: Pick<MemberLogColumns, 'seal' | 'number' | 'newest' | 'old'>): MemberLog {
+  return {
+    seal: bytes(row.seal),
+    newest: row.number === null ? null : { seal: bytes(row.newest), old: row.old === null ? null : BigInt(String(row.old)) },
+  };
+}
+
+/**
+ * Each of `principals`' `MemberLog`, in one statement: the row by its key,
+ * its newest change by one probe of `log_changes_object_idx`, newest first,
+ * and its newest access entry by one probe, whatever the logs' length
+ * (R48). A principal asked has an entry whether or not it has a row.
+ */
+export async function memberLogs(db: Queryable, principals: readonly string[]): Promise<Map<string, MemberLog>> {
+  if (principals.length === 0) return new Map();
+  const rows = await rowsOf<MemberLogColumns>(db, engineOf(db) === 'postgres' ? memberLogsPostgres(principals) : memberLogsSqlite(principals));
+  return new Map(rows.map((row) => [row.principal, { ...memberLogOf(row), access: row.access == null ? null : BigInt(String(row.access)) }]));
+}
+
+/** The vault's newest allowed access entry about principal `p`, unchecked: one probe, as a use's (`m_access`, 0053). */
+function newestAccessSeq(p: SQL, actions: SQL): SQL {
+  return sql`(SELECT a.seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${p} AND a.decision = 'allow' AND a.action IN ${actions} ORDER BY a.seq DESC LIMIT 1)`;
+}
+
+function memberLogsPostgres(principals: readonly string[]): SQL {
+  const asked = sql`unnest(${sql.param([...principals])}::text[])`;
+  const actions = sql`(SELECT unnest(${sql.param([...ACCESS_ACTIONS])}::text[]))`;
+  return sql`SELECT p.principal, m.seal, l.number, l.seal AS newest, l.payload::jsonb ->> 'old' AS old, ${newestAccessSeq(sql`p.principal`, actions)} AS access
+    FROM ${asked} AS p (principal)
+    LEFT JOIN vault_members m ON m.principal = p.principal
+    LEFT JOIN LATERAL (
+      SELECT x.number, x.seal, x.payload FROM log_changes x WHERE x.object = log_object('principal', p.principal) ORDER BY x.number DESC LIMIT 1
+    ) l ON true`;
+}
+
+/** SQLite has no `log_object`: each member's object key, as the vault computes it (`objectKey`), beside its principal. */
+function memberLogsSqlite(principals: readonly string[]): SQL {
+  const pairs = JSON.stringify(principals.map((principal) => ({ p: principal, k: objectKey({ kind: 'principal', id: principal }) })));
+  const actions = sql`(SELECT value FROM json_each(${JSON.stringify(ACCESS_ACTIONS)}))`;
+  return sql`SELECT a.p AS principal, m.seal, c.number, c.seal AS newest, json_extract(c.payload, '$.old') AS old, ${newestAccessSeq(sql`a.p`, actions)} AS access
+    FROM (SELECT json_extract(value, '$.p') AS p, json_extract(value, '$.k') AS k FROM json_each(${pairs})) a
+    LEFT JOIN vault_members m ON m.principal = a.p
+    LEFT JOIN log_changes c ON c.object = a.k AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = a.k)`;
+}
+
 export async function deleteGrant(tx: Transaction, principal: string, place: Place): Promise<void> {
   const { vaultGrants } = tablesOf(tx);
   await tx.delete(vaultGrants).where(and(eq(vaultGrants.principal, principal), at(tx, place)));

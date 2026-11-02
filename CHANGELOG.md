@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The vault decides about a member from 0.15's log, not 0.14's (T179
+  PR 2).** Once the cutover is written, a decision checks a member's row
+  as a use does: the row's seal is the vault's over it and its newest
+  change's, and 0.14's log holds no genuine access entry about them past
+  the one that change accounts for. It reads that with the decision's own
+  statement, where it used to walk back through 0.14's access entries a
+  page at a time, which one statement cannot do. No route makes one more
+  round trip. A member whose row fails is no longer started over under
+  0.15's log, a deployment's named Owner included: the start over wrote a
+  row the log could not seal. They stay refused, holding nothing, until a
+  reseal makes their row the log's again, as 0.15 already did for every
+  other change to them.
+
 - **A page of reads costs as much on a connection's sixth call as on its
   first.** `log_reads_by` and `log_reads_at`, which list a member's reads
   and a key's, an environment's or a project's, let Postgres switch to a

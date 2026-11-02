@@ -1722,7 +1722,12 @@ The cutover from 0.14 (the plan's PR 9).
 - 0.14's row (its MAC and `access_seq`) and chain;
 - an old isolate still serving 0.14 uses and writes after the deploy;
 - two 0.15 vault starts, at once or one after the other;
-- a 0.15 use and a 0.15 change;
+- a 0.15 use and a 0.15 change. The vault's own 0.15 decisions weigh a
+  member by the use's check (NewUseRun: the row's seal its object's and its
+  newest change's, and UsesSeeOldWrites' Accounted), not 0.14's walk back
+  through its access entries (T179 PR 2, vault.ts's `#onLog`). They read it
+  holding 0.14's head, which only removes interleavings from the use's, so
+  the use's invariants and removals cover them, with no action of their own;
 - in Migration015Issue (T123), sign-ins: 0.14's `token.exchange`, which the
   trigger lets by; a 0.15 sign-in (0.14's head, then the issue lock); one
   that also revokes the account's earlier sessions (its trigger: the issue

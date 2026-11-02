@@ -18,12 +18,12 @@ import { sql } from 'drizzle-orm';
 import { keptObjects, loggedChange, NotLogged, prepareChanges, type ChangeKeys } from '../src/changes.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
-import { newestSealedChanges, newestSealedQuery } from '../src/store.ts';
+import { grants, member, newestSealedChanges, newestSealedQuery } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
-import { environmentObject, secretObject } from '../src/objects.ts';
+import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
 import { ENGINE, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
-import { ask, CONFIG, emptyLog, isolate, ROOT, SEAL, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, emptyLog, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -508,14 +508,21 @@ test("`app_change` takes a restored seal only on a key's object made again from 
 // --- what an object covers (0029; formal/SealedObjects.tla) ------------------------------------------------------
 
 /**
- * A vault deciding with 0.15's log, its changes answering at once (no checkpointer here), Root its Owner, admitted
- * afresh: each test empties the log (`emptyLog`), and a member row sealed by a change no longer there is stale.
+ * A vault deciding with 0.15's log, its changes answering at once (no checkpointer here), Root its Owner: admitted by
+ * the vault the first time, then sealed again as it is by a change of the fixture's, since each test empties the log
+ * (`emptyLog`), and a member row sealed by a change no longer there is stale. The change accounts for every 0.14
+ * entry about Root, as the cutover's genesis does (`old`): the vault reads one past it as a write its log never saw.
  */
 async function deciding() {
   const { vault } = await isolate({ sealThrough: sealed, heldOutside: nothingHeld });
-  await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${ROOT}`);
-  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${ROOT}`);
-  await vault.access(ROOT);
+  const row = await member(db.owner, ROOT);
+  if (row === undefined) {
+    await vault.access(ROOT);
+    return vault;
+  }
+  const object = principalObject(row, await grants(db.owner, ROOT));
+  const [newest] = await rows<{ seq: string | number | null }>(db.owner, sql`SELECT max(seq) AS seq FROM audit_log WHERE author = 'vault' AND decision = 'allow' AND subject_principal = ${ROOT}`);
+  await change({ kind: 'principal', id: ROOT }, { op: 'genesis', value: object }, object, seal('vault_members', 'principal', ROOT), newest?.seq == null ? undefined : BigInt(newest.seq));
   return vault;
 }
 

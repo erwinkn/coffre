@@ -679,7 +679,12 @@ Each with what the key write and the first member add then cost:
 1. This design and formal/Writing.tla.
 2. **The vault's decisions on seals**, not 0.14's access entries (the
    compatibility step above), so that one statement can read what a
-   decision needs. No route's cost moves.
+   decision needs. No route's cost moves. Built: `#onLog` in vault.ts
+   checks a member as a use does, its row's seal, its newest change's and
+   the 0.14 entries that change accounts for (`memberLogs`, read with the
+   decision's snapshot); a tampered member is no longer started over under
+   0.15's log, which could not seal the row it writes (a reseal does, plan
+   PR 9).
 3. **The key write's front door, `write_inputs`, `write_request`,
    `write_outcome`, `hold_inputs` and the app's held statement**, with the
    0.14 entries still written. The vault's `key.wrap` entry needs its head
