@@ -162,7 +162,12 @@ dev-eu's `items` alone, leave the index and seal alone, and the use would
 fall back to dev's item: dev-eu's key would go to dev's upstream, which no
 dev-eu definition says. With names in the index, the vault falls back to
 the parent only when the child's sealed index has no entry by that name.
-An entry whose item is missing is `tampered`. A missing child row is the
+An entry whose item is missing is `tampered`. Values inherit through a
+chain of forks, up to three parents (`MAX_PARENTS`), and definitions do
+too: the lookup walks the ancestors nearest first, applying these rules at
+each level, and stops at the first sealed index that names the route. The
+statement reads every level's row at once, in one snapshot: up to four
+rows and four probes per reading. A missing child row is the
 same check one level up: the child has no row only if its object has no
 logged change (the seal probe sees its newest change), and a row deleted
 after a save is `stale`.
@@ -175,14 +180,16 @@ Sealing the whole `items` instead would carry every item, every editor's
 frozen holdings included, on every use of any of them.
 
 The migration only adds (AGENTS.md, "expand, then contract"), and grants
-`coffre_backup` by name as every new table does. An environment with no UI
-definitions has no row.
+`coffre_backup` by name as every new table does. An environment that never
+had a UI definition has no row. Once its object has a change, the row
+stays: removing the last item saves an empty index, so a later missing row
+is still `stale` and a fork's lookup still falls back by the empty index.
 
 **Why one row per environment, not one per item.** The page saves all its
 pending edits at once (save, discard, review), and copying from another
 environment writes many items. One object makes that one change, one seal
-and one entry, and the index keeps a use's reads to its own item. A use reads one row for its environment: two for a fork,
-whose parent's definitions it inherits (question 6). The cost is that two
+and one entry, and the index keeps a use's reads to its own item. A use reads one row for its environment, and one more
+for each parent of a fork, whose definitions it inherits (question 6), up to four. The cost is that two
 Owners saving different routes of one environment at once conflict. The
 second gets a 409 and reviews the first's change (below), which is what the
 page should do anyway.
@@ -312,8 +319,8 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
              fence shared
              one statement, one snapshot:
                the caller's rows, as today
-               the route's item, the index and seal of the place's proxy row (and a fork's parent's,
-                 taken only when the child's sealed index has no entry by the route's name),
+               the route's item, the index and seal of the place's proxy row (and each fork parent's,
+                 nearest first, taken only when every nearer sealed index has no entry by the route's name),
                  and the seal of their newest change
                every key of the route as that item names it, held to the map's ids (else `moved`), and their rows
              one entry per key: the request, the route's name included, under its MAC
@@ -321,7 +328,7 @@ use (a named use, as 0.15's: one call on a map hit, section 4)
   vault    seals checked (proxy object included), then every key decided twice:
              for the caller (purpose use, as today)
              for the definition's frozen editor (section 8)
-           answers: the values, the definition's seal, and its item (omitted when the isolate's copy has that digest)
+           answers: the values, the definition's seal, its item digest, and its item (omitted when the isolate's copy has that digest)
   app      sends only if every key's answer carries the same seal (else asks again)
            checks the handle (section 7), and the method and path against the definition's allow list
            keeps the values beside that definition (the cache key includes its seal)
@@ -357,16 +364,22 @@ take the same use, with what changes for each:
   copy, which came from the vault (`CopyFromVault`) but may be older than
   the version the use decides on, so each is either provisional or moved
   after the answer:
-  - *The limit.* Today the counts come from the credential before
-    `workloadOf` runs (`countsOf`), and the gate (the principal's Durable
-    Object) takes them with the proof's `jti` in one call. A stable URL's
-    place is known only inside `standingSession` or `bindingWorkload`, so
-    for a UI route the counts become a function of the principal and the
-    place, which those call after they have the place and before
-    `gate.admit`. On a cold isolate that function makes the map miss's
-    first call (section 4), which the use would make anyway, so a cold
-    request still costs 2 calls, now one before the gate and one after.
-    Sign, verify and presign take their counts the same way. After an edit
+  - *The limit.* Today the counts are a plain function of the credential
+    (`countsOf`, giving `GateCounts`), and the gate (the principal's
+    Durable Object) takes them with the proof's `jti` in one call, after
+    the proof is verified. A stable URL's place is known only inside
+    `standingSession` or `bindingWorkload`, and `PluginContext.workload`
+    makes no vault call. So for a UI route the counts become
+    `(principal, place) => Promise<GateCounts>`, which those two call once
+    they have the place, before `gate.admit`. On a warm isolate it reads
+    the copy. On a cold one it calls a new context method,
+    `coffre.routeOf(place, name)`: the map miss's first call (section 4)
+    as an RPC of its own, which reads the sealed rows, answers with the
+    reading, the key ids and the item, and decides no use. It cannot be
+    `coffre.use`, whose caller is the session being stood up. The use's own
+    call follows the gate, so a cold request still costs 2 calls, now one
+    before the gate and one after. Sign, verify and presign take their
+    counts the same way. After an edit
     to a limit, an isolate counts against the old one until its next use
     answer brings the new item: at most `cacheSeconds` (60 s by default)
     while its values are kept, one request when `cacheSeconds` is 0. A
@@ -376,12 +389,42 @@ take the same use, with what changes for each:
     upstream and allow list), `carried` (stream the body, or read it
     whole, by inject kind), the DPoP body-line rule (a `sigv4` copy admits
     an unsigned body line only with `unsignedUploads`) and `fieldIn`
-    (where the handle sits) all run on the copy, and refuse early. They
-    are provisional: when the answer's item digest differs from the
+    (where the handle sits) read the route. Today they all run before
+    `standingSession`, because the body line is an input of the proof's
+    verification. A cold isolate has no copy there, so for a stable URL
+    the order is: the body line and `carried` are computed from the
+    request's headers alone, as the client signs them (`bodyLine` in
+    `workload.ts`: a declared `Content-Digest` or `x-amz-content-sha256`
+    streams, any other body is read whole); the proof is verified and the
+    caller stands; then, with the copy (or `routeOf`'s item), `aim`,
+    `fieldIn` and `compute`'s kind checks run, and a line the item's
+    inject kind would have chosen otherwise is 503 `moved`.
+  - *A copy's refusal is provisional.* On a warm isolate the checks run on
+    the copy, which may predate an edit. A refusal that a widening edit
+    would lift must not stick: an Owner who adds `POST /responses/**` to
+    `openai` expects `/responses` to work, but a warm isolate that refuses
+    it before any use would never get the new item, and only a still-allowed
+    request would refresh its copy. So the isolate keeps, beside its copy,
+    when an answer last confirmed it. A refusal on a copy confirmed within
+    `cacheSeconds` stands. On an older copy, the request goes on to the
+    gate, which counts it, and then makes one `routeOf` call, replaces the
+    copy and runs the checks again: what they refuse now is refused. A
+    widening edit therefore takes effect within `cacheSeconds`, as a limit
+    edit does, and refused traffic costs at most one call per route per
+    `cacheSeconds` per isolate, under the limit.
+  - *After the answer.* When the answer's item digest differs from the
     copy's, the app runs `aim`, the allow list and `fieldIn` again on the
     decided item, and if the decided item's inject kinds would have
     carried the body differently or bound another body line, it answers
     503 `moved` and sends nothing. The client's retry finds the new copy.
+  - *On a value-cache hit* no answer comes, and the isolate's copy may be
+    newer than the values: session A's values were decided on version 7,
+    and session B's use has since brought version 8. The cache entry
+    carries the item its values were decided on, and `aim`, the allow
+    list, `fieldIn`, `narrow` and the send all run on that item, never on
+    the copy (`BoundToDefinition`). If the copy already carried the body
+    in a way the entry's item would not, the request is 503 `moved` and
+    the entry is evicted. The same holds for a handle's route use.
   - *`narrow` constraints* are weighed after the use's answer, on the URL
     built from the decided definition's upstream, never the copy's, just
     before the send. A constraint that refuses there sends nothing.
@@ -413,11 +456,15 @@ take the same use, with what changes for each:
   `paths` and `narrow` before the use, then signs that target after it. A
   UI route presigns only when `sigv4` is its one inject rule, and any other
   route answers presign with 400. The checks before the use run on the
-  copy and refuse early. After the answer, the target is built again from
-  the decided item's upstream, and section 7's matcher, its allow list and
-  the `narrow` constraints run again on it, before anything is signed: an
-  edit between the copy and the use can never get a URL for the old host
-  signed with keys decided on the new version.
+  copy, and their refusals are provisional, as a workload's. After the answer, the target is built again from
+  the decided item's upstream. The decided item must still have `sigv4`
+  as its one inject rule, and allow the method; section 7's matcher, its
+  allow list and the `narrow` constraints run again on it, and only then
+  is anything signed, with the decided item's `sigv4` parameters. An edit
+  between the copy and the use can never get a URL for the old host, or
+  under the old rule, signed with keys decided on the new version: any
+  mismatch is 503 `moved`. The use's entry logs the rebuilt target's
+  host, not the copy's.
 
 ### What each protection is for
 
@@ -474,8 +521,8 @@ of that and adds the route's name to what the request names.
 
 | Case | Today (0.15) | With UI definitions |
 |---|---|---|
-| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement: one more row (the route's item and the index) and one more probe of its newest change, inside the same call; two of each through a fork. The item is not sent back, because the isolate's copy has its digest |
-| Map miss: an isolate cold for that environment or URL, or a key it has not used | 2 calls | **2 calls.** The first reads both URL readings by name (section 6): up to two places' proxy rows and probes, four through forks. It picks the reading, resolves the route's keys by name, and answers with the reading, the ids and the item (a few hundred bytes to a few KB). The second makes the use, reading the chosen place only |
+| Map hit, uncached (`cacheSeconds: 0`, or an entry's refresh) | 1 call | **1 call.** The proxy object is one more input of the statement: one more row (the route's item and the index) and one more probe of its newest change, inside the same call; one more of each per fork parent, up to four. The item is not sent back, because the isolate's copy has its digest |
+| Map miss: an isolate cold for that environment or URL, or a key it has not used | 2 calls | **2 calls.** The first reads both URL readings by name (section 6): up to two places' proxy rows and probes, eight through forks of three parents. It picks the reading, resolves the route's keys by name, and answers with the reading, the ids and the item (a few hundred bytes to a few KB). The second makes the use, reading the chosen place only |
 | Right after an edit that keeps the route's keys (a new upstream, rules or allow list) | 1 call | **1 call.** The statement sees the route's item hash to another digest than the copy's and returns the new item in the same answer. Nothing is refused or retried |
 | Right after an edit that adds a key to the route | 1 call | **2 calls, once per isolate**: a map miss for the new key, as any key used for the first time is today |
 | Cache hit | 0 calls | **0 calls** |
@@ -491,7 +538,7 @@ entry, as for every other input (R50: the number orders everything). So two
 routes that name the same key with different editors' holdings replay
 apart. The route's two decisions use the place the use resolved (the
 handle's environment, or the one the URL names), and the route as that
-place's object holds it, or its fork parent's, by name (question 6).
+place's object holds it, or its nearest fork ancestor's, by name (question 6).
 
 **A map hit holds the ids to the definition.** The second call of a miss, and
 every hit, carries the ids the map holds. The statement checks that the
@@ -529,7 +576,12 @@ the isolate caches, and only to save bytes. Postgres compares the copy's
 digest with the row's inside the use's own snapshot, under the fence:
 no change commits between that comparison and the decision, so it cannot
 be wrong. The seals are probed on every call anyway, as above. A kept value
-cache entry is invalidated by time only: the window of section 3.
+cache entry is invalidated by time only: the window of section 3. It keeps
+the item its values were decided on, and a cache hit checks and sends by
+that item, never by the isolate's copy, which another caller's use may
+have refreshed since (`BoundToDefinition`). The answers carry the item's
+digest beside the seal, so the app never hashes an item itself and needs
+none of the vault's canonical form.
 
 **Bytes and CPU.** From Postgres to the vault, every route use carries the
 route's item and the environment's index: the item's bytes plus a name and
@@ -539,8 +591,8 @@ items a save may hold (under 24 KB of index). From the vault to the app, the ite
 only when the isolate's copy is stale. The second decision (the frozen
 editor's) is CPU in the Worker over rows the statement already read: the
 key rows are the same, and the holdings come with the item. The cost the
-statement adds is one row and one probe per use, two through a fork, whose
-parent's object it reads too; the `whole` shape already reads the parent
+statement adds is one row and one probe per use, one more per fork
+parent, whose objects it reads too; the `whole` shape already reads the parent
 environment. The new entry column costs bytes on every route use: PR C
 measures them as PR 3 measured the place column (sealed-inputs.md, "A
 use"). PR C also measures the probes against the 30-buffer budget, holds
@@ -568,7 +620,9 @@ deploy. That calls for two checks code upstreams never needed:
   PR C checks that claim against production for both, and if `connect()`
   does reach one, UI tunnels on Workers take only literal public addresses.
   `insecureUpstreams` lifts these checks for local fakes, as it lifts the
-  rest today. An egress lifts nothing: a code route's upstream is refused
+  rest today. It is the app's code config, which the vault cannot see, so
+  the app passes it in the save's input, as a named use passes `accepts`;
+  the use-time check, on the sending isolate's own config, is what holds. An egress lifts nothing: a code route's upstream is refused
   when private, egress or not (`privateHost` at startup), and a UI route's
   is too. The egress only carries the request.
 - **Database tunnels too.** Today a tunnel's `hosts` is deployment code, so
@@ -644,7 +698,7 @@ Concretely, for `/use/market/dev/openai/chat`:
   `{ place: 'market/dev', route: 'openai' }` and
   `{ place: the handle's own, route: 'market' }`.
 - **On a map miss**, the first call resolves both, which reads up to two
-  places' proxy rows (four through forks), picks the reading by the table,
+  places' proxy rows (up to eight through forks), picks the reading by the table,
   and answers with it, the place's id, the route's key ids and the item.
 - **The isolate's map** keys that answer by the token and the URL's first
   three segments (`market`, `dev`, `openai`), and holds the reading, the
@@ -876,7 +930,14 @@ or on a project (all its environments). It joins `PERMISSIONS` in
   keeps every editor's routing within their reads.
 - **Reading the tab** needs only access to the environment. Upstreams, rules
   and key names are not secret (R6). Anyone who lists the environment sees
-  its definitions, inert (#421's disabled fieldsets).
+  its definitions, inert (#421's disabled fieldsets). `GET …/proxy` is a
+  vault call, not the app's own read: the app holds no key, so it could
+  not tell a forged item, and an Owner who edited or copied one would seal
+  a forgery as their own. The vault checks the seal, the index and the
+  newest change, and answers a display shape: each definition, who saved
+  it and when, and its clearance mark, never the frozen holdings (an
+  editor's grants across projects). A forged object shows as `tampered`
+  and cannot be edited, only replaced whole by an Owner.
 - A token or a handle cannot save: `PUT …/proxy` is a person's, on a browser
   session or `coffre login`, as a role edit is.
 
@@ -984,7 +1045,10 @@ Each runs the suite on both engines (`pnpm test`, `pnpm test:sqlite`), and
   protected environments, tokens refused), replay agrees, the row tampered,
   put back or deleted (`stale`, `tampered`), an item moved under another
   name (`tampered`), an item deleted from a fork's row with its index left
-  (`tampered`, never the parent's item), a save refused under `editable: false`, the backup login reads it
+  (`tampered`, never the parent's item), a fork of a fork served by its
+  grandparent's item, the last item removed (an empty index, the row
+  kept), `GET …/proxy` showing a forged row as `tampered` and never
+  answering holdings, a save refused under `editable: false`, the backup login reads it
   (`test:schema`), Lean cases.
 
 **PR B: matching and injection, for code definitions first.** Server only,
@@ -1018,10 +1082,16 @@ no storage.
   counted on a cold isolate through a stable URL, and a limit edit under a
   warm cache counted against the old one only until the next answer; a
   `narrow` constraint weighed on the decided upstream after an edit; an
-  inject-kind edit between the copy and the answer answered 503 `moved`.
-  Presign refused unless `sigv4` is the route's one rule, and an upstream
-  or allow-list edit between the copy and the use never signs the old
-  target. A tunnel whose `hosts` an Owner narrows mid-session ends within
+  inject-kind edit between the copy and the answer answered 503 `moved`;
+  an allow-list widening served by a warm isolate whose copy refused the
+  path (allowed within `cacheSeconds`, one `routeOf` call); two sessions
+  on one isolate, A's values on version 7 checked and sent by version 7's
+  item after B's use brought version 8; a cold stable-URL request whose
+  body line the item's inject kind would have chosen otherwise (503
+  `moved`).
+  Presign refused unless `sigv4` is the route's one rule, and an upstream,
+  allow-list or inject edit between the copy and the use never signs the
+  old target (503 `moved`), its entry logging the rebuilt host. A tunnel whose `hosts` an Owner narrows mid-session ends within
   one recheck. Both URL readings, on a hit
   and a miss, with `moved` when the handle's environments change. Also `request-cost.test.ts`
   (statements and rows flat as the log grows and as an environment gains
@@ -1124,7 +1194,8 @@ extending the model, before its code (R45).
 
 **6. Do forks inherit UI definitions?**
 - (a) By name, like values: `market/dev-eu` serves dev's `openai` unless it
-  has its own `openai`. One more row per use through a fork.
+  has its own `openai`, through the whole chain of parents as values
+  inherit. One more row per use per parent.
 - (b) No: each environment holds its own, and "copy from environment" fills
   a fork.
 

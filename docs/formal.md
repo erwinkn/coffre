@@ -1961,9 +1961,10 @@ change appends a version (its host, and its clearance: "sensitive" when
 an Owner covering the place saved it, else "secret"). The row is a seal
 and a body: honest code writes the newest version with its body, and a
 database writer may put back an older version whole, or change the body
-under the seal it finds, which the MAC refuses. A use is the app's resolve
-(code first, else the isolate's copy of the definition, a seal and a
-body), the vault's one call (the row, its MAC, the newest change's seal
+under the seal it finds, which the MAC refuses. The model's version stands
+for the item digest, the sealed index's entry for the route. A use is the
+app's resolve (code first, else the isolate's copy of the definition, an
+item and its digest), the vault's one call (the row, its MAC, the newest change's seal
 and the key's nature, decided in one snapshot under the fence, answering
 with the body decided on, or omitting it when the copy has its digest),
 and the send of
@@ -2026,7 +2027,8 @@ clearance per version, frozen at save (proxy-ui.md's question 5, option
 (a)); the decisions over grants, forks and references are the vault's own,
 held by its tests and Lean. The path rules and the allow list are pure
 functions, held by property tests. A row is one body per version, so an
-item moved under another name (the name-bound digests' job) is PR A's
+item moved under another name, or deleted from a fork (the sealed
+index's job: its names and digests), is PR A's
 tests', and a workload's limit and constraints, which never widen where a
 key goes, are not modelled. A deleted row is the vault's `stale`,
 held by PR A's tests. `RoutingCode` and `RoutingRelease` put back no rows:
