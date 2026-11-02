@@ -130,9 +130,14 @@ export function readHolds(key: LogMacKey, row: ReadRow): boolean {
  * Whether a cursor's MAC holds under a key that vouches where it stands
  * (keyring.ts, T168): the projector's, which moves it under the current
  * key, or, until its next move, under the key it replaced, below that
- * key's rotation.
+ * key's rotation. Where it stands is both its numbers: the range it is in
+ * starts at `pair`, at or below `through`, as the projector moves it. A
+ * cursor with `pair` past `through` is no cursor the projector wrote; under
+ * the replaced key, `through` below the rotation and `pair` past it would
+ * skip every use between them (Muse's review r4 of #444).
  */
-export const cursorVouched = (ring: Keyring, cursor: ReadsCursor) => keysAt(ring, cursor.through).some((key) => cursorHolds(key.mac, cursor));
+export const cursorVouched = (ring: Keyring, cursor: ReadsCursor) =>
+  cursor.pair <= cursor.through && keysAt(ring, cursor.through).some((key) => cursorHolds(key.mac, cursor));
 
 /** Whether a read's MAC holds under a key that vouches at its number: the current one, or one it replaced below its rotation (T168). */
 export const readVouched = (ring: Keyring, row: ReadRow) => keysAt(ring, row.number).some((key) => readHolds(key.mac, row));

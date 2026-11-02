@@ -13,7 +13,7 @@ import { entryVouched, keyringOf } from '../src/keyring.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { entryMac, KEY_OBJECT, logMacKey, useEntry } from '../src/log-entry.ts';
 import { logStore } from '../src/log-store.ts';
-import { checkReads, cursorMac, projectReads, Projector, readMac, type ReadRow, type ReadsCursor } from '../src/reads.ts';
+import { checkReads, cursorMac, cursorVouched, projectReads, Projector, readMac, type ReadRow, type ReadsCursor } from '../src/reads.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
@@ -166,6 +166,24 @@ test('A\'s MAC at or past the rotation counts for nothing: on a read, on the cur
     return { tree: 'uses', number: String(number), at: Number(at), requestId: String(requestId), credential, secret, purpose, place, mac: mac.toString('hex') };
   };
   assert.deepEqual((await vault.vouch({ entries: [asEntry(rotation - 1n), asEntry(rotation), asEntry(rotation + 1n)] })).forged, [String(rotation), String(rotation + 1n)]);
+});
+
+test('A cursor under A whose `through` is below the rotation but whose `pair` is past it counts for nothing: it would skip every use between them (review r4 of #444)', async () => {
+  const { rotation } = await rotatedOverReads();
+  await projectedAll();
+  const stands = await store().readsCursor();
+  assert.ok(stands.pair > rotation, 'the cursor stands in a range past the rotation, under B');
+  // Someone who holds A and writes the database: `through` just below the rotation, where A still vouches, and the range
+  // to go on from past it, so that the projector would list nothing between them.
+  const moved = { through: rotation - 1n, pair: stands.pair, at: stands.at };
+  const forged: ReadsCursor = { ...moved, mac: cursorMac(A_MAC, moved) };
+  await run(db.owner, sql`UPDATE log_reads_cursor SET through = ${forged.through}, pair = ${forged.pair}, at = ${forged.at}, mac = ${forged.mac}`);
+  await assert.rejects(projectReads(store(), await after_()), /the reads' cursor, at \d+, is not the vault's/);
+  assert.match((await checked()).join('\n'), /the reads' cursor, at \d+, is not the vault's/);
+  const { vault } = await isolate({}, ROTATED);
+  assert.deepEqual((await vault.vouch({ entries: [cursorVouchedAs(forged)] })).forged, ['cursor']);
+  // Retention holds the cursor to the same rule: cursorVouched, which every reader of it calls.
+  assert.equal(cursorVouched(await keyringOf(await after_(), store()), forged), false);
 });
 
 test('vouch holds a replaced key to its rotation (R41): never any key the vault holds, and its rotation\'s row deleted leaves the key vouching for nothing', async () => {

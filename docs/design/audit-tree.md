@@ -549,7 +549,11 @@ R41's: a replaced key vouches only for what came before the rotation.
   they show, and retention, whose cut, the first pair past a day's end, is
   under the old key for every day that ends before the rotation. A replaced key vouches for a pair, an entry, a read or the
   cursor numbered below its rotation; one no rotation retired yet, while
-  the newest pair is under it; otherwise for nothing. Each reads the
+  the newest pair is under it; otherwise for nothing. A cursor is
+  numbered by both its numbers: the range it stands in starts at `pair`,
+  at or below `through`, and one with `pair` past `through` is refused
+  whatever its MAC (under the old key, `through` below the rotation and
+  `pair` past it would skip every use between them; Muse's review r4). Each reads the
   rotations and the newest pair in one statement, and keeps no bound
   between calls (a restore brings the rotation back at another number).
   The projector lists every read and moves its cursor under the current
