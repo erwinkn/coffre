@@ -17,7 +17,10 @@
 (*               2. the Worker decides on what the statement read (pure,   *)
 (*                  decide.ts), wraps the value's key and seals the app's  *)
 (*                  change from the key's object as read.                  *)
-(*               3. the app's statement: 0.14's head, its rows, then       *)
+(*               3. the app's statement: 0.14's head, the names'           *)
+(*                  resolution as the vault read it (`hold_names`: a       *)
+(*                  rename, a key appearing or a dismissal moves no seal), *)
+(*                  its rows, then                                         *)
 (*                  `app_change`'s issue lock and fence exclusive, the     *)
 (*                  key's change from the seal it was made from            *)
 (*                  (ChangeCAS); then, in statements after it, each input  *)
@@ -72,6 +75,11 @@
 (*            meanwhile, so what she listed is no longer what it replaces; *)
 (*   mrk      the parent's key whose level Ada's override inherits is      *)
 (*            marked sensitive: her write's level was weighed on the old;  *)
+(*   ren      a maintainer renames the key Ada writes (k becomes OLD_K):   *)
+(*            a rename moves no object, only what k's name resolves to;    *)
+(*   phn      the fork's parent gains the key Ada writes, sensitive, where *)
+(*            it held none: an object that did not exist at her read, so   *)
+(*            none she could hold (a dismissal is the same step);          *)
 (*   dbw      a database writer puts cA's row back, live, after its revoke;*)
 (*   bob, cy  two admins each add the service account svc;                *)
 (*   dem      an Owner demotes Bob;                                        *)
@@ -113,11 +121,17 @@ CONSTANTS
     \* ... and the principal's row is the one it read (none): the change
     \* from its object as read.
     PrincipalCAS,
+    \* The app's statement holds the names' resolution to what the vault
+    \* read (`hold_names`, right after 0.14's head, which every rename,
+    \* key made and dismissal takes first).
+    NameHold,
     \* A change answers only once its number is sealed in a checkpoint (R51).
     WaitForSeal
 
 Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
+\* Who moves what a write's names resolve to.
+Renames == {"ren", "phn"}
 \* What each other change moves: one object, turned against the writer or
 \* the adder.
 Moves == [rev |-> "member", end |-> "cred", rol |-> "roles", pol |-> "policy",
@@ -137,6 +151,8 @@ None == "none"
 
 VARIABLES
     ok,         \* each movable object still as the writer or adder needs it
+    names,      \* what the write's names resolve to, moved by a rename or a
+                \* key appearing: no seal moves with it
     svc,        \* svc is a member
     kver,       \* the key's committed versions
     seal,       \* each object's newest change in the log: moved by every change
@@ -151,7 +167,7 @@ VARIABLES
     admits,     \* ghost: each committed member add
     answered    \* ghost: each change answered, with its number
 
-vars == <<ok, svc, kver, seal, putBack, next, sealedTo, head,
+vars == <<ok, names, svc, kver, seal, putBack, next, sealedTo, head,
           pc, l, tries, trips, requests, writes, admits, answered>>
 
 \* What Ada's write needs, as decide.ts and the app's checks weigh it: every
@@ -169,6 +185,7 @@ Stale == \E o \in Inputs : RowSeal(o) # seal[o]
 
 Init ==
     /\ ok = [o \in Movable |-> TRUE]
+    /\ names = 0
     /\ svc = FALSE /\ kver = 0
     /\ seal = [o \in Objects |-> 0]
     /\ putBack = {}
@@ -177,6 +194,7 @@ Init ==
                                 [] p \in Adders -> "a.read"
                                 [] p = "ck" -> "ck"
                                 [] p = "dbw" -> "tamper"
+                                [] p \in Renames -> "rename"
                                 [] OTHER -> "change"]
     /\ l = [p \in Procs |-> [n |-> 0]]
     /\ tries = [p \in Procs |-> 1]
@@ -208,14 +226,14 @@ WVault(p) ==
     /\ IF Stale
          THEN /\ Goto(p, "done")
               /\ UNCHANGED <<next, l, requests>>
-         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, s |-> Now, seals |-> seal, ver |-> kver]]
+         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, s |-> Now, seals |-> seal, ver |-> kver, names |-> names]]
               /\ IF RequestUnderFence
                    THEN /\ next' = next + 1
                         /\ requests' = requests \cup {Request(p, l'[p].s)}
                         /\ Goto(p, "w.decide")
                    ELSE /\ UNCHANGED <<next, requests>>
                         /\ Goto(p, "w.rest")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, sealedTo, head, tries, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, tries, writes, admits, answered>>
 
 \* Without one statement under the fence: the rest of the inputs read, and
 \* the request numbered, in a later step. A change between the two tears
@@ -224,23 +242,25 @@ WRest(p) ==
     /\ pc[p] = "w.rest"
     /\ LET s == [o \in Inputs |-> IF o \in FirstRead THEN l[p].s[o] ELSE ok[o]]
            seals == [o \in Objects |-> IF o \in FirstRead THEN l[p].seals[o] ELSE seal[o]]
-       IN /\ l' = [l EXCEPT ![p].s = s, ![p].seals = seals]
+       IN /\ l' = [l EXCEPT ![p].s = s, ![p].seals = seals, ![p].names = names]
           /\ requests' = requests \cup {Request(p, s)}
     /\ next' = next + 1
     /\ Goto(p, "w.decide")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, sealedTo, head, tries, trips, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, sealedTo, head, tries, trips, writes, admits, answered>>
 
 \* The Worker decides on what it read; allowed, it wraps and seals the
 \* change from the key's seal as read. No round trip.
 WDecide(p) ==
     /\ pc[p] = "w.decide"
     /\ IF Allowed(l[p].s) THEN Goto(p, "w.app") ELSE Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* Each input has no change after the one the vault read: by the log's
 \* newest change, or (a removal) by the seal its row stores.
 Guarded(p) == \A o \in Held : (IF GuardOnLog THEN seal[o] ELSE RowSeal(o)) = l[p].seals[o]
 CasHolds(p) == ~ChangeCAS \/ seal["key"] = l[p].seals["key"]
+\* The names resolve as the vault read them.
+NameHeld(p) == ~NameHold \/ names = l[p].names
 
 \* The write itself, once the guards pass and the fence is held: the key's
 \* next version, its change numbered.
@@ -248,7 +268,7 @@ Commit(p) ==
     /\ kver' = kver + 1
     /\ Numbered("key")
     /\ l' = [l EXCEPT ![p].n = next]
-    /\ writes' = writes \cup {[p |-> p, n |-> next, stands |-> Allowed(Now), from |-> l[p].seals["key"], was |-> seal["key"]]}
+    /\ writes' = writes \cup {[p |-> p, n |-> next, stands |-> Allowed(Now) /\ names = l[p].names, from |-> l[p].seals["key"], was |-> seal["key"]]}
 
 \* The app's statement, guards after the fence: one atomic step. One round trip.
 WApp(p) ==
@@ -256,18 +276,18 @@ WApp(p) ==
     /\ head = None
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ IF GuardsAfterFence
-         THEN IF Guarded(p) /\ CasHolds(p)
+         THEN IF NameHeld(p) /\ Guarded(p) /\ CasHolds(p)
                 THEN /\ Commit(p) /\ Goto(p, "w.seal")
                      /\ UNCHANGED <<head, tries>>
                 ELSE /\ Again(p, "w.vault")
                      /\ UNCHANGED <<kver, seal, next, l, head, writes>>
-         ELSE IF Guarded(p)
+         ELSE IF NameHeld(p) /\ Guarded(p)
                 \* Its guards under 0.14's head, then a wait for the fence.
                 THEN /\ head' = p /\ Goto(p, "w.fence")
                      /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
                 ELSE /\ Again(p, "w.vault")
                      /\ UNCHANGED <<kver, seal, next, l, head, writes>>
-    /\ UNCHANGED <<ok, svc, putBack, sealedTo, requests, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, putBack, sealedTo, requests, admits, answered>>
 
 \* The same statement, after its wait for the fence.
 WFence(p) ==
@@ -276,7 +296,7 @@ WFence(p) ==
     /\ IF CasHolds(p)
          THEN /\ Commit(p) /\ Goto(p, "w.seal") /\ UNCHANGED tries
          ELSE /\ Again(p, "w.vault") /\ UNCHANGED <<kver, seal, next, l, writes>>
-    /\ UNCHANGED <<ok, svc, putBack, sealedTo, trips, requests, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, putBack, sealedTo, trips, requests, admits, answered>>
 
 -----------------------------------------------------------------------------
 (* A member add *)
@@ -287,13 +307,13 @@ ARead(p) ==
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ l' = [l EXCEPT ![p] = [n |-> 0, stands |-> Stands(p), there |-> svc, seals |-> seal]]
     /\ Goto(p, "a.decide")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, tries, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, tries, requests, writes, admits, answered>>
 
 \* The Worker decides; the principal already a member is a conflict.
 ADecide(p) ==
     /\ pc[p] = "a.decide"
     /\ IF l[p].stands /\ ~l[p].there THEN Goto(p, "a.write") ELSE Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* The objects an adder's standing rests on: its own (Bob's; nobody moves
 \* Cy's), and those of AddInputs it holds.
@@ -316,7 +336,7 @@ AWrite(p) ==
               /\ UNCHANGED tries
          ELSE /\ Again(p, "a.read")
               /\ UNCHANGED <<svc, seal, next, l, admits>>
-    /\ UNCHANGED <<ok, kver, putBack, sealedTo, head, requests, writes, answered>>
+    /\ UNCHANGED <<ok, names, kver, putBack, sealedTo, head, requests, writes, answered>>
 
 -----------------------------------------------------------------------------
 (* The seal wait, the answer, and everything else *)
@@ -327,7 +347,7 @@ Answer(p) ==
     /\ ~WaitForSeal \/ l[p].n < sealedTo
     /\ answered' = answered \cup {[p |-> p, n |-> l[p].n]}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits>>
 
 \* Every other change, one atomic step: 0.14's head and the fence (a
 \* session's revoke the fence alone, which the head's holder does not stop).
@@ -338,7 +358,7 @@ Change(p) ==
     /\ Numbered(Moves[p])
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<svc, kver, putBack, sealedTo, head, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, sealedTo, head, tries, trips, requests, writes, admits, answered>>
 
 \* A database writer puts cA's row back as it was, live, once it is revoked.
 \* Nothing logged: the log's newest change of cA is still the revoke.
@@ -347,17 +367,26 @@ Tamper(p) ==
     /\ seal["cred"] > 0
     /\ putBack' = putBack \cup {"cred"}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+
+\* A rename of the key Ada writes, or the parent gaining it: an app write
+\* under 0.14's head, which moves what the names resolve to and no seal.
+Rename(p) ==
+    /\ pc[p] = "rename"
+    /\ head = None
+    /\ names' = names + 1
+    /\ Goto(p, "done")
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* A tick seals every number committed so far.
 Tick ==
     /\ "ck" \in Procs
     /\ sealedTo < next
     /\ sealedTo' = next
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, head, pc, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, next, head, pc, l, tries, trips, requests, writes, admits, answered>>
 
 Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p)
-        \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ Answer(p) \/ Change(p) \/ Tamper(p)
+        \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ Answer(p) \/ Change(p) \/ Tamper(p) \/ Rename(p)
 
 Terminating ==
     /\ \A p \in Procs \ {"ck"} : pc[p] = "done"
@@ -372,6 +401,7 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ ok \in [Movable -> BOOLEAN]
+    /\ names \in Nat
     /\ seal \in [Objects -> Nat]
     /\ putBack \subseteq Inputs
     /\ head \in Procs \cup {None}
@@ -379,8 +409,9 @@ TypeOK ==
 
 \* A key write commits only while every input it stands on is as the vault
 \* decided on it. A revoke, an end, a role or policy change, an archive or
-\* a protection (of env or of its parent), a write of a replaced key or a
-\* new level on an inherited one answered (committed first)
+\* a protection (of env or of its parent), a write of a replaced key, a
+\* new level on an inherited one, a rename of the key written or the parent
+\* gaining it answered (committed first)
 \* stops every write after it, the one already decided included, and a row
 \* put back around coffre does not undo that. Changes that move a seal only:
 \* a session's expiry moves none, and is judged at the vault's clock, at

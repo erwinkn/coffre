@@ -1988,13 +1988,15 @@ parent and the parent's keys weighed (the one a regenerate replaces, the one
 whose level an override inherits), each with its newest change, held to its
 row; and numbers the request. The Worker decides on what it read. The
 app's statement holds 0.14's head, takes the fence through `app_change`,
-commits the key's change from the seal it was made from, and then, in
-statements after it, checks that no input has a change after the one the
-vault read, the keys it writes aside. Beside it: her grant taken away and
-her session revoked (`WritingRevoke`), her role redefined, the policy
-changed and the environment archived (`WritingPlace`), the parent archived,
-the replaced key written and the inherited key marked sensitive
-(`WritingFork`), her session revoked and its row put back, live, by a
+holds the names' resolution to what the vault read (a rename or a key
+appearing moves no seal), commits the key's change from the seal it was
+made from, and then, in statements after it, checks that no input has a
+change after the one the vault read, the keys it writes aside. Beside it:
+her grant taken away and her session revoked (`WritingRevoke`), her role
+redefined, the policy changed, the environment archived and the key she
+writes renamed (`WritingPlace`), the parent archived, the replaced key
+written, the inherited key marked sensitive, and the parent gaining,
+sensitive, a key it held none of at her read (`WritingFork`), her session revoked and its row put back, live, by a
 database writer (`WritingTamper`). Bob and Cy each add svc while Bob is
 demoted and the policy changes so that only Owners add (`WritingAdd`); Bob,
 no admin, sets up svc with a first grant while the roles are redefined, the
@@ -2007,6 +2009,7 @@ committed at each tick.
 |---|---|
 | the vault's statement reads its inputs and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
 | the app's statement holds each input to the object the vault decided on (`Held={...}`, each of the seven left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a role redefined, a policy change, an archive of the environment or of its parent, a write of the replaced key, or a new level on the inherited one |
+| ... and the names' resolution as the vault read it (NameHold) | `WritesStandAtCommit`: a write committed after its key was renamed, or after the parent gained the key it inherits |
 | ... once it holds the fence (GuardsAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the guards and the write |
 | ... by the log's newest change of each, not its row's seal column (GuardOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the guard passes |
 | the key's change from the seal it was made from (ChangeCAS) | `KeyChangesFlip`: two writes from one version both commit |
@@ -2037,7 +2040,15 @@ inputs; which roles write where is the Lean model's. A session's expiry moves
 no seal: it is judged at the vault's clock, at the decision, as today, and
 `WritesStandAtCommit` covers the changes that move one. A new key (no row,
 no seal) is ChangeCAS from nothing: the insert's uniqueness, a second insert
-failing and asking again; here a key with seal 0. A session's revoke takes
+failing and asking again; here a key with seal 0. Every object exists
+from the start with seal 0, so a key that appears in the parent after the
+vault's read is not an object here at all: it is a move of `names`, which
+no guard can see and only the names' hold catches (the code's
+`hold_names`, which resolves each name in each environment of the fork
+chain to its row or to none, and its dismissals). A rename is the same
+move: a key's object holds no name. Names are app rows, unsealed, as
+today; each rename, key made or dismissal is an app write under 0.14's
+head, so the hold reads right after the head. A session's revoke takes
 the fence and not 0.14's head, as it will once 0.16 contracts 0047's head
 away; today's takes the head too, which only adds order. The locks' order
 (the head, the rows, the issue lock, the fence; the vault's rows, in

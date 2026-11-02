@@ -63,9 +63,11 @@ own budget in `change-cost.test.ts`, and may join later:
   (`vault.reference`, `vault.endReferences`), after its decision. Folding
   them in means `write_request` sealing them, a step of its own (PR 7);
 - a value written over a key that is a reference now (the patch ends it),
-  or one whose level resolves through a reference's source, live or ended
-  (`levelsAt`): `write_request` reads each key's current version and
-  answers *not served*, and the write takes today's path;
+  or archived now (it refuses `secret_archived`, or, a fork's override
+  reset, unarchives it, a change from the object the log last sealed), or
+  one whose level resolves through a reference's source, live or ended
+  (`levelsAt`): `write_request` reads each key's row and current version
+  and answers *not served*, and the write takes today's path;
 - a patch that marks a key's sensitivity, or removes a key;
 - a dry run (`?dryRun`): it answers what would happen and writes nothing;
 - a caller through a way in with no token: Cloudflare Access, a binding, an
@@ -102,7 +104,10 @@ takes today's.
    the database stays, before any DEK is made: the same-origin check on a
    change a cookie carries (CSRF), the body's and the entries' caps, the
    route's input validation. A new key's insert that meets another's
-   (`unique_violation`) asks again, as today.
+   (`unique_violation`) asks again, as today. The front door answers no
+   refusal of its own that writes a denial today (a token kind a route
+   refuses, `token.use`'s denied entry): it sends that request down today's
+   path, which writes it, as a named use answers `served: false`.
 2. **The vault's statement** (`write_request`, a SECURITY DEFINER function
    beside `use_credential`, shaped like it):
    - takes the fence shared, and only then reads, in statements after the
@@ -118,8 +123,10 @@ takes today's.
      value says it `replaces`, and each inherited key whose level the write
      takes (`levelsAt`: a key's level is its own mark, else the one it
      inherits from the fork chain);
-   - with each input, its newest change in `log_changes`, to which the
-     Worker holds its row (StaleFirst: a row put back is refused);
+   - with each object among them, its newest change in `log_changes`, to
+     which the Worker holds its row (StaleFirst: a row put back is
+     refused); and the names' resolution as a whole, `write_names` (below,
+     "Names");
    - records the request, numbered (below);
    - commits, and answers the rows and the newest change of each input.
 
@@ -141,18 +148,35 @@ takes today's.
    does) and only then encrypts: the AAD binds `project|environment|key` by
    id (`envelope.ts`), which it learns from the answer. No round trip. Then
    it sends **one Sync**: BEGIN, 0.14's head `FOR UPDATE` (its first
-   statement, and kept after PR 6 as a lock alone: see "Locks"), the
-   new rows and the key's update, each change through `app_change_strict`
-   (the issue lock, the fence exclusive, ChangeCAS; a new key, from no row,
-   is its insert's uniqueness), then **the guards**, then COMMIT.
-   A guard that fails raises, Postgres skips the COMMIT, and the write asks
+   statement, and kept after PR 6 as a lock alone: see "Locks"), **the
+   names' hold**, the new rows and the key's update, each change through
+   `app_change_strict` (the issue lock, the fence exclusive, ChangeCAS; a
+   new key, from no row, is its insert's uniqueness), then **the guards**,
+   then COMMIT.
+   A hold or a guard that fails raises, Postgres skips the COMMIT, and the write asks
    again from 2 (`ObjectMoved`), up to 16 times, as `setSecrets` does now,
    carrying the keys it learnt are sensitive into each new request.
 5. `waitSealed`, then the answer (R51).
 
+### What the app's statement holds
+
+**Every row the vault's statement reads is one of two kinds**, and the
+app's statement holds each by its kind:
+
+- **an object** (a credential, a member, the roles, the policy, an
+  environment, a key's level): a seal moves on each change of it. Held by
+  a guard, by number (below);
+- **a name's resolution** (a slug to its project or environment, the fork
+  chain, a key's name to its row, in each environment of the chain, or to
+  none, a dismissal): no seal moves when it changes. Held by the names'
+  hold (below, "Names").
+
+Nothing the statement reads is neither. That is the rule `write_request`
+is reviewed against, row by row, rather than a list of inputs to keep up.
+
 ### The guards
 
-One per input: **no change of that object numbered after the one the vault
+One per object: **no change of that object numbered after the one the vault
 read.** In SQL, `NOT EXISTS (SELECT 1 FROM log_changes WHERE object = $o AND
 number > $n)`, an index probe. It compares numbers, which only grow, never
 seal values: an object changed and changed back has a newer number, so the
@@ -183,6 +207,52 @@ guard sees it (no ABA).
   own change of it, and its guard would fail every try. ChangeCAS holds the
   keys being written; the guards hold the rest.
 
+### Names
+
+A key's object holds neither its name nor its folder: a rename or a move
+changes no object (`patchSecret`'s "a rename or a move is none"). A key
+that does not exist yet has no object at all. So no guard sees either:
+
+- **A rename.** Ada writes `dev { API_KEY: "new" }`; the vault reads it as
+  key S. A maintainer renames `API_KEY` to `OLD_KEY` and answers. The app's
+  statement updates S: ChangeCAS passes (S's seal did not move), every
+  guard passes, and "API_KEY written" lands on `OLD_KEY`. A parent's key
+  renamed is the same for a regenerate whose `replaces` it names (Coffre's
+  `RegeneratesReplaceWhatTheyListed`), and a project or environment
+  renamed for its slugs.
+- **A key that appears.** Fork `dev-ada` of `dev`, neither holding
+  `API_KEY`. Ada writes it in the fork, weighed at secret, as nothing above
+  marks it. Meanwhile `dev` gains `API_KEY`, sensitive. The fork's write
+  would commit at secret, its value wrapped looser than its level at
+  commit. A nearer override in a fork of a fork, or a dismissal, the same.
+
+Today each of these is caught by the reads under the head (`regenerated`,
+`levelsAt`, `checkEnvironment`). Here the resolution is **one SQL function,
+`write_names(project, environment, keys)`**: the project and environment
+by slug, its fork chain, and for each key and each environment of the
+chain the row the name resolves to (its id, current version, archived or
+not, a reference or not) or none, and whether a dismissal stands. The
+vault's statement calls it and answers its result as canonical JSON. The
+app's statement calls it again, as its second statement, right after the
+head, and raises `CF001` when the result differs from the vault's
+(`hold_names(…, expected)`): the write asks again. One function both sides
+call, so the hold cannot resolve less than the decision did.
+
+Right after the head, before the rows: after them it would read our own
+new version. And the head suffices: every write that changes a name, a
+fork chain, a key's row or a dismissal (`patchSecret`, `setSecrets`,
+`missing.ts`'s dismissals, a project's or environment's rename) is an
+`audited` write, which takes 0.14's head first. One that committed before
+ours took the head is read by the hold, a statement after it; one after
+waits for our COMMIT. This is one more reason the head stays a lock after
+PR 6. The named use does the same in its one call: `use_credential`
+resolves the request's names under the fence and answers `moved` when they
+no longer name the ids it was passed (0045, D153).
+
+Names are app rows, unsealed, here as today: a database writer who renames
+a key is not stopped today either. The AAD binds each value to its key by
+id, so a rename does not move a value to another key.
+
 ### The request and its refusals
 
 The statement records the request, not its outcome (R53), as a use does: a
@@ -198,12 +268,18 @@ What binds a request to ids is a record the Worker MACs once it has the
 statement's answer, as a use's second call writes its MAC'd row:
 
 - allowed and committed: **the change** in `log_changes`, under the same
-  request id. Its MAC (the vault's, made by `prepareChanges`) covers the
-  actor (credential and identity ids), the key's id, the request id, and
-  the request's number, which the answer gave. No extra trip;
+  request id. Its MAC (the vault's, made by `prepareChanges`) covers every
+  column but the change's own number (`log-entry.ts`), so what it binds
+  must sit in one: the key's id is its `object`; the request's one id, the
+  same for every change of the patch (today `prepareChanges` mints one per
+  change), its `request_id`; and the request's number, the credential's
+  id and the identity's ride its payload, as `request`, which
+  `loggedChange` leaves beside `old` (today's `actor` names the principal
+  alone, and a session and an API token of one person carry different
+  scopes). No extra trip;
 - refused, or not done for any other reason (out of time, the key service
   failing): **an outcome record**, the request id, its number, the ids it
-  resolved, each input's newest change and the refusal's code, MAC'd by the
+  resolved, each object's newest change, the names' resolution and the refusal's code, MAC'd by the
   Worker and written by a second vault statement (`write_outcome`). One
   more round trip, on a refusal only: a refusal is not a change, and today
   `Refusal` pays a 0.14 deny entry for it;
@@ -225,7 +301,12 @@ and `setAccess(…, admit)` alike).
 
 **What takes it.** The first add of a principal with no member row, with
 its role and first grants or none, by a caller with a session or an API
-token of a member. Everything else keeps today's path: a re-admit (an
+token of a member; by a caller who does not run the instance (no admin,
+setting up a service account as the services setting lets them), only
+with first grants. Such a caller's standing is `#setsUp`: may they give
+access at some live place? With a first grant, that grant's place answers
+it, and the write holds that place. With none, only every live place
+would, which no single object holds. Everything else keeps today's path: a re-admit (an
 earlier generation, whose end the app writes, `endPriorMembership`), a role
 or grant change on an existing member (`member.role`, the last-Owner
 checks), a caller through a way in with no token, a dry run.
@@ -265,6 +346,13 @@ Example: Bob, no admin, sets up svc with a grant at `market/dev` while the
 services setting is open; an Owner closes it between the read and the
 write. The write sees a newer `settings.change`, writes nothing, and the
 read again refuses Bob.
+
+**A refused add** writes an outcome record, as a refused key write does:
+the request id, the ids the read resolved, each object's newest change and
+the refusal's code, MAC'd by the Worker and written by a second vault
+statement (`admit_outcome`). The read writes nothing, so without it a
+refused add would leave no record once 0.14's `member.add` deny entry
+stops (PR 6). Two trips on a refusal, off the budget.
 
 A warm vault could skip step 1: the isolate keeps the actor's inputs with
 their seals, as the use path keeps its seal cache, and the write's CAS
@@ -319,6 +407,7 @@ formal/Writing.tla checks it (docs/formal.md, "Writing.tla"):
 |---|---|
 | the vault's statement reads and numbers in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered; the Worker allows what the log at the number denies |
 | the app's statement holds every input to the object the vault decided on (`Held`, each of seven left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a role redefined, a policy change, an archive or protection of the environment or its fork parent, a write of the key a regenerate replaces, or a new level on the key an override inherits |
+| ... and the names' resolution as the vault read it (NameHold) | `WritesStandAtCommit`: a write committed after its key was renamed, or after the parent gained the key it inherits, sensitive, or a dismissal there |
 | ... checked once it holds the fence (GuardsAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not the head, between the guards and the write |
 | ... by the log's newest change, not the row's column (GuardOnLog) | `WritesStandAtCommit`: a revoked session's row put back, live, by a database writer |
 | the key's change from the seal it was made from (ChangeCAS) | `KeyChangesFlip`: two writes from one version both commit |
@@ -391,7 +480,8 @@ then contract). Each direction:
   of a credential, a member, the policy, an environment and a key in
   `log_changes` (through `app_change` and `change_input`). So a revoke or a
   policy change made by an old isolate moves exactly what a new guard
-  probes.
+  probes. And its renames and dismissals take 0.14's head, as the names'
+  hold needs.
 - **A new app, an old vault.** The vault's binding has no `writeNamed`: the
   write takes today's path. An old app never calls it.
 - **SQLite** holds the whole file per transaction: the same steps run in
@@ -409,6 +499,7 @@ Each with what the key write and the first member add then cost:
    app's guarded statement**, with the 0.14 entries still written. The
    vault's `key.wrap` entry needs its head (a transaction of two trips);
    the app's statement keeps its head read for its own entry's MAC (two).
+   `write_names` and `hold_names` come with it.
    Key write: 1 + 2 + 2 = 5 round trips (16 today).
 4. **The audit pages, the offboarding report and the members' watermark
    read the log**: writes, their refusals and member changes, place
@@ -420,7 +511,7 @@ Each with what the key write and the first member add then cost:
    stop appending, the watermark freezes, and a member added later with any
    later finding reads tampered for good. After it, nothing reads these
    routes' 0.14 entries.
-5. **The member add's front door, read and write.** Its 0.14 `member.add`
+5. **The member add's front door, read, write and `admit_outcome`.** Its 0.14 `member.add`
    entry still needs the head read before its MAC: read, head, write, 3
    round trips (14 today).
 6. **0.16, the contraction.** The two routes stop writing 0.14's entries;

@@ -9,13 +9,14 @@ EXTENDS Writing
 RevokeProcs == {"w1", "w2", "rev", "end", "ck"}
 
 \* Ada writes key k while an Owner redefines her role and changes the
-\* policy, and a maintainer archives env.
-PlaceProcs == {"w1", "rol", "pol", "arc", "ck"}
+\* policy, a maintainer archives env, and another renames k.
+PlaceProcs == {"w1", "rol", "pol", "arc", "ren", "ck"}
 
 \* Ada regenerates key k in a fork while its parent is archived, the
-\* parent's key she replaces is written, and the parent's key whose level
-\* she inherits is marked sensitive.
-ForkProcs == {"w1", "par", "rep", "mrk", "ck"}
+\* parent's key she replaces is written, the parent's key whose level
+\* she inherits is marked sensitive, and the parent gains, sensitive, a key
+\* it held none of at her read.
+ForkProcs == {"w1", "par", "rep", "mrk", "phn", "ck"}
 
 \* Ada writes key k while her session is revoked and a database writer puts
 \* its row back, live.

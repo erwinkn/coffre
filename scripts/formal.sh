@@ -407,6 +407,9 @@ REMOVALS=(
   'WritingPlace Held={"cred","member","roles","policy","parent","parentKey"} WritesStandAtCommit'
   'WritingFork Held={"cred","member","roles","policy","env","parentKey"} WritesStandAtCommit'
   'WritingFork Held={"cred","member","roles","policy","env","parent"} WritesStandAtCommit'
+  # The names left unheld: a rename of the key written, the parent gaining the key it inherits.
+  "WritingPlace NameHold WritesStandAtCommit"
+  "WritingFork NameHold WritesStandAtCommit"
   "WritingRevoke GuardsAfterFence WritesStandAtCommit"
   # A guard by the row's own seal column: a database writer puts a revoked session back, live.
   "WritingTamper GuardOnLog WritesStandAtCommit"
