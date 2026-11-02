@@ -36,6 +36,15 @@ export type ProxyCodeItem = {
   limitPerService: boolean;
   /** Its requests leave through a binding code gives it (a route's egress, a tunnel's network), which has no name to show. */
   bound: boolean;
+  /**
+   * How its allow list matches where code reads it otherwise than the tab:
+   * `code`, an `allow` in code, whose trailing slash takes what is below it
+   * (`/files/`, which the tab writes `/files/**`); `legacy`, `methods` and
+   * `paths` as before 0.16, each path compared as written and `*` itself,
+   * never a glob; `noMethod` where `methods: []` took no method, which the
+   * tab's `methods: []` (any) cannot say. Null: no allow list, or as the tab's.
+   */
+  allowAs: { from: 'code' | 'legacy'; noMethod: boolean } | null;
 };
 
 const CODE = Symbol('coffre.proxy-code');

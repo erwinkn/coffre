@@ -14,6 +14,7 @@ import {
   copiedInWords,
   diffOf,
   fieldOf,
+  inheritanceOf,
   itemsOf,
   keyStanding,
   NO_DRAFTS,
@@ -263,4 +264,41 @@ test("as code, a UI item serves where it serves now", () => {
   assert.match(codeOf({ kind: 'tunnel', name: 'db', key: 'DATABASE_URL', hosts: ['db.internal'], network: null }, ['market/dev']), /postgres\('DATABASE_URL', \{ hosts: \['db.internal'\], environments: \['market\/dev'\] \}\)/);
   assert.match(codeOf({ kind: 'signer', name: 'sign', signer: { kind: 'private-key', key: 'K' }, limit: NONE }, ['market/dev']), /privateKey\('K', \{ environments: \['market\/dev'\] \}\)/);
   assert.doesNotMatch(codeOf(route('openai')), /environments/);
+});
+
+test('inheritance stops at the first parent the page cannot read or trust: past it, what shows may be overridden', () => {
+  const fork = { project: 'market', environment: 'dev-eu-x' };
+  const base = { path: 'market/dev', page: page([route('openai'), route('stripe', ['STRIPE_KEY'], 'api.stripe.com')]) };
+  const names = (parents: Parameters<typeof itemsOf>[2]) => itemsOf(page([]), fork, parents).filter((item) => item.source === 'inherited').map((item) => `${item.from} ${item.definition.name}`);
+  assert.deepEqual(names([{ path: 'market/dev-eu', page: page([route('gemini')]) }, base]), ['market/dev-eu gemini', 'market/dev openai', 'market/dev stripe']);
+  // dev-eu is closed to this person: its own openai, to another upstream, may override dev's. Neither shows.
+  assert.deepEqual(names([{ path: 'market/dev-eu', page: null }, base]), []);
+  assert.deepEqual(inheritanceOf([{ path: 'market/dev-eu', page: null }, base]).stop, { path: 'market/dev-eu', why: 'closed' });
+  // A forged dev-eu: the vault refuses a use through it, so nothing past it shows either.
+  assert.deepEqual(names([{ path: 'market/dev-eu', page: page([], { state: 'tampered' }) }, base]), []);
+  assert.deepEqual(inheritanceOf([{ path: 'market/dev-eu', page: page([], { state: 'tampered' }) }, base]).stop, { path: 'market/dev-eu', why: 'tampered' });
+  assert.equal(inheritanceOf([base]).stop, null);
+});
+
+test('a pending resave outlives another save removing its item: saving makes it again, as it was', () => {
+  const editor = state(page([])).editor;
+  const origin = itemsOf(page([route('gemini')]), DEV).find((item) => item.id === 'own:gemini')!;
+  const drafts = { ...NO_DRAFTS, resaved: ['own:gemini'], origins: { 'own:gemini': origin } };
+  const rows = rowsOf([], drafts, editor);
+  assert.deepEqual(rows.map((row) => [row.id, row.state, row.gone]), [['own:gemini', 'resaved', true]]);
+  assert.deepEqual(saveOf(rows), { gemini: route('gemini') });
+});
+
+test("a code route's sample call matches as code does: legacy paths as written, a trailing slash, methods: [] taking none", () => {
+  const legacy: ProxyRoute = { ...route('files'), allow: [{ methods: ['GET'], path: '/files/*' }] };
+  // Before 0.16, `*` is itself: only `/files/*` and below, never `/files/a`.
+  assert.match(sampleCall(legacy, 'GET', '/files/a', { from: 'legacy', noMethod: false }).refusal!, /^403/);
+  assert.equal(sampleCall(legacy, 'GET', '/files/*', { from: 'legacy', noMethod: false }).refusal, null);
+  assert.equal(sampleCall(legacy, 'GET', '/files/a').refusal, null, "the tab's own reads it as a glob");
+  // `allow` in code keeps a trailing slash: what is below it.
+  const below: ProxyRoute = { ...route('files'), allow: [{ methods: [], path: '/files/' }] };
+  assert.equal(sampleCall(below, 'GET', '/files/a/b', { from: 'code', noMethod: false }).refusal, null);
+  // Legacy `methods: []` took no method: the converted `methods: []` would read as any.
+  const none: ProxyRoute = { ...route('files'), allow: [{ methods: [], path: '/' }] };
+  assert.match(sampleCall(none, 'GET', '/x', { from: 'legacy', noMethod: true }).refusal!, /^405/);
 });

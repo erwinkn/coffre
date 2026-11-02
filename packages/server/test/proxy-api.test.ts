@@ -59,7 +59,7 @@ function route(name: string, keys: readonly string[] = ['OPENAI_API_KEY'], host 
 }
 
 /** Code's `stripe`, as the Proxy tab shows it locked. */
-const STRIPE = { definition: { ...route('stripe', ['STRIPE_SECRET_KEY'], 'api.stripe.com'), allow: null }, environments: ['market/prod'], limitPerService: false, bound: false };
+const STRIPE = { definition: { ...route('stripe', ['STRIPE_SECRET_KEY'], 'api.stripe.com'), allow: null }, environments: ['market/prod'], limitPerService: false, bound: false, allowAs: null };
 
 beforeEach(async () => {
   await resetDatabase(db.owner);

@@ -26,7 +26,7 @@ import {
   type ProxyTunnel,
   type ProxyVerifier,
 } from '@coffre/core/proxy';
-import { allows, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
+import { allows, NOTHING, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
 import { CREDENTIAL_NAME } from '@coffre/core/workloads';
 
 export type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyKind, ProxyLimit, ProxyMethod, ProxyRoute, ProxySigner, ProxyTunnel, ProxyVerifier };
@@ -63,6 +63,8 @@ export type ProxyItem = {
   limitPerService: boolean;
   /** A code item whose requests leave through a binding, an egress or a network, which has no name to show. */
   bound: boolean;
+  /** A code route's allow list, matched as code matches it (`ProxyPage.code`'s `allowAs`); null: as the tab's. */
+  allowAs: AllowAs | null;
   savedBy: string | null;
   savedAt: number | null;
   routesSensitive: boolean;
@@ -72,8 +74,30 @@ export type ProxyItem = {
   from: string | null;
 };
 
+export type AllowAs = { from: 'code' | 'legacy'; noMethod: boolean };
+
 /** A parent of the fork, nearest first, and its page; null where the page could not be read. */
 export type ParentPage = { path: string; page: ProxyPage | null };
+
+/**
+ * What the page can show of its inheritance: the parents it resolves, nearest
+ * first, up to the first it cannot, and that one, closed to this person or
+ * failing the vault's check. Past it nothing is shown, since it may override
+ * what its own parents hold: with dev-eu-x from dev-eu from dev and dev-eu
+ * closed, dev's openai may be dev-eu's own openai, to another upstream; and
+ * the vault refuses a use whose chain holds a forged object.
+ *
+ *   dev-eu-x: dev-eu closed, dev  ->  resolved [], stop dev-eu (closed)
+ */
+export function inheritanceOf(parents: readonly ParentPage[]): { resolved: (ParentPage & { page: ProxyPage })[]; stop: { path: string; why: 'closed' | 'tampered' | 'stale' } | null } {
+  const resolved: (ParentPage & { page: ProxyPage })[] = [];
+  for (const parent of parents) {
+    if (parent.page === null) return { resolved, stop: { path: parent.path, why: 'closed' } };
+    if (parent.page.state !== 'ok') return { resolved, stop: { path: parent.path, why: parent.page.state } };
+    resolved.push({ ...parent, page: parent.page });
+  }
+  return { resolved, stop: null };
+}
 
 /**
  * The items the page lists: code's, then the environment's own, then those
@@ -85,7 +109,7 @@ export type ParentPage = { path: string; page: ProxyPage | null };
 export function itemsOf(page: ProxyPage, place: Place, parents: readonly ParentPage[] = []): ProxyItem[] {
   const path = `${place.project}/${place.environment}`;
   const code = new Set(page.code.map((item) => item.definition.name));
-  const blank = { environments: null, serves: true, limitPerService: false, bound: false };
+  const blank = { environments: null, serves: true, limitPerService: false, bound: false, allowAs: null };
   const items: ProxyItem[] = page.code.map((item) => ({
     id: `code:${item.definition.kind}:${item.definition.name}`,
     source: 'code',
@@ -94,6 +118,7 @@ export function itemsOf(page: ProxyPage, place: Place, parents: readonly ParentP
     serves: item.environments === null || item.environments.includes(path),
     limitPerService: item.limitPerService,
     bound: item.bound,
+    allowAs: item.allowAs ?? null,
     savedBy: null,
     savedAt: null,
     routesSensitive: false,
@@ -101,15 +126,16 @@ export function itemsOf(page: ProxyPage, place: Place, parents: readonly ParentP
     from: null,
   }));
   const held = new Set(code);
-  const parentOf = (name: string) => parents.find((parent) => parent.page?.items.some((item) => item.definition.name === name))?.path ?? null;
+  const { resolved } = inheritanceOf(parents);
+  const parentOf = (name: string) => resolved.find((parent) => parent.page.items.some((item) => item.definition.name === name))?.path ?? null;
   for (const item of page.items) {
     const name = item.definition.name;
     if (held.has(name)) continue;
     held.add(name);
     items.push({ ...blank, id: `own:${name}`, source: 'own', definition: item.definition, savedBy: item.savedBy, savedAt: item.savedAt, routesSensitive: item.routesSensitive, notCleared: item.notCleared ?? null, from: parentOf(name) });
   }
-  for (const parent of parents) {
-    for (const item of parent.page?.items ?? []) {
+  for (const parent of resolved) {
+    for (const item of parent.page.items) {
       const name = item.definition.name;
       if (held.has(name)) continue;
       held.add(name);
@@ -210,9 +236,12 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
   // An edit whose item another save removed stays, over the item that now has its name, if any: Bob deleted
   // dev-eu's own openai while Alice edited it, and dev-eu inherits dev's again; Alice's edit is the override.
   const present = new Set(items.map((item) => item.id));
+  // A resave whose item went is kept too, as it was: saving it again makes it again.
   const orphans = Object.entries(drafts.origins).flatMap(([id, origin]) => {
+    if (present.has(id)) return [];
     const draft = drafts.edits[id];
-    return present.has(id) || draft == null || sameDefinition(draft, origin.definition) ? [] : [{ id, origin, draft }];
+    if (draft == null) return drafts.resaved.includes(id) && draft === undefined ? [{ id, origin, draft: origin.definition, resaved: true }] : [];
+    return sameDefinition(draft, origin.definition) ? [] : [{ id, origin, draft, resaved: false }];
   });
   const twin = (id: string) => (id.startsWith('own:') ? `from:${id.slice(4)}` : id.startsWith('from:') ? `own:${id.slice(5)}` : null);
   const hidden = new Set(orphans.map(({ id }) => twin(id)));
@@ -237,9 +266,9 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
       keys,
     };
   });
-  for (const { id, origin, draft } of orphans) {
+  for (const { id, origin, draft, resaved } of orphans) {
     const before = keyStanding(definitionKeys(origin.definition), editor);
-    rows.push({ id, item: origin, before: origin.definition, definition: draft, state: 'changed', editable: editor.editable && before.blocked.length === 0, removable: editor.editable, copiedFrom: null, gone: true, keys: keyStanding(definitionKeys(draft), editor) });
+    rows.push({ id, item: origin, before: origin.definition, definition: draft, state: resaved ? 'resaved' : 'changed', editable: editor.editable && before.blocked.length === 0, removable: editor.editable, copiedFrom: null, gone: true, keys: keyStanding(definitionKeys(draft), editor) });
   }
   for (const { id, copiedFrom } of drafts.added) {
     const definition = drafts.edits[id];
@@ -549,20 +578,26 @@ export const soleKey = (template: string | null) => /^\{([A-Za-z_][A-Za-z0-9_]*)
 
 /**
  * Where a sample call through a route goes, or why the proxy refuses it,
- * by the proxy's own matcher: `GET /models/gpt-4` under `GET /models/**`
- * goes to `<upstream>/models/gpt-4`.
+ * by the proxy's own matcher, as it reads the route's allow list (a code
+ * route's as code: `allowAs`): `GET /models/gpt-4` under `GET /models/**`
+ * goes to `<upstream>/models/gpt-4`; under legacy `paths: ['/models/*']`,
+ * only `/models/*` itself does.
  */
-export function sampleCall(route: ProxyRoute, method: string, path: string): { url: string; refusal: string | null } {
+export function sampleCall(route: ProxyRoute, method: string, path: string, allowAs: AllowAs | null = null): { url: string; refusal: string | null } {
   const tail = path.startsWith('/') ? path : `/${path}`;
   const url = `${route.upstream.replace(/\/+$/, '')}${tail}`;
   if (route.allow === null) return { url, refusal: null };
+  const from = allowAs?.from ?? 'ui';
+  const methods = (given: readonly string[]) => (allowAs?.noMethod ? new Set<string>() : given.length === 0 ? null : new Set(given));
   const entries: AllowEntry[] = [];
   for (const entry of route.allow) {
-    const read = readPattern(entry.path, 'ui');
+    const read = readPattern(entry.path, from);
     if ('problem' in read) continue;
-    entries.push({ methods: entry.methods.length === 0 ? null : new Set(entry.methods), path: read.pattern });
+    entries.push({ methods: methods(entry.methods), path: read.pattern });
   }
-  const answer = allows(entries, method, requestSegments(tail));
+  // Legacy `paths: []` takes no path: refused, a 403 (code answers a method its `methods` lack with a 405 first).
+  if (from === 'legacy' && route.allow.length === 0) entries.push({ methods: null, path: NOTHING });
+  const answer = allows(entries, method, requestSegments(tail, from === 'legacy'));
   return { url, refusal: answer === 'allowed' ? null : answer === 'method' ? `405: no allow entry takes ${method} there` : `403: no allow entry takes ${method} ${tail}` };
 }
 

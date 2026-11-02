@@ -20,6 +20,7 @@ import {
   savedByInWords,
   soleKey,
   targetOf,
+  type AllowAs,
   type InjectKind,
   type ProxyHmac,
   type ProxyInject,
@@ -170,7 +171,7 @@ function Panel({ row, edits, keys }: PanelProps) {
           <TunnelFields row={row} tunnel={definition} edits={edits} keys={keys} disabled={disabled} />
         )}
       </fieldset>
-      {definition.kind === 'route' && <Preview route={definition} keys={keys} useUrl={edits.page.useUrl} />}
+      {definition.kind === 'route' && <Preview route={definition} allowAs={item?.allowAs ?? null} keys={keys} useUrl={edits.page.useUrl} />}
       {/* Code's own item is in code already, some of it (a binding, a limit per service) beyond what the page can write out. */}
       {asCode !== null && (
         <details className="proxy-as-code">
@@ -191,7 +192,7 @@ function Panel({ row, edits, keys }: PanelProps) {
 function Provenance({ row, edits }: { row: Row; edits: Edits }) {
   const item = row.item;
   if (item === null) return row.copiedFrom === null ? null : <p className="proxy-provenance">Copied from {row.copiedFrom}, not saved yet.</p>;
-  if (row.gone) return <p className="proxy-provenance">Removed by another save since you began editing it: saving makes it again, as you edited it.</p>;
+  if (row.gone) return <p className="proxy-provenance">Removed by another save since you began editing it: saving makes it again, {row.state === 'resaved' ? 'as it was' : 'as you edited it'}.</p>;
   // Code's item shows locked with code's values, its lock saying where it serves (R66); only one that serves elsewhere says so here.
   if (item.source === 'code') {
     return item.serves ? null : <p className="proxy-provenance">{scopeInWords(item)}: {edits.place.project}/{edits.place.environment} has no {item.definition.name}, and none of its own takes the name.</p>;
@@ -306,6 +307,7 @@ function RouteFields({ row, route, edits, keys, disabled }: { row: Row; route: P
   const setRule = (index: number, rule: ProxyInject) => set((one) => ({ ...one, inject: one.inject.map((each, at) => (at === index ? rule : each)) }));
   const setAllow = (allow: ProxyRoute['allow']) => set((one) => ({ ...one, allow: allow !== null && allow.length === 0 ? null : allow }));
   const shaped = route.inject.some((rule) => rule.kind !== 'basic' && rule.kind !== 'sigv4');
+  const allowAs = row.item?.allowAs ?? null;
   const via = route.egress ?? (row.item?.bound ? "code's egress" : null);
   return (
     <>
@@ -357,14 +359,31 @@ function RouteFields({ row, route, edits, keys, disabled }: { row: Row; route: P
           </Fold>
         </Line>
       )}
-      <Line label="Allows" notes={problemOf(edits, row, 'allow')}>
+      <Line
+        label="Allows"
+        notes={
+          <>
+            {problemOf(edits, row, 'allow')}
+            {allowAs?.from === 'legacy' && (
+              <p className="hint">
+                Code&apos;s <span className="mono">methods</span> and <span className="mono">paths</span>, matched as before 0.16: each path as written, <span className="mono">*</span> itself, never a glob
+                {allowAs.noMethod && <>; its <span className="mono">methods: []</span> takes no method, so every call is refused</>}.
+              </p>
+            )}
+          </>
+        }
+      >
         <div className="proxy-rows">
           {route.allow === null && <span className="proxy-static">Any method, any path</span>}
           {route.allow?.length === 0 && <span className="proxy-static">No request</span>}
           {(route.allow ?? []).map((entry, index) => (
             <div key={index} className="proxy-row">
               <Fold invalid={edits.problems(row)[`allow.${index}`] !== undefined}>
-                <MethodsMenu methods={entry.methods} disabled={disabled} onChange={(methods) => setAllow((route.allow ?? []).map((each, at) => (at === index ? { ...each, methods } : each)))} />
+                {allowAs?.noMethod ? (
+                  <span className="fold-text mono">No method</span>
+                ) : (
+                  <MethodsMenu methods={entry.methods} disabled={disabled} onChange={(methods) => setAllow((route.allow ?? []).map((each, at) => (at === index ? { ...each, methods } : each)))} />
+                )}
                 <input
                   className="fold-input mono"
                   aria-label="Path"
@@ -400,7 +419,10 @@ function InjectRule({ rule, keys, disabled, invalid, onChange }: { rule: ProxyIn
     </select>
   );
   if (rule.kind === 'sigv4') {
-    const pick = (field: 'accessKeyId' | 'secretAccessKey' | 'sessionToken', label: string) => (
+    // A field the API took as a template, `{PREFIX}{AWS_SECRET_ACCESS_KEY}`, is no one key to pick: it shows, and edits, as written.
+    const pick = (field: 'accessKeyId' | 'secretAccessKey' | 'sessionToken', label: string) => (rule[field] ?? '') !== '' && soleKey(rule[field]) === '' ? (
+      <TemplateInput value={rule[field] ?? ''} keys={keys} label={label} placeholder={`{${label.toUpperCase().replace(/ /g, '_')}}`} disabled={disabled} onChange={(template) => onChange({ ...rule, [field]: template === '' && field === 'sessionToken' ? null : template })} />
+    ) : (
       <KeySelect
         value={soleKey(rule[field])}
         keys={keys}
@@ -572,11 +594,11 @@ function TunnelFields({ row, tunnel, edits, keys, disabled }: { row: Row; tunnel
 // --- a sample call -----------------------------------------------------------------------------------
 
 /** A sample call through a route, as the proxy would send it on: the path it goes to, and where each rule puts its keys. */
-function Preview({ route, keys, useUrl }: { route: ProxyRoute; keys: readonly SecretKey[]; useUrl: string }) {
+function Preview({ route, allowAs, keys, useUrl }: { route: ProxyRoute; allowAs: AllowAs | null; keys: readonly SecretKey[]; useUrl: string }) {
   const first = route.allow?.[0];
   const [method, setMethod] = useState<string>(first?.methods[0] ?? 'GET');
   const [path, setPath] = useState(first?.path.replace(/\/\*\*$/, '/x').replace(/\*/g, 'id') ?? '/');
-  const call = sampleCall(route, method, path);
+  const call = sampleCall(route, method, path, allowAs);
   const query = route.inject.flatMap((rule) => (rule.kind === 'query' ? [`${rule.name}=${rule.template}`] : []));
   const url = query.length === 0 ? call.url : `${call.url}${call.url.includes('?') ? '&' : '?'}${query.join('&')}`;
   return (

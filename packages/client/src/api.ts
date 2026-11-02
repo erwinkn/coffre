@@ -2054,6 +2054,10 @@ export type Api = {
         environments: null | string[];
         limitPerService: boolean;
         bound: boolean;
+        allowAs: null | {
+          from: "code" | "legacy";
+          noMethod: boolean;
+        };
       }[];
       routesSensitive: boolean;
       releases: boolean;
@@ -2241,6 +2245,10 @@ export type Api = {
         environments: null | string[];
         limitPerService: boolean;
         bound: boolean;
+        allowAs: null | {
+          from: "code" | "legacy";
+          noMethod: boolean;
+        };
       }[];
       routesSensitive: boolean;
       releases: boolean;
@@ -3048,6 +3056,10 @@ export type ProxyPage = {
     environments: null | string[];
     limitPerService: boolean;
     bound: boolean;
+    allowAs: null | {
+      from: "code" | "legacy";
+      noMethod: boolean;
+    };
   }[];
   routesSensitive: boolean;
   releases: boolean;

@@ -6,7 +6,7 @@ import type { ProxyPage as ProxyView, SecretKey } from '@coffre/client';
 import { useCoffre } from '../lib/coffre';
 import { queries } from '../lib/queries';
 import { useShell } from '../lib/use-shell';
-import { parentsOf, type ParentPage, type Place } from '../lib/proxy';
+import { inheritanceOf, parentsOf, type ParentPage, type Place } from '../lib/proxy';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { EnvironmentTabs } from '../components/environment-tabs';
 import { Protection } from '../components/protected';
@@ -79,7 +79,7 @@ function ProxyTab({ place, page, parents, keys }: { place: Place; page: ProxyVie
   const edits = useProxyEdits({ place, page, parents, keys });
   const [copying, setCopying] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const unread = parents.filter((parent) => parent.page === null).map((parent) => parent.path);
+  const { stop } = inheritanceOf(parents);
 
   return (
     <>
@@ -95,7 +95,11 @@ function ProxyTab({ place, page, parents, keys }: { place: Place; page: ProxyVie
       {page.readOnly?.reason === 'not_editable' && (
         <p className="hint proxy-readonly">This deployment&apos;s code keeps its proxy definitions. Set <span className="mono">credentialProxy({'{'} editable: true {'}'})</span> to write them here.</p>
       )}
-      {unread.length > 0 && <p className="hint proxy-readonly">{unread.join(', ')} is closed to you: what {environment} inherits from it is not shown.</p>}
+      {stop !== null && (
+        <p className="hint proxy-readonly">
+          <span className="mono">{stop.path}</span> {stop.why === 'closed' ? 'is closed to you' : stop.why === 'stale' ? "holds proxy definitions that are not their newest saved version" : "holds proxy definitions that failed the vault's integrity check"}: what {environment} inherits from it, and through it, is not shown.
+        </p>
+      )}
 
       <ProxySheet
         edits={edits}

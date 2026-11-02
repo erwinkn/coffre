@@ -2413,7 +2413,7 @@ function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap
   const limit = (given: Limits | undefined): { limit: ProxyLimit; limitPerService: boolean } =>
     typeof given === 'function' ? { limit: { perMinute: null, perDay: null }, limitPerService: true } : { limit: { perMinute: given?.perMinute ?? null, perDay: given?.perDay ?? null }, limitPerService: false };
   const hmacOf = (signer: Hmac): ProxyHmac => ({ key: signer.key, encoding: signer.encoding, prefix: signer.prefix ?? '', maxBytes: signer.maxBytes ?? null });
-  const item = (definition: ProxyDefinition, from: { environments?: readonly string[] }, limitPerService = false, bound = false): ProxyCodeItem => ({ definition, environments: scope(from), limitPerService, bound });
+  const item = (definition: ProxyDefinition, from: { environments?: readonly string[] }, limitPerService = false, bound = false, allowAs: ProxyCodeItem['allowAs'] = null): ProxyCodeItem => ({ definition, environments: scope(from), limitPerService, bound, allowAs });
   return [
     ...Object.entries(credentials).map(([name, credential]) => {
       const rules = (Array.isArray(credential.inject) ? credential.inject : [credential.inject]) as readonly Inject[];
@@ -2427,7 +2427,9 @@ function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap
         : credential.methods !== undefined ? [{ methods: methods(credential.methods), path: '/' }] : null;
       const { limit: limited, limitPerService } = limit(credential.limit);
       const placeholder = credential.placeholder === undefined ? null : credential.placeholder.kind === 'jwt' ? { kind: 'jwt' as const, claims: [...credential.placeholder.claims] } : { kind: 'prefix' as const, prefix: credential.placeholder.prefix };
-      return item({ kind: 'route', name, upstream: credential.upstream, inject, allow, limit: limited, placeholder, egress: null }, credential, limitPerService, credential.egress !== undefined);
+      // Matched as code matches it, which the tab's preview follows: `paths` as before 0.16, and `methods: []` there took none.
+      const allowAs: ProxyCodeItem['allowAs'] = credential.allow !== undefined ? { from: 'code', noMethod: false } : allow !== null ? { from: 'legacy', noMethod: credential.methods?.length === 0 } : null;
+      return item({ kind: 'route', name, upstream: credential.upstream, inject, allow, limit: limited, placeholder, egress: null }, credential, limitPerService, credential.egress !== undefined, allowAs);
     }),
     ...[...signers].map(([name, signer]) => {
       const { limit: limited, limitPerService } = limit(signer.limit);

@@ -1864,7 +1864,16 @@ is fixed in this document, within PR C.
   it takes away; the page says so rather than predicting each.
 - **Forks**: the tab reads each parent's page beside its own, one round
   trip; editing an inherited item, or saving it again as it is to clear
-  it, saves the fork's own (decision 6).
+  it, saves the fork's own (decision 6). Inheritance shows up to the
+  first parent the page cannot read (closed to the caller) or trust
+  (tampered, stale), and says so: past it, an unseen parent may override
+  what its own parents hold, and the vault refuses a use through a forged
+  object.
+- **Code's allow lists** keep code's matching: a code item says how
+  (`ProxyCodeItem.allowAs`): `code`, an `allow` whose trailing slash takes
+  what is below it; `legacy`, `methods` and `paths` as before 0.16, `*`
+  itself, and `noMethod` where `methods: []` took none. The sample call
+  follows it.
 - **As code** writes a UI item out scoped to the environment it is in
   (`environments: ['market/dev']`), as it serves now; a code item shows no
   snippet, since its binding or limit per service has no words in the tab.
