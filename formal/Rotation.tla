@@ -114,6 +114,10 @@
 (* ranges, each held to the pair that starts it (docs/formal.md, "The      *)
 (* readers", says what that leaves to someone who holds A), and its other  *)
 (* checks (a read's columns, the cursor's place), which Reads.tla's are.   *)
+(* The cursor's two numbers are test-held, deliberately: a cursor counts   *)
+(* below the rotation only with its pair at or below its through and its   *)
+(* through below the rotation (`cursorVouched`; reads-rotation.test.ts     *)
+(* forges one with its pair past the rotation, review r4 of #444).         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 

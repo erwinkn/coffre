@@ -27,6 +27,8 @@ export async function logKeys(seeds: readonly Uint8Array[]): Promise<{ current: 
   if (current === undefined) throw new Error('the vault has no signing key');
   const clash = previous.find((key) => key.mac.tag.equals(current.mac.tag));
   if (clash !== undefined) throw new Error(`the signing key's log tag is that of a key it replaced (${clash.origin}): make another signing key`);
+  const twins = previous.findIndex((key, i) => previous.slice(i + 1).some((other) => other.mac.tag.equals(key.mac.tag)));
+  if (twins !== -1) throw new Error(`two keys the signing key replaced share a log tag (${previous[twins]!.origin}): the database could not tell their entries apart`);
   return { current, previous };
 }
 

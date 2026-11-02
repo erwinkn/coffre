@@ -20,7 +20,7 @@ import { resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '
 import { sealKey, type Input, type Ref } from '../src/inputs.ts';
 import { openLocalVault } from '../src/local.ts';
 import { keyringOf } from '../src/keyring.ts';
-import { openLogCheckpointer, logKey } from '../src/log-checkpointer.ts';
+import { openLogCheckpointer, logKey, logKeys } from '../src/log-checkpointer.ts';
 import { verifierKeys } from '../src/verifier.ts';
 import { authentic, entryMac, KEY_OBJECT, logMacKey, rotationPayload } from '../src/log-entry.ts';
 import { logStore } from '../src/log-store.ts';
@@ -599,4 +599,12 @@ test('config: a rotation keeps the replaced signing key, after the one the vault
   assert.deepEqual(local, [derivedB, derivedA]);
   assert.deepEqual(resolveVaultConfig({ kek: kms, signingKey: s2, previousSigningKeys: [s1], owners }).signingKeys, [Buffer.from(s2, 'base64'), Buffer.from(s1, 'base64')]);
   assert.throws(() => resolveVaultConfig({ kek: kms, signingKey: s2, previousSigningKeys: ['short'], owners }), /previousSigningKeys\[0\] must be 32 bytes/);
+});
+
+test('no two of the vault\'s signing keys may share a log tag, replaced ones included: the database tells their entries apart by it (review r5 of #444)', async () => {
+  const [a, b] = [randomBytes(32), randomBytes(32)];
+  await assert.rejects(logKeys([b, a, b]), /the signing key's log tag is that of a key it replaced/);
+  await assert.rejects(logKeys([b, a, a]), /two keys the signing key replaced share a log tag/);
+  const { previous } = await logKeys([b, a]);
+  assert.equal(previous.length, 1);
 });

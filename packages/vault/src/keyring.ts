@@ -12,7 +12,9 @@ import { authentic, rotationOf, type LogMacKey } from './log-entry.ts';
  * `coffre verify log`'s check of the reads and the vault's `vouch`, through
  * this. The current key vouches for anything. A key it replaced vouches only
  * for what is numbered below its rotation: a pair whose `upto`, an entry or
- * a read whose number, a cursor whose `through` is below it. A replaced key
+ * a read whose number is below it, and a cursor whose `through` is, with its
+ * `pair` at or below its `through` (`cursorVouched`: a cursor's `pair` past
+ * the rotation would skip every use between them). A replaced key
  * no rotation retired yet vouches while the newest pair is under it (the
  * rotation under way: the checkpointer writes it at its first start under
  * the new key), and for nothing once it is not: a rotation's row deleted
