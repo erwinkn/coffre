@@ -141,14 +141,35 @@ test('environments on a signer, a verifier and a tunnel: each is refused, 404, i
 });
 
 test('an empty allow list, or paths: [], takes nothing, and says so; methods: [] takes no method, and says so', async () => {
-  for (const credential of [{ allow: [] }, { paths: [] }]) {
-    const answer = await proxy(credential).ask('/market/dev/api/a');
-    assert.equal(answer.status, 403);
-    assert.match(answer.body, /api's allow list is empty: it takes no request/);
+  const empty = await proxy({ allow: [] }).ask('/market/dev/api/a');
+  assert.equal(empty.status, 403);
+  assert.match(empty.body, /api's allow list is empty: it takes no request/);
+  const pathless = await proxy({ paths: [] }).ask('/market/dev/api/a');
+  assert.equal(pathless.status, 403);
+  assert.match(pathless.body, /api is not for \/a/);
+  for (const credential of [{ methods: [] }, { methods: [], paths: [] }]) {
+    const none = await proxy(credential).ask('/market/dev/api/a');
+    assert.equal(none.status, 405);
+    assert.match(none.body, /api takes no method/);
   }
-  const none = await proxy({ methods: [] }).ask('/market/dev/api/a');
-  assert.equal(none.status, 405);
-  assert.match(none.body, /api takes no method/);
+});
+
+test('legacy methods answer before an empty paths, as on 0.15: a request, and a presigned URL, of another method is a 405, of its own a 403', async () => {
+  const { reached, ask } = proxy({ methods: ['POST'], paths: [] });
+  const get = await ask('/market/dev/api/a');
+  assert.equal(get.status, 405);
+  assert.match(get.body, /api takes POST/);
+  const post = await ask('/market/dev/api/a', { method: 'POST' });
+  assert.equal(post.status, 403);
+  assert.match(post.body, /api is not for \/a/);
+  assert.equal(reached.length, 0);
+  const s3 = sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: 'eu-west-3', service: 's3' });
+  for (const [methods, status, said] of [[['POST'], 405, /api takes POST/], [['GET'], 403, /api is not for \/bucket\/k/]] as const) {
+    const signer = proxy({ upstream: 'https://s3.eu-west-3.amazonaws.com', inject: s3, methods: [...methods], paths: [] });
+    const answer = await signer.ask('/market/dev', { method: 'POST', headers: { authorization: `Bearer ${HANDLE}`, 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 'api', path: '/bucket/k' } }) });
+    assert.equal(answer.status, status, methods.join());
+    assert.match(answer.body, said, methods.join());
+  }
 });
 
 test('a * in code\'s paths is itself, as before 0.16, with a warning: never a glob, and no path of old fails to start', async (t) => {

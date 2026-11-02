@@ -2380,6 +2380,9 @@ function allowList(name: string, credential: Credential): readonly AllowEntry[] 
   const taken = methods(credential.methods, true);
   if (credential.paths === undefined) return [{ methods: taken, path: null }];
   if (!Array.isArray(credential.paths)) throw new Error(`credentialProxy: ${name}'s paths are a list, ['/companies']`);
+  // `paths: []` takes no path, but its methods still answer first, as before 0.16: `methods: ['POST'], paths: []` is a
+  // 405 to a GET and a 403 to a POST. An entry whose path matches none keeps them; no entry at all would be a 403 to both.
+  if (credential.paths.length === 0) return [{ methods: taken, path: { segments: [], tail: 'never', written: true } }];
   // A path of `paths` matches as it did before 0.16 (`readPattern`'s `legacy`): `*` itself, never a glob, and `//` or `;x` as written.
   return credential.paths.map((given) => {
     if (typeof given === 'string' && given.includes('*')) console.warn(`credentialProxy: ${name}'s path ${given} takes * as itself, as before 0.16: allow: [{ path }] reads * and ** as globs`);
