@@ -580,7 +580,9 @@ EXPECTED=(
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,
 # `--workers 4 --heap 4g`): Tampering alone about 410, `large` about 400, and
-# `rest`, every other scenario, about 260. 0.15's models (HotPathOne, Seal,
+# `rest`, every other scenario, about 260. On CI by 2026-11-02, `rest` took 39
+# minutes of its 45 and `large` 4 to 7: T165's ProbingMany scenarios, about
+# 10 minutes of CI (ProbingManyFork 7 of them), are in `large`. 0.15's models (HotPathOne, Seal,
 # Migration015) have seven of their own, each about 5 minutes of TLC with 4
 # workers on a shared host, which CI's runners took about twice as long to
 # run: hotpath, hotpath-policy (the policy, liveness and stale-bulk
@@ -593,7 +595,7 @@ SHARDS="tampering large rest hotpath hotpath-policy hotpath-bulk hotpath-skew se
 shard_of() {
   case "$1" in
     Tampering) echo tampering ;;
-    Overtaking|Walking|Sharing|Rows|Mixed) echo large ;;
+    Overtaking|Walking|Sharing|Rows|Mixed|ProbingMany*) echo large ;;
     HotPathOneBulkSkew|HotPathOneBulkSlack) echo hotpath-skew ;;
     HotPathOneBulk) echo hotpath-bulk ;;
     HotPathOneLive|HotPathOneStallLive|HotPathOnePolicy|HotPathOnePolicyWindow|HotPathOneStaleBulk) echo hotpath-policy ;;

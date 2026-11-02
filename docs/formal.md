@@ -2472,7 +2472,9 @@ every pull request that is not a version-only bump:
   (`shard_of`), each with its runs without a protection, balanced by what
   they took:
   - Tampering's 7 to 11 minutes (17.5 million states) alone;
-  - Overtaking, Walking, Sharing, Rows and Mixed together;
+  - Overtaking, Walking, Sharing, Rows and Mixed together, and T165's
+    ProbingMany four (about 10 minutes on CI, ProbingManyFork 7 of them): in
+    `rest`, which took 39 minutes of its 45 by 2026-11-02, they timed it out;
   - 0.15's models in seven:
     - `hotpath`;
     - `hotpath-policy` (the policy, liveness, stall liveness and stale-bulk scenarios);
