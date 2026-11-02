@@ -4,7 +4,7 @@
 // as whoever a request's credential names, through the API: the same route
 // table, checks, vault and audit log as the CLI.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import { USE_DEADLINE_MS, type DecidedItem, type RouteFound, type RouteUseOutcome } from '@coffre/core/vault';
+import { USE_DEADLINE_MS, type DecidedItem, type RouteFound, type RouteUseOutcome, type Vault } from '@coffre/core/vault';
 import type { CredentialScope } from '@coffre/core/access';
 import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
 
@@ -326,7 +326,7 @@ export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffreP
 /** The plugin's answer to a request under its prefix; null when no plugin takes the path. */
 export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> | null {
   const plugin = pluginFor(request, runtime);
-  return plugin === undefined ? null : gated(runtime, plugin, () => plugin.routes!.fetch(request, pluginContext(request, runtime, sourceIp)));
+  return plugin === undefined ? null : gated(runtime, plugin, (ui) => plugin.routes!.fetch(request, pluginContext(request, runtime, sourceIp, null, ui)));
 }
 
 /**
@@ -334,14 +334,30 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
  * code's names reserved before its first request in this isolate, every request of it, `GET /use` and the plan among
  * them, and its WebSockets: nothing it serves or shows gets past it. A gate that fails answers the request itself.
  */
-async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: () => Promise<T>): Promise<T | Response> {
+async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: (ui: boolean) => Promise<T>): Promise<T | Response> {
+  const code = proxyCodeOf([plugin]);
+  let ui = false;
   try {
-    await gateProxy(runtime.vault, proxyCodeOf([plugin]));
+    await gateProxy(runtime.vault, code);
+    // Whether the vault serves UI items at all (`servesUi`): asked of the proxy alone, once per vault, kept settled.
+    ui = code !== null && (await servesUi(runtime.vault));
   } catch (error) {
     // Not passed: 503, `deploying` or `unavailable` with Retry-After, the plugin never asked; the next request asks again.
     return errorResponse(error);
   }
-  return serve();
+  return serve(ui);
+}
+
+/**
+ * Whether the vault decides UI items (`useRoute`, `proxyItem`): only on 0.15's uses, its log and the hot path's login.
+ * A vault of 0.14's log, a deployment's supported mode, holds no proxy definitions and throws on either call; the proxy
+ * is then given neither, and serves code's items as ever (review r5 of #467).
+ *
+ *   log '0.15', hotDatabase set    useRoute, proxyItem given: the plan asks the place's UI items
+ *   log '0.14'                     neither: `GET /use/market/dev` is code's plan, no vault call for UI items
+ */
+async function servesUi(vault: Vault): Promise<boolean> {
+  return vault.useRoute !== undefined && vault.proxyItem !== undefined && (await uses015(vault));
 }
 
 /**
@@ -355,7 +371,7 @@ async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: () 
  */
 export function bindingRoute(request: Request, runtime: CoffreRuntime, principal: string): Promise<Response> | null {
   const plugin = pluginFor(request, runtime);
-  return plugin === undefined ? null : gated(runtime, plugin, () => plugin.routes!.fetch(request, pluginContext(request, runtime, null, principal)));
+  return plugin === undefined ? null : gated(runtime, plugin, (ui) => plugin.routes!.fetch(request, pluginContext(request, runtime, null, principal, ui)));
 }
 
 /**
@@ -539,7 +555,7 @@ async function workloadIdentity(
 export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
   const plugin = pluginFor(request, runtime);
   const socket = plugin?.routes?.socket;
-  return socket === undefined ? null : gated(runtime, plugin!, () => socket(request, pluginContext(request, runtime, sourceIp)));
+  return socket === undefined ? null : gated(runtime, plugin!, (ui) => socket(request, pluginContext(request, runtime, sourceIp, null, ui)));
 }
 
 /** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
@@ -566,6 +582,7 @@ function pluginContext(
   runtime: CoffreRuntime,
   sourceIp: string | null,
   binding: string | null = null,
+  ui = false,
 ): PluginContext {
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
@@ -772,38 +789,39 @@ function pluginContext(
       return rethrown(error);
     }
   };
-  return {
-    useRoute: routeUse,
-    proxyItem: async (caller, asked) => {
-      try {
-        let input: Parameters<Required<typeof runtime.vault>['proxyItem']>[0];
-        const at = Date.now();
-        if (typeof caller === 'string') {
-          if (binding !== null) throw noCredential();
-          if (tokenKind(caller) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
-          const place = asked.place === null ? null : (() => {
-            const [project, environment] = asked.place.split('/');
-            return { project: project!, environment: environment! };
-          })();
-          input = { caller: { kind: 'handle', tokenHash: hashToken(caller).toString('base64'), accepts: acceptance(runtime) }, place, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
-        } else {
-          const made = await workloadIdentity(runtime, caller, sourceIp, standings);
-          if (made === null || caller.place === null) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-          const way = made.identity.bindingId != null ? { credential: made.identity.bindingId, way: 'binding' as const } : { credential: made.identity.credentialId!, way: 'credential' as const };
-          input = { caller: { kind: 'workload', credential: way.credential, ...(way.way === 'credential' ? {} : { way: way.way }), place: caller.place }, place: null, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
-        }
-        const found = await runtime.vault.proxyItem(input);
-        if (!found.ok && 'busy' in found && found.busy !== undefined) throw refusedUse(found as never);
-        if (!found.ok) {
-          const code = (found as { code: string }).code;
-          if (code === 'credential') throw new CoffreError(401, 'unauthenticated', 'that credential is unknown, expired or revoked');
-          throw refusedUse({ ok: false, code: code as never, number: null });
-        }
-        return { fault: found.fault, personal: found.personal, item: found.item, items: found.items };
-      } catch (error) {
-        return rethrown(error);
+  const proxyItem: PluginContext['proxyItem'] & {} = async (caller, asked) => {
+    try {
+      let input: Parameters<Required<typeof runtime.vault>['proxyItem']>[0];
+      const at = Date.now();
+      if (typeof caller === 'string') {
+        if (binding !== null) throw noCredential();
+        if (tokenKind(caller) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
+        const place = asked.place === null ? null : (() => {
+          const [project, environment] = asked.place.split('/');
+          return { project: project!, environment: environment! };
+        })();
+        input = { caller: { kind: 'handle', tokenHash: hashToken(caller).toString('base64'), accepts: acceptance(runtime) }, place, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
+      } else {
+        const made = await workloadIdentity(runtime, caller, sourceIp, standings);
+        if (made === null || caller.place === null) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
+        const way = made.identity.bindingId != null ? { credential: made.identity.bindingId, way: 'binding' as const } : { credential: made.identity.credentialId!, way: 'credential' as const };
+        input = { caller: { kind: 'workload', credential: way.credential, ...(way.way === 'credential' ? {} : { way: way.way }), place: caller.place }, place: null, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
       }
-    },
+      const found = await runtime.vault.proxyItem(input);
+      if (!found.ok && 'busy' in found && found.busy !== undefined) throw refusedUse(found as never);
+      if (!found.ok) {
+        const code = (found as { code: string }).code;
+        if (code === 'credential') throw new CoffreError(401, 'unauthenticated', 'that credential is unknown, expired or revoked');
+        throw refusedUse({ ok: false, code: code as never, number: null });
+      }
+      return { fault: found.fault, personal: found.personal, item: found.item, items: found.items };
+    } catch (error) {
+      return rethrown(error);
+    }
+  };
+  return {
+    // A vault that decides no UI item (`servesUi`): neither, and the proxy serves code's items alone.
+    ...(ui ? { useRoute: routeUse, proxyItem } : {}),
     publicUrl: runtime.publicUrl,
     binding: binding !== null,
     ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),

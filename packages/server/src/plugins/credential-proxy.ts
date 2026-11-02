@@ -52,7 +52,7 @@ import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, P
 import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
-import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, USE_DEADLINE_MS, type DecidedItem, type ProxyDefinition, type ProxyRoute } from '@coffre/core/vault';
+import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, USE_DEADLINE_MS, type DecidedItem, type ProxyRoute } from '@coffre/core/vault';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
@@ -943,8 +943,11 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   if (caller !== null) return answering(caller, () => workloadPlan(coffre, proxy, caller, caller.path ?? path));
   const handle = bearer(request);
   if (handle === null) return failure(401, 'send the handle `coffre run` made as a bearer token');
-  // The place's UI items, before the read that picks what the app is given: their keys are the handle too.
-  const ui = await uiPlanItems(coffre, proxy, handle, path);
+  // The place's UI items, before the read that picks what the app is given: their keys are the handle too. Asked of the
+  // environment; the read below says whether it reads the person's personal config instead (`generate`'s `@me`), which
+  // serves none, and then they are dropped: decided on the read's own answer, so no config made between the two calls
+  // gets the base environment's routes (review r5 of #467).
+  let ui = await uiPlanItems(coffre, proxy, handle, path);
   // The credentials the environment holds every key of, of those that serve it, code's and the UI's routes: their keys
   // are placeholders, whoever may read them.
   const covering = (keys: readonly string[]) => [...[...proxy.credentials.values()].filter((credential) => serves(credential, path)), ...ui.routes]
@@ -965,6 +968,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     keys: (environment, rows) => {
       resolved = rows;
       personal = environment.personal;
+      if (personal) ui = { routes: [], held: new Set() };
       const using = covering(rows.map((row) => row.key));
       const covered = new Set([...using.flatMap((credential) => credential.keys), ...tunnels.map(([, tunnel]) => tunnel.key), ...signers.map(([, signer]) => signer.key), ...ui.held]);
       // What the proxy fills in itself, a tunnel's URL or a signer's or verifier's handle, never the value the environment holds; and a
@@ -1017,7 +1021,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       if (rule === undefined) {
         throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form or JSON rule carries, and ${held.environment.path}'s keys that are no plain ones sit in ${ride.length} of its rules: mark the others plain, or drop the placeholder`);
       }
-      placeholder = await shaped(coffre, credential, rule.keys[0]!, handle, readOf(proxy, path));
+      placeholder = await shaped(coffre, credential, rule.keys[0]!, handle, readOf(proxy, path), ui.routes.includes(credential) ? resolved : null);
     }
     for (const key of credential.keys) {
       env[key] = placeholder;
@@ -1137,13 +1141,28 @@ async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: Workloa
 
 /**
  * A credential's placeholder in the shape its client checks: the handle behind
- * a prefix, or a JWT of the real token's named claims, which are opened for
- * it as a use of the credential, logged, and go no further than those.
+ * a prefix, or a JWT of the real token's named claims, which go no further than
+ * those. Code's are opened as a use of the credential, logged: the deployment's
+ * code chose those claims. A UI route's (`ui`, the plan read's rows) are opened
+ * for the caller alone, purpose `expose` (docs/design/proxy-ui.md, section 3,
+ * "The plan's placeholder shaping is not a route use"): an editor's choice of
+ * claims shows the caller nothing they may not read (review r5 of #467).
+ *
+ *   code's jwt() on a sensitive DFNS_AUTH_TOKEN, a Developer's plan    its claims, as ever
+ *   a UI route's, the same key                                         403, nothing of it opened
+ *   a UI route's on a secret, a Contributor's plan (uses, never reads) 403, nothing of it opened
  */
-async function shaped(coffre: PluginContext, credential: Resolved, key: string, handle: string, path: string): Promise<string> {
+async function shaped(coffre: PluginContext, credential: Resolved, key: string, handle: string, path: string, ui: Parameters<PickKeys>[1] | null): Promise<string> {
   const placeholder = credential.placeholder!;
   if (placeholder.kind === 'prefix') return `${placeholder.prefix}${handle}`;
-  const used = await coffre.use(handle, { path, keys: [key], purpose: 'use', only: true, logged: { credential: credential.name, placeholder: { claims: placeholder.claims } } });
+  if (ui !== null) {
+    // What the plan's read found of it: refused here, with a reason, rather than by the vault's `expose` below alone.
+    const row = ui.find((one) => one.key === key);
+    if (row === undefined || !row.reads || row.sensitive) {
+      throw new CoffreError(403, 'forbidden', `${credential.name}'s placeholder copies claims of ${key}, which you may not read in ${path}: a route saved in the Proxy tab shows its caller only what they read, so an Owner drops its placeholder, or gives you ${key} to read`, 'placeholder_unread');
+    }
+  }
+  const used = await coffre.use(handle, { path, keys: [key], purpose: ui === null ? 'use' : 'expose', only: true, logged: { credential: credential.name, placeholder: { claims: placeholder.claims } } });
   const real = claimsOf(used.values[key]);
   if (real === null) throw new CoffreError(409, 'conflict', `${used.environment.path}'s ${key} is no JWT, which ${credential.name}'s placeholder copies its claims from`);
   const claims = Object.fromEntries(placeholder.claims.filter((claim) => Object.hasOwn(real, claim)).map((claim) => [claim, real[claim]]));

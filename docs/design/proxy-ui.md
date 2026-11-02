@@ -521,7 +521,9 @@ call, a route use, whose contract is:
 
 The plan's placeholder shaping is not a route use. To copy a JWT's claims
 into its placeholder, the plan opens the key's value for the caller alone,
-purpose `expose`, as it does for a code route. That value goes into the
+purpose `expose`, so the claims show the caller nothing they may not read
+(a code route's opens it as a use: the deployment's code chose its claims,
+an editor chose a UI route's). That value goes into the
 caller's own environment and never to the definition's upstream, so the
 editor is not decided there, and the plan's `proxyItem` call is what holds
 it to the vault-checked item. Code routes keep today's shapes unchanged.
@@ -1710,7 +1712,10 @@ before PR C. Where C2a settles what this section left open:
   reset forgets it with the log (`forgetProxyGates`). A vault of 0.14's
   log holds no proxy definitions and has nothing to reserve: the gate
   passes it without a call (`keeps015`, settled per vault, whose log is
-  fixed when it is made).
+  fixed when it is made). Nor is the proxy given `useRoute` or
+  `proxyItem` there (`servesUi`: 0.15's uses, log and hot login), which
+  that vault throws on: an editable proxy's plan on 0.14's log is code's,
+  and a UI route's URL is 404 (review r5 of #467).
 - **The handle on a cold isolate** is found by its shape before any item
   says where it rides: any header (`x-api-key: <handle>`, SigV4's
   `Credential=<handle>/…`, a Basic pair decoded), the query, then the body
@@ -1821,6 +1826,14 @@ before PR C. Where C2a settles what this section left open:
   item answered without its definition, is 503 and no environment. A
   name code holds is left out; a personal config shapes nothing (the
   vault answers `personal` with no items, checked before the items are).
+  A generated environment's plan (`generate`) reads `market/dev@me` once
+  the person has a value of their own there: the read's answer says so,
+  and the base environment's items are then dropped, so the plan gives
+  their own `OPENAI_API_KEY`, never a handle and route `openai`'s URL,
+  which would send the base key (review r5 of #467). A UI route's JWT
+  placeholder copies claims through an `expose` read (section 3): a
+  Contributor's plan, or anyone's on a sensitive key, is 403
+  `placeholder_unread`, nothing of it opened.
 - **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
   map): the place URL and a stable URL of three segments or more are one
   `use_route` statement and nothing of the app's; `/use/<a>/<b>` is the

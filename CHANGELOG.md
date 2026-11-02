@@ -30,7 +30,11 @@
   within their window: one whose body or signature came later answers
   503 `late` and sends nothing. Two routes reading one key with
   different placeholders, or a UI route shaping a code signer's key, make
-  the plan 409. Workloads, service bindings, signers,
+  the plan 409. A UI route's JWT placeholder copies only claims its
+  caller may read (403 `placeholder_unread` otherwise); a plan read from
+  the person's own personal config takes no UI route of the base
+  environment; and on 0.14's log an editable proxy's plan is code's, as
+  before. Workloads, service bindings, signers,
   verifiers, presign and tunnels of UI items answer 404 until PR C2b.
 
 - **The vault decides about a member from 0.15's log, not 0.14's (T179

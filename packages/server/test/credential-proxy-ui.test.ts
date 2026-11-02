@@ -77,7 +77,7 @@ function deploy(plugin: ReturnType<typeof proxyOf>): void {
 let root: CoffreClient;
 
 useMcp(async () => {
-  if (LOG === '0.14') return;
+  // 0.14's log included: no item is saved there, and its test below holds the plan to code's (review r5 of #467).
   deploy(proxyOf());
   reached.length = 0;
   root = clientFor(deps, ROOT);
@@ -95,9 +95,9 @@ async function save(items: Record<string, ProxyDefinition | null>, as: CoffreCli
   await as.proxy.save(path, { seal: page.seal, items });
 }
 
-/** A handle for DEV on `path`, market/dev by default, as `coffre run` makes one. */
-async function handle(path = 'market/dev'): Promise<string> {
-  const session = await sessionFor(DEV);
+/** A handle for `who` (DEV by default) on `path`, market/dev by default, as `coffre run` makes one. */
+async function handle(path = 'market/dev', who = DEV): Promise<string> {
+  const session = await sessionFor(who);
   const api = createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${session}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
   return (await api.handles.create({ label: 'coffre run market/dev', paths: [path] })).token;
 }
@@ -577,4 +577,63 @@ test("a UI route's upstream goes out through the runtime's public fetch, and a r
     if (kept === undefined) delete runtime.publicFetch;
     else runtime.publicFetch = kept;
   }
+});
+
+/** An unsigned JWT whose claims are `claims`: what a JWT placeholder copies its claims from. */
+const jwtOf = (claims: Record<string, unknown>) => `${Buffer.from('{"alg":"HS256"}').toString('base64url')}.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.c2lnbmF0dXJl`;
+const ORG = 'org-hidden-7f3a';
+
+test("a UI route's JWT placeholder copies only claims its caller may read: a Developer's secret yes, a sensitive value no, a Contributor's secret no (review r5 of #467)", ON_015, async () => {
+  await root.secrets.set('market/dev', { ID_TOKEN: jwtOf({ org: ORG, sub: 'svc' }), SEALED_TOKEN: { value: jwtOf({ org: ORG }), sensitivity: 'sensitive' } });
+  const shapedRoute = (name: string, key: string): ProxyDefinition => ({ ...uiRoute(name, `/${name}`, key), placeholder: { kind: 'jwt', claims: ['org'] } } as ProxyDefinition);
+  await save({ ids: shapedRoute('ids', 'ID_TOKEN') });
+  // A Developer reads secrets: the claim is theirs to see, copied, and nothing else of the token.
+  const token = await handle();
+  const planned = await route('/use/market/dev', as(token));
+  assert.equal(planned.status, 200, await planned.clone().text());
+  const placeholder = (await planned.json() as { env: Record<string, string> }).env.ID_TOKEN!;
+  assert.deepEqual(Object.keys(JSON.parse(Buffer.from(placeholder.split('.')[1]!, 'base64url').toString()) as object).sort(), ['exp', 'org']);
+  assert.ok(placeholder.endsWith(`.${token}`));
+  // A Contributor uses keys and never reads them: 403, the claim nowhere in the answer.
+  await root.access.set(`user:${LIN}`, { market: 'contributor' });
+  const contributor = await route('/use/market/dev', as(await handle('market/dev', LIN)));
+  assert.equal(contributor.status, 403, await contributor.clone().text());
+  const refused = await contributor.text();
+  assert.match(refused, /placeholder_unread/);
+  assert.ok(!refused.includes(ORG));
+  // A sensitive value no plan reads, whoever asks: the Developer's 403 too.
+  await save({ ids: null, sealed: shapedRoute('sealed', 'SEALED_TOKEN') });
+  const sensitive = await route('/use/market/dev', as(token));
+  assert.equal(sensitive.status, 403, await sensitive.clone().text());
+  assert.ok(!(await sensitive.text()).includes(ORG));
+});
+
+test("a generated environment's plan read from the person's personal config: no UI item of the base environment's shapes it, their own value given (review r5 of #467)", ON_015, async () => {
+  deploy(proxyOf({ generate: { 'market/dev': 'all' } }));
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  // No personal config yet: the plan reads market/dev, whose route covers the key.
+  const base = await (await route('/use/market/dev', as(token))).json() as { environment: string; env: Record<string, string>; credentials: Record<string, string> };
+  assert.equal(base.env.OPENAI_API_KEY, token);
+  assert.equal(base.credentials.openai, `${ORIGIN}/use/market/dev/openai`);
+  // Their own key: the plan reads market/dev@me, which serves no UI route, and gives them their value, no handle, no route URL.
+  const MINE = 'sk-openai-mine-0123456789';
+  await clientFor(deps, DEV).secrets.set('market/dev@me', { OPENAI_API_KEY: MINE });
+  const planned = await route('/use/market/dev', as(token));
+  assert.equal(planned.status, 200, await planned.clone().text());
+  const plan = await planned.json() as { environment: string; env: Record<string, string>; credentials: Record<string, string> };
+  assert.equal(plan.environment, 'market/dev@me');
+  assert.equal(plan.credentials.openai, undefined);
+  assert.equal(plan.env.OPENAI_API_KEY, MINE);
+});
+
+test("0.14's log too: an editable proxy's plan is code's, the vault asked for no UI item (review r5 of #467)", async () => {
+  const token = await handle();
+  const planned = await route('/use/market/dev', as(token));
+  assert.equal(planned.status, 200, await planned.clone().text());
+  const plan = await planned.json() as { env: Record<string, string>; credentials: Record<string, string> };
+  assert.equal(plan.env.MAPS_KEY, token);
+  assert.equal(plan.credentials.maps, `${ORIGIN}/use/market/dev/maps`);
+  // The UI route's stable URL is no credential either: 404, never the vault's throw.
+  if (LOG === '0.14') assert.equal((await route('/use/openai/models', as(token))).status, 404);
 });
