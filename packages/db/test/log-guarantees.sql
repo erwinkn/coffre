@@ -82,6 +82,23 @@ BEGIN
 END
 $$;
 
+-- A use names no day of the log (0057, R48, T187): the hot login plans its statements once for any values, and such a
+-- plan of `log_uses` names, and locks at every use, each day's partition. Its cover's probe is `use_covered`'s, planned
+-- each call for its own values; the use functions only insert into `log_uses`.
+DO $$
+BEGIN
+    IF NOT coalesce((SELECT 'plan_cache_mode=force_custom_plan' = ANY (proconfig) FROM pg_proc
+                     WHERE oid = 'use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid)'::regprocedure), false) THEN
+        RAISE EXCEPTION 'FAIL: a use''s cover may be probed by a plan for any values';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_proc WHERE proname IN ('use_credential', 'use_batch', 'use_named_batch') AND pronamespace = 'public'::regnamespace
+                 AND prosrc ~* '(FROM|JOIN)\s+public\.log_uses\M') THEN
+        RAISE EXCEPTION 'FAIL: a use function reads log_uses in a statement the hot login plans for any values';
+    END IF;
+    RAISE NOTICE 'PASS: a use names no day of the log';
+END
+$$;
+
 -- Retention's functions (0027): the vault's alone, each holding it to what a sealed retention change cuts.
 DO $$
 DECLARE
