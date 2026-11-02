@@ -1982,38 +1982,58 @@ statement; a member add, the vault's read and its write; each then waits for
 its seal (R51).
 
 **The model.** Ada writes key k (twice at once in `WritingRevoke`) from her
-session. The vault's statement reads her session, her member object, the
-policy, the place and the key, each with its seal, and numbers the request;
-the Worker decides on what it read; the app's statement holds 0.14's head,
-takes the fence through `app_change`, checks under it that each input is
-still the object the vault read, and commits the key's change from the seal
-it was made from. Beside it: her grant taken away and her session revoked
-(`WritingRevoke`), the place protected and archived (`WritingPlace`). Bob and
-Cy each add svc while Bob is demoted (`WritingAdd`): a read, the Worker's
-decision, a write held to what the read decided on. Every other change is one
-atomic step; the checkpointer seals whatever has committed at each tick.
+session. The vault's statement reads every input her write stands on: her
+session, her member object, the policy, the environment, its fork parent and
+the parent's key a regenerate replaces, each with its newest change, held to
+its row; and numbers the request. The Worker decides on what it read. The
+app's statement holds 0.14's head, takes the fence through `app_change`,
+commits the key's change from the seal it was made from, and then, in
+statements after it, checks that no input has a change after the one the
+vault read. Beside it: her grant taken away and her session revoked
+(`WritingRevoke`), the policy changed and the environment archived
+(`WritingPlace`), the parent archived and the replaced key written
+(`WritingFork`), her session revoked and its row put back, live, by a
+database writer (`WritingTamper`). Bob and Cy each add svc while Bob is
+demoted and the policy changes so that only Owners add (`WritingAdd`): a
+read, the Worker's decision, a write held to what the read decided on. Every
+other change is one atomic step; the checkpointer seals whatever has
+committed at each tick.
 
 | protection | turned off, TLC finds |
 |---|---|
-| the vault's statement reads and numbers the request under the fence shared (RequestUnderFence) | `RequestsReplay`: a change numbered between its read and its number, the replay deciding otherwise |
-| the app's statement holds the session, the member, the policy and the place to the objects the vault decided on (`Held={...}`, each left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a protection or an archive |
+| the vault's statement reads its inputs and numbers the request in one statement under the fence shared (RequestUnderFence) | `RequestsReplay`: the session read, then revoked, then the rest read and numbered: the Worker allows what the log at the number denies |
+| the app's statement holds each input to the object the vault decided on (`Held={...}`, each of the six left out in turn) | `WritesStandAtCommit`: a write committed after a revoke, a session's end, a policy change, an archive of the environment or of its parent, or a write of the replaced key |
 | ... once it holds the fence (GuardsAfterFence) | `WritesStandAtCommit`: a session's revoke, which takes the fence and not 0.14's head, between the guards and the write |
+| ... by the log's newest change of each, not its row's seal column (GuardOnLog) | `WritesStandAtCommit`: a database writer puts the revoked session's row back, and the guard passes |
 | the key's change from the seal it was made from (ChangeCAS) | `KeyChangesFlip`: two writes from one version both commit |
-| a member add's write holds the actor's object and the policy (AdmitCAS) | `AddsStandAtCommit` |
+| a member add's write holds the actor's object and the policy (`AdmitHeld={...}`, each left out) | `AddsStandAtCommit`: a demoted admin's add, an add after the policy gave adding to Owners |
 | ... and the principal's row as read (PrincipalCAS) | `AddsFlip`: svc added twice |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its
-first try made two round trips.
+first try made two round trips. It follows from the steps' shape, so it says
+what the steps are and proves nothing more.
 
-**What it abstracts.** A seal is a counter each change moves: no database
-writer (HotPathOne's `ChangeChecksSeal` and SealedObjects hold seals against
-one). The decision is `decide.ts`'s, reduced to its inputs; which roles write
-where is the Lean model's. The locks' order (the head, the rows, the issue
-lock, the fence; the vault's rows before the head) is the code's today, which
-Migration015's `NoWaitCycle` checks; here each statement that takes the fence
-is one step. The seal is HotPathOne's and Seal.tla's, here a tick that seals
-every committed number.
+**What it abstracts.** A seal is a counter each change moves; the vault's
+StaleFirst and `ChangeChecksSeal` (HotPathOne) are one check here, and
+SealedObjects holds the seals themselves against a forger. A guard is a
+lock-free probe of the log's newest change of its object: a `FOR SHARE`
+there would take a row after the fence, against `change_input`'s order.
+`RequestsReplay` checks that the decision's inputs are the log at the
+request's number; that the replay recomputes the same decision from them is
+HotPathOne's `ReplayAgrees`. The decision is `decide.ts`'s, reduced to its
+inputs; which roles write where is the Lean model's. A session's expiry moves
+no seal: it is judged at the vault's clock, at the decision, as today, and
+`WritesStandAtCommit` covers the changes that move one. A new key (no row,
+no seal) is ChangeCAS from nothing: the insert's uniqueness, a second insert
+failing and asking again; here a key with seal 0. A session's revoke takes
+the fence and not 0.14's head, as it will once 0.16 contracts 0047's head
+away; today's takes the head too, which only adds order. The locks' order
+(the head, the rows, the issue lock, the fence; the vault's rows, in
+principal order, before the head) is the code's today, which Migration015's
+`NoWaitCycle` checks; here each statement that takes the fence is one step.
+The seal is HotPathOne's and Seal.tla's, here a tick that seals every
+committed number.
 
 ## TLC
 

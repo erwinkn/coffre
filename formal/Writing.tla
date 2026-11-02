@@ -6,20 +6,23 @@
 (* else on the request path.                                               *)
 (*                                                                         *)
 (*   key write   1. the vault's statement, as a use's (HotPathOne): under  *)
-(*                  the fence shared, the caller's credential by its       *)
-(*                  token's hash, their member row, the policy, the place  *)
-(*                  and the key, read by name with each one's seal, and    *)
-(*                  the request numbered. Nothing locked after it.         *)
+(*                  the fence shared, every input the decision and the     *)
+(*                  app's checks stand on (the credential, the member, the *)
+(*                  policy, the environment and each one of its fork       *)
+(*                  chain, a regenerate's replaced keys), each with its    *)
+(*                  newest change, held to its row (StaleFirst), and the   *)
+(*                  request numbered. Nothing locked after it.             *)
 (*               2. the Worker decides on what the statement read (pure,   *)
 (*                  decide.ts), wraps the value's key and seals the app's  *)
 (*                  change from the key's object as read.                  *)
 (*               3. the app's statement: 0.14's head, its rows, then       *)
-(*                  `app_change`'s issue lock and fence exclusive; under   *)
-(*                  the fence, each input the vault decided on is still    *)
-(*                  the object it read (its seal), the key's seal is the   *)
-(*                  one its change was made from (ChangeCAS), the rows,    *)
-(*                  the change, the commit. Any guard failing rolls it all *)
-(*                  back, and the write asks again from 1.                 *)
+(*                  `app_change`'s issue lock and fence exclusive, the     *)
+(*                  key's change from the seal it was made from            *)
+(*                  (ChangeCAS); then, in statements after it, each input  *)
+(*                  has no change numbered after the one the vault read    *)
+(*                  (its newest in `log_changes`, not its row's column);   *)
+(*                  the commit. Any guard failing rolls it all back, and   *)
+(*                  the write asks again from 1.                           *)
 (*               4. the seal wait (R51), then the answer.                  *)
 (*   member add  1. the vault reads the actor's standing, the policy and   *)
 (*                  the principal's row, holding nothing (Lifecycle's      *)
@@ -37,20 +40,30 @@
 (* or one transaction under the head and the fence in the code.            *)
 (*                                                                         *)
 (* One step is one statement, or the part of one between two lock waits    *)
-(* (READ COMMITTED; a PL/pgSQL statement after a lock reads afresh).       *)
+(* (READ COMMITTED: each statement reads afresh, so the guards, sent as    *)
+(* statements after `app_change_strict`'s, read after the fence).          *)
 (* Locks: 0.14's head (held across steps by the app's statement when its   *)
-(* guards run before the fence) and the fence, which every change but an   *)
-(* app write under the head takes in one step here. Seals: a counter per   *)
-(* object, moved by each change; honest code only (no database writer:    *)
-(* HotPathOne and SealedObjects hold seals against one).                   *)
+(* guards run before the fence) and the fence. A session's revoke takes    *)
+(* the fence and not the head: 0.16's, once 0047's head in                 *)
+(* `revoke_credential` is contracted away. Today's revoke takes the head   *)
+(* too, which only adds order, so this is the stronger adversary.          *)
+(* Seals: a counter per object, the seal of its newest change in the log,  *)
+(* moved by each change. A row stores its seal too; a database writer may  *)
+(* put a row back (R64), which its column then cannot tell. The vault      *)
+(* holds each row it reads to its newest change (StaleFirst); a guard      *)
+(* compares the log's newest change, never a row's column.                 *)
 (*                                                                         *)
 (* Who is who:                                                             *)
 (*   w1, w2   Ada writes key k at env, each from her session cA;           *)
 (*   rev      an admin takes Ada's grant at env away (her member object);  *)
-(*   end      Ada's session cA is revoked (the credential alone: the fence,*)
-(*            not 0.14's head, as Lifecycle's revoke);                     *)
-(*   pol      an Owner protects env: Ada's role no longer writes there;    *)
-(*   arc      a maintainer archives env (the app's transaction);           *)
+(*   end      Ada's session cA is revoked (the credential alone);          *)
+(*   pol      an Owner changes the policy: Ada's role no longer writes at  *)
+(*            env, and adding members is the Owners' alone;                *)
+(*   arc      a maintainer archives env;                                   *)
+(*   par      a maintainer archives env's fork parent;                     *)
+(*   rep      the parent's key that Ada's regenerate replaces is written   *)
+(*            meanwhile, so what she listed is no longer what it replaces; *)
+(*   dbw      a database writer puts cA's row back, live, after its revoke;*)
 (*   bob, cy  two admins each add the service account svc;                *)
 (*   dem      an Owner demotes Bob;                                        *)
 (*   ck       the checkpointer: each tick seals every committed number.    *)
@@ -64,23 +77,25 @@ CONSTANTS
 CONSTANTS
     \* The vault's statement reads its inputs and numbers the request in one
     \* statement under the fence shared, as a use does (HotPathOne's
-    \* "reads are a statement after the lock"): no change is numbered
-    \* between what it read and its number.
+    \* "reads are a statement after the lock"): its reads are one snapshot,
+    \* and no change is numbered between them and its number.
     RequestUnderFence,
-    \* The inputs the app's statement holds to the objects the vault read,
-    \* by their seals: any of "cred", "member", "policy", "env". Normally
-    \* all four; a removal leaves one out (`Held={...}`).
+    \* The inputs the app's statement holds to the objects the vault read:
+    \* any of Inputs. Normally all; a removal leaves one out (`Held={...}`).
     Held,
     \* ... and checks them once it holds the fence (after `app_change`
     \* took it), so a change that takes the fence and not 0.14's head (a
     \* session's revoke) cannot commit between the check and the write.
     GuardsAfterFence,
+    \* ... each by the newest change the log holds of it, not by the seal
+    \* its row stores, which a database writer can put back.
+    GuardOnLog,
     \* The key's change goes ahead only from the seal it was made from
     \* (`app_change`'s CAS, ChangeCAS): another write meanwhile fails it.
     ChangeCAS,
-    \* A member add's write goes ahead only while the actor's object and
-    \* the policy are what its read decided on (IssuerCAS).
-    AdmitCAS,
+    \* What a member add's write holds to its read (IssuerCAS): any of
+    \* "actor" (the adder's own object) and "policy". Normally both.
+    AdmitHeld,
     \* ... and the principal's row is the one it read (none): the change
     \* from its object as read.
     PrincipalCAS,
@@ -89,19 +104,25 @@ CONSTANTS
 
 Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
-Objects == {"cred", "member", "policy", "env", "key", "bob", "svc"}
-Inputs == {"cred", "member", "policy", "env"}
+\* What each other change moves: one object, turned against the writer or
+\* the adder.
+Moves == [rev |-> "member", end |-> "cred", pol |-> "policy", arc |-> "env",
+          par |-> "parent", rep |-> "replaced", dem |-> "bob"]
+\* What a key write stands on: Ada's session, her member object, the policy,
+\* the environment, its fork parent, the key her regenerate replaces.
+Inputs == {"cred", "member", "policy", "env", "parent", "replaced"}
+Movable == Inputs \cup {"bob"}
+Objects == Movable \cup {"key", "svc"}
+\* The vault's first reads, when its reads are not one statement.
+FirstRead == {"cred"}
 None == "none"
 
 VARIABLES
-    cred,       \* Ada's session cA is live
-    grant,      \* Ada's grant lets her write at env
-    protected,  \* env is protected: her role does not write there
-    archived,   \* env is archived
-    bobAdmin,   \* Bob may add members
+    ok,         \* each movable object still as the writer or adder needs it
     svc,        \* svc is a member
     kver,       \* the key's committed versions
-    seal,       \* each object's seal: moved by every change to it
+    seal,       \* each object's newest change in the log: moved by every change
+    putBack,    \* the rows a database writer put back to their first state
     next,       \* the log's next number
     sealedTo,   \* the checkpointer has sealed every number below this
     head,       \* who holds 0.14's head across steps, or None
@@ -112,25 +133,31 @@ VARIABLES
     admits,     \* ghost: each committed member add
     answered    \* ghost: each change answered, with its number
 
-vars == <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, next, sealedTo, head,
+vars == <<ok, svc, kver, seal, putBack, next, sealedTo, head,
           pc, l, tries, trips, requests, writes, admits, answered>>
-state == <<cred, grant, protected, archived, bobAdmin, svc, kver, seal>>
 
-\* What Ada's write needs, as decide.ts weighs it: a live session, the grant,
-\* a place her role writes in, live.
-Allowed(s) == s.cred /\ s.grant /\ ~s.protected /\ ~s.archived
-Now == [cred |-> cred, grant |-> grant, protected |-> protected, archived |-> archived]
-\* Whether an adder stands: Cy always; Bob while he is an admin.
-Stands(p) == p = "cy" \/ bobAdmin
+\* What Ada's write needs, as decide.ts and the app's checks weigh it: every
+\* input as she needs it.
+Allowed(s) == \A o \in Inputs : s[o]
+Now == [o \in Inputs |-> ok[o]]
+\* Whether an adder stands: while the policy lets admins add, and Bob while
+\* he is one. Cy is an admin nobody demotes.
+Stands(p) == ok["policy"] /\ (p = "cy" \/ ok["bob"])
+\* The seal a row stores: its newest change's, or the first, put back.
+RowSeal(o) == IF o \in putBack THEN 0 ELSE seal[o]
+\* A row the log has moved past (StaleFirst refuses it).
+Stale == \E o \in Inputs : RowSeal(o) # seal[o]
 
 Init ==
-    /\ cred = TRUE /\ grant = TRUE /\ protected = FALSE /\ archived = FALSE
-    /\ bobAdmin = TRUE /\ svc = FALSE /\ kver = 0
+    /\ ok = [o \in Movable |-> TRUE]
+    /\ svc = FALSE /\ kver = 0
     /\ seal = [o \in Objects |-> 0]
+    /\ putBack = {}
     /\ next = 1 /\ sealedTo = 1 /\ head = None
     /\ pc = [p \in Procs |-> CASE p \in Writers -> "w.vault"
                                 [] p \in Adders -> "a.read"
                                 [] p = "ck" -> "ck"
+                                [] p = "dbw" -> "tamper"
                                 [] OTHER -> "change"]
     /\ l = [p \in Procs |-> [n |-> 0]]
     /\ tries = [p \in Procs |-> 1]
@@ -138,7 +165,7 @@ Init ==
     /\ requests = {} /\ writes = {} /\ admits = {} /\ answered = {}
 
 Goto(p, to) == pc' = [pc EXCEPT ![p] = to]
-\* A change commits, numbered, its object's seal moved.
+\* A change commits, numbered, its object's newest change moved.
 Numbered(o) == /\ seal' = [seal EXCEPT ![o] = @ + 1]
                /\ next' = next + 1
 \* Asked again, or given up (the API's 409) once out of tries.
@@ -149,42 +176,51 @@ Again(p, from) ==
 -----------------------------------------------------------------------------
 (* A key write *)
 
-ReadInputs(p) ==
-    l' = [l EXCEPT ![p] = [n |-> 0, s |-> Now, seals |-> seal, ver |-> kver]]
+\* The request, numbered: as the Worker will decide it from what was read,
+\* and as the replay will from the log at its number (each change is one
+\* step here, so the log at this step is the log at the number).
+Request(p, s) == [p |-> p, n |-> next, live |-> Allowed(s), replay |-> Allowed(Now)]
 
-\* The vault's statement: read by name under the fence shared, the request
-\* numbered. One round trip.
+\* The vault's statement: every input, by name, under the fence shared, the
+\* request numbered. One round trip. A row put back is refused (`stale`).
 WVault(p) ==
     /\ pc[p] = "w.vault"
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
-    /\ IF RequestUnderFence
-         THEN /\ ReadInputs(p)
-              /\ next' = next + 1
-              /\ requests' = requests \cup {[p |-> p, n |-> next, live |-> Allowed(Now), replay |-> Allowed(Now)]}
-              /\ Goto(p, "w.decide")
-         ELSE /\ ReadInputs(p)
-              /\ UNCHANGED <<next, requests>>
-              /\ Goto(p, "w.number")
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, sealedTo, head, tries, writes, admits, answered>>
+    /\ IF Stale
+         THEN /\ Goto(p, "done")
+              /\ UNCHANGED <<next, l, requests>>
+         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, s |-> Now, seals |-> seal, ver |-> kver]]
+              /\ IF RequestUnderFence
+                   THEN /\ next' = next + 1
+                        /\ requests' = requests \cup {Request(p, l'[p].s)}
+                        /\ Goto(p, "w.decide")
+                   ELSE /\ UNCHANGED <<next, requests>>
+                        /\ Goto(p, "w.rest")
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, sealedTo, head, tries, writes, admits, answered>>
 
-\* Without the fence, the number comes in a later step: what was read and
-\* what the log holds at the number may differ.
-WNumber(p) ==
-    /\ pc[p] = "w.number"
+\* Without one statement under the fence: the rest of the inputs read, and
+\* the request numbered, in a later step. A change between the two tears
+\* what was read from what the log holds at the number.
+WRest(p) ==
+    /\ pc[p] = "w.rest"
+    /\ LET s == [o \in Inputs |-> IF o \in FirstRead THEN l[p].s[o] ELSE ok[o]]
+           seals == [o \in Objects |-> IF o \in FirstRead THEN l[p].seals[o] ELSE seal[o]]
+       IN /\ l' = [l EXCEPT ![p].s = s, ![p].seals = seals]
+          /\ requests' = requests \cup {Request(p, s)}
     /\ next' = next + 1
-    /\ requests' = requests \cup {[p |-> p, n |-> next, live |-> Allowed(l[p].s), replay |-> Allowed(Now)]}
     /\ Goto(p, "w.decide")
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, sealedTo, head, l, tries, trips, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, sealedTo, head, tries, trips, writes, admits, answered>>
 
 \* The Worker decides on what it read; allowed, it wraps and seals the
 \* change from the key's seal as read. No round trip.
 WDecide(p) ==
     /\ pc[p] = "w.decide"
     /\ IF Allowed(l[p].s) THEN Goto(p, "w.app") ELSE Goto(p, "done")
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
-\* The inputs still the objects the vault read.
-Guarded(p) == \A o \in Held : seal[o] = l[p].seals[o]
+\* Each input has no change after the one the vault read: by the log's
+\* newest change, or (a removal) by the seal its row stores.
+Guarded(p) == \A o \in Held : (IF GuardOnLog THEN seal[o] ELSE RowSeal(o)) = l[p].seals[o]
 CasHolds(p) == ~ChangeCAS \/ seal["key"] = l[p].seals["key"]
 
 \* The write itself, once the guards pass and the fence is held: the key's
@@ -212,7 +248,7 @@ WApp(p) ==
                      /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
                 ELSE /\ Again(p, "w.vault")
                      /\ UNCHANGED <<kver, seal, next, l, head, writes>>
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, sealedTo, requests, admits, answered>>
+    /\ UNCHANGED <<ok, svc, putBack, sealedTo, requests, admits, answered>>
 
 \* The same statement, after its wait for the fence.
 WFence(p) ==
@@ -221,7 +257,7 @@ WFence(p) ==
     /\ IF CasHolds(p)
          THEN /\ Commit(p) /\ Goto(p, "w.seal") /\ UNCHANGED tries
          ELSE /\ Again(p, "w.vault") /\ UNCHANGED <<kver, seal, next, l, writes>>
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, sealedTo, trips, requests, admits, answered>>
+    /\ UNCHANGED <<ok, svc, putBack, sealedTo, trips, requests, admits, answered>>
 
 -----------------------------------------------------------------------------
 (* A member add *)
@@ -232,16 +268,19 @@ ARead(p) ==
     /\ trips' = [trips EXCEPT ![p] = @ + 1]
     /\ l' = [l EXCEPT ![p] = [n |-> 0, stands |-> Stands(p), there |-> svc, seals |-> seal]]
     /\ Goto(p, "a.decide")
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, next, sealedTo, head, tries, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, tries, requests, writes, admits, answered>>
 
 \* The Worker decides; the principal already a member is a conflict.
 ADecide(p) ==
     /\ pc[p] = "a.decide"
     /\ IF l[p].stands /\ ~l[p].there THEN Goto(p, "a.write") ELSE Goto(p, "done")
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
-Actor(p) == IF p = "bob" THEN "bob" ELSE None
-ActorHeld(p) == ~AdmitCAS \/ ((Actor(p) = None \/ seal[Actor(p)] = l[p].seals[Actor(p)]) /\ seal["policy"] = l[p].seals["policy"])
+\* The objects an adder's standing rests on: its own (Bob's; nobody moves
+\* Cy's), and the policy.
+Rests(p) == (IF p = "bob" /\ "actor" \in AdmitHeld THEN {"bob"} ELSE {})
+            \cup (IF "policy" \in AdmitHeld THEN {"policy"} ELSE {})
+ActorHeld(p) == \A o \in Rests(p) : seal[o] = l[p].seals[o]
 PrincipalHeld(p) == ~PrincipalCAS \/ seal["svc"] = l[p].seals["svc"]
 
 \* The write: rows, head, fence, the CAS, the row, the change. One round trip.
@@ -258,7 +297,7 @@ AWrite(p) ==
               /\ UNCHANGED tries
          ELSE /\ Again(p, "a.read")
               /\ UNCHANGED <<svc, seal, next, l, admits>>
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, kver, sealedTo, head, requests, writes, answered>>
+    /\ UNCHANGED <<ok, kver, putBack, sealedTo, head, requests, writes, answered>>
 
 -----------------------------------------------------------------------------
 (* The seal wait, the answer, and everything else *)
@@ -269,36 +308,37 @@ Answer(p) ==
     /\ ~WaitForSeal \/ l[p].n < sealedTo
     /\ answered' = answered \cup {[p |-> p, n |-> l[p].n]}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, sealedTo, head, l, tries, trips, requests, writes, admits>>
 
 \* Every other change, one atomic step: 0.14's head and the fence (a
 \* session's revoke the fence alone, which the head's holder does not stop).
 Change(p) ==
     /\ pc[p] = "change"
     /\ p = "end" \/ head = None
-    /\ CASE p = "rev" -> /\ grant' = FALSE /\ Numbered("member")
-                         /\ UNCHANGED <<cred, protected, archived, bobAdmin>>
-         [] p = "end" -> /\ cred' = FALSE /\ Numbered("cred")
-                         /\ UNCHANGED <<grant, protected, archived, bobAdmin>>
-         [] p = "pol" -> /\ protected' = TRUE /\ Numbered("policy")
-                         /\ UNCHANGED <<cred, grant, archived, bobAdmin>>
-         [] p = "arc" -> /\ archived' = TRUE /\ Numbered("env")
-                         /\ UNCHANGED <<cred, grant, protected, bobAdmin>>
-         [] p = "dem" -> /\ bobAdmin' = FALSE /\ Numbered("bob")
-                         /\ UNCHANGED <<cred, grant, protected, archived>>
+    /\ ok' = [ok EXCEPT ![Moves[p]] = FALSE]
+    /\ Numbered(Moves[p])
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<svc, kver, sealedTo, head, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<svc, kver, putBack, sealedTo, head, tries, trips, requests, writes, admits, answered>>
+
+\* A database writer puts cA's row back as it was, live, once it is revoked.
+\* Nothing logged: the log's newest change of cA is still the revoke.
+Tamper(p) ==
+    /\ pc[p] = "tamper"
+    /\ seal["cred"] > 0
+    /\ putBack' = putBack \cup {"cred"}
+    /\ Goto(p, "done")
+    /\ UNCHANGED <<ok, svc, kver, seal, next, sealedTo, head, l, tries, trips, requests, writes, admits, answered>>
 
 \* A tick seals every number committed so far.
 Tick ==
     /\ "ck" \in Procs
     /\ sealedTo < next
     /\ sealedTo' = next
-    /\ UNCHANGED <<cred, grant, protected, archived, bobAdmin, svc, kver, seal, next, head, pc, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, next, head, pc, l, tries, trips, requests, writes, admits, answered>>
 
-Step(p) == WVault(p) \/ WNumber(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p)
-        \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ Answer(p) \/ Change(p)
+Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p)
+        \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ Answer(p) \/ Change(p) \/ Tamper(p)
 
 Terminating ==
     /\ \A p \in Procs \ {"ck"} : pc[p] = "done"
@@ -312,22 +352,28 @@ Spec == Init /\ [][Next]_vars
 (* What must hold *)
 
 TypeOK ==
+    /\ ok \in [Movable -> BOOLEAN]
     /\ seal \in [Objects -> Nat]
+    /\ putBack \subseteq Inputs
     /\ head \in Procs \cup {None}
     /\ sealedTo <= next
 
-\* A key write commits only while Ada may still write there: her session,
-\* her grant, the policy and the place all as the vault decided on them. A
-\* revoke, an end, a protection or an archive answered (committed first)
-\* stops every write after it, the one already decided included.
+\* A key write commits only while every input it stands on is as the vault
+\* decided on it. A revoke, an end, a policy change, an archive (of env or
+\* of its parent) or a write of a replaced key answered (committed first)
+\* stops every write after it, the one already decided included, and a row
+\* put back around coffre does not undo that. Changes that move a seal only:
+\* a session's expiry moves none, and is judged at the vault's clock, at
+\* its decision, as today.
 WritesStandAtCommit == \A w \in writes : w.stands
 
 \* Each key change goes from the object it was made from: two writes from
 \* one version never both commit (EachChangeFlips, for the app's change).
 KeyChangesFlip == \A w \in writes : w.from = w.was
 
-\* The replay decides each write's request at its number as the vault did
-\* live (HotPathOne's ReplayAgrees, for the request a write logs).
+\* What the vault decided on is the log at the request's number: its reads
+\* are one snapshot, numbered in it. (That the replay recomputes the same
+\* decision from those inputs is HotPathOne's ReplayAgrees.)
 RequestsReplay == \A r \in requests : r.live = r.replay
 
 \* A member is added only while its adder stands, at the commit.
@@ -340,7 +386,8 @@ AddsFlip == \A a \in admits : a.from = a.was
 AnsweredSealed == \A a \in answered : a.n < sealedTo
 
 \* A write or an add that committed at its first try made two round trips:
-\* the vault's statement and the app's, or the vault's two.
+\* the vault's statement and the app's, or the vault's two. It follows from
+\* the steps' shape; it says what the steps are, it proves nothing else.
 TwoTrips == \A p \in Procs : (pc[p] \in {"w.seal", "a.seal"} /\ tries[p] = 1) => trips[p] = 2
 
 =============================================================================

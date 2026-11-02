@@ -397,14 +397,22 @@ REMOVALS=(
   "LifecycleFetched BindingSealed SignInsOnValidTokens"
   # A change in two round trips (Writing.tla, T179): a key write as one vault statement and one app statement, a
   # member add as the vault's read and its write.
+  # Its reads one statement under the fence: a change between two of them tears the request from the log at its number.
   "WritingRevoke RequestUnderFence RequestsReplay"
-  'WritingRevoke Held={"member","policy","env"} WritesStandAtCommit'
-  'WritingRevoke Held={"cred","policy","env"} WritesStandAtCommit'
-  'WritingPlace Held={"cred","member","env"} WritesStandAtCommit'
-  'WritingPlace Held={"cred","member","policy"} WritesStandAtCommit'
+  # The app's guards, each input left out in turn.
+  'WritingRevoke Held={"member","policy","env","parent","replaced"} WritesStandAtCommit'
+  'WritingRevoke Held={"cred","policy","env","parent","replaced"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","env","parent","replaced"} WritesStandAtCommit'
+  'WritingPlace Held={"cred","member","policy","parent","replaced"} WritesStandAtCommit'
+  'WritingFork Held={"cred","member","policy","env","replaced"} WritesStandAtCommit'
+  'WritingFork Held={"cred","member","policy","env","parent"} WritesStandAtCommit'
   "WritingRevoke GuardsAfterFence WritesStandAtCommit"
+  # A guard by the row's own seal column: a database writer puts a revoked session back, live.
+  "WritingTamper GuardOnLog WritesStandAtCommit"
   "WritingRevoke ChangeCAS KeyChangesFlip"
-  "WritingAdd AdmitCAS AddsStandAtCommit"
+  # A member add's write, the actor's object and then the policy left out.
+  'WritingAdd AdmitHeld={"policy"} AddsStandAtCommit'
+  'WritingAdd AdmitHeld={"actor"} AddsStandAtCommit'
   "WritingAdd PrincipalCAS AddsFlip"
   "WritingAdd WaitForSeal AnsweredSealed"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
