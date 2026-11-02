@@ -34,6 +34,7 @@ const TWILIO_SID = 'AC0123456789abcdef';
 const TWILIO_TOKEN = 'twilio-token-0123456789';
 const TWILIO_EDGE = 'edge-key-0123456789abcd';
 const REPLICA = 'prod-only-0123456789abcd';
+const TICKET = 'ticket-0123456789abcdef';
 
 /** The fake upstream: each request it got, and whether its SigV4 signature is the real key's. `/echo` answers with the forms given. */
 let upstream: Server;
@@ -107,6 +108,8 @@ function options(): CredentialProxyOptions {
       oauth: { upstream: `${upstreamUrl}/oauth`, inject: [form('client_id', '{CLIENT_ID}'), form('client_secret', '{CLIENT_SECRET}')] },
       // Basic's pair and a header of its own.
       twilio: { upstream: `${upstreamUrl}/twilio`, inject: [basic('{TWILIO_SID}', '{TWILIO_TOKEN}'), header('x-edge-key', '{TWILIO_EDGE}')] },
+      // A query parameter that holds the handle in a placeholder's shape.
+      tickets: { upstream: `${upstreamUrl}/tickets`, inject: query('token', '{TICKET}'), placeholder: prefix('p_') },
       // Served in market/prod alone.
       replica: { upstream: `${upstreamUrl}/replica`, inject: header('x-replica-key', '{REPLICA_KEY}'), environments: ['market/prod'] },
     },
@@ -125,7 +128,7 @@ useMcp(async () => {
     await root.secrets.set(path, {
       STRIPE_KEY, STRIPE_ACCOUNT: { value: STRIPE_ACCOUNT, sensitivity: 'plain' }, MAPS_KEY, MAPS_SIGNING: { value: MAPS_SIGNING, sensitivity: 'sensitive' },
       TENANT_KEY, AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET, CLIENT_ID: { value: CLIENT_ID, sensitivity: 'plain' }, CLIENT_SECRET,
-      TWILIO_SID: { value: TWILIO_SID, sensitivity: 'plain' }, TWILIO_TOKEN, TWILIO_EDGE, REPLICA_KEY: REPLICA,
+      TWILIO_SID: { value: TWILIO_SID, sensitivity: 'plain' }, TWILIO_TOKEN, TWILIO_EDGE, REPLICA_KEY: REPLICA, TICKET,
     });
   }
   await root.access.set(`user:${DEV}`, { market: 'developer' });
@@ -179,7 +182,18 @@ test('two different handles in one request are refused, wherever and however oft
   const twice = new Headers([['x-api-key', handle], ['x-api-key', other]]);
   assert.equal((await route('/use/maps/geocode', { headers: twice })).status, 400);
   assert.equal((await route('/use/maps/geocode', { headers: { 'x-coffre-handle': `${handle}, ${other}` } })).status, 400);
-  assert.equal(reached.length, 0);
+  // Out of a placeholder's shape too: the second parameter, the second header, the bare handle beside the shaped one.
+  assert.equal((await route(`/use/tickets/list?token=p_${handle}&token=${other}`)).status, 400);
+  assert.equal((await route(`/use/tickets/list?token=p_${handle}&token=${handle}`)).status, 200);
+  const shaped = new Headers([['authorization', `Bearer sk_test_${handle}`], ['authorization', `Bearer ${other}`], ['x-coffre-handle', handle]]);
+  assert.equal((await route('/use/stripe/charges', { headers: shaped })).status, 400);
+  // Basic's pair given twice, which Headers joins, and a handle in Authorization beside Basic's rule.
+  const pair = (of: string) => `Basic ${btoa(`${TWILIO_SID}:${of}`)}`;
+  assert.equal((await route('/use/twilio/messages', { headers: new Headers([['authorization', pair(handle)], ['authorization', pair(other)], ['x-coffre-handle', handle]]) })).status, 400);
+  assert.equal((await route('/use/twilio/messages', { headers: { authorization: `Bearer ${other}`, 'x-coffre-handle': handle } })).status, 400);
+  assert.equal(reached.length, 1);
+  // The one that went: the shaped parameter and the bare one, the same handle, the ticket once in their place.
+  assert.deepEqual(new URL(reached[0]!.url, upstreamUrl).searchParams.getAll('token'), [TICKET]);
 });
 
 test("a header and SigV4: the signature covers the header the rule before it set, and verifies with the real key", async () => {

@@ -452,8 +452,11 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
 - **The handle** rides where the plan put it: in each slot of a key that is
   no plain one (every slot, when all are plain, which then stay
   placeholders), or in `x-coffre-handle`. Two different handles in one
-  request are a 400, every occurrence counted: a parameter given twice
-  (`?token=H1&token=H2`), a header given twice, two in one slot. A field the handle rides in must hold it; a field of
+  request are a 400, every occurrence counted, whatever its shape: a
+  parameter given twice (`?token=p_H1&token=H2`, the second outside the
+  placeholder's `p_`), a header given twice, two Basic pairs, a handle in
+  `Authorization` beside a `basic()` or `sigv4()` rule, two in one slot. Only
+  one in the placeholder's shape, or in `x-coffre-handle`, lets a request in. A field the handle rides in must hold it; a field of
   plain keys holds what the app sent. A `placeholder` shapes the one header,
   query, form or JSON slot the handle rides in, which the environment's
   plain keys decide: where its secret keys sit in several rules, the plan is

@@ -1882,20 +1882,31 @@ function riding(credential: Resolved, plain: (key: string) => boolean): readonly
  * The handle, where the app sends it: `x-coffre-handle` (the `credential(name)`
  * helper), or where any rule of the credential takes its key, a form or JSON
  * rule's in its field (`fields`, in the order of the body's rules); null for
- * none; a refusal for two different ones, which no app sends. Every
- * occurrence counts: a parameter given twice (`?token=H1&token=H2`), a header
- * given twice, which `Headers` joins, or two handles in one slot.
+ * none; a refusal for two different ones, which no app sends. Every handle
+ * the request carries where the proxy looks counts against the one it takes,
+ * whatever its shape: a parameter given twice (`?token=p_H1&token=H2`), a
+ * header given twice, which `Headers` joins, two Basic pairs, or two handles
+ * in one slot. Only one in a placeholder's shape, or in x-coffre-handle,
+ * lets the request in.
  */
 function handleIn(request: Request, credential: Resolved, target: URL, fields: readonly string[] = []): string | null | Response {
   const explicit = request.headers.get('x-coffre-handle');
-  const found = new Set(explicit === null ? [] : explicit.match(HANDLES) ?? []);
-  if (explicit !== null && found.size === 0) return null;
+  const taken = new Set(explicit?.match(HANDLES) ?? []);
+  if (explicit !== null && taken.size === 0) return null;
+  const seen = new Set(taken);
+  const authorization = request.headers.get('authorization');
   let field = 0;
   for (const rule of credential.rules) {
-    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : null)) for (const handle of handlesOf(rule, slot)) found.add(handle);
+    // Basic's and SigV4's Authorization header as sent: a handle in it outside the pair or the signature counts too.
+    if ((rule.kind === 'basic' || rule.kind === 'sigv4') && authorization !== null) for (const handle of authorization.match(HANDLES) ?? []) seen.add(handle);
+    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : null)) {
+      for (const handle of slot.match(HANDLES) ?? []) seen.add(handle);
+      const handle = handleOf(rule, slot);
+      if (handle !== null) taken.add(handle);
+    }
   }
-  if (found.size > 1) return failure(400, `the request carries two different handles: ${credential.name} takes one`);
-  return found.values().next().value ?? null;
+  if (seen.size > 1) return failure(400, `the request carries two different handles: ${credential.name} takes one`);
+  return taken.values().next().value ?? null;
 }
 
 /** What the app put where a rule takes its key, each time it put it: a header, a parameter, a field (given), Basic's pair, or SigV4's access key id. */
@@ -1903,21 +1914,19 @@ function slotsOf(request: Request, rule: Rule, target: URL, field: string | null
   if (rule.kind === 'header') return [request.headers.get(rule.name)].filter((slot) => slot !== null);
   if (rule.kind === 'query') return target.searchParams.getAll(rule.name);
   if (rule.kind === 'form' || rule.kind === 'json') return field === null ? [] : [field];
+  const authorization = request.headers.get('authorization');
+  if (authorization === null) return [];
   // The SDK's `Credential=<access key id>/…`: the handle, as the access key it signed with.
-  if (rule.kind === 'sigv4') return [...(request.headers.get('authorization') ?? '').matchAll(/Credential=([^/,\s]+)\//g)].map((match) => match[1]!);
-  const basic = /^Basic\s+(\S+)$/i.exec(request.headers.get('authorization') ?? '');
-  try {
-    return basic === null ? [] : [atob(basic[1]!)];
-  } catch {
-    return [];
-  }
-}
-
-/** Every handle in what the app put where a rule takes its key: a shaped placeholder's slot is that shape exactly, one handle; the handle alone is found wherever the rule frames it. */
-function handlesOf(rule: Rule, slot: string): string[] {
-  if (rule.shape === undefined) return slot.match(HANDLES) ?? [];
-  const handle = rule.shape.exec(slot)?.[1];
-  return handle === undefined ? [] : [handle];
+  if (rule.kind === 'sigv4') return [...authorization.matchAll(/Credential=([^/,\s]+)\//g)].map((match) => match[1]!);
+  // Each pair, where `Headers` joined two Authorization headers (base64 has no comma).
+  return authorization.split(',').flatMap((part) => {
+    const basic = /^\s*Basic\s+(\S+)\s*$/i.exec(part);
+    try {
+      return basic === null ? [] : [atob(basic[1]!)];
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** The handle in what the app put where a rule takes its key: a shaped placeholder's slot is that shape exactly; the handle alone is found wherever the rule frames it. */
