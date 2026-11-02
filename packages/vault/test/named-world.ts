@@ -226,7 +226,7 @@ export async function holding<T>(db: TestDatabase, lock: ReturnType<typeof sql>,
 export async function slowed(db: TestDatabase, options: { connections?: number } = {}) {
   let statements = 0;
   let delay = 0;
-  /** The last `use_credential` call sent, as postgres.js sends it: its text and arguments (Postgres only). */
+  /** The last `use_credential` call sent, or `use_named_batch`, as postgres.js sends it: its text and arguments (Postgres only). */
   let last: HotCall | null = null;
   if (ENGINE === 'sqlite') {
     const hot = new Proxy(db.vault, {
@@ -249,7 +249,7 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
       if (key !== 'unsafe') return value;
       return (...args: unknown[]) => {
         statements += 1;
-        if (typeof args[0] === 'string' && args[0].includes('use_credential')) last = { query: args[0], args: [...((args[1] ?? []) as unknown[])] };
+        if (typeof args[0] === 'string' && (args[0].includes('use_credential') || args[0].includes('use_named_batch'))) last = { query: args[0], args: [...((args[1] ?? []) as unknown[])] };
         if (delay === 0) return (value as (...a: unknown[]) => unknown).apply(target, args);
         // postgres.js's query is a lazy promise: sent once awaited, so `delay` holds it back.
         return sleep(delay).then(() => (value as (...a: unknown[]) => unknown).apply(target, args));
@@ -305,8 +305,10 @@ export async function weighed(call: HotCall | null, on?: ReturnType<typeof postg
     for (let run = 0; run < 4; run += 1) {
       const args = [...call.args];
       const now = Date.now();
-      // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline.
-      [args[3], args[7]] = [String(now), String(now + 3000)];
+      // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
+      // first, then at, purpose and deadline.
+      if (call.query.includes('use_named_batch')) [args[8], args[10]] = [String(now), String(now + 3000)];
+      else [args[3], args[7]] = [String(now), String(now + 3000)];
       const read = await client.begin(async (tx) => {
         const before = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
         const [plan] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${call.query}`, args as never[]) as unknown as { 'QUERY PLAN': { Plan: Buffers }[] }[];

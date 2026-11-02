@@ -46,7 +46,7 @@ import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
 import { ApiError, badRequest, conflict, forbidden, notAvailable, notFound, UnloggedRefusal, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
-import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord, type Decided } from './keys.ts';
+import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord, type Decided, type DecidedMany } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
 import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
@@ -1761,7 +1761,7 @@ export async function reveal(
    * all; a path that resolves to another (renamed meanwhile) is refused
    * before anything is logged or opened.
    */
-  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string; ahead?: ReadAhead | null; only?: boolean; decided?: Decided },
+  use?: { purpose: 'use' | 'expose'; keys: readonly string[] | PickKeys; logged: Record<string, unknown>; environmentId?: string; ahead?: ReadAhead | null; only?: boolean; decided?: Decided | DecidedMany },
   /**
    * Of a whole environment, these keys only (`coffre export --keys`): read
    * as the whole is, and what it leaves out named as the whole's would be,
@@ -1772,10 +1772,13 @@ export async function reveal(
   only?: readonly string[],
 ): Promise<{ operationId: string; values: Record<string, string>; plain: string[]; sensitive: string[]; useOnly: string[]; version: string | null; environment: { id: string; path: string; personal: boolean }; keys: string[] }> {
   const operationId = randomUUID();
-  // A request's one key, used by name already (`useByName`): its rows are the use's, and its outcome the value's.
+  // A request's one key, used by name already (`useByName`): its rows are the use's, and its outcome the value's. Or its
+  // several keys (`useManyByName`, T165): the rows each key's named call read, and the values, all or nothing.
   const decided = use?.decided ?? ctx.named?.decided;
+  const many = decided !== undefined && 'keys' in decided ? decided : undefined;
+  const single = many === undefined ? decided as Decided | undefined : undefined;
   const one = path.key ?? (use?.only === true && Array.isArray(use.keys) && use.keys.length === 1 ? use.keys[0]! : null);
-  return recorded(ctx, refusedAlike(ctx, decided, operationId, path, one, async (log, fence, at, stood) => {
+  return recorded(ctx, refusedAlike(ctx, single, operationId, path, one, async (log, fence, at, stood) => {
     // The place and its keys in one call where it can (`readValues`); the proxy's read them with the handle already.
     // Of a use, its keys alone when it reads no other (`UseAsked.only`): it answers every key the environment holds.
     const reads = use === undefined ? only : use.only === true && Array.isArray(use.keys) ? use.keys : undefined;
@@ -1805,9 +1808,13 @@ export async function reveal(
     });
     // Decided by the vault's one call by name, a fork's or a personal config's one key: its rows, no layer read again (T165).
     // Its path's key, the proxy's one, or a list of one (`only`, whose key the environment may not hold: left out then).
-    const single = one ?? (only?.length === 1 ? only[0]! : null);
-    const usedByName = decided !== undefined && single !== null && ahead?.held !== undefined && ahead.secrets !== undefined ? { key: single, held: ahead.held } : undefined;
-    const read = await readableValues(ctx.db, place, environment, path.key, ahead?.secrets, usedByName);
+    const key = one ?? (only?.length === 1 ? only[0]! : null);
+    const usedByName = single !== undefined && key !== null && ahead?.held !== undefined && ahead.secrets !== undefined ? { key, held: ahead.held } : undefined;
+    // Several keys by name, the caller standing there (T165): each key's rows, where the vault found it held.
+    const usedMany = many !== undefined && many.stands && ahead?.secrets !== undefined
+      ? { keys: many.keys.flatMap((named) => (named.secretId === null ? [] : [{ key: named.key, held: named.held }])) }
+      : undefined;
+    const read = await readableValues(ctx.db, place, environment, path.key, ahead?.secrets, usedByName ?? usedMany);
     const named = { id: environment.environmentId, path: `${place.project.slug}/${personalName(place) ?? place.environment!.slug}`, personal: place.environment!.owner !== null };
     // The proxy's keys, chosen from these very rows, and what stops them: a parent or a reference one of them reads through, or the chain.
     // A parent's plain value, version and recipe are told only to its readers, as the listing tells them (R8): to anyone

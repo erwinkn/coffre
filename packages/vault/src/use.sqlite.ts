@@ -10,7 +10,7 @@ import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
-import type { Cover, Resolved, UseCall, UseRow } from './use.ts';
+import type { Cover, NamedAhead, NamedBatchCall, NamedBatchRows, Resolved, UseCall, UseRow } from './use.ts';
 
 /**
  * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
@@ -43,6 +43,103 @@ export async function callBatch(db: Queryable, calls: readonly UseCall[], _lock:
     if (rows.some((row) => row.state === null) && Date.now() > calls[0]!.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
     return rows;
   });
+}
+
+/**
+ * `use_named_batch` (0055) on SQLite: in one transaction, the gate's named call with no key, then, for one who stands
+ * there, its chain whole, each key as Postgres's makes it: the keys `calls` name, or, `calls` null, every key the place
+ * holds (`listed`), at most `limit`; a key by the ids its call has when they are its name's now and its value is sealed
+ * (a use by ids, `callUse`'s), else by its name alone.
+ */
+export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readonly NamedBatchCall[] | null, limit: number): Promise<NamedBatchRows> {
+  if (gate.names === undefined || gate.credential !== null || gate.names.key !== null) throw new Error("a named batch's gate reads by its names alone, with no key");
+  return (db as Database).transaction(async (tx) => {
+    const rows = direct(tx);
+    const opened = await useOnce(tx, gate, rows);
+    const none = { gate: opened, keys: null, rows: [], byIds: [], aheads: [] };
+    if (opened.state !== 'moved' || opened.n_standing !== true || opened.n_cut !== false) return none;
+    const place = opened.n_place!;
+    const [at] = await rowsOf<{ project_id: string; parent_id: string | null }>(tx, sql`SELECT project_id, parent_id FROM environments WHERE id = ${place}`);
+    const { layers, cut } = at === undefined ? { layers: [], cut: true } : await chainOf(tx, place, at.parent_id);
+    if (cut) return { ...none, keys: calls === null ? [] : null };
+    const names = calls === null ? await listed(tx, at!.project_id, layers) : calls.map(({ key }) => key);
+    const out: UseRow[] = [];
+    const byIds: boolean[] = [];
+    const aheads: (NamedAhead | null)[] = [];
+    for (const [i, key] of names.slice(0, limit).entries()) {
+      const call = calls?.[i]?.call;
+      const held = call === undefined || call.names !== undefined ? null : await resolved(tx, at!.project_id, layers, key);
+      const by = held !== null && held.sealed && call!.credential === opened.n_credential && call!.secretId === held.id
+        && call!.place === (held.holder === place ? null : place);
+      out.push(await useOnce(tx, by ? call! : { ...gate, names: { ...gate.names!, key } }, rows));
+      byIds.push(by);
+      aheads.push(by ? { secret: null, version: null, held: held!.holder === place ? null : { environmentId: held!.holder, slug: held!.slug } } : null);
+    }
+    // Past the deadline once written, as `callBatch`'s: the whole statement rolls back.
+    if (out.some((row, i) => byIds[i] && row.state === null) && Date.now() > gate.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
+    return { gate: opened, keys: calls === null ? names : null, rows: out, byIds, aheads };
+  });
+}
+
+/**
+ * The key `key` names through `layers` (0051): the nearest layer that holds it live, or but the last that removed it;
+ * none, removed or held nowhere. With where it is held, and whether its value is a sealed one of its own.
+ */
+async function resolved(tx: Queryable, project: string, layers: readonly string[], key: string): Promise<{ id: string; holder: string; slug: string; sealed: boolean } | null> {
+  for (const [depth, layer] of layers.entries()) {
+    const [held] = await rowsOf<{ id: string; slug: string; sealed: number }>(tx, sql`SELECT s.id, e.slug,
+        (s.current_version_id IS NOT NULL AND v.plaintext IS NULL) AS sealed
+      FROM secrets s JOIN environments e ON e.id = s.environment_id LEFT JOIN secret_versions v ON v.id = s.current_version_id
+      WHERE s.project_id = ${project} AND s.environment_id = ${layer} AND s.key = ${key} AND s.archived_at IS NULL LIMIT 1`);
+    if (held !== undefined) return { id: held.id, holder: layer, slug: held.slug, sealed: Boolean(held.sealed) };
+    if (depth < layers.length - 1) {
+      const [removed] = await rowsOf<{ one: number }>(tx, sql`SELECT 1 AS one FROM dismissed_keys WHERE environment_id = ${layer} AND key = ${key} AND restored_at IS NULL LIMIT 1`);
+      if (removed !== undefined) return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * What `place` inherits from, nearest first (0051's chain): the place, then each parent; a parent archived, deleted (its
+ * slug a tombstone) or not there, or a chain that loops or runs past 3, cuts it.
+ */
+async function chainOf(tx: Queryable, place: string, parentId: string | null): Promise<{ layers: string[]; cut: boolean }> {
+  const layers = [place];
+  const seen = new Set(layers);
+  for (let next: string | null = parentId, depth = 1; next !== null; depth += 1) {
+    const parent: { id: string; parent_id: string | null; slug: string; archived: number } | undefined = depth > 3 || seen.has(next) ? undefined
+      : (await rowsOf<{ id: string; parent_id: string | null; slug: string; archived: number }>(tx, sql`SELECT id, parent_id, slug, archived_at IS NOT NULL AS archived FROM environments WHERE id = ${next}`))[0];
+    if (parent === undefined || Boolean(parent.archived) || parent.slug.includes('~')) return { layers, cut: true };
+    seen.add(parent.id);
+    layers.push(parent.id);
+    next = parent.parent_id;
+  }
+  return { layers, cut: false };
+}
+
+/**
+ * Every key the place holds through `layers`, its chain whole, as `resolveValues` lists them (0055): a key held live in a
+ * layer is the place's unless a nearer layer but the last removed it. Sorted by name.
+ */
+async function listed(tx: Queryable, project: string, layers: readonly string[]): Promise<string[]> {
+  const depth = new Map(layers.map((id, i) => [id, i]));
+  const live = new Map<string, number>();
+  for (const one of await rowsOf<{ key: string; environment_id: string }>(tx, sql`SELECT key, environment_id FROM secrets
+    WHERE project_id = ${project} AND environment_id IN (${sql.join(layers.map((id) => sql`${id}`), sql`, `)}) AND archived_at IS NULL`)) {
+    const at = depth.get(one.environment_id)!;
+    live.set(one.key, Math.min(live.get(one.key) ?? at, at));
+  }
+  const removed = new Map<string, number>();
+  const nearer = layers.slice(0, -1);
+  if (nearer.length > 0) {
+    for (const one of await rowsOf<{ key: string; environment_id: string }>(tx, sql`SELECT key, environment_id FROM dismissed_keys
+      WHERE environment_id IN (${sql.join(nearer.map((id) => sql`${id}`), sql`, `)}) AND restored_at IS NULL`)) {
+      const at = depth.get(one.environment_id)!;
+      removed.set(one.key, Math.min(removed.get(one.key) ?? at, at));
+    }
+  }
+  return [...live].filter(([key, at]) => !removed.has(key) || at <= removed.get(key)!).map(([key]) => key).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /** A change's number as text: SQLite's integers are 64 bits, a JavaScript number's exact ones 53. */
@@ -353,22 +450,8 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
     stands = state === null && place !== undefined && await standsAt(tx, credential.id, place.id, call);
     // What the place inherits from, nearest first, for one who stands (0051): a parent archived, deleted, not there, or a
     // chain that loops or runs past 3 cuts it, and the place reads nothing.
-    const layers = place === undefined ? [] : [place.id];
-    let cut = false;
-    if (stands && names.forks && place!.parent_id !== null) {
-      const seen = new Set(layers);
-      for (let next: string | null = place!.parent_id, depth = 1; next !== null; depth += 1) {
-        const parent: { id: string; parent_id: string | null; slug: string; archived: number } | undefined = depth > 3 || seen.has(next) ? undefined
-          : await one<{ id: string; parent_id: string | null; slug: string; archived: number }>(sql`SELECT id, parent_id, slug, archived_at IS NOT NULL AS archived FROM environments WHERE id = ${next}`);
-        if (parent === undefined || Boolean(parent.archived) || parent.slug.includes('~')) {
-          cut = true;
-          break;
-        }
-        seen.add(parent.id);
-        layers.push(parent.id);
-        next = parent.parent_id;
-      }
-    }
+    const { layers, cut } = place === undefined ? { layers: [], cut: false }
+      : stands && names.forks && place.parent_id !== null ? await chainOf(tx, place.id, place.parent_id) : { layers: [place.id], cut: false };
     // The key, in the nearest layer that settles it: holds it live, or (but the last) removed it.
     let key: { id: string; environment_id: string } | undefined;
     if (stands && !cut && names.key !== null) {

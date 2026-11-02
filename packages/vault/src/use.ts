@@ -1,7 +1,7 @@
 import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
-import { type Access, type CredentialAcceptance, type NamedUseInput, type NamedUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue } from '@coffre/core/vault';
+import { type Access, type CredentialAcceptance, type NamedKey, type NamedManyInput, type NamedManyOutcome, type NamedUseInput, type NamedUseOutcome, type NamedValue, newUseRequestId, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
 
@@ -12,8 +12,8 @@ import { noEdits, objectKey, sealedOnce, type EnvironmentInput, type Input, type
 import { entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './log-entry.ts';
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
-import { callBatch as batchPostgres, callUse as callPostgres } from './use.postgres.ts';
-import { callBatch as batchSqlite, callUse as callSqlite } from './use.sqlite.ts';
+import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callUse as callPostgres } from './use.postgres.ts';
+import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callUse as callSqlite } from './use.sqlite.ts';
 
 /**
  * 0.15's use (docs/design/0.15-plan.md, PR 5; hot-path-one.md, "A use";
@@ -45,7 +45,7 @@ import { callBatch as batchSqlite, callUse as callSqlite } from './use.sqlite.ts
  *   in a second call (DecideBeforeLock, DecideEachLock).
  */
 
-export type { UseInput, UseManyInput, UseManyOutcome, UseOutcome, UsedValue };
+export type { NamedManyInput, NamedManyOutcome, UseInput, UseManyInput, UseManyOutcome, UseOutcome, UsedValue };
 
 /** A use's request id (`newUseRequestId`, core's: the app makes them too). */
 export { newUseRequestId as newRequestId } from '@coffre/core/vault';
@@ -403,9 +403,32 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
   if (new Set(items.map((item) => item.requestId)).size !== items.length) throw new Error("a batch's uses each have a request id of their own");
   const way = wayOf(asked);
   const each: Asked[] = items.map((item) => ({ ...asked, ...way, secretId: item.secretId, place: item.place, requestId: item.requestId }));
+  const made = await byIds(path, input, each, sealedOnce());
+  if ('busy' in made) return made;
+  if ('index' in made) return refusedAt(made.index, made.used);
+  // Every key allowed: each opened, within the deadline.
+  const opened = await Promise.all(made.allowed.map((one) => opening(path, one, input.deadline)));
+  const values: Extract<UseManyOutcome, { ok: true }>['values'] = [];
+  for (const [index, one] of opened.entries()) {
+    const outcome = 'outcome' in one ? one.outcome : null;
+    if (outcome === null || !outcome.ok || !('value' in outcome)) return refusedAt(index, one);
+    values.push({ number: outcome.number, covered: outcome.covered, value: outcome.value });
+  }
+  return { ok: true, values };
+}
+
+/**
+ * A batch's uses by ids (T167; formal/Batching.tla), `useMany`'s rounds: each key's use made as `use` makes it, by ids,
+ * in order, in one statement (of at most `limits.batch` keys: more in statements of that many, in turn), and decided on
+ * what it read (`settle`), under one admission and one deadline; then, only once every key is allowed on those rows
+ * (AllDecidedFirst), one more call for the keys that would take the principal's lock, which answered `decide` having
+ * written and locked nothing: it takes the lock exclusive before its first key (StrongestFirst), and each key is decided
+ * again on what it reads then. Every key allowed, its key yet to open; or the first key in order not allowed; or busy.
+ */
+async function byIds(
+  path: UsePath, input: Pick<UseInput, 'at' | 'deadline'>, each: readonly Asked[], seals: typeof sealed,
+): Promise<{ allowed: Allowed[] } | { index: number; used: Used | Allowed | Uncovered } | Extract<UseOutcome, { busy: UseBusy }>> {
   const settled: (Used | Allowed | Uncovered | undefined)[] = [];
-  // The objects every key shares, their seals checked once for the batch.
-  const seals = sealedOnce();
   let pending = each.map((_, index) => index);
   for (let round = 1; pending.length > 0; round++) {
     const decided = round > 1;
@@ -419,14 +442,7 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
     const lock = principals.size === 1 ? [...principals][0] ?? null : null;
     const answered = await raced(path, input.deadline, (sends) => inStatements(path, made.map((one) => one.call), lock, sends), async (rows, starts) => {
       if (rows.length !== made.length) throw new Error(`use_batch answered ${rows.length} rows for ${made.length} keys`);
-      const forged = new Map<string, Promise<boolean>>();
-      // One check a principal and entry, as every key's row reads the same (`oldWrite`), in turn on the call's connection;
-      // none once the race is lost (T177).
-      const forgedOf = async (row: UseRow, known: CachedSeals | undefined) => {
-        const at = `${row.c_principal}\n${row.m_access}\n${(known?.last ?? lastsOf(row)).mOld}`;
-        if (!forged.has(at)) forged.set(at, forgedPast(path, row, starts, known));
-        return forged.get(at)!;
-      };
+      const forgedOf = forgedOnce(path, starts);
       const out: { row: UseRow; forged: boolean }[] = [];
       for (const [i, row] of rows.entries()) out.push({ row, forged: await forgedOf(row, row.probed ? undefined : made[i]!.known) });
       return out;
@@ -435,18 +451,24 @@ export async function useMany(path: UsePath, input: UseManyInput): Promise<UseMa
     for (const [i, index] of pending.entries()) settled[index] = settle(path, each[index]!, undefined, decided, made[i]!, answered[i]!.row, answered[i]!.forged);
     // The first key not allowed, in the request's order, answers for the batch, and no other call is made.
     const first = settled.findIndex((one) => one !== undefined && !('again' in one) && !('allowed' in one));
-    if (first >= 0) return refusedAt(first, settled[first]!);
+    if (first >= 0) return { index: first, used: settled[first]! };
     pending = settled.flatMap((one, index) => (one !== undefined && 'again' in one ? [index] : []));
   }
-  // Every key allowed: each opened, within the deadline.
-  const opened = await Promise.all(settled.map((one) => opening(path, one as Allowed, input.deadline)));
-  const values: Extract<UseManyOutcome, { ok: true }>['values'] = [];
-  for (const [index, one] of opened.entries()) {
-    const outcome = 'outcome' in one ? one.outcome : null;
-    if (outcome === null || !outcome.ok || !('value' in outcome)) return refusedAt(index, one);
-    values.push({ number: outcome.number, covered: outcome.covered, value: outcome.value });
-  }
-  return { ok: true, values };
+  return { allowed: settled as Allowed[] };
+}
+
+/**
+ * Whether each row's principal has an access entry forged past what its newest change accounts for (`forgedPast`): one
+ * check a principal and entry, as every key's row of a batch reads the same, in turn on the call's connection; none
+ * once the race is lost (T177).
+ */
+function forgedOnce(path: UsePath, starts: () => void): (row: UseRow, known: CachedSeals | undefined) => Promise<boolean> {
+  const forged = new Map<string, Promise<boolean>>();
+  return async (row, known) => {
+    const at = `${row.c_principal}\n${row.m_access}\n${(known?.last ?? lastsOf(row)).mOld}`;
+    if (!forged.has(at)) forged.set(at, forgedPast(path, row, starts, known));
+    return forged.get(at)!;
+  };
 }
 
 /** A batch's answer for the key at `index` that was not allowed. */
@@ -577,7 +599,7 @@ type Uncovered = { uncovered: true; outcome: Extract<UseOutcome, { code: UseCode
  * The decision on a call's row (`useOnce`, after the statement): a use allowed with its key yet to open (`Allowed`), or
  * refused on its cover by ids (`Uncovered`), or any other answer.
  */
-function settle(path: UsePath, input: Asked, names: Names | undefined, decided: boolean, made: Ready, row: UseRow, forged: boolean): Used | Allowed | Uncovered {
+function settle(path: UsePath, input: Asked, names: Names | undefined, decided: boolean, made: Ready, row: UseRow, forged: boolean, plainAtOnce = false): Used | Allowed | Uncovered {
   const { cache } = path;
   const { request, key, coverKey, known } = made;
   const way = input.way ?? 'credential';
@@ -604,6 +626,15 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
     const checked = checkedOf(path.sealKeys, view.view, named, view.accounted || forged, made.seals);
     const code = decidedOn(checked, named, row) ?? (names !== undefined && readsArchived(row) ? 'archived' : null);
     if (code !== null) return { outcome: { ok: false, code, number: null }, row, checked, request: named };
+    // A named batch's plain value, decided on these rows: its text, which its object's digest binds, at once, as a lone
+    // named use's second call would hand it back; no use is made of it, no entry, no cover (`plainAtOnce`). A batch's
+    // second round is by ids, which makes no plain value's use (`bad_claim`).
+    const read = view.view.secret.row;
+    const value = read == null ? null : read.source === null ? read : view.view.source?.row ?? null;
+    if (plainAtOnce && value != null && value.key === null) {
+      if (Date.now() >= input.deadline) return { outcome: busy('late'), row, checked, request: named };
+      return { outcome: { ok: true, plain: row.v_plaintext!, versionId: value.version }, row, checked, request: named };
+    }
     return { again: ids, row };
   }
   const view = viewOf(row, request, row.probed ? undefined : known);
@@ -700,10 +731,7 @@ function mapped(row: UseRow): Resolved | null {
 export async function useNamed(path: UsePath, input: NamedUseInput): Promise<NamedUseOutcome> {
   checkInput(input);
   if ((input.key !== null && (typeof input.key !== 'string' || input.key === '')) || typeof input.tokenHash !== 'string') throw new Error('a named use names its token, by hash, and its key, if any');
-  const { accepts } = input;
-  if (typeof accepts?.signin !== 'boolean' || !Array.isArray(accepts.issuers) || accepts.issuers.some((issuer) => typeof issuer !== 'string')) {
-    throw new Error('a named use says what credentials the app accepts: whether it signs in, and its providers\' issuers');
-  }
+  const accepts = acceptsOf(input);
   const { cache } = path;
   const tokenHash = Buffer.from(input.tokenHash, 'base64');
   const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
@@ -719,7 +747,7 @@ export async function useNamed(path: UsePath, input: NamedUseInput): Promise<Nam
     tokenHash, project: input.place?.project ?? null, environment: input.place?.environment ?? null, key: input.key, handle: input.place === null,
     // The places a stable URL does not mean, judged by the call against the slugs it reads, never the map's.
     unless: input.place !== null ? [] : (input.unless ?? []).map((other) => `${other.project}/${other.environment}`),
-    accepts: { signin: accepts.signin, issuers: [...accepts.issuers] },
+    accepts,
     forks: input.forks === true,
   };
   const asked = { purpose: input.purpose, keepsSensitive: input.keepsSensitive, requestId: input.requestId, at: input.at, deadline: input.deadline };
@@ -760,6 +788,245 @@ export async function useNamed(path: UsePath, input: NamedUseInput): Promise<Nam
     at: placeOf(checked, row),
   };
 }
+
+/**
+ * A request's several keys as it names them (T165, B2's PR 2; formal/ProbingMany.tla; migration 0055,
+ * `use_named_batch`): one call, whose first statement decides the caller's standing at the place first, from rows no key
+ * decides (GateBeforeKeys), and reads nothing of any key without it: no standing, a chain cut, and the request is the
+ * place's refusal, whatever the keys are or were. For one who stands, the same statement reads each key as a lone
+ * named use reads it (`useNamed`), the request's names, or every key the place holds, which it lists itself: with the
+ * ids this isolate maps it to, if any, a key whose row of the cap's is fresh is used at once; otherwise the call writes
+ * and locks nothing. The vault decides every key on those rows (DecideAllFirst); then, only once it allowed every one,
+ * makes the rest as `useMany` makes a batch by ids, and opens them all. All or nothing: every value, or the first key
+ * refused, or busy.
+ *
+ * A read that leaves out a sensitive value, naming it (`leavesSensitive`: a person's), passes no ids in its first
+ * statement, which then writes nothing (LeaveFirst): the vault leaves every sensitive key out, unused, on its rows.
+ *
+ *   Ada's `coffre export market/dev`, 9 keys            1 call: 2 statements (3, a key entering her cap's set)
+ *   the same, her grant revoked                         1 call, 1 statement: 403, no key listed, whatever dev holds
+ *   the proxy's two keys of a credential, mapped        1 call, 1 statement, both values
+ */
+export async function useNamedMany(path: UsePath, input: NamedManyInput): Promise<NamedManyOutcome> {
+  checkInput({ ...input, requestId: '0' });
+  const keys = input.keys === null ? null : [...input.keys];
+  if (keys !== null && (keys.length === 0 || keys.some((key) => typeof key !== 'string' || key === '') || new Set(keys).size !== keys.length)) {
+    throw new Error("a named batch names each of its keys once, or none, for every key the place holds");
+  }
+  if (typeof input.tokenHash !== 'string') throw new Error('a named batch names its token, by hash');
+  const accepts = acceptsOf(input);
+  const { cache } = path;
+  const busyFor = (outcome: Extract<UseOutcome, { busy: UseBusy }>) => ({ served: true as const, route: 'busy' as const, outcome });
+  if (input.deadline > input.at + USE_DEADLINE_MS || Date.now() >= input.deadline) return busyFor(busy('late'));
+  if (cache.full()) return busyFor(busy('overloaded'));
+  const tokenHash = Buffer.from(input.tokenHash, 'base64');
+  const at = `${input.tokenHash}\n${input.place?.project ?? ''}\n${input.place?.environment ?? ''}`;
+  const found = cache.named(at);
+  const leaves = input.leavesSensitive === true;
+  const names = (key: string | null): Names => ({
+    tokenHash, project: input.place?.project ?? null, environment: input.place?.environment ?? null, key, handle: input.place === null,
+    unless: input.place !== null ? [] : (input.unless ?? []).map((other) => `${other.project}/${other.environment}`),
+    accepts, forks: true,
+  });
+  const asked = { purpose: input.purpose, keepsSensitive: input.keepsSensitive, at: input.at, deadline: input.deadline };
+  const none = { credential: null, secretId: null, place: null };
+  // A key's ids, as this isolate maps them, for its use in the first statement: none for a read that leaves keys out.
+  const mappedIds = (key: string): Pick<Ids, 'credential' | 'secretId' | 'place'> | null => {
+    if (found === undefined || leaves) return null;
+    const keyed = cache.keyed(found.environment, key);
+    return keyed === undefined ? null : { credential: found.credential, secretId: keyed?.id ?? null, place: keyed === null || keyed.through ? found.environment : null };
+  };
+  const seals = sealedOnce();
+  const gateAsked: Asked = { ...asked, ...none, requestId: newUseRequestId() };
+  const gate = ready(path, gateAsked, requestOf(gateAsked, names(null)), names(null), false, seals);
+  // Each key's use as asked, and its call: by the ids the isolate maps it to, which the statement takes only when they
+  // are its name's now and its value is sealed, as a use by ids is made (the cached form, its cover); else by its name.
+  const keyAsked = new Map<string, Asked>();
+  const keyReady = new Map<string, { made: Ready; byIds: boolean }>();
+  const callFor = (key: string): NamedBatchCall => {
+    const ids = mappedIds(key);
+    const one: Asked = { ...asked, ...(ids ?? none), requestId: keyAsked.get(key)?.requestId ?? newUseRequestId() };
+    keyAsked.set(key, one);
+    const byIds = ids !== null && ids.secretId !== null;
+    const made = byIds ? ready(path, one, requestOf(one, undefined), undefined, false, seals) : readyFor(path, { ...one, ...none }, names(key), seals);
+    keyReady.set(key, { made, byIds });
+    return { key, call: made.call };
+  };
+  const limit = cache.limits.batch;
+  const answered = await raced(path, input.deadline, async (sends) => {
+    // The first statement: the gate, then the request's first keys, or the place's, listed.
+    const first = keys === null ? null : keys.slice(0, limit).map(callFor);
+    const read = await namedBatchOf(path.db)(path.db, gate.call, first, limit);
+    const listed = keys ?? read.keys ?? [];
+    const rows = [...read.rows];
+    const byIds = [...read.byIds];
+    const aheads = [...read.aheads];
+    // A place of more keys than a statement reads: the rest by their names, in statements of that many, each its gate.
+    for (let start = rows.length; read.rows.length > 0 && start < listed.length; start += limit) {
+      sends();
+      const more = await namedBatchOf(path.db)(path.db, gate.call, listed.slice(start, start + limit).map(callFor), limit);
+      if (more.rows.length === 0) return { gate: more.gate, listed: [], rows: [], byIds: [], aheads: [] };
+      rows.push(...more.rows);
+      byIds.push(...more.byIds);
+      aheads.push(...more.aheads);
+    }
+    return { gate: read.gate, listed: read.rows.length === 0 ? [] : listed, rows, byIds, aheads };
+  }, async (read, starts) => {
+    const forgedOf = forgedOnce(path, starts);
+    const gateForged = await forgedOf(read.gate, undefined);
+    const forged: boolean[] = [];
+    for (const [i, row] of read.rows.entries()) {
+      // A use by ids judged on the seals its call passed, as `byIds`' are; a named call's, on every seal it read.
+      const known = read.byIds[i] === true && !row.probed ? keyReady.get(read.listed[i]!)?.made.known : undefined;
+      forged.push(await forgedOf(row, known));
+    }
+    return { ...read, gateForged, forged };
+  });
+  if ('busy' in answered) return busyFor(answered);
+  // The gate's row: the caller, the place and its chain, decided on rows no key decides.
+  const opened = settle(path, gateAsked, names(null), false, gate, answered.gate, answered.gateForged);
+  if ('unknown' in opened) {
+    cache.names.delete(at);
+    return { served: true, route: 'credential', outcome: { ok: false, code: 'credential', number: null } };
+  }
+  if ('nowhere' in opened) return { served: false };
+  if ('again' in opened || 'allowed' in opened || 'uncovered' in opened) throw new Error('a named batch\'s gate made a use');
+  if ('busy' in opened.outcome) return busyFor(opened.outcome);
+  const gateRow = answered.gate;
+  const checked = opened.checked!;
+  keep(cache, at, null, gateRow);
+  if (routeOf(checked, input.at) === 'credential') {
+    const outcome = opened.outcome.ok ? null : opened.outcome;
+    if (outcome === null || !('code' in outcome)) throw new Error('a use was allowed on a credential its seals do not bear out');
+    return { served: true, route: 'credential', outcome };
+  }
+  // Standing there and its chain whole, as a key the place does not hold answers to one who may act there: `missing`.
+  const gateCode = opened.outcome.ok ? null : 'code' in opened.outcome ? opened.outcome.code : null;
+  const stands = gateRow.n_standing === true && gateRow.n_cut === false && gateCode === 'missing';
+  const named = {
+    served: true as const, route: 'name' as const, standing: standingOf(checked, opened.request),
+    app: gateRow.app == null ? null : JSON.stringify(gateRow.app),
+    place: input.place ?? mapped(gateRow)?.slugs ?? null, at: placeOf(checked, gateRow),
+  };
+  if (!stands || answered.rows.length !== answered.listed.length) {
+    return { ...named, stands: false, keys: [], outcome: { ok: false, index: null, code: gateCode ?? 'stale', number: null } };
+  }
+  // Each key, decided on the rows its named call read, every one before any other call (DecideAllFirst).
+  const out: NamedKey[] = [];
+  const decided: ({ none: true } | { plain: string; versionId: string } | { again: Ids; asked: Asked } | { allowed: Allowed } | { refused: Used | Allowed | Uncovered })[] = [];
+  for (const [i, key] of answered.listed.entries()) {
+    const row = answered.rows[i]!;
+    if (answered.byIds[i] === true) {
+      // By its ids: a key with a sealed value of its own, its name's now, decided as a batch by ids decides its first round.
+      const { made } = keyReady.get(key)!;
+      const one = keyAsked.get(key)!;
+      const rows = answered.aheads[i] ?? null;
+      out.push({
+        key, secretId: one.secretId, held: rows?.held ?? null, left: false,
+        app: rows === null || gateRow.app == null ? null : JSON.stringify({ ...(gateRow.app as Record<string, unknown>), secrets: [{ secret: rows.secret, version: rows.version }] }),
+      });
+      const used = settle(path, one, undefined, false, made, row, answered.forged[i]!);
+      if ('allowed' in used) decided.push({ allowed: used });
+      else if ('again' in used) decided.push({ again: used.again, asked: one });
+      else if ('uncovered' in used) decided.push({ refused: used });
+      else if ('unknown' in used || 'nowhere' in used) throw new Error('a use by ids answered a named state');
+      else if ('busy' in used.outcome) return { ...named, stands: true, keys: out, outcome: used.outcome };
+      else decided.push({ refused: used });
+      continue;
+    }
+    const one = keyAsked.get(key) ?? { ...asked, ...none, requestId: newUseRequestId() };
+    keep(cache, at, key, row);
+    const held = inherited(row) ? { environmentId: row.s_environment!, slug: row.e2_slug! } : null;
+    // Left out by the read, its value sensitive: decided by no rule, used by nothing, its call having written nothing.
+    const left = leaves && row.state === 'moved' && row.n_secret !== null && row.v_sensitive === true;
+    out.push({ key, secretId: row.n_secret, held, app: row.app == null ? null : JSON.stringify(row.app), left });
+    if (left) {
+      decided.push({ none: true });
+      continue;
+    }
+    // By its name alone: the call it was made by, or, its ids passed but not its name's now, the named call the
+    // statement made in their place, as this request asks it.
+    const named1 = { ...one, ...none };
+    const sent = keyReady.get(key);
+    const used = settle(path, named1, names(key), false, sent !== undefined && !sent.byIds ? sent.made : readyFor(path, named1, names(key), seals), row, answered.forged[i]!, true);
+    if ('allowed' in used) decided.push({ allowed: used });
+    else if ('again' in used) decided.push({ again: used.again, asked: one });
+    else if ('unknown' in used || 'nowhere' in used || 'uncovered' in used) decided.push({ refused: { outcome: { ok: false, code: 'stale', number: null }, row, checked: null, request: requestOf(one, names(key)) } });
+    else if ('busy' in used.outcome) return { ...named, stands: true, keys: out, outcome: used.outcome };
+    else if (used.outcome.ok) decided.push('plain' in used.outcome ? { plain: used.outcome.plain, versionId: used.outcome.versionId } : { refused: used });
+    // A key the place does not hold, to one who stands there: none, which the request leaves out. One held with neither a
+    // value nor a reference, written around coffre (its seal does not hold), reads as no value, as the app's read reads
+    // it (`Hollow`): left out too, nothing served. A reference ended is refused, as the app refuses it.
+    else if ('code' in used.outcome && used.outcome.code === 'missing' && row.n_secret === null) decided.push({ none: true });
+    else if ('code' in used.outcome && (used.outcome.code === 'tampered' || used.outcome.code === 'stale') && hollow(row)) decided.push({ none: true });
+    else decided.push({ refused: used });
+  }
+  const refusedFirst = decided.findIndex((one) => 'refused' in one);
+  if (refusedFirst >= 0) return { ...named, stands: true, keys: out, outcome: refusal(refusedFirst, (decided[refusedFirst] as { refused: Used | Allowed | Uncovered }).refused) };
+  // Every key allowed: the rest made by the ids its row read, as a batch by ids makes them, decided again.
+  const again = decided.flatMap((one, index) => ('again' in one ? [{ index, asked: { ...one.asked, ...one.again } }] : []));
+  const values: (NamedValue | null)[] = decided.map((one) => ('plain' in one ? { plain: one.plain, versionId: one.versionId } : null));
+  const allowed = new Map<number, Allowed>(decided.flatMap((one, index) => ('allowed' in one ? [[index, one.allowed] as const] : [])));
+  if (again.length > 0) {
+    const made = await byIds(path, input, again.map((one) => one.asked), seals);
+    if ('busy' in made) return { ...named, stands: true, keys: out, outcome: made };
+    if ('index' in made) return { ...named, stands: true, keys: out, outcome: refusal(again[made.index]!.index, made.used) };
+    for (const [i, one] of made.allowed.entries()) allowed.set(again[i]!.index, one);
+  }
+  const indices = [...allowed.keys()].sort((a, b) => a - b);
+  const opened2 = await Promise.all(indices.map((index) => opening(path, allowed.get(index)!, input.deadline)));
+  for (const [i, one] of opened2.entries()) {
+    const outcome = 'outcome' in one ? one.outcome : null;
+    if (outcome === null || !outcome.ok || !('value' in outcome)) return { ...named, stands: true, keys: out, outcome: refusal(indices[i]!, one) };
+    values[indices[i]!] = { number: outcome.number, covered: outcome.covered, value: outcome.value };
+  }
+  return { ...named, stands: true, keys: out, outcome: { ok: true, values } };
+}
+
+/** Whether a key's row reads neither a value of its own nor a reference: a key held with nothing to read. */
+function hollow(row: UseRow): boolean {
+  return row.n_secret !== null && row.s_environment !== null && row.s_version === null && row.s_source === null;
+}
+
+/** A named batch's answer for its key at `index`, not allowed: refused, or busy. */
+function refusal(index: number, used: Used | Allowed | Uncovered): Extract<NamedManyOutcome, { route: 'name' }>['outcome'] {
+  if (!('outcome' in used)) throw new Error('a refused key answered a named state');
+  const { outcome } = used;
+  if ('busy' in outcome) return outcome;
+  if (outcome.ok) throw new Error('a use allowed is no refusal');
+  return { ok: false, index, code: outcome.code, number: outcome.number };
+}
+
+/** A key's named call made ready, its request as the vault decides it. */
+function readyFor(path: UsePath, asked: Asked, names: Names, seals: typeof sealed): Ready {
+  return ready(path, asked, requestOf(asked, names), names, false, seals);
+}
+
+/** What the app's config accepts of a credential, as a named call carries it, checked. */
+function acceptsOf(input: { accepts: CredentialAcceptance }): CredentialAcceptance {
+  const { accepts } = input;
+  if (typeof accepts?.signin !== 'boolean' || !Array.isArray(accepts.issuers) || accepts.issuers.some((issuer) => typeof issuer !== 'string')) {
+    throw new Error('a named use says what credentials the app accepts: whether it signs in, and its providers\' issuers');
+  }
+  return { signin: accepts.signin, issuers: [...accepts.issuers] };
+}
+
+/** The engine's `use_named_batch`. */
+function namedBatchOf(db: Queryable): (db: Queryable, gate: UseCall, calls: readonly NamedBatchCall[] | null, limit: number) => Promise<NamedBatchRows> {
+  return engineOf(db) === 'postgres' ? namedPostgres : namedSqlite;
+}
+
+/** A named batch's key: its name, and its call, by its name alone or by the ids the isolate maps it to. */
+export type NamedBatchCall = { key: string; call: UseCall };
+
+/** The app's rows of a key a named batch used by its ids: its row and its version's, as `to_json` writes them, and where it is held, inherited. */
+export type NamedAhead = { secret: unknown; version: unknown; held: { environmentId: string; slug: string } | null };
+
+/**
+ * What `use_named_batch` answers: the gate's row, the names it listed (none named), each key's row, in order, whether
+ * each was its use by ids, and, for those, the app's rows of it.
+ */
+export type NamedBatchRows = { gate: UseRow; keys: string[] | null; rows: UseRow[]; byIds: boolean[]; aheads: (NamedAhead | null)[] };
 
 /**
  * The ids and slugs a named call read, kept in the isolate's map for the request's names and its key: never a key it

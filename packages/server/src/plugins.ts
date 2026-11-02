@@ -22,7 +22,7 @@ import { uses015 } from './api/changes.ts';
 import { callBindings, frozenTargets } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
 import { fetchApi } from './fetch-api.ts';
-import { useByName } from './named-use.ts';
+import { useByName, useManyByName } from './named-use.ts';
 import { errorResponse } from './http.ts';
 import { limitAlert, raiseAlert } from './alerts.ts';
 import { logged } from './logged.ts';
@@ -557,6 +557,31 @@ function pluginContext(
       return rethrown(error);
     }
   };
+  /**
+   * A handle's use of several keys by name, the vault's one call (`useManyByName`, T165), and the read on what it
+   * answered; null where the vault serves none so. Its keys only (`UseAsked.only`), each once.
+   */
+  const byNameMany = async (handle: string, asked: UseAsked & { keys: readonly string[] }) => {
+    if (binding !== null) return null;
+    const named = parsedPlace(asked.path);
+    // A fork, and `dev@me`, its caller's personal config of dev or dev, by name too.
+    if (named?.environment === undefined) return null;
+    const place = { project: named.project, environment: named.environment };
+    try {
+      const used = await useManyByName(runtime, request, sourceIp, handle, {
+        kinds: ['handle'], place, keys: [...new Set(asked.keys)], purpose: asked.purpose === 'expose' ? 'expose' : 'use', leavesSensitive: false,
+      });
+      if (used === null) return null;
+      if (used.identity instanceof Response) await answer(used.identity);
+      const identity = used.identity as AuthenticatedIdentity;
+      const read = await reveal(apiContext(runtime, identity), place, {
+        purpose: asked.purpose, keys: asked.keys, logged: asked.logged, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
+      });
+      return { values: read.values, plain: read.plain, keys: read.keys, environment: { path: read.environment.path, personal: read.environment.personal }, expiresAt: identity.credentialExpiresAt! };
+    } catch (error) {
+      return rethrown(error);
+    }
+  };
   const noCredential = () => new CoffreError(403, 'forbidden', 'a call through a service binding is its service\'s, and takes no other credential', 'binding');
   // The workload callers this request's context made: the only ones its `use` takes.
   const standings: Standings = new WeakMap();
@@ -633,10 +658,12 @@ function pluginContext(
       await answer(await logout(new Request(`${runtime.publicUrl}/api/auth/logout`, { method: 'POST', headers: carrying(token) }), runtime, sourceIp));
     },
     use: async (handle, asked) => {
-      // One key, a handle's: the vault's one named call, which decides on the caller as it is (T145). Several, or anything
-      // the vault does not serve by name, as below until PR B2.
-      if (typeof handle === 'string' && asked.only === true && Array.isArray(asked.keys) && asked.keys.length === 1) {
-        const used = await byName(handle, asked);
+      // One key, a handle's: the vault's one named call, which decides on the caller as it is (T145). Several, the same
+      // call of all of them (T165). Keys the proxy chooses from what the read resolves (`PickKeys`), a workload's, or
+      // anything the vault does not serve by name, as below.
+      if (typeof handle === 'string' && asked.only === true && Array.isArray(asked.keys) && asked.keys.length > 0) {
+        const keys = asked.keys as readonly string[];
+        const used = new Set(keys).size === 1 ? await byName(handle, asked) : await byNameMany(handle, { ...asked, keys });
         if (used !== null) return used;
       }
       // On the vault's answer about the caller kept from an earlier request, which the vault checks as it opens the

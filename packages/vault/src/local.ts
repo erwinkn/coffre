@@ -26,6 +26,7 @@ export const METHODS = [
   'use',
   'useNamed',
   'useMany',
+  'useNamedMany',
   'prepare',
   'waitSealed',
   'signIn',

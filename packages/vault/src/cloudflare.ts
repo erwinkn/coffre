@@ -33,6 +33,7 @@ import type { ChangeBindingsInput, CutoverInput,
   SignInInput,
   ChangePolicyInput,
   UnwrapInput,
+  NamedManyInput,
   NamedUseInput,
   UseManyInput,
   UseInput,
@@ -140,6 +141,19 @@ export class VaultEntrypoint extends WorkerEntrypoint implements Vault {
     try {
       const hot = createDatabase(pool);
       return await openVault(hot, prepared, hot).useMany!(input);
+    } finally {
+      this.ctx.waitUntil(pool.end(closeBy(input)));
+    }
+  }
+
+  /** A request's several keys as it names them (T165): the same one connection, for its one statement, or two or three. */
+  async useNamedMany(input: NamedManyInput) {
+    const { prepared, hotDatabase } = this.#behind(await this.#prepared());
+    if (hotDatabase === undefined) throw new Error("0.15's uses need the hot path's Hyperdrive config: set hotDatabase in vault(…)");
+    const pool = new HyperdrivePool(hotDatabase.hyperdrive.connectionString);
+    try {
+      const hot = createDatabase(pool);
+      return await openVault(hot, prepared, hot).useNamedMany!(input);
     } finally {
       this.ctx.waitUntil(pool.end(closeBy(input)));
     }
