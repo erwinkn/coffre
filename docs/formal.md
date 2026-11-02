@@ -1725,9 +1725,11 @@ The cutover from 0.14 (the plan's PR 9).
 - a 0.15 use and a 0.15 change. The vault's own 0.15 decisions weigh a
   member by the use's check (NewUseRun: the row's seal its object's and its
   newest change's, and UsesSeeOldWrites' Accounted), not 0.14's walk back
-  through its access entries (T179 PR 2, vault.ts's `#onLog`). They read it
-  holding 0.14's head, which only removes interleavings from the use's, so
-  the use's invariants and removals cover them, with no action of their own;
+  through its access entries (T179 PR 2, vault.ts's `#onLog`). Decisions read
+  it holding 0.14's head; reads (`#read`, `#issuerRead`, `#sweep`) take the
+  row, its seals and its access in one snapshot, as NewUseRun reads them
+  together. Either only removes interleavings from the use's, so the use's
+  invariants and removals cover them, with no action of their own;
 - in Migration015Issue (T123), sign-ins: 0.14's `token.exchange`, which the
   trigger lets by; a 0.15 sign-in (0.14's head, then the issue lock); one
   that also revokes the account's earlier sessions (its trigger: the issue

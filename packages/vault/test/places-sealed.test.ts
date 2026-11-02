@@ -28,6 +28,7 @@ const CI = 'token:ci';
 const APP_KEY = 'app:0123456789abcdef';
 /** What the vault answers of a decision on a place whose row is not as its log holds it. */
 const TAMPERED_PLACE = "an environment it is about failed the vault's integrity check: its row is not as the log holds it";
+const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: a reseal makes it the log's again";
 
 let db: TestDatabase;
 before(async () => {
@@ -215,8 +216,8 @@ for (const [how, { tamper, projectOf, regrants }] of Object.entries(TAMPERS)) {
     const none = await credentialRows();
     const issued = await w.vault.issueToken!(await issueOn(w.vault, issue(MAYA, atProd)));
     if (regrants) {
-      // CI's own object no longer its seal's: refused before any place is weighed, as the account the issue is to.
-      assert.equal(!issued.ok && issued.refused, 'gone');
+      // CI's own object no longer its seal's: refused before any place is weighed, as tampered, not gone (review r1).
+      assert.deepEqual(issued, { ok: false, refused: 'refused', why: TAMPERED_SUBJECT });
       assert.equal(await credentialRows(), none);
       return;
     }

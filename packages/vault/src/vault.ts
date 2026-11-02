@@ -467,8 +467,9 @@ function placeOf(grant: store.Place) {
   return { projectId: grant.projectId ?? null, environmentId: grant.environmentId ?? null, environmentSlug: grant.environmentSlug ?? null };
 }
 
-/** Why a change to a tampered member is refused. */
+/** Why a change to a tampered member is refused: under 0.14's log, removal starts them over; under 0.15's, only a reseal (`START_OVER_015`). */
 const TAMPERED_SUBJECT = "this member's record failed the vault's integrity check: remove them to start over";
+const TAMPERED_SUBJECT_015 = "this member's record failed the vault's integrity check: a reseal makes it the log's again";
 
 /** Why a decision on a place whose row is not as 0.15's log holds it is refused (T159): the row, not the member, is at fault. */
 const TAMPERED_PLACE = "an environment it is about failed the vault's integrity check: its row is not as the log holds it";
@@ -988,6 +989,11 @@ class VaultService implements Vault {
    * once its cutover is written, which seals every row. Every read of them
    * asks their seals then (`seals`).
    */
+  /** Why a change to, or an issue for, a tampered member is refused, and what recovers them under this log. */
+  #tamperedSubject(): string {
+    return this.#checksSeals() ? TAMPERED_SUBJECT_015 : TAMPERED_SUBJECT;
+  }
+
   #checksSeals(): boolean {
     const { log015, cutover, marked } = this.#prepared;
     return log015 !== null && (cutover || marked);
@@ -2483,7 +2489,7 @@ class VaultService implements Vault {
 
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
-      if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
+      if (subject.status === 'tampered') throw refused('tampered', this.#tamperedSubject());
       // A service account admitted with its first grants, as `admit` would: all of it, or none.
       const admitted = input.admit === true && row?.status !== 'active' ? await this.#admitWith(d, acting, principal, row, input) : undefined;
       if (admitted === undefined && row?.status === 'removed') throw refused('removed');
@@ -2599,7 +2605,7 @@ class VaultService implements Vault {
       }
       const row = d.members.get(principal);
       const subject = await this.#standing(d.tx, principal, row, d.at, d.reports, d.reads);
-      if (subject.status === 'tampered') throw refused('tampered', TAMPERED_SUBJECT);
+      if (subject.status === 'tampered') throw refused('tampered', this.#tamperedSubject());
       d.touched.add(principal);
       d.grants.set(principal, [...subject.stored]);
 
@@ -3946,6 +3952,8 @@ class VaultService implements Vault {
     const principalRow = reads.members.get(principal);
     const subject = principal === actor ? acting : await this.#standing(this.#db, principal, principalRow, at, reports, reads);
     if (subject.status !== 'active' || principalRow === undefined || principalRow.generation !== input.generation) {
+      // A service account whose row the log does not hold is no gone account: say which, as a grant to it would.
+      if (principal !== actor && subject.status === 'tampered') return refuse('refused', this.#tamperedSubject());
       return refuse(principal === actor ? 'ended' : 'gone');
     }
     if (scope.some((grant) => grant.environmentId != null && faulty.has(grant.environmentId))) return refuse('refused', TAMPERED_PLACE);

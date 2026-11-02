@@ -662,8 +662,9 @@ PlaceLive == \E k \in Cutovers : ~k.deleted /\ del.env = k.deleted
 \* One statement: the row and the newest seal; `stale` unless the row is it; the place; its number.
 \* The vault's own 0.15 decisions weigh a member by this same check (T179 PR 2: vault.ts's `#onLog`,
 \* the row's seal its object's and its newest change's, and Accounted), not 0.14's walk (Genuine14).
-\* They hold 0.14's head while they read, which only removes interleavings from this action's, so
-\* what holds of these decisions holds of theirs: they need no action of their own.
+\* Decisions read it under 0.14's head; reads (`#read`, `#issuerRead`, `#sweep`) take row, seal and
+\* access in one snapshot, as this action reads them together. Either only removes interleavings from
+\* this action's, so what holds of it holds of them: they need no action of their own.
 NewUseRun(x) ==
     /\ nu[x].pc = "locked"
     /\ LET s == SealBelow(nextSeq)
