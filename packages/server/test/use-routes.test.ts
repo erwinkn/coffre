@@ -329,14 +329,16 @@ test("0.15: a read through a fork vouches for no kept answer: its uses check whe
 test('0.15: a value written between the app\'s read and its use answers 409, to ask again: the answer is never of two versions', async () => {
   await instance('0.15');
   const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
-  const use = deps.vault.use!;
-  deps.vault.use = async (input) => {
-    deps.vault.use = use;
+  // Two keys, which the app reads before their uses, by ids, as a workload's read takes them: a request by name is the
+  // vault's one call, which reads its rows with the use, so there is no read before it to differ from. Its vault here
+  // serves no named batch, which sends the request by ids, as a vault that does not serve one does.
+  deps.vault.useNamedMany = async () => ({ served: false });
+  const useMany = deps.vault.useMany!;
+  deps.vault.useMany = async (input) => {
+    deps.vault.useMany = useMany;
     await root.secrets.set('market/dev', { API_KEY: 'rotated' });
-    return use(input);
+    return useMany(input);
   };
-  // Two keys, which the app reads before their uses (a request of one key is the vault's use by name, which reads its rows
-  // with the use: there is no read before it to differ from).
   const both = () => ci.secrets.reveal('market/dev', ['API_KEY', 'WEBHOOK']);
   await assert.rejects(both(), (error: { status: number; reason?: string }) => error.status === 409 && error.reason === 'changed');
   assert.equal((await both()).values.API_KEY, 'rotated', 'asked again, the new one');

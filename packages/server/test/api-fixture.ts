@@ -93,6 +93,28 @@ function said(input: unknown): unknown {
 
 const vaults = new Set<TestVault>();
 
+/** The vault's calls that use values: one key's, by ids or by name, and several's. */
+const USES = ['use', 'useNamed', 'useMany', 'useNamedMany'] as const;
+
+/**
+ * Run `before` and `after` once, around the vault's next use of values, whichever call makes it: a request of one key
+ * is `useNamed`, of several `useNamedMany`, and by ids (a workload's, or with named batches gone) `use` or `useMany`.
+ */
+export function aroundNextUse(vault: Vault, hooks: { before?: () => Promise<unknown>; after?: () => Promise<unknown> }): void {
+  const methods = vault as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>;
+  const saved = USES.map((name) => [name, methods[name]] as const);
+  for (const [name, method] of saved) {
+    if (method === undefined) continue;
+    methods[name] = async (...args) => {
+      for (const [restored, original] of saved) methods[restored] = original;
+      await hooks.before?.();
+      const used = await method(...args);
+      await hooks.after?.();
+      return used;
+    };
+  }
+}
+
 /** A test runtime's waitUntil: retain the task until the case is finished. */
 export function waitUntil(promise: Promise<unknown>): void {
   trackBackgroundTask(promise);
@@ -352,6 +374,12 @@ export function testVault(
     use: call('use'),
     // And its use by name (T145, PR B): a reveal's or a handle's one key, which the vault resolves and uses in one call.
     useNamed: call('useNamed'),
+    // And a request's several keys in one call, by ids (T167) and by name (T165), as the app asks a vault of this
+    // release. Without them, its keys were a call each, four at once: each new to its principal's cap set took the
+    // principal's lock in a transaction of its own, so a request's keys waited on each other, and one past the hot
+    // login's lock_timeout answered busy, `late`, where the vault's one batch takes the lock once (T203).
+    useMany: call('useMany'),
+    useNamedMany: call('useNamedMany'),
     // 0.16's proxy definitions (T186).
     proxy: call('proxy'),
     saveProxy: call('saveProxy'),
