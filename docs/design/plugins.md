@@ -239,8 +239,10 @@ else is needed.
 - `useRouteOrPlace(handle, …)` (T186 PR C2b4): a handle's `useRoute` of
   a URL that may name the place itself, `/use/<a>/<b>`: route `<a>`'s
   stable reading and the place `<a>/<b>` in the vault's one call, which
-  answers the route's use, or null for the place, nothing used, when the
-  handle was made for it (docs/design/proxy-ui.md, section 6).
+  answers the route's use, or, when the handle was made for the place,
+  `{ reading: 'place', expiresAt }`: nothing used, and `expiresAt` the
+  handle's end, past which a kept copy of that answer must not vouch for
+  it (docs/design/proxy-ui.md, section 6).
 
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):
