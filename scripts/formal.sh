@@ -205,6 +205,9 @@ REMOVALS=(
   # A tunnel saved in the Proxy tab (T186 PR C2b3): an edit of its item ends it within a recheck, another item's edit ends nothing.
   "Tunnel DigestRecheck EditEndsWithinBound"
   "Tunnel ItemDigest StandingStaysOpen"
+  # Its admission, whose answer may come late (review r1 of #485): the group's clock starts from the admission, and one past its bound lets nothing in.
+  "Tunnel AdmitClock EditEndsWithinBound"
+  "Tunnel LateAdmitRefused EditEndsWithinBound"
   # Proxy definitions edited in the UI (Routing.tla, T186): where a key may go when its route is a row an Owner edits.
   "Routing FencedRead EverySendAllowed"
   "Routing SealChecked EverySendAllowed"

@@ -91,6 +91,13 @@ export type PluginContext = {
    */
   publicFetch?: (url: URL, init: RequestInit) => Promise<Response>;
   /**
+   * TCP out to a host an Owner typed in a web page, a UI tunnel's database:
+   * on Node, one that dials only public addresses, whatever the name
+   * resolves to; on Workers, the platform's `connect()`. Absent, the plugin
+   * dials none (docs/design/proxy-ui.md, section 5).
+   */
+  publicConnect?: Connect;
+  /**
    * The API as whoever `token` names, which the plugin read from its
    * request: a service, personal or CLI token with coffre's sign-in, Access's
    * assertion behind Cloudflare Access; never a cookie, which coffre alone
@@ -934,6 +941,7 @@ function pluginContext(
     publicUrl: runtime.publicUrl,
     binding: binding !== null,
     ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),
+    ...(runtime.publicConnect === undefined ? {} : { publicConnect: runtime.publicConnect }),
     workload: (asked, at) => {
       const { counts, ...rest } = at;
       const checked: WorkloadAsk = { ...rest, ...(counts === undefined ? {} : { counts: counted(counts)! }) };

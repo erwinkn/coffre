@@ -2091,6 +2091,42 @@ open:
 - **The plan** names the place's UI databases under `tunnels`, as code's,
   with the key the listener stands in for and never the URL; a
   workload's plan the same, from its one `proxyItem` call.
+- **An Owner's database on Node** (section 5; review r1 of #485). The
+  hosts are an Owner's, so a name they typed may resolve to the server's
+  own network: `dialled` checks the URL's host against them by spelling,
+  and the session then dials through the runtime's `publicConnect`
+  (`PluginContext.publicConnect`, from the platform's transport), never
+  the platform's plain TCP. On Node it resolves the name through
+  `publicLookup` as the connection opens, so `db.attacker.example`
+  resolving to `10.0.1.5` gets no SYN, and Postgres's SSL request never
+  reaches it; an address written as one is checked as written. TLS, once
+  Postgres says it will, still checks the certificate against the name.
+  On Workers it is `connect()`, whose network reaches no private address
+  (the Sockets object's runtime carries it). A runtime without one answers
+  503 before the use; `insecureUpstreams` keeps the platform's, for a
+  local database. Code's tunnels are unchanged: their hosts are the
+  deployment's.
+- **The clock starts at the admission** (review r1 of #485;
+  `Tunnel.tla`'s `AdmitClock` and `LateAdmitRefused`). The vault may
+  decide the item well before its answer reaches the proxy, and an Owner
+  may save the item anew in between. The group's watchdog and its first
+  check count from when the admission's use started, not from when the
+  group was made: an answer that came after a recheck's interval is
+  checked again at once. One that came after the whole bound (R + D for a
+  handle) lets nothing in, 503 `late`, and the client asks again, by the
+  new item. Code's tunnels take the same clock.
+- **The copy it claims is the copy it holds** (review r1 of #485). The
+  open tells the vault the digest it holds a definition for only when it
+  does: its copies of definitions (`ui.items`) and of which digest each
+  reading last had (`ui.last`) turn over apart, past ten thousand
+  entries, and claiming a digest whose definition is gone would have the
+  vault leave the definition out, and every open answer 503 `moved` until
+  something else brought it back. The copy claimed is kept through the
+  use, so the answer finds it however the isolate's copies turned over
+  meanwhile, and a decided item whose definition neither has is refused
+  before any value opens (`refuses`).
+- **A workload's refusals carry its nonce**, the ones the open returns as
+  its thrown ones (`nonced`), so the next proof signs the current nonce.
 - **Cost**: the open, one vault call (`useRoute`); a recheck, one.
 
 

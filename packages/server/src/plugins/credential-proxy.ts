@@ -476,7 +476,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const groups = new Map<string, Group>();
   const editable = options.editable === true;
   const ui: UiState = { items: new Map(), last: new Map(), kept: new Map() };
-  return withProxyCode({
+  const plugin = withProxyCode({
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
@@ -504,6 +504,19 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
     items: codeItems(options.credentials, tunnels, signers, verifiers),
     cacheSeconds: cacheMs / 1000,
   });
+  UI_STATES.set(plugin, ui);
+  return plugin;
+}
+
+/** Each proxy's copies of UI items, by its plugin (`forgetUiItems`). */
+const UI_STATES = new WeakMap<CoffrePlugin, UiState>();
+
+/**
+ * Drop a proxy's copies of UI items' definitions, as `remember` does past `UI_KEPT` entries, its copies of which
+ * digest each reading last had kept: for tests, which save no ten thousand items to turn them over.
+ */
+export function forgetUiItems(plugin: CoffrePlugin): void {
+  UI_STATES.get(plugin)?.items.clear();
 }
 
 /** A group of tunnel sessions: how to end each, its last answer (settled, never pending), and its timers: its checks', the one its bytes stop by, and its end's. */
@@ -915,13 +928,20 @@ function keptFor(proxy: Proxy, handle: string, named: { path: string; route: str
   return copy !== undefined && copy.path !== named?.path ? copy : undefined;
 }
 
-/** The definition of an item a use decided on: the answer's, or this isolate's copy of that digest, which the answer left out. */
-function itemOf(proxy: Proxy, item: DecidedItem): ProxyDefinition | null {
+/**
+ * The definition of an item a use decided on: the answer's, or the copy of that digest the caller kept through the
+ * use (`copy`), or this isolate's, which the answer left out.
+ */
+function itemOf(proxy: Proxy, item: DecidedItem, copy: { digest: string; definition: ProxyDefinition } | null = null): ProxyDefinition | null {
   if (item.definition !== null) {
     remember(proxy.ui.items, item.digest, { definition: item.definition, resolved: null });
     return item.definition;
   }
-  return proxy.ui.items.get(item.digest)?.definition ?? null;
+  const held = proxy.ui.items.get(item.digest)?.definition;
+  if (held !== undefined) return held;
+  if (copy === null || copy.digest !== item.digest) return null;
+  remember(proxy.ui.items, item.digest, { definition: copy.definition, resolved: null });
+  return copy.definition;
 }
 
 /**
@@ -1333,6 +1353,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   const handle = bearer(request);
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
+  const admitted = Date.now();
   const { expiresAt } = await coffre.handle(handle);
   let fresh = false;
   const { values } = await valuesFor(coffre, proxy, handle, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
@@ -1354,7 +1375,7 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
     database: db,
     // Just before a login: the handle afresh, opening nothing, and the group's last word on its person's access.
     stands: async () => (await coffre.handle(handle).then(() => true, () => false)) && (proxy.groups.get(key)?.stands ?? true),
-    watch: (end) => watch(proxy, key, { checks: [check], bound: proxy.recheckMs + deadline, until: Date.parse(expiresAt) }, end),
+    watch: (end) => watch(proxy, key, { checks: [check], bound: proxy.recheckMs + deadline, until: Date.parse(expiresAt), admitted }, end),
   });
 }
 
@@ -1377,6 +1398,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
   if (!constraintsAllow(caller.constraints, { place: path, credential: name })) return nonced(failure(403, `this narrowed session may not open ${name}`, 'narrowed'), caller);
   let fresh = false;
   let opened: Opened;
+  const admitted = Date.now();
   try {
     opened = await valuesFor(coffre, proxy, caller, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
   } catch (error) {
@@ -1402,7 +1424,7 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
     group: key,
     database: db,
     stands: async () => (await coffre.recheck(caller)) && (proxy.groups.get(key)?.stands ?? true),
-    watch: (end) => watch(proxy, key, { checks, bound, until: null }, end),
+    watch: (end) => watch(proxy, key, { checks, bound, until: null, admitted }, end),
   });
 }
 
@@ -1424,6 +1446,8 @@ type Dialling = { who: User; at: string; reading: string; asked: Pick<RouteAsked
  *   an Owner saves `openai` beside it                              nothing ends
  */
 async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, path: string, name: string): Promise<Response | SocketSession> {
+  // The admission's first check starts now, the caller's: the group's clock starts from it (`AdmitClock`).
+  const admitted = Date.now();
   const caller = await workloadOf(request, coffre, { place: path, credential: name });
   if (caller instanceof Response) return caller;
   if (caller !== null) {
@@ -1434,7 +1458,7 @@ async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, p
       // `recheckSeconds`, whose no ends the group.
       const dialling = { who: caller, at: caller.path, reading: `w\n${caller.place}\n${name}`, asked: { named: null, stable: name } };
       const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
-      return await uiDialled(coffre, proxy, dialling, name, {
+      const opened = await uiDialled(coffre, proxy, dialling, name, {
         checks: (run) => [
           { every: (bound * 2) / 3, deadline: bound / 3, arms: true, now: false, run: () => coffre.recheck(caller) },
           { every: proxy.recheckMs, deadline: Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS), arms: false, now: false, run },
@@ -1443,7 +1467,10 @@ async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, p
         until: () => null,
         stands: () => coffre.recheck(caller),
         handle: null,
+        admitted,
       });
+      // Its refusals as its thrown ones: with the nonce the next proof signs (review r1 of #485).
+      return opened instanceof Response ? nonced(opened, caller) : opened;
     } catch (error) {
       if (!(error instanceof CoffreError)) throw error;
       return nonced(failure(error.status, error.message, error.reason ?? error.code, error.retryAfter), caller);
@@ -1459,11 +1486,12 @@ async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, p
     until: (expiresAt) => Date.parse(expiresAt),
     stands: () => coffre.handle(handle).then(() => true, () => false),
     handle,
+    admitted,
   });
 }
 
 /** How a UI tunnel's group is checked, by caller (`uiTunnel`): its checks around the item's recheck, their bound, its end, and the check just before a login. */
-type UiChecks = { checks: (run: () => Promise<boolean>) => Check[]; bound: number; until: (expiresAt: string) => number | null; stands: () => Promise<boolean>; handle: string | null };
+type UiChecks = { checks: (run: () => Promise<boolean>) => Check[]; bound: number; until: (expiresAt: string) => number | null; stands: () => Promise<boolean>; handle: string | null; admitted: number };
 
 /** Why a UI item is no database this proxy dials, or null: its kind, or a network binding this deployment's code does not declare. */
 function undialled(definition: ProxyDefinition): CoffreError | null {
@@ -1473,27 +1501,42 @@ function undialled(definition: ProxyDefinition): CoffreError | null {
   return null;
 }
 
-/** A UI tunnel's open once its caller is known: the use, the decided item's database, and its session, checked by that item's digest. */
+/**
+ * A UI tunnel's open once its caller is known: the use, the decided item's database, and its session, checked by that
+ * item's digest, and dialled only to public addresses (`publicConnect`; `insecureUpstreams` aside, for a local database).
+ * The digest it tells the vault it holds is a copy it keeps through the use, so the answer that leaves the definition
+ * out finds it however the isolate's copies turned over meanwhile; one it lacks, it never claims (review r1 of #485).
+ */
 async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling, name: string, checked: UiChecks): Promise<Response | SocketSession> {
   const { who, at, reading, asked } = dialling;
+  // A host an Owner typed is dialled only where it resolves to a public address: a runtime with no such dial opens
+  // none, asked before the use, so no use is logged for nothing (as a UI route's `publicFetch`).
+  const dial = proxy.insecure ? undefined : coffre.publicConnect;
+  if (!proxy.insecure && dial === undefined) return failure(503, `${name}: this runtime has no connect that checks where a database resolves, which a tunnel saved in the Proxy tab dials through`, 'unavailable', '60');
   const last = proxy.ui.last.get(reading);
-  const used = await coffre.useRoute!(who, { ...asked, digests: last === undefined ? [] : [last.digest], logged: { ui: true, tunnel: true }, refuses: (decided) => {
-    const definition = itemOf(proxy, decided);
-    if (definition === null) return null;
+  const held = last === undefined ? undefined : proxy.ui.items.get(last.digest);
+  const copy = last === undefined || held === undefined ? null : { digest: last.digest, definition: held.definition };
+  const used = await coffre.useRoute!(who, { ...asked, digests: copy === null ? [] : [copy.digest], logged: { ui: true, tunnel: true }, refuses: (decided) => {
+    // Refused before any value opens when neither the answer nor the copy kept holds the item's definition.
+    const definition = itemOf(proxy, decided, copy);
+    if (definition === null) return gone(decided);
     // The vault's item is this isolate's copy now (`CopyFromVault`).
     remember(proxy.ui.last, reading, { digest: decided.digest, confirmed: Date.now() });
     return undialled(definition);
   } });
-  const definition = itemOf(proxy, used.item);
-  if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+  const definition = itemOf(proxy, used.item, copy);
+  if (definition === null) return answered(gone(used.item));
   const unfit = undialled(definition);
-  if (unfit !== null) return failure(unfit.status, unfit.message, unfit.reason ?? unfit.code, unfit.retryAfter);
+  if (unfit !== null) return answered(unfit);
   const item = definition as ProxyTunnel;
   // Own values only: a key named `toString` reads no prototype (review r3 of #480).
   if (!Object.hasOwn(used.values, item.key)) return failure(409, `${used.environment.path} holds no ${item.key}, which ${name} dials`);
   const tunnel: Tunnel = { kind: 'postgres', key: item.key, hosts: item.hosts };
   const db = dialled(proxy, used.environment.path, name, tunnel, used.values[item.key]!);
   if (db instanceof Response) return db;
+  // The admission is the group's first check, from when it started: one that answered after its whole bound lets in
+  // nothing, as an edit since may have narrowed the item (`AdmitClock`; review r1 of #485).
+  if (Date.now() - checked.admitted >= checked.bound) return failure(503, `${name}: its use answered too late to dial by; ask again`, 'late', '1');
   const digest = used.item.digest;
   // By the item dialled: a session dialled by a newer item never joins a group whose checks hold it to an older one.
   const key = `${cacheKey(who, at, name)}\u0000ui\u0000${digest}`;
@@ -1510,9 +1553,15 @@ async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling
     database: db,
     // Just before a login: the caller afresh, opening nothing, and the group's last word on the item.
     stands: async () => (await checked.stands()) && (proxy.groups.get(key)?.stands ?? true),
-    watch: (end) => watch(proxy, key, { checks: checked.checks(run), bound: checked.bound, until: checked.until(used.expiresAt) }, end),
-  });
+    watch: (end) => watch(proxy, key, { checks: checked.checks(run), bound: checked.bound, until: checked.until(used.expiresAt), admitted: checked.admitted }, end),
+  }, dial);
 }
+
+/** A use whose item's definition this isolate holds no copy of, and its answer left out: ask again, which advertises none. */
+const gone = (item: DecidedItem): CoffreError => new CoffreError(503, 'unavailable', `${item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+
+/** A refusal as the answer it is. */
+const answered = (error: CoffreError): Response => failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
 
 /** The database a tunnel's URL names, as it is dialled, or why it is not: its hosts, TLS and private addresses as the tunnel allows. */
 function dialled(proxy: Proxy, path: string, name: string, tunnel: Tunnel, url: string): Database | Response {
@@ -1536,10 +1585,13 @@ function dialled(proxy: Proxy, path: string, name: string, tunnel: Tunnel, url: 
   return db;
 }
 
-/** The session a tunnel's connection runs: through its network binding, if it has one, or the platform's TCP. */
-function session(tunnel: Tunnel, given: Omit<Parameters<typeof tunnelPostgres>[1], 'connect'>): SocketSession {
+/**
+ * The session a tunnel's connection runs: through its network binding, if it has one; else through `dial`, a UI
+ * tunnel's, which reaches only public addresses (`PluginContext.publicConnect`); else the platform's TCP.
+ */
+function session(tunnel: Tunnel, given: Omit<Parameters<typeof tunnelPostgres>[1], 'connect'>, dial?: Connect): SocketSession {
   const network = tunnel.connect;
-  return (client, connect) => tunnelPostgres(client, { ...given, connect: network === undefined ? connect : through(network) });
+  return (client, connect) => tunnelPostgres(client, { ...given, connect: network !== undefined ? through(network) : dial ?? connect });
 }
 
 /**
@@ -1558,7 +1610,7 @@ type Check = { every: number; deadline: number; arms: boolean; now: boolean; run
  * check that never comes back keeps nothing open. It lives as long as its
  * sessions, and goes with the last.
  */
-function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bound: number; until: number | null }, end: () => void): () => void {
+function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bound: number; until: number | null; admitted: number }, end: () => void): () => void {
   let group = proxy.groups.get(key);
   if (group === undefined) {
     const made: Group = { ends: new Set(), stands: true, timers: [], watchdog: undefined, expiry: undefined };
@@ -1588,12 +1640,22 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
         // A group its last session has left arms nothing: its watchdog would close it later, dropping a newer group's cache.
         if (check.arms && proxy.groups.get(key) === made) arm(started);
       };
-      made.timers.push(setInterval(() => void recheck(), check.every));
       // A new group let in on the cache's values decides now: its first interval starts from an answer of its own.
-      if (check.now) void recheck();
+      if (check.now) {
+        void recheck();
+        made.timers.push(setInterval(() => void recheck(), check.every));
+      } else {
+        // Else its admission was its first check, which started at `admitted`, and may have answered late: the next is
+        // an interval after that start, at once if that is past, never an interval after the group (review r1 of #485).
+        made.timers.push(setTimeout(() => {
+          void recheck();
+          // clearInterval clears either kind of timer, on Node as on Workers.
+          if (made.stands) made.timers.push(setInterval(() => void recheck(), check.every));
+        }, Math.max(0, tunnel.admitted + check.every - Date.now())));
+      }
     }
-    // Let in just now, on a check of the admission's own.
-    arm(Date.now());
+    // Let in on a check of the admission's own, which started at `admitted`.
+    arm(tunnel.admitted);
     if (tunnel.until !== null) made.expiry = setTimeout(close, Math.max(0, tunnel.until - Date.now()));
     group = made;
     proxy.groups.set(key, group);

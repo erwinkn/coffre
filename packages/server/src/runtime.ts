@@ -62,6 +62,8 @@ export type CoffreRuntime = {
   gates?: Gates;
   /** A request to a host an Owner typed, a UI route's upstream: the transport's (`WorkloadTransport.fetch`); absent, none is sent. */
   publicFetch?: WorkloadTransport['fetch'];
+  /** TCP out to a host an Owner typed, a UI tunnel's database: the transport's (`WorkloadTransport.connect`); absent, none is dialled. */
+  publicConnect?: WorkloadTransport['connect'];
 };
 
 /**
@@ -135,6 +137,7 @@ export function createRuntime(
     plugins: config.plugins,
     gates,
     ...(transport.fetch === undefined ? {} : { publicFetch: transport.fetch }),
+    ...(transport.connect === undefined ? {} : { publicConnect: transport.connect }),
   };
 }
 

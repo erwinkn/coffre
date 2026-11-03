@@ -587,8 +587,12 @@ test("a session's tunnel to a database saved in the Proxy tab: dialled by the de
       const url = `${ORIGIN}/use/market/prod/db`;
       const proof = await createProof(held.key, { method: 'GET', url, token: held.token, nonce: await gates(MEMBER).nonce() });
       const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/use/market/prod/db`, { headers: { authorization: `DPoP ${held.token}`, dpop: proof } });
-      const opened = await Promise.race([once(ws, 'open').then(() => true), once(ws, 'unexpected-response').then(([, response]) => (response as IncomingMessage).statusCode)]);
-      return { ws, opened };
+      let nonce: string | null = null;
+      const opened = await Promise.race([once(ws, 'open').then(() => true), once(ws, 'unexpected-response').then(([, response]) => {
+        nonce = ((response as IncomingMessage).headers['dpop-nonce'] as string | undefined) ?? null;
+        return (response as IncomingMessage).statusCode;
+      })]);
+      return { ws, opened, nonce };
     };
     const first = await open();
     assert.equal(first.opened, true);
@@ -602,9 +606,10 @@ test("a session's tunnel to a database saved in the Proxy tab: dialled by the de
     const editedAt = Date.now();
     const at = await closed;
     assert.ok(at - editedAt <= 2000 + 300, `ended ${at - editedAt} ms after the edit`);
-    // The reconnect dials by the new item, which reaches no 127.0.0.1.
+    // The reconnect dials by the new item, which reaches no 127.0.0.1: refused, with the nonce its next proof signs (review r1 of #485).
     const again = await open();
     assert.equal(again.opened, 403);
+    assert.equal(again.nonce, await gates(MEMBER).nonce(), "the refusal carries the gate's nonce");
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -38,7 +38,7 @@ import { runScheduled, settleKey, walkAuditBacklog } from './app.ts';
 import { resolveConfig, type CoffreConfig } from './config.ts';
 import { processGates } from './gate.ts';
 import { logged } from './logged.ts';
-import { upgrade } from './node-sockets.ts';
+import { publicConnect, upgrade } from './node-sockets.ts';
 import { createRuntime, type CoffreRuntime } from './runtime.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
@@ -89,7 +89,7 @@ export function createCoffre(config: NodeConfig): CoffreNode {
   // `rotating` meanwhile, `/livez` and `/readyz` aside: a Worker's CPU limit is not Node's.
   const ready = () =>
     (runtime ??= openDatabase(config.database).then((database) => {
-      const rt = createRuntime(resolved, database.db, versioned(config.vault), nodeTransport(), undefined, processGates());
+      const rt = createRuntime(resolved, database.db, versioned(config.vault), { ...nodeTransport(), connect: publicConnect() }, undefined, processGates());
       void settleKey(rt);
       return rt;
     }));

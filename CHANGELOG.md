@@ -92,7 +92,14 @@
   database (404). A database naming a network, which no deployment's
   code declares yet and the Proxy tab refuses at save, answers 503 and
   is never dialled directly. Each connection is a use of its own: its
-  values are never kept.
+  values are never kept. The hosts are an Owner's, so on Node the
+  connection resolves the name as it opens and dials only a public
+  address (`publicConnect`, as a UI route's `publicFetch`): a name that
+  resolves to `10.0.1.5` gets no SYN; a runtime without such a connect
+  dials none, 503, and `insecureUpstreams` keeps the platform's, for a
+  local database. A session's clock starts when its admission's use
+  started, so one whose answer came late is checked at once, and one
+  that came after the whole bound lets nothing in (503 `late`).
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart
