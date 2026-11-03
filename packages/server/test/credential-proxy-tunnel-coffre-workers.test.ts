@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
+import { WebSocket } from 'ws';
 
 
 import { clientFor, LOG, usesLogged } from './api-fixture.ts';
@@ -20,6 +21,7 @@ import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_U
 import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 import { appClient, tunnelListener } from './tunnel-listener.ts';
+import { FLOW } from '../src/cloudflare-sockets.ts';
 
 const skip = TEST_ENGINE !== 'postgres'
   ? 'the tunnel reaches a Postgres database, over Hyperdrive'
@@ -31,6 +33,7 @@ const NAME = 'coffre-tunnel-coffre-workers-test';
 let dir: string;
 let worker: Unstable_DevWorker;
 let handle: string;
+let booted: Promise<void> | undefined;
 
 useMcp(async () => {
   if (skip) return;
@@ -80,7 +83,7 @@ after(async () => {
 });
 
 test("a run's session in coffre's object: admitted and logged as on Node, rechecked a second, and ended once its handle is revoked", { skip, timeout: 180_000 }, async () => {
-  await boot();
+  await (booted ??= boot());
   const listener = await tunnelListener(`ws://${worker.address}:${worker.port}/use/market/dev/db`, handle);
   try {
     const client = appClient(listener.port, handle);
@@ -108,4 +111,21 @@ test("a run's session in coffre's object: admitted and logged as on Node, rechec
   } finally {
     listener.close();
   }
+});
+
+test("the object hands a plugin's WebSocket admission its `connect()`, which a UI tunnel dials through (review r2 of #485)", { skip, timeout: 180_000 }, async () => {
+  // Without it installed (cloudflare-handler.ts, `Sockets`), every UI tunnel on Workers would answer 503.
+  await (booted ??= boot());
+  // The probe's answer is a refusal, as a WebSocket client sees one: the response in place of the upgrade.
+  const answered = await new Promise<string>((resolve, reject) => {
+    const ws = new WebSocket(`ws://${worker.address}:${worker.port}/probe`, { headers: { [FLOW]: 'credit', authorization: `Bearer ${handle}` } });
+    ws.on('unexpected-response', (_, response) => {
+      let body = '';
+      response.on('data', (chunk: Buffer) => (body += chunk.toString()));
+      response.on('end', () => resolve(body));
+    });
+    ws.on('open', () => reject(new Error('the probe opened a session')));
+    ws.on('error', () => {});
+  });
+  assert.deepEqual(JSON.parse(answered), { connect: 'function' });
 });

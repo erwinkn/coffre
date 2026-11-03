@@ -12,6 +12,7 @@ import { once } from 'node:events';
 import { WebSocket } from 'ws';
 
 import type { CoffreClient } from '@coffre/client';
+import { github, signin } from '@coffre/core/identity';
 import type { ProxyDefinition } from '@coffre/core/vault';
 
 import { clientFor, LOG } from './api-fixture.ts';
@@ -19,6 +20,7 @@ import { trackBackgroundTask } from './background-tasks.ts';
 import { TEST_RUNTIME_DATABASE_URL } from './db/connections.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 import { deps, DEV, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { createCoffre as nodeCoffre } from '../src/node.ts';
 import { publicConnect, upgrade } from '../src/node-sockets.ts';
 import { checkPlugins, pluginSocket, type CoffrePlugin } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
@@ -410,4 +412,28 @@ test("an isolate whose copy of the item's definition turned over claims no diges
   holding = async () => forgetUiItems(runtime.plugins[0]!);
   assert.equal(await upgraded(), 'session');
   assert.equal(holding, null, 'the admission was held');
+});
+
+test("Node's coffre hands its plugins the connect that dials only public addresses, which a UI tunnel needs (review r2 of #485)", { skip: TEST_ENGINE !== 'postgres' ? 'the deployment opens the suite\'s Postgres' : false }, async () => {
+  // A plugin of its own, under `createCoffre` as a deployment calls it: what its context's `publicConnect` does with
+  // loopback. Without one installed (node.ts), every UI tunnel on Node would answer 503, these cases all passing.
+  const probe: CoffrePlugin = {
+    name: 'probe',
+    routes: {
+      prefix: '/probe',
+      fetch: async (_, context) => {
+        if (context.publicConnect === undefined) return Response.json({ connect: null });
+        try {
+          (await context.publicConnect('127.0.0.1', 9, AbortSignal.timeout(2000))).close();
+          return Response.json({ connect: 'dialled' });
+        } catch (error) {
+          return Response.json({ connect: (error as NodeJS.ErrnoException).code ?? String(error) });
+        }
+      },
+    },
+  };
+  const node = nodeCoffre({ publicUrl: ORIGIN, database: TEST_RUNTIME_DATABASE_URL, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }), auditChainKey: deps.chainKey.toString('base64'), plugins: [probe] });
+  const request = new Request(`${ORIGIN}/probe`);
+  const answered = await node.request(request).coffre.route(request);
+  assert.deepEqual(await answered.json(), { connect: 'ENOTPUBLIC' });
 });
