@@ -28,7 +28,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { USES_AT_ONCE } from '../src/api/keys.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
+import { aroundNextUseByIds, clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, environments, logBulk, logCheckpoints, logFence, logTiles, logUses } from './db/tables.ts';
 import { openVaultDatabase } from './db/engine.ts';
 import { answer, type Pages } from './start-fixture.ts';
@@ -86,9 +86,10 @@ after(async () => {
 
 /**
  * The instance with 0.14's log alone, or 0.15's with its uses, its changes sealed by a checkpointer on the vault's
- * seed (each change waits for its tick, R51), and `inFlight`, the isolate's uses in flight at most.
+ * seed (each change waits for its tick, R51), and `inFlight`, the isolate's uses in flight at most. `batches` false: a
+ * 0.15 vault from before T165 and T167, mid-deploy, which serves a request's several keys in no one call.
  */
-async function instance(log: '0.14' | '0.15', inFlight?: number): Promise<void> {
+async function instance(log: '0.14' | '0.15', inFlight?: number, batches = true): Promise<void> {
   await checkpointer?.stop();
   checkpointer = null;
   await resetDatabase(db.owner);
@@ -103,6 +104,10 @@ async function instance(log: '0.14' | '0.15', inFlight?: number): Promise<void> 
   const vault = log === '0.15'
     ? testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: checkpointer!.sealThrough, heldOutside: checkpointer!.heldOutside, ...(inFlight === undefined ? {} : { uses: { inFlight } }) })
     : testVault([ROOT], {}, { kek }, {}, { log: '0.14' });
+  if (!batches) {
+    delete vault.useMany;
+    delete vault.useNamedMany;
+  }
   deps = testDeps(db.runtime, [ROOT], { vault });
   const config = resolveConfig({
     publicUrl: ORIGIN,
@@ -285,14 +290,26 @@ test('0.15: a use the rows refuse refuses the request, logged as its request, an
   assert.equal([...replayed.decided.values()][0], null, 'the first allowed, live as replayed');
 });
 
-test(`0.15: a whole environment of more keys than a request has uses in flight (${USES_AT_ONCE}) opens each, by one use each`, async () => {
-  await instance('0.15');
+test(`0.15: of a vault that serves no batch, mid-deploy, a whole environment of more keys than a request has uses in flight (${USES_AT_ONCE}) opens each by one use each, and one refused refuses the read`, async () => {
+  // The app asks such a vault one use a key, four at a time.
+  await instance('0.15', undefined, false);
   const many = Object.fromEntries(Array.from({ length: USES_AT_ONCE * 2 + 1 }, (_, i) => [`KEY_${i}`, `value-${i}`]));
   await root.environments.create('market/many');
   await root.secrets.set('market/many', many);
   const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
+  const use = deps.vault.use!;
+  let uses = 0;
+  deps.vault.use = (input) => {
+    uses += 1;
+    return use(input);
+  };
   assert.deepEqual({ ...(await ci.secrets.reveal('market/many')).values }, many);
+  assert.equal(uses, Object.keys(many).length);
   assert.equal((await usesLogged()).length, Object.keys(many).length);
+  // A key past the first uses in flight refused (late): the whole read is, and none of its values goes back.
+  uses = 0;
+  deps.vault.use = async (input) => ((uses += 1) === USES_AT_ONCE + 2 ? { ok: false, busy: 'late', retryAfter: 1 } : use(input));
+  await assert.rejects(ci.secrets.reveal('market/many'), (error: { status: number; reason?: string }) => error.status === 503 && error.reason === 'busy');
 });
 
 test('0.15: past its uses in flight, the isolate refuses a read at once, by the API and the proxy, 503 with the vault\'s Retry-After, and logs nothing', async () => {
@@ -330,15 +347,8 @@ test('0.15: a value written between the app\'s read and its use answers 409, to 
   await instance('0.15');
   const ci = bearer((await root.tokens.issue(CI, { label: 'ci', expiresInDays: 30 })).token);
   // Two keys, which the app reads before their uses, by ids, as a workload's read takes them: a request by name is the
-  // vault's one call, which reads its rows with the use, so there is no read before it to differ from. Its vault here
-  // serves no named batch, which sends the request by ids, as a vault that does not serve one does.
-  deps.vault.useNamedMany = async () => ({ served: false });
-  const useMany = deps.vault.useMany!;
-  deps.vault.useMany = async (input) => {
-    deps.vault.useMany = useMany;
-    await root.secrets.set('market/dev', { API_KEY: 'rotated' });
-    return useMany(input);
-  };
+  // vault's one call, which reads its rows with the use, so there is no read before it to differ from.
+  aroundNextUseByIds(deps.vault, { before: () => root.secrets.set('market/dev', { API_KEY: 'rotated' }) });
   const both = () => ci.secrets.reveal('market/dev', ['API_KEY', 'WEBHOOK']);
   await assert.rejects(both(), (error: { status: number; reason?: string }) => error.status === 409 && error.reason === 'changed');
   assert.equal((await both()).values.API_KEY, 'rotated', 'asked again, the new one');

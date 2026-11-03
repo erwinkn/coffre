@@ -93,22 +93,30 @@ function said(input: unknown): unknown {
 
 const vaults = new Set<TestVault>();
 
-/** The vault's calls that use values: one key's, by ids or by name, and several's. */
-const USES = ['use', 'useNamed', 'useMany', 'useNamedMany'] as const;
+/** The vault's calls that use values by name, which it makes before the app authenticates, and by ids, after. */
+const BY_NAME = ['useNamed', 'useNamedMany'] as const;
+const BY_IDS = ['use', 'useMany'] as const;
 
 /**
- * Run `before` and `after` once, around the vault's next use of values, whichever call makes it: a request of one key
- * is `useNamed`, of several `useNamedMany`, and by ids (a workload's, or with named batches gone) `use` or `useMany`.
+ * Run `before` and `after` once, around the vault's next use by ids (`use`, or `useMany` for several keys), which the
+ * app asks once it has authenticated the request. A request by name is one vault call, made before the app
+ * authenticates from the rows it returns; its next one is declined (`served: false`), as a vault that serves none,
+ * so the app authenticates the request as ever and asks by ids, as a workload's read does.
  */
-export function aroundNextUse(vault: Vault, hooks: { before?: () => Promise<unknown>; after?: () => Promise<unknown> }): void {
+export function aroundNextUseByIds(vault: Vault, hooks: { before?: () => Promise<unknown>; after?: () => Promise<unknown> }): void {
   const methods = vault as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>;
-  const saved = USES.map((name) => [name, methods[name]] as const);
-  for (const [name, method] of saved) {
+  const saved = [...BY_NAME, ...BY_IDS].map((name) => [name, methods[name]] as const);
+  const restore = () => {
+    for (const [name, original] of saved) methods[name] = original;
+  };
+  for (const name of BY_NAME) if (methods[name] !== undefined) methods[name] = async () => ({ served: false });
+  for (const name of BY_IDS) {
+    const method = methods[name];
     if (method === undefined) continue;
     methods[name] = async (...args) => {
-      for (const [restored, original] of saved) methods[restored] = original;
+      restore();
       await hooks.before?.();
-      const used = await method(...args);
+      const used = await method.apply(vault, args);
       await hooks.after?.();
       return used;
     };
