@@ -19,6 +19,7 @@ import { replayStored } from '../src/log-replay.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
+import { weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
 import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
@@ -456,9 +457,10 @@ test("a later statement's fresh ids reach the map: an edit between a use's state
       return (...args: unknown[]) => {
         const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         if (!String(args[0]).includes('use_route')) return sent;
-        // A first round's statement: no principal's lock (a key new to the cap's set takes one more, under it).
+        // A first round's statement: no principal's lock (a key new to the cap's set takes one more, under it). `p_lock`
+        // is the third parameter from the end, before `p_use` and `p_light` (0060).
         const params = args[1] as unknown[];
-        if (params[params.length - 2] === null) routed += 1;
+        if (params[params.length - 3] === null) routed += 1;
         if (!armed) return sent;
         armed = false;
         return Promise.resolve(sent).then(async (result) => {
@@ -713,4 +715,165 @@ test("T190: a level's environment archived, its row put back and the archive's e
   await run(db.owner, sql`UPDATE environments SET archived_at = NULL, seal = ${row!.seal} WHERE id = ${eu}`);
   await forgeNewest(ref, Buffer.from(row!.seal));
   for (const one of [vault, (await isolate()).vault]) assert.deepEqual(refused(await one.useRoute(atFork())), { code: 'stale', key: null });
+});
+
+// --- T200: the light gate --------------------------------------------------------------------------------------------
+// A statement made with the map's ids reads its caller's rows once, by its first key's use, under the fence the gate
+// took, and the vault decides the caller on that row; the gate only decides, in SQL, that they stand there before the
+// route is read (`use_stands`, GateBeforeKeys). Where it makes no use, it asks the whole gate, and answers as without it.
+
+/** An isolate whose hot pool notes each route statement's gate as it answered: `stood`, light (T200), or the whole gate's state. */
+async function watched(): Promise<{ vault: ReturnType<typeof openVault>; gates: string[]; end: () => Promise<void> }> {
+  const gates: string[] = [];
+  const client = postgresClient(HOT_URL, { max: 2 });
+  const pool = new Proxy(client, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        if (!String(args[0]).includes('use_route')) return sent;
+        return Promise.resolve(sent).then((result) => {
+          const [row] = result as { route: string }[];
+          gates.push((JSON.parse(row!.route) as { gate: { state: string | null } }).gate.state ?? 'null');
+          return result;
+        });
+      };
+    },
+  });
+  const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
+  return { vault, gates, end: () => client.end() };
+}
+
+test("T200: a warm route use's gate is light, the use made by the map's ids; a statement that makes none (its item deleted since) asks the whole gate and answers as one without it", { skip: ENGINE !== 'postgres' ? "the hot pool's answers" : false }, async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
+  const { vault, gates, end } = await watched();
+  try {
+    // Cold: the miss reads the ids under the whole gate; the use by them, and its round under the lock, light.
+    assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
+    assert.equal(gates[0], 'moved', 'a miss: the whole gate');
+    assert.ok(gates.length > 1 && gates.slice(1).every((state) => state === 'stood'), gates.join());
+    const cold = gates.length;
+    assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
+    assert.deepEqual(gates.slice(cold), ['stood'], 'warm: one statement, its gate light');
+    // The item deleted since: the map's ids name no item now, no use is made, and the whole gate answers.
+    await w.save({ openai: null });
+    const warm = gates.length;
+    const gone = answered(await vault.useRoute(w.askRoute('openai')));
+    assert.equal(gates[warm], 'moved', 'no use made: the whole gate');
+    assert.equal(gone.stands, true);
+    assert.deepEqual(refused(gone), { code: 'missing', key: null });
+    // As an isolate whose map is cold answers it, by the whole gate alone.
+    const { vault: fresh } = await isolate();
+    const cold2 = answered(await fresh.useRoute(w.askRoute('openai')));
+    assert.deepEqual([cold2.stands, cold2.standing, cold2.outcome], [gone.stands, gone.standing, gone.outcome]);
+  } finally {
+    await end();
+  }
+});
+
+test("T200: under a light gate the caller is decided on their key's row: their grant revoked, their rows put back and the revoke's entry made to record the old seal, the credential's route, `stale`, never served, warm or cold (ChangeMacChecked, R64)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
+  const watch = ENGINE === 'postgres' ? await watched() : null;
+  const vault = watch?.vault ?? (await isolate()).vault;
+  try {
+    for (let i = 0; i < 2; i += 1) assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
+    const [member] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${w.principal}`);
+    const grants = await rows<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: unknown; granted_at: unknown; granted_by: string }>(
+      db.owner, sql`SELECT project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by FROM vault_grants WHERE principal = ${w.principal}`);
+    assert.ok(grants.length > 0);
+    await w.revoke();
+    assert.equal(answered(await vault.useRoute(w.askRoute('openai'))).stands, false, 'revoked: refused on the place');
+    // Her grants and her seal put back as they were, and her newest change made to record that seal: the statement's
+    // gate finds her standing on the rows, and only the vault, on her key's row, finds the change's MAC not holding.
+    for (const g of grants) {
+      await run(db.owner, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, expires_at, granted_at, granted_by)
+        VALUES (${w.principal}, ${g.project_id}, ${g.environment_id}, ${g.environment_slug}, ${g.role}, ${g.expires_at}, ${g.granted_at}, ${g.granted_by})`);
+    }
+    await run(db.owner, sql`UPDATE vault_members SET seal = ${member!.seal} WHERE principal = ${w.principal}`);
+    await forgeNewest({ kind: 'principal', id: w.principal }, Buffer.from(member!.seal));
+    // Her account's row not as the log says: the credential's own route (`routeOf`), `stale`, as the whole gate answers it.
+    const stale = { served: true, route: 'credential', outcome: { ok: false, code: 'stale', number: null } };
+    const seen = watch?.gates.length ?? 0;
+    assert.deepEqual(await vault.useRoute(w.askRoute('openai')), stale);
+    if (watch !== null) assert.equal(watch.gates[seen], 'stood', 'the warm use went by the light gate');
+    assert.deepEqual(await (await isolate()).vault.useRoute(w.askRoute('openai')), stale);
+  } finally {
+    await watch?.end();
+  }
+});
+
+test("T200: a caller who stands nowhere there reads nothing of the route, its gate asked light or not: each refusal weighed beside its twin (a route the world never saved), its key's blocks and its buffers alike whatever the route names (NoKeyBeforeStanding; the named matrix's weighing, slack 6)", { skip: ENGINE !== 'postgres' ? 'the hot path\'s statements, weighed' : false }, async () => {
+  const w = await routeWorld(db);
+  const held = await w.key('sk');
+  const sensitive = await w.key('sens');
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  const names = { held: await w.nameOf(held), sensitive: await w.nameOf(sensitive), never: 'NEVER_MADE_BY_THIS_WORLD' };
+  await w.save({
+    held: { definition: route('held', [names.held]), editor: ada },
+    sensitive: { definition: route('sensitive', [names.sensitive]), editor: ada },
+    never: { definition: route('never', [names.never]), editor: ada },
+  });
+  await w.markSensitive(sensitive);
+  // Each use_route call as the vault sends it.
+  const calls: HotCall[] = [];
+  const client = postgresClient(HOT_URL, { max: 2 });
+  const pool = new Proxy(client, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        if (String(args[0]).includes('use_route')) calls.push({ query: String(args[0]), args: [...(args[1] as unknown[])] });
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  });
+  const session = weighingSession(HOT_URL);
+  try {
+    const warm = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
+    // Her map warm on each route while she stood (a refused one too: its ids read), then her grant revoked.
+    for (const name of ['held', 'sensitive', 'never'] as const) for (let i = 0; i < 2; i += 1) await warm.useRoute(w.askRoute(name));
+    await w.revoke();
+    const cold = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
+    const asked: { label: string; call: HotCall }[] = [];
+    for (const [label, vault] of [['warm', warm], ['cold', cold]] as const) {
+      for (const name of ['held', 'sensitive', 'never'] as const) {
+        const before = calls.length;
+        const answer = answered(await vault.useRoute(w.askRoute(name)));
+        assert.equal(answer.stands, false, `${label} ${name}: refused on the place`);
+        assert.equal(answer.found, null, `${label} ${name}: nothing of the route read`);
+        assert.equal(calls.length - before, 1, `${label} ${name}: one statement`);
+        asked.push({ label: `${label} ${name}`, call: calls.at(-1)! });
+      }
+    }
+    // Light where the map was warm: the vault asked the light gate there, and the statement answered the whole one.
+    assert.ok(asked.slice(0, 3).every(({ call }) => call.args.at(-1) === true), 'the warm map asked the light gate');
+    assert.ok(asked.slice(3).every(({ call }) => call.args.at(-1) === false), 'the cold map did not');
+    await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
+    const twinOf = (call: HotCall): HotCall => {
+      const args = [...call.args];
+      args[3] = 'nothing-saved';
+      return { query: call.query, args };
+    };
+    const read: { label: string; buffers: number; keyBlocks: number; beyond: number }[] = [];
+    for (const { label, call } of asked) {
+      const [one, twin] = [await weigh(session, call), await weigh(session, twinOf(call))];
+      assert.equal(one.keyBlocks, twin.keyBlocks, `${label}: the key's blocks as its twin's`);
+      read.push({ label, buffers: one.buffers, keyBlocks: one.keyBlocks, beyond: one.buffers - twin.buffers });
+    }
+    const beyond = read.map((one) => one.beyond);
+    assert.ok(Math.max(...beyond) - Math.min(...beyond) <= 6, JSON.stringify(read));
+    assert.equal(new Set(read.map((one) => one.keyBlocks)).size, 1, JSON.stringify(read));
+  } finally {
+    await session.end();
+    await client.end();
+  }
 });

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A UI route's use reads its caller once (T200).** `use_route`
+  decided its caller with a whole named call of no key, then read the
+  same rows again in each key's use: a UI route cost Postgres about
+  twice a code route's CPU (2.95 ms a use against 1.52 at 1,000 a
+  second), and refused about 45% of its uses busy where Postgres had
+  two cores. With the map warm the gate is now light (migration 0060:
+  `use_credential`'s `p_gate`, `use_route`'s `p_light`): the vault
+  decides the caller on the first key's row, read under the same fence,
+  and the whole gate is asked only where no use is made. 2.16 to 2.23
+  ms a use now (1.45x a code route's); at three cores, about 90 busy
+  refusals in 20,000 where there were 677.
 - **The proxy serves UI routes to handles (T186, PR C2a).** Under
   `credentialProxy({ editable: true })`, a name the deployment's code
   lacks is looked up in the environment's Proxy tab: `GET

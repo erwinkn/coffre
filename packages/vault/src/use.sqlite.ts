@@ -104,9 +104,10 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
  * call's ids are the names' now at its reading, each key's use by them (a call with no request id only checked).
  */
 export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRows> {
+  const handle = call.tokenHash !== null;
+  if (call.light && (!handle || !call.use || call.keys === null)) throw new Error("a route use's light gate is a handle's, with its map's ids");
   return (db as Database).transaction(async (tx) => {
     const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
-    const handle = call.tokenHash !== null;
     let madeFor: string[] | null = null;
     let made = false;
     if (handle && call.named !== null) {
@@ -127,23 +128,33 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     const route = reading === 1 ? call.named : call.stable;
     const rows = direct(tx);
     const base = { requestId: '0', at: call.at, purpose: call.purpose, mac: call.mac, deadline: call.deadline };
+    // A handle's gate: its named call of no key, light when the vault asks (T200).
+    const gated = (light: boolean) => useOnce(tx, {
+      ...base, credential: null, secretId: null, place: null, way: 0, principal: null,
+      names: {
+        tokenHash: call.tokenHash!, project: reading === 1 ? call.project : null, environment: reading === 1 ? call.environment : null, key: null, handle: reading === 2,
+        unless: reading === 2 && call.project !== null ? [`${call.project}/${call.environment}`] : [], accepts: call.accepts!, forks: true,
+      },
+      ...(light ? { gate: true as const } : {}),
+    }, rows);
     const gate = handle
-      ? await useOnce(tx, {
-        ...base, credential: null, secretId: null, place: null, way: 0, principal: null,
-        names: {
-          tokenHash: call.tokenHash!, project: reading === 1 ? call.project : null, environment: reading === 1 ? call.environment : null, key: null, handle: reading === 2,
-          unless: reading === 2 && call.project !== null ? [`${call.project}/${call.environment}`] : [], accepts: call.accepts!, forks: true,
-        },
-      }, rows)
+      ? await gated(call.light)
       : await useOnce(tx, { ...base, credential: call.credential, secretId: null, place: call.place, way: call.way, principal: call.principal, route: route ?? 'every' }, rows);
     const none = { reading, route, madeFor, place: null, project: null, personal: false, cut: false, levels: [], editor: null, keys: [], resolved: [], made: false, rows: [] };
-    if (handle ? gate.state !== 'moved' || gate.n_standing !== true || gate.n_cut !== false : gate.state !== null) return { ...none, gate, stood: false };
+    if (handle ? (gate.state !== 'moved' && gate.state !== 'stood') || gate.n_standing !== true || gate.n_cut !== false : gate.state !== null) return { ...none, gate, stood: false };
+    // A light gate whose statement makes no use: the whole gate, its rows the vault's to decide the caller on. The
+    // handle's places by path only where no use is made, as Postgres's (0060): a use made by the map's ids was made at
+    // the reading the map picked.
+    const whole = async (answer: RouteRows): Promise<RouteRows> => {
+      if (answer.made) return { ...answer, madeFor: null };
+      return answer.gate.state === 'stood' ? { ...answer, gate: await gated(false) } : answer;
+    };
     const place = handle ? gate.n_place! : call.place!;
     const credential = handle ? gate.n_credential! : call.credential!;
     const at = await one<{ project_id: string; parent_id: string | null; owner: string | null }>(sql`SELECT project_id, parent_id, owner FROM environments WHERE id = ${place}`);
-    if (at?.owner != null || (handle && reading === 1 && call.environment!.endsWith('@me'))) return { ...none, gate, stood: true, place, personal: true };
+    if (at?.owner != null || (handle && reading === 1 && call.environment!.endsWith('@me'))) return whole({ ...none, gate, stood: true, place, personal: true });
     const { layers, cut } = at === undefined ? { layers: [], cut: true } : await chainOf(tx, place, at.parent_id);
-    if (cut) return { ...none, gate, stood: true, place, cut: true };
+    if (cut) return whole({ ...none, gate, stood: true, place, cut: true });
     const levels: RouteLevelRow[] = [];
     let serving: Record<string, unknown> | null = null;
     let inputs = 0n;
@@ -180,7 +191,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       });
       if (looking && route !== null && item !== null) serving = typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
     }
-    if (serving === null) return { ...none, gate, stood: true, place, project: at!.project_id, levels };
+    if (serving === null) return whole({ ...none, gate, stood: true, place, project: at!.project_id, levels });
     let editor: EditorRow | null = null;
     if (typeof serving.savedBy === 'string') {
       const principal = serving.savedBy;
@@ -232,7 +243,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       await batched?.write();
       if (out.some((row) => row !== null && row.state === null) && Date.now() > call.deadline) throw Object.assign(new Error('past its deadline'), { code: '57014' });
     }
-    return { gate, reading, route, madeFor, stood: true, place, project: at!.project_id, personal: false, cut: false, levels, editor, keys, resolved: resolvedRows, made: right, rows: out };
+    return whole({ gate, reading, route, madeFor, stood: true, place, project: at!.project_id, personal: false, cut: false, levels, editor, keys, resolved: resolvedRows, made: right, rows: out });
   });
 }
 
@@ -651,6 +662,14 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
       right: read.credential === call.credential && read.secretId === call.secretId && read.place === call.place,
       place: place?.id ?? null, project: place?.project_slug ?? null, environment: mine !== null ? names.environment : place?.slug ?? null, cut,
     };
+    // A route use's light gate (0060's `p_gate`, T200): one who stands at a live place whose chain is whole is answered by
+    // their names, nothing more read; the route's keys' uses read their rows. Else it reads on as any named call.
+    if (call.gate === true && state === null && stands && !cut) {
+      return {
+        state: 'stood', n_credential: credential.id, n_secret: null, n_place: resolved.place, n_project: resolved.project, n_environment: resolved.environment,
+        n_standing: true, n_cut: false, app: null,
+      } as UseRow;
+    }
   }
 
   // The way in (0046, T147): a credential's row, an MCP connection's or a Cloudflare binding's, each read as the
