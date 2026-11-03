@@ -1352,17 +1352,20 @@ to a POST (review round 9).
 ### Several inject rules
 
 A route's `inject` is an ordered list. Each rule fills a header, a query
-parameter, a form or JSON field, Basic authorization, or a SigV4 signature,
+parameter, a form or JSON field, a path segment (0.16, `{ kind: 'path',
+template: 'bot{TELEGRAM_BOT_TOKEN}' }`, [credential-proxy.md](credential-proxy.md),
+section 5, "A segment of the path"), Basic authorization, or a SigV4 signature,
 in that order. Validation, at save and at the app's startup for code:
 
 - every rule names at least one key (`{KEY}`), as code's startup check
   requires today, so no route use is ever standing-only;
-- at most one `basic`, at most one `sigv4`, and `sigv4` last;
+- at most one `path`, its template one segment naming one key once; at most
+  one `basic`, at most one `sigv4`, and `sigv4` last;
 - one rule per header (case-insensitive), parameter or field name;
 - no `basic` beside a rule that sets `authorization`, and no rule sets a
   header SigV4 owns (`authorization`, `x-amz-*`);
 - a `placeholder` (`jwt`, `prefix`) only where the route's non-plain keys sit
-  in exactly one header, query, form or JSON slot, the case it shapes today.
+  in exactly one header, query, form, JSON or path slot, the case it shapes today.
 
 **SigV4 signs what the earlier rules set.** It runs last, over the request
 as the earlier rules left it, and adds the headers they set to
@@ -1773,7 +1776,8 @@ before PR C. Where C2a settles what this section left open:
   and a UI route's URL is 404 (review r5 of #467).
 - **The handle on a cold isolate** is found by its shape before any item
   says where it rides: any header (`x-api-key: <handle>`, SigV4's
-  `Credential=<handle>/…`, a Basic pair decoded), the query, then the body
+  `Credential=<handle>/…`, a Basic pair decoded), the query, the path (a
+  path rule's segment, as sent and decoded once), then the body
   (64 KiB). The query and the body are read as sent and as decoded, every
   way a rule reads its slot: `?key=coffre%5Fuse_…`, a form's percent escapes
   and a JSON string's `\u005f` find the handle `sendAs` reads there (review

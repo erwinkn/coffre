@@ -17,6 +17,7 @@ import {
   routedInWords,
   methodChoices,
   sampleCall,
+  samplePath,
   savedByInWords,
   soleKey,
   targetOf,
@@ -459,6 +460,17 @@ function InjectRule({ rule, keys, disabled, invalid, onChange }: { rule: ProxyIn
       </div>
     );
   }
+  if (rule.kind === 'path') {
+    // One segment of the path, `bot{TELEGRAM_BOT_TOKEN}`: the first the proxy finds it frames takes the value.
+    return (
+      <Fold invalid={invalid}>
+        {kind}
+        <span className="fold-text">/</span>
+        <TemplateInput value={rule.template} keys={keys} label="Segment" placeholder="bot{KEY}" disabled={disabled} onChange={(template) => onChange({ ...rule, template })} />
+        <span className="fold-text">/</span>
+      </Fold>
+    );
+  }
   if (rule.kind === 'basic') {
     return (
       <Fold invalid={invalid}>
@@ -606,7 +618,7 @@ function TunnelFields({ row, tunnel, edits, keys, disabled }: { row: Row; tunnel
 function Preview({ route, allowAs, keys, useUrl }: { route: ProxyRoute; allowAs: AllowAs | null; keys: readonly SecretKey[]; useUrl: string }) {
   const first = route.allow?.[0];
   const [method, setMethod] = useState<string>(first?.methods[0] ?? 'GET');
-  const [path, setPath] = useState(first?.path.replace(/\/\*\*$/, '/x').replace(/\*/g, 'id') ?? '/');
+  const [path, setPath] = useState(() => samplePath(route));
   const call = sampleCall(route, method, path, allowAs);
   const query = route.inject.flatMap((rule) => (rule.kind === 'query' ? [`${rule.name}=${rule.template}`] : []));
   const url = query.length === 0 ? call.url : `${call.url}${call.url.includes('?') ? '&' : '?'}${query.join('&')}`;
@@ -673,6 +685,7 @@ function InjectedLine({ rule, keys }: { rule: ProxyInject; keys: readonly Secret
         </p>
       );
     case 'query':
+    case 'path':
       return null;
   }
 }

@@ -1,5 +1,5 @@
 import { CREDENTIAL_NAME } from './identity/workloads.ts';
-import { alike, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, PARAMETER_NAME, PLACEHOLDER_PREFIX, readPattern, SIGNATURE_PREFIX } from './proxy-match.ts';
+import { alike, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, PARAMETER_NAME, pathTemplate, PLACEHOLDER_PREFIX, readPattern, SIGNATURE_PREFIX } from './proxy-match.ts';
 
 /**
  * Proxy definitions written in the UI, per environment (0.16, T186;
@@ -16,9 +16,10 @@ import { alike, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, PARAMETER_NAME, PLA
  * network it declares.
  */
 
-/** How a route's values reach its upstream: each field a template, `{KEY}` the environment's value. */
+/** How a route's values reach its upstream: each field a template, `{KEY}` the environment's value; a path rule's, one segment, `bot{TELEGRAM_BOT_TOKEN}`. */
 export type ProxyInject =
   | { kind: 'header' | 'query' | 'form' | 'json'; name: string; template: string }
+  | { kind: 'path'; template: string }
   | { kind: 'basic'; user: string; password: string }
   | { kind: 'sigv4'; accessKeyId: string; secretAccessKey: string; sessionToken: string | null; region: string; service: string };
 
@@ -144,8 +145,10 @@ export function canonicalDefinition(value: unknown, options: { insecureUpstreams
       injectOrder(inject, name);
       const placeholder = placeholderOf(item.placeholder, name);
       if (placeholder !== null && !inject.some((rule) => rule.kind !== 'basic' && rule.kind !== 'sigv4' && keysIn(rule.template).length === 1)) {
-        problem(at('a placeholder shapes a header, query, form or JSON rule that sends one key, and this route has none'));
+        problem(at('a placeholder shapes a header, query, form, JSON or path rule that sends one key, and this route has none'));
       }
+      // As the proxy's own check (`resolve`): the placeholder may shape the path's one segment, which a slash would make two.
+      if (placeholder?.kind === 'prefix' && placeholder.prefix.includes('/') && inject.some((rule) => rule.kind === 'path')) problem(at('a route with a path rule takes a placeholder prefix with no /'));
       definition = {
         kind: 'route',
         name,
@@ -242,6 +245,13 @@ function injectRule(value: unknown, what: string): ProxyInject {
       // As the proxy's own check (`checkRule`): a field at the top of the body, named as every parser reads it.
       if (typeof rule.name !== 'string' || !FIELD_NAME.test(rule.name)) problem(`${what}: a field's name is letters, digits and _.-, a letter or digit among them, 1 to 128`);
       return { kind: rule.kind, name: rule.name, template: template(rule.template, `${what}.template`) };
+    case 'path': {
+      only(rule, ['kind', 'template'], what);
+      // As the proxy's own check (`checkRule`): one segment, its key once, the text around it a segment's own characters.
+      const written = text(rule.template, `${what}.template`, 1024);
+      if (pathTemplate(written) === null) problem(`${what}.template is one path segment naming one key once, bot{TELEGRAM_BOT_TOKEN}, the text around it letters, digits and -._~!$&'()*+,=:@`);
+      return { kind: 'path', template: written };
+    }
     case 'basic': {
       only(rule, ['kind', 'user', 'password'], what);
       const user = text(rule.user, `${what}.user`, 1024, 0);
@@ -266,13 +276,13 @@ function injectRule(value: unknown, what: string): ProxyInject {
       };
     }
     default:
-      problem(`${what}: a rule is a 'header', 'query', 'form', 'json', 'basic' or 'sigv4'`);
+      problem(`${what}: a rule is a 'header', 'query', 'form', 'json', 'path', 'basic' or 'sigv4'`);
   }
 }
 
 /**
  * The rules among themselves (section 7): one per header (any case),
- * parameter or field; a form and a JSON body never both; one `basic` at
+ * parameter or field, one path rule at most; a form and a JSON body never both; one `basic` at
  * most, never beside a rule setting `authorization`; one `sigv4` at most,
  * last, beside no rule setting `authorization`, an `x-amz-` header or
  * parameter, or a body field, which would change what it signs.
@@ -281,6 +291,11 @@ function injectOrder(rules: readonly ProxyInject[], name: string): void {
   const slots = new Set<string>();
   for (const rule of rules) {
     if (rule.kind === 'basic' || rule.kind === 'sigv4') continue;
+    if (rule.kind === 'path') {
+      if (slots.has('path')) problem(`${name}: one path rule at most`);
+      slots.add('path');
+      continue;
+    }
     // As the proxy reads them (`checkRules`): a header in any case, a parameter or a field as any parser may (`alike`: `secret` and `SECRET` are one).
     const slot = rule.kind === 'header' ? `header:${rule.name.toLowerCase()}` : `${rule.kind === 'json' ? 'form' : rule.kind}:${alike(rule.name)}`;
     if (slots.has(slot)) problem(`${name}: one rule per header, parameter or field: ${rule.name} is set twice`);

@@ -443,7 +443,7 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
 ```
 
 - **Rules.** One per header (by name, any case), query parameter or
-  field; `basic()` once at most, and never beside a rule that sets
+  field; `path()` once at most (section 5, "A segment of the path"); `basic()` once at most, and never beside a rule that sets
   `authorization`; `sigv4()` once at most, last, beside no rule that sets
   `authorization`, an `x-amz-` header or parameter, or a field of the
   body, whose hash it signs. SigV4 signs the headers the rules before it
@@ -701,7 +701,7 @@ request sent on:
    `paths`, section 3) narrows it further.
 2. **Who.** The handle, from `x-coffre-handle` if present, and from
    where each rule puts its key: the header, the query parameter, the
-   body's field, Basic's user or password, or SigV4's access key id. A
+   body's field, the path's segment, Basic's user or password, or SigV4's access key id. A
    shaped placeholder's slot must be that shape exactly (section 5). No
    handle gets a 401, two different ones a 400.
 3. **What.** The credential's keys, from the cache for the handle,
@@ -965,6 +965,113 @@ get and list passed, a 40 MiB PutObject streamed through, and a presigned
 GET fetched straight from MinIO. A client holding the handle as its keys was
 refused by MinIO directly, and a GET's median was 1.3 ms direct against
 2.6 ms through the proxy, over loopback HTTP to coffre.
+
+**A segment of the path (0.16).** Telegram's Bot API takes its token
+in the URL's path, `https://api.telegram.org/bot<token>/sendMessage`, and
+its files under `/file/bot<token>/<file_path>`. Every SDK builds that URL
+from a base URL and the token it holds (grammY, Telegraf, aiogram and
+python-telegram-bot alike: `${root}/bot${token}/${method}`). `path()`
+names the segment's template, one key in it once:
+
+```ts
+telegram: {
+  upstream: 'https://api.telegram.org',
+  inject: path('bot{TELEGRAM_BOT_TOKEN}'),
+  allow: [{ methods: ['POST'], path: '/*/sendMessage' }, { methods: ['GET'], path: '/file/*/**' }],
+},
+```
+
+The app points its SDK's base URL at the stable URL
+(`new Bot(process.env.TELEGRAM_BOT_TOKEN, { client: { apiRoot: 'https://secrets.acme.example/use/telegram' } })`;
+Telegraf's `apiRoot` takes a trailing slash, as it resolves `./bot…`
+against it), and holds the placeholder as its token:
+
+```
+POST /use/telegram/botcoffre_use_…/sendMessage          → https://api.telegram.org/bot123456789:AAE…/sendMessage
+GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.telegram.org/file/bot123456789:AAE…/photos/file_0.jpg
+```
+
+- **Which segment.** The first segment under the upstream that the
+  template frames: its text before the key and after it, with at least
+  one character between, read decoded once, as an allow list reads it
+  (`bot…` in `/bot…/sendMessage` and in `/file/bot…/photos/x.jpg`). A
+  template of the key alone frames the first segment. A path with none is
+  a 400. Its handle must be that whole segment, in the template's shape
+  (the placeholder's too, if shaped), as a field's must be the field: the
+  handle anywhere else in the URL is refused by the leak check, as before,
+  and two different handles are a 400. A workload's session, which
+  carries no handle, has whatever its SDK put there replaced
+  (`new Bot('coffre', …)` sends `/botcoffre/…`).
+- **Before the value.** Routing, the allow list and a narrowed session's
+  constraints read the path as the app sent it, placeholder and all
+  (`/*/sendMessage` takes `/botcoffre_use_…/sendMessage`). The value goes
+  in after them, so it can never change which route, entry or
+  environment a request is.
+- **As a segment.** The value goes in percent-encoded, every byte but
+  letters, digits, `-._~` and `:` (Telegram's tokens are `<bot id>:<35
+  characters>`, which go as they are). A value that is empty, or holds
+  `/`, `\`, `?`, `#`, `%`, `;`, `..`, a space or a control character, is
+  refused with a 409 naming the key and none of the value, with nothing
+  sent: encoded or not, a server behind might read it as another path. The
+  segment it makes must read as one segment to every server: no dot
+  segment (`climbs`, as a request's own segments), and none a server
+  drops (`vanishes`, as a `*` of an allow list takes none:
+  `path('..{T}')` with `.` is `...`); and the URL that goes out must be
+  the one the app sent with that one segment changed, or nothing goes.
+- **One rule.** One `path()` per credential, beside any other rules; before
+  a `sigv4()`, which signs the path as filled.
+- **Shaped placeholders.** aiogram checks its token's shape before it
+  sends anything (`<digits>:<anything>`, no whitespace:
+  `aiogram/utils/token.py`), and reads the bot's id from it; grammY,
+  Telegraf and python-telegram-bot only refuse an empty one. So
+  `placeholder: prefix('123456789:')`, the bot's own id (no secret: its
+  users see it), gives aiogram `123456789:coffre_use_…`, and the slot is
+  then `bot123456789:coffre_use_…` exactly. No new kind of placeholder is
+  needed. A route with a `path()` rule takes a prefix with no `/`.
+- **What it says, what it logs.** coffre's refusals quote the path as the
+  app sent it; the audit's `credential.use` names the upstream's host, as
+  for every rule; no log line has the URL. A `Location` is read as a URL
+  first, a relative one (`getMe`, `?offset=1`, `#top`, an empty one)
+  against the URL the app sent, never the one the value went out in. If
+  it is under the upstream, each segment of its path that is the segment
+  as it went out, compared decoded once (`%3a` and `%41` are `:` and
+  `A`), gets the app's segment back, so the app follows it through the
+  proxy with its placeholder
+  (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`).
+  Only the path's segments: swapped in the text before it is read,
+  `bot123456789%3AAAE…/getMe` would become the scheme `bot123456789:`,
+  and a value that is the upstream's own `host:port` would replace its
+  authority. A `query()` rule's parameter gets the app's placeholder the
+  same way, every other pair of the query left as the upstream wrote it,
+  taken from the raw `Location` (`?` to `#`) and redacted before any
+  parser reads it: written again through `searchParams`, `echo=%41%42…`,
+  a key that is those escapes, would be `echo=AB…`, and the parser's own
+  copy encodes `'` as `%27`, so `%41%42'` would be `%41%42%27`; neither
+  is a form redaction names. Its spaces go as `%20`, as the parser's
+  would: `?cursor=abc #top` without its fragment ends in one, which a
+  header's value loses.
+  The value anywhere else in it, or in an answer's headers or text body,
+  is redacted as any value is (section 4), its encoded form and the whole
+  segment included. The path is the parser's, which encodes `"` or a
+  space, so a check comes last: the `Location` read as the app's client
+  reads it (decoded once, tabs and newlines dropped, `\` as `/`) must
+  hold no value, nor any echo of one (section 4's list), read the same
+  way, or it is a 502 with nothing of the answer (`/x%41%42"` is
+  `/x%41%42%22`, both `/xAB"`; Go's JSON `foo\u003cbar`, for the value
+  `foo<bar`, is `foo/u003cbar` in the parsed path, which the echo's own
+  reading matches). Whether a form is long enough to mask is decided as
+  written, before the reading shortens it: `%41%42%43"`, a key of ten
+  characters, reads `ABC"`, which the check still looks for. As with
+  `query()`, the URL that goes out holds the
+  value, and so does what a platform records of outgoing requests
+  (Workers' tracing, which what `coffre init` writes leaves off). The
+  other way, the handle rides in the URL the app sends, as a `query()`
+  rule's does, so a log of incoming URLs (Workers Logs, which `coffre
+  init` turns on) holds the handle, never the value; a handle reaches only
+  the environments it was made for, until it ends or is revoked. A
+  workload's session puts nothing of its own in the path.
+- **In the UI.** The Proxy tab's routes take a Path rule, its template
+  checked by the vault's save as code's is at startup.
 
 **Postgres through a tunnel (PR 3, built on Node).** The deployment
 names the key that holds the database's real URL:

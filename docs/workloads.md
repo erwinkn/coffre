@@ -156,6 +156,22 @@ and 256 fields at most. Every other byte goes on as the app sent it. The proof s
 body as sent, and coffre recomputes the `Content-Digest` of the body that
 goes out ([credential-proxy.md, section 5](design/credential-proxy.md#5-the-other-shapes)).
 
+### A key in the path
+
+Telegram's Bot API takes its token in the path, `/bot<token>/sendMessage`.
+The credential names the segment, `path('bot{TELEGRAM_BOT_TOKEN}')`, and
+the app gives its SDK anything as the token: coffre puts the value in the
+first segment under the upstream that the template frames, after the
+allow list has read the path as the app sent it.
+
+```ts
+const bot = new Bot('coffre', { client: { apiRoot: coffre.url('telegram'), fetch: coffre.fetch } });
+```
+
+A path with no such segment is a 400, and a value a server could read as
+another path (`/`, `..`, `?`, `%`, …) is a 409, with nothing sent
+([credential-proxy.md, section 5](design/credential-proxy.md#5-the-other-shapes)).
+
 ### `read`: the escape hatch
 
 ```ts

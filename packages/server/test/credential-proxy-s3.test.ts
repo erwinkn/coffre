@@ -19,7 +19,7 @@ import { clientFor, LOG, usesLogged } from './api-fixture.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
-import { credentialProxy, sigv4 } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, path, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { presignV4, signV4 } from '../src/plugins/sigv4.ts';
 
 const ACCESS_KEY_ID = 'AKIAREALKEY000000001';
@@ -382,4 +382,32 @@ test('an upload past what the proxy holds streams through: 20 MiB, signed again,
   await client.send(new PutObjectCommand({ Bucket: 'uploads', Key: 'big.bin', Body: big, ContentLength: big.length }));
   assert.equal(objects.get('uploads/big.bin'), `${big.length} bytes`);
   assert.ok(seen.at(-1)!.verified);
+});
+
+// A path rule before SigV4 (review r2 of #483): the bucket a secret of its own, in the first segment, and the signature
+// made on the path the bucket went into, which S3 recomputes, never the one the app sent.
+test("a path rule's segment is filled before SigV4 signs: S3 verifies the signature on the bucket the app never saw", async () => {
+  const BUCKET = 'tenant-7f3k9q';
+  runtime.plugins = checkPlugins([credentialProxy({
+    credentials: {
+      bucketed: {
+        upstream: s3Url,
+        inject: [path('{BUCKET}'), sigv4({ accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', region: REGION, service: 's3' })],
+      },
+    },
+    insecureUpstreams: true,
+  })]);
+  await clientFor(deps, ROOT).secrets.set('market/dev', { BUCKET: { value: BUCKET, sensitivity: 'sensitive' } });
+  const { handle } = await appClient();
+  const signed = { authorization: `AWS4-HMAC-SHA256 Credential=${handle}/20261018/${REGION}/s3/aws4_request, SignedHeaders=host, Signature=00`, 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' };
+  const put = await route(`/use/market/dev/bucketed/${handle}/kyc/a.txt`, { method: 'PUT', headers: signed, body: 'hello' });
+  assert.equal(put.status, 200, await put.clone().text());
+  const got = await route(`/use/market/dev/bucketed/${handle}/kyc/a.txt`, { headers: signed });
+  assert.equal(await got.text(), 'hello');
+  assert.deepEqual(seen.map((request) => [request.url, request.verified]), [[`/${BUCKET}/kyc/a.txt`, true], [`/${BUCKET}/kyc/a.txt`, true]]);
+  assert.ok(seen.every((request) => !request.authorization.includes(handle)));
+  // The handle in its signature but not in the bucket's segment: refused, nothing sent.
+  const misplaced = await route('/use/market/dev/bucketed/uploads/kyc/a.txt', { headers: signed });
+  assert.equal(misplaced.status, 400);
+  assert.equal(seen.length, 2);
 });

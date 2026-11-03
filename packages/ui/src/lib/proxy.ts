@@ -26,7 +26,7 @@ import {
   type ProxyTunnel,
   type ProxyVerifier,
 } from '@coffre/core/proxy';
-import { allows, climbs, NOTHING, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
+import { allows, climbs, NOTHING, pathSlot, pathTemplate, readPattern, requestSegments, type AllowEntry } from '@coffre/core/proxy-match';
 import { CREDENTIAL_NAME } from '@coffre/core/workloads';
 
 export type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyKind, ProxyLimit, ProxyMethod, ProxyRoute, ProxySigner, ProxyTunnel, ProxyVerifier };
@@ -40,8 +40,8 @@ export const KIND_LABELS: Record<ProxyKind, string> = { route: 'Route', signer: 
 const KIND_ORDER: readonly ProxyKind[] = ['route', 'tunnel', 'signer', 'verifier'];
 
 export type InjectKind = ProxyInject['kind'];
-export const INJECT_KINDS: readonly InjectKind[] = ['header', 'query', 'form', 'json', 'basic', 'sigv4'];
-export const INJECT_LABELS: Record<InjectKind, string> = { header: 'Header', query: 'Query', form: 'Form', json: 'JSON', basic: 'Basic', sigv4: 'SigV4' };
+export const INJECT_KINDS: readonly InjectKind[] = ['header', 'query', 'form', 'json', 'path', 'basic', 'sigv4'];
+export const INJECT_LABELS: Record<InjectKind, string> = { header: 'Header', query: 'Query', form: 'Form', json: 'JSON', path: 'Path', basic: 'Basic', sigv4: 'SigV4' };
 export const ENCODINGS: readonly ProxyHmac['encoding'][] = ['hex', 'base64', 'base64url'];
 
 // --- what the page shows ---------------------------------------------------------------------
@@ -528,6 +528,8 @@ export function blankInject(kind: InjectKind): ProxyInject {
       return { kind, accessKeyId: '', secretAccessKey: '', sessionToken: null, region: '', service: 's3' };
     case 'header':
       return { kind, name: 'authorization', template: 'Bearer ' };
+    case 'path':
+      return { kind, template: '' };
     default:
       return { kind, name: '', template: '' };
   }
@@ -614,7 +616,7 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
   if (rest.map(asSent).some(climbs)) return { url, refusal: '400: the path may not climb out of the upstream' };
   const under = target === null ? '' : new URL(base).pathname.replace(/\/$/, '');
   const tail = target === null ? written : target.pathname.slice(under.length) || '/';
-  if (route.allow === null) return { url, refusal: null };
+  if (route.allow === null) return slotted(route, url, target, under, tail);
   const from = allowAs?.from ?? 'ui';
   // `allow: []` takes no request: a 403 whatever the method, as the proxy answers it.
   if (from !== 'legacy' && route.allow.length === 0) return { url, refusal: '403: this route takes no request' };
@@ -630,7 +632,46 @@ export function sampleCall(route: ProxyRoute, method: string, path: string, allo
   // Legacy `paths: []` takes no path, but its `methods` answer first, as code's: `methods: ['POST'], paths: []` is a 405 to a GET, a 403 to a POST.
   if (from === 'legacy' && route.allow.length === 0) entries.push({ methods: legacy, path: NOTHING });
   const answer = allows(entries, method, requestSegments(tail, from === 'legacy'));
-  return { url, refusal: answer === 'allowed' ? null : answer === 'method' ? `405: no allow entry takes ${method} there` : `403: no allow entry takes ${method} ${tail}` };
+  if (answer !== 'allowed') return { url, refusal: answer === 'method' ? `405: no allow entry takes ${method} there` : `403: no allow entry takes ${method} ${tail}` };
+  return slotted(route, url, target, under, tail);
+}
+
+/**
+ * A sample call through a route with a path rule: the URL with the segment the proxy puts its key in (`pathSlot`, the
+ * proxy's own) written as the rule's template, `bot{TELEGRAM_BOT_TOKEN}`, or the proxy's 400 for a path with none.
+ */
+function slotted(route: ProxyRoute, url: string, target: URL | null, under: string, tail: string): { url: string; refusal: string | null } {
+  const rule = route.inject.find((one) => one.kind === 'path');
+  const read = rule === undefined ? null : pathTemplate(rule.template);
+  if (rule === undefined || read === null || target === null) return { url, refusal: null };
+  const at = pathSlot(read, tail);
+  if (at === -1) return { url, refusal: `400: no segment of this path is ${rule.template}, where the key goes` };
+  const segments = tail.split('/');
+  segments[at] = rule.template;
+  return { url: `${target.origin}${under}${segments.join('/')}${target.search}`, refusal: null };
+}
+
+/**
+ * A sample path through a route: its first allow entry's, a `*` an id and a last `**` an `x`. With a path rule, the
+ * rule's segment, as written (`bot*{T}` keeps its `*`), goes where the sample call takes it: in a wildcard's place,
+ * else beneath the entry's path (`/file` is `/file/bot{T}`), else before it.
+ */
+export function samplePath(route: ProxyRoute): string {
+  const entry = route.allow?.[0];
+  const pattern = entry?.path ?? '/';
+  const written = pattern === '/' ? [] : pattern.replace(/^\//, '').split('/');
+  const segments = written.map((segment) => (segment === '**' ? 'x' : segment.replace(/\*/g, 'id')));
+  const rule = route.inject.find((one) => one.kind === 'path');
+  if (rule === undefined) return `/${segments.join('/')}`;
+  const wild = written.flatMap((segment, at) => (segment.includes('*') ? [at] : []));
+  const tame = written.flatMap((segment, at) => (segment.includes('*') ? [] : [at]));
+  const candidates = [
+    ...wild.map((at) => segments.with(at, rule.template)),
+    ...Array.from({ length: segments.length + 1 }, (_, k) => segments.toSpliced(segments.length - k, 0, rule.template)),
+    ...tame.map((at) => segments.with(at, rule.template)),
+  ].map((one) => `/${one.join('/')}`);
+  const method = entry?.methods[0] ?? 'GET';
+  return candidates.find((path) => sampleCall(route, method, path).refusal === null) ?? candidates[0]!;
 }
 
 /** A segment as a URL sends it: `/À-propos` goes as `/%C3%80-propos`, what is ASCII as written. */
@@ -676,6 +717,8 @@ export function injectInWords(inject: ProxyInject): string {
       return `${inject.name}=${inject.template}`;
     case 'json':
       return `"${inject.name}": "${inject.template}"`;
+    case 'path':
+      return `/${inject.template}/`;
     case 'basic':
       return `${inject.user}:${inject.password}`;
     case 'sigv4':
@@ -836,6 +879,8 @@ const injectCode = (inject: ProxyInject) => {
       return `basic(${q(inject.user)}, ${q(inject.password)})`;
     case 'sigv4':
       return `sigv4({ accessKeyId: ${q(inject.accessKeyId)}, secretAccessKey: ${q(inject.secretAccessKey)}${inject.sessionToken === null ? '' : `, sessionToken: ${q(inject.sessionToken)}`}, region: ${q(inject.region)}, service: ${q(inject.service)} })`;
+    case 'path':
+      return `path(${q(inject.template)})`;
     default:
       return `${inject.kind}(${q(inject.name)}, ${q(inject.template)})`;
   }

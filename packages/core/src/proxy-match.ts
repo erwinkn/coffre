@@ -108,9 +108,10 @@ export function climbs(segment: string): boolean {
  * and dots, as Windows' do, decoded however often: `;x`, `%3Bx`, `%20`,
  * `...`. Such a server reads `/companies/;x/documents` as
  * `/companies//documents`, or `/companies/documents`, and a glob counted
- * it as one.
+ * it as one. A `path()` rule's filled segment is held to it too: `..{T}`
+ * with `.` is `...`, which goes as no segment.
  */
-function vanishes(decoded: string): boolean {
+export function vanishes(decoded: string): boolean {
   return anyReading(decoded, (view) => /^[ .]*$/.test(view.split(';')[0]!));
 }
 
@@ -299,4 +300,59 @@ export const MAX_MESSAGE_BYTES = 1024 * 1024;
  */
 export function alike(name: string): string {
   return name.split('[', 1)[0]!.toUpperCase().toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * A `path()` rule's template (docs/design/credential-proxy.md, section 5, "A
+ * segment of the path"): one segment, its key once, `bot{TELEGRAM_BOT_TOKEN}`.
+ * The text around the key goes out as written, so it is a segment's own
+ * characters (RFC 3986's pchar), but `%` and `;`, which a server behind may
+ * read as another: letters, digits and -._~!$&'()*+,=:@.
+ */
+export const PATH_TEMPLATE = /^([A-Za-z0-9._~!$&'()*+,=:@-]*)\{([A-Za-z_][A-Za-z0-9_]{0,127})\}([A-Za-z0-9._~!$&'()*+,=:@-]*)$/;
+
+/** A `path()` rule's template, read: the text before its key and after it, and the key; null for no template of one segment. */
+export function pathTemplate(template: string): { before: string; key: string; after: string } | null {
+  const read = PATH_TEMPLATE.exec(template);
+  return read === null ? null : { before: read[1]!, key: read[2]!, after: read[3]! };
+}
+
+/**
+ * Where a `path()` rule's key goes in a path under the upstream, as it goes
+ * (`/botcoffre_use_…/sendMessage`): the index, in its segments split at `/`
+ * (the first, before the leading slash, is 0), of the first that the
+ * template frames, decoded once as an allow list reads it: the text before
+ * the key and after it, at least one character between. A template of its
+ * key alone frames the first segment. -1 for none. What the app sent, never
+ * the value, decides it.
+ *
+ *   bot{T}, /botcoffre_use_…/sendMessage             1
+ *   bot{T}, /file/botcoffre_use_…/photos/file_0.jpg  2
+ *   bot{T}, /getMe                                   -1
+ */
+export function pathSlot(template: { before: string; after: string }, relative: string): number {
+  const segments = relative.split('/');
+  for (let at = 1; at < segments.length; at++) {
+    const decoded = bytesOf(segments[at]!);
+    if (decoded.length > template.before.length + template.after.length && decoded.startsWith(template.before) && decoded.endsWith(template.after)) return at;
+  }
+  return -1;
+}
+
+/**
+ * A value as the part of a path segment a `path()` rule puts it in:
+ * percent-encoded, but letters, digits, -._~ and `:` (Telegram's
+ * `123456789:AAE…` goes as it is). Null for one a server behind might read
+ * as another path however it is encoded, which goes nowhere: empty, or
+ * holding `/`, `\`, `?`, `#`, `%`, `;`, `..`, whitespace or a control
+ * character. The segment it makes is checked again whole (`climbs`).
+ */
+export function pathValue(value: string): string | null {
+  if (value === '' || /[/\\?#%;\s\u0000-\u001f\u007f]/.test(value) || value.includes('..')) return null;
+  try {
+    return encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`).replaceAll('%3A', ':');
+  } catch {
+    // A lone surrogate, which no UTF-8 holds.
+    return null;
+  }
 }
