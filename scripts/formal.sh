@@ -496,6 +496,9 @@ REMOVALS=(
   "WriteLocks TouchFirst NoWaitCycle"
   # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
   "WritingFallBack FallBackUncommitted OneWritePerRequest"
+  # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its
+  # decision does not stop it (review r3 of #469).
+  "WritingFallBack TodayPolicyHeld TodayPolicyStandsAtCommit"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"
@@ -598,8 +601,9 @@ EXPECTED=(
   # The rotation entry deleted before its first seal, by someone who holds the old key, who signs a pair over its
   # place: the rotation's window, a tick long, which no check sees (Rotation.tla).
   "RotationWindow VerifiedSound"
-  # Today's path decides at the vault's wrap and commits after, weighing only the environment and the key's row again:
-  # a revoke between the two does not stop the write (Writing.tla's WToday, WTodayCommit; review r1 of #469). Every
+  # Today's path decides at the vault's wrap and commits after, weighing only the policy (`policyStill`), the
+  # environment and the key's row again: a grant revoked or a session ended after the front door does not stop the
+  # write (Writing.tla's WToday, WTodayCommit; reviews r1 and r3 of #469). Every
   # write has had this window since 0.14; the two-trip path closes it for the writes it serves (WritesStandAtCommit),
   # 0.16 for every write (docs/design/two-trips.md, PR 6).
   "WritingFallBack TodayStandsAtCommit"

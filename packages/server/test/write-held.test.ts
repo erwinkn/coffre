@@ -55,11 +55,22 @@ async function world({ fast = true }: { fast?: boolean } = {}) {
   // Each `writeKeys` answer, and what runs once, right after the next one, before the app's hold.
   const answers: WriteKeysOutcome[] = [];
   let next: (() => Promise<void>) | null = null;
+  // What runs once, right after the vault's next `wrap` (today's path's decision), before the app's transaction.
+  let wrapped: (() => Promise<void>) | null = null;
   const hooked = new Proxy(vault, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key === 'writeKeys' && !fast) return undefined;
       if (typeof value !== 'function') return value;
+      if (key === 'wrap') {
+        return async (...args: unknown[]) => {
+          const answer: unknown = await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
+          const adversary = wrapped;
+          wrapped = null;
+          if (adversary !== null) await adversary();
+          return answer;
+        };
+      }
       if (key !== 'writeKeys') return (value as (...args: unknown[]) => unknown).bind(target);
       return async (input: WriteKeysInput) => {
         const answer = await (value as Vault['writeKeys'])!.call(target, input);
@@ -99,7 +110,7 @@ async function world({ fast = true }: { fast?: boolean } = {}) {
     }), runtime, { sourceIp: null });
     assert.ok(response.ok, await response.text());
   };
-  return { deps, root, runtime, ada, session, write, signOut, answers, between: (adversary: () => Promise<void>) => void (next = adversary) };
+  return { deps, root, runtime, ada, session, write, signOut, answers, between: (adversary: () => Promise<void>) => void (next = adversary), afterWrap: (adversary: () => Promise<void>) => void (wrapped = adversary) };
 }
 
 const { secrets, secretVersions, vaultMembers, vaultGrants, credentials } = tablesOf(db.owner);
@@ -469,6 +480,17 @@ test("a try the vault served, abandoned at its hold, then refused; Ada's grant g
   assert.equal((await versionOf(row.currentVersionId))?.createdBy, ADA);
   const [session] = await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, w.ada.id));
   assert.notEqual(session?.revokedAt, null, 'her session was revoked before the write committed');
+});
+
+test("Developers' write taken away between today's wrap and its commit: 409 `policy_changed`, nothing written, as `audited` holds the commit to the policy the caller was loaded with (WritingFallBack, TodayPolicyHeld; review r3 of #469)", { skip: POSTGRES }, async () => {
+  const w = await world({ fast: false });
+  w.afterWrap(async () => {
+    await w.root.roles.set('developer', { name: 'Developer', description: 'Read and use secrets.', permissions: ['secret.read', 'secret.use'], protected: ['secret.use'] });
+  });
+  const wrote = await w.write({ API_KEY: 'fake-ada' });
+  assert.equal(wrote.status, 409, JSON.stringify(wrote.body));
+  assert.equal(wrote.body.reason ?? (wrote.body.error as { reason?: string } | undefined)?.reason, 'policy_changed', JSON.stringify(wrote.body));
+  assert.equal((await keyRow('API_KEY'))!.currentVersion, 1);
 });
 
 test("a try the vault served, abandoned at its hold, then refused StaleFirst: today's path refuses it as it would have alone, and the abandoned try leaves only its `key.wrap`, which no write names (WToday)", { skip: POSTGRES }, async () => {

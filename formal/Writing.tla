@@ -39,26 +39,29 @@
 (* Each asks again at most MaxTries times in all, then answers 409.        *)
 (*                                                                         *)
 (* Today's path (PR 3: `served: false`). A key write the vault does not    *)
-(* serve goes as every write went before: the vault decides on the rows    *)
-(* as they are, each object's row held to its newest change, and that      *)
-(* change to its MAC once T190 is in it (TodayChangeMacChecked), and wraps *)
-(* the key; then the app's transaction, under 0.14's head and the fence,   *)
+(* serve goes as every write went before: the vault decides on the rows as *)
+(* they are, each object's row held to its newest change, and that change  *)
+(* to its MAC once T190 is in it (TodayChangeMacChecked), and wraps the    *)
+(* key; then the app's transaction, under 0.14's head and the fence,       *)
 (* writes on that decision (WToday, then WTodayCommit). A change between   *)
-(* the two does not stop it (TodayStandsAtCommit, EXPECTED broken: the     *)
-(* window every write has had since 0.14; review r1 of #469). A write      *)
-(* goes there from its vault step (an object but the caller's credential   *)
-(* not as the log has it) or from its decision (refused), on its first try *)
-(* or on a later one, after a try the vault served and the app's hold      *)
-(* abandoned: that try's request number and its wrap stay (0.14's          *)
-(* `key.wrap` entry), a gap the checkpointer seals past and a record of a  *)
-(* wrap no change names. The caller's own credential, not as its log has   *)
-(* it or ended, answers 401 and never goes there: the credential's own     *)
-(* check holds its row to its MAC alone, and would take one a database     *)
-(* writer put back meanwhile. Nor is it weighed there again (review r2 of  *)
-(* #469): today's path goes on with the caller the app authenticated, on   *)
-(* the first try's read or by that check (Auth), and a session revoked     *)
-(* after does not stop the write (TodayCallerStandsAtDecision, EXPECTED    *)
-(* broken, as today's front door to its wrap; WritingCaller).              *)
+(* the two does not stop it, but for the roles' or the policy's, which the *)
+(* commit holds to as the caller was loaded with (TodayPolicyHeld,         *)
+(* `policyStill`; review r3 of #469): a grant revoked, a session ended     *)
+(* (TodayStandsAtCommit, EXPECTED broken: the window every write has had   *)
+(* since 0.14; review r1). A write goes there from its vault step (an      *)
+(* object but the caller's credential not as the log has it) or from its   *)
+(* decision (refused), on its first try or on a later one, after a try the *)
+(* vault served and the app's hold abandoned: that try's request number    *)
+(* and its wrap stay (0.14's `key.wrap` entry), a gap the checkpointer     *)
+(* seals past and a record of a wrap no change names. The caller's own     *)
+(* credential, not as its log has it or ended, answers 401 and never goes  *)
+(* there: the credential's own check holds its row to its MAC alone, and   *)
+(* would take one a database writer put back meanwhile. Nor is it weighed  *)
+(* there again (review r2 of #469): today's path goes on with the caller   *)
+(* the app authenticated, on the first try's read or by that check (Auth), *)
+(* and a session revoked after does not stop the write                     *)
+(* (TodayCallerStandsAtDecision, EXPECTED broken, as today's front door to *)
+(* its wrap; WritingCaller).                                               *)
 (*                                                                         *)
 (* Every other change (a revoke, a role or policy change, an archive, a    *)
 (* demotion, a rename) is one atomic step here, as each is one statement   *)
@@ -179,7 +182,12 @@ CONSTANTS
     \* A request goes down today's path only from a try that committed
     \* nothing: the vault's refusal, or a hold that failed and rolled back.
     \* Without, one whose seal wait failed after its COMMIT goes down it too.
-    FallBackUncommitted
+    FallBackUncommitted,
+    \* Today's commit holds to the policy the caller was loaded with: the
+    \* newest change of the roles and of the policy, as the front door read
+    \* them (`audited`'s `policyStill`, 409 `policy_changed`). Without, a
+    \* roles change between today's decision and its commit does not stop it.
+    TodayPolicyHeld
 
 Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
@@ -335,7 +343,7 @@ Actor(p) == IF ActorFromRead THEN l[p].read[Token].name ELSE names[Token]
 \* A committed change, as the ghosts record it.
 Committed(p, o, stands) ==
     [p |-> p, n |-> next, stands |-> stands, replays |-> Replays(p),
-     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0, today |-> FALSE, decided |-> TRUE, caller |-> TRUE,
+     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0, today |-> FALSE, decided |-> TRUE, caller |-> TRUE, policy |-> TRUE,
      t |-> tries[p], wrap |-> IF "wrap" \in DOMAIN l[p] THEN l[p].wrap ELSE tries[p]]
 
 -----------------------------------------------------------------------------
@@ -357,7 +365,12 @@ Request(p, r) == [p |-> p, n |-> next, live |-> Decide(p, r), replay |-> Decide(
 \* today's path, after one, goes on with the caller the first checked
 \* (review r2 of #469). Only the token's resolution is kept: the caller's
 \* standing is the read's, and no step after rechecks it on today's path.
-Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token]] ELSE l[p].auth
+\* With it, the policy the caller was loaded with: the newest change of the
+\* roles and of the policy (`Caller.policySeq`), which today's commit holds
+\* to (TodayPolicyHeld).
+PolicyObjects == {"roles", "policy"}
+Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token], pol |-> [o \in PolicyObjects |-> seal[o]]]
+                           ELSE l[p].auth
 
 \* The vault's statement: the read under the fence shared, the request
 \* numbered. One round trip. The caller's own credential not as its log
@@ -459,8 +472,10 @@ WCommit(p) ==
 \* wraps the key (0.14's `key.wrap`), then the app's transaction, under
 \* 0.14's head and the fence, writes on that decision. Two steps (review r1
 \* of #469): a change may come between them, which today's commit does not
-\* weigh again (TodayStandsAtCommit, a window every write has had since
-\* 0.14, which the two-trip path closes for the writes it serves).
+\* weigh again but for the roles and the policy (TodayPolicyHeld, review
+\* r3): a grant revoked, a session ended (TodayStandsAtCommit, a window
+\* every write has had since 0.14, which the two-trip path closes for the
+\* writes it serves).
 \*
 \* The decision holds each object but the caller's credential to its newest
 \* change (the row's seal), and that change to its MAC once T190 is in it.
@@ -493,14 +508,17 @@ WToday(p) ==
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
 
 \* ... and the app's transaction: under 0.14's head and the fence, it finds
-\* the environment still live (`checkEnvironment`) and the key's row where
+\* the policy the caller was loaded with still the newest (`policyStill`,
+\* else 409 `policy_changed`, the end; review r3 of #469), the environment
+\* still live (`checkEnvironment`) and the key's row where
 \* the decision found it (`app_change`, else `ObjectMoved`, asked again);
 \* then the key's next version, its change numbered. Its write binds no
 \* read, so it replays trivially; its wrap is its own (0).
 WTodayCommit(p) ==
     /\ pc[p] = "w.tcommit"
     /\ head = None /\ held = None
-    /\ IF ~ok["env"]
+    /\ IF \/ TodayPolicyHeld /\ \E o \in PolicyObjects : seal[o] # l[p].auth.pol[o]
+          \/ ~ok["env"]
          THEN /\ Goto(p, "done")
               /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
        ELSE IF seal["key"] # l[p].seals["key"]
@@ -511,6 +529,7 @@ WTodayCommit(p) ==
               /\ l' = [l EXCEPT ![p].n = next]
               /\ writes' = writes \cup {[p |-> p, n |-> next, today |-> TRUE,
                                            stands |-> \A o \in WriteObjects \ {"key"} : ok[o],
+                                           policy |-> \A o \in PolicyObjects : ok[o],
                                            decided |-> l[p].decided, caller |-> l[p].caller,
                                            replays |-> TRUE, from |-> seal["key"], was |-> seal["key"],
                                            authentic |-> IF ActorFromRead THEN l[p].auth.tok = 0 ELSE names[Token] = 0,
@@ -695,8 +714,13 @@ TodayStandsAtDecision == \A w \in writes : w.today => w.decided
 \* #469: revoked after the first try's check, the write still goes).
 TodayCallerStandsAtDecision == \A w \in writes : w.today => w.caller
 
-\* ... not at its commit: a revoke between the vault's wrap and the app's
-\* COMMIT does not stop it (EXPECTED in scripts/formal.sh: the window every
+\* ... and commits only while the roles and the policy are still as the
+\* caller was loaded with (`policyStill`): a roles or policy change after
+\* the front door stops it, 409 `policy_changed` (review r3 of #469).
+TodayPolicyStandsAtCommit == \A w \in writes : w.today => w.policy
+
+\* ... not at its commit: a revoke or a session's end between the vault's
+\* wrap and the app's COMMIT does not stop it (EXPECTED in scripts/formal.sh: the window every
 \* write has had since 0.14, which the two-trip path closes for the writes
 \* it serves, and 0.16 for every write, PR 6).
 TodayStandsAtCommit == \A w \in writes : w.today => w.stands

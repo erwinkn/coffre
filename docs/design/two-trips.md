@@ -353,10 +353,12 @@ rename, and another environment made under the old name: a try asks by
 slugs, and the route writes to the first's ids), and a try that finds a
 key a secret that an earlier one found sensitive (review r1 of #469). That
 path decides at the vault, as it always has, and its transaction commits
-on that decision, weighing again only the environment and the key's row;
-it answers and logs as it always has (formal/Writing.tla, `WToday` and
-`WTodayCommit`). A revoke between its decision and its commit does not
-stop it, the window every write has had since 0.14
+on that decision, weighing again only the policy the caller was loaded
+with (`policyStill`: a role redefined or the policy changed since, 409
+`policy_changed`), the environment and the key's row; it answers and logs
+as it always has (formal/Writing.tla, `WToday` and `WTodayCommit`). A
+grant revoked or a session ended between its decision and its commit does
+not stop it, the window every write has had since 0.14
 (`TodayStandsAtCommit`, an expected gap in `scripts/formal.sh`), which this
 path closes for the writes it serves and PR 6 for every write. PR 6's outcome record moves only
 the refusals off it; what the two-trip path does not serve (forks until

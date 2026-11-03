@@ -2285,10 +2285,15 @@ reaches it on any try: after a try the vault served and whose hold failed,
 the abandoned try's number and wrap stay, a gap the tick seals past and a
 wrap no change names. `TodayStandsAtDecision`: everything the wrap weighs
 (the caller's member, roles, policy, place, parent) stood, by the log,
-when the vault decided. Not at its commit: a revoke or a role
-redefined between the two does not stop it, the window every write has
-had since 0.14 (`TodayStandsAtCommit`, which TLC must find broken in
-`WritingFallBack`: listed under EXPECTED in `scripts/formal.sh`). The
+when the vault decided. At its commit, the roles and the policy still as
+the caller was loaded with (`TodayPolicyStandsAtCommit`: `audited`'s
+`policyStill`, 409 `policy_changed`; review r3 of #469 found the r2 model
+left it out, and so let a role redefined after the wrap commit, which the
+code refuses). The rest it does not weigh again: a grant revoked or a
+session ended after the front door does not stop it, the window every
+write has had since 0.14 (`TodayStandsAtCommit`, which TLC must find
+broken in `WritingFallBack`, on a session revoked: listed under EXPECTED
+in `scripts/formal.sh`). The
 two-trip path closes it for the writes it serves (`WritesStandAtCommit`
 holds of those alone); 0.16 closes it for every write
 ([two-trips.md](design/two-trips.md), PR 6). Review r1 of #469 found the
@@ -2311,6 +2316,7 @@ it.
 | the Worker holds each object's newest change in the read to its MAC (`changeHolds`) before StaleFirst weighs its seal (ChangeMacChecked, T190) | `WritesStandAtCommit`, `AddsStandAtCommit` (Forge): a revoked session's row, or a demoted adder's, put back with its seal written into the log's newest change of it; row and log agree, the read and its hold agree, and the write or the add commits on a standing the log's MAC'd changes deny |
 | today's path holds each object's newest change to its MAC too (TodayChangeMacChecked, T190 on that path) | `TodayStandsAtDecision` (Forge): Ada's grant revoked and her member row put back with its seal forged; the two-trip path refuses it (`tampered`) and sends it down today's path, which decides on it |
 | a request goes down today's path only from a try that committed nothing (FallBackUncommitted) | `OneWritePerRequest` (FallBack): a seal wait failing after the COMMIT taken for `served: false`, and the key written twice |
+| today's commit holds to the policy the caller was loaded with (TodayPolicyHeld: `audited`'s `policyStill`) | `TodayPolicyStandsAtCommit` (FallBack): the roles redefined after today's wrap, and the write commits on a right the caller no longer has (review r3 of #469) |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its
