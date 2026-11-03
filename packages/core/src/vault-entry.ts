@@ -48,6 +48,8 @@ export const VAULT_METHODS = [
   'proxyItem',
   'prepare',
   'writeKeys',
+  'admitRead',
+  'admitWrite',
   'waitSealed',
   'signIn',
   'revokeCredential',

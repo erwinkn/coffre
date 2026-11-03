@@ -56,6 +56,25 @@
   credential's JSON rule as for a UI route's handle. It now reads each
   character once.
 
+- **A member add makes three round trips, not fourteen (T179 PR 5).**
+  On Postgres with 0.15's log, `PUT /members/<member>` adding someone
+  new (a person, with an instance role and its scope or none, or a
+  service account), by an admin's or an instance Owner's session or CLI
+  login, is served before the router: the vault reads everything its
+  decision weighs in one statement (`admit_read`, migration 0062),
+  decides on that read alone, checking each object's newest change's
+  MAC and seal first, and prepares the add under its own MAC; the app
+  checks the caller's rows on what it answered and hands the add back;
+  the vault writes it in one transaction of two round trips that holds
+  the same read again under the fence (`admit_hold`): a demotion, a
+  revoke, a roles change or another add of the same member in between
+  makes the add read again, three tries in all, then 409 `changed` with
+  `Retry-After: 1`. About 80 ms at 20 ms a round trip, where it was 320.
+  Everything else adds as before: first grants (`access`), a set-up by
+  someone who runs no instance, a re-admit or a role change, a member
+  the config names, SQLite, and every refusal, which that path answers
+  and logs as before, after the vault's read. 0.14's `member.add` entry
+  is still written; 0.16 drops it, and the add to two round trips.
 - **A key write makes five round trips, not sixteen (T179 PR 3).** On
   Postgres with 0.15's log, `PATCH /secrets/<project>/<env>` of values
   (given or generated), at an environment of its own, by a session, a CLI

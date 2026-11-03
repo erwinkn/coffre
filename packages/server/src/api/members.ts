@@ -23,6 +23,7 @@ import {
   type Scope,
 } from '@coffre/core/access';
 import { isTombstone } from '@coffre/core/schemas';
+import type { Admitted } from '@coffre/core/vault';
 import type { Queryable } from '@coffre/db';
 import { credentials, identities, mcpConnections } from '@coffre/db/schema';
 import { SNAPSHOT } from '@coffre/db/dialect';
@@ -42,6 +43,7 @@ import {
   priorCredentials,
   missingMembers,
   places,
+  touchCredential,
   updateAuth,
   type MemberRow,
   type PlaceRow,
@@ -50,9 +52,9 @@ import {
 import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf, projectsReached } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, connectionRevokes, retrying, revokes } from './changes.ts';
+import { AppChanges, connectionRevokes, ObjectMoved, retrying, revokes } from './changes.ts';
 import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
-import { badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { keeps015 } from './changes.ts';
 import { formatMember, parseGrantee, type MemberRef, type Path } from './paths.ts';
@@ -244,7 +246,11 @@ function placed(grants: StoredGrant[], known: PlaceRow[]): PlacedGrant[] {
  * there. Its environments are slugs already.
  */
 export function scopeView(scope: Scope, known: PlaceRow[]): Scope {
-  const names = slugs(known);
+  return scopeViewBy(scope, slugs(known));
+}
+
+/** A scope as the API shows it, projects by slug, from the slugs of the projects it names. */
+function scopeViewBy(scope: Scope, names: ReadonlyMap<string, string>): Scope {
   const named = (ids: string[]) => ids.flatMap((id) => names.get(id) ?? []).sort();
   const projects: Filter = scope.projects === 'all' ? 'all' : 'only' in scope.projects ? { only: named(scope.projects.only) } : { except: named(scope.projects.except) };
   return { projects, environments: scope.environments };
@@ -746,6 +752,12 @@ export async function putMember(
       if (admitted !== undefined) await endPriorMembership(ctx, member, admitted.generation);
       return { member: principal, instanceRole: 'member' as const, scope: EVERYWHERE, created: admitted?.created ?? false, changes };
     }
+    // A first add the vault decided on its own read (T179 PR 5): handed back to its write, which holds that read.
+    const held = ctx.admission?.asked.principal === principal ? await admitHeld(ctx) : null;
+    if (held !== null) {
+      const names = new Map(held.projects.map(({ id, slug }) => [id, slug]));
+      return { member: principal, instanceRole: held.admitted.role, scope: scopeViewBy(held.admitted.scope, names), created: held.admitted.created };
+    }
     const known = await places(ctx.db);
     const scope = input.role === undefined ? undefined : scopeIds(input.scope ?? {}, known);
     // An Owner of the whole instance may step down: nothing they could ask for is more than they hold. The vault keeps the last one.
@@ -773,6 +785,30 @@ export async function putMember(
     await endPriorMembership(ctx, member, result.generation);
     return { member: principal, instanceRole: result.role, scope: scopeView(result.scope, known), created: result.created };
   });
+}
+
+/**
+ * A first add the vault decided on its own read (`admitAhead`, T179 PR 5), written by its write, which holds that read
+ * (`admit_hold`): three tries in all, each a read of its own, then 409 `changed`, asked again in a second, as a key
+ * write's (`heldWrite`). Null where a try is no longer served, the add then going down today's path, its credential's
+ * last use written first, as `verify` would have. A first add ends no earlier membership: there is none
+ * (`endPriorMembership` finds nothing below generation 0).
+ */
+async function admitHeld(ctx: ApiContext): Promise<{ admitted: Admitted; projects: { id: string; slug: string }[] } | null> {
+  const admission = ctx.admission!;
+  for (let tries = 1; ; tries += 1) {
+    const tried = admission.current;
+    if (tried === null) break;
+    const written = await ctx.vault.admitWrite!({ ticket: tried.ticket });
+    if (written.written) return { admitted: written.admitted, projects: tried.projects };
+    if (tries >= 3) throw new ObjectMoved('1');
+    const again = await admission.again();
+    // Its credential no longer the caller's: as the credential's own check answers it.
+    if (again === 'credential') throw new ApiError('unauthenticated', 'that credential is unknown, expired or revoked');
+    if (typeof again === 'string') break;
+  }
+  if (admission.touched !== null) await touchCredential(ctx.db, admission.touched);
+  return null;
 }
 
 /**

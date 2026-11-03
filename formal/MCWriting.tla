@@ -4,7 +4,8 @@
 (* adversary of one of them, so each stays pinned: rounds 1 and 2 in       *)
 (* Revoke, Place and Fork, round 3 in Names, round 5 in Protect, round 6   *)
 (* in Tamper and Add, T190's forged seal in Forge, PR 3's fallback to      *)
-(* today's path in FallBack and Forge, its caller in Caller (r2 of #469).  *)
+(* today's path in FallBack and Forge, its caller in Caller (r2 of #469);  *)
+(* PR 5's add, its session and its fallback, in Add and Forge.             *)
 (***************************************************************************)
 EXTENDS Writing
 
@@ -55,9 +56,10 @@ FallBackProcs == {"w1", "w2", "rev", "bk", "rol", "end", "ck"}
 CallerProcs == {"w1", "rev", "bk", "end", "ck"}
 
 \* Bob and Cy each add svc while an Owner demotes Bob and changes the
-\* policy so that only Owners add, and a database writer copies a token
-\* hash onto Bob's credential (round 6).
-AddProcs == {"bob", "cy", "dem", "pol", "sub", "ck"}
+\* policy so that only Owners add, a database writer copies a token hash
+\* onto Bob's credential (round 6), and the adders' session is revoked
+\* (PR 5: the add's read holds it). A refused add goes down today's path.
+AddProcs == {"bob", "cy", "dem", "pol", "sub", "end", "ck"}
 
 \* Bob, no admin, sets up svc with a first grant at a place, as the services
 \* setting lets him, while an Owner redefines the roles and closes the

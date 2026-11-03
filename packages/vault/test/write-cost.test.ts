@@ -24,7 +24,7 @@ before(async () => {
 after(() => db.close());
 
 /** History that is not this write's: uses, other objects' changes, 0.14's entries about others. */
-async function grow(total: number): Promise<void> {
+async function grow(total: number, tag = ''): Promise<void> {
   const uses = Math.round(total * 0.9);
   const changes = Math.max(5_000, Math.round(total * 0.01));
   const others = Math.max(50_000, Math.round(total * 0.09));
@@ -33,7 +33,7 @@ async function grow(total: number): Promise<void> {
     SELECT nextval('log_number'), ${now - 80_000_000}::bigint + (g * 80000000::bigint / ${uses}), g, gen_random_uuid(), gen_random_uuid(), 1, ${randomBytes(16)}, NULL
       FROM generate_series(1, ${uses}) g`);
   await run(db.owner, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-    SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total)}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)}
+    SELECT nextval('log_number'), ${now}, 'history-' || g || '-' || ${String(total) + tag}, gen_random_uuid(), 'system:x', '{"op":"x"}', NULL, ${randomBytes(16)}
       FROM generate_series(1, ${changes}) g`);
   await run(db.owner, sql`INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, subject_principal, metadata, prev_hash, mac, hash, log015)
     SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', ${now}, 'system:x', CASE WHEN g % 10 = 0 THEN 'access.grant' ELSE 'secret.read' END, 'allow',
@@ -79,5 +79,43 @@ test("R48: a key write's vault statement and its app's hold read as many buffers
   } finally {
     await vault.end();
     await app.end();
+  }
+});
+
+// A member add's two statements, the same (T179 PR 5): the vault's read (`admit_read`) and its hold (`admit_hold`)
+// read the caller's objects, the member asked for and the scope's projects by id and slug, each object's newest change
+// by one probe, and 0.14's newest access entry about each principal by its index, never history.
+test("R48: a member add's read and its hold read as many buffers before the log grows by a million entries as after", { ...postgresOnly("a member add's statements are Postgres's"), timeout: 600_000 }, async () => {
+  const w = await world({ caller: 'person' });
+  const [names] = await rows<{ token_hash: Buffer; project: string }>(db.owner, sql`SELECT c.token_hash, p.slug AS project
+    FROM credentials c, environments e JOIN projects p ON p.id = e.project_id WHERE c.id = ${w.credentialId} AND e.slug = 'dev' LIMIT 1`);
+  const principal = 'user:new@acme.example';
+  const scope = [names!.project];
+  const vault = postgresClient(VAULT_URL, { max: 1 });
+  const least = async (call: string, args: () => Promise<unknown[]>): Promise<number> => {
+    let fewest = Infinity;
+    for (let i = 0; i < 6; i += 1) {
+      const [plan] = await vault.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, (await args()) as never[]);
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      fewest = Math.min(fewest, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+    }
+    return fewest;
+  };
+  const read = () => least('admit_read($1, $2, $3, $4)', async () => [String(Date.now()), names!.token_hash, principal, scope]);
+  const hold = () => least('admit_hold($1, $2, $3, $4)', async () => {
+    const [now] = await rows<{ digest: Buffer }>(db.owner, sql`SELECT sha256(convert_to(admit_inputs(${names!.token_hash}::bytea, ${principal}, ${sql.param(scope)}::text[]), 'UTF8')) AS digest`);
+    return [names!.token_hash, principal, scope, now!.digest];
+  });
+  try {
+    await grow(10_000, '-add');
+    const small = { read: await read(), hold: await hold() };
+    await grow(990_000, '-add');
+    const large = { read: await read(), hold: await hold() };
+    console.log(JSON.stringify({ small, large }));
+    for (const form of ['read', 'hold'] as const) {
+      assert.ok(large[form] - small[form] <= 4, `${form}: ${small[form]} buffers before, ${large[form]} after`);
+    }
+  } finally {
+    await vault.end();
   }
 });

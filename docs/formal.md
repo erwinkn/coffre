@@ -2250,8 +2250,11 @@ redefined, a try the vault served abandoned at its hold and the next
 refused, down today's path (`WritingFallBack`, PR 3), or while her grant
 is taken and given back and her session revoked before that path
 (`WritingCaller`, review r2 of #469). Bob and Cy each add svc while Bob is demoted,
-the policy changes so that only Owners add, and a database writer copies a
-token hash onto Bob's credential (`WritingAdd`); Bob, no admin, sets up svc with a first grant while the
+the policy changes so that only Owners add, a database writer copies a
+token hash onto Bob's credential and the adders' session is revoked
+(`WritingAdd`; PR 5: the add's read holds the adder's session, and an add
+the vault leaves, refused or not served, goes down today's add, one step:
+`AToday`); Bob, no admin, sets up svc with a first grant while the
 roles are redefined, the services setting is closed and the grant's place
 archived (`WritingSetUp`), or on a whole project while one of its
 environments is protected, a protected fork is made in it, the project is
@@ -2367,7 +2370,16 @@ is an UPDATE of the credential's row, which `issue_token` takes shared
 before the issue lock: the write makes it before the hold, after 0.14's
 head, the order WriteLocks.tla checks (below). An add's write takes its rows, in
 principal order, then the head, then the fence, as `change_input` does, and
-holds after them. An app and a vault of different versions are refused
+holds after them. As built (PR 5) the rows and the head are a statement of
+their own, a round trip before the rest, for the head's read that 0.14's
+`member.add` entry's MAC needs: taken early, they only add order (a change
+that takes either waits; one that takes neither, a session's revoke, is what
+the hold after the fence weighs), so `AWrite` stays one step, and whether
+those locks can close a cycle is WriteLocks.tla's `AddLocks`. Today's add
+(`admit`) decides and writes in one transaction under the rows and the
+head, which every change of what it weighs takes but a session's revoke:
+one step too (`AToday`). Its caller's session it does not weigh again, as
+today's key write does not (`TodayCallerStandsAtDecision`). An app and a vault of different versions are refused
 while both deploy (503 `deploying`), so the model has one version. The seal
 is HotPathOne's and Seal.tla's, here a tick that seals every committed
 number.
@@ -2396,6 +2408,19 @@ holder and no request ahead of it conflicts, and commits with them all.
 | protection | turned off, TLC finds |
 |---|---|
 | the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469, which saw it stall a write and a use 908 ms) |
+
+**A member add's** (PR 5, `AddLocks.cfg`, `Flow = "add"`): its first
+statement locks the members' rows (`lockMembers`) and 0.14's head, its
+second appends `member.add`, whose trigger takes the issue lock shared
+and then the fence, and holds the read. Against a change of the adder's
+member (`#decide`, `change_input`: the row, the head, the issue lock, the
+fence), a token issued to the adder (`issue_token`: the members' rows
+shared, the credential's, the issue lock), the barrier, a revoke and a
+use. 28,408 states.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the add locks the members' rows before the head, as every flow that takes both does (MembersFirst) | `NoWaitCycle`: the add holds the head and waits for the adder's row, which a demotion holds while it waits for the head |
 
 ## 0.16: proxy definitions in the UI
 

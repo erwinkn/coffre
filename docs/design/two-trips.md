@@ -1,7 +1,8 @@
 # A change in two round trips (T179)
 
-Status: design and model (formal/Writing.tla). The key write's path is built (PR 3, below, "As built: PR 3"); the
-member add and the contraction follow.
+Status: design and model (formal/Writing.tla). The key write's path is built (PR 3, below, "As built: PR 3"), and
+an admin's first member add (PR 5, "As built: PR 5"); first grants, a set-up by someone who runs no instance and the
+contraction follow.
 
 R57 wants a change answered in under 200 ms in 0.16. Erwin's target (2026-11-02):
 **a key write and a member add each make at most two database round trips on the
@@ -807,7 +808,11 @@ Each with what the key write and the first member add then cost:
    an exchanged token's binding's `auth_mac` and expects no write and no
    add, as `authenticate` refuses it today), with the same
    regression cases. Its 0.14 `member.add` entry still needs the head read before its
-   MAC: read, head, write, 3 round trips (14 today).
+   MAC: read, head, write, 3 round trips (14 today). Built for an admin's first add, a
+   person's or a service account's, with no first grants and without `admit_outcome`
+   (a refusal takes today's path, as PR 3's): "As built: PR 5". First grants and a
+   set-up by someone who runs no instance (the read holding the places, the protected
+   set and the services setting, as the steps above have it) are PR 5b.
 6. **0.16, the contraction.** The two routes stop writing 0.14's entries;
    `revoke_credential` drops the head (a migration); the app's statement
    keeps it as a lock (above). The services setting's changes move into
@@ -887,3 +892,64 @@ second write, a grant taken and given back, a hold that keeps failing (409 after
 name, a key sensitive at the first try and a secret at the next; and one that the read's digest moves with each.
 packages/vault/test/write-cost.test.ts holds both statements' buffers flat from 10k entries to 1M.
 
+## As built: PR 5
+
+An admin's first member add, on Postgres (`admit_inputs`, `admit_read` and `admit_hold`, migration 0062; the vault's
+`admitRead` and `admitWrite`, packages/vault/src/admit.ts; the app's front door, packages/server/src/admit-ahead.ts,
+and `admitHeld` in api/members.ts). `change-cost.test.ts` holds a first add, of a person with or without a role and of
+a service account, to `{ app: 0, vault: 3 }` (14 before; at 20 ms a round trip, the seal apart, about 80 ms against
+320):
+
+```
+vault  admit_read: the read, and app_read's rows of the caller, one snapshot, no lock          1
+       the Worker: each newest change's MAC, each row's seal, the decision; the add prepared
+app    the rows' auth_mac, in memory; the prepared add handed back
+vault  BEGIN + the members' rows + 0.14's head and its read                                    1
+       admit_hold | 0.14's member.add | the row | the change | COMMIT                         1
+       waitSealed                                                                              the seal
+```
+
+What it serves, and what keeps today's path (`served: false`: the app adds as before, which answers and logs it):
+
+- **The add**: the first of a principal no row names, a person with an instance role and its scope or none, or a
+  service account with neither. Not first grants (`access`, PR 5b); not a re-admit, a role change, a member the
+  deployment's config names (its Owners'), a `member` role with a scope (whose projects the route still resolves,
+  404 on one it does not find).
+- **The caller**: someone who runs the instance (`runsInstance`: an admin or an Owner of all of it, no credential
+  scope), by a browser session or a CLI login, its config accepting it, not ended at the vault's clock. Not someone
+  who sets a service account up as the services setting lets them (PR 5b); not a personal token (the router refuses
+  it this route, logged), a service's token (no instance role), a token a trust binding issued, Cloudflare Access.
+- **The vault**: 0.15's log, cut over, on Postgres (`about().admits`). SQLite adds as before: one transaction.
+
+How it holds, and what it leaves to later PRs:
+
+- **The read holds the caller's session**, as a key write's does (formal/Writing.tla, the add's `cred`): a session
+  revoked between the read and the write moves the digest, and the read again answers 401, as does one revoked or
+  put back before the read (`ended`, `forged`), never sent down today's path.
+- **The prepared add is a ticket**: the vault's MAC (its change key's, domain-separated from every log MAC) over
+  what the write writes, the read it holds (its arguments and digest) and who the add is by, by ids, the credential
+  and identity the checked read resolved (ActorFromRead). The app carries it from the read to the write and can
+  neither change it nor make one; the write takes it for 30 seconds.
+- **The write's locks**: the members' rows, then 0.14's head, in the write's first statement, as every flow that
+  takes both takes them (formal/WriteLocks.tla, `AddLocks`, MembersFirst: the head first waits in a circle with a
+  demotion); then `admit_hold` takes the issue lock shared and the fence, as `change_input` does, and holds the read
+  after them. A hold that fails writes nothing (CF001, the transaction rolled back); the app reads again, three
+  tries in all, then 409 `changed` with `Retry-After: 1`.
+- **Two adds of one member**: the second's hold finds the first's row, its change and its 0.14 entry; read again, it
+  is no first add, and today's path answers it as it answers an add of a member (`created: false`). The members'
+  primary key backs it: a unique violation is read again too.
+- **No outcome record** (`admit_outcome`, with PR 6's `write_outcome`): every refusal goes down today's path, which
+  refuses and logs it as now, after the vault's read (R64 allows a refusal's extra trip). Its status and body are
+  today's, pinned by `admit-held.test.ts`.
+- **No last use**: the add has no app statement to carry the credential's `last_used_at`; its next use or key write
+  sets it, and an add that goes down today's path writes it on its own first, as `verify` would have.
+
+The regressions (packages/server/test/admit-held.test.ts) make each adversary of Writing.tla's add between the vault's
+read and its write, through the real front door: the adder demoted, their session revoked, the roles redefined,
+another add of the member first, a hold that keeps failing (409 after three tries); before the add, a session revoked
+and its row put back (dbw), the adder's row put back and its seal written into the demotion's change (WritingForge),
+a token hash copied onto an Owner's session (sub); a ticket edited; a change naming a read its transaction did not
+hold; and one that the read's digest moves with each. Each fails with its protection taken out. The refusals (a
+caller who runs no instance, a project no slug names, an Owner asked of an admin) answer as a vault that serves no
+`admitRead` answers them. packages/vault/test/write-cost.test.ts holds both statements' buffers flat as the log grows
+by a million entries (R48).

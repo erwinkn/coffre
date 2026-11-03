@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { AccessFault } from './access-fault.ts';
-import type { CallerKind, CredentialScope, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
+import type { CallerKind, CredentialScope, Filter, GrantPlace, InstanceRole, Policy, Role, RoleDefinition, Scope, ServiceSetting } from './access.ts';
 
 export type { CallerKind } from './access.ts';
 
@@ -239,6 +239,11 @@ export interface Vault {
      * vault older than this app, mid-deploy, the app writes as before. Absent otherwise.
      */
     writes?: true;
+    /**
+     * `true` when the vault decides a member's first add on one read of its own and writes it in one transaction of
+     * two round trips (`admitRead`, then `admitWrite`; T179 PR 5), as `writes` says of a key write. Absent otherwise.
+     */
+    admits?: true;
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
@@ -337,6 +342,20 @@ export interface Vault {
    * with `about().writes`.
    */
   writeKeys?(input: WriteKeysInput): Promise<WriteKeysOutcome>;
+  /**
+   * A member's first add decided on one read (T179 PR 5; docs/design/two-trips.md, "A member add"; formal/Writing.tla):
+   * one statement reads everything the decision weighs (`admit_inputs`), with no lock; the vault decides on that read
+   * alone and prepares the add, under its own MAC (`ticket`), which the app hands back to `admitWrite` once it has
+   * checked the caller's rows (`app`) as `authenticate` does. `served: false` for any add it does not serve so, a
+   * refusal among them: the app adds as before, which answers and logs it. Only with `about().admits`.
+   */
+  admitRead?(input: AdmitReadInput): Promise<AdmitReadOutcome>;
+  /**
+   * The add `admitRead` prepared, written: the members' rows and 0.14's head, then the read held again under the fence
+   * (`admit_hold`), the rows, the change, COMMIT; then the seal wait (R51). `moved` where the read no longer holds,
+   * nothing written: the app asks `admitRead` again. Only with `about().admits`.
+   */
+  admitWrite?(input: AdmitWriteInput): Promise<AdmitWriteOutcome>;
   /**
    * Answers once the log's entry `number` is sealed in a signed checkpoint
    * and, if a witness is configured, witnessed or past its 2 s (R51): what a
@@ -757,6 +776,37 @@ export type WriteKeysOutcome =
     keys: { name: string; id: string; created: boolean; version: number; sensitive: boolean; wrapped: WrappedKey; seq: number }[];
     changes: PreparedChange[];
   };
+
+/**
+ * A member's first add as the app asks it (`Vault.admitRead`): the token's hash, what the deployment's config accepts
+ * of a credential, the member, and its instance role and that role's scope, projects by slug, as `PUT /members/:member`
+ * names them.
+ */
+export type AdmitReadInput = Correlation & {
+  tokenHash: string;
+  accepts: CredentialAcceptance;
+  principal: string;
+  role?: InstanceRole;
+  scope?: { projects: Filter; environments: Filter };
+};
+
+/**
+ * What the vault decided of an add: none, the app adding as before; or the add prepared (`ticket`, for `admitWrite`),
+ * what it makes the member (`admitted`, the scope's projects by id, and by slug as asked), the app's rows as the read
+ * found them (`app`, as `app_read` answers them), the caller as the vault decided them (`standing`), and the instant
+ * the credential's end was judged at (`at`).
+ */
+export type AdmitReadOutcome =
+  | { served: false; why: string }
+  | { served: true; at: number; app: string; standing: Access; ticket: string; admitted: Admitted; projects: { id: string; slug: string }[] };
+
+/** The add `admitRead` prepared, as it answered it. */
+export type AdmitWriteInput = { ticket: string };
+
+/** The add written and sealed (its change's number), or not: `moved`, the read no longer as decided; `expired`, the ticket's time past. */
+export type AdmitWriteOutcome =
+  | { written: true; number: string; admitted: Admitted }
+  | { written: false; why: 'moved' | 'expired' };
 
 export type PrepareInput = {
   /** Who makes the changes, as their entries name them: `user:…`, `token:…`, or the app's own (`coffre`). */

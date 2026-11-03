@@ -38,7 +38,7 @@ import { ApiError, vaultRefused } from './errors.ts';
 export const COFFRE_ACTOR = 'coffre';
 
 /** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
-type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean };
+type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean; admits: boolean };
 
 const keeping = new WeakMap<Vault, Kept>();
 
@@ -57,6 +57,7 @@ async function about015(vault: Vault): Promise<Kept> {
     issues: log && about.issues === true && vault.issueToken !== undefined,
     binds: log && about.binds === true && vault.changeBindings !== undefined,
     writes: log && about.writes === true && vault.writeKeys !== undefined,
+    admits: log && about.admits === true && vault.admitRead !== undefined && vault.admitWrite !== undefined,
   };
   keeping.set(vault, kept);
   return kept;
@@ -94,6 +95,11 @@ export async function vaultIssuesTokens(vault: Vault): Promise<boolean> {
 /** Whether the vault decides a key write on one read of its own (`writeKeys`, T179 PR 3): the app's key write then makes five round trips. */
 export async function vaultWrites(vault: Vault): Promise<boolean> {
   return (await about015(vault)).writes;
+}
+
+/** Whether the vault decides a member's first add on one read of its own (`admitRead`, `admitWrite`; T179 PR 5): the add then makes three round trips. */
+export async function vaultAdmits(vault: Vault): Promise<boolean> {
+  return (await about015(vault)).admits;
 }
 
 /** Whether the vault answers 0.15's uses too: the app opens each value through one (keys.ts, `openValues`). */

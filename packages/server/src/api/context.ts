@@ -8,6 +8,7 @@ import { lockLogHeadRead } from '@coffre/db/log';
 import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
 import type { ReadAhead } from '../db/read-ahead.ts';
 import type { Written } from '../write-ahead.ts';
+import type { Admission } from '../admit-ahead.ts';
 import { AppChanges, keeps015 } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
 import { policyNow, wayInStands } from '../db/queries.ts';
@@ -98,6 +99,11 @@ export type ApiContext = {
    * its route resolves its place from them and commits it in one transaction that holds that read (`heldWrite`).
    */
   written?: Written;
+  /**
+   * A member's first add the vault decided already, on one read of its own, with the rows it answered (`admitAhead`,
+   * T179 PR 5): its route hands it back to the vault's write, which holds that read (`admitHeld`).
+   */
+  admission?: Admission;
 };
 
 /** The fields of an audit entry that are the same for everything one request does. */

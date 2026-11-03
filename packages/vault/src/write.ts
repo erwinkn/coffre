@@ -26,7 +26,7 @@ export { callWrite, type WriteCall, type WriteRead } from './write.postgres.ts';
 type RawChange = { number: number | string; at: number | string; request_id: string; object: string; actor: string; payload: string; seal: string | null; mac: string };
 
 /** One object as the read has it: its row (null: none), the seal on it, and its newest change, whole. */
-type Held<T extends Input> = { row: T | null; seal: Buffer | null; newest: ChangeRow | null };
+export type Held<T extends Input> = { row: T | null; seal: Buffer | null; newest: ChangeRow | null };
 
 /** A key as the read has it: by the name asked, its row (archived or not), its object, and its version's number. */
 export type ReadKey = {
@@ -41,22 +41,29 @@ export type ReadKey = {
 };
 
 /**
- * The read (`write_inputs`), parsed: the only data the decision takes (two-trips.md, "Why the read is complete by
- * construction"), made here and nowhere else.
+ * The caller as a read has it (`write_inputs`, `admit_inputs`): the credential of the token's hash and its identity, its
+ * principal's member object and 0.14's newest access entry about it, the roles and the policy.
  */
-export type WriteInputs = {
+export type CallerInputs = {
   credential: Held<CredentialInput> & { kind: string | null; createdBy: string | null; identityId: string | null; identity: { provider: string; issuerHash: string; revoked: boolean } | null };
   principal: Held<PrincipalInput> & { access: bigint | null };
   roles: Held<RolesInput>;
   policy: Held<PolicyInput>;
+};
+
+/**
+ * The read (`write_inputs`), parsed: the only data the decision takes (two-trips.md, "Why the read is complete by
+ * construction"), made here and nowhere else.
+ */
+export type WriteInputs = CallerInputs & {
   environment: Held<EnvironmentInput>;
   keys: ReadKey[];
 };
 
-const bytes = (hex: string | null | undefined): Buffer | null => (hex == null ? null : Buffer.from(hex.replace(/^\\x/, ''), 'hex'));
+export const bytes = (hex: string | null | undefined): Buffer | null => (hex == null ? null : Buffer.from(hex.replace(/^\\x/, ''), 'hex'));
 const base64Of = (hex: unknown): string => Buffer.from(String(hex), 'hex').toString('base64');
 
-function changeOf(raw: RawChange | null | undefined): ChangeRow | null {
+export function changeOf(raw: RawChange | null | undefined): ChangeRow | null {
   if (raw == null) return null;
   return {
     number: BigInt(raw.number), at: Number(raw.at), requestId: raw.request_id, object: raw.object, actor: raw.actor, payload: raw.payload,
@@ -64,22 +71,30 @@ function changeOf(raw: RawChange | null | undefined): ChangeRow | null {
   };
 }
 
-type Raw = {
+/** The caller's part of a read's text, as `write_inputs` and `admit_inputs` both render it. */
+export type RawCaller = {
   credential: { row: Record<string, unknown>; expires: number | string | null; newest: RawChange | null } | null;
   identity: Record<string, unknown> | null;
   principal: { row: Record<string, unknown> | null; grants: Record<string, unknown>[]; access: number | string | null; newest: RawChange | null } | null;
   roles: { value: string | null; seal: string | null; newest: RawChange | null };
   policy: { value: string | null; seal: string | null; newest: RawChange | null };
-  project: Record<string, unknown> | null;
-  environment: { row: Record<string, unknown>; newest: RawChange | null } | null;
-  secrets: { key: string; row: Record<string, unknown> | null; version: Record<string, unknown> | null; newest: RawChange | null }[];
 };
 
-/** The read's text as the decision takes it. */
-export function parseInputs(text: string): WriteInputs {
-  const raw = JSON.parse(text) as Raw;
+/** A member's object as a read renders its row and its grants (`to_jsonb`, each grant with its `resolved_project`). */
+function memberObjectOf(principal: string, m: Record<string, unknown>, grants: readonly Record<string, unknown>[]): PrincipalInput {
+  return principalObject(
+    { principal, status: String(m.status), generation: Number(m.generation), ...memberStanding({ owner: m.owner === true, role: m.role as string | null, scope: m.scope as string | null }) },
+    grants.map((g) => ({
+      projectId: g.resolved_project == null ? null : String(g.resolved_project), environmentId: g.environment_id == null ? null : String(g.environment_id),
+      environmentSlug: g.environment_slug == null ? null : String(g.environment_slug), role: String(g.role), expiresAt: g.expires_at == null ? null : Number(g.expires_at),
+    })),
+  );
+}
+
+/** The caller's part of a read, parsed. */
+export function callerInputs(raw: RawCaller): CallerInputs {
   const c = raw.credential?.row ?? null;
-  const credential: WriteInputs['credential'] = c === null
+  const credential: CallerInputs['credential'] = c === null
     ? { row: null, seal: null, newest: null, kind: null, createdBy: null, identityId: null, identity: null }
     : {
       row: credentialObject({
@@ -95,19 +110,26 @@ export function parseInputs(text: string): WriteInputs {
     };
   const m = raw.principal?.row ?? null;
   const principalId = c === null ? null : String(c.principal);
-  const principal: WriteInputs['principal'] = {
-    row: m === null || principalId === null ? null : principalObject(
-      { principal: principalId, status: String(m.status), generation: Number(m.generation), ...memberStanding({ owner: m.owner === true, role: m.role as string | null, scope: m.scope as string | null }) },
-      (raw.principal?.grants ?? []).map((g) => ({
-        projectId: g.resolved_project == null ? null : String(g.resolved_project), environmentId: g.environment_id == null ? null : String(g.environment_id),
-        environmentSlug: g.environment_slug == null ? null : String(g.environment_slug), role: String(g.role), expiresAt: g.expires_at == null ? null : Number(g.expires_at),
-      })),
-    ),
+  const principal: CallerInputs['principal'] = {
+    row: m === null || principalId === null ? null : memberObjectOf(principalId, m, raw.principal?.grants ?? []),
     seal: m === null ? null : bytes(m.seal as string | null),
     newest: changeOf(raw.principal?.newest),
     access: raw.principal?.access == null ? null : BigInt(raw.principal.access),
   };
-  const config = <T extends Input>(part: Raw['roles']): Held<T> => ({ row: part.value === null ? null : (configObject(part.value) as T), seal: bytes(part.seal), newest: changeOf(part.newest) });
+  const config = <T extends Input>(part: RawCaller['roles']): Held<T> => ({ row: part.value === null ? null : (configObject(part.value) as T), seal: bytes(part.seal), newest: changeOf(part.newest) });
+  return { credential, principal, roles: config<RolesInput>(raw.roles), policy: config<PolicyInput>(raw.policy) };
+}
+
+type Raw = RawCaller & {
+  project: Record<string, unknown> | null;
+  environment: { row: Record<string, unknown>; newest: RawChange | null } | null;
+  secrets: { key: string; row: Record<string, unknown> | null; version: Record<string, unknown> | null; newest: RawChange | null }[];
+};
+
+/** The read's text as the decision takes it. */
+export function parseInputs(text: string): WriteInputs {
+  const raw = JSON.parse(text) as Raw;
+  const caller = callerInputs(raw);
   const e = raw.environment?.row ?? null;
   const environment: Held<EnvironmentInput> = {
     row: e === null ? null : environmentObject({
@@ -134,7 +156,7 @@ export function parseInputs(text: string): WriteInputs {
       object: { row: object, seal: row === null ? null : bytes(row.seal as string | null), newest: changeOf(newest) },
     };
   });
-  return { credential, principal, roles: config<RolesInput>(raw.roles), policy: config<PolicyInput>(raw.policy), environment, keys };
+  return { ...caller, environment, keys };
 }
 
 /** Why the vault does not serve a write so, which goes down today's path: said in the vault's log only by that path's own entries. */
@@ -165,12 +187,35 @@ export type WriteDecided = {
  * (`keyRefusals`, on the reader its principal, credential, roles and place make: `readerOf`), and a key's sensitivity,
  * which a write saying nothing keeps (`bareLevel` in the app: sensitive where the value it replaces is, else a secret).
  */
-export function decideWrite(
+/** An object of a read, by its ref: what `holds` and `stands` weigh. */
+export type ReadObject = { held: Held<Input>; ref: Ref };
+
+/**
+ * Each object's newest change held to its MAC (T190: its seal is only what a writer could not have written once it
+ * holds), and each row to its seal: the vault's over the row, and the one its object's newest change left (StaleFirst).
+ */
+export function holds(keys: { macs: readonly LogMacKey[] }, { held }: ReadObject): boolean {
+  return held.newest === null || changeHolds(keys.macs, held.newest);
+}
+
+export function stands(keys: { seals: SealKeys }, { held, ref }: ReadObject): boolean {
+  const newest = held.newest?.seal ?? null;
+  const valid = held.row === null ? held.seal === null : sealed(keys.seals, ref, held.row, held.seal);
+  const current = held.row === null ? newest === null : held.seal !== null && newest !== null && held.seal.equals(newest);
+  return valid && current;
+}
+
+/**
+ * What a two-trip path refuses of the caller's credential before any other object (a key write's, an add's): what the
+ * app would refuse of it (AcceptedFirst: its config's `accepts`, its kind, an exchanged token's binding, which is the
+ * app's to check); then its own row and newest change (`forged`, 401, never today's path); then its end at the
+ * vault's clock (`ended`, 401). Else the credential, as an object of the read, for the rest of the decision to weigh.
+ */
+export function callerFirst(
   keys: { seals: SealKeys; macs: readonly LogMacKey[] },
-  read: WriteInputs,
-  request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[]; asked: readonly { name: string; id: string; replaces?: string | null }[] },
-): WriteDecided | Unserved {
-  const { credential, principal, roles, policy, environment } = read;
+  { credential }: Pick<CallerInputs, 'credential'>,
+  request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[] },
+): { own: ReadObject; row: CredentialInput } | Unserved {
   if (credential.row === null || credential.kind === null || !request.kinds.includes(credential.kind)) return 'credential';
   // An exchanged token's issuing binding is the app's to check, a read this path does not make: today's path.
   if (credential.createdBy?.startsWith('binding:') === true) return 'credential';
@@ -178,28 +223,31 @@ export function decideWrite(
   if (!request.accepts.signin) return 'credential';
   if (credential.kind === 'browser' && (credential.identity === null || !request.accepts.issuers.includes(`${credential.identity.provider}:${credential.identity.issuerHash}`))) return 'credential';
   if (credential.identity?.revoked === true) return 'credential';
-  // Every newest change's MAC first: its seal is only what a writer could not have written once it holds (T190). Then
-  // each row's seal: the vault's over the row, and the one its object's newest change left (StaleFirst).
-  const holds = ({ held }: { held: Held<Input> }) => held.newest === null || changeHolds(keys.macs, held.newest);
-  const stands = ({ held, ref }: { held: Held<Input>; ref: Ref }) => {
-    const newest = held.newest?.seal ?? null;
-    const valid = held.row === null ? held.seal === null : sealed(keys.seals, ref, held.row, held.seal);
-    const current = held.row === null ? newest === null : held.seal !== null && newest !== null && held.seal.equals(newest);
-    return valid && current;
-  };
   // The caller's own credential first, which no other path may then answer for: a session revoked and its row put back
   // live (WritingTamper's dbw), whose MAC the app's check would find whole, is refused here, never written on.
-  const own: { held: Held<Input>; ref: Ref } = { held: credential, ref: { kind: 'credential', id: credential.row.id } };
-  if (!holds(own) || !stands(own)) return 'forged';
+  const own: ReadObject = { held: credential, ref: { kind: 'credential', id: credential.row.id } };
+  if (!holds(keys, own) || !stands(keys, own)) return 'forged';
   // ... then revoked or expired, as the log has it: answered 401 here, as today's path answers it, and never sent down
   // that path, which reads the row again and would take one a database writer put back meanwhile (formal/Writing.tla,
   // WToday). Before any other object's refusal, which goes down that path: a missing place's too (Fable's review of
   // #469: a session put back, writing to an environment that is not there, was answered 404 by today's path).
   if (credential.row.revoked || (credential.row.expiresAt !== null && request.at >= credential.row.expiresAt)) return 'ended';
+  return { own, row: credential.row };
+}
+
+export function decideWrite(
+  keys: { seals: SealKeys; macs: readonly LogMacKey[] },
+  read: WriteInputs,
+  request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[]; asked: readonly { name: string; id: string; replaces?: string | null }[] },
+): WriteDecided | Unserved {
+  const { credential, principal, roles, policy, environment } = read;
+  const caller = callerFirst(keys, read, request);
+  if (typeof caller === 'string') return caller;
+  const { own } = caller;
   if (environment.row === null) return 'place';
-  const objects: { held: Held<Input>; ref: Ref }[] = [
+  const objects: ReadObject[] = [
     own,
-    { held: principal, ref: { kind: 'principal', id: credential.row.principal } },
+    { held: principal, ref: { kind: 'principal', id: caller.row.principal } },
     { held: roles, ref: { kind: 'roles', id: 'instance' } },
     { held: policy, ref: { kind: 'policy', id: 'instance' } },
     { held: environment, ref: { kind: 'environment', id: environment.row.id } },
@@ -207,16 +255,16 @@ export function decideWrite(
   ];
   // A key whose object this path does not rebuild (archived, a reference): today's path, before its seal is weighed.
   if (read.keys.some((key) => key.id !== null && key.object.row === null)) return 'shape';
-  if (!objects.every(holds)) return 'tampered';
-  if (!objects.every(stands)) return 'stale';
+  if (!objects.every((object) => holds(keys, object))) return 'tampered';
+  if (!objects.every((object) => stands(keys, object))) return 'stale';
   // 0.14's newest access entry about the principal, which its newest change must account for (UsesSeeOldWrites).
   const old = oldOf(principal.newest);
   if (principal.access !== null && (old === null || principal.access > old)) return 'stale';
   if (principal.row === null || policy.row === null) return 'credential';
-  if (credentialEnded(credential.row, principal.row, request.at)) return 'credential';
+  if (credentialEnded(caller.row, principal.row, request.at)) return 'credential';
   const place = environment.row;
   if (place.deleted || place.archived || place.projectArchived || place.owner !== null || place.parentId !== null) return 'place';
-  const reader = readerOf(principal.row, credential.row, roles.row ?? noEdits(), [place], request.at);
+  const reader = readerOf(principal.row, caller.row, roles.row ?? noEdits(), [place], request.at);
   const decided: WriteDecided['keys'] = [];
   for (const [i, asked] of request.asked.entries()) {
     const key = read.keys[i];
@@ -230,15 +278,15 @@ export function decideWrite(
   }
   const secrets = decided.map(({ id }) => ({ projectId: place.projectId, environmentId: place.id, secretId: id }));
   const environments = new Map([[place.id, { projectId: place.projectId, slug: place.slug, owner: place.owner, parentId: place.parentId, deleted: place.deleted, archived: place.archived || place.projectArchived }]]);
-  let codes = keyRefusals(reader, { principal: credential.row.principal, permission: 'secret.write', secrets, at: secrets, environments, needs: secrets.map(() => ['secret.write'] as const) });
+  let codes = keyRefusals(reader, { principal: caller.row.principal, permission: 'secret.write', secrets, at: secrets, environments, needs: secrets.map(() => ['secret.write'] as const) });
   codes = useOnlyRefusals(codes, reader, { action: 'key.wrap', secrets });
-  codes = sensitiveRefusals(codes, reader, { action: 'key.wrap', principal: credential.row.principal, secrets: decided.map(({ sensitive }) => ({ projectId: place.projectId, sensitive })) });
+  codes = sensitiveRefusals(codes, reader, { action: 'key.wrap', principal: caller.row.principal, secrets: decided.map(({ sensitive }) => ({ projectId: place.projectId, sensitive })) });
   if (codes.some((code) => code !== null)) return 'refused';
-  return { credential: credential.row, principal: principal.row, reader, environment: place, keys: decided };
+  return { credential: caller.row, principal: principal.row, reader, environment: place, keys: decided };
 }
 
 /** The 0.14 access entry a principal's newest change accounts for (`old` in its payload), if it names one. */
-function oldOf(change: ChangeRow | null): bigint | null {
+export function oldOf(change: ChangeRow | null): bigint | null {
   if (change === null) return null;
   try {
     const old = (JSON.parse(change.payload) as { old?: unknown }).old;
@@ -289,7 +337,7 @@ export function secretColumnsOf(key: ReadKey): SecretColumns {
  * standing, role, scope and live grants, and the policy as far as the place it weighed, which is all the app checks of
  * them after (the route's permission there).
  */
-export function writeStanding(decided: WriteDecided, at: number): Access {
+export function writeStanding(decided: Pick<WriteDecided, 'credential' | 'principal' | 'reader'>, at: number): Access {
   const { live, status } = decided.reader;
   return {
     principal: decided.credential.principal,

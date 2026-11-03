@@ -222,9 +222,16 @@ const MEMBER_QUEUE = 0x636f666d;
  * Add `row`. A principal has one row: when two decisions admit the same
  * one at once, the second fails here, and rolls back with its entries.
  */
-export async function insertMember(tx: Transaction, row: Member): Promise<void> {
+export async function insertMember(
+  tx: Transaction,
+  row: Member,
+  /** `final`: nothing awaits it, it goes with what the transaction asks next, its COMMIT at the latest (`later`). */
+  { final = false }: { final?: boolean } = {},
+): Promise<void> {
   const { vaultMembers } = tablesOf(tx);
-  await tx.insert(vaultMembers).values(storedChange(row) as typeof vaultMembers.$inferInsert);
+  const statement = tx.insert(vaultMembers).values(storedChange(row) as typeof vaultMembers.$inferInsert);
+  if (final) later(tx, statement);
+  else await statement;
 }
 
 export async function updateMember(

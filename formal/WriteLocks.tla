@@ -28,24 +28,45 @@
 (*               waits for the row, which the issuer holds shared, queued  *)
 (*               for the issue lock behind the barrier, which waits for    *)
 (*               the write's issue lock: a cycle (review r1 of #469).      *)
+(*                                                                         *)
+(* A member add's (T179 PR 5, Flow = "add"; Writing.tla's AWrite, which    *)
+(* holds none): its first statement locks the members' rows (`lockMembers`:*)
+(* the adder's and the new member's queue locks and rows) and 0.14's head; *)
+(* its second appends `member.add`, whose trigger takes the issue lock     *)
+(* shared, then the fence, and holds the read. Against:                    *)
+(*   demote   a change of the adder's member (`#decide`, `change_input`):  *)
+(*            the row, the head, the issue lock shared, the fence;         *)
+(*   issue    a token issued to the adder (`issue_token`, 0047): the       *)
+(*            members' rows FOR SHARE, the credential's, the issue lock;   *)
+(*   barrier, revoke, use as above.                                        *)
+(*   MembersFirst  the add locks the rows before the head, as every flow   *)
+(*               that takes both does. Without, it holds the head and      *)
+(*               waits for the row a demotion holds, which waits for the   *)
+(*               head.                                                     *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS TouchFirst
+CONSTANTS TouchFirst, Flow, MembersFirst
 
-Procs == {"write", "issue", "barrier", "revoke", "use"}
+Procs == IF Flow = "write" THEN {"write", "issue", "barrier", "revoke", "use"}
+                           ELSE {"add", "demote", "issue", "barrier", "revoke", "use"}
 
 \* Each one's locks, in the order it takes them: a lock and its mode, S(hared) or X (exclusive).
 Plan(p) ==
     CASE p = "write" ->
             IF TouchFirst THEN << <<"head", "X">>, <<"cred", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
                           ELSE << <<"head", "X">>, <<"issue", "S">>, <<"fence", "X">>, <<"cred", "X">> >>
-      [] p = "issue" -> << <<"cred", "S">>, <<"issue", "S">> >>
+      [] p = "add" ->
+            IF MembersFirst THEN << <<"member", "X">>, <<"head", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+                            ELSE << <<"head", "X">>, <<"member", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+      [] p = "demote" -> << <<"member", "X">>, <<"head", "X">>, <<"issue", "S">>, <<"fence", "X">> >>
+      [] p = "issue" /\ Flow = "add" -> << <<"member", "S">>, <<"cred", "S">>, <<"issue", "S">> >>
+      [] p = "issue" /\ Flow = "write" -> << <<"cred", "S">>, <<"issue", "S">> >>
       [] p = "barrier" -> << <<"issue", "X">>, <<"fence", "X">> >>
       [] p = "revoke" -> << <<"head", "X">>, <<"cred", "X">>, <<"fence", "X">> >>
       [] p = "use" -> << <<"fence", "S">> >>
 
-Locks == {"head", "cred", "issue", "fence"}
+Locks == {"member", "head", "cred", "issue", "fence"}
 
 VARIABLES
     pc,      \* each one's step: "run" (asks its next lock, or commits), "wait" (queued), "done"

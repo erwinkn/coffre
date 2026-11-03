@@ -147,6 +147,10 @@ import {
   type VouchedEntry,
   type VouchInput,
   type WrapInput,
+  type AdmitReadInput,
+  type AdmitReadOutcome,
+  type AdmitWriteInput,
+  type AdmitWriteOutcome,
   type WriteKeysInput,
   type WriteKeysOutcome,
   type WrappedKey,
@@ -169,9 +173,10 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, HeadBusy, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
+import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, parseAdmitInputs, scopeSlugs, sealTicket, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
+import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
@@ -3569,6 +3574,7 @@ class VaultService implements Vault {
       ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const, batchUses: true as const, namedBatches: true as const }),
       // A key write decided on one read (`writeKeys`, T179 PR 3), where this vault serves it.
       ...(this.#serveWrites() ? { writes: true as const } : {}),
+      ...(this.#serveAdmits() ? { admits: true as const } : {}),
     };
   }
 
@@ -3935,6 +3941,94 @@ class VaultService implements Vault {
       keys: decided.keys.map((key, i) => ({ name: key.name, id: key.id, created: key.created, version: key.before.version + 1, sensitive: key.sensitive, wrapped: wrapped[i]!, seq: Number(appended.seqStart) + i })),
       changes,
     };
+  }
+
+  /**
+   * A member's first add, decided on one read (T179 PR 5; admit.ts): `admit_read`, one statement, no lock; then the
+   * decision on that read alone. Served, the add prepared under the vault's MAC (`ticket`), for `admitWrite` once the
+   * app has checked the caller's rows the read answered (`app`). Anything else `served: false`, the app adding as before.
+   */
+  async admitRead(input: AdmitReadInput): Promise<AdmitReadOutcome> {
+    const unserved = (why: string): AdmitReadOutcome => ({ served: false, why });
+    const log015 = this.#prepared.log015;
+    if (log015 === null || !this.#serveAdmits()) return unserved('vault');
+    validateAdmitRead(input);
+    if ((await this.#settled()) !== null || !(await this.#cutOverNow())) return unserved('vault');
+    const at = Date.now() + this.#prepared.options.clockOffset();
+    const asked: AdmitAsked = { principal: input.principal, ...(input.role === undefined ? {} : { role: input.role }), ...(input.scope === undefined ? {} : { scope: input.scope }) };
+    const slugs = scopeSlugs(asked);
+    const read = await callAdmit(this.#db, { at, tokenHash: Buffer.from(input.tokenHash, 'base64'), principal: input.principal, scope: slugs });
+    if (read.state === 'ahead') return unserved('clock');
+    const inputs = parseAdmitInputs(read.inputs, input.principal);
+    const decided = decideAdmit({ seals: log015.seals, macs: log015.macs }, inputs, { at, accepts: input.accepts, kinds: ADMIT_KINDS, asked, listed: this.#listed(input.principal) });
+    if (typeof decided === 'string') return unserved(decided);
+    const ticket: AdmitTicket = {
+      v: 1, until: at + TICKET_MS, at, digest: read.digest, tokenHash: input.tokenHash, principal: input.principal, scopeSlugs: slugs,
+      // Who the add is by, by ids, as the checked read resolved them (ActorFromRead): the write resolves no token.
+      actor: decided.credential.principal, credential: decided.credential.id, identity: inputs.credential.identityId, personal: inputs.credential.kind === 'personal',
+      role: decided.role, scope: decided.scope, requestId: input.requestId ?? null, operationId: input.operationId ?? null,
+    };
+    return {
+      served: true, at, app: read.app, standing: admitStanding(decided, at), ticket: sealTicket(log015.mac, ticket),
+      admitted: { created: true, role: decided.role, scope: decided.scope, generation: 0 },
+      projects: inputs.projects.flatMap(({ slug, id }) => (id === null ? [] : [{ id, slug }])),
+    };
+  }
+
+  /**
+   * The add `admitRead` prepared, written in one transaction of two round trips (T179 PR 5): the bound on lock waits,
+   * the members' rows (`lockMembers`) and 0.14's head, read for its entry's MAC (`snapshot`, as a decision takes them:
+   * MembersFirst, formal/WriteLocks.tla's AddLocks); then, left to `later` and sent with the COMMIT, the hold
+   * (`admit_hold`: the issue lock, the fence, the read again, as decided or `coffre_moved`), 0.14's `member.add` entry,
+   * the member's row, sealed as `#seal` seals one, and its change (`change_input_strict`, the read's digest in its
+   * payload). Then the seal wait (R51). A hold that fails writes nothing: `moved`, and the app reads again.
+   */
+  async admitWrite(input: AdmitWriteInput): Promise<AdmitWriteOutcome> {
+    const log015 = this.#prepared.log015;
+    if (log015 === null || !this.#serveAdmits()) throw new Error('this vault writes no prepared add: it does not serve admitRead');
+    const opened = openTicket(log015.macs, input?.ticket, Date.now() + this.#prepared.options.clockOffset());
+    if (opened === 'expired') return { written: false, why: 'expired' };
+    if (opened === null) throw new Error("an add's ticket is the vault's own, as admitRead answered it: this one is not");
+    const ticket = opened;
+    const { principal, actor } = ticket;
+    const { role, scope } = asStored(ticket.role, ticket.scope);
+    const correlation = { operationId: ticket.operationId, requestId: ticket.requestId, ...(ticket.personal ? { credentialId: ticket.credential } : {}) };
+    const entry = accessEntry(actor, 'member.add', principal, 'allow', correlation, { role, scope });
+    let numbers: ChangeNumbers;
+    try {
+      numbers = await this.#db.transaction(async (tx) => {
+        // One Sync: the bound, the members' rows, then the head and its read, in that order (as `#decideOnce` asks them).
+        const [, , reads] = await Promise.all([
+          store.boundLockWaits(tx, LOCK_TIMEOUT_MS),
+          store.lockMembers(tx, [actor, principal]),
+          snapshot(tx, { principals: [], head: true, waiters: READ_HEAD_WAITERS }),
+        ]);
+        // The rest, nothing awaited: the hold first, which every write after it rests on.
+        holdAdmit(tx, { tokenHash: Buffer.from(ticket.tokenHash, 'base64'), principal, scope: ticket.scopeSlugs, digest: Buffer.from(ticket.digest, 'hex') });
+        const appended = await this.#append(tx, [entry], [], reads, { final: true });
+        const at = appended.occurredAt;
+        const row = { principal, status: 'active' as const, role, scope, generation: 0, createdAt: at, createdBy: actor, statusChangedAt: at, statusChangedBy: actor, accessSeq: appended.seqStart };
+        await store.insertMember(tx, { ...row, mac: memberMac(this.#prepared.rowKey, row, []) }, { final: true });
+        const after = principalObject({ principal, status: 'active', generation: 0, role, scope }, []);
+        return store.laterInputs(tx, [admitChange(log015, {
+          at, actor, principal, after, op: { op: 'member.add', role, scope }, old: appended.seqStart,
+          credential: ticket.credential, identity: ticket.identity, inputs: ticket.digest,
+        })]);
+      });
+    } catch (error) {
+      // The read moved under it, or another add made the row first: nothing written, and the app reads again.
+      if (isMovedChange(error) || isUniqueViolation(error)) return { written: false, why: 'moved' };
+      throw error;
+    }
+    const newest = await newestCommitted(this.#db, numbers);
+    if (newest === null) throw new Error("an add's change committed with no number");
+    await log015.sealThrough(newest);
+    return { written: true, number: newest.toString(), admitted: { created: true, role, scope, generation: 0 } };
+  }
+
+  /** Whether this vault serves `admitRead` and `admitWrite`: 0.15's log, on Postgres. */
+  #serveAdmits(): boolean {
+    return this.#prepared.log015 !== null && engineOf(this.#db) === 'postgres';
   }
 
   /** Whether this vault serves `writeKeys`: 0.15's log, on Postgres, its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */

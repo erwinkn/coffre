@@ -197,6 +197,15 @@ const accessPatch = z.record(
   z.string().max(200),
   z.union([role, z.object({ role, until: z.string().max(40).nullable() }).strict(), z.null()]),
 );
+/** `PUT /members/:member`'s body: a person's instance role and its scope, or a service account's first grants (`putMember`). */
+export const memberBody = z
+  .object({
+    role: instanceRole.optional(),
+    scope: scopeInput.optional(),
+    access: accessPatch.refine((access) => Object.keys(access).length > 0, 'name a place to grant').optional(),
+  })
+  .strict();
+
 /** A token's or a binding's scope, each place by path and its role: `{ "market/dev": "developer" }`. All its account holds when left out. */
 const credentialScope = z
   .record(z.string().max(200), role)
@@ -506,13 +515,7 @@ export const routes = {
     run: (ctx, { params }) => memberAccess(ctx, parseMember(params.member)),
   }),
   ...route('PUT /members/:member', {
-    input: z
-      .object({
-        role: instanceRole.optional(),
-        scope: scopeInput.optional(),
-        access: accessPatch.refine((access) => Object.keys(access).length > 0, 'name a place to grant').optional(),
-      })
-      .strict(),
+    input: memberBody,
     run: (ctx, { params, input }) => putMember(ctx, parseMember(params.member), input),
   }),
   ...route('DELETE /members/:member', {

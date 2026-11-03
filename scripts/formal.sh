@@ -464,6 +464,8 @@ REMOVALS=(
   'WritingProtect Unheld={"slug"} AddsStandAtCommit'
   'WritingProtect Unheld={"scope"} AddsStandAtCommit'
   'WritingAdd Unheld={"svc"} AddsFlip'
+  # The add's read holding the adder's session (PR 5): revoked between the read and the write, the add still commits.
+  'WritingAdd Unheld={"cred"} AddsStandAtCommit'
   # The decision weighing anything but the read (the roles from its isolate's cache): the hold holds the read, and
   # the role redefined before both is missed.
   "WritingPlace DecideOnRead WritesStandAtCommit"
@@ -494,6 +496,9 @@ REMOVALS=(
   # fence and waits for an issue's shared hold on its credential, that issue queued behind the barrier, which waits
   # for the write's issue lock.
   "WriteLocks TouchFirst NoWaitCycle"
+  # A member add taking 0.14's head before the members' rows (AddLocks, T179 PR 5): a demotion holds the row and
+  # waits for the head, which the add holds while it waits for the row.
+  "AddLocks MembersFirst NoWaitCycle"
   # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
   "WritingFallBack FallBackUncommitted OneWritePerRequest"
   # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its
