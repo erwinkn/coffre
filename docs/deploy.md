@@ -343,14 +343,24 @@ step 4.
    new passwords for the logins that exist. It makes the
    `coffre_vault_hot` login, migrates, and prints the `wrangler hyperdrive
    create` command for its config: run it, and put the id it prints under
-   `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`. On Node, the URL it shows
-   is `HOT_DATABASE_URL`. 0.14.5 keeps serving on the migrated schema. The
+   `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`. The database's connections
+   are now split three ways, so it also prints a `wrangler hyperdrive
+   update <id> --origin-connection-limit=<n>` for the app's and the
+   vault's configs: run those too, before step 4. On a `max_connections`
+   of 25, each config's share drops from 9 to 6; left at 9, the two old
+   configs and the new one could open 24 connections where 22 are free,
+   and calls fail under load. On Node, the URL setup shows is
+   `HOT_DATABASE_URL`. 0.14.5 keeps serving on the migrated schema. The
    migrations hold the log's tables for about a second, so migrate at a
    quiet moment.
 4. **Deploy both Workers at once**, `pnpm run deploy` (with Workers
-   Builds, start both builds together). On Node, stop every 0.14 process,
-   then start the vault, then the servers: no rolling update. The first
-   request to the new app cuts over.
+   Builds, start both builds together). On Node, first `pnpm build`:
+   `pnpm start` serves the built app, which `pnpm install` leaves as 0.14.5
+   built it, and an old app cannot cut over. Then stop every 0.14 process,
+   set `HOT_DATABASE_URL` and `CHECKPOINTER_MEMORY` (a path on persistent
+   storage only the vault's user writes) in `vault.env`, and start the
+   vault, then the servers: no rolling update. The first request to the
+   new app cuts over.
 5. **Check it**: `/readyz` green, `coffre --url <instance> verify
    instance` passes, the audit page shows a sealed log, and a `/use`
    through the proxy answers.
@@ -362,7 +372,7 @@ What answers what, step by step:
 | Step 3, migrating | about a second | Nothing, though a request may wait; one sign-in failed with a 500 on a deadlock in the rehearsal |
 | Step 4, between the vault's deploy and the app's | about 15 s, the app's upload | The old app's calls on the new vault answer 500: reveals, exports, writes, sign-ins, uses an isolate had not kept. A CI run then must run again |
 | The cutover, on the first request | about 0.4 s at 1,000 keys, 3 s at 10,000 | Every request but `/livez` and `/readyz` answers 503 with `Retry-After`, uses included |
-| After | once | A session an old isolate renews is refused once: that person signs in again. A principal may read up to twice the bulk cap within one window |
+| After | once | A workload session an old isolate renews is refused once: that workload signs in again for a new session. A principal may read up to twice the bulk cap within one window |
 
 In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
 10 s), 16 requests answered 500 and 194 uses 503, over 20 s.
@@ -385,8 +395,11 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
   show. Cloudflare refuses a vault without it (code 10064), and deleting
   the class would erase the newest checkpoint its object remembers. Then
   `pnpm run deploy`, by hand: a pipeline that migrates first stops there,
-  as `coffre migrate` refuses a database a newer release migrated. In the
-  rehearsal, the switch back failed requests for 28 s.
+  as `coffre migrate` refuses a database a newer release migrated. On
+  Node, which has no `deploy` script, put the code and pins back as
+  0.14.5 had them, `pnpm install` and `pnpm build`, then stop every
+  process and start the vault, then the servers. In the rehearsal, the
+  switch back failed requests for 28 s.
 - *Writes back on 0.14.5*: only by restoring step 1's backup, which loses
   everything written since.
 - *Forward again*: deploy 0.15 as in step 4. It serves at once, with its
@@ -410,14 +423,18 @@ instance` passes:
    0.15.1 keeps serving on them.
 3. **Deploy both Workers at once.** While they deploy, an app and a vault
    of different versions don't serve each other: the app answers 503
-   `deploying` with a short `Retry-After`, and clients ask again.
+   `deploying` with a short `Retry-After`, and clients ask again. On Node,
+   `pnpm build` first, then restart the vault, then the servers.
 4. **Check it** as above.
 
 Nothing is read-only during this upgrade, and no cutover runs: 0.15's log
 already holds everything.
 
 **Rolling back to 0.15.1 or later** is a deploy of the release before,
-by hand (`pnpm run deploy`, for the reason above), with no restore: its code reads what 0.16 wrote, from 0.15's log. Two
+by hand (on Workers `pnpm run deploy`, for the reason above; on Node,
+restore that release's code and pins, `pnpm install`, `pnpm build`, then
+restart the vault, then the servers), with no restore of the database:
+its code reads what 0.16 wrote, from 0.15's log. Two
 things differ while rolled back. Key writes and member adds that 0.16
 made have no 0.14 entry, so a 0.15 audit page that lists entries of
 0.14's omits them, though 0.15's log still holds and seals them. And
