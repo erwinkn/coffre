@@ -1059,7 +1059,10 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   way, or it is a 502 with nothing of the answer (`/x%41%42"` is
   `/x%41%42%22`, both `/xAB"`; Go's JSON `foo\u003cbar`, for the value
   `foo<bar`, is `foo/u003cbar` in the parsed path, which the echo's own
-  reading matches). As with `query()`, the URL that goes out holds the
+  reading matches). Whether a form is long enough to mask is decided as
+  written, before the reading shortens it: `%41%42%43"`, a key of ten
+  characters, reads `ABC"`, which the check still looks for. As with
+  `query()`, the URL that goes out holds the
   value, and so does what a platform records of outgoing requests
   (Workers' tracing, which what `coffre init` writes leaves off). The
   other way, the handle rides in the URL the app sends, as a `query()`

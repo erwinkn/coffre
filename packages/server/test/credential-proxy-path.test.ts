@@ -26,6 +26,8 @@ const ESCAPED = '%41%42%43%44%45%46%47%48';
 /** Escapes as written and punctuation a URL's parser encodes: `'` in a query, `"` in a path (review r5 of #483). */
 const PUNCTUATED = `${ESCAPED}'"`;
 /** Values a JSON string escapes, each its own way: Go `<` and `>`, Python what is past ASCII, PHP `/` (review r6 of #483). */
+/** A key long enough to mask that reads, as a URL's client reads it, shorter than that: `ABC"` (review r7 of #483). */
+const SHORTENED = '%41%42%43"';
 const ANGLED = 'foo<bar>baz';
 const ACCENTED = 'foo\u00e9baz';
 const SLASHED = 'foo/bar/baz';
@@ -116,6 +118,7 @@ function options(): CredentialProxyOptions {
       // A query rule whose value is percent-escapes, as written: `%41` is three characters of the key, not `A`.
       keyed: { upstream: `${upstreamUrl}/keyed`, inject: query('api_key', '{ESCAPED_KEY}') },
       punctuated: { upstream: `${upstreamUrl}/punctuated`, inject: query('api_key', '{PUNCTUATED_KEY}') },
+      shortened: { upstream: `${upstreamUrl}/shortened`, inject: query('api_key', '{SHORTENED_KEY}') },
       angled: { upstream: `${upstreamUrl}/angled`, inject: path('bot{ANGLED_KEY}') },
       accented: { upstream: `${upstreamUrl}/accented`, inject: path('bot{ACCENTED_KEY}') },
       angledq: { upstream: `${upstreamUrl}/angledq`, inject: query('k', '{ANGLED_KEY}') },
@@ -134,7 +137,7 @@ useMcp(async () => {
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, PUNCTUATED_KEY: { value: PUNCTUATED, sensitivity: 'sensitive' }, ANGLED_KEY: { value: ANGLED, sensitivity: 'sensitive' }, ACCENTED_KEY: { value: ACCENTED, sensitivity: 'sensitive' }, SLASHED_KEY: { value: SLASHED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
+  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, PUNCTUATED_KEY: { value: PUNCTUATED, sensitivity: 'sensitive' }, SHORTENED_KEY: { value: SHORTENED, sensitivity: 'sensitive' }, ANGLED_KEY: { value: ANGLED, sensitivity: 'sensitive' }, ACCENTED_KEY: { value: ACCENTED, sensitivity: 'sensitive' }, SLASHED_KEY: { value: SLASHED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -336,6 +339,15 @@ test("a key of escapes and punctuation, echoed in a redirect, is masked in its q
   assert.equal(pathed.headers.get('location'), null);
   const said = await pathed.text();
   for (const form of forms) assert.ok(!said.includes(form), said);
+});
+
+test("a key that reads shorter than the masking minimum, echoed in a redirect's path, is refused all the same", async () => {
+  const { handle } = await run();
+  const moved = await route(`/use/shortened/echopath?api_key=${handle}`);
+  assert.equal(moved.status, 502, `${moved.headers.get('location')}`);
+  assert.equal(moved.headers.get('location'), null);
+  const said = await moved.text();
+  for (const form of [SHORTENED, '%41%42%43%22', 'ABC"']) assert.ok(!said.includes(form), said);
 });
 
 test("a value a JSON string escapes, echoed so in a redirect's path, is refused: each escape's backslash a `/` hides it from no check", async () => {

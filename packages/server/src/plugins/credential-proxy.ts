@@ -2731,8 +2731,13 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     // `%41` for `A`), or one the path's parsing made (`%41%42"` as `%41%42%22`), goes nowhere. Each value, and each
     // echo of it, read the same way: a parse only encodes, so whatever it encoded the same decoding undoes, and an
     // echo's backslashes are the `/` a parse made of them, Go's `foo\u003cbar` `foo/u003cbar` (review r6 of #483).
-    const read = (forms: string[]) => forms.flatMap((form) => [form, readAsURL(form)]);
-    if (at !== null && redactor(read(read(known).flatMap(echoed))).whole(readAsURL(at)) !== readAsURL(at)) {
+    // Whether a form is long enough to mask is decided as it is written, before reading shortens it: `%41%42%43"`, a
+    // key, reads `ABC"`, too short on its own, yet the key's (review r7 of #483).
+    type Form = [form: string, written: number];
+    const read = (forms: Form[]): Form[] => forms.flatMap(([form, written]) => [[form, written], [readAsURL(form), written]]);
+    const echoes = read(read(known.map((value) => [value, value.length])).flatMap(([form, written]) => echoed(form).map((echo): Form => [echo, Math.max(written, echo.length)])));
+    const masked = redactor(echoes.filter(([form, written]) => written >= MIN_REDACTED && form.length > 0).map(([form]) => form), 1);
+    if (at !== null && masked.whole(readAsURL(at)) !== readAsURL(at)) {
       await upstream.body?.cancel();
       return failure(502, `the upstream's Location quoted what ${credential.name} sent, in a form coffre does not mask`);
     }
@@ -3345,9 +3350,9 @@ function render(template: string, values: Record<string, string>): string {
 /** What redacts the forms of what a request carried (`echoed`): a whole string, or part of a stream (`scrub`). */
 type Redactor = { scrub: (text: string, final: boolean) => { done: string; rest: string }; whole: (text: string) => string; any: boolean };
 
-function redactor(values: string[]): Redactor {
+function redactor(values: string[], shortest = MIN_REDACTED): Redactor {
   // Each form as the bytes an answer carries it in, UTF-8 or Latin-1, scanned as binary strings: lossless in any charset.
-  const forms = values.filter((value) => value.length >= MIN_REDACTED).flatMap((value) => {
+  const forms = values.filter((value) => value.length >= shortest).flatMap((value) => {
     const utf8 = binary(new TextEncoder().encode(value));
     return /^[\u0000-\u00ff]*$/.test(value) && value !== utf8 ? [utf8, value] : [utf8];
   });
