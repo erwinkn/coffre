@@ -108,9 +108,10 @@ export function climbs(segment: string): boolean {
  * and dots, as Windows' do, decoded however often: `;x`, `%3Bx`, `%20`,
  * `...`. Such a server reads `/companies/;x/documents` as
  * `/companies//documents`, or `/companies/documents`, and a glob counted
- * it as one.
+ * it as one. A `path()` rule's filled segment is held to it too: `..{T}`
+ * with `.` is `...`, which goes as no segment.
  */
-function vanishes(decoded: string): boolean {
+export function vanishes(decoded: string): boolean {
   return anyReading(decoded, (view) => /^[ .]*$/.test(view.split(';')[0]!));
 }
 

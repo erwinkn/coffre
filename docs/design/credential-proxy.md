@@ -1013,9 +1013,11 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   `/`, `\`, `?`, `#`, `%`, `;`, `..`, a space or a control character, is
   refused with a 409 naming the key and none of the value, with nothing
   sent: encoded or not, a server behind might read it as another path. The
-  segment it makes must read as one segment to every server (`climbs`,
-  as a request's own segments), and the URL that goes out must be the one
-  the app sent with that one segment changed, or nothing goes.
+  segment it makes must read as one segment to every server: no dot
+  segment (`climbs`, as a request's own segments), and none a server
+  drops (`vanishes`, as a `*` of an allow list takes none:
+  `path('..{T}')` with `.` is `...`); and the URL that goes out must be
+  the one the app sent with that one segment changed, or nothing goes.
 - **One rule.** One `path()` per credential, beside any other rules; before
   a `sigv4()`, which signs the path as filled.
 - **Shaped placeholders.** aiogram checks its token's shape before it
@@ -1029,12 +1031,16 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
 - **What it says, what it logs.** coffre's refusals quote the path as the
   app sent it; the audit's `credential.use` names the upstream's host, as
   for every rule; no log line has the URL. A redirect under the upstream
-  whose `Location` holds the segment as it went out gets the app's
-  segment back, so the app follows it through the proxy with its
-  placeholder (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`);
-  the value anywhere else in it, or in an answer's headers or text body,
+  whose `Location` holds the segment as it went out, compared decoded
+  once (`%3a` and `%41` are `:` and `A`), gets the app's segment back, so
+  the app follows it through the proxy with its placeholder
+  (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`);
+  a relative one (`getMe`, `?offset=1`, `#top`, an empty one) resolves
+  against the URL the app sent, never the one the value went out in.
+  The value anywhere else in it, or in an answer's headers or text body,
   is redacted as any value is (section 4), its encoded form and the whole
-  segment included. As with `query()`, the URL that goes out holds the
+  segment included; and a `Location` that still holds it once decoded,
+  in a form no redaction names, is a 502 with nothing of the answer. As with `query()`, the URL that goes out holds the
   value, and so does what a platform records of outgoing requests
   (Workers' tracing, which what `coffre init` writes leaves off). The
   other way, the handle rides in the URL the app sends, as a `query()`

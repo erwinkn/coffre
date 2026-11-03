@@ -57,7 +57,7 @@ import { database, tunnel as tunnelPostgres, type Database } from './postgres-tu
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, methodsFor, PARAMETER_NAME, pathSlot, pathTemplate, pathValue, PLACEHOLDER_PREFIX, readPattern, requestSegments, SIGNATURE_PREFIX } from '@coffre/core/proxy-match';
+import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, methodsFor, PARAMETER_NAME, pathSlot, pathTemplate, pathValue, PLACEHOLDER_PREFIX, readPattern, requestSegments, SIGNATURE_PREFIX, vanishes } from '@coffre/core/proxy-match';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
@@ -650,15 +650,16 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     const named = place[2] === undefined ? undefined : proxy.credentials.get(place[2]);
     // A form or JSON rule's refusal of the body, which says more than that no handle came: the named credential's, if both refuse.
     let refused: Response | null = null;
-    const found = async (credential: Resolved) => {
+    // Each by its own path under its upstream, `rest`: `/use/bots/bot<handle>/getMe` is `/bot<handle>/getMe` to `bots`.
+    const found = async (credential: Resolved, rest: readonly string[]) => {
       const read = await peekField(request, credential);
       if (read instanceof Response) refused = read;
       else if (read !== null) peeked.set(credential, read);
-      return handleIn(request, credential, url, read instanceof Response ? [] : read?.fields.values);
+      return handleIn(request, credential, url, within(credential, rest, url.search)?.relative ?? null, read instanceof Response ? [] : read?.fields.values);
     };
-    const first = await found(stable);
+    const first = await found(stable, raw.slice(1));
     if (first instanceof Response) return first;
-    const second = first ?? (named === undefined ? null : await found(named));
+    const second = first ?? (named === undefined ? null : await found(named, raw.slice(3)));
     if (second instanceof Response) return second;
     // Where code's credential takes no handle, a URL whose third segment may name the handle's environment's UI route:
     // the handle wherever that route's item may take it, `x-openai-key` say, which the made-for list below then weighs
@@ -1963,13 +1964,9 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   // byte either, which a server may cut a segment at (`..%00`), nor an overlong lead byte, which an old one decodes to a
   // dot (`%c0%ae`); and a dot segment is one with trailing blanks too (`..%20`). (`climbs`, @coffre/core/proxy-match.)
   if (rest.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
-  // The credential's own URL, as the app asked for it: `…/schumann` is the upstream itself, `…/schumann/` the upstream and a slash.
-  const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
-  const under = credential.base.pathname.replace(/\/$/, '');
-  if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) {
-    return failure(400, `${credential.name} reaches ${credential.base.href} only`);
-  }
-  const relative = target.pathname.slice(under.length) || '/';
+  const at = within(credential, rest, search);
+  if (at === null) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
+  const { target, under, relative } = at;
   const refused = allowed(credential, request.method, relative);
   if (refused !== null) return refused;
   // A path rule's segment, found in the path as the app sent it, before anything is opened: the value never decides it.
@@ -1984,6 +1981,19 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
     if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
   }
   return { target, under, relative, slot };
+}
+
+/**
+ * The credential's own URL for a request's path under it, `rest`, as the app asked for it: `…/schumann` is the upstream
+ * itself, `…/schumann/` the upstream and a slash; with the upstream's own path, and the request's under it. Null for a
+ * URL that leaves the upstream. `aim` reads it, and so does the stable URL's search for a handle, for each credential
+ * the URL may be for: a `path()` rule's segment is the one under that credential's upstream, never the incoming URL's.
+ */
+function within(credential: Resolved, rest: readonly string[], search: string): { target: URL; under: string; relative: string } | null {
+  const target = new URL(`${rest.length === 0 ? credential.base.href : `${credential.base.href.replace(/\/$/, '')}/${rest.join('/')}`}${search}`);
+  const under = credential.base.pathname.replace(/\/$/, '');
+  if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return null;
+  return { target, under, relative: target.pathname.slice(under.length) || '/' };
 }
 
 /**
@@ -2101,12 +2111,12 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (aimed instanceof Response) return refuse(aimed);
   // An environment the URL names, which a code item may not serve: before the body is read, or anything opened.
   if (typeof path === 'string' && !serves(credential, path)) return notServed(credential.name, path);
-  const { target } = aimed;
+  const { target, relative } = aimed;
   // A form or JSON rule's handle is in the body's field: the body read whole first, and the fields found.
   const early = peeked ?? (credential.body.length > 0 ? await read(() => body((from) => fillable(from, credential))) : null);
   if (early instanceof Response) return refuse(early);
   const fields = early?.fields ?? null;
-  const handle = handleIn(request, credential, target, fields?.values);
+  const handle = handleIn(request, credential, target, relative, fields?.values);
   if (handle instanceof Response) return refuse(handle);
   if (handle === null) return refuse(failure(401, `send what \`coffre run\` gave your app for its key where ${credential.name} takes it, or the handle as x-coffre-handle`));
   // Each query rule's parameter as the app sent it, if it stands in for this handle, its shape and all: what a redirect
@@ -2146,7 +2156,7 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const ride = riding(credential, (key) => opened.plain.includes(key));
     if (credential.body.some((rule, at) => ride.includes(rule) && handleOf(rule, fields.values[at]!) !== handle)) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
   }
-  const unheld = pathHeld(credential, target, handle, opened.plain);
+  const unheld = pathHeld(credential, relative, handle, opened.plain);
   if (unheld !== null) return unheld;
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
@@ -2178,11 +2188,11 @@ function backOf(credential: Resolved, target: URL, handle: string): [string, str
 async function sendAs(request: Request, coffre: PluginContext, credential: Resolved, rest: string[], search: string, handle: string, opened: Opened, route: string, sendBy: number, through: Egress | undefined): Promise<Response> {
   const aimed = aim(request, credential, rest, search);
   if (aimed instanceof Response) return aimed;
-  const { target } = aimed;
+  const { target, relative } = aimed;
   const early = credential.body.length > 0 ? await fillable(request, credential) : null;
   if (early instanceof Response) return early;
   const fields = early?.fields ?? null;
-  const found = handleIn(request, credential, target, fields?.values);
+  const found = handleIn(request, credential, target, relative, fields?.values);
   if (found instanceof Response) return found;
   if (found !== handle) return failure(400, `send the handle where ${credential.name} takes its key, or as x-coffre-handle`);
   const back = backOf(credential, target, handle);
@@ -2192,7 +2202,7 @@ async function sendAs(request: Request, coffre: PluginContext, credential: Resol
     const ride = riding(credential, (key) => opened.plain.includes(key));
     if (credential.body.some((rule, at) => ride.includes(rule) && handleOf(rule, fields.values[at]!) !== handle)) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
   }
-  const unheld = pathHeld(credential, target, handle, opened.plain);
+  const unheld = pathHeld(credential, relative, handle, opened.plain);
   if (unheld !== null) return unheld;
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
@@ -2576,6 +2586,9 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   let { body } = out;
   // A path rule's segment as it went out and as the app sent it: a redirect that quotes the one gets the other back.
   let swap: { sent: string; app: string } | null = null;
+  // The URL as the app sent it, before any rule put a value in it: what a relative redirect resolves against (`""`,
+  // `getMe`, `?offset=1`), so it inherits the app's placeholder, never the value.
+  const asSent = new URL(target.href);
   // A streamed body says its length itself, which S3 requires of a PutObject.
   if (streamed) headers.set('content-length', declared);
   // Each rule in order: the headers the rules before SigV4 set, which it signs too, so none is swapped on the way.
@@ -2605,7 +2618,8 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
         const key = rule.keys[0]!;
         const encoded = pathValue(values[key]!);
         const segment = encoded === null ? null : `${rule.framed!.before}${encoded}${rule.framed!.after}`;
-        if (segment === null || climbs(segment)) return failure(409, `${credential.name}'s ${key} is no segment of a path: empty, or with a /, \\, ?, #, %, ;, .., a space or a control character in it`);
+        // Whole, as a server behind reads it: no dot segment, and none that goes as no segment (`..{T}` with `.` is `...`).
+        if (segment === null || climbs(segment) || vanishes(bytesOf(segment))) return failure(409, `${credential.name}'s ${key} is no segment of a path: empty, or with a /, \\, ?, #, %, ;, .., a space or a control character in it`);
         // The path as the app sent it, that one segment changed, and nothing else: the URL setter encodes nothing more of it.
         const segments = target.pathname.slice(under.length).split('/');
         const app = segments[slot]!;
@@ -2690,19 +2704,26 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   const location = raw === null ? null : redact.whole(swap === null ? raw : swappedBack(raw, swap));
   let at: string | null = null;
   if (location !== null) {
-    // A `Location` no URL reads, `//` say, is nowhere under the upstream.
-    const to = URL.canParse(location, target) ? new URL(location, target) : null;
+    // A `Location` no URL reads, `//` say, is nowhere under the upstream. A relative one is the app's URL's, not the target's.
+    const to = URL.canParse(location, asSent) ? new URL(location, asSent) : null;
     const inside = to !== null && to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
       // The proxy's URL for it, and a query rule's parameter, kept or not, the app's placeholder, for it to follow and be let in.
       const moved = new URL(`${out.proxied}${to.pathname.slice(under.length)}${to.search}`);
       for (const [name, value] of out.back) moved.searchParams.set(name, value);
-      at = moved.href;
+      // Redacted again as the URL it now is, which no value reached through the steps above: should one have, it is masked.
+      at = redact.whole(moved.href);
     } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
       return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
     } else at = location;
+    // Decoded once, as the app's HTTP client reads it, it holds no value either: a form no list above names (`%3a` for
+    // `%3A`, `%41` for `A`) goes nowhere.
+    if (at !== null && redact.whole(bytesOf(at)) !== bytesOf(at)) {
+      await upstream.body?.cancel();
+      return failure(502, `the upstream's Location quoted what ${credential.name} sent, in a form coffre does not mask`);
+    }
   }
   const refused = upload?.refused() ?? null;
   if (refused !== null) {
@@ -2713,12 +2734,14 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
 }
 
 /**
- * A `Location` with each segment that is the one a path rule sent, exactly, the app's again, so a redirect it follows
- * goes through the proxy with its placeholder: `https://api.telegram.org/bot123:AAE…/getMe` is
+ * A `Location` with each segment that is the one a path rule sent, decoded once, the app's again, so a redirect it
+ * follows goes through the proxy with its placeholder: `https://api.telegram.org/bot123:AAE…/getMe`, or
+ * `…/bot123%3aAAE…/getMe` and `…/bot%31%323:AAE…/getMe`, which decode to the same, is
  * `https://api.telegram.org/botcoffre_use_…/getMe`. Any other copy of the value is then redacted, as any answer's.
  */
 function swappedBack(location: string, { sent, app }: { sent: string; app: string }): string {
-  return location.replace(new RegExp(`(?<=/)${sent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[/?#]|$)`, 'g'), () => app);
+  const value = bytesOf(sent);
+  return location.replace(/(?<=\/)[^/?#]*(?=[/?#]|$)/g, (segment) => (bytesOf(segment) === value ? app : segment));
 }
 
 /**
@@ -2945,9 +2968,11 @@ function riding(credential: Resolved, plain: (key: string) => boolean): readonly
  * whatever its shape: a parameter given twice (`?token=p_H1&token=H2`), a
  * header given twice, which `Headers` joins, two Basic pairs, or two handles
  * in one slot. Only one in a placeholder's shape, or in x-coffre-handle,
- * lets the request in.
+ * lets the request in. `relative` is the path under the credential's
+ * upstream, where a `path()` rule's segment is (`appSegment`); null for
+ * none.
  */
-function handleIn(request: Request, credential: Resolved, target: URL, fields: readonly string[] = []): string | null | Response {
+function handleIn(request: Request, credential: Resolved, target: URL, relative: string | null, fields: readonly string[] = []): string | null | Response {
   const explicit = request.headers.get('x-coffre-handle');
   const taken = new Set(explicit?.match(HANDLES) ?? []);
   if (explicit !== null && taken.size === 0) return null;
@@ -2957,7 +2982,7 @@ function handleIn(request: Request, credential: Resolved, target: URL, fields: r
   for (const rule of credential.rules) {
     // Basic's and SigV4's Authorization header as sent: a handle in it outside the pair or the signature counts too.
     if ((rule.kind === 'basic' || rule.kind === 'sigv4') && authorization !== null) for (const handle of authorization.match(HANDLES) ?? []) seen.add(handle);
-    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : rule.kind === 'path' ? appSegment(credential, target) : null)) {
+    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : rule.kind === 'path' ? appSegment(credential, relative) : null)) {
       for (const handle of slot.match(HANDLES) ?? []) seen.add(handle);
       const handle = handleOf(rule, slot);
       if (handle !== null) taken.add(handle);
@@ -2993,12 +3018,11 @@ function handleOf(rule: Rule, slot: string): string | null {
 }
 
 /**
- * The segment a credential's `path()` rule takes its key in, as the app sent it, decoded once (`pathSlot`, as `aim`
- * found it): `botcoffre_use_…`; null for none, or no such rule.
+ * The segment a credential's `path()` rule takes its key in, as the app sent it under the upstream (`relative`),
+ * decoded once (`pathSlot`, as `aim` found it): `botcoffre_use_…`; null for none, or no such rule.
  */
-function appSegment(credential: Resolved, target: URL): string | null {
-  if (credential.path === undefined) return null;
-  const relative = target.pathname.slice(credential.base.pathname.replace(/\/$/, '').length) || '/';
+function appSegment(credential: Resolved, relative: string | null): string | null {
+  if (credential.path === undefined || relative === null) return null;
   const at = pathSlot(credential.path.framed!, relative);
   return at === -1 ? null : bytesOf(relative.split('/')[at]!);
 }
@@ -3008,10 +3032,10 @@ function appSegment(credential: Resolved, target: URL): string | null {
  * rides there (`riding`): the segment exactly, in its shape, as a field the handle rides in must hold it, x-coffre-handle's
  * handle too. A segment of plain keys alone holds what the app put, which the value replaces.
  */
-function pathHeld(credential: Resolved, target: URL, handle: string, plain: readonly string[]): Response | null {
+function pathHeld(credential: Resolved, relative: string, handle: string, plain: readonly string[]): Response | null {
   const rule = credential.path;
   if (rule === undefined || !riding(credential, (key) => plain.includes(key)).includes(rule)) return null;
-  const segment = appSegment(credential, target);
+  const segment = appSegment(credential, relative);
   return segment !== null && handleOf(rule, segment) === handle ? null : failure(400, `the handle is not in the segment of the path where ${credential.name} takes its key, ${rule.template}`);
 }
 

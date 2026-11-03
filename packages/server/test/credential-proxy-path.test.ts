@@ -37,6 +37,15 @@ before(async () => {
       if (url.endsWith('/moved')) response.writeHead(302, { location: url.replace(/moved$/, 'getMe') }).end();
       else if (url.endsWith('/absolute')) response.writeHead(307, { location: `${upstreamUrl}${url.replace(/absolute$/, 'getMe')}?again=${encodeURIComponent(decodeURIComponent(url))}` }).end();
       else if (url.endsWith('/away')) response.writeHead(302, { location: `https://elsewhere.example${url}` }).end();
+      // Relative ones, which resolve against the URL the token went out in (review r1 of #483).
+      else if (url.endsWith('/relative')) response.writeHead(302, { location: 'getMe' }).end();
+      else if (url.endsWith('/offset')) response.writeHead(302, { location: '?offset=1' }).end();
+      else if (url.endsWith('/fragment')) response.writeHead(302, { location: '#top' }).end();
+      else if (url.endsWith('/here')) response.writeHead(302, { location: '' }).end();
+      // The token's segment encoded otherwise than it went (`%3a`, `%41` for `A`), and the token so encoded in a query.
+      else if (url.endsWith('/lower')) response.writeHead(302, { location: url.replace(/lower$/, 'getMe').replace(':', '%3a') }).end();
+      else if (url.endsWith('/spelled')) response.writeHead(302, { location: url.replace(/spelled$/, 'getMe').replace('AAE', '%41AE') }).end();
+      else if (url.endsWith('/quoted')) response.writeHead(302, { location: `/tg/getMe?t=${url.split('/')[2]!.slice(3).replace(':', '%3a')}` }).end();
       // An error page that quotes the request, as a framework's 404 may: as it came, and decoded.
       else if (url.endsWith('/echo')) response.writeHead(404, { 'content-type': 'text/plain', 'x-path': url }).end(`no route for ${url} (${decodeURIComponent(url)})`);
       else if (url.includes('/file/')) response.writeHead(200, { 'content-type': 'image/jpeg' }).end(Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
@@ -63,6 +72,12 @@ function options(): CredentialProxyOptions {
       odd: { upstream: `${upstreamUrl}/odd`, inject: path('bot{BOT_VALUE}') },
       // A path rule of a plain key beside a header of a secret: the handle rides in the header, the app holds the account as it is.
       tenant: { upstream: `${upstreamUrl}/tenant`, inject: [header('x-api-key', '{TENANT_KEY}'), path('{ACCOUNT}')] },
+      // Where the stable URL's own segments would frame the slot, read against the wrong base (review r1 of #483): a name
+      // the template frames (`bots`, `bot{…}`), and a key alone under a long base path.
+      bots: { upstream: upstreamUrl, inject: path('bot{TELEGRAM_BOT_TOKEN}') },
+      bare: { upstream: `${upstreamUrl}/a/long/base/path/for/the/bot`, inject: path('{TELEGRAM_BOT_TOKEN}') },
+      // A template whose text and a value make a segment that goes as none: `..` and `.` is `...`.
+      dots: { upstream: `${upstreamUrl}/dots`, inject: path('..{BOT_VALUE}'), allow: [{ methods: ['GET'], path: '/*/getMe' }] },
     },
     insecureUpstreams: true,
     cacheSeconds: 0,
@@ -203,6 +218,47 @@ test("a redirect under the upstream quoting the token gets the app's placeholder
   assert.equal(echoed.status, 404);
   assert.ok(free(page) && free(echoed.headers.get('x-path')!), page);
   assert.match(page, /\[redacted by coffre\]/);
+});
+
+test('a relative redirect resolves against the URL the app sent, never the one the token went out in', async () => {
+  const { handle } = await run();
+  for (const [at, want] of [['relative', `bot${handle}/getMe`], ['offset', `bot${handle}/offset?offset=1`], ['fragment', `bot${handle}/fragment`], ['here', `bot${handle}/here`]]) {
+    const moved = await route(`/use/telegram/bot${handle}/${at}`);
+    assert.equal(moved.status, 302, at);
+    const location = moved.headers.get('location')!;
+    assert.equal(location, `${ORIGIN}/use/market/dev/telegram/${want}`, at);
+    assert.ok(free(location) && free(decodeURIComponent(location)), location);
+  }
+});
+
+test("the token's segment, encoded otherwise in a redirect, gets the placeholder back; the token so encoded elsewhere is a 502", async () => {
+  const { handle } = await run();
+  for (const at of ['lower', 'spelled']) {
+    const moved = await route(`/use/telegram/bot${handle}/${at}`);
+    assert.equal(moved.status, 302, at);
+    assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/telegram/bot${handle}/getMe`, at);
+  }
+  // In the query, a form no redaction names: decoded once it is the token, so nothing of the answer goes.
+  const quoted = await route(`/use/telegram/bot${handle}/quoted`);
+  assert.equal(quoted.status, 502);
+  assert.equal(quoted.headers.get('location'), null);
+  assert.ok(free(await quoted.text()));
+});
+
+test("the stable URL finds the handle in the segment under each credential's own upstream", async () => {
+  const { handle } = await run();
+  assert.equal((await route(`/use/bots/bot${handle}/getMe`)).status, 200);
+  assert.equal(reached.at(-1)!.url, `/bot${TOKEN}/getMe`);
+  assert.equal((await route(`/use/bare/${handle}/getMe`)).status, 200);
+  assert.equal(reached.at(-1)!.url, `/a/long/base/path/for/the/bot/${TOKEN}/getMe`);
+});
+
+test('a value that makes a segment a server reads as none is a 409, though no dot segment', async () => {
+  const { handle } = await run();
+  await clientFor(deps, ROOT).secrets.set('market/dev', { BOT_VALUE: '.' });
+  const refused = await route(`/use/dots/..${handle}/getMe`);
+  assert.equal(refused.status, 409, await refused.clone().text());
+  assert.equal(reached.length, 0);
 });
 
 test("the token is in no log line, no audit entry and no refusal; 0.14's use names the host alone", async () => {

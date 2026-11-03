@@ -14,8 +14,9 @@
   A value a server could read as another path (empty, or with `/`, `\`,
   `?`, `#`, `%`, `;`, `..`, whitespace or a control character) is a 409
   naming the key, with nothing sent; a path with no such segment is a
-  400. A redirect under the upstream that quotes the segment gets the
-  app's back, and the value is redacted from answers, its encoded form
+  400. A redirect under the upstream that quotes the segment, however
+  encoded, gets the app's back; a relative one resolves against the URL
+  the app sent; and the value is redacted from answers, its encoded form
   and the segment included. aiogram, which checks the token's shape,
   takes `placeholder: prefix('<bot id>:')`. A use is still one vault call
   (docs/design/credential-proxy.md, section 5, "A segment of the path").
