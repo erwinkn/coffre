@@ -1378,8 +1378,9 @@ class VaultService implements Vault {
     const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
     if (everyProject.length === 0) return;
     // Weighed against the change their row was just checked against, its MAC with it (`#onLog`), not the newest read
-    // again: that read's number is no MAC's (review r1 of #476). Before the cutover, the newest as it stands.
-    const weighed = subject.log === undefined ? (await newestChangeNames(d.tx, [principal])).get(principal)! : weighedOf(subject.log);
+    // again: that read's number is no MAC's (review r1 of #476). Without 0.15's log checked, none: only 0.14's findings
+    // are the vault's then (review r2).
+    const weighed = subject.log === undefined ? null : weighedOf(subject.log);
     if (await reportStands(d.tx, principal, this.#check(d.reports, principal), weighed)) return;
     // The projects there are now, read under the log's head, which a deletion holds; each environment by its slug as 0.15's
     // log holds its row (T159, review r7): a grant on a slug in every project becomes one on each place that answers to

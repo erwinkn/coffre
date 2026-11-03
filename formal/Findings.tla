@@ -20,9 +20,14 @@
 (*              change;                                                    *)
 (*   CheckLate  one that read none (`#seal`, `#notLogged`): its finding    *)
 (*              names the newest as it appends (`#weigh`);                 *)
-(*   CheckOld   0.14's check, which appends its finding at once, under     *)
-(*              0.14's head, and names no change (Legacy: a finding of     *)
-(*              before the cutover, read beside 0.15's);                   *)
+(*   CheckOld   0.14's check, whose finding names no change (Legacy: a     *)
+(*              finding of before the cutover, read beside 0.15's). It     *)
+(*              checks in a snapshot and appends later (`access`, then     *)
+(*              `#record`), as a late one does: a change between the two   *)
+(*              leaves it after that change's access entry, and it stands  *)
+(*              by seq though its check predates the change, until the     *)
+(*              next change (review r2 of #476). So what it says is as of  *)
+(*              its append, the one point 0.14's rule weighs;              *)
 (*   Commit     a check's finding appended, in any order: two checks       *)
 (*              commit in an order of their own, not the one they read in; *)
 (*   Change     the vault's change of the member, which passes only a row  *)
@@ -73,7 +78,7 @@ VARIABLES
     changes,   \* the vault's changes of the member, made in order: change i is the i-th, its id
     number,    \* number[i]: the number change i holds in log_changes
     seq,       \* the log's sequence: the number the next change takes
-    checks,    \* checks in flight: [id, n] the change read and its number then, or id = LATE; at, the vault's changes then
+    checks,    \* checks in flight: [id, n] the change read and its number then, or id = LATE; at, the vault's changes then; old, 0.14's
     log,       \* the audit log, oldest first: findings, 0.14's findings and access entries
     made,      \* checks made
     tampers,   \* times tampered
@@ -138,8 +143,8 @@ Check(late) ==
     /\ Finds
     /\ made < MaxChecks
     /\ made' = made + 1
-    /\ checks' = checks \cup {IF late THEN [id |-> LATE, n |-> 0, at |-> changes, k |-> made + 1]
-                                    ELSE [id |-> NewestId, n |-> NumberOf(NewestId), at |-> changes, k |-> made + 1]}
+    /\ checks' = checks \cup {IF late THEN [id |-> LATE, n |-> 0, at |-> changes, k |-> made + 1, old |-> FALSE]
+                                    ELSE [id |-> NewestId, n |-> NumberOf(NewestId), at |-> changes, k |-> made + 1, old |-> FALSE]}
     /\ UNCHANGED <<row, changes, number, seq, log, tampers, renumbers>>
 
 CheckOld ==
@@ -147,15 +152,15 @@ CheckOld ==
     /\ Finds
     /\ made < MaxChecks
     /\ made' = made + 1
-    /\ log' = Append(log, [kind |-> "legacy", id |-> NewestId, n |-> 0, at |-> changes])
-    /\ UNCHANGED <<row, changes, number, seq, checks, tampers, renumbers>>
+    /\ checks' = checks \cup {[id |-> LATE, n |-> 0, at |-> changes, k |-> made + 1, old |-> TRUE]}
+    /\ UNCHANGED <<row, changes, number, seq, log, tampers, renumbers>>
 
 Commit(c) ==
     /\ checks' = checks \ {c}
-    /\ log' = Append(log, [kind |-> "finding",
+    /\ log' = Append(log, [kind |-> IF c.old THEN "legacy" ELSE "finding",
                            id |-> IF c.id = LATE THEN NewestId ELSE c.id,
                            n |-> IF c.id = LATE THEN NumberOf(NewestId) ELSE c.n,
-                           \* A late one weighs what it names as it appends: what it says is as of then.
+                           \* A late one, and 0.14's, weighs what it names as it appends: what it says is as of then.
                            at |-> IF c.id = LATE THEN changes ELSE c.at])
     /\ UNCHANGED <<row, changes, number, seq, made, tampers, renumbers>>
 

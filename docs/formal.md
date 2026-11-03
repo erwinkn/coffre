@@ -2448,9 +2448,10 @@ the newest, each taking the log's next number; a writer who gives a change
 any number no other holds (`Renumber`); checks of a bad row, each naming the
 change it read (`#onLog`, `#integrity`), or, for one that read none, the
 newest as its finding appends (`#weigh`: `#seal`, `#notLogged`); 0.14's
-checks, which append at once and name none (`CheckOld`, `Findings015.cfg`
-only: the 0.15 reader is both rules at once); and findings appended in any
-order. The readers take the change numbered highest as the newest. When
+checks, which name none and, like a late one, append after their check,
+in a transaction of their own (`CheckOld`: `access`, then `#record`;
+`Findings015.cfg` only: the 0.15 reader is both rules at once); and
+findings appended in any order. The readers take the change numbered highest as the newest. When
 that is an older change put above the newest (`Honest` false), the vault's
 check finds the row stale and refuses; what a finding says then is outside
 the invariants: an entry replayed or deleted whole, its MAC intact, is the
@@ -2459,7 +2460,7 @@ a finding whose check read the vault's newest change, none made since,
 stands. `Settles`: a change after every finding's check settles them.
 `Findings.cfg` has no access entries (0.16), 82,200 states;
 `Findings015.cfg` writes one beside each change, and 0.14's findings beside
-0.15's, 190,803.
+0.15's, 408,314.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2471,6 +2472,11 @@ A finding that reads its change as it appends, not as its check read the
 row, weighs any change committed between the two: it then stands until the
 next change, as 0.14's rule held one past the access entry that change
 wrote. The model allows it (`Check(TRUE)`); it errs only toward standing.
+So does 0.14's own finding, weighed by where it appends: a change between
+its check and its append leaves it after that change's access entry, and it
+stands until the next. The model takes what such a finding says as of its
+append; taken as of its check, TLC finds `Settles` broken by exactly that
+trace (review r2 of #476).
 
 ## 0.16: proxy definitions in the UI
 

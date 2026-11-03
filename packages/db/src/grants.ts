@@ -290,11 +290,14 @@ export async function tamperedMembers(db: Queryable, principal?: string): Promis
     newestChangeNames(db, named),
   ]);
   const accessOf = new Map(access.map((row) => [row.principal!, BigInt(row.seq)]));
+  // One pass over the findings: those naming their member's newest change (review r2 of #476: a lookup per member
+  // grew with the findings squared).
+  const naming = new Set(found.flatMap((row) => (row.weighed !== null && row.weighed === changes.get(row.principal!) ? [row.principal!] : [])));
   const principals = new Set(found.map((row) => row.principal!));
   return new Set([...principals].filter((principal) => findingStands({
     legacy: legacy.get(principal) ?? null,
     access: accessOf.get(principal) ?? null,
-    named: found.some((row) => row.principal === principal && row.weighed !== null && row.weighed === changes.get(principal)),
+    named: naming.has(principal),
   })));
 }
 
@@ -400,11 +403,16 @@ export function findingsOf(db: Queryable, principal: string): { legacy: SQL<stri
  * those after that entry are read. So older ones, forged or not, never hide
  * one. From LOOK_BACK forged entries on, of either kind, one may stand, so
  * it is taken to. `newest` is the change the decision that asks checked
- * with their row (`#onLog`): its MAC, and their row's seal against it.
+ * with their row (`#onLog`): its MAC, and their row's seal against it;
+ * null when it checked none (0.14's log alone, where no finding of 0.15's
+ * is the vault's), and only 0.14's are weighed. Never the newest read
+ * again, whose number no MAC covers (review r1 of #476).
  */
-export async function reportStands(db: Queryable, principal: string, check: Authenticity, newest: string): Promise<boolean> {
-  const numbered = await newestAuthentic((limit, before) => tamperReportsAbout(db, principal, limit, { names: newest }, before), check);
-  if (numbered === 'unreached' || typeof numbered !== 'string') return true;
+export async function reportStands(db: Queryable, principal: string, check: Authenticity, newest: string | null): Promise<boolean> {
+  if (newest !== null) {
+    const named = await newestAuthentic((limit, before) => tamperReportsAbout(db, principal, limit, { names: newest }, before), check);
+    if (named === 'unreached' || typeof named !== 'string') return true;
+  }
   const access = await newestAccess(db, principal, check);
   if (access === 'unreached') return true;
   const after = typeof access === 'string' ? -1n : access.seq;
