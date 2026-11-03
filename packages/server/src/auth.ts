@@ -7,7 +7,7 @@ import { callerFrom, newestPolicySeq, withRecalled, withShown, type Caller } fro
 import { formatMember } from './api/paths.ts';
 import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
-import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken } from './api/signin.ts';
+import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken, type Touch } from './api/signin.ts';
 import { answerShown, policySeqAndSettings, shownActive, type Shows } from './db/answers.ts';
 import type { CredentialRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
@@ -137,6 +137,9 @@ export function unauthenticated(auth: AuthConfig): Response {
   );
 }
 
+/** A credential its check found unknown, expired or revoked: the 401 a signed-out caller gets (and the two-trip write's, write-ahead.ts). */
+export const endedCredential = () => errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
+
 export const registrationRequired = () =>
   errorResponse(new ApiError('registration_required', 'you are signed in, but not a member here'));
 
@@ -185,7 +188,7 @@ export async function authenticateRequest(
    * `standing`: the caller as the vault's named use decided them (`Vault.useNamed`, T145): nothing asked or kept.
    * `at`: the instant that use was asked at, at which its credential's expiry is judged, as the vault judged it (one clock).
    */
-  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number } = {},
+  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number; touch?: (touched: Touch) => void } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   const kind = tokenKind(token);
@@ -214,6 +217,7 @@ export async function authenticateRequest(
     const asked = {
       sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }),
       ...(options.at === undefined ? {} : { at: options.at }),
+      ...(options.touch === undefined ? {} : { touch: options.touch }),
     };
     // Only coffre's own credentials are read ahead: Access's verifier reads none.
     const verifying = options.ahead !== undefined && runtime.verifier instanceof SigninService
@@ -244,7 +248,7 @@ export async function authenticateRequest(
       console.error('checking a credential failed', { requestId, error: logged(error.cause) });
       return errorResponse(new ApiError('unavailable', 'coffre cannot check who you are right now'));
     }
-    return errorResponse(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'));
+    return endedCredential();
   }
 
   try {

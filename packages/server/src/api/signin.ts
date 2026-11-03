@@ -295,6 +295,9 @@ const DEVICE_PENDING_PER_IP = 5;
 const DEVICE_PENDING_TOTAL = 200;
 /** No vowels, so a code never spells a word; no 0/O or 1/I lookalikes. */
 const USER_CODE_ALPHABET = 'BCDFGHJKLMNPQRSTVWXZ';
+/** A credential's last use, as `verify` records it once every five minutes: by the request, when it writes it itself. */
+export type Touch = { credential: string; at: Date; ip: string | null };
+
 const TOUCH_INTERVAL_MS = 5 * 60 * 1000;
 export { MAX_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
 
@@ -769,7 +772,11 @@ export class SigninService {
      * credential live when its request began is that request's, which the use's deadline bounds; its revocation and
      * generation stay as they are now.
      */
-    request: { sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number } = { sourceIp: null },
+    request: {
+      sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number;
+      /** `touch`: the request writes the touch itself, with what it writes, at no round trip of its own (a key write's held statement, T179 PR 3). */
+      touch?: (touched: Touch) => void;
+    } = { sourceIp: null },
   ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
     const { db, chainKey } = this.#deps;
@@ -821,7 +828,8 @@ export class SigninService {
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {
       // Coarse on purpose: one write per credential per five minutes, not
       // one per request. Losing it must never cost the request.
-      await update(db, credentials, { id: row.id }, { lastUsedAt: now, lastUsedIp: request.sourceIp }).catch(() => 0);
+      if (request.touch !== undefined) request.touch({ credential: row.id, at: now, ip: request.sourceIp });
+      else await update(db, credentials, { id: row.id }, { lastUsedAt: now, lastUsedIp: request.sourceIp }).catch(() => 0);
     }
 
     const member = memberOf(row.principal);

@@ -4,7 +4,7 @@ import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
-import { own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
+import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { logObject, newestSeqQuery, newestVaultSeq, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
@@ -100,6 +100,14 @@ export async function update<T extends Table>(
 ): Promise<number> {
   const mine = own(db, table);
   return changedRows(await db.update(mine).set(set as never).where(matching(mine, match)));
+}
+
+/**
+ * A credential's last use, on its own and outside any transaction, as sign-in writes it when nothing carries it: a touch
+ * handed to a held write (`heldWrites`) whose write then went down today's path instead. Losing it never costs the request.
+ */
+export async function touchCredential(db: Queryable, touch: { credential: string; at: Date; ip: string | null }): Promise<void> {
+  await update(db, tablesOf(db).credentials, { id: touch.credential }, { lastUsedAt: touch.at, lastUsedIp: touch.ip }).catch(() => 0);
 }
 
 /** State changes authenticate the old row first and cannot overwrite a concurrent change. */
@@ -2985,3 +2993,37 @@ export async function auditActionCounts(
     )
     .groupBy(auditLog.action);
 }
+
+/**
+ * A key write's writes, held to the vault's read (T179 PR 3; `heldWrite` in api/secrets.ts), each left to `later`, so
+ * that they go with what its transaction asks next, its COMMIT at the latest, under one Sync: its credential's last
+ * use first, when `verify` left it to the request; then the hold (`hold_inputs`, migration 0061: the issue lock and the
+ * fence, then the vault's read again, `coffre_moved` unless it reads as decided); then each new key's row, the
+ * versions and each key's current version. Postgres only, as the vault's read is.
+ *
+ * The credential's row before the issue lock and the fence, as `issue_token` and `revoke_credential` take it
+ * (formal/WriteLocks.tla, TouchFirst): after them, the write would hold the issue lock and wait for an issue's shared
+ * hold on the row, that issue queued for the issue lock behind the checkpointer's barrier, which waits for the
+ * write's: a cycle Postgres breaks only after `deadlock_timeout`, the fence held exclusive and every use waiting.
+ */
+export function heldWrites(
+  tx: Transaction,
+  write: {
+    hold: { tokenHash: Buffer; project: string; environment: string; keys: readonly string[]; digest: Buffer };
+    made: readonly { id: string; projectId: string; environmentId: string; key: string }[];
+    versions: readonly NewRow<typeof schema.secretVersions>[];
+    touched: { credential: string; at: Date; ip: string | null } | null;
+  },
+): void {
+  const { secrets, secretVersions, credentials } = tablesOf(tx);
+  const { hold } = write;
+  if (write.touched !== null) later(tx, tx.update(credentials).set({ lastUsedAt: write.touched.at, lastUsedIp: write.touched.ip }).where(eq(credentials.id, write.touched.credential)));
+  later(tx, sql`SELECT hold_inputs(${hold.tokenHash}::bytea, ${hold.project}::text, ${hold.environment}::text, ${sql.param([...hold.keys])}::text[], ${hold.digest}::bytea)`);
+  if (write.made.length > 0) later(tx, tx.insert(secrets).values([...write.made]));
+  if (write.versions.length > 0) later(tx, tx.insert(secretVersions).values([...write.versions]));
+  const now = new Date();
+  for (const version of write.versions) {
+    later(tx, tx.update(secrets).set({ currentVersionId: version.id!, currentVersion: version.version, updatedAt: now }).where(eq(secrets.id, version.secretId)));
+  }
+}
+

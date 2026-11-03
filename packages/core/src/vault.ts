@@ -233,6 +233,12 @@ export interface Vault {
     issues?: true;
     /** `true` when the vault makes and ends trust bindings itself, and signs in through none it did not seal (`changeBindings`; T149, PR 3a). Absent otherwise. */
     binds?: true;
+    /**
+     * `true` when the vault decides a key write on one read of its own (`writeKeys`; T179 PR 3): its log is 0.15's, on
+     * Postgres, its key-encryption key held in memory. Said here, as a Worker's stub answers any method's name: of a
+     * vault older than this app, mid-deploy, the app writes as before. Absent otherwise.
+     */
+    writes?: true;
   }>;
   /**
    * What an escrowed vault key is checked against: the vault key it wraps
@@ -322,6 +328,15 @@ export interface Vault {
    * (`about().log`); a vault older than 0.15 has none.
    */
   prepare?(input: PrepareInput): Promise<Outcome<Prepared>>;
+  /**
+   * A key write decided on one read (T179 PR 3; docs/design/two-trips.md, "A key write"; formal/Writing.tla): one
+   * statement reads, under the fence shared, everything the decision weighs (`write_inputs`) and numbers the request;
+   * the vault decides on that read alone, wraps each data key and prepares each key's change, the read's digest in it,
+   * which the app's transaction holds the same read to again (`hold_inputs`) before it commits. `served: false` for
+   * any write it does not serve so, a refusal among them: the app writes as before, which answers and logs it. Only
+   * with `about().writes`.
+   */
+  writeKeys?(input: WriteKeysInput): Promise<WriteKeysOutcome>;
   /**
    * Answers once the log's entry `number` is sealed in a signed checkpoint
    * and, if a witness is configured, witnessed or past its 2 s (R51): what a
@@ -708,6 +723,40 @@ export type EnvironmentColumns = {
   /** Its project's: 0.14 takes an environment of an archived project as archived. */
   projectArchived: boolean;
 };
+
+/**
+ * A key write as the app asks it (`Vault.writeKeys`): the token's hash, what the deployment's config accepts of a
+ * credential, the place by the slugs its path names, and each key by name, with the id it takes if the place holds
+ * none (a new key's, the app's to draw), its new version's id, the data key it is to be encrypted under (fresh, 32
+ * bytes, base64), and, for a regenerate, the version it replaces. Times in ms since the epoch.
+ */
+export type WriteKeysInput = Correlation & {
+  tokenHash: string;
+  accepts: CredentialAcceptance;
+  project: string;
+  environment: string;
+  keys: { name: string; id: string; versionId: string; key: string; replaces?: string | null }[];
+};
+
+/**
+ * What the vault decided of a key write: none, the app writing as before; or each key's id (made, or as the place
+ * holds it), whether the write makes it, its sensitivity and its data key wrapped, with the seq of its `key.wrap`
+ * entry, its change, prepared (the read's digest in its payload), the read's digest the app's hold compares, the app's
+ * rows as the read found them (`app`, as `app_read` answers them, with the database's clock), the caller as the
+ * vault decided them (`standing`, as `access` answers), and the instant the credential's end was judged at (`at`).
+ */
+export type WriteKeysOutcome =
+  | { served: false; why: string }
+  | {
+    served: true;
+    at: number;
+    number: string;
+    app: string;
+    standing: Access;
+    digest: string;
+    keys: { name: string; id: string; created: boolean; version: number; sensitive: boolean; wrapped: WrappedKey; seq: number }[];
+    changes: PreparedChange[];
+  };
 
 export type PrepareInput = {
   /** Who makes the changes, as their entries name them: `user:…`, `token:…`, or the app's own (`coffre`). */

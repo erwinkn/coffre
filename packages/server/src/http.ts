@@ -14,9 +14,11 @@ export function jsonResponse(
 /** Anything thrown, as the API's one error shape: `{ error, message }`; a moment's 503 says when to ask again, a deploy's in a second. */
 export function errorResponse(error: unknown, headers: HeadersInit = {}): Response {
   const { status, body } = toErrorBody(error);
-  // A moment's 503: what coffre could not reach (no reason), or one that says itself when to ask again (a busy use, the vault's).
+  // A moment's 503: what coffre could not reach (no reason), or one that says itself when to ask again (a busy use, the
+  // vault's). Any other error only when it says so itself (a two-trip write's 409 `changed`, its tries spent).
   const own = error instanceof ApiError ? error.retryAfter : undefined;
-  const later = status !== 503 || new Headers(headers).has('retry-after') ? undefined
+  const later = new Headers(headers).has('retry-after') ? undefined
+    : status !== 503 ? own
     : body.error === 'deploying' ? DEPLOYING_RETRY_AFTER
     : body.error !== 'unavailable' ? undefined : own ?? (body.reason === undefined ? UNAVAILABLE_RETRY_AFTER : undefined);
   return jsonResponse(body, status, later === undefined ? headers : { ...Object.fromEntries(new Headers(headers)), 'retry-after': later });

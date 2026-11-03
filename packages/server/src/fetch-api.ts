@@ -23,6 +23,7 @@ import {
 } from './auth.ts';
 import { errorResponse, jsonResponse, methodNotAllowed, parseJsonBody, readLimitedBytes } from './http.ts';
 import { useByName, useManyByName } from './named-use.ts';
+import { writeAhead, writeAsked, type Written } from './write-ahead.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { publicProviders } from './signin.ts';
 
@@ -292,8 +293,36 @@ export async function fetchApi(
         };
       }
     }
-    const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess);
-    if (identity instanceof Response) return identity;
+    // A key write of values with a coffre credential: the vault's one call, which decides on the caller as they are and
+    // prepares the write, that the route then commits in one transaction of two round trips (`writeAhead`, T179 PR 3).
+    // Its body is read first, to know the keys; only for a request of the shape it serves, and for no caller asked of
+    // otherwise above.
+    let written: Written | undefined;
+    if (body === null && !recall && !shows && options.authenticate === undefined && request.method === 'PATCH' && runtime.vault.writeKeys !== undefined) {
+      const credential = apiCredential(request, runtime.auth);
+      if (credential !== null) {
+        const read = await bytes();
+        if (read instanceof Response) return read;
+        body = read;
+        const asked = writeAsked(request, body);
+        if (asked !== null) {
+          authenticate = async (token) => {
+            const ahead = await writeAhead(runtime, request, options.sourceIp, token, asked);
+            if (ahead === null) return authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp);
+            if (ahead.written !== null) written = ahead.written;
+            return ahead.identity;
+          };
+        }
+      }
+    }
+    const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess).catch((error: unknown) => {
+      written?.wipe();
+      throw error;
+    });
+    if (identity instanceof Response) {
+      written?.wipe();
+      return identity;
+    }
     if (!identity.registered && !(request.method === 'GET' && pathname === '/api/me')) {
       return identity.caller.tampered ? accessTampered() : registrationRequired();
     }
@@ -309,7 +338,8 @@ export async function fetchApi(
       served = replay();
       if (identity.caller.recalled !== undefined) again = replay();
     }
-    const response = await serveApi(served, { ...apiContext(runtime, identity, options.render), ...(named === undefined ? {} : { named }) });
+    const response = await serveApi(served, { ...apiContext(runtime, identity, options.render), ...(named === undefined ? {} : { named }), ...(written === undefined ? {} : { written }) })
+      .finally(() => written?.wipe());
     // Nothing goes back on a kept answer the vault has not vouched for this request.
     await identity.caller.recalled?.confirm();
     if (identity.workload == null) return response;

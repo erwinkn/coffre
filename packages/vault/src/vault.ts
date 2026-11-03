@@ -112,6 +112,7 @@ import {
   type RevokeCredentialInput,
   type RevokeCredentialOutcome,
   type RewrapInput,
+  type ObjectChange,
   type SecretRef,
   type SetAccessInput,
   type SetSettingsInput,
@@ -146,6 +147,8 @@ import {
   type VouchedEntry,
   type VouchInput,
   type WrapInput,
+  type WriteKeysInput,
+  type WriteKeysOutcome,
   type WrappedKey,
   VOUCHED_AT_ONCE,
   canonicalDefinition,
@@ -193,6 +196,7 @@ import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
 import { ACCESS_ACTIONS, type CheckedChange, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog, type ReadKind } from './store.ts';
+import { callWrite, decideWrite, parseInputs, secretColumnsOf, validateWriteKeys, WRITE_KINDS, writeStanding } from './write.ts';
 import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
@@ -3546,7 +3550,7 @@ class VaultService implements Vault {
     return JSON.parse(refused.metadata) as { failedAtSeq?: number | null; reason?: string };
   }
 
-  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; batchUses?: true; namedBatches?: true; sealing?: true; credentials?: true; issues?: true }> {
+  async about(): Promise<{ checkpointKeys: Record<string, CheckpointKey>; owners: string[]; rootAdmins: []; log?: '0.15'; uses?: true; batchUses?: true; namedBatches?: true; sealing?: true; credentials?: true; issues?: true; writes?: true }> {
     await this.#settled();
     const { signers, since } = this.#prepared;
     // A key it replaced vouches only for prefixes before its first entry under the current one: none, before it has one.
@@ -3563,6 +3567,8 @@ class VaultService implements Vault {
       // only of a vault that has it.
       // And a request's several keys by name (`useNamedMany`, T165), which reads them with the caller's standing first.
       ...(this.#prepared.log015 === null || this.#hot === undefined ? {} : { uses: true as const, batchUses: true as const, namedBatches: true as const }),
+      // A key write decided on one read (`writeKeys`, T179 PR 3), where this vault serves it.
+      ...(this.#serveWrites() ? { writes: true as const } : {}),
     };
   }
 
@@ -3862,6 +3868,78 @@ class VaultService implements Vault {
       await this.#record(reports);
       return { ok: false, refusal: refused.refusal };
     }
+  }
+
+  /**
+   * A key write decided on one read (write.ts; T179 PR 3; docs/design/two-trips.md, "A key write"; formal/Writing.tla):
+   * `write_request`, one statement, reads what the decision weighs and numbers the request; the decision takes that
+   * read alone (`decideWrite`); then each data key is wrapped, 0.14's `key.wrap` entries appended (a transaction of
+   * two round trips, its head read before its MAC, until 0.16 stops the appends), and each key's change prepared from
+   * its object as read, the request and the read's digest in its payload. The app's transaction holds the same read
+   * before it commits (`hold_inputs`). Anything this path does not serve, a refusal among them, answers `served: false`,
+   * nothing written but the request's number: the app writes as before, which decides, answers and logs it.
+   */
+  async writeKeys(input: WriteKeysInput): Promise<WriteKeysOutcome> {
+    const unserved = (why: string): WriteKeysOutcome => ({ served: false, why });
+    const log015 = this.#prepared.log015;
+    if (log015 === null || !this.#serveWrites()) return unserved('vault');
+    validateWriteKeys(input);
+    if (!(await this.#cutOverNow())) return unserved('vault');
+    if ((await this.#kekMismatch(Date.now() + READ_DEADLINE_MS)) !== null) return unserved('kek');
+    const at = Date.now() + this.#prepared.options.clockOffset();
+    const read = await callWrite(this.#db, {
+      at, tokenHash: Buffer.from(input.tokenHash, 'base64'), project: input.project, environment: input.environment, keys: input.keys.map((key) => key.name),
+    });
+    if (read.state === 'ahead') return unserved('clock');
+    const inputs = parseInputs(read.inputs);
+    const decided = decideWrite({ seals: log015.seals, macs: log015.macs }, inputs, { at, accepts: input.accepts, kinds: WRITE_KINDS, asked: input.keys });
+    if (typeof decided === 'string') return unserved(decided);
+    const { credential, environment } = decided;
+    const principal = credential.principal;
+    const secrets: SecretRef[] = decided.keys.map((key) => ({
+      projectId: environment.projectId, environmentId: environment.id, secretId: key.id, version: key.before.version + 1,
+      path: `${input.project}/${input.environment}/${key.name}`, ...(key.sensitive ? { sensitive: true } : {}),
+    }));
+    // Each data key wrapped as its version's context binds it: its ids, and whether it is sensitive (no personal config here).
+    const operation = { deadline: Date.now() + READ_DEADLINE_MS, signal: new AbortController().signal };
+    const wrapped = await Promise.all(secrets.map(async (secret, i) => {
+      const dek = Buffer.from(input.keys[i]!.key, 'base64');
+      try {
+        return serialisable(await this.#config.keks.wrap(dek, context(secret), operation));
+      } finally {
+        dek.fill(0);
+      }
+    }));
+    // 0.14's record of the wraps, which its readers still take (two-trips.md, "The PRs", 3 and 4), and which a write's
+    // `secret.write` entries name.
+    // A personal token's entries name it, as the app's `asking` does for one (`vaultCredential`): here from the read.
+    const correlation = { operationId: input.operationId ?? null, requestId: input.requestId ?? null, ...(inputs.credential.kind === 'personal' ? { credentialId: credential.id } : {}) };
+    const entries = secrets.map((secret) => keyEntry('key.wrap', principal, secret, 'allow', null, correlation));
+    // Two round trips: BEGIN, the head locked and read in one statement (`snapshot`, as a decision takes it), then the
+    // append with the COMMIT.
+    const appended = await this.#db.transaction(async (tx) => this.#append(tx, entries, [], await snapshot(tx, { principals: [], head: true, waiters: READ_HEAD_WAITERS }), { final: true }));
+    // Each key's change, from its object as read (none for a key the write makes) to its new version.
+    const changes = prepareChanges(log015, at, principal, decided.keys.map((key, i): ObjectChange => ({
+      kind: 'secret', id: key.id,
+      before: key.created ? null : { columns: secretColumnsOf(key.before), seal: key.before.object.seal!.toString('base64') },
+      after: {
+        id: key.id, projectId: environment.projectId, environmentId: environment.id, source: null, reference: null,
+        version: {
+          id: input.keys[i]!.versionId, sensitive: key.sensitive, plaintext: null,
+          kekProvider: wrapped[i]!.kekProvider, kekId: wrapped[i]!.kekId, kekVersion: wrapped[i]!.kekVersion, wrappedDek: wrapped[i]!.bytes,
+        },
+      },
+    })), new Map(), { number: read.number, credential: credential.id, identity: inputs.credential.identityId, inputs: read.digest });
+    return {
+      served: true, at, number: read.number.toString(), app: read.app, standing: writeStanding(decided, at), digest: read.digest,
+      keys: decided.keys.map((key, i) => ({ name: key.name, id: key.id, created: key.created, version: key.before.version + 1, sensitive: key.sensitive, wrapped: wrapped[i]!, seq: Number(appended.seqStart) + i })),
+      changes,
+    };
+  }
+
+  /** Whether this vault serves `writeKeys`: 0.15's log, on Postgres, its key-encryption key in memory (a key service's intent and outcome are records of their own, PR 7). */
+  #serveWrites(): boolean {
+    return this.#prepared.log015 !== null && engineOf(this.#db) === 'postgres' && !this.#remote(this.#config.keks.primary);
   }
 
   /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): its newest changes' MACs checked (T190), one statement, then `sign_in`'s, then the seal wait (R51). */

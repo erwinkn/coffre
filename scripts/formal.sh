@@ -482,6 +482,23 @@ REMOVALS=(
   # writer takes no lock, and copies the hash after the hold, before the COMMIT.
   "WritingTamper ActorFromRead CommitsAuthentic"
   "WritingAdd ActorFromRead CommitsAuthentic"
+  # The newest change's MAC left unchecked (T190): a database writer puts a revoked session's row, or a demoted
+  # adder's, back and writes its seal into the log's newest change of it; row and log agree, and only that change's
+  # MAC says the vault never wrote it.
+  "WritingForge ChangeMacChecked WritesStandAtCommit"
+  "WritingForge ChangeMacChecked AddsStandAtCommit"
+  # Today's path without T190 (PR 3's fallback): a request the two-trip path refused for its forged grant goes down a
+  # path that trusts the forged seal, and decides on the grant the log took away.
+  "WritingForge TodayChangeMacChecked TodayStandsAtDecision"
+  # A key write's credential touch after the hold (WriteLocks.tla, review r1 of #469): it holds the issue lock and the
+  # fence and waits for an issue's shared hold on its credential, that issue queued behind the barrier, which waits
+  # for the write's issue lock.
+  "WriteLocks TouchFirst NoWaitCycle"
+  # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
+  "WritingFallBack FallBackUncommitted OneWritePerRequest"
+  # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its
+  # decision does not stop it (review r3 of #469).
+  "WritingFallBack TodayPolicyHeld TodayPolicyStandsAtCommit"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"
@@ -584,6 +601,17 @@ EXPECTED=(
   # The rotation entry deleted before its first seal, by someone who holds the old key, who signs a pair over its
   # place: the rotation's window, a tick long, which no check sees (Rotation.tla).
   "RotationWindow VerifiedSound"
+  # Today's path decides at the vault's wrap and commits after, weighing only the policy (`policyStill`), the
+  # environment and the key's row again: a grant revoked or a session ended after the front door does not stop the
+  # write (Writing.tla's WToday, WTodayCommit; reviews r1 and r3 of #469). Every
+  # write has had this window since 0.14; the two-trip path closes it for the writes it serves (WritesStandAtCommit),
+  # 0.16 for every write (docs/design/two-trips.md, PR 6).
+  "WritingFallBack TodayStandsAtCommit"
+  # Today's path after a try the vault served goes on with the caller that try's read checked, and its wrap weighs the
+  # caller's member and roles, not its session: a session revoked between that check and the wrap does not stop the
+  # write (Writing.tla's Auth, WToday; review r2 of #469). Today's front door has had the same window before its wrap
+  # since 0.14; after a served try it spans those tries too. 0.16 closes it (docs/design/two-trips.md, PR 6).
+  "WritingCaller TodayCallerStandsAtDecision"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

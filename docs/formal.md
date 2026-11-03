@@ -52,7 +52,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
     rotation of the vault's signing key, and
     [`formal/Keyring.tla`](../formal/Keyring.tla), its keyring across two.
 - [`formal/Writing.tla`](../formal/Writing.tla) holds a change in two round
-  trips (T179, [below](#writingtla)), the design 0.16's change routes follow.
+  trips (T179, [below](#writingtla)), the design 0.16's change routes follow,
+  and [`formal/WriteLocks.tla`](../formal/WriteLocks.tla) the locks of its key
+  write, with Postgres's lock queue.
 - One holds 0.16's proxy definitions edited in the UI, before they are
   built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
   when its route is a row an Owner edits ([below](#routingtla)).
@@ -2239,7 +2241,15 @@ written and the key she inherits marked sensitive (`WritingFork`), the key
 she writes renamed, the parent gaining it, sensitive, and her personal
 config deleted (`WritingNames`), her session revoked and its row put back,
 live, by a database writer, and a token hash copied onto her credential by
-another (`WritingTamper`). Bob and Cy each add svc while Bob is demoted,
+another (`WritingTamper`), her session revoked and its row put back by a
+database writer who also writes the row's seal into the revoke's change in
+the log, or her grant taken and her member row put back so, and Bob's row
+put back so after his demotion while he adds svc (`WritingForge`, T190),
+her two writes while her grant is taken away and given back and the roles
+redefined, a try the vault served abandoned at its hold and the next
+refused, down today's path (`WritingFallBack`, PR 3), or while her grant
+is taken and given back and her session revoked before that path
+(`WritingCaller`, review r2 of #469). Bob and Cy each add svc while Bob is demoted,
 the policy changes so that only Owners add, and a database writer copies a
 token hash onto Bob's credential (`WritingAdd`); Bob, no admin, sets up svc with a first grant while the
 roles are redefined, the services setting is closed and the grant's place
@@ -2248,9 +2258,49 @@ environments is protected, a protected fork is made in it, the project is
 renamed and another made under its slug, and the scope's project likewise
 (`WritingProtect`). Each review round's P1 is one of these adversaries:
 rounds 1 and 2 in Revoke, Place and Fork, round 3 in Names, round 5 in
-Protect, rounds 6 and 7 in Tamper and Add. Every other change is one atomic step; the checkpointer seals
+Protect, rounds 6 and 7 in Tamper and Add, T190's in Forge. Every other change is one atomic step; the checkpointer seals
 whatever has committed at each tick. A hold that fails asks again, three
 tries in all, then gives up (409).
+
+**Today's path** (PR 3's `served: false`). A write the vault refuses, or
+whose read finds an object other than the caller's credential not as its
+log has it, goes down today's path, in two steps, as the code takes it.
+The vault decides on the rows as they are (`WToday`), holding each object
+but the credential to its newest change's seal, and that change to its
+MAC once T190 is in it (TodayChangeMacChecked), and wraps the key; then the
+app's transaction, under 0.14's head and the fence, finds the environment
+still live and the key's row where the decision found it, and writes on
+that decision (`WTodayCommit`). The caller's credential it does not weigh:
+the request goes on with the caller the app authenticated (`Auth`), on the
+first try's read or by the credential's own check, which holds the row to
+its `auth_mac` alone; that is why a caller's own credential, not as its log
+has it or revoked, answers 401 at the vault's read and never goes there. A
+session revoked after that check does not stop the write
+(`TodayCallerStandsAtDecision`, which TLC must find broken in
+`WritingCaller`: today's front door has had that window before its wrap
+since 0.14, and after a try the vault served it spans those tries too;
+review r2 of #469 found the r1 model rechecked the session at the wrap,
+which the code does not). A write
+reaches it on any try: after a try the vault served and whose hold failed,
+the abandoned try's number and wrap stay, a gap the tick seals past and a
+wrap no change names. `TodayStandsAtDecision`: everything the wrap weighs
+(the caller's member, roles, policy, place, parent) stood, by the log,
+when the vault decided. At its commit, the roles and the policy still as
+the caller was loaded with (`TodayPolicyStandsAtCommit`: `audited`'s
+`policyStill`, 409 `policy_changed`; review r3 of #469 found the r2 model
+left it out, and so let a role redefined after the wrap commit, which the
+code refuses). The rest it does not weigh again: a grant revoked or a
+session ended after the front door does not stop it, the window every
+write has had since 0.14 (`TodayStandsAtCommit`, which TLC must find
+broken in `WritingFallBack`, on a session revoked: listed under EXPECTED
+in `scripts/formal.sh`). The
+two-trip path closes it for the writes it serves (`WritesStandAtCommit`
+holds of those alone); 0.16 closes it for every write
+([two-trips.md](design/two-trips.md), PR 6). Review r1 of #469 found the
+model's first today's path, one atomic step, hid this window.
+`OneWritePerRequest`: a request writes once, whichever path commits it.
+`WritesNameTheirWrap`: its write names the wrap of the try that committed
+it.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2263,6 +2313,10 @@ tries in all, then gives up (409).
 | the hold compares numbers, not values alone (ReadByNumber) | `CommitsReplay`: the grant taken and given back; the write commits on equal values, and the log replayed at its commit finds the member changed since the read |
 | the app checks the caller's `auth_mac` on the rows as read (AuthChecked) | `CommitsAuthentic` (Tamper, Add): a token hash copied onto an Owner's credential; the vault resolves the token to the Owner, read and hold agree, and the write or the add commits as the Owner (round 6) |
 | the change's actor is the checked read's, bound by id; nothing after the check resolves the token again (ActorFromRead) | `CommitsAuthentic` (Tamper, Add): the hash copied onto the Owner's row after the hold and before the COMMIT, which the hold, already passed, cannot see (round 7) |
+| the Worker holds each object's newest change in the read to its MAC (`changeHolds`) before StaleFirst weighs its seal (ChangeMacChecked, T190) | `WritesStandAtCommit`, `AddsStandAtCommit` (Forge): a revoked session's row, or a demoted adder's, put back with its seal written into the log's newest change of it; row and log agree, the read and its hold agree, and the write or the add commits on a standing the log's MAC'd changes deny |
+| today's path holds each object's newest change to its MAC too (TodayChangeMacChecked, T190 on that path) | `TodayStandsAtDecision` (Forge): Ada's grant revoked and her member row put back with its seal forged; the two-trip path refuses it (`tampered`) and sends it down today's path, which decides on it |
+| a request goes down today's path only from a try that committed nothing (FallBackUncommitted) | `OneWritePerRequest` (FallBack): a seal wait failing after the COMMIT taken for `served: false`, and the key written twice |
+| today's commit holds to the policy the caller was loaded with (TodayPolicyHeld: `audited`'s `policyStill`) | `TodayPolicyStandsAtCommit` (FallBack): the roles redefined after today's wrap, and the write commits on a right the caller no longer has (review r3 of #469) |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its
@@ -2308,12 +2362,40 @@ app checked, by id, and never resolves the token again (`ActorFromRead`).
 Its rows come after the fence, as `app_change`
 already updates a key's row after it; every statement that locks a key's
 row holds 0.14's head first, so this adds no wait Migration015's
-`NoWaitCycle` would have to check. An add's write takes its rows, in
+`NoWaitCycle` would have to check. Its credential's last use, when due,
+is an UPDATE of the credential's row, which `issue_token` takes shared
+before the issue lock: the write makes it before the hold, after 0.14's
+head, the order WriteLocks.tla checks (below). An add's write takes its rows, in
 principal order, then the head, then the fence, as `change_input` does, and
 holds after them. An app and a vault of different versions are refused
 while both deploy (503 `deploying`), so the model has one version. The seal
 is HotPathOne's and Seal.tla's, here a tick that seals every committed
 number.
+
+### WriteLocks.tla
+
+The locks of PR 3's key write, against the transactions that take the same
+ones, with what Writing.tla leaves out: Postgres's lock queue. A request
+waits for every holder of its lock in a conflicting mode, and also for every
+request queued ahead of it that conflicts: a shared request queues behind a
+waiting exclusive one. Postgres breaks such a cycle only after
+`deadlock_timeout` (1 s), by reordering the queue or failing one, the fence
+held exclusive meanwhile and every use waiting on it.
+
+**The model.** Five transactions, each its locks in order, a lock and its
+mode: the key write (0.14's head; its credential's row, the last-use
+UPDATE; `hold_inputs`' issue lock shared, then the fence exclusive), an
+issue on that credential (`issue_token`: the credential's row shared, then
+the issue lock shared), the checkpointer's barrier (the issue lock
+exclusive, then the fence), a revoke of the credential (`revoke_credential`:
+0.14's head, the row, the fence) and a use (the fence shared). Each asks
+for its next lock at the end of that lock's queue, is granted it once no
+holder and no request ahead of it conflicts, and commits with them all.
+`NoWaitCycle`: nobody waits, through others, for itself. 4,612 states.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469, which saw it stall a write and a use 908 ms) |
 
 ## 0.16: proxy definitions in the UI
 
