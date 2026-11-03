@@ -216,7 +216,12 @@ unsupported diff select full validation.
   sequential and reset per test. Templates and clones are removed after the run.
   `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
   simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
-  still recreates the exact database it names. Needs Postgres.
+  still recreates the exact database it names. Then the files that run alone
+  (`packages/*/test/*.alone.ts`), one at a time: those that hold one backend's
+  work to the same call by call. Any commit of thousands of catalog changes in
+  the cluster (a test's migration) resets every backend's caches, and the call
+  it lands in plans everything again; a run beside another checkout's on the
+  same Postgres can still land one, a Postgres of your own cannot. Needs Postgres.
 - `pnpm test:sqlite` runs the same suite on SQLite (`COFFRE_TEST_ENGINE`);
   `pnpm test:all` runs Postgres and SQLite. SQLite needs nothing and is kept
   for tests and local development; deployed app databases use Postgres.
