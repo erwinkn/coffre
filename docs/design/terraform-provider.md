@@ -500,11 +500,19 @@ feeds `value_wo`; a destination is each resource that takes the value
    resets it) or a creation time (to the second, it can repeat). A
    destination whose trigger is an int gets one that fits a signed 32-bit
    int, which SDKv2 providers' `int` is on their 386 and arm builds.
-5. **Checked on the saved plan.** Before a source is recommended, a run
-   saves a plan and an apply's state with a known value, and the value is
-   searched for in the raw files: the state, and the plan file unzipped,
-   private data included. Section 8's acceptance tests do the same for
-   `coffre_secret`.
+5. **Checked on the saved plan, private data decoded.** Before a source
+   is recommended, a run saves a plan and an apply's state with a known
+   value, and a checker searches both for it. Private data is encoded, so
+   a raw search can miss it: the state's `private` field is base64, and
+   inside it the plugin framework's private data is a JSON map whose
+   values are base64 again (`Private.SetKey` takes JSON, so a value kept
+   there is base64 of JSON). The checker reads the state's `private` and
+   each resource's private bytes in the plan file (`tfplan`, unzipped),
+   decodes every layer it finds (base64, then JSON, then each map value's
+   base64), and searches every layer for the value, its JSON-escaped form
+   and its base64. It must first catch a fixture provider that keeps a
+   value through `Private.SetKey` on purpose, or it proves nothing.
+   Section 8's acceptance tests run the same checker on `coffre_secret`.
 
 | Source | Gives all five? |
 |---|---|
@@ -625,9 +633,11 @@ mirror.
     version change). After each step the verifier reads the value back
     and checks it, and Terraform's own credential is refused the same
     read. The Owner's session is refused it while the key is `sensitive`,
-    and reads it at `secret` and `plain`, as coffre's natures say. Neither the state file nor the saved
-    plan file, unzipped and searched raw (private data included, not only
-    `terraform show -json`), contains the value;
+    and reads it at `secret` and `plain`, as coffre's natures say. Section 7's checker finds the value
+    in neither the state file nor the saved plan file, private data
+    decoded layer by layer (not only `terraform show -json`, nor only a
+    raw search), and it first catches the fixture provider that leaks a
+    value through `Private.SetKey`;
   - the write rule: an `on_destroy`-only change and a refresh call no
     `PATCH` (the fake records calls), and `version` stays;
   - drift: a version written by hand gives a warning, no write, and the
@@ -699,8 +709,9 @@ mirror.
    state, plans or their private data; one stored value per generation
    that every destination reads; reads pinned to the written revision;
    triggers that follow the source version's ID (an int one within 32
-   bits); and a check of the raw saved plan. Section 1's API key gives
-   the first four, its raw-plan check still to run; Scaleway's `data_wo`
+   bits); and a check of the saved plan and state with their private data
+   decoded. Section 1's API key gives the first four, that check still to
+   run; Scaleway's `data_wo`
    fails the first, so the database-password pattern waits on an
    upstream fix. In a fork, a key reset to its
    parent's is reported like a hand-written version, and a removed one
