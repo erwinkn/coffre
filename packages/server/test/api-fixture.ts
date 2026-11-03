@@ -6,14 +6,17 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
+import { sealEntry, type LogFields } from '@coffre/core/audit';
 import type { Through, UseInput, UseOutcome, Vault, VaultEntry } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { rowsOf } from '@coffre/db/dialect';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { derivedSigningKey } from '@coffre/vault';
 import { localVault, runCheckpointer, spoken, type SpokenVault, type VaultConfig, type VaultOptions } from '@coffre/vault/node';
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
+import { appLogKey } from '../src/db/audit.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { watchContext, watcherOf } from '../src/watch.ts';
@@ -23,7 +26,7 @@ import { serveApi } from '../src/api/router.ts';
 import type { SigninService } from '../src/api/signin.ts';
 import type { WorkloadService } from '../src/api/workloads.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
-import { emptyLog, openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
+import { emptyLog, openVaultDatabase, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
 import { assertOutsideTransaction } from './transaction-guard.ts';
 import { drainBackgroundTasks, trackBackgroundTask } from './background-tasks.ts';
 
@@ -618,6 +621,30 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(environments);
   await owner.delete(projects);
   for (const vault of vaults) await vault.reset();
+}
+
+/**
+ * The log's next entry numbered `from`, the app's, signed with `chainKey` and chained to the head (the entries between
+ * never written, as a log grown so far would hold them), and 0.15's next change numbered past it: on Postgres its
+ * sequence moved on (never back, onto a change numbered already), on SQLite a change of an object nothing reads, as the newest. Past 2^53, no JS number holds them.
+ */
+export async function numbersFrom(owner: Database, from: bigint, chainKey: Buffer): Promise<void> {
+  const { auditChainHead, auditLog, logChanges } = tablesOf(owner);
+  const key = appLogKey(chainKey);
+  const [head] = await owner.select({ headHash: auditChainHead.headHash }).from(auditChainHead);
+  const fields: LogFields = {
+    seq: from, author: key.author, keyId: key.keyId, occurredAt: Date.now(), actor: 'system:test', action: 'test', decision: 'allow', code: null,
+    subjectPrincipal: null, projectId: null, environmentId: null, secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null,
+    relatedSeq: null, metadata: '{}',
+  };
+  const prevHash = Buffer.from(head!.headHash);
+  const entry = { ...fields, prevHash, ...sealEntry(key, prevHash, fields) };
+  await withLogUnlocked(owner, async (owned) => {
+    await owned.insert(auditLog).values(entry);
+  });
+  await owner.update(auditChainHead).set({ nextSeq: from + 1n, headHash: entry.hash });
+  if (TEST_ENGINE === 'postgres') await rowsOf(owner, sql`SELECT setval('log_number', greatest(${from.toString()}::bigint, (SELECT coalesce(max(number), 0) FROM log_changes)))`);
+  else await owner.insert(logChanges).values({ number: from, at: Date.now(), requestId: randomUUID(), object: randomUUID(), actor: 'system:test', payload: '{"op":"test"}', seal: null, mac: randomBytes(16) });
 }
 
 /**

@@ -5,6 +5,7 @@ import { PRINCIPAL } from '@coffre/core/vault';
 import type { Access, AdmitReadInput, CredentialAcceptance } from '@coffre/core/vault';
 
 import { credentialEnded, readerOf, type Reader } from './decide.ts';
+import { exactly } from './exact.ts';
 import { noEdits, type CredentialInput, type PrincipalInput, type SealKeys } from './inputs.ts';
 import type { ChangeRow, LogMacKey } from './log-entry.ts';
 import { bytes, callerFirst, callerInputs, changeOf, holds, memberHolds, oldOf, stands, writeStanding, type MemberSealed, type CallerInputs, type RawCaller, type ReadObject, type Unserved } from './write.ts';
@@ -51,7 +52,7 @@ type RawAdmit = RawCaller & {
 
 /** The read's text as the decision takes it. */
 export function parseAdmitInputs(text: string, principal: string): AdmitInputs {
-  const raw = JSON.parse(text) as RawAdmit;
+  const raw = exactly(text) as RawAdmit;
   const s = raw.subject;
   return {
     ...callerInputs(raw),

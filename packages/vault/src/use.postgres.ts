@@ -3,6 +3,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { GATE_ROLES } from './decide.ts';
+import { exactly, unsafe } from './exact.ts';
 import type { ChangeColumns, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
@@ -119,21 +120,9 @@ export function rowOf(text: string): UseRow {
   return rowFrom(inexact(row) ? exactly(text) as Record<string, unknown> : row);
 }
 
-const unsafe = (value: unknown) => typeof value === 'number' && !Number.isSafeInteger(value);
-
 /** Whether a row as `JSON.parse` read it has a whole number it could not read exactly. */
 function inexact(row: Record<string, unknown>): boolean {
   return WHOLE.some((name) => unsafe(row[name])) || ((row.g_expires as unknown[] | null)?.some(unsafe) ?? false);
-}
-
-/** JSON read with each number past 2^53 as its own text. */
-function exactly(text: string): unknown {
-  return JSON.parse(text, (_key, value: unknown, context?: { source?: string }) => {
-    if (!unsafe(value)) return value;
-    // A runtime without JSON.parse's source text: never a number misread.
-    if (context?.source === undefined) throw new Error('use_credential answered a whole number past 2^53, which this runtime cannot read exactly');
-    return context.source;
-  });
 }
 
 /** A row read, its whole numbers as text and its bytes as bytes. */

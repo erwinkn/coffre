@@ -20,7 +20,7 @@ import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, entryOf, LOG, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
+import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -41,7 +41,7 @@ const run = (on: Queryable, query: ReturnType<typeof sql>) => rowsOf(on, query);
  * A fresh instance: market/dev holding API_KEY, Ada a developer there, and each one's browser session. `fast: false`:
  * a vault that serves no `writeKeys`, every write down today's path, to answer as the two-trip path's refusals must.
  */
-async function world({ fast = true }: { fast?: boolean } = {}) {
+async function world({ fast = true, past = 0n }: { fast?: boolean; past?: bigint } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
   const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
@@ -50,6 +50,8 @@ async function world({ fast = true }: { fast?: boolean } = {}) {
   await root.projects.create('market', { name: 'Market' });
   await root.environments.create('market/dev');
   await root.secrets.set('market/dev', { API_KEY: 'fake-old' });
+  // From here on, numbers from `past`: the log's entries and 0.15's changes, bigints no JS number holds past 2^53.
+  if (past > 0n) await numbersFrom(db.owner, past, deps.chainKey);
   await root.members.add(`user:${ADA}`);
   await root.access.set(`user:${ADA}`, { 'market/dev': 'developer' });
   // Each `writeKeys` answer, and what runs once, right after the next one, before the app's hold.
@@ -127,6 +129,15 @@ async function versionOf(id: string | null): Promise<{ sensitive: boolean; creat
   return row === undefined ? undefined : { sensitive: Boolean(row.sensitive), createdBy: row.createdBy };
 }
 
+/** A member's `access_seq`, exactly. */
+async function accessSeq(principal: string): Promise<bigint> {
+  const [row] = await run(db.owner, sql`SELECT CAST(access_seq AS TEXT) AS seq FROM vault_members WHERE principal = ${principal}`) as { seq: string }[];
+  return BigInt(row!.seq);
+}
+
+/** Whether a JS number holds `value` exactly, as `JSON.parse` would read it. */
+const exactAsNumber = (value: bigint) => BigInt(Number(value)) === value;
+
 const served = (answers: readonly WriteKeysOutcome[]) => answers.map((answer) => (answer.served ? 'served' : answer.why));
 
 test('a key write the vault decided on its read commits in two of the app\'s round trips, its change naming the request and the read it was decided on', { skip: POSTGRES }, async () => {
@@ -153,6 +164,24 @@ test('a key write the vault decided on its read commits in two of the app\'s rou
   const wraps = entries.filter((entry) => entry.action === 'key.wrap').slice(-2).map((entry) => String(entry.seq));
   const writes = entries.filter((entry) => entry.action === 'secret.write').slice(-2).map((entry) => String(entry.related_seq));
   assert.deepEqual(writes.sort(), wraps.sort());
+});
+
+test("numbers past 2^53 (Ada's newest access entry, every object's newest change): her write is served and commits, each read exactly, none through a JS number (Fable's review of #474)", async () => {
+  // Past 2^53 a double holds only every other whole number: started one further on if Ada's access_seq lands on one.
+  const past = 2n ** 53n + 1n;
+  let w = await world({ past });
+  if (exactAsNumber(await accessSeq(`user:${ADA}`))) w = await world({ past: past + 1n });
+  const seq = await accessSeq(`user:${ADA}`);
+  assert.ok(seq > past && !exactAsNumber(seq), `Ada's access_seq ${seq} is past 2^53, and no JS number holds it`);
+  const wrote = await w.write({ NEW_KEY: 'fake-new', API_KEY: 'fake-again' });
+  assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
+  assert.deepEqual(wrote.body.keys, { NEW_KEY: { version: 1, sensitivity: 'secret' }, API_KEY: { version: 2, sensitivity: 'secret' } });
+  // On Postgres the two-trip path served it, its request numbered exactly; SQLite's writes take today's path.
+  if (TEST_ENGINE === 'postgres' && LOG === '0.15') {
+    assert.deepEqual(served(w.answers), ['served']);
+    const answer = w.answers[0]!;
+    assert.ok(answer.served && BigInt(answer.number) > past, JSON.stringify(answer));
+  }
 });
 
 test("the head held and every place in the reads' line taken when Ada writes: the vault's wrap waits for the head, as today's does, and the write commits in one try (Fable's review of #474)", { skip: POSTGRES }, async () => {
