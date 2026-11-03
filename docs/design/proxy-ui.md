@@ -1965,6 +1965,49 @@ section and section 3 left open:
 - **Cost**: warm, cache off, one vault call (`useRoute`); cold, two
   (`proxyItem`, then `useRoute`); a kept entry, none. No `access()`.
 
+**PR C as built, signers, verifiers and presign (C2b2, W312).** Where
+C2b2 settles what section 3's "Signers and verifiers" and "Presign" left
+open:
+- **The model is unchanged.** A sign, verify or presign is a route use
+  of the item by name (`useRoute`, the handle's place reading or the
+  workload's stable one), decided twice like a route's keys; what the app
+  does with the answer is `Routing.tla`'s `Send`, with the value cache
+  per caller and its entry carrying the item (`BoundToDefinition`). No
+  lock or recheck is added.
+- **Where:** `POST /use/<project>/<env>` for a handle, and a workload's
+  `POST /use` or `POST /use/<project>/<env>`, `{ sign | verify | presign:
+  { credential: <name>, … } }`, a name code lacks of any kind (R66). The
+  compute body is read up to what an HMAC saved in the UI may take
+  (`maxBytes`, 1 MiB) under `editable`, as code's longest otherwise.
+- **The checks** (`unfit`, `presignTarget`) run on the copy before the
+  use, and stand only for a fresh copy (confirmed within `cacheSeconds`;
+  for a handle, only on a place its checked made-for list names); then on
+  the decided item, the kind and the message's size inside
+  `RouteAsked.refuses`, before the read opens any value, and presign's
+  target after it, built from the decided route's upstream before
+  anything is signed. A request a fresh copy admitted and the decided
+  item refuses is 503 `moved` (`Retry-After: 1`), nothing made; the
+  decided item is then the isolate's copy, which answers the next one. A
+  sign of a route or verifier, a verify with a private key, a presign of
+  a signer: 404; a presign of a route whose one inject rule is not
+  `sigv4`: 400.
+- **The cache.** An HMAC sign or verify keeps its values for
+  `cacheSeconds` beside a route use of the same name and caller, the
+  entry carrying its item, whose `encoding`, `prefix` and `maxBytes` a
+  kept sign takes, never a newer copy's. A private key's signature and a
+  presigned URL are a use each, never kept, as code's are.
+- **The log.** `RouteAsked.logged` may be a function of the decided
+  item: a presign's entry names the decided route's host, never the
+  copy's; a private key's sign names the message's SHA-256. Both are the
+  app's `credential.use` entry, which 0.15 writes only when no key is
+  secret: a secret's use is the vault's slim row (R53), naming the route,
+  and the item by the object's seal.
+- **Counts**: a signer's or verifier's limit is the item's (`itemCounts`,
+  shared with C2b1's routes; a presign counts the route's), from this
+  isolate's copy or, cold, one `proxyItem` call before the gate.
+- **Cost**: a handle, one vault call (`useRoute`); a workload, one warm
+  and two cold; a kept HMAC, none.
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

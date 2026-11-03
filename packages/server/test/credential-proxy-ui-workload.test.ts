@@ -9,7 +9,7 @@
 // A revocation or a freeze stops the next request whatever the value cache holds. Both engines, 0.15's log.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomUUID, sign as signWith, type KeyObject } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, randomUUID, sign as signWith, verify as verifyWith, type KeyObject } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -425,3 +425,79 @@ test("a workload's plan names its environment's UI routes, giving values only as
 
 // For `Vault` in the import list: the methods counted above are the vault's own.
 void (null as unknown as Vault);
+
+const NO_LIMIT = { perMinute: null, perDay: null };
+const HOOK = 'whsec-prod-0123456789abcdef';
+const AWS_ID = 'AKIAREALPROD00000001';
+const AWS_SECRET = 'real/prod+secret/key0123456789ABCDEFGHI';
+
+/** `POST <path>` with `body` as JSON, the proof signing it: a sign, verify or presign. */
+const compute = (held: Session, body: unknown, path = '/use') => use(held, 'POST', path, { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+
+test("a workload signs, verifies and presigns with items saved in the UI: the signer's limit counted before the gate from the vault's item, one use a sign (C2b2)", ON_015, async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  await clientFor(deps, ROOT).secrets.set('market/prod', { HOOK_SECRET: HOOK, DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
+  await save({
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: 'sha256=', maxBytes: null }, limit: { perMinute: 3, perDay: null } },
+    inbound: { kind: 'verifier', name: 'inbound', hmac: { key: 'HOOK_SECRET', encoding: 'base64', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'DFNS_PEM' }, limit: NO_LIMIT },
+    s3: {
+      kind: 'route', name: 's3', upstream: 'https://s3.eu-west-3.example.test/files',
+      inject: [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }],
+      allow: [{ methods: ['GET'], path: '/bucket/**' }], limit: NO_LIMIT, placeholder: null, egress: null,
+    },
+  });
+  await bind();
+  const held = await session();
+  const message = Buffer.from('transfer 10').toString('base64url');
+  const expected = `sha256=${createHmac('sha256', HOOK).update('transfer 10').digest('hex')}`;
+  // Cold: the item for its counts, before the gate, then the use; warm, cache off: the use alone.
+  let from = new Map(calls);
+  const cold = await compute(held, { sign: { credential: 'hooks', message } });
+  assert.deepEqual([cold.status, cold.body.signature], [200, expected], JSON.stringify(cold.body));
+  assert.deepEqual(since(from), { proxyItem: 1, useRoute: 1 });
+  from = new Map(calls);
+  // The place's URL names the environment, as a workload of several writes it.
+  const warm = await compute(held, { sign: { credential: 'hooks', message } }, '/use/market/prod');
+  assert.deepEqual([warm.status, warm.body.signature], [200, expected], JSON.stringify(warm.body));
+  assert.deepEqual(since(from), { useRoute: 1 });
+  // Its limit, 3 a minute, the item's: the third use, then 429, no use decided; the item asked again, as a refusal by a
+  // kept copy's limit does (an Owner may have raised it).
+  assert.equal((await compute(held, { verify: { credential: 'hooks', message, signature: expected } })).body.valid, true);
+  from = new Map(calls);
+  const past = await compute(held, { sign: { credential: 'hooks', message } });
+  assert.deepEqual([past.status, past.body.reason], [429, 'limit']);
+  assert.deepEqual(since(from), { proxyItem: 1 });
+  // A verifier, counted apart.
+  const checked = await compute(held, { verify: { credential: 'inbound', message, signature: createHmac('sha256', HOOK).update('transfer 10').digest('base64') } });
+  assert.deepEqual([checked.status, checked.body.valid], [200, true], JSON.stringify(checked.body));
+  // A private key's: a use each, never kept.
+  from = new Map(calls);
+  const signed = await compute(held, { sign: { credential: 'dfns', message } });
+  assert.equal(signed.status, 200, JSON.stringify(signed.body));
+  assert.ok(verifyWith(null, Buffer.from('transfer 10'), publicKey, Buffer.from(signed.body.signature as string, 'base64url')));
+  assert.deepEqual(since(from), { proxyItem: 1, useRoute: 1 });
+  // A presign, by the decided route: its upstream, its allow list, the real pair, the session token in none of it.
+  const url = await compute(held, { presign: { credential: 's3', path: '/bucket/report.csv', expiresIn: 60 } });
+  assert.equal(url.status, 200, JSON.stringify(url.body));
+  const made = new URL(url.body.url as string);
+  assert.equal(`${made.origin}${made.pathname}`, 'https://s3.eu-west-3.example.test/files/bucket/report.csv');
+  assert.match(made.searchParams.get('X-Amz-Credential')!, new RegExp(`^${AWS_ID}/`));
+  assert.ok(!made.href.includes(AWS_SECRET) && !made.href.includes(held.token));
+  assert.equal((await compute(held, { presign: { credential: 's3', path: '/other/report.csv' } })).status, 403);
+  // Kinds: a verifier signs nothing; a name nothing defines is 404, after the proof.
+  assert.equal((await compute(held, { sign: { credential: 'inbound', message } })).status, 404);
+  assert.equal((await compute(held, { sign: { credential: 'nothing', message } })).status, 404);
+  assert.equal(reached.length, 0, 'nothing went upstream');
+});
+
+test("a Cloudflare call signs with a UI signer as its binding, at the one environment it reaches (C2b2)", ON_015, async () => {
+  await clientFor(deps, ROOT).secrets.set('market/prod', { HOOK_SECRET: HOOK });
+  await save({ hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT } });
+  await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
+  for (const path of ['/use', '/use/market/prod']) {
+    const request = new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sign: { credential: 'hooks', message: Buffer.from('hi').toString('base64url') } }) });
+    const sent = await read((await bindingRoute(request, runtime, MEMBER))!);
+    assert.deepEqual([sent.status, sent.body.signature], [200, createHmac('sha256', HOOK).update('hi').digest('hex')], `${path}: ${JSON.stringify(sent.body)}`);
+  }
+});

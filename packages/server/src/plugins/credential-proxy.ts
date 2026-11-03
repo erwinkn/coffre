@@ -51,7 +51,7 @@ import { isUnavailable } from '@coffre/db/dialect';
 import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod } from '@coffre/core/vault';
 import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteAsked, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, USE_DEADLINE_MS, type DecidedItem, type ProxyRoute } from '@coffre/core/vault';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
@@ -1471,9 +1471,12 @@ function watch(proxy: Proxy, key: string, tunnel: { checks: readonly Check[]; bo
  * naming the credential it uses, as these do.
  */
 async function compute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null): Promise<Response> {
-  // Read up to what the longest message takes, as base64url in JSON beside the rest.
-  const raw = await boundedBody(request, Math.ceil(proxy.messageBytes / 3) * 4 + 4096);
-  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(proxy.messageBytes)} here: an hmac()'s maxBytes takes a longer one`);
+  // Read up to what the longest message takes, as base64url in JSON beside the rest: under `editable`, what an HMAC saved
+  // in the Proxy tab may take, 1 MiB.
+  const ui = proxy.editable && coffre.useRoute !== undefined;
+  const most = ui ? Math.max(proxy.messageBytes, MAX_MESSAGE_BYTES) : proxy.messageBytes;
+  const raw = await boundedBody(request, Math.ceil(most / 3) * 4 + 4096);
+  if (raw === null) return failure(413, `a message to sign or verify is at most ${sized(most)} here: an hmac()'s maxBytes takes a longer one`);
   type Asked = { presign?: Record<string, unknown>; sign?: Record<string, unknown>; verify?: Record<string, unknown> };
   let asked: Asked | null = null;
   try {
@@ -1489,6 +1492,8 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   }
   const given = asked[operation] ?? {};
   const name = typeof given.credential === 'string' ? given.credential : '';
+  // A name code lacks, of any kind (R66): the environment's item saved in the Proxy tab (C2b2).
+  if (ui && CREDENTIAL_NAME.test(name) && !coded(proxy, name)) return uiCompute(request, coffre, proxy, path, operation, name, given, raw);
   // A verifier verifies, and an HMAC signer too, which could check a signature by making it: a private key's is no HMAC.
   const signer = operation === 'sign' ? proxy.signers.get(name) : operation === 'verify' ? (proxy.verifiers.get(name) ?? proxy.signers.get(name)) : undefined;
   const credential = operation === 'presign' ? proxy.credentials.get(name) : undefined;
@@ -1506,6 +1511,210 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   const handle = bearer(request);
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
   return run(handle, path);
+}
+
+/** What `POST /use/<project>/<env>` makes with an item's values. */
+type Operation = 'presign' | 'sign' | 'verify';
+
+/** Who asks a UI item's compute, and where its copy, its kept values and its use are: a handle's place reading, or a workload's place. */
+type Computing = {
+  who: User;
+  /** The environment's path, which a narrowed session's constraints name. */
+  at: string;
+  /** Where its values are kept (`proxy.ui.kept`), and its copy (`proxy.ui.last`), as a route use of the same name keeps them. */
+  kept: string;
+  reading: string;
+  asked: Pick<RouteAsked, 'named' | 'stable'>;
+};
+
+/**
+ * A sign, verify or presign of an item saved in the Proxy tab, a name code lacks (T186 PR C2b2; docs/design/proxy-ui.md,
+ * section 3, "Signers and verifiers" and "Presign"). One route use decides the item and its keys, for the caller and
+ * for the item's editor, as a route's are; then everything the request asks is checked again on the decided item, and
+ * the signature, the check or the URL is made by it alone, never by this isolate's copy (`SentAsDecided`). A copy's
+ * refusal before the use stands only when the vault confirmed the copy within `cacheSeconds`, and for a handle only on
+ * a place its checked made-for list names; a request such a copy admitted and the decided item refuses is 503 `moved`,
+ * nothing made. An HMAC's values are kept for `cacheSeconds` with the item they were decided on, whose `encoding`,
+ * `prefix` and `maxBytes` a kept sign or verify takes, never a newer copy's (`BoundToDefinition`). A private key's sign
+ * and a presign are each a use of their own, never kept, as code's are.
+ *
+ *   workload, cold   proxyItem (the item's limit, counted before the gate), then the use: 2 calls
+ *   workload, warm   the use: 1 call; an HMAC kept: none
+ *   handle           the use: 1 call; an HMAC kept: none
+ */
+async function uiCompute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null, operation: Operation, name: string, given: Record<string, unknown>, raw: Uint8Array | undefined): Promise<Response> {
+  const item = itemCounts(proxy, (definition) => (takes(definition, operation) ? (definition as { limit: ProxyLimit }).limit : null));
+  const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), counts: item.counts });
+  if (caller instanceof Response) return limitRefused(caller, item);
+  if (caller !== null) {
+    return answering(caller, async () => {
+      if (caller.path === null || caller.place === null) return failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone');
+      const copy = item.copy();
+      if (copy instanceof CoffreError) throw copy;
+      const computing = { who: caller, at: caller.path, kept: `w\n${caller.credentialId}\n${caller.place}\n${name}`, reading: `w\n${caller.place}\n${name}`, asked: { named: null, stable: name } };
+      return uiMade(coffre, proxy, computing, operation, name, given, copy);
+    });
+  }
+  if (path === null) return failure(405, 'GET only: a handle names its environment, POST /use/<project>/<environment>');
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  // The place reading's copy, which any handle's use of the place brings: its refusals stand only for a handle whose
+  // checked made-for list names the place, never a stranger's token (review r2 of #467).
+  const now = Date.now();
+  const reading = `n\n${path}\n${name}`;
+  const last = proxy.ui.last.get(reading);
+  const held = last === undefined ? undefined : proxy.ui.items.get(last.digest);
+  const known = proxy.handles.get(handle);
+  const vouched = known !== undefined && known.until > now && (known.paths ?? []).includes(path);
+  const copy = last === undefined || held === undefined ? null : { digest: last.digest, definition: held.definition, fresh: vouched && now - last.confirmed < proxy.cacheMs };
+  const named = { path, route: name };
+  return uiMade(coffre, proxy, { who: handle, at: path, kept: keptAt(handle, { named }), reading, asked: { named, stable: null } }, operation, name, given, copy);
+}
+
+/** Whether an item is of a kind `operation` takes: a signer signs, an HMAC (a verifier's, or a signer's) verifies, a route presigns. */
+function takes(definition: ProxyDefinition, operation: Operation): boolean {
+  if (operation === 'presign') return definition.kind === 'route';
+  if (operation === 'sign') return definition.kind === 'signer';
+  return hmacOf(definition) !== null;
+}
+
+/** The HMAC an item signs or checks with: a verifier's, or an HMAC signer's; null for any other. */
+function hmacOf(definition: ProxyDefinition): ProxyHmac | null {
+  if (definition.kind === 'verifier') return definition.hmac;
+  if (definition.kind === 'signer' && definition.signer.kind === 'hmac') return definition.signer;
+  return null;
+}
+
+/**
+ * Why an item takes no such request, or null: its kind, a message longer than it takes, a presign of a route whose one
+ * inject rule is not SigV4. Nothing here reads a value, so the decided item's is asked before the read opens any
+ * (`RouteAsked.refuses`).
+ */
+function unfit(definition: ProxyDefinition, operation: Operation, bytes: number): CoffreError | null {
+  const { name, kind } = definition;
+  if (!takes(definition, operation)) {
+    const what = operation === 'presign' ? 'presigns no URL: a route saved with sigv4 as its one inject rule does' : operation === 'sign' ? 'signs nothing: a signer does' : 'checks no signature: a verifier, or an HMAC signer, does';
+    return new CoffreError(404, 'not_found', `${name} is a ${definition.kind === 'signer' ? (definition.signer.kind === 'hmac' ? 'HMAC signer' : 'private-key signer') : kind}, which ${what}`);
+  }
+  if (definition.kind === 'route') {
+    if (definition.inject.length !== 1 || definition.inject[0]!.kind !== 'sigv4') return new CoffreError(400, 'bad_request', `${name} presigns no URL: a presigned URL carries a SigV4 signature alone, and ${name} sends ${definition.inject.length === 1 ? `a ${definition.inject[0]!.kind} rule` : `${definition.inject.length} inject rules`}`);
+    return null;
+  }
+  const most = hmacOf(definition)?.maxBytes ?? MESSAGE_BYTES;
+  if (bytes > most) return new CoffreError(413, 'too_large', `${name} ${operation === 'sign' ? 'signs' : 'checks'} a message of ${sized(most)} at most`);
+  return null;
+}
+
+/** 503 `moved`: the item changed between the copy that admitted a request and the use that decided it; nothing made. */
+const movedItem = (name: string) => new CoffreError(503, 'unavailable', `${name} changed since this isolate's copy admitted the request, and nothing was made with it: send it again`, 'moved', '1');
+
+/** A UI item's compute once its caller is known (`uiCompute`): the request's own checks, the kept values or the copy, the use, then the decided item's. */
+async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing, operation: Operation, name: string, given: Record<string, unknown>, copy: ItemCopy | null): Promise<Response> {
+  const { who, at } = computing;
+  // The request's own checks, which no item changes, before anything is used.
+  let message: Uint8Array<ArrayBuffer> | null = null;
+  let asked: PresignAsked | null = null;
+  if (operation === 'presign') {
+    const read = presignAsked(given);
+    if (read instanceof Response) return read;
+    asked = read;
+  } else {
+    message = messageOf(given.message);
+    if (message === null) return failure(400, operation === 'sign' ? 'sign a message given as base64url' : 'verify a message given as base64url: the body as it came, byte for byte');
+    if (operation === 'verify' && typeof given.signature !== 'string') return failure(400, 'verify a signature given as a string, as its header carried it');
+    // A narrowed session's signers are named, and one limited to methods or paths signs nothing: no request to check them on.
+    if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: at, credential: name })) return failure(403, `this narrowed session may not ${operation} with ${name}`, 'narrowed');
+  }
+  const bytes = message?.byteLength ?? 0;
+  const now = Date.now();
+  // An HMAC's values kept: the item they were decided on says how to sign or check, never the copy.
+  if (message !== null) {
+    const kept = proxy.ui.kept.get(computing.kept);
+    if (kept !== undefined && kept.until <= now) proxy.ui.kept.delete(computing.kept);
+    else if (kept !== undefined) {
+      const refused = unfit(kept.definition, operation, bytes);
+      if (refused !== null) throw refused;
+      const hmac = hmacOf(kept.definition);
+      if (hmac !== null) return hmacMade(kept.path, name, hmac, kept.values, operation, message, given.signature);
+    }
+  }
+  // A fresh copy's refusals stand; a copy it admitted makes the decided item's refusal a move.
+  let admitted: string | null = null;
+  if (copy !== null && copy.fresh) {
+    const refused = unfit(copy.definition, operation, bytes);
+    if (refused !== null) throw refused;
+    if (asked !== null) {
+      const resolved = uiCredential(proxy, copy.digest, copy.definition as ProxyRoute);
+      if (typeof resolved !== 'string') {
+        const aimed = presignTarget(resolved, asked);
+        if (aimed instanceof Response) return aimed;
+      }
+    }
+    admitted = copy.digest;
+  }
+  const sha256 = operation === 'sign' ? hex(await crypto.subtle.digest('SHA-256', message!)) : null;
+  // The entry records what was asked of the item the vault decided on: a private key's sign the message's SHA-256, a
+  // presign the decided upstream's host, never the copy's (section 3, "Presign").
+  const logged = (decided: DecidedItem | null): Record<string, unknown> => {
+    const definition = decided === null ? null : itemOf(proxy, decided);
+    if (asked !== null) {
+      const resolved = definition?.kind === 'route' ? uiCredential(proxy, decided!.digest, definition) : null;
+      const host = resolved === null || typeof resolved === 'string' ? undefined : resolved.base.host;
+      return { ui: true, ...(host === undefined ? {} : { host }), presign: { method: asked.method, path: `/${asked.segments.join('/')}`, expiresIn: asked.expiresIn } };
+    }
+    return { ui: true, ...(definition?.kind === 'signer' && definition.signer.kind === 'private-key' ? { sign: { sha256 } } : {}) };
+  };
+  const used = await coffre.useRoute!(who, { ...computing.asked, digests: copy === null ? [] : [copy.digest], logged, refuses: (decided) => {
+    const definition = itemOf(proxy, decided);
+    if (definition === null) return null;
+    // The vault's item is this isolate's copy now (`CopyFromVault`), whatever is made of it.
+    remember(proxy.ui.last, computing.reading, { digest: decided.digest, confirmed: Date.now() });
+    const refused = unfit(definition, operation, bytes);
+    return refused === null ? null : admitted !== null && admitted !== decided.digest ? movedItem(name) : refused;
+  } });
+  const definition = itemOf(proxy, used.item);
+  if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+  // Refused before its use opened anything (`refuses`): the item takes the request.
+  if (definition.kind === 'route') {
+    const resolved = uiCredential(proxy, used.item.digest, definition);
+    if (typeof resolved === 'string') return failure(503, resolved, 'unavailable', '1');
+    const aimed = presignTarget(resolved, asked!);
+    if (aimed instanceof Response) {
+      if (admitted !== null && admitted !== used.item.digest) throw movedItem(name);
+      return aimed;
+    }
+    if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: at, credential: name, request: { method: asked!.method, url: aimed.target } })) {
+      return failure(403, `this narrowed session may not presign ${asked!.method} ${aimed.relative} through ${name}`, 'narrowed');
+    }
+    if (resolved.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${name} signs with`);
+    return presigned(resolved.sigv4!, asked!, aimed.target, used.values, used.expiresAt, who, name);
+  }
+  if (definition.kind === 'signer' && definition.signer.kind === 'private-key') {
+    const pem = used.values[definition.signer.key];
+    if (pem === undefined) return failure(409, `${used.environment.path} holds no ${definition.signer.key}, which ${name} signs with`);
+    try {
+      return answer({ signature: base64url(await signWith(pem, message!)) });
+    } catch (error) {
+      // What is wrong with the key is said, never the key: neither the platform's error nor its message goes anywhere.
+      return failure(409, `${used.environment.path}'s ${definition.signer.key} ${error instanceof SigningKeyError ? error.message : 'signs nothing'}`);
+    }
+  }
+  const hmac = hmacOf(definition)!;
+  if (proxy.cacheMs > 0) {
+    remember(proxy.ui.kept, computing.kept, { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
+  }
+  return hmacMade(used.environment.path, name, hmac, used.values, operation, message!, given.signature);
+}
+
+/** An HMAC's sign or check with its values, by `hmac`, the item they were decided on. */
+async function hmacMade(path: string, name: string, hmac: ProxyHmac, values: Record<string, string>, operation: Operation, message: Uint8Array<ArrayBuffer>, signature: unknown): Promise<Response> {
+  const secret = values[hmac.key];
+  if (secret === undefined) return failure(409, `${path} holds no ${hmac.key}, which ${name} ${operation === 'sign' ? 'signs' : 'checks'} with`);
+  // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
+  if (secret === '') return failure(409, `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
+  const scheme = { encoding: hmac.encoding, prefix: hmac.prefix };
+  if (operation === 'sign') return answer({ signature: await hmacSign(secret, message, scheme) });
+  return answer({ valid: await hmacVerify(secret, message, signature as string, scheme) });
 }
 
 /**
@@ -1591,58 +1800,86 @@ async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who
  * lasts, never served from the cache. A narrowed session's methods and
  * paths are held to the presigned request's.
  */
-async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, credential: Resolved, asked: { path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown }): Promise<Response> {
+async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, credential: Resolved, given: PresignGiven): Promise<Response> {
   const inject = credential.sigv4!;
-  const method = asked.method ?? 'GET';
+  const method = given.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
   // Legacy `methods` answer before the other arguments are read, as before 0.16: `methods: ['POST']` is a 405 to any presign,
   // a malformed one included. `allow` never sets them (the two do not mix), and its methods answer with its paths, below.
   if (credential.methods !== undefined && !credential.methods.some((taken) => taken.toUpperCase() === method)) {
     return failure(405, credential.methods.length === 0 ? `${credential.name} takes no method` : `${credential.name} takes ${credential.methods.map((taken) => taken.toUpperCase()).join(', ')}`);
   }
-  const expiresIn = asked.expiresIn ?? 900;
+  const asked = presignAsked(given);
+  if (asked instanceof Response) return asked;
+  const aimed = presignTarget(credential, asked);
+  if (aimed instanceof Response) return aimed;
+  const { target, relative } = aimed;
+  if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: credential.name, request: { method, url: target } })) {
+    return failure(403, `this narrowed session may not presign ${method} ${relative} through ${credential.name}`, 'narrowed');
+  }
+  // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
+  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: credential.keys, purpose: 'use', only: true, logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn: asked.expiresIn } } });
+  if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
+  return presigned(inject, asked, target, used.values, used.expiresAt, who, credential.name);
+}
+
+/** What a presign asks for, as its JSON gave it. */
+type PresignGiven = { path?: unknown; method?: unknown; query?: unknown; expiresIn?: unknown };
+
+/** A presign's arguments, checked as nothing of the credential's needs: the method, how long, the path, the query. */
+type PresignAsked = { method: 'GET' | 'HEAD'; expiresIn: number; segments: string[]; query: Record<string, string> };
+
+/** What a presign asks, checked before any credential's rules are: the URL is for GET or HEAD, an hour at most, a path that climbs nowhere. */
+function presignAsked(given: PresignGiven): PresignAsked | Response {
+  const method = given.method ?? 'GET';
+  if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
+  const expiresIn = given.expiresIn ?? 900;
   if (typeof expiresIn !== 'number' || !Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > 3600) return failure(400, 'a presigned URL lasts between a second and an hour: expiresIn, in seconds');
   // No control character either: a URL drops a tab or a line break, which could join what the checks below saw apart.
-  if (typeof asked.path !== 'string' || !asked.path.startsWith('/') || /[?#\u0000-\u001F\u007F]/.test(asked.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
-  const query = asked.query ?? {};
+  if (typeof given.path !== 'string' || !given.path.startsWith('/') || /[?#\u0000-\u001F\u007F]/.test(given.path)) return failure(400, 'presign a path under the credential as a URL has it, /bucket/key, each segment encoded: the query goes in query');
+  const query = given.query ?? {};
   if (typeof query !== 'object' || query === null || Object.values(query).some((value) => typeof value !== 'string')) return failure(400, 'query is a map of strings, response-content-disposition and the like');
-  // The same rules as a request through it: under the upstream, its allow list, and no segment that climbs, decoded however
-  // often, a slash, a control byte or a dot segment (`..;`, `%252e%252e`), since a server behind may decode it again.
-  const segments = asked.path.slice(1).split('/');
+  // The same rules as a request through it: no segment that climbs, decoded however often, a slash, a control byte or a
+  // dot segment (`..;`, `%252e%252e`), since a server behind may decode it again.
+  const segments = given.path.slice(1).split('/');
   if (segments.some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
-  const target = new URL(`${credential.base.href.replace(/\/$/, '')}/${segments.join('/')}`);
-  for (const [name, value] of Object.entries(query as Record<string, string>)) {
-    if (name.toLowerCase().startsWith('x-amz-')) return failure(400, 'the X-Amz- parameters are the signature\'s own');
-    target.searchParams.set(name, value);
-  }
+  for (const name of Object.keys(query)) if (name.toLowerCase().startsWith('x-amz-')) return failure(400, 'the X-Amz- parameters are the signature\'s own');
+  return { method, expiresIn, segments, query: query as Record<string, string> };
+}
+
+/**
+ * The URL a presign signs, under `credential`'s upstream, or the refusal: its allow list, as for a request through it,
+ * and the handle in none of it. A UI route's is built again from the item the use decided on, before anything is signed.
+ */
+function presignTarget(credential: Resolved, asked: PresignAsked): { target: URL; relative: string } | Response {
+  const target = new URL(`${credential.base.href.replace(/\/$/, '')}/${asked.segments.join('/')}`);
+  for (const [name, value] of Object.entries(asked.query)) target.searchParams.set(name, value);
   const under = credential.base.pathname.replace(/\/$/, '');
   if (target.origin !== credential.base.origin || (target.pathname !== under && !target.pathname.startsWith(`${under}/`))) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
   // And again on the path as the URL made it, which is the one signed: the same rule, `climbs`, on what URL parsing left.
   if (target.pathname.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   // Its allow list, as for a request through it: the URL is one.
-  const refused = allowed(credential, method, relative);
+  const refused = allowed(credential, asked.method, relative);
   if (refused !== null) return refused;
   // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
   if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
-  if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: credential.name, request: { method, url: target } })) {
-    return failure(403, `this narrowed session may not presign ${method} ${relative} through ${credential.name}`, 'narrowed');
-  }
-  // Every URL is one use in the log, opened now: a URL outlives the request, and whoever holds it may use it.
-  const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: credential.keys, purpose: 'use', only: true, logged: { credential: credential.name, host: target.host, presign: { method, path: relative, expiresIn } } });
-  if (credential.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${credential.name} signs with`);
-  // Never past the handle's or the session's own end.
-  const lasts = Math.min(expiresIn, Math.floor((Date.parse(used.expiresAt) - Date.now()) / 1000));
+  return { target, relative };
+}
+
+/** The presigned URL, signed with `values` for at most what was asked, and never past the handle's or the session's own end. */
+async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, values: Record<string, string>, expiresAt: string, who: User, name: string): Promise<Response> {
+  const lasts = Math.min(asked.expiresIn, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
   if (lasts < 1) return failure(401, typeof who === 'string' ? 'the handle ends now: run the app with `coffre run` again' : 'the session ends now: renew it');
   let url: URL;
   try {
-    url = await presignV4(method, target, {
-      accessKeyId: render(inject.accessKeyId, used.values),
-      secretAccessKey: render(inject.secretAccessKey, used.values),
-      ...(inject.sessionToken === undefined ? {} : { sessionToken: render(inject.sessionToken, used.values) }),
+    url = await presignV4(asked.method, target, {
+      accessKeyId: render(inject.accessKeyId, values),
+      secretAccessKey: render(inject.secretAccessKey, values),
+      ...(inject.sessionToken === undefined ? {} : { sessionToken: render(inject.sessionToken, values) }),
     }, inject, lasts);
   } catch {
-    return failure(409, `${credential.name}'s values sign no URL`);
+    return failure(409, `${name}'s values sign no URL`);
   }
   return answer({ url: url.href, expiresAt: new Date(Date.now() + lasts * 1000).toISOString() });
 }
@@ -2055,46 +2292,9 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
   }
   // The route's item, by this isolate's copy at the workload's place, or the vault's (`proxyItem`), as its counts need
   // it: a refusal of the item answered once the gate has counted the request.
-  const now = Date.now();
-  let copy: { digest: string; definition: ProxyDefinition; fresh: boolean } | CoffreError | null = null;
-  // The vault's answer for the item, asked as the workload, kept as this isolate's copy (`CopyFromVault`).
-  let asked: (() => Promise<void>) | null = null;
-  const counts: PluginCounts = async ({ service, place: where, credential: name, item }) => {
-    if (where === null || name === null) return [];
-    const reading = `w\n${where}\n${name}`;
-    const last = proxy.ui.last.get(reading);
-    const held = last === undefined ? undefined : proxy.ui.items.get(last.digest);
-    const ask = async () => {
-      try {
-        const found = await item(name);
-        if (found.fault !== null) copy = new CoffreError(503, 'unavailable', `${name}: this environment's proxy definitions are not as the vault sealed them (${found.fault}): an Owner saves them again`, found.fault, '1');
-        else if (found.item === null || found.item.definition === null) copy = new CoffreError(404, 'not_found', `this instance has no credential ${JSON.stringify(name)} here: neither its deployment's code nor this environment's definitions name it`);
-        else {
-          const definition = itemOf(proxy, found.item)!;
-          remember(proxy.ui.last, reading, { digest: found.item.digest, confirmed: now });
-          copy = { digest: found.item.digest, definition, fresh: true };
-        }
-      } catch (error) {
-        if (!(error instanceof CoffreError)) throw error;
-        copy = error;
-      }
-    };
-    if (last !== undefined && held !== undefined) {
-      copy = { digest: last.digest, definition: held.definition, fresh: now - last.confirmed < proxy.cacheMs };
-      asked = ask;
-    } else {
-      await ask();
-    }
-    const found = copy as typeof copy;
-    return found === null || found instanceof CoffreError || found.definition.kind !== 'route' ? [] : routeCounts(name, found.definition, service);
-  };
-  const caller = await workloadOf(request, coffre, { ...at, ...(body === undefined ? {} : { body }), counts });
-  if (caller instanceof Response) {
-    // Refused by a limit a kept copy said: the vault's item now, for the next request, so that a limit an Owner raised
-    // since refuses one request more at most, never until its window ends (no use's answer would bring the new item).
-    if (caller.status === 429 && asked !== null && (await caller.clone().json().catch(() => ({})) as { reason?: string }).reason === 'limit') await (asked as () => Promise<void>)();
-    return caller;
-  }
+  const item = itemCounts(proxy, (definition) => (definition.kind === 'route' ? definition.limit : null));
+  const caller = await workloadOf(request, coffre, { ...at, ...(body === undefined ? {} : { body }), counts: item.counts });
+  if (caller instanceof Response) return limitRefused(caller, item);
   // Its body read, it is no other caller's request now.
   if (caller === null) return failure(401, "a workload's request carries its session, Authorization: DPoP, with its proof");
   return answering(caller, async () => {
@@ -2106,7 +2306,7 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
     const named = at.or !== undefined ? caller.path === at.or.place : at.place !== null;
     const name = named ? placed!.credential : at.credential!;
     const rest = raw.slice(named ? 3 : 1);
-    const found = copy as typeof copy;
+    const found = item.copy();
     if (found instanceof CoffreError) throw found;
     const keptAt = `w\n${caller.credentialId}\n${caller.place}\n${name}`;
     const nowAt = Date.now();
@@ -2191,11 +2391,73 @@ async function uiCarried(request: Request, credential: Resolved, content: Carrie
   return { body: whole, streamed: false, declared: String(whole?.byteLength ?? 0), digest: content.digest };
 }
 
-/** A UI route's limit as the gate counts it, under the names code's limit takes (`countsOf`). */
-function routeCounts(name: string, route: ProxyRoute, service: string): readonly GateCount[] {
-  const limit: Limit = { ...(route.limit.perMinute === null ? {} : { perMinute: route.limit.perMinute }), ...(route.limit.perDay === null ? {} : { perDay: route.limit.perDay }) };
+/** A UI item's limit as the gate counts it, under the names code's limit takes (`countsOf`). */
+function limitCounts(name: string, given: ProxyLimit, service: string): readonly GateCount[] {
+  const limit: Limit = { ...(given.perMinute === null ? {} : { perMinute: given.perMinute }), ...(given.perDay === null ? {} : { perDay: given.perDay }) };
   const made = countsOf(name, limit).counts;
   return made === undefined ? [] : typeof made === 'function' ? [] : made;
+}
+
+/** A copy of a UI item at a workload's place: this isolate's, `fresh` when the vault confirmed it within `cacheSeconds`. */
+type ItemCopy = { digest: string; definition: ProxyDefinition; fresh: boolean };
+
+/** What `itemCounts` makes: the counts, the copy they were made from (or the vault's refusal of it), and how to ask again. */
+type ItemCounted = { counts: PluginCounts; copy: () => ItemCopy | CoffreError | null; refresh: () => (() => Promise<void>) | null };
+
+/**
+ * The counts of a workload's request to a UI item (C2b), and the copy they were made from: this isolate's at the
+ * workload's place, or, on a cold isolate, the vault's (`proxyItem`, asked as the workload), whose refusal is answered
+ * after the gate (`copy`). `limit` names the kinds the request counts against (a route's limit for a forward, a signer's
+ * for a sign): another kind counts nothing, and the use's answer refuses it. `refresh`, when a kept copy made the
+ * counts, asks the vault for the item again (`limitRefused`).
+ */
+function itemCounts(proxy: Proxy, limit: (definition: ProxyDefinition) => ProxyLimit | null): ItemCounted {
+  let copy: ItemCopy | CoffreError | null = null;
+  // The vault's answer for the item, asked as the workload, kept as this isolate's copy (`CopyFromVault`).
+  let asked: (() => Promise<void>) | null = null;
+  const counts: PluginCounts = async ({ service, place: where, credential: name, item }) => {
+    if (where === null || name === null) return [];
+    const now = Date.now();
+    const reading = `w\n${where}\n${name}`;
+    const last = proxy.ui.last.get(reading);
+    const held = last === undefined ? undefined : proxy.ui.items.get(last.digest);
+    const ask = async () => {
+      try {
+        const found = await item(name);
+        if (found.fault !== null) copy = new CoffreError(503, 'unavailable', `${name}: this environment's proxy definitions are not as the vault sealed them (${found.fault}): an Owner saves them again`, found.fault, '1');
+        else if (found.item === null || found.item.definition === null) copy = new CoffreError(404, 'not_found', `this instance has no credential ${JSON.stringify(name)} here: neither its deployment's code nor this environment's definitions name it`);
+        else {
+          const definition = itemOf(proxy, found.item)!;
+          remember(proxy.ui.last, reading, { digest: found.item.digest, confirmed: now });
+          copy = { digest: found.item.digest, definition, fresh: true };
+        }
+      } catch (error) {
+        if (!(error instanceof CoffreError)) throw error;
+        copy = error;
+      }
+    };
+    if (last !== undefined && held !== undefined) {
+      copy = { digest: last.digest, definition: held.definition, fresh: now - last.confirmed < proxy.cacheMs };
+      asked = ask;
+    } else {
+      await ask();
+    }
+    const found = copy as ItemCopy | CoffreError | null;
+    const counted = found === null || found instanceof CoffreError ? null : limit(found.definition);
+    return counted === null ? [] : limitCounts(name, counted, service);
+  };
+  return { counts, copy: () => copy, refresh: () => asked };
+}
+
+/**
+ * A workload's refusal before its use: refused by a limit a kept copy said, the vault's item now, for the next request,
+ * so that a limit an Owner raised since refuses one request more at most, never until its window ends (no use's answer
+ * would bring the new item).
+ */
+async function limitRefused(refusal: Response, item: ItemCounted): Promise<Response> {
+  const refresh = item.refresh();
+  if (refusal.status === 429 && refresh !== null && (await refusal.clone().json().catch(() => ({})) as { reason?: string }).reason === 'limit') await refresh();
+  return refusal;
 }
 
 /** What a workload's request answers, a refusal of coffre's included, with the gate's newest nonce on it. */

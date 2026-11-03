@@ -6,7 +6,7 @@
 // the key stops their route (EditorStillHolds).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, type Hash, type Hmac } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, verify as verifyWith, type Hash, type Hmac } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
@@ -864,4 +864,141 @@ test("0.14's log too: an editable proxy's plan is code's, the vault asked for no
   assert.equal(plan.credentials.maps, `${ORIGIN}/use/market/dev/maps`);
   // The UI route's stable URL is no credential either: 404, never the vault's throw.
   if (LOG === '0.14') assert.equal((await route('/use/openai/models', as(token))).status, 404);
+});
+
+/** The vault's `useRoute`, counted while `work` runs. */
+async function countingUses(work: (uses: () => number) => Promise<void>): Promise<void> {
+  const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
+  const real = vault.useRoute;
+  let uses = 0;
+  vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
+    uses += 1;
+    return real.apply(runtime.vault, args);
+  }) as Vault['useRoute'];
+  try {
+    await work(() => uses);
+  } finally {
+    vault.useRoute = real;
+  }
+}
+
+const NO_LIMIT = { perMinute: null, perDay: null };
+
+/** `POST /use/market/dev` with `body` as JSON, the handle as its bearer token: a sign, verify or presign. */
+async function compute(token: string, body: unknown): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | null }> {
+  const answer = await route('/use/market/dev', as(token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  return { status: answer.status, body: await answer.json() as Record<string, unknown>, retryAfter: answer.headers.get('retry-after') };
+}
+
+const b64 = (text: string) => Buffer.from(text).toString('base64url');
+
+test("a signer and a verifier saved in the UI: a private key's signature and an HMAC's, each made by the item the use decided on, an HMAC's values kept with it (C2b2)", ON_015, async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const HOOK = 'whsec-0123456789abcdef';
+  await root.secrets.set('market/dev', { DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), HOOK_SECRET: HOOK });
+  const hooks = (prefix: string): ProxyDefinition => ({ kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix, maxBytes: null }, limit: NO_LIMIT });
+  await save({
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'DFNS_PEM' }, limit: NO_LIMIT },
+    hooks: hooks('sha256='),
+    inbound: { kind: 'verifier', name: 'inbound', hmac: { key: 'HOOK_SECRET', encoding: 'base64', prefix: 'v1,', maxBytes: 16 }, limit: NO_LIMIT },
+    openai: uiRoute('openai', '/openai'),
+  });
+  const token = await handle();
+  const message = Buffer.from('transfer 10');
+  await countingUses(async (uses) => {
+    // A private key's: each signature a use of its own, never kept (0.15's row is slim, R53, naming no message).
+    for (let round = 0; round < 2; round++) {
+      const signed = await compute(token, { sign: { credential: 'dfns', message: message.toString('base64url') } });
+      assert.equal(signed.status, 200, JSON.stringify(signed.body));
+      assert.ok(verifyWith(null, message, publicKey, Buffer.from(signed.body.signature as string, 'base64url')));
+    }
+    assert.equal(uses(), 2);
+    // An HMAC's: its scheme's signature, its values kept for cacheSeconds (60 here), so the second asks nothing.
+    const expected = (prefix: string, encoding: 'hex' | 'base64') => `${prefix}${createHmac('sha256', HOOK).update(message).digest(encoding)}`;
+    for (let round = 0; round < 2; round++) {
+      const signed = await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } });
+      assert.deepEqual([signed.status, signed.body.signature], [200, expected('sha256=', 'hex')]);
+    }
+    assert.equal(uses(), 3);
+    // A verifier: valid or not, no more; a message longer than its maxBytes, 413.
+    assert.deepEqual((await compute(token, { verify: { credential: 'inbound', message: message.toString('base64url'), signature: expected('v1,', 'base64') } })).body, { valid: true });
+    assert.deepEqual((await compute(token, { verify: { credential: 'inbound', message: message.toString('base64url'), signature: expected('v1,', 'hex') } })).body, { valid: false });
+    assert.equal((await compute(token, { verify: { credential: 'inbound', message: b64('seventeen bytes!!'), signature: 'v1,x' } })).status, 413);
+    // An HMAC signer verifies too, by its own scheme.
+    assert.deepEqual((await compute(token, { verify: { credential: 'hooks', message: message.toString('base64url'), signature: expected('sha256=', 'hex') } })).body, { valid: true });
+  });
+  // BoundToDefinition: the prefix edited, another handle's use brings the new item to this isolate; the first handle's
+  // kept values still sign by the item they were decided on, never the newer copy's prefix.
+  await save({ hooks: hooks('v2=') });
+  const other = await handle();
+  assert.equal((await compute(other, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `sha256=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  // An isolate that keeps nothing: decided on the newest version.
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  // Each item takes what its kind does: a verifier signs nothing, a private key checks nothing, a route signs nothing
+  // and presigns only with sigv4 its one rule; a name nothing defines, 404.
+  for (const [ask, status] of [
+    [{ sign: { credential: 'inbound', message: 'aGk' } }, 404],
+    [{ verify: { credential: 'dfns', message: 'aGk', signature: 'x' } }, 404],
+    [{ sign: { credential: 'openai', message: 'aGk' } }, 404],
+    [{ presign: { credential: 'openai', path: '/models' } }, 400],
+    [{ presign: { credential: 'dfns', path: '/models' } }, 404],
+    [{ sign: { credential: 'nothing', message: 'aGk' } }, 404],
+  ] as const) {
+    const refused = await compute(token, ask);
+    assert.equal(refused.status, status, `${JSON.stringify(ask)}: ${JSON.stringify(refused.body)}`);
+  }
+});
+
+test("a presign of a route saved in the UI: built and checked again on the decided item, signed with its pair, its entry logging the decided host; a copy that admitted what the decided item refuses is 503 moved (C2b2)", ON_015, async () => {
+  // Plain keys, so that the app writes its credential.use entry, whose host this test reads: a secret's use is the
+  // vault's slim row alone (R53), which names the route, and the item by the object's seal.
+  await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: { value: AWS_ID, sensitivity: 'plain' }, AWS_SECRET_ACCESS_KEY: { value: AWS_SECRET, sensitivity: 'plain' } });
+  const s3 = (upstream: string, allow: string, inject: 'sigv4' | 'header' = 'sigv4'): ProxyDefinition => ({
+    kind: 'route', name: 's3', upstream,
+    inject: inject === 'sigv4'
+      ? [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }]
+      : [{ kind: 'header', name: 'authorization', template: 'Bearer {AWS_SECRET_ACCESS_KEY}' }],
+    allow: [{ methods: ['GET', 'HEAD'], path: allow }], limit: NO_LIMIT, placeholder: null, egress: null,
+  });
+  await save({ s3: s3('https://s3.eu-west-3.example.test/files', '/bucket/**') });
+  const token = await handle();
+  const presign = (path: string) => compute(token, { presign: { credential: 's3', path, expiresIn: 60 } });
+  await countingUses(async (uses) => {
+    const made = await presign('/bucket/report.csv');
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    const url = new URL(made.body.url as string);
+    assert.equal(`${url.origin}${url.pathname}`, 'https://s3.eu-west-3.example.test/files/bucket/report.csv');
+    assert.match(url.searchParams.get('X-Amz-Credential')!, new RegExp(`^${AWS_ID}/\\d{8}/eu-west-3/s3/aws4_request$`));
+    assert.equal(url.searchParams.get('X-Amz-Expires'), '60');
+    assert.ok(!made.body.url!.toString().includes(AWS_SECRET) && !made.body.url!.toString().includes(token));
+    assert.equal(uses(), 1);
+    // Its allow list, the decided item's: 403, a fresh copy's refusal standing with no use.
+    assert.equal((await presign('/other/report.csv')).status, 403);
+    assert.equal(uses(), 1);
+    // The upstream moves: the copy admits, the use decides on the new item, and the URL is built from its upstream.
+    await save({ s3: s3('https://s3-new.example.test/files', '/bucket/**') });
+    const moved = await presign('/bucket/report.csv');
+    assert.equal(moved.status, 200, JSON.stringify(moved.body));
+    assert.equal(new URL(moved.body.url as string).host, 's3-new.example.test');
+    const hosts = (await entries('credential.use')).filter((entry) => entry.metadata.presign !== undefined).map((entry) => entry.metadata.host);
+    assert.deepEqual(hosts, ['s3.eu-west-3.example.test', 's3-new.example.test']);
+    // An allow-list edit the copy did not see: it admits the path, the decided item refuses it, 503 moved, nothing signed;
+    // then the copy is the decided item's, and refuses it as it is.
+    await save({ s3: s3('https://s3-new.example.test/files', '/archive/**') });
+    const narrowed = await presign('/bucket/report.csv');
+    assert.deepEqual([narrowed.status, narrowed.body.reason, narrowed.retryAfter], [503, 'moved', '1'], JSON.stringify(narrowed.body));
+    assert.equal((await presign('/bucket/report.csv')).status, 403);
+    // An inject edit under a copy that admits the path (another route, as a fresh copy's refusal stands for
+    // cacheSeconds): the decided route no longer signs with sigv4 alone, refused before its values are read, 503 moved;
+    // then 400 by the copy it brought.
+    const other = (path: string) => compute(token, { presign: { credential: 'backup', path, expiresIn: 60 } });
+    await save({ backup: { ...s3('https://backup.example.test/files', '/bucket/**'), name: 'backup' } as ProxyDefinition });
+    assert.equal((await other('/bucket/report.csv')).status, 200);
+    await save({ backup: { ...s3('https://backup.example.test/files', '/bucket/**', 'header'), name: 'backup' } as ProxyDefinition });
+    const reinjected = await other('/bucket/report.csv');
+    assert.deepEqual([reinjected.status, reinjected.body.reason], [503, 'moved'], JSON.stringify(reinjected.body));
+    assert.equal((await other('/bucket/report.csv')).status, 400);
+  });
 });

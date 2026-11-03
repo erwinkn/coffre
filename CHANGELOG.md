@@ -22,9 +22,30 @@
   most: a refusal counted on the isolate's copy asks the vault for the
   item again. A workload's plan names its environment's UI routes, and
   answers 503 when one of them was changed around the vault. Its
-  two-segment URLs (`/use/<a>/<b>`) stay the plan and compute; signers,
-  verifiers, presign and tunnels of UI items still answer 404, until
-  PR C2b2 and C2b3.
+  two-segment URLs (`/use/<a>/<b>`) stay the plan and compute (signers,
+  verifiers and presign of UI items: PR C2b2, below); tunnels of UI
+  items still answer 404, until PR C2b3.
+- **Signers, verifiers and presigned URLs saved in the Proxy tab
+  (T186, PR C2b2).** `POST /use/<project>/<env>` (and a workload's
+  `POST /use`) now signs, verifies and presigns with an item saved in the
+  UI whose name code lacks, for a handle, a key-bound session or a
+  Cloudflare binding's call. One route use decides the item and its keys
+  for the caller and for the item's editor, and the signature, the check
+  or the URL is made by the decided item alone: an HMAC's `encoding`,
+  `prefix` and `maxBytes`, a presigned URL's upstream, allow list and
+  SigV4 parameters, built again from the decided route before anything
+  is signed. A presign of a route whose one inject rule is not `sigv4`
+  is 400; a request the isolate's copy admitted and the decided item
+  refuses (an upstream, allow-list or inject edit in between) is 503
+  `moved`, nothing made, and the next request is answered by the new
+  item. An HMAC's values are kept for `cacheSeconds` with the item they
+  were decided on, so a `prefix` edit never wraps a secret decided
+  before it; a private key's signature and a presigned URL are each a
+  use of their own. A signer's or verifier's limit is counted from the
+  item, as a UI route's is: on a cold isolate, one `proxyItem` call
+  before the gate. An HMAC saved in the UI may take messages up to its
+  `maxBytes`, 1 MiB at most, so an editable proxy reads a compute body
+  up to that.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart
@@ -85,8 +106,8 @@
   caller may read (403 `placeholder_unread` otherwise); a plan read from
   the person's own personal config takes no UI route of the base
   environment; and on 0.14's log an editable proxy's plan is code's, as
-  before. Signers, verifiers, presign and tunnels of UI items answer
-  404 until PR C2b (workloads' routes: PR C2b1, above); a
+  before. Tunnels of UI items answer 404 until PR C2b3 (workloads'
+  routes: PR C2b1; signers, verifiers and presign: PR C2b2, above); a
   handle's request to a signer, verifier or tunnel saved in the UI is
   refused before the app reads its key's value, and keeps none.
 
