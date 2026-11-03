@@ -2737,11 +2737,12 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
  * A `Location` with each segment that is the one a path rule sent, decoded once, the app's again, so a redirect it
  * follows goes through the proxy with its placeholder: `https://api.telegram.org/bot123:AAE…/getMe`, or
  * `…/bot123%3aAAE…/getMe` and `…/bot%31%323:AAE…/getMe`, which decode to the same, is
- * `https://api.telegram.org/botcoffre_use_…/getMe`. Any other copy of the value is then redacted, as any answer's.
+ * `https://api.telegram.org/botcoffre_use_…/getMe`, and a relative `bot123%3aAAE…/getMe` is `botcoffre_use_…/getMe`. Any other copy of the value is then redacted, as any answer's.
  */
 function swappedBack(location: string, { sent, app }: { sent: string; app: string }): string {
   const value = bytesOf(sent);
-  return location.replace(/(?<=\/)[^/?#]*(?=[/?#]|$)/g, (segment) => (bytesOf(segment) === value ? app : segment));
+  // Each segment, the first of a relative path's included (`bot123%3AAAE…/getMe`): what follows `/`, or the start.
+  return location.replace(/(?<=^|\/)[^/?#]*(?=[/?#]|$)/g, (segment) => (bytesOf(segment) === value ? app : segment));
 }
 
 /**

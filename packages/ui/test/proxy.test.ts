@@ -382,6 +382,17 @@ test('a path rule: its segment in the sample call, the path the proxy would take
   assert.equal(samplePath(telegram), '/bot{TELEGRAM_BOT_TOKEN}/sendMessage');
   assert.equal(samplePath({ ...telegram, allow: [{ methods: ['GET'], path: '/file/*/**' }] }), '/file/bot{TELEGRAM_BOT_TOKEN}/x');
   assert.equal(samplePath({ ...telegram, allow: null }), '/bot{TELEGRAM_BOT_TOKEN}');
+  // Where the sample call takes it (review r2 of #483): beneath a literal entry, and a `*` of the template's own kept.
+  const file = { ...telegram, allow: [{ methods: ['GET'], path: '/file' }] };
+  assert.equal(samplePath(file), '/file/bot{TELEGRAM_BOT_TOKEN}');
+  assert.equal(sampleCall(file, 'GET', samplePath(file)).refusal, null);
+  const starred: ProxyRoute = { ...telegram, inject: [{ kind: 'path', template: 'bot*{TELEGRAM_BOT_TOKEN}' }], allow: [{ methods: ['GET'], path: '/*/getMe' }] };
+  assert.equal(samplePath(starred), '/bot*{TELEGRAM_BOT_TOKEN}/getMe');
+  assert.equal(sampleCall(starred, 'GET', samplePath(starred)).refusal, null);
+  for (const allow of [[{ methods: ['POST'], path: '/*/sendMessage' }], [{ methods: ['GET'], path: '/file/*/**' }], [{ methods: [], path: '/v1/*/x/**' }], null]) {
+    const one = { ...telegram, allow };
+    assert.equal(sampleCall(one, allow?.[0]?.methods[0] ?? 'GET', samplePath(one)).refusal, null, JSON.stringify(allow));
+  }
   // The URL shows the template where the value goes, whatever the app holds in its place.
   assert.deepEqual(sampleCall(telegram, 'POST', '/botcoffre_use_x/sendMessage'), { url: 'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage', refusal: null });
   assert.deepEqual(sampleCall(telegram, 'GET', '/file/bot{TELEGRAM_BOT_TOKEN}/photos/a.jpg'), { url: 'https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/photos/a.jpg', refusal: null });

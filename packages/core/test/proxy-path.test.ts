@@ -1,4 +1,4 @@
-// A path rule (0.15.1, T208; docs/design/credential-proxy.md, section 5, "A segment of the path"): its template, the
+// A path rule (0.16, T208; docs/design/credential-proxy.md, section 5, "A segment of the path"): its template, the
 // segment it takes its key in, as the app sent the path, and the value as that segment's part, or its refusal. The
 // proxy, code's startup check and the vault's save all read them here.
 import test from 'node:test';

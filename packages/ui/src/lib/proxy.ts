@@ -651,12 +651,27 @@ function slotted(route: ProxyRoute, url: string, target: URL | null, under: stri
   return { url: `${target.origin}${under}${segments.join('/')}${target.search}`, refusal: null };
 }
 
-/** A sample path through a route: its first allow entry's, a `*` an id, or, with a path rule, the rule's segment in the first `*`'s place (or first). */
+/**
+ * A sample path through a route: its first allow entry's, a `*` an id and a last `**` an `x`. With a path rule, the
+ * rule's segment, as written (`bot*{T}` keeps its `*`), goes where the sample call takes it: in a wildcard's place,
+ * else beneath the entry's path (`/file` is `/file/bot{T}`), else before it.
+ */
 export function samplePath(route: ProxyRoute): string {
-  const sample = route.allow?.[0]?.path.replace(/\/\*\*$/, '/x') ?? '/';
+  const entry = route.allow?.[0];
+  const pattern = entry?.path ?? '/';
+  const written = pattern === '/' ? [] : pattern.replace(/^\//, '').split('/');
+  const segments = written.map((segment) => (segment === '**' ? 'x' : segment.replace(/\*/g, 'id')));
   const rule = route.inject.find((one) => one.kind === 'path');
-  const slotted = rule === undefined ? sample : sample.includes('*') ? sample.replace('*', rule.template) : `/${rule.template}${sample === '/' ? '' : sample}`;
-  return slotted.replace(/\*/g, 'id');
+  if (rule === undefined) return `/${segments.join('/')}`;
+  const wild = written.flatMap((segment, at) => (segment.includes('*') ? [at] : []));
+  const tame = written.flatMap((segment, at) => (segment.includes('*') ? [] : [at]));
+  const candidates = [
+    ...wild.map((at) => segments.with(at, rule.template)),
+    ...Array.from({ length: segments.length + 1 }, (_, k) => segments.toSpliced(segments.length - k, 0, rule.template)),
+    ...tame.map((at) => segments.with(at, rule.template)),
+  ].map((one) => `/${one.join('/')}`);
+  const method = entry?.methods[0] ?? 'GET';
+  return candidates.find((path) => sampleCall(route, method, path).refusal === null) ?? candidates[0]!;
 }
 
 /** A segment as a URL sends it: `/À-propos` goes as `/%C3%80-propos`, what is ASCII as written. */

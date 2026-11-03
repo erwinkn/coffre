@@ -966,7 +966,7 @@ GET fetched straight from MinIO. A client holding the handle as its keys was
 refused by MinIO directly, and a GET's median was 1.3 ms direct against
 2.6 ms through the proxy, over loopback HTTP to coffre.
 
-**A segment of the path (0.15.1).** Telegram's Bot API takes its token
+**A segment of the path (0.16).** Telegram's Bot API takes its token
 in the URL's path, `https://api.telegram.org/bot<token>/sendMessage`, and
 its files under `/file/bot<token>/<file_path>`. Every SDK builds that URL
 from a base URL and the token it holds (grammY, Telegraf, aiogram and
@@ -1032,7 +1032,8 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   app sent it; the audit's `credential.use` names the upstream's host, as
   for every rule; no log line has the URL. A redirect under the upstream
   whose `Location` holds the segment as it went out, compared decoded
-  once (`%3a` and `%41` are `:` and `A`), gets the app's segment back, so
+  once (`%3a` and `%41` are `:` and `A`), wherever it is, a relative
+  path's first segment included (`bot123456789%3AAAE…/getMe`), gets the app's segment back, so
   the app follows it through the proxy with its placeholder
   (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`);
   a relative one (`getMe`, `?offset=1`, `#top`, an empty one) resolves

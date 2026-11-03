@@ -1352,7 +1352,7 @@ to a POST (review round 9).
 ### Several inject rules
 
 A route's `inject` is an ordered list. Each rule fills a header, a query
-parameter, a form or JSON field, a path segment (0.15.1, `{ kind: 'path',
+parameter, a form or JSON field, a path segment (0.16, `{ kind: 'path',
 template: 'bot{TELEGRAM_BOT_TOKEN}' }`, [credential-proxy.md](credential-proxy.md),
 section 5, "A segment of the path"), Basic authorization, or a SigV4 signature,
 in that order. Validation, at save and at the app's startup for code:

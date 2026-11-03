@@ -1,4 +1,4 @@
-// A path rule (0.15.1, T208; docs/design/credential-proxy.md, section 5, "A segment of the path"), end to end:
+// A path rule (0.16, T208; docs/design/credential-proxy.md, section 5, "A segment of the path"), end to end:
 // coffre's own vault, a handle as `coffre run` makes one, and a fake Telegram Bot API over HTTP. A method call and a
 // file download, each with the token in its path; the allow list read on the path as the app sent it; a value that
 // would change the path's shape, refused; a redirect quoting the token, given back the app's placeholder; an echo,
@@ -46,6 +46,11 @@ before(async () => {
       else if (url.endsWith('/lower')) response.writeHead(302, { location: url.replace(/lower$/, 'getMe').replace(':', '%3a') }).end();
       else if (url.endsWith('/spelled')) response.writeHead(302, { location: url.replace(/spelled$/, 'getMe').replace('AAE', '%41AE') }).end();
       else if (url.endsWith('/quoted')) response.writeHead(302, { location: `/tg/getMe?t=${url.split('/')[2]!.slice(3).replace(':', '%3a')}` }).end();
+      // A relative redirect whose first segment is the token's, `%3A` or `%3a` for its colon (review r2 of #483).
+      else if (url.includes('?first=')) {
+        const [segment, way] = url.split('/').at(-1)!.split('?first=') as [string, string];
+        response.writeHead(302, { location: `${segment.replace(':', way === 'upper' ? '%3A' : '%3a')}/getMe` }).end();
+      }
       // An error page that quotes the request, as a framework's 404 may: as it came, and decoded.
       else if (url.endsWith('/echo')) response.writeHead(404, { 'content-type': 'text/plain', 'x-path': url }).end(`no route for ${url} (${decodeURIComponent(url)})`);
       else if (url.includes('/file/')) response.writeHead(200, { 'content-type': 'image/jpeg' }).end(Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
@@ -237,6 +242,12 @@ test("the token's segment, encoded otherwise in a redirect, gets the placeholder
     const moved = await route(`/use/telegram/bot${handle}/${at}`);
     assert.equal(moved.status, 302, at);
     assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/telegram/bot${handle}/getMe`, at);
+  }
+  // A relative one that starts with the token's segment: the app's, under the same parent.
+  for (const way of ['upper', 'lower']) {
+    const moved = await route(`/use/telegram/x/bot${handle}?first=${way}`);
+    assert.equal(moved.status, 302, way);
+    assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/telegram/x/bot${handle}/getMe`, way);
   }
   // In the query, a form no redaction names: decoded once it is the token, so nothing of the answer goes.
   const quoted = await route(`/use/telegram/bot${handle}/quoted`);

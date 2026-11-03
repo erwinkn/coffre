@@ -814,3 +814,35 @@ test("a path rule fills the first segment its template frames, whatever the app 
   assert.match(leaked.body.message as string, /session token/);
   assert.equal(reached.length, 2);
 });
+
+// A `narrow` child's paths are weighed on the URL the app sent, its segment as the app wrote it, never the token's: a
+// child no one could write without the token is no child at all (review r2 of #483). Planted, as above.
+test("a narrowed session's paths are weighed on the app's segment, before the token goes in", { skip: LOG_014_ONLY }, async () => {
+  runtime = makeRuntime({
+    plugins: checkPlugins([credentialProxy({
+      credentials: { telegram: { upstream: `${upstreamAt}/tg`, inject: path('bot{STRIPE_KEY}') } },
+      insecureUpstreams: true,
+    })]),
+  });
+  await bind();
+  const parent = await session();
+  const root = await sessionRow(parent);
+  const narrowed = async (paths: string[], fill: number) => {
+    const key = await generateProofKey();
+    const child = { token: `coffre_wl_${Buffer.alloc(32, fill).toString('base64url')}`, key };
+    await insertSession(deps.db, deps.chainKey, {
+      id: randomUUID(), kind: 'workload', tokenHash: hashToken(child.token), tokenHint: child.token.slice(0, 13), generation: root.generation, principal: MEMBER,
+      identityId: null, label: 'bot', createdBy: root.createdBy, expiresAt: root.expiresAt, revokedAt: null, scope: root.scope, places: root.places,
+      jkt: await thumbprint(key.jwk), notAfter: root.notAfter!, ancestors: JSON.stringify([root.id]), constraints: JSON.stringify({ credentials: ['telegram'], methods: ['POST'], paths }), enrollmentId: null, approvedAt: null, approvedBy: null,
+    });
+    return child;
+  };
+  const send = (child: Awaited<ReturnType<typeof narrowed>>) => use(child, 'POST', '/use/telegram/botcoffre/sendMessage', { headers: { 'content-type': 'application/json' }, body: '{"chat_id":1}' });
+  const sent = await send(await narrowed(['/tg/botcoffre/sendMessage'], 8));
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(reached.at(-1)!.url, `/tg/bot${STRIPE_KEY}/sendMessage`);
+  const refused = await send(await narrowed([`/tg/bot${STRIPE_KEY}/sendMessage`], 9));
+  assert.deepEqual([refused.status, refused.body.reason], [403, 'narrowed']);
+  assert.ok(!JSON.stringify(refused.body).includes(STRIPE_KEY));
+  assert.equal(reached.length, 1);
+});
