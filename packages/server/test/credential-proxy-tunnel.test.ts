@@ -494,6 +494,28 @@ test('a check the vault never answers is a no, by its deadline: the sessions do 
   }
 });
 
+test("an admission whose opening answered after its whole bound lets nothing in, and the next is let in (review of #485 by Fable)", postgresOnly, async () => {
+  // recheckSeconds 0.2: a bound of 400 ms, from when the admission started. The vault opens the URL, and its answer
+  // comes 600 ms on, as a slow vault or event loop would bring it: the grant may have been lost meanwhile.
+  const open = opens();
+  let held = 0;
+  openWith(async (...args) => {
+    const opened = await open(...args);
+    if (held++ === 0) await new Promise((resolve) => setTimeout(resolve, 600));
+    return opened;
+  });
+  try {
+    assert.deepEqual(await upgradeRefusal(), { status: 503, message: 'db: its use answered too late to dial by; ask again' });
+    assert.ok(held >= 1, 'the admission was held');
+  } finally {
+    openWith(open);
+  }
+  // Asked again, in time.
+  const client = appClientOf();
+  assert.deepEqual([...(await client.unsafe('SELECT 1 AS one'))], [{ one: 1 }]);
+  await client.end();
+});
+
 test("a new group let in on a cached URL decides at once: a grant lost meanwhile ends it, not an interval later", postgresOnly, async () => {
   // Checked every 5 seconds: an interval later is seconds on, which no load makes of at once.
   runtime.plugins = checkPlugins([credentialProxy({ credentials: {}, tunnels: { db: postgres('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 5 })]);

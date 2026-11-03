@@ -99,7 +99,9 @@
   dials none, 503, and `insecureUpstreams` keeps the platform's, for a
   local database. A session's clock starts when its admission's use
   started, so one whose answer came late is checked at once, and one
-  that came after the whole bound lets nothing in (503 `late`).
+  that came after the whole bound lets nothing in (503 `late`). Code's
+  tunnels now count from their admission too, a workload's from before
+  its session's statement, and refuse one past the bound the same way.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart

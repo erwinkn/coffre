@@ -2114,7 +2114,9 @@ open:
   group was made: an answer that came after a recheck's interval is
   checked again at once. One that came after the whole bound (R + D for a
   handle) lets nothing in, 503 `late`, and the client asks again, by the
-  new item. Code's tunnels take the same clock.
+  new item. Code's tunnels take the same clock, and the same refusal:
+  a workload's from before its session's statement, a handle's from
+  before its use (review of #485 by Fable).
 - **The copy it claims is the copy it holds** (review r1 of #485). The
   open tells the vault the digest it holds a definition for only when it
   does: its copies of definitions (`ui.items`) and of which digest each

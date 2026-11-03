@@ -3,7 +3,7 @@
 // session, and TCP out for that session, TLS once its protocol says so.
 // Node only: `node:net` and `node:tls` stay out of the Workers build.
 import type { IncomingMessage } from 'node:http';
-import { connect as tcp, isIP, type LookupFunction, type Socket as NetSocket } from 'node:net';
+import { connect as tcp, type LookupFunction, type Socket as NetSocket } from 'node:net';
 import { connect as tls } from 'node:tls';
 import type { Duplex } from 'node:stream';
 
@@ -12,8 +12,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Connect, Pipe, Socket } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { admitSocket } from './socket-admission.ts';
-import { isPublicAddress } from './workloads/addresses.ts';
-import { publicLookup } from './workloads/node-transport.ts';
+import { literalRefusal, publicLookup } from './workloads/node-transport.ts';
 
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
 
@@ -114,9 +113,9 @@ const connect: Connect = (host, port, signal) => dial({ host, port }, signal);
  */
 export function publicConnect(lookup: LookupFunction = publicLookup): Connect {
   return (host, port, signal) => {
-    const literal = host.replace(/^\[|\]$/g, '');
-    if (isIP(literal) !== 0 && !isPublicAddress(literal)) return Promise.reject(Object.assign(new Error(`${literal} is an address that is not public`), { code: 'ENOTPUBLIC' }));
-    return dial({ host: literal, port, lookup }, signal);
+    const refused = literalRefusal(host);
+    if (refused !== null) return Promise.reject(refused);
+    return dial({ host: host.replace(/^\[|\]$/g, ''), port, lookup }, signal);
   };
 }
 

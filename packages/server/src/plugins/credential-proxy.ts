@@ -512,8 +512,8 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 const UI_STATES = new WeakMap<CoffrePlugin, UiState>();
 
 /**
- * Drop a proxy's copies of UI items' definitions, as `remember` does past `UI_KEPT` entries, its copies of which
- * digest each reading last had kept: for tests, which save no ten thousand items to turn them over.
+ * Test-only: drop a proxy's copies of UI items' definitions, as `remember` does past `UI_KEPT` entries, its copies of
+ * which digest each reading last had kept. Tests save no ten thousand items to turn them over; nothing else calls it.
  */
 export function forgetUiItems(plugin: CoffrePlugin): void {
   UI_STATES.get(plugin)?.items.clear();
@@ -1324,6 +1324,12 @@ function readOf(proxy: Proxy, path: string, user: User = ''): string {
 }
 
 /**
+ * An admission that answered after its group's whole bound: it dials nothing, as the item or the caller's standing may
+ * have changed since it was decided, and the client asks again (`LateAdmitRefused`; review r1 of #485).
+ */
+const tooLate = (name: string): Response => failure(503, `${name}: its use answered too late to dial by; ask again`, 'late', '1');
+
+/**
  * A tunnel asked for, `/use/<project>/<env>/<name>` as a WebSocket, by
  * `coffre run`'s listener with the handle as its bearer token, or by a
  * workload with its session and a proof (`htm` GET, `htu` the URL's https
@@ -1347,20 +1353,23 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   if (tunnel === undefined && proxy.editable && coffre.useRoute !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name)) return uiTunnel(request, coffre, proxy, path, name);
   if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
   if (!serves(tunnel, path)) return notServed(name, path);
+  // The admission's first check starts now, before the workload's statement reads its session: the group's clock
+  // starts from it, as a UI tunnel's (`AdmitClock`; review of #485 by Fable).
+  const admitted = Date.now();
   const caller = await workloadOf(request, coffre, { place: path, credential: name });
   if (caller instanceof Response) return caller;
-  if (caller !== null) return workloadTunnel(request, coffre, proxy, caller, name, tunnel);
+  if (caller !== null) return workloadTunnel(request, coffre, proxy, caller, name, tunnel, admitted);
   const handle = bearer(request);
   if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
   // A connection is no request that the cache's minute may serve: each checks the handle stands, opening nothing.
-  const admitted = Date.now();
   const { expiresAt } = await coffre.handle(handle);
   let fresh = false;
   const { values } = await valuesFor(coffre, proxy, handle, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
   const db = dialled(proxy, path, name, tunnel, values[tunnel.key]!);
   if (db instanceof Response) return db;
-  const key = cacheKey(handle, path, name);
   const deadline = Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS);
+  if (Date.now() - admitted >= proxy.recheckMs + deadline) return tooLate(name);
+  const key = cacheKey(handle, path, name);
   // Every `recheckSeconds`, the database's URL opened again for the handle's sessions, as the vault decides it (a revoked handle, a lost grant), logged as a use.
   const check: Check = {
     every: proxy.recheckMs,
@@ -1391,14 +1400,13 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
  * `recheckSeconds`, the vault's decision afresh too, which a lost grant
  * changes.
  */
-async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, name: string, tunnel: Tunnel): Promise<Response | SocketSession> {
+async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, name: string, tunnel: Tunnel, admitted: number): Promise<Response | SocketSession> {
   if (sessionToken(request) === null || caller.path === null) return nonced(failure(403, 'a tunnel is a session\'s, which names its environment'), caller);
   const path = caller.path;
   if (!serves(tunnel, path)) return nonced(notServed(name, path), caller);
   if (!constraintsAllow(caller.constraints, { place: path, credential: name })) return nonced(failure(403, `this narrowed session may not open ${name}`, 'narrowed'), caller);
   let fresh = false;
   let opened: Opened;
-  const admitted = Date.now();
   try {
     opened = await valuesFor(coffre, proxy, caller, path, { name, keys: [tunnel.key] }, { tunnel: true }, () => (fresh = true));
   } catch (error) {
@@ -1407,8 +1415,9 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
   }
   const db = dialled(proxy, path, name, tunnel, opened.values[tunnel.key]!);
   if (db instanceof Response) return nonced(db, caller);
-  const key = cacheKey(caller, path, name);
   const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
+  if (Date.now() - admitted >= bound) return nonced(tooLate(name), caller);
+  const key = cacheKey(caller, path, name);
   const checks: Check[] = [
     { every: (bound * 2) / 3, deadline: bound / 3, arms: true, now: false, run: () => coffre.recheck(caller) },
     {
@@ -1536,7 +1545,7 @@ async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling
   if (db instanceof Response) return db;
   // The admission is the group's first check, from when it started: one that answered after its whole bound lets in
   // nothing, as an edit since may have narrowed the item (`AdmitClock`; review r1 of #485).
-  if (Date.now() - checked.admitted >= checked.bound) return failure(503, `${name}: its use answered too late to dial by; ask again`, 'late', '1');
+  if (Date.now() - checked.admitted >= checked.bound) return tooLate(name);
   const digest = used.item.digest;
   // By the item dialled: a session dialled by a newer item never joins a group whose checks hold it to an older one.
   const key = `${cacheKey(who, at, name)}\u0000ui\u0000${digest}`;

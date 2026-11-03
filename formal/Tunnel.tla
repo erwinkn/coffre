@@ -89,9 +89,10 @@ Init ==
     /\ admit = "asking" /\ admitRead = "none" /\ slow = FALSE
 
 \* The admission's use reads the handle and the item, at some tick after it
-\* started. A revocation before then refuses it; an edit before then is the
-\* item it dials, of which the edit's bound says nothing, so the model lets
-\* that admission go too.
+\* started. A revocation before then refuses it. So does an edit before then,
+\* in the model only: the code dials the edited item, by its new digest, in a
+\* group of its own, which is the no-edit case again, so refusing it here
+\* leaves out no behaviour the bound is about.
 AdmitRead ==
     /\ admit = "asking" /\ admitRead = "none"
     /\ admitRead' = IF Stale THEN "no" ELSE "yes"
