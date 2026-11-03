@@ -284,31 +284,21 @@ printf '%s' "$owner_url" | pnpm exec coffre migrate --yes
 unset owner_url
 ```
 
-### From 0.14.5 to 0.16, and on to 0.17
+### From 0.14.5 to 0.16
 
-A deployment on 0.14.5 goes to 0.16 in one upgrade: 0.15.0 is not a stop
-it needs. Every release after it goes through 0.16:
+A deployment on 0.14.5 goes to 0.16.0 or later in one upgrade: 0.15.0 is
+not a stop it needs. 0.16 moves the audit log to 0.15's log (the cutover),
+as 0.15.0 did. Once it has cut over, the database refuses every write of
+0.14's.
 
-1. **0.14.5 to 0.16.0 or later.** 0.16 moves the audit log to 0.15's log
-   (the cutover), as 0.15.0 did. Once it has cut over, the database
-   refuses every write of 0.14's.
-2. **0.16 to 0.17**, the contraction (`docs/design/two-trips.md`, PR 6),
-   once 0.16 serves and `coffre verify instance` passes. 0.17 stops
-   writing 0.14's entries for key writes and member adds, and stops
-   taking 0.14's head on a revoke.
-
-0.17 needs 0.16 first because of what 0.16 still writes. 0.16's vault
-decides about a member from 0.15's log, but 0.16 still writes each change's
-0.14 entry, since the releases before it read them: 0.15.0's vault checks
-each member against their newest 0.14 access entry, and a 0.14.5 rolled
-back to serves reads only as long as those entries are there. 0.17 writes
-none, so neither release may serve after it. Example: Ada is added under
-0.17, so no 0.14 `member.add` entry names her. A 0.15.0 vault, still
-serving during the deploy or deployed again in a rollback, finds no entry,
-reads her row as tampered and refuses her. A 0.16 vault reads her row's
-seal and serves her. So don't go from 0.14.5 or 0.15.0 straight to 0.17.
-
-#### 0.14.5 to 0.16
+0.16's vault decides about a member from 0.15's log alone, but 0.16 still
+writes each change's 0.14 entry too, because the releases before it read
+them. A 0.14.5 rolled back to serves reads only as long as those entries
+are there (below). And 0.15.0's vault checks each member against their
+newest 0.14 access entry: without one, as for a member added by a release
+that wrote none, it reads their row as tampered and refuses them. A later
+release stops writing them (the contraction, `docs/design/two-trips.md`,
+PR 6); its release notes will say which release it upgrades from.
 
 The steps follow [0.15.0's release notes](../CHANGELOG.md#0150-2026-11-01)
 ("Upgrading a deployment from 0.14"), with 0.16's setup in step 3.
@@ -319,10 +309,10 @@ Nothing serves 0.16 before step 4.
 2. **Update the code to the 0.16 release you chose**, 0.16.N here.
    `coffre update` always moves to npm's latest release and takes no
    version, whichever CLI runs it. While 0.16.N is the latest, `pnpm exec
-   coffre update` takes the deployment there. Once 0.17 is out, it would
-   take 0.14.5 straight to 0.17, so don't run it: bring the deployment by
-   hand to that release's `examples/workers` (Git tag `v0.16.N`), which is
-   what its `coffre init` writes. That is every `@coffre/*` pin, the Start
+   coffre update` takes the deployment there. Once a later release is out,
+   it would take 0.14.5 straight there, so don't run it: bring the
+   deployment by hand to that release's `examples/workers` (Git tag
+   `v0.16.N`), which is what its `coffre init` writes. That is every `@coffre/*` pin, the Start
    app's packages and `packageManager` in `package.json`, and the pages in
    `app/src/routes/` with `app/src/routeTree.gen.ts`; then `pnpm install`.
 
@@ -415,44 +405,12 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
   `pnpm build`). 0.16 serves at once, with its log verified whole.
 
 A deployment already on 0.15.0 upgrades to 0.16 as to any release
-([Upgrading](#upgrading)). While on 0.15.0, don't rotate the vault's
+([Upgrading](#upgrading)), with one edit `coffre update` leaves to it: on
+Workers, step 2's `VaultEntry` type for `app/src/coffre.ts`'s `VAULT`
+binding, without which the typecheck fails ("Property 'call' is
+missing"). While on 0.15.0, don't rotate the vault's
 signing key or a local vault key: every change would fail at its seal.
 0.16 supports the rotation.
-
-#### 0.16 to 0.17
-
-0.17 is not released yet. What follows is what its design holds it to
-(`docs/design/two-trips.md`, PR 6), and its release notes will say so too.
-From 0.16.0 or later, once its cutover has run and `coffre verify
-instance` passes:
-
-1. **Back the database up**, `coffre backup`.
-2. **Update and migrate** as for any release (`coffre update`, then
-   [migrate, then deploy](#upgrading)). Once a release after 0.17 is out,
-   `coffre update` would take that instead: update by hand to 0.17's
-   `examples/workers`, as in step 2 above. 0.17's migrations only add, so
-   0.16 keeps serving on them.
-3. **Deploy both Workers at once.** While they deploy, an app and a vault
-   of different versions don't serve each other: the app answers 503
-   `deploying` with a short `Retry-After`, and clients ask again. On Node,
-   `pnpm build` first, then restart the vault, then the servers.
-4. **Check it** as above.
-
-Nothing is read-only during this upgrade, and no cutover runs: 0.15's log
-already holds everything.
-
-**Rolling back to 0.16** is a deploy of the release before, by hand (on
-Workers, restore that release's code and pins, `pnpm install`, then `pnpm
-run deploy`, for the reasons above; on Node, restore that release's code
-and pins, `pnpm install`, `pnpm build`, then restart the vault, then the
-servers), with no restore of the database: its code reads what 0.17
-wrote, from 0.15's log. Two things differ while rolled back. Key writes
-and member adds that 0.17 made have no 0.14 entry, so a 0.16 audit page
-that lists entries of 0.14's omits them, though 0.15's log still holds
-and seals them. And 0.16's revoke takes 0.14's head again, which costs a
-moment and changes nothing. Never roll back from 0.17 to 0.15.0 or
-0.14.5: 0.15.0 refuses the members 0.17 added (above), and 0.14.5 serves
-reads only, and not theirs either.
 
 ### From a release before 0.4.0
 
