@@ -87,7 +87,9 @@ const START_AGAIN_MS = 10_000;
  * it is private, the hot path's included. Each call gets a database of its
  * own, one client that its queries take turns on, since a Worker's
  * connections belong to the call that made them; it is closed once the
- * call is done.
+ * call is done. Its plain reads asked together go together, one round trip
+ * (`groupReads`): a cold call's start asks its first reads so (`#start`
+ * in vault.ts, T206).
  */
 export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
   async call(release: string, method: VaultMethod, args: readonly unknown[]): Promise<VaultAnswer> {
@@ -110,7 +112,7 @@ export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
 
   async #call<T>(run: (vault: Required<Vault>) => Promise<T>): Promise<T> {
     const { prepared, database } = await this.#ready();
-    const pool = new HyperdrivePool(database.hyperdrive.connectionString);
+    const pool = new HyperdrivePool(database.hyperdrive.connectionString, { groupReads: true });
     try {
       return await run(openVault(createDatabase(pool), prepared));
     } finally {

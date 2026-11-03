@@ -24,7 +24,7 @@ import { tablesOf, type Database } from '@coffre/db';
 import { everyProjectPreview, findingMetadata, newestChangeNames, reportStands, tamperedMembers } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound, logObject } from '@coffre/db/log';
-import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { signer } from '../src/checkpoint.ts';
@@ -4255,6 +4255,9 @@ test('a root admin of 0.5 still holding grants on every project gets what `coffr
  * `database`, whose first read about `principal` in `table` (their entries
  * in the log, unless named), once armed, waits after its answer arrived
  * until released: another request runs in between, as on a busy instance.
+ * A built query or a statement of its own (`snapshot`'s, by its text and
+ * values, an array's or a JSON array's included); `arm(skip)` lets the
+ * first `skip` such reads by.
  */
 function pausedReadAbout(database: Database, principal: string, table = 'audit_log') {
   let paused = () => {};
@@ -4262,6 +4265,19 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
   const reached = new Promise<void>((resolve) => (paused = resolve));
   const released = new Promise<void>((resolve) => (release = resolve));
   let armed = false;
+  let skips = 0;
+  /** Whether the read just answered is the one to pause after. */
+  const due = (text: string, values: readonly unknown[]): boolean => {
+    // `snapshot`'s principals: an array on Postgres, a JSON array on SQLite.
+    const names = (value: unknown): unknown[] => (Array.isArray(value) ? value : typeof value === 'string' && value.startsWith('[') ? JSON.parse(value) as unknown[] : [value]);
+    if (!armed || !text.includes(table) || !values.flatMap(names).includes(principal)) return false;
+    if (skips > 0) {
+      skips -= 1;
+      return false;
+    }
+    armed = false;
+    return true;
+  };
   const wrap = <Q extends object>(query: Q): Q => new Proxy(query, {
     get(target, property) {
       const value = Reflect.get(target, property, target) as unknown;
@@ -4269,8 +4285,7 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
         return (resolve: (result: unknown) => void, reject: (error: unknown) => void) =>
           (value as (ok: (result: unknown) => unknown) => Promise<unknown>).call(target, async (result: unknown) => {
             const { sql, params } = (target as { toSQL(): { sql: string; params: unknown[] } }).toSQL();
-            if (armed && sql.includes(table) && params.includes(principal)) {
-              armed = false;
+            if (due(sql, params)) {
               paused();
               await released;
             }
@@ -4297,8 +4312,7 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
           if (original === undefined) continue;
           prepared[run] = async (values) => {
             const result = await original(values);
-            if (armed && query.sql.includes(table) && Object.values(values ?? {}).includes(principal)) {
-              armed = false;
+            if (due(query.sql, Object.values(values ?? {}))) {
               paused();
               await released;
             }
@@ -4313,11 +4327,25 @@ function pausedReadAbout(database: Database, principal: string, table = 'audit_l
     get(target, property) {
       if (property === 'select') return (...args: Parameters<Database['select']>) => wrap(target.select(...args));
       if (property === 'session') return session(Reflect.get(target, property, target) as never);
+      // A statement of its own, Postgres's `execute` or SQLite's `all` (`rowsOf`): `snapshot`'s, one for several principals.
+      if (property === 'execute' || property === 'all') {
+        const run = Reflect.get(target, property, target) as (query: SQL) => Promise<unknown>;
+        const { dialect } = target as unknown as { dialect: { sqlToQuery(query: SQL): { sql: string; params: unknown[] } } };
+        return async (query: SQL) => {
+          const result = await run.call(target, query);
+          const { sql: text, params } = dialect.sqlToQuery(query);
+          if (due(text, params)) {
+            paused();
+            await released;
+          }
+          return result;
+        };
+      }
       const value = Reflect.get(target, property, target) as unknown;
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
   });
-  return { database: wrapped, arm: () => void (armed = true), reached, release };
+  return { database: wrapped, arm: (skip = 0) => void ((armed = true), (skips = skip)), reached, release };
 }
 
 for (const [shared, joined] of [[false, false], [true, false], [false, true]] as const) {
@@ -4331,7 +4359,8 @@ for (const [shared, joined] of [[false, false], [true, false], [false, true]] as
     // Both settled first, so that only root's requests remain.
     assert.equal((await first.access(ADA)).status, 'unknown');
     assert.equal((await other.access(ADA)).status, 'unknown');
-    slow.arm();
+    // Past root's own read (`#read`), to the quick read of the Owners the deployment names (`#declare`).
+    slow.arm(1);
     const pending = first.access(ROOT);
     await slow.reached;
     assert.equal((await other.access(ROOT)).role, 'owner');

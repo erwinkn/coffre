@@ -494,7 +494,7 @@ try {
   };
   // Every connection's plans made, and every key's bulk row written, before the first level.
   // `--warm` seconds: long enough that each pooled connection has planned its statements, as Hyperdrive's have.
-  // Reported apart, first: a cold start's window (new isolates, unplanned statements), held to nothing.
+  // Reported apart, first: a cold start's window (new isolates, unplanned statements), its refusals by quarter second.
   await usesIn('warm-up');
   await new Promise((resolve) => setTimeout(resolve, Number(values.warm) * 1000));
   await usesIn(null);
@@ -555,6 +555,11 @@ try {
         `  ${name.padEnd(8)} ${String(sent).padStart(6)} uses  p50 ${percentile(sorted, 50).toFixed(1).padStart(6)}  p90 ${percentile(sorted, 90).toFixed(1).padStart(6)}  p99 ${percentile(sorted, 99).toFixed(1).padStart(6)}  ` +
           `max ${sorted.at(-1)!.toFixed(1).padStart(7)}  app CPU ${app.toFixed(2)} ms/use${cpuShown(used, sent)}  refused: ${[...refused].map(([why, n]) => `${why} ${n}`).join(', ') || 'none'}`,
       );
+      // Refusals by when each was due, a quarter second a column, every thread's together; each thread's first use.
+      const timeline: number[] = [];
+      for (const phase of each) phase.timeline.forEach((n, i) => (timeline[i] = (timeline[i] ?? 0) + n));
+      if (timeline.length > 0) console.log(`           refused by 250 ms: ${Array.from(timeline, (n) => n ?? 0).join(' ')}`);
+      if (name === 'warm-up') console.log(`           first use, each thread: ${each.map(({ first }) => (first === null ? '-' : first.toFixed(0))).join(' ')} ms`);
     }
   }
   if (loader !== null) {

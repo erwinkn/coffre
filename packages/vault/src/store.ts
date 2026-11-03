@@ -717,14 +717,21 @@ export async function vaultPage(db: Queryable, before: bigint | undefined, limit
 /**
  * The seq of the vault's first entry under `keyId`, or undefined. No index
  * serves it: it reads the log from its start up to that entry, which for
- * the key a log began under is among its first.
+ * the key a log began under is among its first: the vault's entries alone,
+ * by `audit_log_subject_idx`, its author first. With `unlessRotated`, none
+ * read once a `key.rotate` of the vault's is under `keyId`, an index probe of
+ * the few such entries decided before the walk: asked before the start knows
+ * whether it needs it (`#start` in vault.ts, T206), it walks no entries of a
+ * key the vault rotated from, as the start, finding the rotation, never did
+ * (R48). Undefined then says nothing.
  */
-export async function firstVaultEntryUnder(db: Queryable, keyId: string): Promise<bigint | undefined> {
+export async function firstVaultEntryUnder(db: Queryable, keyId: string, { unlessRotated = false } = {}): Promise<bigint | undefined> {
   const { auditLog } = tablesOf(db);
+  const due = sql`NOT EXISTS (SELECT 1 FROM audit_log r WHERE r.author = 'vault' AND r.action = 'key.rotate' AND r.decision = 'allow' AND r.key_id = ${keyId})`;
   const [row] = await db
     .select({ seq: auditLog.seq })
     .from(auditLog)
-    .where(and(eq(auditLog.author, 'vault' satisfies Author), eq(auditLog.keyId, keyId)))
+    .where(and(eq(auditLog.author, 'vault' satisfies Author), eq(auditLog.keyId, keyId), unlessRotated ? due : undefined))
     .orderBy(asc(auditLog.seq))
     .limit(1);
   return row?.seq;

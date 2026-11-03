@@ -43,7 +43,7 @@ import {
   readScope,
 } from '@coffre/core/access';
 import { GENESIS_HASH, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
-import { openPair, type LogEntry, type PairNotes } from '@coffre/core/merkle';
+import { openPair, type LogEntry, type PairNotes, type StoredPair } from '@coffre/core/merkle';
 import { checkContext, ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { shownMember } from '@coffre/core/schemas';
 import {
@@ -203,7 +203,7 @@ import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
-import { ACCESS_ACTIONS, type CheckedChange, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog, type ReadKind } from './store.ts';
+import { ACCESS_ACTIONS, type CheckedChange, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type HeldObject, type Member, type MemberLog, type ReadKind } from './store.ts';
 import { callWrite, decideWrite, parseInputs, secretColumnsOf, validateWriteKeys, WRITE_KINDS, writeStanding } from './write.ts';
 import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
@@ -707,6 +707,21 @@ type Standing = {
   principal: string; status: Access['status']; live: Holdings; all: Holdings; fault: Fault | null; stored: GrantRow[];
   /** Under 0.15's log, what their row was checked against (`#onLog`): its newest change, its MAC checked when no fault. */
   log?: MemberLog;
+};
+
+/** What a call's start reads first, asked together (`#start`): each step's first read, by the step. */
+type StartReads = {
+  /** `#settle`'s: the vault's newest `key.rotate`, its newest entry, and its first under its current key. */
+  rotation: Promise<StoredEntry | undefined>;
+  newest: Promise<StoredEntry | undefined>;
+  first: Promise<bigint | undefined>;
+  /** The cutover's change, null for none, and the newest checkpoint, its seal's (`#cutoverSealed`): null unless still to know. */
+  cutover: Promise<bigint | null>;
+  checkpoint: Promise<StoredPair | null>;
+  /** `#convert`'s: who holds a grant on every project of 0.4. */
+  holders: Promise<string[]>;
+  /** `#limit`'s: the policy as 0.15's log holds it. */
+  policy: Promise<HeldObject>;
 };
 
 /**
@@ -1305,20 +1320,54 @@ class VaultService implements Vault {
    */
   async #settled(): Promise<string | null> {
     const prepared = this.#prepared;
+    if (prepared.superseded !== null) return prepared.superseded;
+    const log015 = prepared.log015 !== null;
+    if (prepared.since !== null && prepared.converted && (!log015 || prepared.cutover || prepared.marked) && (!log015 || prepared.limited)) return null;
     // Each call that finds it unsettled reads for itself, over its own
     // database; calls that race settle it alike, and a rotation they race
     // to write goes in once (`#rotate`).
-    if (prepared.since === null && prepared.superseded === null) await this.#settle();
+    const start = this.#start();
+    if (prepared.since === null) await this.#settle(start);
     // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
     // the bulk cap, after it, as decisions of 0.15's log.
     if (prepared.superseded === null && prepared.log015 !== null && !prepared.cutover && !prepared.marked) {
-      if (!(await store.cutOver(this.#db))) return prepared.superseded;
+      if ((await start.cutover) === null) return prepared.superseded;
       prepared.marked = true;
     }
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
-    if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert();
-    if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit();
+    if (prepared.superseded === null && prepared.since !== null && !prepared.converted) await this.#convert(start);
+    if (prepared.superseded === null && prepared.log015 !== null && !prepared.limited) await this.#limit(start);
     return prepared.superseded;
+  }
+
+  /**
+   * What a call's start reads first, asked at once (T206): one round trip
+   * on Workers, where the vault's pool sends plain reads asked together
+   * under one Sync (`groupReads`, cloudflare.ts), as Node's pool sends them
+   * on connections side by side; asked one after another, as each step
+   * came to it, they made a cold isolate's first call some ten round
+   * trips before its first decision. Each is the unlocked read its step
+   * began with, which it checks as it did: only asked sooner, before the
+   * steps between, none of which writes what another of them reads. A
+   * step that reads again, a retry or under a lock, reads the database.
+   * Local to the call, as an isolate keeps no pending promise (AGENTS.md).
+   */
+  #start(): StartReads {
+    const db = this.#db;
+    const log015 = this.#prepared.log015 !== null && !this.#prepared.cutover;
+    const asked: StartReads = {
+      rotation: store.latestVaultEntry(db, [KEY_ROTATE]),
+      newest: store.vaultPage(db, undefined, 1).then(([entry]) => entry),
+      // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.
+      first: store.firstVaultEntryUnder(db, this.#prepared.logKey.keyId, { unlessRotated: true }),
+      cutover: log015 ? store.cutoverNumber(db) : Promise.resolve(null),
+      checkpoint: log015 ? logStore(db).newest() : Promise.resolve(null),
+      holders: store.everyProjectHolders(db),
+      policy: this.#prepared.log015 !== null ? store.readObject(db, POLICY_REF as Ref & { kind: 'policy' }) : Promise.resolve({ row: null, seal: null }),
+    };
+    // A step that returns first leaves the reads after it unawaited: their failures are the call's own, not unhandled.
+    for (const read of Object.values(asked)) (read as Promise<unknown>).catch(() => {});
+    return asked;
   }
 
   /**
@@ -1342,11 +1391,13 @@ class VaultService implements Vault {
    * names. Until both finish, each call does again what is left, a few
    * reads once nothing is.
    */
-  async #convert(): Promise<void> {
-    for (const principal of await store.everyProjectHolders(this.#db)) {
+  async #convert(start: StartReads): Promise<void> {
+    const holders = await start.holders;
+    for (const principal of holders) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
-    this.#prepared.converted = await this.#declare(this.#config.owners.map((email) => `user:${email}`));
+    // A conversion decided reads the cutover's seal again, as it did; none, and the Owners' declaration takes the start's.
+    this.#prepared.converted = await this.#declare(this.#config.owners.map((email) => `user:${email}`), holders.length === 0 ? start : undefined);
   }
 
   /**
@@ -1359,8 +1410,8 @@ class VaultService implements Vault {
    * that starts finds it there, and takes neither 0.14's head nor the fence
    * for it, which every other start would queue behind (PR 5b's bench).
    */
-  async #limit(): Promise<void> {
-    const { row: logged } = await store.readObject(this.#db, POLICY_REF as Ref & { kind: 'policy' });
+  async #limit(start: StartReads): Promise<void> {
+    const { row: logged } = await start.policy;
     if (limitChange(logged?.kind === 'policy' ? logged : null, this.#config.bulkLimit) === null) {
       this.#prepared.limited = true;
       return;
@@ -1457,19 +1508,22 @@ class VaultService implements Vault {
    * moved on from, or that holds no key its newest entries are under,
    * writes nothing: `superseded` says why.
    */
-  async #settle(): Promise<void> {
+  async #settle(start?: StartReads): Promise<void> {
     const prepared = this.#prepared;
     const current = prepared.logKey.keyId;
     for (let attempt = 1; ; attempt += 1) {
-      const rotation = await store.latestVaultEntry(this.#db, [KEY_ROTATE]);
+      // The start's reads first; a retry, after a rotation that raced another, reads again.
+      const asked = attempt === 1 ? start : undefined;
+      const rotation = await (asked?.rotation ?? store.latestVaultEntry(this.#db, [KEY_ROTATE]));
       if (rotation?.keyId === current && this.#authentic(rotation)) {
         prepared.since = rotation.seq;
         return;
       }
-      const [newest] = await store.vaultPage(this.#db, undefined, 1);
+      const newest = await (asked?.newest ?? store.vaultPage(this.#db, undefined, 1).then(([entry]) => entry));
       // A log the vault has not written to: nothing to settle until it does.
       if (newest === undefined) return;
-      const first = await store.firstVaultEntryUnder(this.#db, current);
+      // The start's says only where it found one: none may mean a rotation to the key it did not walk past.
+      const first = (await asked?.first) ?? (await store.firstVaultEntryUnder(this.#db, current));
       if (first !== undefined && newest.keyId === current) {
         prepared.since = first;
         return;
@@ -2374,13 +2428,15 @@ class VaultService implements Vault {
    * again (`#makeOwner`). One whose row the log never admitted stays as it is,
    * and is asked about again at each of their requests. Whether it ran.
    */
-  async #declare(principals: readonly string[]): Promise<boolean> {
+  async #declare(principals: readonly string[], start?: StartReads): Promise<boolean> {
     // Under 0.15's log, no Owner made before the cutover: nothing of the log's precedes its change (AnchorHolds).
-    if (!(await this.#cutOverNow())) return false;
-    const at = await this.#now(this.#db);
+    if (!(await this.#cutOverNow(start))) return false;
+    // Their rows, grants and the policy in one statement, as `access` reads one member's (T206).
+    const reads = await snapshot(this.#db, { principals, members: true, seals: this.#checksSeals() });
+    const at = this.#at(reads);
     const due: string[] = [];
     for (const principal of principals) {
-      const subject = await this.#standing(this.#db, principal, await store.member(this.#db, principal), at, []).catch((error: unknown) => {
+      const subject = await this.#standing(this.#db, principal, reads.members.get(principal), at, [], reads).catch((error: unknown) => {
         if (error instanceof Retry) return null;
         throw error;
       });
@@ -3831,10 +3887,10 @@ class VaultService implements Vault {
   }
 
   /** Whether the vault may serve 0.15's log: kept by 0.14's alone, or cut over, its change sealed (`#cutoverSealed`). */
-  async #cutOverNow(): Promise<boolean> {
+  async #cutOverNow(start?: StartReads): Promise<boolean> {
     const prepared = this.#prepared;
     if (prepared.log015 === null || prepared.cutover) return true;
-    if (!(await this.#cutoverSealed())) return false;
+    if (!(await this.#cutoverSealed(start))) return false;
     prepared.cutover = true;
     return true;
   }
@@ -3849,10 +3905,10 @@ class VaultService implements Vault {
    * uses among them, ask no checkpointer, which may be the one thing that
    * does not answer.
    */
-  async #cutoverSealed(): Promise<boolean> {
-    const number = await store.cutoverNumber(this.#db);
+  async #cutoverSealed(start?: StartReads): Promise<boolean> {
+    const number = await (start?.cutover ?? store.cutoverNumber(this.#db));
     if (number === null) return false;
-    if (!(await this.#signedPast(number))) await this.#log015().sealThrough(number);
+    if (!(await this.#signedPast(number, start))) await this.#log015().sealThrough(number);
     return true;
   }
 
@@ -3861,9 +3917,9 @@ class VaultService implements Vault {
    * is proved, as its seal proves it: a pair covering its number may cover a gap a writer moved the change into
    * (review r1). Anything short of that goes to the seal, which alarms on what it refuses.
    */
-  async #signedPast(number: bigint): Promise<boolean> {
+  async #signedPast(number: bigint, start?: StartReads): Promise<boolean> {
     const store = logStore(this.#db);
-    const newest = await store.newest();
+    const newest = await (start?.checkpoint ?? store.newest());
     if (newest === null || newest.upto < number) return false;
     const pair = await openPair(newest.notes, (await this.#verifierKeys()).current.verifiers);
     if (pair === null || pair.upto !== newest.upto) return false;

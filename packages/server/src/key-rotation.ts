@@ -86,19 +86,21 @@ export type KeyState =
  * rows the new key signed meanwhile are left as they are, and the order
  * the keys are listed in changes nothing. A key the app does not hold,
  * the log's newest, is said and served under: as before rotations, its
- * rows fail and the log does not verify, but the instance does not stop. A few indexed reads; a key
+ * rows fail and the log does not verify, but the instance does not stop. Three indexed reads, together; a key
  * held as replaced is looked for among the entries until one is found.
  */
 export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> {
   const current = appLogKey(keys.chainKey).keyId;
   const previous = keys.previousChainKeys.map((key) => ({ id: appLogKey(key).keyId, key }));
   const held = new Map([[current, keys.chainKey], ...previous.map(({ id, key }) => [id, key] as const)]);
-  const moved = await movedFrom(db, [...held.keys()]);
+  // Its first reads asked together: one round trip at a cold isolate's door, not three (T206; `groupReads`, or a
+  // transaction's statements under one Sync). The newest app entry is read whether or not a move is found: an indexed
+  // read of the newest few, where the entries a replaced key wrote are looked for only as each is due (`wroteUnder`).
+  const [moved, move, latest] = await Promise.all([movedFrom(db, [...held.keys()]), newestMove(db), newestAppEntry(db)]);
   const due = (from: Buffer) => previous.filter(({ id, key }) => !moved.has(id) && !key.equals(from)).map(({ key }) => key);
   if (moved.has(current)) {
     return refused(`the log moved on from ${current}, this app's key: a key the app moved on from writes no more, and comes back only as a new key's rotation`);
   }
-  const move = await newestMove(db);
   let unknown = move !== undefined && !held.has(move.keyId) ? move.keyId : null;
   if (move !== undefined && unknown === null) {
     const under = held.get(move.keyId)!;
@@ -123,10 +125,7 @@ export async function keyState(db: Queryable, keys: AppKeys): Promise<KeyState> 
     if (await wroteUnder(db, id)) return { kind: 'rotating', from: key, next: START, others: due(key) };
     unused(id);
   }
-  if (move === undefined) {
-    const latest = await newestAppEntry(db);
-    if (latest !== undefined && !held.has(latest.keyId)) unknown = latest.keyId;
-  }
+  if (move === undefined && latest !== undefined && !held.has(latest.keyId)) unknown = latest.keyId;
   if (unknown !== null) unheld(unknown, current);
   return { kind: 'settled' };
 }

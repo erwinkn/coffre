@@ -183,9 +183,10 @@ same deadline (`packages/server/src/asked-once.ts`, T201).
 **One connection per call.** On Workers, each app request and each vault
 call has one Postgres client through Hyperdrive (`HyperdrivePool` in
 `@coffre/db`), connected on its first query. Its queries take turns on it,
-and a transaction holds it from BEGIN to COMMIT; the app's plain reads
-asked together take one turn, under one Sync, one round trip
-(`groupReads`), and fail together. A transaction's statements asked
+and a transaction holds it from BEGIN to COMMIT; plain reads asked
+together, the app's and the vault's, take one turn, under one Sync, one
+round trip (`groupReads`), and fail together: a cold isolate's start asks
+its first reads so (T206). A transaction's statements asked
 together go under one Sync too, BEGIN with the first, in the order they
 were started, and the writes
 it leaves to `later` (`@coffre/db`) with its
