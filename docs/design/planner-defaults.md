@@ -86,6 +86,26 @@ prunes to the day and plans the index read newest first, the same plan the
 settings forced. Planning a covered use's probe costs about 0.09 ms
 (686 calls, 64 ms of planning), as the custom plan did before.
 
+## Arrays a plan cannot see
+
+`use_named_batch` and `use_route` resolve the names asked in one
+statement, over two arrays: the names, and the place's layers (the place,
+then what it inherits from). Planned for a call's own values, Postgres
+counts each array, three names and two layers, say; planned for any
+values, it guesses ten of each. So the plan for each call's values always
+looked cheaper than the plan for any values, and the cache never kept the
+latter: that statement planned on every call (43 plans for 42 calls of
+`use_named_batch` in `use-cost.test.ts`, 140 for 137 of `use_route` in
+the use tests), and each batch's buffers carried that planning's reads,
+which move with the data. CI caught it as a batch's own buffers moving by
+7 between 1,000 and 10,000 forks.
+
+0063 reads each array through a scalar subquery,
+`unnest((SELECT v_layers))`. Its value is then unknown to both plans,
+both count ten, and the cache keeps the plan for any values after five
+calls, as 0.15.0's forced generic plans did. The rows and their order are
+the same.
+
 ## Planning before the fence (T131)
 
 `use_credential` takes a shared advisory lock, the fence, which a
@@ -157,16 +177,37 @@ its own database did, and holds it to every other check
 - Measured at 5, 100 and 365 days attached, at 1,000 uses a second: 1.62,
   1.70 and 1.66 ms of Postgres CPU a use, about 50 buffers, the generic
   plan kept (estimate 222 to 237, far below `jit_above_cost`).
-- Tests that weigh a call's buffers (`scripts/matrix-weigh.ts`) refuse
-  sequential scans in their session, as before, to plan a test's tables of
-  a few pages as an instance's grown ones are. Refused scans cost the plan
-  for any values so much more than each call's own that the plan cache
-  would never keep it there, and each call would be weighed on a plan for
-  its own values: a key never made read 22 blocks where every other key
-  read 26. At the server's settings the cache keeps that plan within a
-  session's first few calls (a probe alternating a key and a key never
-  made: 6, 2 and 1 plans on the first three calls, none after), so the
-  weighing session asks for it, and for no JIT, which those costs would
-  reach. These are the weighing's own session settings, never a login's
-  or a function's. A session's first calls, before the cache keeps its
-  plan, plan for their own values, as any Postgres client's do.
+- The use matrices hold a refusal of a caller who stands nowhere to
+  reading as many blocks of the key's tables for every key, in two ways
+  (`scripts/matrix-weigh.ts`):
+  - On settled plans (`weigh`): one session that refuses sequential scans,
+    to plan a test's tables of a few pages as an instance's grown ones
+    are, and forces the plan for any values, which refused scans would
+    otherwise keep the cache from settling on (each call would be weighed
+    on a plan for its own values: a key never made read 22 blocks where
+    every other key read 26), without JIT, which those costs would reach.
+  - At each of a new session's first seven calls (`weighInTurn`), at the
+    server's own settings: the dry run, the four calls planned for their
+    own values, the one that makes the plan for any values, and the first
+    on it. Each key is weighed in a session of its own, against every
+    other key at the same call.
+
+  These are the weighing's own session settings, never a login's or a
+  function's.
+
+## The dry run plans for no key
+
+A plan made for a call's own values is made with them, and planning for a
+value can read pages by it. Sol's review r2 weighed a session's first
+calls at the server's settings and found a named call of a caller who
+stands nowhere reading 16 more blocks of the key's tables (`log_bulk`,
+`secret_versions`, `environments`) on its first call for a key held than
+for one never made. Every statement's own execution read the same: the
+gap was the dry run's planning, which bound the key id the isolate passed
+before anything had decided the caller may know of it. 0.15.0's generic
+plans never planned for a value, so never showed it.
+
+The dry run now binds the nil id, which no key has; the call binds a key
+where it reads it, a use by id or a named call of a caller who stands.
+Weighed at each of a session's first eight calls, a held key and a key
+never made then read the same blocks at every call.

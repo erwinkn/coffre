@@ -14,7 +14,7 @@ import type { Input, Op } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { weigh, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
+import { weigh, weighInTurn, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
 
@@ -286,7 +286,7 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 
-export { keyBlocksOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
+export { keyBlocksOf, turnsApart, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
 
 /**
  * The shared buffers `call` reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled
@@ -308,6 +308,12 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
   } finally {
     if (on === undefined) await session.end();
   }
+}
+
+/** What `call` reads at each of a new session's first calls, at the server's planner settings (`weighInTurn`); null on SQLite, or for no call. */
+export async function weighedInTurn(call: HotCall | null): Promise<Weighed[] | null> {
+  if (ENGINE !== 'postgres' || call === null) return null;
+  return await weighInTurn(HOT_URL, call);
 }
 
 /** A session of the hot login's to weigh calls in alike (`bufferedBy`): its plans made once, by the first. */

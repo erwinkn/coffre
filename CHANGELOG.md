@@ -128,7 +128,14 @@
   226 with or without statistics, the plan kept after five calls. The day
   reads (`use_covered`, `log_reads_by`, `log_reads_at`) plan per call with
   `EXECUTE`, which prunes to their day, as the forced custom plans did.
-  At 1,000 uses a second, three rounds alternating with 0.15.0's
+  A session's first use plans each form dry before it takes the fence,
+  now for no key: planned for the key the isolate passed, a refusal of a
+  caller who stands nowhere read more of a held key's tables than of one
+  never made, on that first call. The use matrices weigh a session's
+  first seven calls at the server's settings too. `use_named_batch` and
+  `use_route` read the names asked and the place's layers through a
+  scalar subquery, so that their names' statement keeps one plan instead
+  of planning on every call. At 1,000 uses a second, three rounds alternating with 0.15.0's
   settings: the same Postgres CPU (1.60 to 1.75 ms against 1.70 to 1.74),
   p50 and busy refusals; flat at 5, 100 and 365 days of log. The lock
   and statement timeouts, and `bytea_output = 'hex'` where a function
