@@ -9,7 +9,7 @@ import { entryColumns, numbersIn, strictly, withinBytes, type ChangeNumbers } fr
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
-import { CUTOVER_OBJECT, type ChangeRow } from './log-entry.ts';
+import { changeHolds, CUTOVER_OBJECT, type ChangeRow, type LogMacKey } from './log-entry.ts';
 import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
@@ -277,9 +277,11 @@ export type EnvironmentRow = {
 /**
  * What 0.15's log holds an environment's row to (T159): the row's object
  * (`environmentObject`), its seal, and its object's newest change's seal,
- * null for none. The vault checks them before it decides on the row.
+ * null for none, with that change whole (`change`), its MAC to check
+ * (T190, review r3): the seal column alone is a writer's to edit. The vault
+ * checks them before it decides on the row.
  */
-export type EnvironmentSeal = { object: EnvironmentInput; seal: Buffer | null; newest: Buffer | null };
+export type EnvironmentSeal = { object: EnvironmentInput; seal: Buffer | null; newest: Buffer | null; change: Omit<ChangeRow, 'number'> | null };
 
 /**
  * Each of these environments that exists, by id, with its project, its
@@ -317,8 +319,8 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
     ownArchived: truth(isNotNull(environments.archivedAt)),
     projectArchived: truth(isNotNull(projects.archivedAt)),
     seal: environments.seal,
-    // One probe of its object's changes, newest first (`log_changes_object_idx`, which holds the seal).
-    ...(postgres ? { newest: sql<Buffer | Uint8Array | null>`(SELECT l.seal FROM log_changes l WHERE l.object = log_object('environment', ${environments.id}::text) ORDER BY l.number DESC LIMIT 1)` } : {}),
+    // One probe of its object's changes, newest first (`log_changes_object_idx`): that change whole, its MAC to check.
+    ...(postgres ? { newest: sql<NewestColumns | string | null>`${newestChangeJson(sql`log_object('environment', ${environments.id}::text)`)}` } : {}),
   };
   const rows = (await db
     .select(seals ? { ...columns, ...sealColumns } : columns)
@@ -326,7 +328,7 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
     .innerJoin(projects, eq(projects.id, environments.projectId))
     .where(ids === 'all' ? undefined : inArray(environments.id, [...new Set(ids)]))) as (Omit<EnvironmentRow, 'sealed'> & { id: string } & Partial<SealedColumns>)[];
   // SQLite has no `log_object`: the newest changes in a statement of their own, by the keys the vault computes.
-  const newest = seals && !postgres ? await newestSeals(db, rows.map((row) => ({ kind: 'environment', id: row.id }))) : null;
+  const newest = seals && !postgres ? await newestChanges(db, rows.map((row) => ({ kind: 'environment', id: row.id }))) : null;
   // An id asked with no row, which the log holds a change of: deleted outright around it (review r5). A statement more,
   // only when a row is missing.
   const rowless = seals && ids !== 'all' ? [...new Set(ids)].filter((id) => !rows.some((row) => row.id === id)) : [];
@@ -350,7 +352,7 @@ async function environmentRows(db: Queryable, ids: readonly string[] | 'all', se
  */
 export function goneEnvironment(id: string, newest: Buffer | null): EnvironmentRow {
   const columns = { id, projectId: '', slug: '', owner: null, parentId: null, protected: null, archived: false, projectArchived: false };
-  return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest } };
+  return { projectId: '', slug: '', owner: null, parentId: null, deleted: false, archived: false, sealed: { object: environmentObject(columns), seal: null, newest, change: null } };
 }
 
 /**
@@ -380,11 +382,53 @@ export function oneSnapshot<T>(db: Queryable, read: (on: Queryable) => Promise<T
 }
 
 /** The columns `environmentsById` reads with `seals`, as the drivers answer them. */
-type SealedColumns = { protected: boolean | number | null; ownArchived: boolean | number; projectArchived: boolean | number; seal: Buffer | Uint8Array | null; newest: Buffer | Uint8Array | null };
+type SealedColumns = { protected: boolean | number | null; ownArchived: boolean | number; projectArchived: boolean | number; seal: Buffer | Uint8Array | null; newest: NewestColumns | string | null };
 
-/** An environment's row as 0.15's log holds it to (`EnvironmentSeal`), from its columns and the two seals as read. */
-export function environmentSeal(columns: EnvironmentColumns, seal: Buffer | Uint8Array | null, newest: Buffer | Uint8Array | null): EnvironmentSeal {
-  return { object: environmentObject(columns), seal: bytes(seal), newest: bytes(newest) };
+/** An environment's row as 0.15's log holds it to (`EnvironmentSeal`), from its columns, its seal and its newest change as read. */
+export function environmentSeal(columns: EnvironmentColumns, seal: Buffer | Uint8Array | null, newest: NewestColumns | string | null): EnvironmentSeal {
+  const change = newestRowOf(newest);
+  return { object: environmentObject(columns), seal: bytes(seal), newest: change?.seal ?? null, change };
+}
+
+/**
+ * An object's newest change, as a statement reads it beside the object's row: on Postgres one JSON object
+ * (`newestChangeJson`), its bytes in hex; on SQLite its columns (`newestChanges`). Null for none.
+ */
+export type NewestColumns = {
+  at: string | number | bigint; request_id: string; object: string; actor: string; payload: string;
+  newest: Buffer | Uint8Array | string | null; mac: Buffer | Uint8Array | string | null;
+};
+
+/** `newestChangeJson`, on Postgres: the newest change of the object `key` names, whole, one probe of `log_changes_object_idx`. */
+export function newestChangeJson(key: SQL): SQL {
+  return sql`(SELECT json_build_object('at', l.at::text, 'request_id', l.request_id::text, 'object', l.object::text, 'actor', l.actor, 'payload', l.payload,
+      'newest', encode(l.seal, 'hex'), 'mac', encode(l.mac, 'hex'))
+    FROM log_changes l WHERE l.object = ${key} ORDER BY l.number DESC LIMIT 1)`;
+}
+
+/** The change `NewestColumns` reads, as its MAC covers it (`changeHolds`); null for none. */
+export function newestRowOf(read: NewestColumns | string | null | undefined): Omit<ChangeRow, 'number'> | null {
+  if (read == null) return null;
+  const row = typeof read === 'string' ? (JSON.parse(read) as NewestColumns) : read;
+  const raw = (value: Buffer | Uint8Array | string | null) => (typeof value === 'string' ? Buffer.from(value, 'hex') : bytes(value));
+  return {
+    at: Number(row.at), requestId: String(row.request_id).toLowerCase(), object: String(row.object).toLowerCase(), actor: String(row.actor), payload: String(row.payload),
+    seal: raw(row.newest), mac: raw(row.mac) ?? Buffer.alloc(0),
+  };
+}
+
+/** `newestSeals`, each change whole (`NewestColumns`), its MAC to check: by its key in the log. One probe of each object's changes. */
+export async function newestChanges(db: Queryable, refs: readonly Ref[]): Promise<Map<string, NewestColumns>> {
+  if (refs.length === 0) return new Map();
+  const rows = await rowsOf<NewestColumns & { key: string }>(db, newestChangesQuery(refs));
+  return new Map(rows.map(({ key, ...row }) => [key, row]));
+}
+
+/** `newestChanges`' statement, on SQLite: `newestSealsQuery`'s probe, each change whole. */
+export function newestChangesQuery(refs: readonly Ref[]): SQL {
+  const keys = JSON.stringify([...new Set(refs.map((ref) => objectKey(ref)))]);
+  return sql`SELECT k.value AS key, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac FROM json_each(${keys}) k
+    JOIN log_changes c ON c.object = k.value AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.value)`;
 }
 
 /**
@@ -1165,8 +1209,32 @@ export async function proxiesSavedBy(db: Queryable, member: string): Promise<str
   return rows.map((row) => row.id);
 }
 
-/** The object's newest change in the log: whether it has one, and the seal it left (HotPathOne's NewestIn). */
-export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buffer | null } | null> {
+/**
+ * The object's newest change in the log: whether it has one, the seal it records (HotPathOne's NewestIn), and whether
+ * that change's MAC holds over it under one of `macs`, the vault's (T190; HotPathOne.tla, ChangeChecksMac). One that
+ * does not is a seal a database writer wrote into the column (a put-back row's, so that a change applied to that row
+ * would seal it as the log's): a reader that holds a row to it refuses it (`heldFrom`, `Changes`). One probe and its
+ * row, the same however long the object's history.
+ */
+export async function newestChange(db: Queryable, ref: Ref, macs: readonly LogMacKey[]): Promise<NewestChange | null> {
+  const { logChanges } = tablesOf(db);
+  const [row] = await db
+    .select({ at: logChanges.at, requestId: logChanges.requestId, object: logChanges.object, actor: logChanges.actor, payload: logChanges.payload, seal: logChanges.seal, mac: logChanges.mac })
+    .from(logChanges)
+    .where(eq(logChanges.object, objectKey(ref)))
+    .orderBy(desc(logChanges.number))
+    .limit(1);
+  if (row === undefined) return null;
+  const seal = row.seal == null ? null : Buffer.from(row.seal);
+  const holds = changeHolds(macs, { at: Number(row.at), requestId: row.requestId, object: objectKey(ref), actor: row.actor, payload: row.payload, seal, mac: Buffer.from(row.mac) });
+  return { seal, holds };
+}
+
+/** An object's newest change as `newestChange` reads it: the seal its row records, and whether its MAC holds over it. */
+export type NewestChange = { seal: Buffer | null; holds: boolean };
+
+/** The seal the object's newest change records, as SQL compares it under the fence (`change_input`'s, SQLite's twin here): no MAC, which SQL cannot check. */
+async function newestSeal(db: Queryable, ref: Ref): Promise<{ seal: Buffer | null } | null> {
   const { logChanges } = tablesOf(db);
   const [row] = await db
     .select({ seal: logChanges.seal })
@@ -1177,23 +1245,45 @@ export async function newestChange(db: Queryable, ref: Ref): Promise<{ seal: Buf
   return row === undefined ? null : { seal: row.seal ?? null };
 }
 
-/** `newestSealedChanges`' statement, which its cost test explains. */
-export function newestSealedQuery(refs: readonly Ref[]): SQL {
-  const newest = sql.join(refs.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE d.object = ${objectKey(ref)} AND d.seal IS NOT NULL ORDER BY d.number DESC LIMIT 1)`), sql`, `);
-  return sql`SELECT c.number, c.at, c.object, c.payload, c.seal FROM log_changes c WHERE c.number IN (${newest})`;
+/**
+ * `loggedChanges`' statement, which its cost test explains: each object's newest change's number, and for each of
+ * `previous` the one before it too, one probe each of its changes, newest first (`log_changes_object_idx`); then those
+ * rows by number, with every column their MAC covers.
+ */
+export function loggedChangesQuery(refs: readonly Ref[], previous: readonly Ref[] = []): SQL {
+  const numbers = [
+    ...refs.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE d.object = ${objectKey(ref)} ORDER BY d.number DESC LIMIT 1)`),
+    ...previous.map((ref) => sql`(SELECT d.number FROM log_changes d WHERE d.object = ${objectKey(ref)} ORDER BY d.number DESC LIMIT 1 OFFSET 1)`),
+  ];
+  return sql`SELECT c.number, c.at, c.request_id, c.object, c.actor, c.payload, c.seal, c.mac FROM log_changes c WHERE c.number IN (${sql.join(numbers, sql`, `)})`;
 }
 
+/** A change as `loggedChanges` reads it: its number, its columns, and whether its MAC holds over them (T190). */
+export type CheckedChange = { number: bigint; at: number; object: string; payload: string; seal: Buffer | null; holds: boolean };
+
 /**
- * Each object's newest change that left a seal, by its key in the log: what
- * an unarchive restores (an archived key's newest change is its
- * `secret.delete`, which left none). One probe of each object's changes,
- * newest first (`log_changes_object_idx`), then its row by number: the
- * same work however long its history.
+ * Each of `refs`' newest change, and for each of `previous` (among `refs`) the one before it, by the object's key in
+ * the log, newest first, each with whether its MAC holds under one of `macs` (`changeHolds`); none for an object the
+ * log has no change of. One statement however many objects, the same work however long their histories.
+ *
+ * What a write the vault seals goes on from where the statement that makes it holds a row to its object's newest
+ * seal: SQL compares that seal, and cannot check a MAC, so the vault checks it here first (T190). A writer who edits
+ * the seal of a change already checked here, between this read and that statement, is not seen: the statement would
+ * have to hold the newest change's seal column to the seal this read checked, not its number alone, which an edit in
+ * place keeps (T179's two-trip writes, which check it under the lock; sealed-inputs.md).
  */
-export async function newestSealedChanges(db: Queryable, refs: readonly Ref[]): Promise<Map<string, { number: bigint; at: number; object: string; payload: string; seal: Buffer }>> {
-  if (refs.length === 0) return new Map();
-  const found = await rowsOf<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | Uint8Array }>(db, newestSealedQuery(refs));
-  return new Map(found.map((row) => [row.object, { number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: Buffer.from(row.seal) }]));
+export async function loggedChanges(db: Queryable, macs: readonly LogMacKey[], refs: readonly Ref[], previous: readonly Ref[] = []): Promise<Map<string, CheckedChange[]>> {
+  const found = new Map<string, CheckedChange[]>();
+  if (refs.length === 0) return found;
+  type Read = { number: string | number; at: string | number; request_id: string; object: string; actor: string; payload: string; seal: Buffer | Uint8Array | null; mac: Buffer | Uint8Array };
+  for (const row of await rowsOf<Read>(db, loggedChangesQuery(refs, previous))) {
+    const seal = bytes(row.seal);
+    const at = Number(row.at);
+    const holds = changeHolds(macs, { at, requestId: row.request_id, object: row.object, actor: row.actor, payload: row.payload, seal, mac: Buffer.from(row.mac) });
+    found.set(row.object, [...(found.get(row.object) ?? []), { number: BigInt(row.number), at, object: row.object, payload: row.payload, seal, holds }]);
+  }
+  for (const changes of found.values()) changes.sort((x, y) => (x.number > y.number ? -1 : x.number < y.number ? 1 : 0));
+  return found;
 }
 
 /**
@@ -1255,7 +1345,7 @@ export async function endReferenceRows(tx: Transaction, ids: readonly string[], 
     WHERE y.id IN (${listed}) AND y.ended_at IS NULL AND x.archived_at IS NULL AND x.current_version_id IS NULL
       AND y.id = (SELECT z.id FROM secret_references z WHERE z.secret_id = x.id ORDER BY z.created_seq DESC LIMIT 1)`);
   for (const row of standing) {
-    if (row.seal !== null || (await newestChange(tx, { kind: 'secret', id: row.holder })) !== null) {
+    if (row.seal !== null || (await newestSeal(tx, { kind: 'secret', id: row.holder })) !== null) {
       // Postgres's code for it, `invalid_parameter_value`, as `end_reference` raises it.
       throw Object.assign(new Error(`reference ${row.id} is its holder's standing one: its end is a change of the holder`), { code: '22023' });
     }
@@ -1387,7 +1477,7 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
     : proxied ? value === null : value !== null;
   if (valued) throw new Error(`a ${ref.kind} change ${op} carries the object it leaves exactly when change_input writes it`);
   // ChangeChecksSeal; the proxy's rows are written whole, from the newest change's seal (0056).
-  const newest = await newestChange(tx, ref);
+  const newest = await newestSeal(tx, ref);
   const held = proxied ? newest?.seal ?? null : await heldSeal(tx, ref);
   if (!sameBytes(held, newest?.seal ?? null)) throw new StaleRow(`the ${ref.kind} object's row is not its newest change's: stale`);
   // ChangeCAS.
@@ -1527,22 +1617,36 @@ function sameBytes(a: Buffer | null, b: Buffer | null): boolean {
 /**
  * A credential a token's issue came in on (`Vault.issueToken`, T149): its
  * object's columns, as the app sends them (`CredentialColumns`), its seal,
- * and its object's newest change's seal, in one read; null for no row.
+ * and its object's newest change's seal, with whether that change's MAC holds
+ * under `macs` (T190: `issue_token` and `change_bindings` hold the row to
+ * that seal, which SQL cannot authenticate), in one read; null for no row.
  */
-export async function issuingCredential(db: Queryable, id: string): Promise<{ columns: CredentialColumns; seal: Buffer | null; newest: Buffer | null } | null> {
-  type Read = { id: string; principal: string; kind: string; scope: string | null; revoked: boolean | number; expires_at: number | string; not_after: number | string | null; generation: number; seal: Buffer | null; newest: Buffer | null };
+export async function issuingCredential(db: Queryable, id: string, macs: readonly LogMacKey[]): Promise<{ columns: CredentialColumns; seal: Buffer | null; newest: NewestChange | null } | null> {
+  type Read = {
+    id: string; principal: string; kind: string; scope: string | null; revoked: boolean | number; expires_at: number | string; not_after: number | string | null; generation: number; seal: Buffer | null;
+    number: string | number | null; at: string | number | null; request_id: string | null; actor: string | null; payload: string | null; newest: Buffer | null; mac: Buffer | null;
+  };
+  const object = objectKey({ kind: 'credential', id });
+  // The credential's columns as 0036's function answers them (the vault's login reads no credential otherwise), and
+  // beside them, in the same statement, its newest change's columns, which the vault's login reads.
+  const newest = sql`SELECT l.number, l.at, l.request_id, l.actor, l.payload, l.seal, l.mac FROM log_changes l WHERE l.object = ${object} ORDER BY l.number DESC LIMIT 1`;
   const [row] = engineOf(db) === 'postgres'
-    ? await rowsOf<Read>(db, sql`SELECT * FROM issuing_credential(${id}::uuid)`)
+    ? await rowsOf<Read>(db, sql`SELECT c.id, c.principal, c.kind, c.scope, c.revoked, c.expires_at, c.not_after, c.generation, c.seal,
+        l.number, l.at, l.request_id, l.actor, l.payload, l.seal AS newest, l.mac
+        FROM issuing_credential(${id}::uuid) c LEFT JOIN LATERAL (${newest}) l ON true`)
     : await rowsOf<Read>(db, sql`SELECT c.id, c.principal, c.kind, c.scope, c.revoked_at IS NOT NULL AS revoked, c.expires_at, c.not_after, c.generation, c.seal,
-        (SELECT l.seal FROM log_changes l WHERE l.object = ${objectKey({ kind: 'credential', id })} ORDER BY l.number DESC LIMIT 1) AS newest
-        FROM credentials c WHERE c.id = ${id}`);
+        l.number, l.at, l.request_id, l.actor, l.payload, l.seal AS newest, l.mac
+        FROM credentials c LEFT JOIN (${newest}) l ON true WHERE c.id = ${id}`);
   if (row === undefined) return null;
   const ends = [Number(row.expires_at), ...(row.not_after == null ? [] : [Number(row.not_after)])];
-  const bytes = (value: Buffer | null) => (value == null ? null : Buffer.from(value));
+  const seal = bytes(row.newest);
   return {
     columns: { id: row.id, principal: row.principal, kind: row.kind, scope: row.scope, revoked: Boolean(row.revoked), expiresAt: Math.min(...ends), generation: Number(row.generation) },
     seal: bytes(row.seal),
-    newest: bytes(row.newest),
+    newest: row.number == null ? null : {
+      seal,
+      holds: changeHolds(macs, { at: Number(row.at), requestId: row.request_id!, object, actor: row.actor!, payload: row.payload!, seal, mac: Buffer.from(row.mac!) }),
+    },
   };
 }
 

@@ -22,7 +22,7 @@ import { logOrigin } from '../src/checkpointer.ts';
 import { objectKey, sealOf, type Input, type Ref } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
-import { authentic } from '../src/log-entry.ts';
+import { authentic, entryMac } from '../src/log-entry.ts';
 import { purposeCode } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
@@ -146,8 +146,10 @@ test('StatementSnapshot: a use that waits behind a change reads what the change 
     await released;
     const after = { ...(w.objects.credential as Extract<Input, { kind: 'credential' }>), revoked: true };
     await run(tx, sql`UPDATE credentials SET revoked_at = now(), seal = ${sealOf(SEAL, { kind: 'credential', id: w.credentialId }, after)} WHERE id = ${w.credentialId}`);
-    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), ${Date.now()}, ${randomUUID()},
-      ${objectKey({ kind: 'credential', id: w.credentialId })}, ${ROOT}, ${JSON.stringify({ op: 'credential.revoke' })}, ${sealOf(SEAL, { kind: 'credential', id: w.credentialId }, after)}, ${randomBytes(16)})`);
+    // A vault's change: its MAC is real, which the use checks (T190).
+    const row = { at: Date.now(), requestId: randomUUID(), object: objectKey({ kind: 'credential', id: w.credentialId }), actor: ROOT, payload: JSON.stringify({ op: 'credential.revoke' }), seal: sealOf(SEAL, { kind: 'credential', id: w.credentialId }, after) };
+    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac) VALUES (nextval('log_number'), ${row.at}, ${row.requestId},
+      ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${entryMac(MAC, { tree: 'changes', row })})`);
   });
   await waitForFence();
   const using = use(request);
@@ -495,7 +497,7 @@ test('a session\'s first call plans its four statements before it takes the fenc
       [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
     assert.equal(answer!.use.state, null);
     const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0058');
+    assert.equal(setting!.planned, '0059');
   } finally {
     await fence.end();
     await fresh.end();
@@ -619,7 +621,7 @@ test("the probe's MAC check runs within the use's admission and deadline: held u
   let release = () => {};
   const held = new Promise<void>((resolve) => (release = resolve));
   const path: UsePath = {
-    db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 })),
+    db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 })),
     oldWrite: async () => {
       await held;
       return false;
@@ -640,7 +642,7 @@ test("a call that never settles, as a Workers call whose request ended, gives it
   const pathFor = (lapses: boolean) => {
     let readies = 0;
     const path: UsePath = {
-      db: hot, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: lapses }),
+      db: hot, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest: lapses }),
       ready: () => (readies++ === 0 ? new Promise<void>(() => {}) : Promise.resolve()),
     };
     return { path, readies: () => readies };
@@ -678,7 +680,7 @@ function heldBack(callsEndWithRequest: boolean): { path: UsePath; asked: () => n
   let waits = () => {};
   const waiting = new Promise<void>((resolve) => (waits = resolve));
   const path: UsePath = {
-    db: counted, sealKeys: [SEAL], macKey: MAC, keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest }),
+    db: counted, sealKeys: [SEAL], macKey: MAC, macKeys: [MAC], keks: CONFIG.keks, cache: new UseCache(useLimits(1, { inFlight: 1 }), { callsEndWithRequest }),
     ready: () => new Promise<void>((resolve) => {
       lift = resolve;
       waits();
@@ -903,8 +905,10 @@ test('CacheSameChange: a newest change of the same number but another MAC (a log
   await db.owner.transaction(async (tx) => {
     const [newest] = await rows<{ number: string | number }>(tx, sql`SELECT max(number) AS number FROM log_changes`);
     await run(tx, sql`DELETE FROM log_changes WHERE number = ${newest!.number}`);
+    // The revoke a vault wrote, its MAC real (T190): only its number is the one the cache was read at.
+    const row = { at: Date.now(), requestId: randomUUID(), object: objectKey(credentialRef), actor: ROOT, payload: JSON.stringify({ op: 'credential.revoke' }), seal: revokedSeal };
     await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
-      VALUES (${newest!.number}, ${Date.now()}, ${randomUUID()}, ${objectKey(credentialRef)}, ${ROOT}, ${JSON.stringify({ op: 'credential.revoke' })}, ${revokedSeal}, ${randomBytes(16)})`);
+      VALUES (${newest!.number}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${entryMac(MAC, { tree: 'changes', row })})`);
     await run(tx, sql`UPDATE credentials SET revoked_at = ${ENGINE === 'postgres' ? sql`now()` : sql`${Date.now()}`}, seal = ${revokedSeal} WHERE id = ${w.credentialId}`);
   });
   // Trusting the cache by number alone would hold the row to the credential's old seal (`stale`); read again, it is revoked.

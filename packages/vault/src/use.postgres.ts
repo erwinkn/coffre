@@ -3,7 +3,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { GATE_ROLES } from './decide.ts';
-import type { EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
+import type { ChangeColumns, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
  * A use on Postgres: one call of `use_credential` (0024's, as 0053 has it), one
@@ -144,7 +144,17 @@ function rowFrom(row: Record<string, unknown>): UseRow {
     const value = row[name];
     if (typeof value === 'string') row[name] = Buffer.from(value.slice(2), 'hex');
   }
+  // Each newest change's MAC, last of its columns (0059, T190). Its time, a JSON number, is a time in ms: one a writer
+  // put past 2^53 reads inexactly, and its MAC then does not hold, which refuses the input, as any edit does.
+  const changes = row.changes as Record<string, unknown> | null | undefined;
+  if (changes != null) for (const [input, columns] of Object.entries(changes)) changes[input] = changeFrom(columns);
   return row as UseRow;
+}
+
+/** A newest change's MAC'd columns as `use_credential` and `use_route` answer them, its MAC as bytes; null for none. */
+function changeFrom(columns: unknown): ChangeColumns | null {
+  if (!Array.isArray(columns) || typeof columns[4] !== 'string') return null;
+  return [columns[0], columns[1], columns[2], columns[3], Buffer.from(columns[4].slice(2), 'hex')] as ChangeColumns;
 }
 
 /**
@@ -177,18 +187,18 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     project: read.project ?? null, personal: read.personal === true, cut: read.cut === true,
     levels: (read.levels ?? []).map((level): RouteLevelRow => ({
       environment: String(level.environment), row: level.row === true, item: level.item ?? null, digests: bytes(level.digests), seal: bytes(level.seal),
-      newest: bytes(level.newest), number: level.number == null ? null : String(level.number),
+      newest: bytes(level.newest), number: level.number == null ? null : String(level.number), change: changeFrom(level.change),
       env: level.env == null ? null : (() => {
         const env = level.env as Record<string, unknown>;
         return {
           project: String(env.project), slug: String(env.slug), owner: env.owner == null ? null : String(env.owner), parent: env.parent == null ? null : String(env.parent),
           protected: env.protected == null ? null : env.protected === true, archived: env.archived === true, project_archived: env.project_archived === true,
-          seal: bytes(env.seal), last: bytes(env.last),
+          seal: bytes(env.seal), last: bytes(env.last), change: changeFrom(env.change),
         };
       })(),
     })),
     editor: read.editor === null || read.editor === undefined ? null : {
-      ...(read.editor as Omit<EditorRow, 'seal' | 'last'>), seal: bytes(read.editor.seal), last: bytes(read.editor.last),
+      ...(read.editor as Omit<EditorRow, 'seal' | 'last' | 'change'>), seal: bytes(read.editor.seal), last: bytes(read.editor.last), change: changeFrom(read.editor.change),
       generation: read.editor.generation == null ? null : Number(read.editor.generation),
     },
     keys: read.keys ?? [], resolved: (read.resolved ?? []) as ResolvedRow[], made: read.made === true,

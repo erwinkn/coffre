@@ -59,6 +59,21 @@ export function entryMac(key: LogMacKey, entry: { tree: 'changes'; row: Omit<Cha
   return mac(key, entry.tree, entry.tree === 'changes' ? changeColumns(entry.row) : useColumns(entry.row));
 }
 
+/**
+ * Whether a change's row, as a reader got it, carries the vault's MAC over its columns, its seal included (T190): under
+ * the key its tag names, among `keys`, every signing key the vault holds, current first. What a use or a change holds a
+ * row to is the seal its object's newest change records; a database writer can write any seal into that column, but
+ * not a MAC over it (R64). A key the log moved on from still counts here, as it does for the seals it made
+ * (`sealed`): the seal check this guards trusts every held key alike. What it cannot see is an entry deleted or
+ * replayed whole, its MAC intact, which the checkpoints catch (docs/design/merkle-checkpoints.md, (a) and (f)).
+ */
+export function changeHolds(keys: readonly LogMacKey[], row: Omit<ChangeRow, 'number'>): boolean {
+  if (row.mac.length !== MAC_BYTES) return false;
+  // Every key of that tag, not the first: `logKeys` refuses twins where the checkpointer derives them, nothing here (review r3).
+  const tag = row.mac.subarray(0, TAG_BYTES);
+  return keys.some((held) => held.tag.equals(tag) && timingSafeEqual(entryMac(held, { tree: 'changes', row }), row.mac));
+}
+
 /** A change's row as the trees take it: every column in the table's order, the MAC last (`log_changes`'s own order puts it there too). */
 export function changeEntry(r: ChangeRow): LogEntry {
   return { tree: 'changes', number: r.number, at: r.at, columns: [...changeColumns(r), r.mac] };

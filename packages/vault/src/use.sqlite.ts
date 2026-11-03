@@ -10,7 +10,7 @@ import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
-import type { Cover, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
+import type { ChangeColumns, Cover, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
  * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
@@ -153,7 +153,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       const looking = serving === null;
       const row = looking ? await one<{ items: string; digests: Buffer; seal: Buffer }>(sql`SELECT items, digests, seal FROM proxy_definitions WHERE environment_id = ${layer}`) : undefined;
       // By the column, not the text it is read as, which the alias would sort by.
-      const newest = looking ? await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
+      const newest = looking ? await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
         WHERE c.object = ${objectKey({ kind: 'proxy', id: layer })} ORDER BY c.number DESC LIMIT 1`) : undefined;
       if (newest !== undefined && BigInt(newest.number) > inputs) inputs = BigInt(newest.number);
       let items: unknown;
@@ -166,16 +166,16 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       const item = route === null ? items : record !== null && Object.hasOwn(record, route) ? record[route] ?? null : null;
       // The level's environment, row, seal and newest change, which the vault checks the chain by, link by link.
       const env = await one<EnvironmentRow & { parent_id: string | null }>(sql`SELECT ${ENVIRONMENT} FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${layer}`);
-      const envNewest = await one<{ number: string; seal: Buffer | null }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal FROM log_changes c
+      const envNewest = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
         WHERE c.object = ${objectKey({ kind: 'environment', id: layer })} ORDER BY c.number DESC LIMIT 1`);
       if (envNewest !== undefined && BigInt(envNewest.number) > inputs) inputs = BigInt(envNewest.number);
       levels.push({
         environment: layer, row: row !== undefined, item, digests: row === undefined ? null : Buffer.from(row.digests), seal: row === undefined ? null : Buffer.from(row.seal),
-        newest: newest?.seal == null ? null : Buffer.from(newest.seal), number: newest?.number ?? null,
+        newest: newest?.seal == null ? null : Buffer.from(newest.seal), number: newest?.number ?? null, change: columnsOf(newest) ?? null,
         env: env === undefined ? null : {
           project: env.project_id, slug: env.slug, owner: env.owner, parent: env.parent_id, protected: env.protected === null ? null : Boolean(env.protected),
           archived: Boolean(env.archived), project_archived: Boolean(env.project_archived), seal: env.seal == null ? null : Buffer.from(env.seal),
-          last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal),
+          last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal), change: columnsOf(envNewest) ?? null,
         },
       });
       if (looking && route !== null && item !== null) serving = typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
@@ -189,7 +189,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       const grants = member === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx, sql`SELECT
         coalesce(g.project_id, e.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
         FROM vault_grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
-      const last = await one<{ number: string; seal: Buffer | null; payload: string }>(sql`SELECT CAST(c.number AS TEXT) AS number, c.seal, c.payload FROM log_changes c
+      const last = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
         WHERE c.object = ${objectKey({ kind: 'principal', id: principal })} ORDER BY c.number DESC LIMIT 1`);
       const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${principal}
         AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
@@ -201,6 +201,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
         g_project: listOf((grant) => grant.project_id), g_environment: listOf((grant) => grant.environment_id), g_slug: listOf((grant) => grant.environment_slug),
         g_role: listOf((grant) => grant.role), g_expires: listOf((grant) => (grant.expires_at === null ? null : String(grant.expires_at))),
         last: last?.seal == null ? null : Buffer.from(last.seal), number: last?.number ?? null, old: last === undefined ? null : oldOf(last.payload), access: access?.seq ?? null,
+        change: columnsOf(last) ?? null,
       };
     }
     const keys = Array.isArray(serving.keys) ? serving.keys.map(String) : [];
@@ -312,8 +313,15 @@ async function listed(tx: Queryable, project: string, layers: readonly string[])
   return [...live].filter(([key, at]) => !removed.has(key) || at <= removed.get(key)!).map(([key]) => key).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** A change's number as text: SQLite's integers are 64 bits, a JavaScript number's exact ones 53. */
-type Changed = { number: string; mac: Buffer; seal: Buffer | null; payload: string };
+/**
+ * An input's newest change: its number as text (SQLite's integers are 64 bits, a JavaScript number's exact ones 53), its
+ * seal, and what its MAC covers besides its object, with the MAC, which the vault checks (T190, `ChangeColumns`).
+ */
+type Changed = { number: string; at: number; request_id: string; actor: string; payload: string; seal: Buffer | null; mac: Buffer };
+
+/** The columns of a newest change the vault checks its MAC over, as `use_credential` answers them; none for no change. */
+const columnsOf = (change: Changed | undefined): ChangeColumns | undefined =>
+  change === undefined ? undefined : [Number(change.at), change.request_id, change.actor, change.payload, Buffer.from(change.mac)];
 
 type SecretRow = { id: string; project_id: string; environment_id: string; current_version_id: string | null; seal: Buffer | null; key: string };
 type ReferenceRow = { source_secret_id: string | null; id: string | null };
@@ -326,6 +334,8 @@ type EnvironmentRow = { project_id: string; slug: string; owner: string | null; 
 const SECRET = sql.raw('id, project_id, environment_id, current_version_id, seal, key');
 const REFERENCE = sql.raw('CASE WHEN ended_at IS NULL THEN source_secret_id END AS source_secret_id, CASE WHEN ended_at IS NULL THEN id END AS id');
 const VERSION = sql.raw('envelope_version, ciphertext, iv, auth_tag, wrapped_dek, kek_provider, kek_id, kek_version, sensitive, plaintext');
+/** A newest change's columns, `Changed`: its number as text. */
+const CHANGED = sql.raw('CAST(c.number AS TEXT) AS number, c.at, c.request_id, c.actor, c.payload, c.seal, c.mac');
 const ENVIRONMENT = sql.raw('e.project_id, e.slug, e.owner, e.parent_id, e.protected, e.archived_at IS NOT NULL AS archived, p.archived_at IS NOT NULL AS project_archived, e.seal');
 
 /**
@@ -442,7 +452,7 @@ class Batched implements Rows {
     batch.#all('environment', places, await batch.#in<EnvironmentRow & { of: string }>(places, (list) => sql`SELECT e.id AS of, ${ENVIRONMENT}
         FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id IN (${list})`));
     const objects = [...ids([...asked, ...sources]).map((id) => objectKey({ kind: 'secret', id })), ...places.map((id) => objectKey({ kind: 'environment', id }))];
-    batch.#all('newest', objects, await batch.#in<Changed & { of: string }>(objects, (list) => sql`SELECT c.object AS of, CAST(c.number AS TEXT) AS number, c.seal, c.payload
+    batch.#all('newest', objects, await batch.#in<Changed & { of: string }>(objects, (list) => sql`SELECT c.object AS of, ${CHANGED}
         FROM log_changes c WHERE c.object IN (${list}) AND c.number = (SELECT max(number) FROM log_changes WHERE object = c.object)`));
     const covered = calls.filter((call) => call.cover !== undefined);
     for (let start = 0; start < covered.length; start += CHUNK) {
@@ -574,7 +584,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   if (names !== undefined && (credential === undefined || !names.accepts.signin
     || (credential.kind === 'browser' && !names.accepts.issuers.includes(`${credential.provider}:${credential.issuer_hash}`)))) return nothing('unknown');
   const newestOf = (kind: Kind, id: string | null) =>
-    id === null ? Promise.resolve(undefined) : once<Changed>(`newest\n${objectKey({ kind, id })}`, sql`SELECT CAST(c.number AS TEXT) AS number, c.seal, c.payload FROM log_changes c WHERE c.object = ${objectKey({ kind, id })} ORDER BY c.number DESC LIMIT 1`);
+    id === null ? Promise.resolve(undefined) : once<Changed>(`newest\n${objectKey({ kind, id })}`, sql`SELECT ${CHANGED} FROM log_changes c WHERE c.object = ${objectKey({ kind, id })} ORDER BY c.number DESC LIMIT 1`);
   const n = await once<{ number: string; mac: Buffer }>('head', sql`SELECT CAST(c.number AS TEXT) AS number, c.mac FROM log_changes c ORDER BY c.number DESC LIMIT 1`);
   const known = call.known;
   let cached = n !== undefined && known !== undefined && n.number === known.newest && Buffer.from(n.mac).equals(known.newestMac);
@@ -776,6 +786,10 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
     n_credential: resolved === null ? null : read.credential, n_secret: resolved === null ? null : read.secretId, n_place: resolved?.place ?? null,
     n_project: resolved?.project ?? null, n_environment: resolved?.environment ?? null, n_standing: stands, n_cut: resolved === null ? null : resolved.cut,
     w_row: wRow,
+    changes: cached ? null : {
+      c: columnsOf(lc), m: columnsOf(lm), r: columnsOf(lr), p: columnsOf(policy), s: columnsOf(ls), x: columnsOf(lx),
+      e1: columnsOf(le[0]), e2: columnsOf(le[1]), e3: columnsOf(le[2]), e4: columnsOf(le[3]),
+    },
   } as UseRow;
 }
 

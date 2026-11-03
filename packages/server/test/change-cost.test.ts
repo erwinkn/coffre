@@ -268,25 +268,29 @@ const seals = new Map<number, string | null>();
  * Each route's round trips, as measured: the app's Syncs, the vault's, and the hot path's. A change that adds one fails
  * here; one that saves one lowers its row (T179, R42, R57). The seal (R51) is the checkpointer's, apart: about three more
  * on Cloudflare (docs/design/0.15-plan.md, "As built: T171").
+ *
+ * Each `prepare` of a logged object costs the vault one statement (T190): `app_change` holds the app's row to its object's
+ * newest change's seal, which SQL cannot authenticate, so the vault reads those changes and checks their MACs first.
+ * A fork prepares twice. The pin that would fold it into the write is T179's (sealed-inputs.md).
  */
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
-  'key set, one': { app: 13, vault: 3 },
-  'key set, existing': { app: 13, vault: 3 },
-  'key set, five': { app: 17, vault: 3 },
-  'key archived': { app: 12, vault: 1 },
-  'key restored (a version)': { app: 13, vault: 7 },
+  'key set, one': { app: 13, vault: 4 },
+  'key set, existing': { app: 13, vault: 4 },
+  'key set, five': { app: 17, vault: 4 },
+  'key archived': { app: 12, vault: 2 },
+  'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },
   'key filed in a folder': { app: 6, vault: 1 },
-  'reference made': { app: 15, vault: 7 },
+  'reference made': { app: 15, vault: 8 },
   'reference broken': { app: 4, vault: 13 },
   'project made': { app: 4, vault: 1 },
   'project renamed': { app: 5, vault: 1 },
   'project archived': { app: 8, vault: 1 },
-  'environment made': { app: 5, vault: 1 },
-  'environment forked': { app: 43, vault: 3, hot: 1 },
-  'environment renamed': { app: 6, vault: 1 },
-  'environment protected': { app: 5, vault: 8 },
-  'environment archived': { app: 10, vault: 1 },
+  'environment made': { app: 5, vault: 2 },
+  'environment forked': { app: 43, vault: 5, hot: 1 },
+  'environment renamed': { app: 6, vault: 2 },
+  'environment protected': { app: 5, vault: 9 },
+  'environment archived': { app: 10, vault: 2 },
   'member added': { app: 8, vault: 6 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.

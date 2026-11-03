@@ -164,14 +164,19 @@ test('a revoke undone in the database, its old seal put back, is refused at the 
   const row = token();
   await write(row, await prepare(w, row), false);
   const live = (await stored(row.id))!.seal;
+  // A renewal prepared from the live row, before the revoke: `prepare` held it to the newest change then.
+  const renewed = { ...row, expiresAt: new Date(row.expiresAt.getTime() + 60_000) };
+  const calls = await prepare(w, renewed, row);
   const revoked = { ...row, revokedAt: new Date() };
   await write(revoked, await prepare(w, revoked, row), true);
   // The writer puts back the live row, with the seal the vault made over it once: valid, but not the newest change's.
   const { credentials } = tablesOf(db.owner);
   await db.owner.update(credentials).set({ revokedAt: null, seal: live }).where(eq(credentials.id, row.id));
-  // The vault takes the seal (it is its own); the change, under the fence, finds it is not the newest, and fails.
-  const renewed = { ...row, expiresAt: new Date(row.expiresAt.getTime() + 60_000) };
-  const calls = await prepare(w, renewed, row);
+  // Prepared now, from the row put back, the change is not held to the revoke's checked seal: read it again (T190).
+  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', id: row.id, before: { columns: columns(row), seal: live!.toString('base64') }, after: columns(renewed) }] });
+  assert.equal(outcome.ok ? null : outcome.refusal.code, 'moved');
+  // The one prepared before: its seal is the row's again (ChangeCAS passes); under the fence, the change finds it is
+  // not the newest, and fails.
   await assert.rejects(write(renewed, calls, true), (error: unknown) => isStaleChange(error));
   assert.deepEqual(await opsOf(w.keys, row.id), ['credential.issue', 'credential.revoke'], 'nothing logged');
   assert.equal((await stored(row.id))!.expiresAt.getTime(), row.expiresAt.getTime(), 'nothing written: the transaction failed');
@@ -229,9 +234,12 @@ test('app_change_strict, with the COMMIT: its number answers after it; a change 
   assert.equal((await stored(row.id))!.expiresAt.getTime(), renewed.expiresAt.getTime());
   await holdsReplay(w.keys, row.id);
   // The row put back to its issue, with the seal the vault made over it then (ChangeChecksSeal): the wrapper lets the
-  // inner refusal through as stale, the put-back error, not as moved, which would read again (review r3).
+  // inner refusal through as stale, the put-back error, not as moved, which would read again (review r3). The revoke
+  // prepared from the issue, before the renewal, is held to that seal again; one prepared now is not (T190, moved).
   await db.owner.update(credentials).set({ expiresAt: row.expiresAt, seal: issued }).where(eq(credentials.id, row.id));
-  await assert.rejects(commit(revoked, await prepare(w, revoked, row)), (error: unknown) => isStaleChange(error) && !isMovedChange(error));
+  const outcome = await w.vault.prepare!({ actor: ROOT, changes: [{ kind: 'credential', id: row.id, before: { columns: columns(row), seal: issued!.toString('base64') }, after: columns(revoked) }] });
+  assert.equal(outcome.ok ? null : outcome.refusal.code, 'moved');
+  await assert.rejects(commit(revoked, revoke), (error: unknown) => isStaleChange(error) && !isMovedChange(error));
   assert.equal((await stored(row.id))!.revokedAt, null, 'nothing written');
 });
 
@@ -311,7 +319,7 @@ test('a deleted environment\'s object holds its slug before the tombstone: the c
   assert.equal(row.slug, slug, 'its tombstone kept');
   // The use path's mapping of the row (objects.ts) is the object sealed: authentic, and its newest change's.
   assert.deepEqual(row.seal ?? null, sealOf(w.keys.seals[0]!, ref, object(row)));
-  assert.deepEqual(row.seal ?? null, (await store.newestChange(db.owner, ref))?.seal ?? null);
+  assert.deepEqual(row.seal ?? null, (await store.newestChange(db.owner, ref, [w.keys.mac]))?.seal ?? null);
 });
 
 test('a change of the app\'s waits for every use in flight, and the uses after it for its commit (ChangeLocks, LockToCommit)', postgresOnly('SQLite has one writer: the fence is implicit'), async () => {

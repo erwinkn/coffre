@@ -200,6 +200,42 @@ test('a change to a member row put back from before a revoke is refused, though 
   assert.deepEqual(reports.map(({ code }) => code), ['stale']);
 });
 
+test("the same rows put back, and the revoke's seal column made theirs: the next change is refused, never sealing the writer's rows as the log's (T190, ChangeChecksMac)", async () => {
+  const w = await world();
+  const { vaultMembers, vaultGrants, auditLog, logChanges } = tablesOf(db.owner);
+  const third = (await places(db.owner)).dev;
+  const grant = (environmentId: string, projectId: string, role: string | null) =>
+    w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId, environmentId, role, expiresAt: null }] });
+  assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
+  assert.ok((await grant(w.dev, w.project, 'viewer')).ok); // A
+  assert.ok((await grant(w.prod, w.project, 'developer')).ok); // B
+  const [kept] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+  const keptGrants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA));
+  const keptSeq = (await rows<{ seq: string }>(db.owner, sql`SELECT max(seq) AS seq FROM audit_log`))[0]!.seq;
+  assert.ok((await grant(w.prod, w.project, null)).ok); // B revoked: the log seals {A}
+  const revoked = (await changeRows()).at(-1)!;
+  // Mallory puts the rows back as above, and writes their seal into the revoke's entry: now the row is its object's
+  // newest change's, by every column but the MAC.
+  await withLogUnlocked(db.owner, async (owned) => {
+    await owned.delete(auditLog).where(sql`${auditLog.seq} > ${keptSeq}`);
+    const [{ hash }] = await owned.select({ hash: auditLog.hash }).from(auditLog).where(eq(auditLog.seq, BigInt(keptSeq)));
+    await owned.update(tablesOf(owned).auditChainHead).set({ nextSeq: BigInt(keptSeq) + 1n, headHash: hash });
+  });
+  forgetLogHeads();
+  await db.owner.update(vaultMembers).set(kept!).where(eq(vaultMembers.principal, ADA));
+  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, ADA));
+  await db.owner.insert(vaultGrants).values(keptGrants);
+  await db.owner.update(logChanges).set({ seal: kept!.seal }).where(eq(logChanges.number, revoked.number));
+  const before = (await changeRows()).length;
+
+  // A grant of C, applied to the rows put back, would seal {A, B, C} under a new, authentic change: B's revoke undone
+  // for good. Refused as tampered, nothing written or logged, the rows left as Mallory left them.
+  const refused = await grant(third, (await rows<{ project_id: string }>(db.owner, sql`SELECT project_id FROM environments WHERE id = ${third}`))[0]!.project_id, 'viewer');
+  assert.equal(!refused.ok && refused.refusal.code, 'tampered');
+  assert.equal((await changeRows()).length, before);
+  assert.deepEqual((await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA))).map((row) => row.environmentId).sort(), [w.dev, w.prod].sort());
+});
+
 test('change_input refuses a row that is not its object\'s newest change\'s, under the lock, whatever the vault read (ChangeChecksSeal)', async () => {
   const w = await world();
   const { vaultMembers } = tablesOf(db.owner);
@@ -322,11 +358,11 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
     for (const ref of refs) {
       const { row, seal } = await store.readObject(db.owner, ref);
       live.set(objectKey(ref), { row: row!, seal });
-      newest.set(objectKey(ref), (await store.newestChange(db.owner, ref))?.seal ?? null);
+      newest.set(objectKey(ref), (await store.newestChange(db.owner, ref, [w.keys.mac]))?.seal ?? null);
     }
     for (const [ref, row] of [[{ kind: 'credential' as const, id: credentialId }, credential], [{ kind: 'secret' as const, id: secretId }, secret]] as const) {
       live.set(objectKey(ref), { row, seal: sealOf(w.keys.seals[0]!, ref, row) });
-      newest.set(objectKey(ref), (await store.newestChange(db.owner, ref))?.seal ?? null);
+      newest.set(objectKey(ref), (await store.newestChange(db.owner, ref, [w.keys.mac]))?.seal ?? null);
     }
     const asked = request();
     const now = decideUse(w.keys.seals, readUse(live, newest, replayed.limit, new Map(), asked), asked);

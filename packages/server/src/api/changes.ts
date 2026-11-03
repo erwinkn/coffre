@@ -139,7 +139,8 @@ export class AppChanges {
    * The changes `actor` is about to make, sealed by the vault; null with
    * 0.14's log, where none is made, and none read: `changes` may be the read
    * of the rows they are of, which 0.14's write does not need. A row the
-   * vault refuses (`tampered`: not the vault's) refuses the write.
+   * vault refuses (`tampered`: not the vault's) refuses the write; one that
+   * is no longer its object's newest change's (`moved`) is read again.
    */
   static async prepare(
     vault: Vault,
@@ -150,6 +151,9 @@ export class AppChanges {
     const changes = typeof of === 'function' ? await of() : of;
     if (changes.length === 0) return new AppChanges(vault, [], []);
     const outcome = await vault.prepare!({ actor: typeof actor === 'function' ? actor(changes) : actor, changes: [...changes] });
+    // A row read is no longer its object's newest change's: a write came between, read again (`retrying`), as
+    // `app_change` answers a row moved since it was read.
+    if (!outcome.ok && outcome.refusal.code === 'moved') throw new ObjectMoved();
     if (!outcome.ok) throw vaultRefused(outcome.refusal);
     return new AppChanges(vault, changes, outcome.changes);
   }

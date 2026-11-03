@@ -138,6 +138,136 @@ to model, and it gives `stale` whenever any input is not the log's. A
 mutation test holds it: with the credential's revoked flag read before the
 seals, the property tests fail.
 
+## The newest change's MAC (T190)
+
+A row is held to the seal its object's **newest change** records, and that
+seal is a column of `log_changes` like any other. A database writer can
+write it. Example (Fable's, on #461): Ada revokes Bo (seal S0 after S1).
+Mallory puts back Bo's row and grant with S1, then runs `UPDATE log_changes
+SET seal = S1` on the revoke. The row's seal is the vault's, and it equals
+the newest change's. Before T190 every use served Bo the value, while
+`access` called him tampered.
+
+What the writer cannot write is the change's **MAC**: it covers every
+column but the number, the seal included (`entryMac`). So nothing holds a
+row to a newest change's seal before that change's MAC holds:
+
+- **A use.** Each probe of an input's newest change (the way in, the
+  principal, the roles, the policy, the key, a reference's source, each
+  place) reads the change's other MAC'd columns too: its time, request,
+  actor and payload, and its MAC. The statement answers them in `changes`
+  (0059; SQLite's twin the same). The Worker checks each MAC over them, the
+  object the input is of and the seal (`lastsHeld`, `changeHolds`). An
+  input whose change does not hold has a newest seal equal to none, and
+  the use is `stale`, as a row put back is: nothing opened, nothing
+  served. The payload is under the MAC too, so the 0.14 entry a member's
+  change accounts for (`old`, UsesSeeOldWrites) and the policy's cap
+  cannot be edited either. Every way a use is asked goes through it: by
+  ids, as a batch, by name, as a named batch, by route.
+- **A route use** (`use_route`, 0059 too) reads three newest changes
+  beside its caller's and its keys' inputs: each fork level's definitions
+  and its environment, and the route's editor's principal. Each answers
+  its MAC'd columns the same way (`change`), and the vault checks them
+  (`newestHolds`) before it holds a level or the editor to that seal: a
+  level that fails makes the chain `stale` (`chainFault`), an editor that
+  fails is `stale` (`editorOf`). The chain's is the only check on a level
+  above the key's place: neither the gate nor the key's own use reads it.
+- **The isolate's seal cache** keeps a key's seals only when every one of
+  their changes' MACs held (CacheVerified). Kept, they are not checked
+  again: they are the isolate's memory, which no database writer reaches,
+  and any change since moves the log's newest change, which sends the next
+  use back to its probes (CacheSameChange).
+- **A write the vault seals** checks the MAC of the newest change its
+  statement holds the base row to, before the statement runs: SQL compares
+  that seal under the fence and holds no key to check its MAC. Without the
+  check the writer's row is laundered, not merely served: the next
+  legitimate change applies its op to the put-back row and seals the
+  result under a new, authentic change, and the revoke is undone for good.
+  Every such write checks it, refused `tampered` (or as its statement
+  refuses a stale row) otherwise:
+  - the vault's own changes (`Changes`, `newestChange`, ChangeChecksMac):
+    a member, a grant, roles, the policy, proxy definitions;
+  - the app's changes (`Vault.prepare` before `app_change`): one
+    statement reads every object's newest change (`loggedChanges`), and
+    for an unarchive the change before it, the write its archive ended
+    (`keptFrom`), so that a write's seal blanked cannot make an older one
+    look the newest sealed. Reviewer r1 found this route open: a credential
+    revoked, put back, its revoke's seal forged, then renewed by a minute,
+    and served again;
+  - a sign-in through a binding (`sign_in`): the member and the binding,
+    one statement before it;
+  - an issue, and a binding made, on the credential the request came in on
+    (`issue_token`, `change_bindings`): read in the same statement as that
+    credential (`issuingCredential`), no round trip more.
+
+  A revoke (`revoke_credential`) and a binding's end, with the credentials
+  it sweeps, do not check it, on purpose: they only end, so a forged seal
+  gets the writer a credential revoked from the row it put back, revoked
+  all the same; refusing them would let a forged log keep a credential
+  live.
+
+  Each check is a read before the statement, which then compares the seal
+  alone (ChangeCAS, ChangeChecksSeal): bytes, which SQL cannot tell from a
+  forgery. `prepare` also holds the row the app read to the seal of the
+  change it checked (each object's first call from it, each later call
+  from the seal the one before leaves: the calls, not the app's entries,
+  so that an entry changing nothing cannot stand in for the one that
+  writes, review r3), and answers `moved` when they differ, which is also
+  what an honest write between the app's read and `prepare` makes: nothing
+  is reported, and the app reads again (`ObjectMoved`, `retrying`), as it
+  does when `app_change` finds a row moved. Without that, a writer would
+  put the revoked row back with its old seal, let the app read it, and make
+  the revoke's seal column the old one after `prepare` checked the revoke's
+  MAC: the renewal then passes `app_change` and seals the put-back row
+  under an authentic entry (review Fable). With it, a writer must forge a
+  change the vault has already checked, after its read and before the
+  statement, and that change must be an honest one landing in that gap
+  (row and seal put back, its seal forged). An issue holds the credential
+  it came in on to its checked change's seal the same way, and so does a
+  sign-in its binding (review r3: without it, an ended binding put back,
+  its end's seal column forged once the vault read the end, signed a run
+  in), and both statements take that seal as a parameter: the same gap.
+  A sign-in's member is wider: `sign_in` reads the member's row itself,
+  and the vault, which never sees it, pins nothing, so a member removed,
+  its row put back and the removal's seal forged after the MAC check,
+  takes no honest change, only the timing (a writer holding the member's
+  row locked widens it to `lock_timeout`). Closing both takes the statement
+  holding the newest
+  change's seal column to the seal the vault checked (a number alone is not
+  enough: the forgery edits the seal in place and keeps the number), under
+  the lock: a parameter of `app_change`, `sign_in` (the member's) and
+  `issue_token`.
+  T179's two-trip writes, which check their read set there (#458), take it
+  on. The model checks the MAC as the code does, of the change read at
+  `ChangeStart`, and its scenarios, one tamper each (`MaxTampers = 1`),
+  cannot reach the gap.
+
+A change's MAC is checked under the key its tag names, among every
+signing key the vault holds, as seals are (`sealed`): this check guards
+the seal check and trusts no more keys than it. A retired key
+included: its holder can forge a row's seal and re-MAC the change to match
+under that key's tag, and `log_fence.retired`, which stops them inserting
+entries, does not stop them editing one. Refusing that takes accepting a
+retired key only for changes numbered at or before its rotation, which the
+keyring knows and the hot path does not load: a known limit, not a
+guarantee of T190's.
+
+**What it does not see:** an entry deleted, or replayed whole under
+another number (the MAC does not cover the number). With Bo's revoke
+deleted outright, the grant before it is the newest change, authentic,
+and its seal is S1. No check of one use can tell; the Merkle checkpoints
+do (merkle-checkpoints.md, attacks (a) and (f)), and so does the
+whole-log verifier. That is the same boundary as `access` and every other
+reader of the log.
+
+**The decision path** (T159) holds each environment's row to its newest
+change the same way: `snapshot` and `environmentsById` read that change
+whole, in the same probe, and `#placeFault` refuses the row `tampered`
+when its MAC does not hold, before the seal comparison (review r3: an
+archived place put back, the archive's seal column forged, otherwise had
+grants on it hold, its old protection weighed and an issue on it made).
+The route use reads proxy definitions through the same check (above).
+
 ## The bulk cap
 
 As W211 built it ([hot-path-one.md](hot-path-one.md), "The bulk cap"; decisions 16 to 21 there are this PR's), with **both numbers
@@ -208,6 +338,12 @@ the same.
     apart, never release more than `count` keys in a window.
   - Each fails with the stale check removed, or with a row read before the
     seals (measured).
+- **Forged log** ([`use-forged.test.ts`](../../packages/vault/test/use-forged.test.ts),
+  both engines): for each input a use reads, the change's seal column
+  forged over a row put back, refused on a warm isolate and a fresh one,
+  and by every way a use is asked; and a change on such a row refused
+  ([`change-path.test.ts`](../../packages/vault/test/change-path.test.ts)).
+  Each serves the value on 0.15.0.
 - **Lean** (`pnpm formal:lean`): `decideUse` and `bulkRule` against the
   model on 26,000 cases, and the theorems in [`docs/formal.md`](../formal.md).
 

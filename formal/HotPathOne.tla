@@ -50,8 +50,12 @@
 (* harmlessly. An input in Unsealed is read without its seal checked (a    *)
 (* removal: normally {}). A database writer with no key (MaxTampers) can   *)
 (* only put back a row the vault once sealed: an earlier value of that     *)
-(* input. The log stores no outcome; each entry's decision here is a       *)
-(* ghost, for the invariants.                                              *)
+(* input; with LogTampers (T190), it also writes that row's seal into the  *)
+(* seal column of the input's newest change, which the vault compares rows *)
+(* with, and that entry's MAC, which covers the seal, then no longer       *)
+(* holds. It cannot make a MAC, nor delete or move an entry here: those    *)
+(* the checkpoints catch (merkle-checkpoints.md). The log stores no        *)
+(* outcome; each entry's decision here is a ghost, for the invariants.     *)
 (*                                                                         *)
 (* Covers (fewer rows): once an allowed use's entry #k has committed, the  *)
 (* isolate passes k with the next uses of the same key. Under the same     *)
@@ -260,6 +264,27 @@
 (*                         the policy row, which a writer may have put     *)
 (*                         back: the SQL cannot check a MAC, and the cap's *)
 (*                         row moves whatever the Worker then decides;     *)
+(*   ChangeMacChecked      a use holds a row to the seal its newest change *)
+(*                         records only once that change's MAC holds over  *)
+(*                         it, the seal included (T190): the statement     *)
+(*                         answers each newest change's MAC'd columns, and *)
+(*                         the Worker checks them; a change whose MAC does *)
+(*                         not hold leaves the row `stale`;                *)
+(*   CacheVerified         the isolate's seal cache keeps only seals whose *)
+(*                         changes' MACs held: one kept unchecked would be *)
+(*                         trusted, unprobed, by every use while the log's *)
+(*                         newest change stays the same;                   *)
+(*   ChangeChecksMac       a write checks the MAC of the newest change it  *)
+(*                         holds the row to (`newestChange`, `prepare`,    *)
+(*                         sign-in, issue), as a use does; else a change   *)
+(*                         to a row put back so seals the writer's row     *)
+(*                         under a new, authentic entry (EachChangeFlips). *)
+(*                         The code checks it just before its statement,   *)
+(*                         and so does the model: of the change read at    *)
+(*                         ChangeStart. The gap between the two needs a    *)
+(*                         second tamper, past MaxTampers = 1: T179's to   *)
+(*                         close, pinning the checked seal                 *)
+(*                         (sealed-inputs.md);                             *)
 (*   IssueOwnLock          an issue takes the issue lock shared, not the   *)
 (*                         fence shared (which a barrier or a change       *)
 (*                         queued behind it would make every use wait on); *)
@@ -307,6 +332,7 @@ CONSTANTS
     Unsealed,        \* the inputs read without their seal checked: {} (a removal sets some)
     SealCache,       \* the isolate keeps the seals a use read, and later uses may pass them
     MaxTampers,      \* rows a database writer puts back in a behaviour
+    LogTampers,      \* ... and may write the row's seal into its newest change's `seal` column too (T190)
     MaxRestores,     \* restores from a backup in a behaviour
     Holds,           \* Hyperdrive may hold a call and never run it
     FloorTampers,    \* the writer's tampering (MaxTampers) may lower the floor of `at` instead of a row
@@ -326,7 +352,7 @@ CONSTANTS
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
     ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, BarrierAcceptsLate, ChunkFloor, AheadChecked, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
     PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, Slack, DeadlineSlack,
-    AheadSlack, CapFromPolicy, CapSealed,
+    AheadSlack, CapFromPolicy, CapSealed, ChangeMacChecked, CacheVerified, ChangeChecksMac,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
     IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue,
     DecideBeforeLock
@@ -394,7 +420,16 @@ Committed == Cardinality(ChangesIn(log))
 NewestIn(L, i) ==
     LET cs == {e \in ChangesIn(L) : e.input = i}
     IN IF cs = {} THEN TRUE ELSE (CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq).value
-Newest == [i \in Inputs |-> NewestIn(log, i)]
+\* The seal its newest change's row in L records (`log_changes.seal`), which a use's probe and the change
+\* path's check read: the value the vault sealed (`value`, under the entry's MAC) unless a writer
+\* wrote another (LogTampers); and the inputs whose newest change's MAC no longer holds over it.
+NewestEntriesIn(L, i) ==
+    LET cs == {e \in ChangesIn(L) : e.input = i}
+    IN {e \in cs : \A d \in cs : d.seq <= e.seq}
+LoggedIn(L, i) == IF NewestEntriesIn(L, i) = {} THEN TRUE ELSE (CHOOSE e \in NewestEntriesIn(L, i) : TRUE).seal
+ForgedIn(L) == {i \in Inputs : \E e \in NewestEntriesIn(L, i) : e.seal /= e.value}
+Newest == [i \in Inputs |-> LoggedIn(log, i)]
+Forged == ForgedIn(log)
 Rows == [i \in Inputs |-> IF tamper[i].on THEN tamper[i].value ELSE NewestIn(log, i)]
 
 \* The log's newest change, as its number and MAC (here, its id) say it, or none.
@@ -405,12 +440,14 @@ NewestChange ==
        ELSE LET e == CHOOSE e \in cs : \A d \in cs : d.seq <= e.seq IN [seq |-> e.seq, made |-> e.made]
 
 \* `decide`, on the rows a use read and the seals of their newest changes: `stale` when a sealed
-\* row is not its newest change's, then allowed only if every row allows. Without StaleFirst,
-\* what the rows say is checked first, and a row put back that refuses shows as a plain refusal.
-Stale(read, newest) == \E i \in Inputs \ Unsealed : read[i] /= newest[i]
+\* row is not its newest change's, or (ChangeMacChecked) that change's MAC does not hold over the
+\* seal it records (`forged`: none to hold the row to), then allowed only if every row allows.
+\* Without StaleFirst, what the rows say is checked first, and a row put back that refuses shows as
+\* a plain refusal.
+Stale(read, newest, forged) == \E i \in Inputs \ Unsealed : read[i] /= newest[i] \/ (ChangeMacChecked /\ i \in forged)
 Content(read) == \A i \in Inputs \ {"policy"} : read[i]
-Code(read, newest) ==
-    IF Stale(read, newest) /\ (StaleFirst \/ Content(read)) THEN "stale"
+Code(read, newest, forged) ==
+    IF Stale(read, newest, forged) /\ (StaleFirst \/ Content(read)) THEN "stale"
     ELSE IF Content(read) THEN "allow" ELSE "refused"
 
 AllTrue == [i \in Inputs |-> TRUE]
@@ -481,23 +518,24 @@ ReplayAllows(e) ==
 
 \* Entries: a use's is its request (number, key, at, deadline) with ghosts: the changes it saw, its
 \* decision and code, when decided, the cap's decision, the changes answered when it committed. A
-\* change's: its number, its input, the value it leaves, its id. Both: flushed yet.
+\* change's: its number, its input, the value it leaves (under its MAC), the seal its row records
+\* (`seal`: the same, unless a writer wrote another), its id. Both: flushed yet.
 UseEntry(x, durable) ==
     [seq |-> u[x].seq, kind |-> "use", id |-> x, seen |-> u[x].seen, allow |-> u[x].allow, code |-> u[x].code,
      answeredAt |-> answered, key |-> u[x].key, at |-> u[x].at, deadline |-> u[x].deadline, decidedAt |-> u[x].decidedAt,
-     admitted |-> u[x].admitted, input |-> None, value |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable]
+     admitted |-> u[x].admitted, input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable]
 ChangeEntry(seq, input, value, made, durable) ==
     [seq |-> seq, kind |-> "change", id |-> Change, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> input, value |-> value, made |-> made, fresh |-> None, durable |-> durable]
+     input |-> input, value |-> value, seal |-> value, made |-> made, fresh |-> None, durable |-> durable]
 \* An issue's: its number, its issuer (whose credential it makes).
 IssueEntry(seq, i, durable) ==
     [seq |-> seq, kind |-> "issue", id |-> i, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> None, value |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable]
+     input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable]
 
 IdleUse == [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTrue, snapNewest |-> AllTrue,
-            snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
+            snapForged |-> {}, forged |-> {}, snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
             probed |-> FALSE, newest |-> AllTrue, newestChange |-> NoChange,
             key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE, write |-> NoTime,
             replied |-> FALSE, gaveUp |-> FALSE, fresh |-> None, snapIssued |-> FALSE, mode |-> None, enters |-> FALSE,
@@ -513,7 +551,7 @@ Init ==
     /\ shared = {}
     /\ plock = NoPlock
     /\ u = [x \in Uses |-> IdleUse]
-    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, value |-> FALSE]]
+    /\ c = [h \in Changers |-> [pc |-> "idle", n |-> 0, seq |-> 0, aborts |-> 0, input |-> None, read |-> TRUE, forged |-> FALSE, value |-> FALSE]]
     /\ answered = 0
     /\ released = {}
     /\ cp = [open |-> FALSE, from |-> 0, upto |-> 0, readFloor |-> 0, floor |-> 0 - D]
@@ -569,7 +607,7 @@ UseStart(x) ==
     /\ \E k \in KeysOr, s \in -MaxSkew..(MaxSkew + Ahead),
           f \in {None} \cup {i \in Issuers : NamedAfterIssue => iss[i].pc = "answered"} :
           u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "started", !.key = k, !.at = pnow + s, !.deadline = pnow + s + D,
-                                          !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest,
+                                          !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest, !.snapForged = Forged,
                                           !.snapNewestChange = NewestChange, !.fresh = f,
                                           !.snapIssued = f /= None /\ IssuedIn(log, f),
                                           !.seq = IF UseNumberUnderLock THEN 0 ELSE nextSeq]]
@@ -628,7 +666,7 @@ UseRead(x) ==
                                              \* Asking for the lock in its second call, the truth when the Worker decided its first.
                                              !.standing = waits /\ IF u[x].second THEN @ ELSE Stands(f),
                                              \* What the Worker will decide on the rows this first call read.
-                                             !.firstAllows = decides /\ (f = None \/ IssuedIn(log, f)) /\ Code(Rows, Newest) = "allow",
+                                             !.firstAllows = decides /\ (f = None \/ IssuedIn(log, f)) /\ Code(Rows, Newest, Forged) = "allow",
                                              !.second = FALSE]]
           /\ shared' = IF decides THEN shared \ {x} ELSE shared
     /\ UNCHANGED <<log, nextSeq, holder, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
@@ -643,7 +681,7 @@ UseDecide(x) ==
            f == u[x].fresh
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF allow THEN "started" ELSE "done", !.replied = @ \/ ~allow,
                                              !.second = allow, !.standing = @ /\ allow, !.firstAllows = FALSE,
-                                             !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest,
+                                             !.snap = Committed, !.snapRows = Rows, !.snapNewest = Newest, !.snapForged = Forged,
                                              !.snapNewestChange = NewestChange, !.snapIssued = f /= None /\ IssuedIn(log, f)]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
@@ -707,9 +745,12 @@ UseRun(x) ==
            seen == IF StatementSnapshot THEN Committed ELSE u[x].snap
            read == IF StatementSnapshot THEN Rows ELSE u[x].snapRows
            probes == IF StatementSnapshot THEN Newest ELSE u[x].snapNewest
+           probedForged == IF StatementSnapshot THEN Forged ELSE u[x].snapForged
            newestChange == IF StatementSnapshot THEN NewestChange ELSE u[x].snapNewestChange
            skip == passed /\ (CacheChecked => CacheHolds(sl, newestChange))
            newest == IF skip THEN cache[sl].seals ELSE probes
+           \* The cache's seals were checked when a use probed them (CacheVerified): none is forged.
+           forged == IF skip THEN {} ELSE probedForged
            p == IF "policy" \notin Inputs THEN PolicyOf(TRUE)
                 ELSE IF ~CapFromPolicy THEN callerPolicy
                 ELSE PolicyOf(IF CapSealed THEN newest["policy"] ELSE read["policy"])
@@ -719,13 +760,13 @@ UseRun(x) ==
            admitted == covered \/ r.admitted
            \* A new credential is found only once its issue has committed, in the statement's snapshot (its row).
            found == u[x].fresh = None \/ IF StatementSnapshot THEN IssuedIn(log, u[x].fresh) ELSE u[x].snapIssued
-           base == IF found THEN Code(read, newest) ELSE "refused"
+           base == IF found THEN Code(read, newest, forged) ELSE "refused"
            code == IF base = "allow" /\ ~admitted THEN "bulk" ELSE base
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "ran", !.seen = seen, !.decidedAt = pnow,
                                      !.covered = IF covered THEN cover[sl].seq ELSE 0, !.coverId = IF covered THEN cover[sl].id ELSE None,
                                      !.allow = (code = "allow"), !.code = code, !.admitted = admitted,
                                      !.write = IF covered THEN NoTime ELSE r.write,
-                                     !.probed = ~skip, !.newest = newest, !.newestChange = newestChange,
+                                     !.probed = ~skip, !.newest = newest, !.newestChange = newestChange, !.forged = forged,
                                      !.seq = IF UseNumberUnderLock /\ ~covered THEN nextSeq ELSE @]]
           /\ released' = IF ~ReleaseAfterCommit /\ code = "allow"
                          THEN released \cup {[id |-> x, key |-> k, at |-> t, deadline |-> u[x].deadline, t |-> pnow]}
@@ -789,7 +830,9 @@ UseRelease(x) ==
                          ELSE released
           /\ cover' = IF ~u[x].allow THEN [cover EXCEPT ![sl] = NoCover]
                       ELSE IF answers /\ u[x].covered = 0 THEN [cover EXCEPT ![sl] = [seq |-> u[x].seq, id |-> x]] ELSE cover
-          /\ cache' = IF SealCache /\ u[x].probed THEN [cache EXCEPT ![sl] = [on |-> TRUE, seals |-> u[x].newest, change |-> u[x].newestChange]]
+          \* With CacheVerified, only seals whose changes' MACs held: a use that read a forged one leaves the cache as it was.
+          /\ cache' = IF SealCache /\ u[x].probed /\ (CacheVerified => u[x].forged = {})
+                      THEN [cache EXCEPT ![sl] = [on |-> TRUE, seals |-> u[x].newest, change |-> u[x].newestChange]]
                       ELSE cache
     /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = "done", !.replied = TRUE]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, c, answered, cp, lastUpto, lastFloor, signed, floor, crashes,
@@ -808,12 +851,12 @@ UseCrash(x) ==
 (* A change: one input revoked, or restored, by one of the changers. *)
 
 \* The call starts, for one input: the vault reads its row, outside the lock, and works out the
-\* next state from it. Without ChangeNumberUnderLock, its number was taken by a read before it.
+\* next state from it; and its newest change's, whose MAC it checks (ChangeChecksMac, T190). Without ChangeNumberUnderLock, its number was taken by a read before it.
 ChangeStart(h) ==
     /\ c[h].pc = "idle"
     /\ c[h].n < MaxChanges
     /\ \E i \in Inputs :
-          c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.input = i, !.read = Rows[i],
+          c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.input = i, !.read = Rows[i], !.forged = i \in Forged,
                                           !.seq = IF ChangeNumberUnderLock THEN 0 ELSE nextSeq]]
     /\ nextSeq' = IF ChangeNumberUnderLock THEN nextSeq ELSE nextSeq + 1
     /\ UNCHANGED <<log, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
@@ -822,7 +865,7 @@ ChangeStart(h) ==
 \* After a refused write, the vault reads the row again.
 ChangeReread(h) ==
     /\ c[h].pc = "refused"
-    /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.read = Rows[c[h].input]]]
+    /\ c' = [c EXCEPT ![h] = [@ EXCEPT !.pc = "started", !.read = Rows[c[h].input], !.forged = c[h].input \in Forged]]
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
@@ -836,14 +879,16 @@ ChangeLock(h) ==
                    cover, repeats, tamper, tampers, cache, restores, bulk, pnow, backs, issueVars>>
 
 \* Its statement: if the row is no longer the one it read (ChangeCAS), or not the one its object's
-\* newest change wrote (ChangeChecksSeal), nothing is written, the lock goes and the vault reads
+\* newest change wrote (ChangeChecksSeal), or that change's MAC did not hold over its seal when the
+\* vault read it (ChangeChecksMac: SQL cannot check a MAC; the CAS holds the row to that read), nothing is written, the lock goes and the vault reads
 \* again (without ChangeRereads, it tries the same read again). Else the write (the flip of what it
 \* read) and its entry's number. Without LockToCommit the lock goes here; without CommitBeforeAnswer
 \* it answers here.
 ChangeRun(h) ==
     /\ c[h].pc = "locked"
     /\ IF \/ ChangeCAS /\ Rows[c[h].input] /= c[h].read
-          \/ ChangeChecksSeal /\ Rows[c[h].input] /= NewestIn(log, c[h].input)
+          \/ ChangeChecksSeal /\ Rows[c[h].input] /= LoggedIn(log, c[h].input)
+          \/ ChangeChecksMac /\ c[h].forged
        THEN /\ c' = [c EXCEPT ![h].pc = IF ChangeRereads THEN "refused" ELSE "started"]
             /\ holder' = IF holder = h THEN None ELSE holder
             /\ UNCHANGED <<nextSeq, answered, issueVars>>
@@ -1061,6 +1106,20 @@ Tamper ==
     /\ UNCHANGED <<log, nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
                    cover, repeats, cache, restores, bulk, pnow, backs, issueVars>>
 
+\* With LogTampers (T190), the writer also writes the seal of the row it puts back into the input's
+\* newest change, its `seal` column, which the use's probe and the change path's check compare the
+\* row with: that entry's MAC, over the seal the vault logged (`value`), no longer holds.
+TamperLog ==
+    /\ LogTampers
+    /\ tampers < MaxTampers
+    /\ \E i \in Inputs :
+          \E e \in NewestEntriesIn(log, i), v \in {TRUE} \cup {d.value : d \in {d \in ChangesIn(log) : d.input = i}} :
+             /\ tamper' = [tamper EXCEPT ![i] = [on |-> TRUE, value |-> v]]
+             /\ log' = (log \ {e}) \cup {[e EXCEPT !.seal = v]}
+    /\ tampers' = tampers + 1
+    /\ UNCHANGED <<nextSeq, holder, shared, plock, u, c, answered, released, cp, lastUpto, lastFloor, signed, floor, crashes,
+                   cover, repeats, cache, restores, bulk, pnow, backs, issueVars>>
+
 \* The writer lowers the floor of `at`, an unsigned row.
 TamperFloor ==
     /\ FloorTampers
@@ -1108,7 +1167,7 @@ Next ==
     \/ \E h \in Changers : ChangeStep(h) \/ ChangeAbort(h)
     \/ \E i \in Issuers : IssueStep(i) \/ IssueFail(i)
     \/ BarrierLock \/ CheckpointClose \/ CheckpointSign \/ LateBarrier
-    \/ Flush \/ Crash \/ Tamper \/ TamperFloor \/ Restore
+    \/ Flush \/ Crash \/ Tamper \/ TamperLog \/ TamperFloor \/ Restore
 
 Spec == Init /\ [][Next]_vars
 

@@ -18,7 +18,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
-import { newestSeals, newestSealsQuery } from '../src/store.ts';
+import { objectKey } from '../src/inputs.ts';
+import { newestChanges, newestChangesQuery, newestSeals, newestSealsQuery } from '../src/store.ts';
 import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
@@ -94,6 +95,18 @@ const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: 
       const [{ slug }] = await rows<{ slug: string }>(db.owner, sql`SELECT slug FROM environments WHERE id = ${w.dev}`) as [{ slug: string }];
       await changePlace(db.owner, w.dev, { slug: `${slug}~deleted-1` });
       await run(db.owner, sql`UPDATE environments SET slug = ${slug} WHERE id = ${w.dev}`);
+    },
+    projectOf: (w) => w.project,
+  },
+  // Archived as the app archives it, a change the log holds, MAC and all; then the row as it was before, its old seal
+  // valid, and the archive's seal column made that seal (not its MAC): the seal comparison alone passes (T190, review r3).
+  'put back after its archive, the archive\'s seal column made the old one': {
+    tamper: async (w) => {
+      const [{ seal }] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM environments WHERE id = ${w.dev}`) as [{ seal: Buffer }];
+      await changePlace(db.owner, w.dev, { archived: true });
+      await run(db.owner, sql`UPDATE environments SET archived_at = NULL, seal = ${seal} WHERE id = ${w.dev}`);
+      const object = objectKey({ kind: 'environment', id: w.dev });
+      await run(db.owner, sql`UPDATE log_changes SET seal = ${seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
     },
     projectOf: (w) => w.project,
   },
@@ -288,14 +301,19 @@ test('unprotecting a place whose tombstone a writer set around the log is refuse
 
 test('on SQLite, the newest changes of several places are one probe each, however long their histories (R48, review r1)', { skip: ENGINE === 'sqlite' ? false : 'SQLite only: Postgres reads them in the snapshot' }, async () => {
   const refs = [randomUUID(), randomUUID(), randomUUID()].map((id) => ({ kind: 'environment' as const, id }));
-  const plan = await sqlitePlan(newestSealsQuery(refs));
-  // Each newest number by the index's `max`, then its row by its number: never every change of an object in turn.
-  assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
-  assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
-  assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
+  // Both statements: the seals alone (a place deleted, `loggedEnvironments`) and each change whole, its MAC to check
+  // (the places read, `newestChanges`; T190, review by Fable).
+  for (const query of [newestSealsQuery, newestChangesQuery]) {
+    const plan = await sqlitePlan(query(refs));
+    // Each newest number by the index's `max`, then its row by its number: never every change of an object in turn.
+    assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
+    assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
+    assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
+  }
   // However many: a member with 600 grants on places is read as one with 6 (review r2: a compound SELECT stops at 500).
   const many = Array.from({ length: 600 }, () => ({ kind: 'environment' as const, id: randomUUID() }));
   assert.deepEqual(await newestSeals(db.vault, many), new Map());
+  assert.deepEqual(await newestChanges(db.vault, many), new Map());
 });
 
 test('a protected place in a project whose tombstone a writer set around the log stays protected: its own object says it lives (review r2)', async () => {

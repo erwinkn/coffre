@@ -14,12 +14,12 @@ import { sql } from 'drizzle-orm';
 
 import { ROLES } from '@coffre/core/access';
 
-import { applyOp, itemDigest, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
+import { applyOp, itemDigest, objectKey, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { replayStored } from '../src/log-replay.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
-import { change, CONFIG, emptyLog, isolate, LOG_015, SIGNING_KEY, useDatabases } from './use-world.ts';
+import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
 before(async () => {
@@ -637,4 +637,80 @@ test("OneVersion holds the roles too: a role edit landing between a use's rounds
   } finally {
     await client.end();
   }
+});
+
+// --- T190: each newest change the route reads, its seal forged --------------------------------------------------------
+// The attack T190 closes on every input of a use (use-forged.test.ts), on the three a route use reads beside its caller's:
+// a writer with no key puts a row back as the vault once sealed it, then writes that old seal into its object's newest
+// change, whose MAC then no longer holds. The rows alone are the vault's; only the MAC says the change is not.
+
+/** The newest change of `ref`'s object made to record `seal`: what the writer writes, its MAC left as it was. */
+const forgeNewest = (ref: Ref, seal: Buffer) =>
+  run(db.owner, sql`UPDATE log_changes SET seal = ${seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${objectKey(ref)})`);
+
+test("T190: a level's definitions put back from before an edit, the edit's entry made to record their seal: `stale`, never served (ChangeMacChecked)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ openai: { definition: route('openai', [name], 'evil.example'), editor: ada } });
+  const old = (await w.stored(w.dev))!;
+  await w.save({ openai: { definition: route('openai', [name], 'good.example'), editor: ada } });
+  const { vault } = await isolate();
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
+  const json = JSON.stringify(old.items);
+  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}::jsonb, digests = ${old.digests}, seal = ${old.seal} WHERE environment_id = ${w.dev}`);
+  else await run(db.owner, sql`UPDATE proxy_definitions SET items = ${json}, digests = ${old.digests}, seal = ${old.seal} WHERE environment_id = ${w.dev}`);
+  await forgeNewest({ kind: 'proxy', id: w.dev }, old.seal);
+  for (const one of [vault, (await isolate()).vault]) {
+    assert.deepEqual(refused(await one.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
+    const at = Date.now();
+    const caller = { kind: 'handle' as const, tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [] } };
+    const item = await one.proxyItem({ caller, place: { project: w.slug, environment: 'dev' }, name: 'openai', at, deadline: at + 3000 });
+    assert.ok(item.ok && 'fault' in item && item.fault === 'stale' && item.item === null, JSON.stringify(item));
+  }
+});
+
+test("T190: an editor demoted, their rows put back and the demotion's entry made to record the old seal: `stale`, never their old clearance (ChangeMacChecked)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const lin = await w.member([{ environmentId: w.dev, role: 'developer' }]);
+  await w.save({ openai: { definition: route('openai', [name]), editor: lin } });
+  const { vault } = await isolate();
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
+  const [before] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${lin.principal}`);
+  await w.restand(lin, []);
+  assert.equal(refused(await vault.useRoute(w.askRoute('openai'))).code, 'route_not_cleared');
+  // Her grant and her seal put back as they were, and her newest change made to record that seal.
+  await run(db.owner, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
+    VALUES (${lin.principal}, NULL, ${w.dev}, NULL, 'developer', ${Date.now()}, 'root')`);
+  await run(db.owner, sql`UPDATE vault_members SET seal = ${before!.seal} WHERE principal = ${lin.principal}`);
+  await forgeNewest({ kind: 'principal', id: lin.principal }, Buffer.from(before!.seal));
+  for (const one of [vault, (await isolate()).vault]) assert.deepEqual(refused(await one.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
+});
+
+test("T190: a level's environment archived, its row put back and the archive's entry made to record the old seal: `stale`, never served (ChangeMacChecked; the chain's check alone, since neither the gate nor the key, in dev, reads dev-eu)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  const eu = await w.fork('dev-eu');
+  const x = await w.fork('dev-eu-x', eu);
+  await w.grantAt(x, 'developer');
+  await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
+  const atFork = () => w.askRoute('openai', { named: { place: { project: w.slug, environment: 'dev-eu-x' }, route: 'openai' } });
+  const { vault } = await isolate();
+  assert.deepEqual(values(await vault.useRoute(atFork())), { [name]: 'sk' });
+  const ref: Ref = { kind: 'environment', id: eu };
+  const [row] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM environments WHERE id = ${eu}`);
+  const archived: Input = { kind: 'environment', id: eu, projectId: w.project, slug: 'dev-eu', owner: null, parentId: w.dev, protected: false, deleted: false, archived: true, projectArchived: false };
+  await change(ref, { op: 'environment.archive', archived: true }, archived, async (tx, value) => {
+    await run(tx, ENGINE === 'postgres' ? sql`UPDATE environments SET archived_at = now() WHERE id = ${eu}` : sql`UPDATE environments SET archived_at = ${Date.now()} WHERE id = ${eu}`);
+    await seal('environments', 'id', eu)(tx, value);
+  });
+  assert.ok(!answered(await vault.useRoute(atFork())).outcome.ok, 'an archived level serves nothing');
+  await run(db.owner, sql`UPDATE environments SET archived_at = NULL, seal = ${row!.seal} WHERE id = ${eu}`);
+  await forgeNewest(ref, Buffer.from(row!.seal));
+  for (const one of [vault, (await isolate()).vault]) assert.deepEqual(refused(await one.useRoute(atFork())), { code: 'stale', key: null });
 });

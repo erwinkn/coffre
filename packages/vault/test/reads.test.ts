@@ -69,18 +69,21 @@ test("a change a read is derived from, edited since its seal, stops the projecti
   await tick();
   await projectReads(logStore(db.vault), await keys());
   assert.equal(await count('log_reads'), 1);
-  // Whoever owns the database says the credential was issued to someone else, then the credential reads again.
+  // The credential reads again, then whoever owns the database says it was issued to someone else.
+  const { use } = await isolate();
+  const key = await w.key();
+  assert.ok((await use(ask(w, key))).ok);
   await withLogUnlocked(db.owner, async (owner) => {
     await run(owner, sql`UPDATE log_changes SET payload = replace(payload, ${w.principal}, 'user:bob@acme.example')
       WHERE number = (SELECT min(number) FROM log_changes WHERE payload LIKE ${`%${w.credentialId}%`})`);
   });
-  const { use } = await isolate();
-  assert.ok((await use(ask(w, await w.key()))).ok);
   await tick();
   await assert.rejects(projectReads(logStore(db.vault), await keys()), /does not hold to its MAC: edited since its seal/);
   assert.deepEqual((await rows<{ principal: string }>(db.owner, sql`SELECT principal FROM log_reads`)).map((row) => row.principal), [w.principal]);
   // The check walks that change's range again, and its tree says the same.
   assert.match((await checked()).join('\n'), /does not hold to the pair that sealed it|does not hold to its MAC/);
+  // A use from now on reads that change as the credential's newest, and refuses it: its MAC fails (T190).
+  assert.equal((await (await isolate()).use(ask(w, key))).ok, false);
 });
 
 test("two projectors at once write each read once, and the whole log's check finds nothing", async () => {

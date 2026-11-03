@@ -8,7 +8,7 @@ import { applyOp, canonical, indexBytes, objectKey, refOf, sealOf, sealed, type 
 import type { LoggedChange } from './log-replay.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
 import { connectionObject, credentialObject, environmentObject, secretObject } from './objects.ts';
-import { isStale, laterInputs, newestChange, newestSealedChanges, readObject, type ChangeCall, type ReadKind } from './store.ts';
+import { isStale, laterInputs, loggedChanges, newestChange, readObject, type ChangeCall, type CheckedChange, type NewestChange, type ReadKind } from './store.ts';
 
 /**
  * 0.15's change path (plan PR 4a; formal/HotPathOne.tla's change actions):
@@ -78,13 +78,20 @@ export type Held = { log: 'unlogged' } | { log: 'gone' } | { log: 'live'; object
  * out: a seal no change wrote, a gone object's row live again, a live one's
  * row gone, or a row its seal does not cover.
  */
-export async function heldByLog(keys: SealKeys, db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
-  const [read, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
-  return heldFrom(keys, ref, read, newest);
+export async function heldByLog(keys: ChangeKeys, db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
+  const [read, newest] = await Promise.all([readObject(db, ref), newestChange(db, ref, macsOf(keys))]);
+  return heldFrom(keys.seals, ref, read, newest);
+}
+
+/** Every MAC key a change's entry may be under (`ChangeKeys.macs`). */
+export function macsOf(keys: ChangeKeys): readonly LogMacKey[] {
+  return keys.macs ?? [keys.mac];
 }
 
 /** `heldByLog`, on an object's row and its newest change as read. */
-export function heldFrom(keys: SealKeys, ref: Ref & { kind: ReadKind }, { row, seal }: { row: Input | null; seal: Buffer | null }, newest: { seal: Buffer | null } | null): Held {
+export function heldFrom(keys: SealKeys, ref: Ref & { kind: ReadKind }, { row, seal }: { row: Input | null; seal: Buffer | null }, newest: NewestChange | null): Held {
+  // Its newest change's MAC does not hold over the seal it records (T190): the log, not only the row, was written around.
+  if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
   if (newest === null) {
     if (seal !== null) throw new NotLogged(ref, 'stale');
     return { log: 'unlogged' };
@@ -103,7 +110,15 @@ export function heldFrom(keys: SealKeys, ref: Ref & { kind: ReadKind }, { row, s
 export class Moved extends Error {}
 
 /** The keys a change is made with: seals (inputs.ts) and entries' MACs (log-entry.ts). */
-export type ChangeKeys = { seals: SealKeys; mac: LogMacKey };
+export type ChangeKeys = {
+  seals: SealKeys;
+  mac: LogMacKey;
+  /**
+   * The MAC keys of every signing key the vault holds, `mac` first: what the newest change a row is held to is checked
+   * under (T190, `changeHolds`), as `seals` are every one's. Absent: `mac` alone, a vault of one signing key.
+   */
+  macs?: readonly LogMacKey[];
+};
 
 type Step = { op: Op; actor: string };
 type Read = { logged: false } | { logged: true; seal: Buffer | null; now: Input | null; afters: (Input | null)[] };
@@ -116,7 +131,7 @@ export class Changes {
    * The proxy's objects as `held` read them in this decision's transaction, which `prepare` takes rather than
    * read them again: nothing writes between the two but the decision, whose writes come after `prepare`.
    */
-  readonly #seen = new Map<string, [{ row: Input | null; seal: Buffer | null }, { seal: Buffer | null } | null]>();
+  readonly #seen = new Map<string, [{ row: Input | null; seal: Buffer | null }, NewestChange | null]>();
   /** The calls `commit` made, once it has: what the transaction's failure is of (`failed`). */
   #made: readonly ChangeCall[] | null = null;
 
@@ -151,14 +166,14 @@ export class Changes {
    * a decision to weigh before it stages anything.
    */
   async held(db: Queryable, ref: Ref & { kind: ReadKind }): Promise<Held> {
-    const read = await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+    const read = await Promise.all([readObject(db, ref), newestChange(db, ref, macsOf(this.#keys))]);
     if (ref.kind === 'proxy' || ref.kind === 'proxy-reserved') this.#seen.set(objectKey(ref), read);
     return heldFrom(this.#keys.seals, ref, ...read);
   }
 
   /** What a key with no object would be unarchived as (`keptObjects`): null for one its log never held. */
   async kept(db: Queryable, ref: Ref & { kind: 'secret' }): Promise<Input | null> {
-    return (await keptObjects(this.#keys.seals, db, [ref])).get(objectKey(ref))?.object ?? null;
+    return (await keptObjects(this.#keys, db, [ref])).get(objectKey(ref))?.object ?? null;
   }
 
   /**
@@ -198,10 +213,18 @@ export class Changes {
     // section 8): from no object, whatever its row holds, moved on from its newest change's seal, which `change_input`
     // holds it to under the fence. Nothing of the row is weighed, so nothing forged is carried on.
     if (whole) {
-      const newest = await newestChange(db, ref);
+      // Its seal whatever the change's MAC: nothing of the change or the row is carried on, so a forged change gains a
+      // writer nothing here. Whether the save repairs the object is the checkpointer's: a forged change it already signed
+      // over stays below its pair, and the save seals past it; one still in its window halts every tick with an alert
+      // (`its MAC does not hold`), so the save commits but its seal wait fails, until an operator puts the log right.
+      const newest = await newestChange(db, ref, macsOf(this.#keys));
       return { logged: true, seal: newest?.seal ?? null, now: null, afters: [] };
     }
-    const [{ row, seal }, newest] = this.#seen.get(objectKey(ref)) ?? await Promise.all([readObject(db, ref), newestChange(db, ref)]);
+    const [{ row, seal }, newest] = this.#seen.get(objectKey(ref)) ?? await Promise.all([readObject(db, ref), newestChange(db, ref, macsOf(this.#keys))]);
+    // Its newest change's MAC does not hold over the seal it records (T190; HotPathOne.tla, ChangeChecksMac): a row put
+    // back with its old seal, written into that change too, would pass every check below, and this change would seal
+    // the writer's row as the log's. Refused, as a row its seal does not cover is.
+    if (newest !== null && !newest.holds) throw new NotLogged(ref, 'tampered');
     // Before the cutover: a row, unsealed, that the log has never heard of; or the roles, whose edits 0.14's policy
     // holds until the cutover's genesis writes them (a role defined before it is 0.14's alone). Not the roles' or the
     // policy's row, which only change_input writes, sealed: one with no seal was planted.
@@ -268,31 +291,49 @@ export class Changes {
 
 /**
  * What each key in `refs` would be unarchived as: the object its log's
- * newest change with a seal left it (`newestSealedChanges`; an archive,
- * `secret.delete`, leaves none), by the key's key in the log; null for a key
- * the log never held (0.14's alone, before the cutover). That change's seal
- * is checked over the object its payload makes (`tampered` otherwise). A
- * key's every sealed change is its whole object: a write or a genesis.
- * Read outside any transaction: `app_change` holds the seal to the log's
- * newest sealed one again under the fence (formal/SealedObjects.tla,
- * RestorePinned).
+ * newest change with a seal left it, by the key's key in the log; null for a
+ * key the log never held (0.14's alone, before the cutover). An archived
+ * key's newest change is its archive (`secret.delete`, which leaves no
+ * seal), and the one before it the write or genesis it archived, its whole
+ * object: both read in one statement (`loggedChanges`), both held to their
+ * MACs (T190), so that a writer who blanks that write's seal cannot make an
+ * older one look the newest sealed. That change's seal is checked over the
+ * object its payload makes (`tampered` otherwise). Read outside any
+ * transaction: `app_change` holds the seal to the log's newest sealed one
+ * again under the fence (formal/SealedObjects.tla, RestorePinned).
  */
-export async function keptObjects(keys: SealKeys, db: Queryable, refs: readonly (Ref & { kind: 'secret' })[]): Promise<Map<string, { object: Input; seal: Buffer } | null>> {
-  const found = await newestSealedChanges(db, refs);
-  const kept = new Map<string, { object: Input; seal: Buffer } | null>();
-  for (const ref of refs) {
-    const row = found.get(objectKey(ref));
-    if (row === undefined) {
-      kept.set(objectKey(ref), null);
-      continue;
-    }
-    // Its payload names the key (`loggedChange` holds it to the row's key in the log), and makes its whole object.
-    const change = loggedChange(row);
-    const object = change === null ? undefined : applyOp(null, ref, change.op);
-    if (object == null || !sealed(keys, ref, object, row.seal)) throw new NotLogged(ref, 'tampered');
-    kept.set(objectKey(ref), { object, seal: row.seal });
-  }
-  return kept;
+export async function keptObjects(keys: ChangeKeys, db: Queryable, refs: readonly (Ref & { kind: 'secret' })[]): Promise<Map<string, { object: Input; seal: Buffer } | null>> {
+  const found = await loggedChanges(db, macsOf(keys), refs, refs);
+  return new Map(refs.map((ref) => [objectKey(ref), keptFrom(keys.seals, ref, found.get(objectKey(ref)) ?? [])]));
+}
+
+/** `keptObjects` for one key, from its newest change and the one before it as `loggedChanges` read them. */
+export function keptFrom(keys: SealKeys, ref: Ref & { kind: 'secret' }, changes: readonly CheckedChange[]): { object: Input; seal: Buffer } | null {
+  if (changes.length === 0) return null;
+  if (changes.some((change) => !change.holds)) throw new NotLogged(ref, 'tampered');
+  // A key not archived restores its newest (which `app_change` refuses: its row is no object); else the write its archive ended.
+  const kept = changes[0]!.seal !== null ? changes[0]! : changes[1];
+  if (kept === undefined || kept.seal === null) throw new NotLogged(ref, 'stale');
+  // Its payload names the key (`loggedChange` holds it to the row's key in the log), and makes its whole object.
+  const change = loggedChange(kept);
+  const object = change === null ? undefined : applyOp(null, ref, change.op);
+  if (object == null || !sealed(keys, ref, object, kept.seal)) throw new NotLogged(ref, 'tampered');
+  return { object, seal: kept.seal };
+}
+
+/**
+ * Throws `tampered` for the first of `refs` whose newest change's MAC does
+ * not hold (T190): what a write goes on from where its statement holds a
+ * row to its object's newest seal in SQL, which cannot check a MAC. A row
+ * put back and its object's newest change's seal written to match would
+ * pass that comparison, and the write would seal the rollback, a revoked
+ * credential renewed live again. One statement for them all; what it read,
+ * by object key, each object's newest change first.
+ */
+export async function changesHold(keys: ChangeKeys, db: Queryable, refs: readonly Ref[]): Promise<Map<string, CheckedChange[]>> {
+  const found = await loggedChanges(db, macsOf(keys), refs);
+  for (const ref of refs) if (found.get(objectKey(ref))?.[0]?.holds === false) throw new NotLogged(ref, 'tampered');
+  return found;
 }
 
 /**

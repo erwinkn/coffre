@@ -168,7 +168,7 @@ import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, HeadBusy, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { Changes, heldByLog, heldFrom, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
+import { Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
 import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
@@ -182,7 +182,7 @@ import {
 } from './inputs.ts';
 import { frozenHoldings, notCleared, proxyView, reservedProblem, routeRefusal, type ResolvedKey } from './proxy.ts';
 import { TICK_MS } from './log-checkpointer.ts';
-import { authentic, changeEntry, entryMac, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
+import { authentic, changeEntry, changeHolds, logMacKey, useEntry as usedEntry, type LogMacKey } from './log-entry.ts';
 import { logStore } from './log-store.ts';
 import { checkReads, cursorVouched, readVouched, type ReadRow } from './reads.ts';
 import { carries, further, ownEntries, rehash, relink, START, vaultLogKey, VERIFY_BATCH, withCause, type Position } from './log.ts';
@@ -192,7 +192,7 @@ import { memberMac, rowKey, sameGrants, sealed, standing } from './rows.ts';
 import { snapshot, type Asked, type Snapshot } from './snapshot.ts';
 import * as store from './store.ts';
 import { accessDigest, CHECKPOINT, EMPTY_TALLY, expectedKey, TALLY_VERSION, Walk, type AccessTally, type Expected, type TalliedCheckpoint, type Tally } from './tally.ts';
-import { ACCESS_ACTIONS, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog, type ReadKind } from './store.ts';
+import { ACCESS_ACTIONS, type CheckedChange, type EnvironmentRow, type EnvironmentSeal, type GrantRow, type Member, type MemberLog, type ReadKind } from './store.ts';
 import { proxyItem, use, UseCache, useLimits, useMany, useNamed, useNamedMany, useRoute, type UseLimits, type UsePath } from './use.ts';
 import { verifierKeys, verifyTrees, type VerifierKeys } from './verifier.ts';
 import { alone, entryVouched, keyringOf, type Keyring } from './keyring.ts';
@@ -349,7 +349,8 @@ function log015(
 ): NonNullable<PreparedVault['log015']> {
   if (sealThrough === undefined) throw new Error("0.15's log answers a change once its entry is sealed (R51): give the vault the checkpointer's sealThrough");
   if (heldOutside === undefined) throw new Error("0.15's log is verified against the pairs held where no database writer reaches: give the vault the checkpointer's heldOutside");
-  return { seals: seeds.map((seed) => sealKey(seed)), mac: logMacKey(seeds[0]!), macs: seeds.map((seed) => logMacKey(seed)), sealThrough, heldOutside, sealing };
+  const macs = seeds.map((seed) => logMacKey(seed));
+  return { seals: seeds.map((seed) => sealKey(seed)), mac: macs[0]!, macs, sealThrough, heldOutside, sealing };
 }
 
 /** The vault's own keys, from each of its signing keys, the one it signs with first. */
@@ -463,11 +464,6 @@ const KEY_CHECK_SAMPLE = 3;
 
 /** The vault's first entry under a new key, which the keys it replaced count only before (`#settle`). */
 const KEY_ROTATE = 'key.rotate';
-
-/** Whether two MACs are the same bytes, in constant time. */
-function sameMac(a: Buffer, b: Buffer): boolean {
-  return a.length === b.length && timingSafeEqual(a, b);
-}
 
 /** Why a tampered member is not started over under 0.15's log (`#startOver`). */
 const START_OVER_015 = "this member's record failed the vault's integrity check, and 0.15's log changes no member whose row it does not hold: a reseal makes it the log's again";
@@ -768,7 +764,7 @@ class VaultService implements Vault {
     // An isolate's first uses read the cutover's marker (`#cutOverYet`) within their admission, as any call holds a connection.
     const ready = this.#prepared.cutover ? undefined : () => this.#cutOverYet();
     return {
-      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
+      db: this.#hot, sealKeys: log015.seals, macKey: log015.mac, macKeys: log015.macs ?? [log015.mac], keks: this.#config.keks, cache, ...(ready === undefined ? {} : { ready }),
       oldWrite: (principal, old, through, starts) => this.#oldWrite(principal, old, through, starts),
     };
   }
@@ -1009,8 +1005,8 @@ class VaultService implements Vault {
    * docs/design/two-trips.md, "Compatibility"): the member's row as 0.15's
    * log holds it (Migration015.tla's MemberHolds), not a walk back through
    * 0.14's entries, which one statement cannot make (`write_request`, PR 3).
-   * A use's check (`checkSeals`, `checkedOf`) is the same but for the
-   * newest change's MAC, which a use does not verify yet (T190):
+   * A use's check (`checkSeals`, `checkedOf`) is the same, the newest
+   * change's MAC included (T190, `changeHolds`, which this one calls too):
    *
    * - the row's seal is the vault's over its object, the row and its grants
    *   (`principalObject`): `mac` otherwise, written around the vault;
@@ -1034,9 +1030,9 @@ class VaultService implements Vault {
   ): Promise<Fault | null> {
     const log = logs?.get(principal) ?? reads?.memberLogs.get(principal) ?? (await store.memberLogs(db, [principal])).get(principal)!;
     const { newest } = log;
-    // The newest change's own MAC, under any of the vault's keys, as a seal is: its seal and `old` are only what a writer
-    // could not have edited once it holds (0.14's walk checked each entry it took so).
-    if (newest !== null && !this.#prepared.log015!.macs.some((key) => sameMac(entryMac(key, { tree: 'changes', row: newest.row }), newest.row.mac))) {
+    // The newest change's own MAC, under the vault's key its tag names, as a use checks one (`changeHolds`, T190): its
+    // seal and `old` are only what a writer could not have edited once it holds (0.14's walk checked each entry it took so).
+    if (newest !== null && !changeHolds(this.#prepared.log015!.macs, newest.row)) {
       this.#report(reports, principal, 'mac', 'log:change');
       return 'mac';
     }
@@ -1088,7 +1084,9 @@ class VaultService implements Vault {
    * holds it (T159; R53, every decision input sealed): its seal is not the
    * vault's over its object (`tampered`: re-parented, renamed, its tombstone
    * set or cleared around the log), or not its object's newest change's
-   * (`stale`: put back from before a change, or written with none). A live
+   * (`stale`: put back from before a change, or written with none), or
+   * that change's MAC does not hold (`tampered`, T190: its seal column
+   * written to match a row put back). A live
    * object in a project whose slug is a tombstone is `tampered` too: a
    * project's deletion under 0.15's log deletes each of its environments, as
    * the cutover sealed them, so only a writer leaves one so (review r2). Each
@@ -1101,7 +1099,11 @@ class VaultService implements Vault {
     if (read === undefined) return null;
     let fault = PLACE_FAULTS.get(read);
     if (fault === undefined) {
-      fault = !sealedObject(this.#prepared.log015!.seals, { kind: 'environment', id }, read.object, read.seal) || (row.deleted && !read.object.deleted) ? 'tampered'
+      const log015 = this.#prepared.log015!;
+      // The newest change's seal is held to the row only once that change's MAC holds (T190, review r3): else a row
+      // put back after an archive or a protection, its old seal written into the change, passes as the log's.
+      fault = !sealedObject(log015.seals, { kind: 'environment', id }, read.object, read.seal) || (row.deleted && !read.object.deleted)
+          || (read.change !== null && !changeHolds(log015.macs, read.change)) ? 'tampered'
         : read.newest === null || !read.newest.equals(read.seal!) ? 'stale' : null;
       PLACE_FAULTS.set(read, fault);
     }
@@ -3802,10 +3804,13 @@ class VaultService implements Vault {
 
   /**
    * The app's changes, sealed (`prepareChanges`, plan PR 4b): no lock,
-   * nothing written, and no read but, for an unarchive, what its key's log
-   * last sealed (`keptObjects`, T134); but the report of a row that is not
-   * the vault's, which refuses them all (`tampered`, `stale`), as a decision
-   * of its own would.
+   * nothing written, and one read, each object's newest change with its MAC
+   * checked (T190), and for an unarchive what its key's log last sealed
+   * (`keptFrom`, T134); but the report of a row that is not the vault's, or a
+   * newest change whose MAC does not hold, which refuses them all
+   * (`tampered`, `stale`), as a decision of its own would. A row that is
+   * not, as the app read it, its object's newest change's is `moved`,
+   * reported nowhere: the app reads it again.
    */
   async prepare(input: PrepareInput): Promise<Outcome<Prepared>> {
     const log015 = this.#log015();
@@ -3815,9 +3820,41 @@ class VaultService implements Vault {
     // makes an object, or changes one the log holds, waits for the cutover.
     if (input.changes.some((change) => change.before === null || change.before.seal !== null)) await this.#cutOverYet();
     try {
+      // Each object's newest change, its MAC checked (T190), in one statement: `app_change` holds the row to that
+      // change's seal, which SQL compares and cannot authenticate. An unarchive reads the write its archive ended too.
+      const refs = [...new Map(input.changes.map((change) => [objectKey({ kind: change.kind, id: change.id }), { kind: change.kind, id: change.id }])).values()];
       const restored = input.changes.flatMap((change) => (change.kind === 'secret' && change.restores === true ? [{ kind: 'secret' as const, id: change.id }] : []));
-      const kept = restored.length === 0 ? new Map() : await keptObjects(log015.seals, this.#db, restored);
-      return { ok: true, changes: prepareChanges(log015, Date.now() + this.#prepared.options.clockOffset(), input.actor, input.changes, kept) };
+      const logged = await store.loggedChanges(this.#db, macsOf(log015), refs, restored);
+      for (const ref of refs) if (logged.get(objectKey(ref))?.[0]?.holds === false) throw new NotLogged(ref, 'tampered');
+      const kept = new Map(restored.map((ref) => [objectKey(ref), keptFrom(log015.seals, ref, logged.get(objectKey(ref)) ?? [])]));
+      const changes = prepareChanges(log015, Date.now() + this.#prepared.options.clockOffset(), input.actor, input.changes, kept);
+      // Each object's calls go on from its newest change: the change whose MAC holds above (T190, review Fable). Its
+      // first call from that change's seal, each after from the seal the one before leaves. `app_change` compares bytes
+      // alone, so a row put back with an old seal, read by the app, would pass it once the newest change's seal was
+      // forged to match after this read; held to the checked seal here, a forgery needs an honest change of the object
+      // to land between this read and that statement (sealed-inputs.md). The calls, not the app's entries: two entries
+      // of one object, the first a no-op on the row as the log holds it, the second from a row put back, make one call,
+      // from the second's (review r3). A row whose seal is not the vault's was refused above (`tampered`, reported); a
+      // mismatch here is also what a write that came between makes, honestly, so nothing is reported, and the app
+      // reads again (`moved`), as it does when `app_change` finds a row moved. An object with no call writes nothing.
+      const left = new Map<string, Buffer | null>();
+      for (const call of changes) {
+        // A row read unsealed (0.14's), or a key its log never held, logs nothing: `app_change` holds it to there being
+        // no change of its object at all, which no edit of a seal column fakes.
+        if (call.requestId === null) continue;
+        const from = call.sealFrom === null ? null : Buffer.from(call.sealFrom, 'base64');
+        const same = (seal: Buffer | null) => (seal === null ? from === null : from?.equals(seal) ?? false);
+        // A first call from no row (made, or restored), or of an object the log has no change of, is `app_change`'s to
+        // refuse (stale). A newest change that ended the object (its seal null) counts: its seal column could be made
+        // the read row's too.
+        const newest = logged.get(call.object)?.[0];
+        const held = left.has(call.object) ? same(left.get(call.object)!) : from === null || newest === undefined || same(newest.seal);
+        if (!held) {
+          return { ok: false, refusal: refusal('moved', `the ${call.kind} ${call.id} is not, as the app read it, its newest change's: read it again`) };
+        }
+        left.set(call.object, call.seal === null ? null : Buffer.from(call.seal, 'base64'));
+      }
+      return { ok: true, changes };
     } catch (error) {
       if (!(error instanceof NotLogged)) throw error;
       const reports: NewEntry[] = [];
@@ -3827,7 +3864,7 @@ class VaultService implements Vault {
     }
   }
 
-  /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): one statement, then the seal wait (R51). */
+  /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): its newest changes' MACs checked (T190), one statement, then `sign_in`'s, then the seal wait (R51). */
   async signIn(input: SignInInput): Promise<SignInOutcome> {
     const log015 = this.#log015();
     await this.#cutOverYet();
@@ -3835,6 +3872,27 @@ class VaultService implements Vault {
     // The proof, verified here on the sealed binding (D148): what the credential is held to comes of the token, not the app.
     const proven = await this.#proven(log015, input, at);
     if ('refused' in proven) return proven;
+    // `sign_in` holds the member's and the binding's rows to their objects' newest seals, which SQL cannot
+    // authenticate: their MACs first (T190), one statement, else a member removed or a binding ended, put back with
+    // its newest change's seal written to match, signs a run in. Refused as the statement refuses a stale row.
+    const binding: Ref = { kind: 'binding', id: proven.binding.columns.id };
+    let found: Map<string, CheckedChange[]>;
+    try {
+      found = await changesHold(log015, this.#db, [{ kind: 'principal', id: proven.principal }, binding]);
+    } catch (error) {
+      if (!(error instanceof NotLogged)) throw error;
+      const reports: NewEntry[] = [];
+      this.#notLogged(reports, error);
+      await this.#record(reports);
+      return { ok: false, refused: 'unbound' };
+    }
+    // The binding as `#proven` checked its seal is its newest change's, the one whose MAC holds (review r3): else an
+    // ended binding put back, its old seal valid, would pass that check, and the end's seal column, written to match
+    // once this read is done, `sign_in`'s comparison. `sign_in` takes that seal (`p_binding_seal`): a forgery now needs
+    // an honest change of the binding between here and there. Nothing reported: an end that came between makes it so.
+    // The member's row `sign_in` reads itself, unpinned, until T179 hands it the seal checked here (sealed-inputs.md).
+    const newest = found.get(objectKey(binding))?.[0];
+    if (newest?.seal == null || !newest.seal.equals(Buffer.from(proven.binding.seal!, 'base64'))) return { ok: false, refused: 'unbound' };
     const answer = await signIn(this.#db, log015, at, proven);
     if (answer.number == null) return { ok: false, refused: answer.state as Exclude<SignInRefusal, 'proof'> };
     const sealed = await log015.sealThrough(BigInt(answer.number));
@@ -3847,6 +3905,13 @@ class VaultService implements Vault {
    * object's newest change's, is reported, as `prepare` reports one; one
    * whose policy moved since its revoke was weighed is refused, nothing
    * reported.
+   *
+   * Unlike `prepare`, `signIn` and an issue, it does not check its newest
+   * change's MAC first (T190), on purpose: a revoke only ends, so the most a
+   * writer who forged that change's seal gets is the credential revoked from
+   * the row it put back, which is revoked all the same; refusing it would
+   * let a forged log keep a credential live. `changeBindings`' ends and the
+   * credentials they sweep go ahead so too.
    */
   async revokeCredential(input: RevokeCredentialInput): Promise<RevokeCredentialOutcome> {
     const log015 = this.#log015();
@@ -3995,7 +4060,7 @@ class VaultService implements Vault {
     // The members, their grants, the policy, the setting and the places in one statement; the credential beside it.
     const [reads, via] = await Promise.all([
       snapshot(this.#db, { principals: [...new Set([actor, principal])], members: true, settings: input.service, environments: environmentIds, seals: this.#checksSeals() }),
-      input.via === null ? Promise.resolve(null) : store.issuingCredential(this.#db, input.via),
+      input.via === null ? Promise.resolve(null) : store.issuingCredential(this.#db, input.via, macsOf(log015)),
     ]);
     // The settings from the snapshot's newest entry; the pages before it read only when it fails its check.
     const settings = input.service ? await this.#settingsAt(this.#db, reports, reads) : null;
@@ -4025,8 +4090,14 @@ class VaultService implements Vault {
       if (via === null) return refuse('ended');
       // One 0.14 made, which the log never held, has nothing the vault can authenticate: the app issues on it as before.
       if (via.seal === null && via.newest === null) return refuse('unlogged');
+      // Its newest change's MAC first (T190): `issue_token` and `change_bindings` hold the row to that change's seal
+      // in SQL, which cannot authenticate it, so a revoked credential put back, the seal written to match, issues.
+      if (via.newest !== null && !via.newest.holds) {
+        this.#notLogged(reports, new NotLogged({ kind: 'credential', id: input.via }, 'tampered'));
+        return refuse('ended');
+      }
       const object = credentialObject(via.columns);
-      const logged = via.seal !== null && via.newest !== null && via.newest.equals(via.seal) && sealedObject(log015.seals, { kind: 'credential', id: input.via }, object, via.seal);
+      const logged = via.seal !== null && via.newest?.seal != null && via.newest.seal.equals(via.seal) && sealedObject(log015.seals, { kind: 'credential', id: input.via }, object, via.seal);
       if (!logged || via.columns.principal !== actor || via.columns.revoked || (via.columns.expiresAt ?? Infinity) <= at || via.columns.generation !== actorRow.generation) {
         return refuse('ended');
       }
@@ -4163,7 +4234,7 @@ class VaultService implements Vault {
     // checked against, which a save names.
     const read = async <K extends 'proxy' | 'proxy-reserved'>(ref: Ref & { kind: K }) => {
       for (let attempt = 0; ; attempt += 1) {
-        const [row, newest] = await Promise.all([store.readObject(this.#db, ref), store.newestChange(this.#db, ref)]);
+        const [row, newest] = await Promise.all([store.readObject(this.#db, ref), store.newestChange(this.#db, ref, macsOf(keys))]);
         try {
           const held = heldFrom(keys.seals, ref, row, newest);
           return { object: held.log === 'live' ? (held.object as Extract<Input, { kind: K }>) : null, seal: newest?.seal ?? null, state: 'ok' as const };
@@ -4174,7 +4245,7 @@ class VaultService implements Vault {
         }
       }
     };
-    const held = (ref: Ref & { kind: ReadKind }) => heldByLog(keys.seals, this.#db, ref);
+    const held = (ref: Ref & { kind: ReadKind }) => heldByLog(keys, this.#db, ref);
     const [proxy, reserved, chain] = await Promise.all([read({ kind: 'proxy', id: input.environmentId }), read(RESERVED_REF), this.#chain(held, input.environmentId)]);
     // Each item that would not route now, marked: what the tab says an Owner must save again (decision 5).
     // A fork's inherited items too, nearest parent first, each decided here: where this environment's use resolves
@@ -4258,7 +4329,7 @@ class VaultService implements Vault {
         changes.held(d.tx, ROLES_REF as Ref & { kind: 'roles' }),
         changes.held(d.tx, RESERVED_REF),
         changes.held(d.tx, { kind: 'environment', id: environmentId }),
-        store.newestChange(d.tx, ref),
+        store.newestChange(d.tx, ref, macsOf(keys)),
         // A replace weighs none of it: read only for the audit's `removed`, the items its log had.
         changes.held(d.tx, ref).catch((error: unknown) => {
           if (error instanceof NotLogged) return error;
@@ -4430,7 +4501,7 @@ class VaultService implements Vault {
     if (typeof input?.member !== 'string' || !/^(user|token):/.test(input.member)) throw new Error('a member is named user:<email> or token:<name>');
     await this.#settled();
     const found = await store.proxiesSavedBy(this.#db, input.member);
-    const objects = await Promise.all(found.map((id) => heldByLog(keys.seals, this.#db, { kind: 'proxy', id }).catch(notLogged)));
+    const objects = await Promise.all(found.map((id) => heldByLog(keys, this.#db, { kind: 'proxy', id }).catch(notLogged)));
     const items = objects.flatMap((held, i) => held.log !== 'live' || held.object.kind !== 'proxy' ? [] : Object.values(held.object.items)
       .filter((item) => item.savedBy === input.member)
       .map((item) => ({ environmentId: found[i]!, name: item.definition.name, kind: item.definition.kind, keys: [...item.keys] })));
@@ -4467,7 +4538,7 @@ class VaultService implements Vault {
     // comes before the transaction, as its own statement (review r15 of #467).
     const reads = (await this.#settled()) === null && (await this.#cutOverNow());
     const sqlite = engineOf(this.#db) === 'sqlite';
-    const first = reads && !sqlite ? (tx: Transaction) => this.#reservedAlready(tx, keys.seals, wanted) : undefined;
+    const first = reads && !sqlite ? (tx: Transaction) => this.#reservedAlready(tx, keys, wanted) : undefined;
     // One bound for the call: each attempt's lock waits within what is left of it (review r14 of #467), a call that
     // took the place late never waiting the whole bound again. A no-op attempt, every call of a deploy's herd but one,
     // waits for nothing else; the one that writes waits, after the head, for the issue lock and the fence, each within
@@ -4475,7 +4546,7 @@ class VaultService implements Vault {
     const deadline = Date.now() + this.#prepared.options.codeWaitMs;
     for (let pause = CODE_PAUSE_MS; ; pause = Math.min(2 * pause, CODE_PAUSE_MAX_MS)) {
       if (reads && sqlite) {
-        const found = await this.#reservedAlready(this.#db, keys.seals, wanted);
+        const found = await this.#reservedAlready(this.#db, keys, wanted);
         if (found !== null) return { ok: true, ...found };
       }
       try {
@@ -4492,10 +4563,11 @@ class VaultService implements Vault {
   /**
    * `wanted` reserved, as the sealed set read before the head says, or null: it cannot say, or a name is missing.
    * A set its log does not bear out says nothing, not "none": it decides under the head, which reports it and
-   * refuses, an empty ask's (a deployment of UI routes alone) as much as any (review r12 of #467).
+   * refuses, an empty ask's (a deployment of UI routes alone) as much as any (review r12 of #467). So does a set whose
+   * newest change's MAC does not hold (T190): a row put back with a forged seal never stands for names reserved.
    */
-  async #reservedAlready(db: Queryable, seals: ChangeKeys['seals'], wanted: readonly string[]): Promise<{ reserved: string[]; cleared: ClearedItem[] } | null> {
-    const held = await heldByLog(seals, db, RESERVED_REF).catch((error: unknown) => {
+  async #reservedAlready(db: Queryable, keys: ChangeKeys, wanted: readonly string[]): Promise<{ reserved: string[]; cleared: ClearedItem[] } | null> {
+    const held = await heldByLog(keys, db, RESERVED_REF).catch((error: unknown) => {
       if (error instanceof NotLogged) return null;
       throw error;
     });

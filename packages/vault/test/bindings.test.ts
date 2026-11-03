@@ -12,7 +12,7 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { ChangeBindingsInput, CredentialColumns, MadeBinding, SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
-import { asc, eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { loggedChange, type ChangeKeys } from '../src/changes.ts';
@@ -20,7 +20,7 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, ENGINE, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -56,7 +56,7 @@ async function world() {
   assert.ok((await vault.admit({ actor: ROOT, caller: 'person', principal: CI })).ok);
   assert.ok((await vault.setAccess({ actor: ROOT, caller: 'person', principal: CI, changes: [{ projectId: project, environmentId: null, role: 'viewer', expiresAt: null }] })).ok);
   const keys: ChangeKeys = { seals: config.signingKeys.map((seed) => sealKey(seed)), mac: logMacKey(config.signingKeys[0]!) };
-  return { vault, project, keys };
+  return { vault, project, keys, config };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -144,6 +144,59 @@ test("a binding the Owner makes is a change of the log, its row the object it se
   assert.deepEqual((JSON.parse(row!.payload) as { bind: unknown }).bind, { by: ROOT, via: null, label: 'deploys', replaces: [] });
   assert.equal((await read(made.id)).seal, Buffer.from(row!.seal!).toString('base64'), "the row carries its object's seal");
   assert.ok((await signIn(w, made.id)).outcome.ok);
+});
+
+test("a binding ended, put back, its end's seal column written to match only once the vault has read that change, MAC and all: signs nobody in (review r3)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const { credentials, logChanges, serviceBindings } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  // The writer: the row as it was before its end, its old seal valid. The end's log row untouched, so far: its MAC holds.
+  await db.owner.update(serviceBindings).set({ revokedAt: null, seal: row!.seal, authMac: row!.authMac }).where(eq(serviceBindings.id, made.id));
+  const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: made.id }))).orderBy(desc(logChanges.number)).limit(1);
+  // Then, as `sign_in`'s statement goes out (Postgres), or its transaction opens (SQLite): the end's seal column made
+  // the row's, after the vault checked that change's MAC, before the statement compares that column with the row.
+  const forge = async () => { await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, newest!.number)); };
+  const raw = db.vault as unknown as { dialect: { sqlToQuery(query: unknown): { sql: string } } } & Record<string | symbol, unknown>;
+  const postgres = ENGINE === 'postgres';
+  const late = new Proxy(raw, {
+    get(target, key) {
+      const value = Reflect.get(target, key);
+      if (typeof value !== 'function') return value;
+      if (postgres && key === 'execute') {
+        return async (query: unknown) => {
+          if (target.dialect.sqlToQuery(query).sql.includes('sign_in(')) await forge();
+          return value.call(target, query);
+        };
+      }
+      if (!postgres && key === 'transaction') return async (...args: unknown[]) => (await forge(), value.apply(target, args));
+      return value.bind(target);
+    },
+  });
+  const vault = await openLocalVault(late as never, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const signedIn = (await db.owner.select().from(credentials)).length;
+  // Held by the end's MAC alone, the sign-in went on to `sign_in`, whose comparison the forged column then passed: a
+  // credential through an ended binding. The binding's seal, as the vault proved it, is held to the checked change's.
+  assert.deepEqual((await signIn({ ...w, vault }, made.id)).outcome, { ok: false, refused: 'unbound' });
+  assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
+});
+
+test("a binding ended, put back by a writer with its end's seal column written to match, signs nobody in: that change's MAC does not hold (T190)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const { credentials, logChanges, serviceBindings } = tablesOf(db.owner);
+  const [row] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, made.id));
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }))).ok);
+  // The writer: the row as it was before its end, and the end's seal column made that row's seal (not its MAC).
+  await db.owner.update(serviceBindings).set({ revokedAt: null, seal: row!.seal, authMac: row!.authMac }).where(eq(serviceBindings.id, made.id));
+  const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'binding', id: made.id }))).orderBy(desc(logChanges.number)).limit(1);
+  await db.owner.update(logChanges).set({ seal: row!.seal }).where(eq(logChanges.number, newest!.number));
+  const signedIn = (await db.owner.select().from(credentials)).length;
+  assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
+  assert.equal((await db.owner.select().from(credentials)).length, signedIn, 'no credential made');
 });
 
 test("only an Owner of its project gives a binding's runs sensitive reads (R32); a service account gives none; nothing written", async () => {
