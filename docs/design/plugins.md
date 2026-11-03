@@ -215,6 +215,16 @@ else is needed.
   `props` name. That context's `workload` answers from the service's
   `cloudflare` binding (`workloadFromBinding`), and it takes no handle,
   token or session. No plugin can name a principal.
+- `useRoute(caller, …)` and `proxyItem(caller, …)` (T186 PR C2b) take
+  such a caller too: a UI route's use at the place its statement checked,
+  the vault deciding the workload's standing in the same one call, and
+  that place's items, using nothing. `workload`'s `counts` may be a
+  function of the service, the place and the credential named there,
+  made just before the gate takes them, with `item(name)` to look up a UI
+  route's limit as the workload (`proxyItem`); and `or`, the URL's other
+  reading (`/use/<project>/<env>/<route>/…`), which the checks take,
+  before the gate, when the workload reaches several environments or its
+  one is that path.
 
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):

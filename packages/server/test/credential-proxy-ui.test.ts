@@ -528,14 +528,15 @@ test("64 KiB of escaped quotes that never close cost their length, not their squ
   assert.ok(performance.now() - started < 1_000, `the field's read took ${performance.now() - started} ms`);
 });
 
-test("a service binding's call is never served a handle's kept values: no UI route for it before C2b, the copy unread (review r2 of #467)", ON_015, async () => {
+test("a service binding's call is never served a handle's kept values: its own binding is checked, the handle's copy unread (review r2 of #467)", ON_015, async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   const token = await handle();
   assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
   const before = reached.length;
-  // The same URL and handle through a binding, on the same isolate, within cacheSeconds: nothing sent.
+  // The same URL and handle through a binding, on the same isolate, within cacheSeconds: the binding's own call (C2b1),
+  // refused here, as `token:svc` holds no live binding; nothing sent.
   const bound = await bindingRoute(new Request(`${ORIGIN}/use/market/dev/openai/models`, as(token)), runtime, 'token:svc')!;
-  assert.equal(bound.status, 404, await bound.clone().text());
+  assert.equal(bound.status, 401, await bound.clone().text());
   assert.equal(reached.length, before);
 });
 

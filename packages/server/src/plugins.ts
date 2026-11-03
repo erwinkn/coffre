@@ -4,9 +4,9 @@
 // as whoever a request's credential names, through the API: the same route
 // table, checks, vault and audit log as the CLI.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
-import { USE_DEADLINE_MS, type DecidedItem, type RouteFound, type RouteUseOutcome, type Vault } from '@coffre/core/vault';
+import { USE_DEADLINE_MS, type Access, type DecidedItem, type RouteCaller, type RouteFound, type RouteUseOutcome, type Vault } from '@coffre/core/vault';
 import type { CredentialScope } from '@coffre/core/access';
-import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
+import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type GateCount, type WorkloadCaller } from '@coffre/core/identity';
 
 import { AccessChanged, accessFor, type Recalled } from './accesses.ts';
 import { authenticateRequest, type AuthenticatedIdentity } from './auth.ts';
@@ -18,7 +18,7 @@ import { readScope } from './api/services.ts';
 import { environmentsOf } from './api/workloads.ts';
 import { checkAuthRow } from './auth-rows.ts';
 import { environmentPaths, places as placeRows, type BindingRow, type CredentialRead } from './db/queries.ts';
-import { readAhead, type ReadAhead } from './db/read-ahead.ts';
+import { namedManyAhead, readAhead, type ReadAhead } from './db/read-ahead.ts';
 import { uses015 } from './api/changes.ts';
 import { callBindings, frozenTargets } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
@@ -31,7 +31,7 @@ import { logged } from './logged.ts';
 import { proxyCodeOf } from './proxy-code.ts';
 import { gateProxy } from './proxy-gate.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
-import { dpopToken, gateOf, namedPlace, SessionRefused, sessionScope, sessionStands, standingSession, type GateCounts, type StandingSession } from './workload-sessions.ts';
+import { dpopToken, gateOf, namedPlace, OtherReading, SessionRefused, sessionScope, sessionStands, standingSession, type CountsAt, type GateCounts, type StandingSession } from './workload-sessions.ts';
 
 export type { PickKeys };
 
@@ -178,16 +178,17 @@ export type PluginContext = {
    * and the item they were decided on (its definition left out where `digests` names its digest: the copy's), which
    * the proxy sends by, never by a copy of its own. Refused: a `CoffreError` (404 no such item, 409 a personal config,
    * 403 a key its editor may not route, 503 an item a writer changed). The app's `credential.use` entry records it, with
-   * `logged`, as `use`'s does, under the name of the route the vault's reading took (review r4 of #467). A handle's
-   * alone: a workload's UI items wait for C2b (section 10).
+   * `logged`, as `use`'s does, under the name of the route the vault's reading took (review r4 of #467). In place of
+   * a handle, the workload `workload` returned for this request (C2b): its route `stable`, at the place its statement
+   * checked, decided for it as the vault decides its standing there, in the same one call.
    */
-  useRoute?(handle: string, asked: RouteAsked): Promise<RouteUsed>;
+  useRoute?(caller: string | WorkloadUse, asked: RouteAsked): Promise<RouteUsed>;
   /**
    * A place's UI items as a use would find them, using nothing (section 3, `proxyItem`): the caller checked first, then
-   * `name`'s item, or, with none, every item the place serves. `place`, a handle's by path, null for its own. A
-   * handle's alone, as `useRoute`. Refused: a `CoffreError`.
+   * `name`'s item, or, with none, every item the place serves. `place`, a handle's by path, null for its own; a
+   * workload's is always its own, the one its statement checked. Refused: a `CoffreError`.
    */
-  proxyItem?(handle: string, asked: { place: string | null; name: string | null }): Promise<ItemsFound>;
+  proxyItem?(caller: string | WorkloadUse, asked: { place: string | null; name: string | null }): Promise<ItemsFound>;
 };
 
 /** What a UI route's use names (`PluginContext.useRoute`). */
@@ -224,15 +225,30 @@ export type WorkloadAt = {
   place: string | null;
   credential: string | null;
   /**
+   * With `place` null, the URL's other reading (`/use/<a>/<b>/<c>/…`, a UI route's; T186 PR C2b), as a workload's
+   * client writes its URLs: `credential` at the one environment the workload reaches, unless it reaches several, or
+   * none, or that one is at `or.place`'s path, when `or` is the request, at that path. Decided before the gate: the
+   * proof is spent once, by the reading taken, which the caller's `path` says.
+   */
+  or?: { place: string; credential: string };
+  /**
    * `bodyDigest(bytes)` of a buffered body, a sigv4 upload's declared
    * digest, or `UNSIGNED_BODY`, which only a binding that says
    * `unsignedUploads` takes: for a request whose proof signs its content.
    * Left out for one that signs none.
    */
   body?: string;
-  /** The counts, or how to make them for the service, `token:<name>`, which only authentication tells (a limit per workload). */
-  counts?: GateCounts;
+  /**
+   * The counts, or how to make them once authentication says who sends the request and where: the service,
+   * `token:<name>` (a limit per workload), and the place by ID, whose UI item `item` finds as this workload, using
+   * nothing (`PluginContext.proxyItem`), for a UI route's limit (T186 PR C2b). Made only when the gate is about to
+   * take them; a function that throws fails the request.
+   */
+  counts?: PluginCounts;
 };
+
+/** A workload request's counts as a plugin gives them (`WorkloadAt.counts`). */
+export type PluginCounts = readonly GateCount[] | ((at: { service: string; place: string | null; credential: string | null; item: (name: string) => Promise<ItemsFound> }) => readonly GateCount[] | Promise<readonly GateCount[]>);
 
 /**
  * A workload, authenticated for one request: the caller the proxy sees, the
@@ -391,11 +407,14 @@ export function bindingRoute(request: Request, runtime: CoffreRuntime, principal
  * `credentialId` `binding:<id>`, so the proxy sees one kind of caller.
  * Throws `WorkloadRefused`.
  */
-export function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAt): Promise<WorkloadUse> {
+export function workloadFromBinding(runtime: CoffreRuntime, principal: string, at: WorkloadAsk): Promise<WorkloadUse> {
   return bindingWorkload(runtime, principal, at, new WeakMap());
 }
 
-async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: WorkloadAt, standings: Standings): Promise<WorkloadUse> {
+/** What a workload's request asks, as the checks take it: a plugin's `WorkloadAt`, its counts made for the caller (`GateCounts`). */
+type WorkloadAsk = Omit<WorkloadAt, 'counts'> & { counts?: GateCounts };
+
+async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: WorkloadAsk, standings: Standings): Promise<WorkloadUse> {
   const workloads = runtime.auth.mode === 'signin' ? runtime.auth.signin.workloads : null;
   const unbound = () => refusedWith(new ApiError('unauthenticated', `no live cloudflare binding of ${principal} takes this call`));
   if (workloads === null || !/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(principal)) throw await unbound();
@@ -429,6 +448,11 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   const place = asked ?? (reached.length === 1 ? reached[0]! : null);
   // Its path: the statement's for a place named, else the one it reaches, read by its ID.
   const path = asked !== null ? found.placePath : place === null ? null : ((await environmentPaths(runtime.db, [place])).get(place) ?? null);
+  // The URL's other reading (`WorkloadAt.or`): the environment it reaches is the one the URL names, or there is not one.
+  if (at.or !== undefined && at.place === null && (place === null || path === at.or.place)) {
+    const { or, ...rest } = at;
+    return bindingWorkload(runtime, principal, { ...rest, place: or.place, credential: or.credential }, standings);
+  }
   if (at.credential !== null && place === null) {
     throw await refusedWith(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this service reaches none, or several'));
   }
@@ -436,7 +460,7 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
   const frozen = found.frozen.instance || found.frozen.service || found.frozen.binding || found.frozen.credential
     || (asked === null && place !== null && at.credential !== null && (await frozenTargets(runtime.db, [`credential:${place}/${at.credential}`])).length > 0);
   if (frozen) throw await refusedWith(new ApiError('forbidden', 'frozen: a manager stopped this use; nothing passes until they lift it', 'frozen'));
-  const counts = typeof at.counts === 'function' ? at.counts(principal) : at.counts;
+  const counts = typeof at.counts === 'function' ? await at.counts({ service: principal, place, name: at.credential, credential: binding.id, way: 'binding' }) : at.counts;
   if (counts !== undefined && counts.length > 0) {
     let admitted;
     try {
@@ -474,25 +498,33 @@ async function bindingWorkload(runtime: CoffreRuntime, principal: string, at: Wo
 }
 
 /** A workload's session for a plugin's request (`PluginContext.workload`), as `standingSession` checks it. */
-async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAt, standings: Standings): Promise<WorkloadUse | null> {
+async function sessionWorkload(request: Request, runtime: CoffreRuntime, sourceIp: string | null, at: WorkloadAsk, standings: Standings): Promise<WorkloadUse | null> {
   const token = dpopToken(request);
   if (token === null) return null;
   let session: StandingSession;
+  // The fields a plugin may ask, each by name: nothing it adds reaches the checks (a `freezes`, say).
+  const asking = (where: { place: string | null; credential: string | null; unless?: string }) => standingSession(request, runtime, token, sourceIp, {
+    ...where,
+    ...(at.body === undefined ? {} : { body: at.body }),
+    ...(at.counts === undefined ? {} : { counts: at.counts }),
+    children: true,
+  });
+  let credential = at.credential;
   try {
-    // The fields a plugin may ask, each by name: nothing it adds reaches the checks (a `freezes`, say).
-    session = await standingSession(request, runtime, token, sourceIp, {
-      place: at.place,
-      credential: at.credential,
-      ...(at.body === undefined ? {} : { body: at.body }),
-      ...(at.counts === undefined ? {} : { counts: at.counts }),
-      children: true,
-    });
+    try {
+      session = await asking(at.or === undefined || at.place !== null ? { place: at.place, credential: at.credential } : { place: null, credential: at.credential, unless: at.or.place });
+    } catch (error) {
+      // The URL's other reading (`WorkloadAt.or`), refused before its gate: asked again by that one.
+      if (!(error instanceof OtherReading) || at.or === undefined) throw error;
+      credential = at.or.credential;
+      session = await asking({ place: at.or.place, credential });
+    }
   } catch (error) {
     if (error instanceof SessionRefused) throw await workloadRefused(error.response, error.limit);
     throw error;
   }
   const caller: WorkloadUse = { ...session.caller, nonce: session.nonce, places: session.places, place: session.place, path: session.path };
-  standings.set(caller, { kind: 'session', session, credential: at.credential });
+  standings.set(caller, { kind: 'session', session, credential });
   return caller;
 }
 
@@ -527,13 +559,15 @@ async function workloadIdentity(
   standings: Standings,
   /** Its read may decide on the vault's answer kept from an earlier request, which the vault checks (`accessFor`). */
   recall = false,
+  /** The vault's answer about its service in the call that used the values (a route use's `standing`): nothing asked. */
+  given?: Access,
 ): Promise<{ identity: AuthenticatedIdentity; expiresAt: string; constraints: Constraints | null } | null> {
   const standing = standings.get(caller);
   if (standing === undefined) return null;
   const { row, binding, policy, policySeq } = standing.kind === 'session' ? standing.session : { ...standing, row: null };
   const scope: CredentialScope = sessionScope(row ?? { scope: null }, binding, policy);
   const generation = row?.generation ?? binding.generation;
-  const { access, recalled } = await accessFor(runtime, caller.principal, recall && { generation });
+  const { access, recalled } = given !== undefined ? { access: given, recalled: null } : await accessFor(runtime, caller.principal, recall && { generation });
   const id = caller.principal.slice('token:'.length);
   const callerOf = withRecalled(callerFrom({ type: 'service', id }, access, policySeq, scope, 'workload'), recalled);
   if (callerOf.generation !== generation) return null;
@@ -751,8 +785,8 @@ function pluginContext(
     }
     return null;
   };
-  /** A UI route's use: the vault's call, the read on what it decided, and the item the values go by. */
-  const routeUse = async (handle: string, asked: RouteAsked): Promise<RouteUsed> => {
+  /** A handle's UI route use: the vault's call, the read on what it decided, and the item the values go by. */
+  const handleRouteUse = async (handle: string, asked: RouteAsked): Promise<RouteUsed> => {
     const name = asked.named?.route ?? asked.stable ?? '';
     const named = asked.named === null ? null : (() => {
       const [project, environment] = asked.named.path.split('/');
@@ -781,27 +815,96 @@ function pluginContext(
       return rethrown(error);
     }
   };
-  const proxyItem: PluginContext['proxyItem'] & {} = async (handle, asked) => {
+  /**
+   * A workload caller as the vault's route use names it (`RouteCaller`): its session's credential, or its Cloudflare
+   * binding, at the place its statement checked, by ID. Only one this context's `workload` made, as `use` takes.
+   */
+  const workloadCaller = (caller: WorkloadUse): RouteCaller => {
+    const standing = standings.get(caller);
+    if (standing === undefined) throw new CoffreError(401, 'unauthenticated', 'that workload is no caller coffre authenticated');
+    if (caller.place === null) throw new CoffreError(409, 'conflict', 'the environment this session reaches is gone, or it reaches several: name it, /use/<project>/<environment>/<credential>');
+    return standing.kind === 'binding'
+      ? { kind: 'workload', credential: standing.binding.id, way: 'binding', place: caller.place }
+      : { kind: 'workload', credential: caller.credentialId, place: caller.place };
+  };
+  /**
+   * A workload's UI route use (C2b; docs/design/proxy-ui.md, section 3, "Workloads"): the vault's one call decides the
+   * route at the place its statement checked, the workload's standing there with it (`standing`), so the read asks the
+   * vault nothing more; the read is at that place by ID, as every workload's use is (a path renamed onto another since
+   * reads nothing).
+   */
+  const workloadRouteUse = async (caller: WorkloadUse, asked: RouteAsked): Promise<RouteUsed> => {
     try {
-      if (binding !== null) throw noCredential();
-      if (tokenKind(handle) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
+      if (asked.named !== null || asked.stable === null) throw new Error("a workload's route use names its route as stable, at its place");
       const at = Date.now();
+      const answered = await runtime.vault.useRoute({ caller: workloadCaller(caller), named: null, stable: asked.stable, digests: asked.digests, purpose: 'use', at, deadline: at + USE_DEADLINE_MS });
+      if (!answered.served) throw new CoffreError(404, 'not_found', `${asked.stable}: the environment this workload uses is gone`);
+      if (answered.route !== 'name') throw refusedUse(answered.outcome);
+      const refused = routeRefusal(answered, asked);
+      if (refused !== null) throw refused;
+      const unserved = answered.found?.found === true && answered.outcome.ok ? asked.refuses?.(answered.found.item) ?? null : null;
+      if (unserved !== null) throw new CoffreError(404, 'not_found', unserved);
+      const made = await workloadIdentity(runtime, caller, sourceIp, standings, false, answered.standing);
+      if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
+      const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal: false });
+      const read = await reveal(apiContext(runtime, made.identity), parsePath(caller.path!, [2]), {
+        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: asked.stable }, only: true, environmentId: caller.place!,
+        decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, ...(ahead == null ? {} : { ahead }),
+      });
+      return routeUsed(answered, read, made.expiresAt);
+    } catch (error) {
+      return rethrown(error);
+    }
+  };
+  const routeUse: PluginContext['useRoute'] & {} = (caller, asked) => (typeof caller === 'string' ? handleRouteUse(caller, asked) : workloadRouteUse(caller, asked));
+  /** `proxyItem`'s call as `caller`, refused as a use is. */
+  const itemsAs = async (caller: RouteCaller, place: { project: string; environment: string } | null, name: string | null): Promise<ItemsFound> => {
+    const at = Date.now();
+    const found = await runtime.vault.proxyItem({ caller, place, name, at, deadline: at + USE_DEADLINE_MS });
+    if (!found.ok && 'busy' in found && found.busy !== undefined) throw refusedUse(found as never);
+    if (!found.ok) {
+      const code = (found as { code: string }).code;
+      if (code === 'credential') throw new CoffreError(401, 'unauthenticated', 'that credential is unknown, expired or revoked');
+      throw refusedUse({ ok: false, code: code as never, number: null });
+    }
+    return { fault: found.fault, personal: found.personal, item: found.item, items: found.items };
+  };
+  const proxyItem: PluginContext['proxyItem'] & {} = async (caller, asked) => {
+    try {
+      if (typeof caller !== 'string') {
+        if (asked.place !== null) throw new Error("a workload's items are at the place its statement checked");
+        return await itemsAs(workloadCaller(caller), null, asked.name);
+      }
+      if (binding !== null) throw noCredential();
+      if (tokenKind(caller) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
       const place = asked.place === null ? null : (() => {
         const [project, environment] = asked.place.split('/');
         return { project: project!, environment: environment! };
       })();
-      const input = { caller: { kind: 'handle' as const, tokenHash: hashToken(handle).toString('base64'), accepts: acceptance(runtime) }, place, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
-      const found = await runtime.vault.proxyItem(input);
-      if (!found.ok && 'busy' in found && found.busy !== undefined) throw refusedUse(found as never);
-      if (!found.ok) {
-        const code = (found as { code: string }).code;
-        if (code === 'credential') throw new CoffreError(401, 'unauthenticated', 'that credential is unknown, expired or revoked');
-        throw refusedUse({ ok: false, code: code as never, number: null });
-      }
-      return { fault: found.fault, personal: found.personal, item: found.item, items: found.items };
+      return await itemsAs({ kind: 'handle', tokenHash: hashToken(caller).toString('base64'), accepts: acceptance(runtime) }, place, asked.name);
     } catch (error) {
       return rethrown(error);
     }
+  };
+  /**
+   * A plugin's counts as the checks make them (`GateCounts`): a function's, with `item` asking the vault, as the caller
+   * the statement found, for its place's UI item. No UI item without `servesUi`.
+   */
+  const counted = (counts: PluginCounts | undefined): GateCounts | undefined => {
+    if (typeof counts !== 'function') return counts;
+    return (made: CountsAt) => counts({
+      service: made.service,
+      place: made.place,
+      credential: made.name,
+      item: async (name) => {
+        try {
+          if (!ui || made.place === null) throw new CoffreError(404, 'not_found', `${name}: this instance serves no item defined in the UI here`);
+          return await itemsAs({ kind: 'workload', credential: made.credential, ...(made.way === undefined ? {} : { way: made.way }), place: made.place }, null, name);
+        } catch (error) {
+          return rethrown(error);
+        }
+      },
+    });
   };
   return {
     // A vault that decides no UI item (`servesUi`): neither, and the proxy serves code's items alone.
@@ -809,7 +912,11 @@ function pluginContext(
     publicUrl: runtime.publicUrl,
     binding: binding !== null,
     ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),
-    workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
+    workload: (asked, at) => {
+      const { counts, ...rest } = at;
+      const checked: WorkloadAsk = { ...rest, ...(counts === undefined ? {} : { counts: counted(counts)! }) };
+      return binding === null ? sessionWorkload(asked, runtime, sourceIp, checked, standings) : bindingWorkload(runtime, binding, checked, standings);
+    },
     recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {
       // A handle of one environment: its person's standing there, decided by the vault's one named call on the sealed

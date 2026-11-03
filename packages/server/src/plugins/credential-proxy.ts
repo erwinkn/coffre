@@ -44,14 +44,14 @@ import { createHash } from 'node:crypto';
 
 import { CoffreError } from '@coffre/client';
 import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
-import { constraintsAllow, CREDENTIAL_NAME } from '@coffre/core/identity';
+import { constraintsAllow, CREDENTIAL_NAME, type GateCount } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
 import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod } from '@coffre/core/vault';
 import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
-import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
+import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, USE_DEADLINE_MS, type DecidedItem, type ProxyRoute } from '@coffre/core/vault';
 import { database, tunnel as tunnelPostgres, type Database } from './postgres-tunnel.ts';
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
@@ -586,8 +586,8 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
     return failure(400, 'the path is not valid percent-encoding');
   }
   const stable = proxy.credentials.get(place[0]!);
-  // Whether a name may be a UI route's for this request: under `editable`, of a handle's request (no session, no service
-  // binding, whose calls C2b serves), and a name code lacks (R66).
+  // Whether a name may be a handle's UI route for this request: under `editable`, of a handle's request (no session, no
+  // service binding, whose calls `uiWorkloadForward` takes), and a name code lacks (R66).
   const uiServes = (name: string | undefined) => proxy.editable && coffre.useRoute !== undefined && !coffre.binding && sessionToken(request) === null
     && name !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name);
   // A workload's: `/use/<credential>/<path>` whenever `<credential>` is one, for the one environment it reaches, and
@@ -596,6 +596,12 @@ async function serve(request: Request, coffre: PluginContext, proxy: Proxy): Pro
   const named = stable === undefined && raw.length >= 3 ? proxy.credentials.get(place[2]!) : undefined;
   if (stable !== undefined || named !== undefined) {
     const used = await workloadForward(request, coffre, proxy, stable !== undefined ? null : `${place[0]}/${place[1]}`, (stable ?? named)!, raw.slice(stable !== undefined ? 1 : 3), url.search);
+    if (used !== null) return used;
+  }
+  // A name code lacks, of a workload's request (a session's or a service binding's call): the environment's UI route,
+  // under `editable` (T186 PR C2b). `/use/<a>/<b>` stays the plan or compute for a workload, as before.
+  if (proxy.editable && coffre.useRoute !== undefined && stable === undefined && named === undefined && raw.length !== 2) {
+    const used = await uiWorkloadForward(request, coffre, proxy, raw, place, url);
     if (used !== null) return used;
   }
   // A name code lacks, of a handle's request: the environment's UI definitions, under `editable` (T186 PR C). Code wins
@@ -1165,20 +1171,41 @@ async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, 
  * coffre, and its tunnels, each with the key whose URL the local listener
  * stands in for, as a handle's plan has them; and every key it holds but
  * does not read, `useOnly`. No placeholder: its requests carry its proof,
- * never a value in a slot.
+ * never a value in a slot. Its environment's UI routes too (T186 PR C2b):
+ * one `proxyItem` call as the workload, failing closed as a handle's plan
+ * does (a level a writer changed: 503, no plan).
  */
 async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<Response> {
+  const routes = await uiRoutesOf(coffre, proxy, caller, path);
   const held = await coffre.use(caller, { path, purpose: 'expose', logged: { plan: true }, keys: (_, rows) => rows.filter((row) => row.plain || row.reads).map((row) => row.key) });
   // The items that serve its environment, whose keys it holds every one of.
   const holds = (item: { environments?: readonly string[] }, keys: readonly string[]) => serves(item, path) && keys.every((key) => held.keys.includes(key));
   return answer({
     environment: held.environment.path,
     values: { ...held.values },
-    credentials: [...[...proxy.credentials.values()].filter((credential) => holds(credential, credential.keys)).map((credential) => credential.name), ...keyed(proxy).filter(([, signer]) => holds(signer, [signer.key])).map(([name]) => name)],
+    credentials: [
+      ...[...proxy.credentials.values()].filter((credential) => holds(credential, credential.keys)).map((credential) => credential.name),
+      ...keyed(proxy).filter(([, signer]) => holds(signer, [signer.key])).map(([name]) => name),
+      ...routes.filter((route) => holds({}, definitionKeys(route))).map((route) => route.name),
+    ],
     tunnels: Object.fromEntries([...proxy.tunnels].filter(([, tunnel]) => holds(tunnel, [tunnel.key])).map(([name, tunnel]) => [name, { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` }])),
     useOnly: held.keys.filter((key) => !Object.hasOwn(held.values, key)),
     mints: [],
   });
+}
+
+/**
+ * A workload's environment's UI routes, as its plan lists them: one `proxyItem` call with no name, as the workload, at
+ * the place its statement checked; a name code holds left out. A level a writer changed, or an item answered without
+ * its definition, is 503, as a handle's plan (`uiPlanItems`).
+ */
+async function uiRoutesOf(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<ProxyRoute[]> {
+  if (!proxy.editable || coffre.proxyItem === undefined) return [];
+  const found = await coffre.proxyItem(caller, { place: null, name: null });
+  const forged = (fault: string) => new CoffreError(503, 'unavailable', `${path}'s proxy definitions are not as the vault sealed them (${fault}): an Owner saves them again; until then no plan is given`, fault, '1');
+  if (found.fault !== null) throw forged(found.fault);
+  if (found.items === null || found.items.some((item) => item.definition === null)) throw forged('incomplete');
+  return found.items.flatMap(({ definition }) => (definition !== null && definition.kind === 'route' && !coded(proxy, definition.name) ? [definition] : []));
 }
 
 /**
@@ -1694,10 +1721,19 @@ function allowed(credential: Resolved, method: string, relative: string): Respon
 type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string; digest: string | null };
 
 async function carried(request: Request, credential: Resolved): Promise<Carried | Response> {
+  return carriedAs(request, credential.name, { field: credential.body.length > 0, sigv4: credential.sigv4 !== undefined });
+}
+
+/**
+ * `carried`, by what the credential does with a body: `field`, a form or JSON rule's, which fills a field of it;
+ * `sigv4`, whose `x-amz-content-sha256` binds it. A UI route's workload request, whose item comes after its proof,
+ * is carried by its headers alone (`sigv4` whatever it is, no field: the client's rule, `bodyLine`), and the decided
+ * item then takes it or refuses it (`uiCarried`).
+ */
+async function carriedAs(request: Request, name: string, { field, sigv4 }: { field: boolean; sigv4: boolean }): Promise<Carried | Response> {
   const declared = request.headers.get('content-length') ?? '';
   // A body whose field coffre fills is read whole, and small: it is parsed, and changed.
-  const field = credential.body.length > 0;
-  const amz = credential.sigv4 !== undefined && request.headers.has('x-amz-content-sha256');
+  const amz = sigv4 && request.headers.has('x-amz-content-sha256');
   let digest: string | null = null;
   try {
     digest = amz ? null : declaredDigest(request.headers.get('content-digest') ?? '');
@@ -1711,7 +1747,7 @@ async function carried(request: Request, credential: Resolved): Promise<Carried 
     return failure(413, `a body that declares its digest streams through the proxy up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes: send a larger one in parts`);
   }
   const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request, field ? MAX_FIELD_BODY : MAX_BODY_BYTES);
-  if (body === null && field) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
+  if (body === null && field) return failure(413, `${name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
   if (body === null) {
     return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB read whole; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
   }
@@ -1967,6 +2003,199 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
     const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
     return send(request, credential, { ...aimed, ...content, opened, headers, proxied, back: [], fields, secret, ...(payload === undefined ? {} : { payload }) });
   });
+}
+
+/**
+ * A UI route's request by a workload (T186 PR C2b; docs/design/proxy-ui.md, section 3, "Workloads"), or null when it
+ * is no workload's: a key-bound session's, or a Cloudflare service binding's call, at the environment the workload's
+ * statement checks. The URL is read as the workload's client writes it (`WorkloadAt.or`): `/use/<route>/…` at the one
+ * environment it reaches, `/use/<project>/<environment>/<route>/…` when it reaches several, or that one is
+ * `<project>/<environment>`. Its item comes after its proof, so in this order:
+ * - the body, carried by its headers alone, and its line in `req` from them (`carriedAs`: a declared `Content-Digest`
+ *   or `x-amz-content-sha256` streams, any other body is read whole);
+ * - the proof, the session's standing and the gate, whose counts are the route's limit: this isolate's copy of the
+ *   item, or, on a cold isolate, `coffre.proxyItem`'s, asked as the workload once its place is known (a refusal there
+ *   answered after the gate);
+ * - the copy's refusals (aim, allow list), provisional unless the copy is fresh, as a handle's are;
+ * - the use: the kept values, each with the item they were decided on, or the vault's one route use, as the workload;
+ * - every check again on the item the values were decided on, never the copy (`BoundToDefinition`): aim and allow
+ *   list, the `narrow` constraints on the URL its upstream makes, and whether it takes the body as it was carried
+ *   (`uiCarried`: else 503 `moved`, nothing sent); then the send, before the values' window ends.
+ *
+ *   market/prod's sidecar, GET /use/openai/v1/models, warm   statement + gate, no vault call: kept values, by their item
+ *   the same, cold                                          proxyItem (its limit), then one route use
+ *   the same, an Owner pointed openai elsewhere since       the new item's upstream, or 503 moved if it takes no such body
+ */
+async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy: Proxy, raw: readonly string[], place: readonly string[], url: URL): Promise<Response | null> {
+  const token = sessionToken(request);
+  if (token === null && !coffre.binding) return null;
+  const ui = (name: string | undefined): name is string => name !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name);
+  // The readings: route `<a>` at the one environment, or route `<c>` at `<a>/<b>` (`WorkloadAt.or`).
+  const placed = raw.length >= 3 && ui(place[2]) ? { place: `${place[0]}/${place[1]}`, credential: place[2]! } : null;
+  const at: Pick<WorkloadAt, 'place' | 'credential' | 'or'> | null = ui(place[0])
+    ? { place: null, credential: place[0]!, ...(placed === null ? {} : { or: placed }) }
+    : placed === null ? null : { place: placed.place, credential: placed.credential };
+  if (at === null) return null;
+  let through: Egress | undefined;
+  if (!proxy.insecure) {
+    if (coffre.publicFetch === undefined) return failure(503, 'this runtime has no fetch that checks where an upstream resolves, which a route saved in the Proxy tab is sent through', 'unavailable', '60');
+    through = { fetch: coffre.publicFetch };
+  }
+  // Its body, by its headers alone: the item that says how it goes is not known before the proof that binds it.
+  const content = await carriedAs(request, at.credential!, { field: false, sigv4: true });
+  if (content instanceof Response) return content;
+  const amz = content.digest === null ? request.headers.get('x-amz-content-sha256') : null;
+  const declared = content.digest ?? amz;
+  const length = content.streamed ? Number(content.declared) : (content.body?.byteLength ?? 0);
+  const declaring = declared === null || length === 0 ? null : content.digest !== null ? 'content-digest' : 'x-amz-content-sha256';
+  let body: string | undefined;
+  if (token !== null) {
+    body = await bodyLine({ declared, length, bytes: content.body ?? null });
+    if (amz !== null && length !== 0 && !content.streamed && body !== UNSIGNED_BODY && body !== (await bodyDigest(content.body!))) return failure(400, 'the body is not what its x-amz-content-sha256 says');
+  }
+  // The route's item, by this isolate's copy at the workload's place, or the vault's (`proxyItem`), as its counts need
+  // it: a refusal of the item answered once the gate has counted the request.
+  const now = Date.now();
+  let copy: { digest: string; definition: ProxyDefinition; fresh: boolean } | CoffreError | null = null;
+  // The vault's answer for the item, asked as the workload, kept as this isolate's copy (`CopyFromVault`).
+  let asked: (() => Promise<void>) | null = null;
+  const counts: PluginCounts = async ({ service, place: where, credential: name, item }) => {
+    if (where === null || name === null) return [];
+    const reading = `w\n${where}\n${name}`;
+    const last = proxy.ui.last.get(reading);
+    const held = last === undefined ? undefined : proxy.ui.items.get(last.digest);
+    const ask = async () => {
+      try {
+        const found = await item(name);
+        if (found.fault !== null) copy = new CoffreError(503, 'unavailable', `${name}: this environment's proxy definitions are not as the vault sealed them (${found.fault}): an Owner saves them again`, found.fault, '1');
+        else if (found.item === null || found.item.definition === null) copy = new CoffreError(404, 'not_found', `this instance has no credential ${JSON.stringify(name)} here: neither its deployment's code nor this environment's definitions name it`);
+        else {
+          const definition = itemOf(proxy, found.item)!;
+          remember(proxy.ui.last, reading, { digest: found.item.digest, confirmed: now });
+          copy = { digest: found.item.digest, definition, fresh: true };
+        }
+      } catch (error) {
+        if (!(error instanceof CoffreError)) throw error;
+        copy = error;
+      }
+    };
+    if (last !== undefined && held !== undefined) {
+      copy = { digest: last.digest, definition: held.definition, fresh: now - last.confirmed < proxy.cacheMs };
+      asked = ask;
+    } else {
+      await ask();
+    }
+    const found = copy as typeof copy;
+    return found === null || found instanceof CoffreError || found.definition.kind !== 'route' ? [] : routeCounts(name, found.definition, service);
+  };
+  const caller = await workloadOf(request, coffre, { ...at, ...(body === undefined ? {} : { body }), counts });
+  if (caller instanceof Response) {
+    // Refused by a limit a kept copy said: the vault's item now, for the next request, so that a limit an Owner raised
+    // since refuses one request more at most, never until its window ends (no use's answer would bring the new item).
+    if (caller.status === 429 && asked !== null && (await caller.clone().json().catch(() => ({})) as { reason?: string }).reason === 'limit') await (asked as () => Promise<void>)();
+    return caller;
+  }
+  // Its body read, it is no other caller's request now.
+  if (caller === null) return failure(401, "a workload's request carries its session, Authorization: DPoP, with its proof");
+  return answering(caller, async () => {
+    if (declaring !== null && caller.hdr !== null && !caller.hdr.includes(declaring)) {
+      return failure(400, `${declaring} says what binds the body, so the proof signs it: name it in hdr`);
+    }
+    if (caller.path === null || caller.place === null) return failure(409, 'the environment this session reaches is gone');
+    // The reading the checks took: the place's, when the statement found the workload at `<a>/<b>`.
+    const named = at.or !== undefined ? caller.path === at.or.place : at.place !== null;
+    const name = named ? placed!.credential : at.credential!;
+    const rest = raw.slice(named ? 3 : 1);
+    const found = copy as typeof copy;
+    if (found instanceof CoffreError) throw found;
+    const keptAt = `w\n${caller.credentialId}\n${caller.place}\n${name}`;
+    const nowAt = Date.now();
+    let kept = proxy.ui.kept.get(keptAt);
+    if (kept !== undefined && kept.until <= nowAt) {
+      proxy.ui.kept.delete(keptAt);
+      kept = undefined;
+    }
+    let sendBy: number;
+    if (kept === undefined) {
+      // No values kept: the copy's refusals before any use, standing when it is fresh (provisional otherwise: the use's
+      // answer decides). Kept values answer to their own item alone, never to a newer copy another session's use
+      // brought, which would hold the request to both versions' rules at once (P2, review r1 of #477).
+      if (found !== null && found.fresh) {
+        if (found.definition.kind !== 'route') return failure(404, unrouted(found.definition)!);
+        const read = uiCredential(proxy, found.digest, found.definition);
+        if (typeof read !== 'string') {
+          const aimed = aim(request, read, [...rest], url.search);
+          if (aimed instanceof Response) return aimed;
+        }
+      }
+      const used = await coffre.useRoute!(caller, { named: null, stable: name, digests: found === null ? [] : [found.digest], logged: { ui: true }, refuses: (item) => {
+        const definition = itemOf(proxy, item);
+        return definition === null ? null : unrouted(definition);
+      } });
+      const definition = itemOf(proxy, used.item);
+      if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+      remember(proxy.ui.last, `w\n${caller.place}\n${name}`, { digest: used.item.digest, confirmed: nowAt });
+      kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: 'stable', path: used.environment.path, until: Math.min(nowAt + proxy.cacheMs, Date.parse(used.expiresAt)) };
+      if (proxy.cacheMs > 0) remember(proxy.ui.kept, keptAt, kept);
+      sendBy = Math.min(nowAt + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
+    } else {
+      sendBy = kept.until;
+    }
+    if (kept.definition.kind !== 'route') return failure(404, unrouted(kept.definition)!);
+    // From here on, the item the values were decided on, never the copy.
+    const credential = uiCredential(proxy, kept.digest, kept.definition);
+    if (typeof credential === 'string') return failure(503, credential, 'unavailable', '1');
+    const aimed = aim(request, credential, [...rest], url.search);
+    if (aimed instanceof Response) return aimed;
+    const carrying = await uiCarried(request, credential, content, declared);
+    if (carrying instanceof Response) {
+      if (carrying.status === 503) proxy.ui.kept.delete(keptAt);
+      return carrying;
+    }
+    const fields = credential.body.length > 0 ? fieldsIn(request, carrying.body, credential.name, credential.body) : null;
+    if (fields instanceof Response) return fields;
+    if (!constraintsAllow(caller.constraints, { place: caller.path, credential: name, request: { method: request.method, url: aimed.target } })) {
+      return failure(403, `this narrowed session may not ${request.method} ${aimed.relative} through ${name}`, 'narrowed');
+    }
+    const headers = new Headers();
+    for (const [header, value] of request.headers) if ((caller.hdr === null || caller.hdr.includes(header)) && sent(header)) headers.set(header, value);
+    const proxied = `${coffre.publicUrl}/use/${named ? `${caller.path}/` : ''}${name}`;
+    const secret = token === null ? null : { pattern: new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), length: token.length, what: 'the session token' };
+    const payload = body === undefined || credential.sigv4 === undefined ? undefined : body === UNSIGNED_BODY ? 'UNSIGNED-PAYLOAD' : body;
+    return send(request, credential, {
+      ...aimed, ...carrying, opened: { values: kept.values, plain: kept.plain }, headers, proxied, back: [], fields, secret,
+      ...(payload === undefined ? {} : { payload }), ...(through === undefined ? {} : { through }), sendBy,
+    });
+  });
+}
+
+/**
+ * A UI workload request's body as its headers carried it (`carriedAs`), as the decided item takes it: a hash declared
+ * in `x-amz-content-sha256` binds it only through a `sigv4` item (another was decided on another copy: 503 `moved`,
+ * nothing sent); a form or JSON item fills a field of a body read whole, 64 KiB at most, so a streamed one is read
+ * whole now and still held to the digest the proof bound (docs/design/proxy-ui.md, section 3, "What is read before
+ * the answer").
+ */
+async function uiCarried(request: Request, credential: Resolved, content: Carried, declared: string | null): Promise<Carried | Response> {
+  if (declared !== null && content.digest === null && credential.sigv4 === undefined) {
+    return failure(503, `${credential.name} no longer signs with sigv4(), which this request's x-amz-content-sha256 is for: send it again`, 'moved', '1');
+  }
+  if (credential.body.length === 0) return content;
+  if (!content.streamed) {
+    if ((content.body?.byteLength ?? 0) > MAX_FIELD_BODY) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
+    return content;
+  }
+  const whole = await boundedBody(request, MAX_FIELD_BODY);
+  if (whole === null) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
+  if ((whole?.byteLength ?? 0) !== Number(content.declared) || (await bodyDigest(whole ?? new Uint8Array(0))) !== declared) return failure(400, 'the body is not what its digest says');
+  return { body: whole, streamed: false, declared: String(whole?.byteLength ?? 0), digest: content.digest };
+}
+
+/** A UI route's limit as the gate counts it, under the names code's limit takes (`countsOf`). */
+function routeCounts(name: string, route: ProxyRoute, service: string): readonly GateCount[] {
+  const limit: Limit = { ...(route.limit.perMinute === null ? {} : { perMinute: route.limit.perMinute }), ...(route.limit.perDay === null ? {} : { perDay: route.limit.perDay }) };
+  const made = countsOf(name, limit).counts;
+  return made === undefined ? [] : typeof made === 'function' ? [] : made;
 }
 
 /** What a workload's request answers, a refusal of coffre's included, with the gate's newest nonce on it. */
@@ -3087,7 +3316,7 @@ function countsOf(name: string, limit: Limits | undefined): Pick<WorkloadAt, 'co
       ...(checked.perDay === undefined ? [] : [{ key: `${name} per day`, windowMs: 86_400_000, most: checked.perDay }]),
     ];
   };
-  return { counts: typeof limit === 'function' ? (service: string) => counts(limit(service)) : counts(limit) };
+  return { counts: typeof limit === 'function' ? ({ service }) => counts(limit(service)) : counts(limit) };
 }
 
 /** A limit as configured, or as its function gave it for a service: whole numbers of uses, at least 1, or none. */
