@@ -608,6 +608,16 @@ test('sign and presign take a workload, its proof signing what is asked; the pla
   const presigned = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 's3', path: '/bucket/report.pdf', expiresIn: 60 } }) });
   assert.equal(presigned.status, 200, JSON.stringify(presigned.body));
   assert.match(presigned.body.url as string, /X-Amz-Credential=AKIAREAL0123456789AB/);
+  // The session's token in none of a URL, which is for sharing: in its query, or its path, as it is, escaped, or escaped twice (review r1 of #480).
+  for (const presign of [
+    { path: '/bucket/report.pdf', query: { trace: held.token } },
+    { path: `/bucket/${held.token}` },
+    { path: `/bucket/${held.token.replaceAll('_', '%5F')}` },
+    { path: `/bucket/${held.token.replaceAll('_', '%255F')}` },
+  ]) {
+    const carried = await use(held, 'POST', '/use/market/prod', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ presign: { credential: 's3', expiresIn: 60, ...presign } }) });
+    assert.deepEqual([carried.status, carried.body.message], [400, 'the session token goes in no presigned URL'], JSON.stringify(presign));
+  }
   const plan = await use(held, 'GET', '/use/market/prod');
   assert.equal(plan.status, 200, JSON.stringify(plan.body));
   assert.equal(plan.body.environment, 'market/prod');

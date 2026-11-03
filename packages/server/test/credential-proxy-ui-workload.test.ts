@@ -485,6 +485,16 @@ test("a workload signs, verifies and presigns with items saved in the UI: the si
   assert.match(made.searchParams.get('X-Amz-Credential')!, new RegExp(`^${AWS_ID}/`));
   assert.ok(!made.href.includes(AWS_SECRET) && !made.href.includes(held.token));
   assert.equal((await compute(held, { presign: { credential: 's3', path: '/other/report.csv' } })).status, 403);
+  // Nor in any URL it asks for: its token in the query, or the path, as it is, escaped, or escaped twice, is 400, nothing signed (review r1 of #480).
+  for (const presign of [
+    { path: '/bucket/report.csv', query: { trace: held.token } },
+    { path: `/bucket/${held.token}` },
+    { path: `/bucket/${held.token.replaceAll('_', '%5F')}` },
+    { path: `/bucket/${held.token.replaceAll('_', '%255F')}` },
+  ]) {
+    const carried = await compute(held, { presign: { credential: 's3', expiresIn: 60, ...presign } });
+    assert.deepEqual([carried.status, carried.body.message], [400, 'the session token goes in no presigned URL'], JSON.stringify(presign));
+  }
   // Kinds: a verifier signs nothing; a name nothing defines is 404, after the proof.
   assert.equal((await compute(held, { sign: { credential: 'inbound', message } })).status, 404);
   assert.equal((await compute(held, { sign: { credential: 'nothing', message } })).status, 404);

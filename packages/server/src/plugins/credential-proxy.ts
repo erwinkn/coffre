@@ -1505,7 +1505,7 @@ async function compute(request: Request, coffre: PluginContext, proxy: Proxy, pa
   if (operation === 'presign' && !(credential?.rules.length === 1 && credential.sigv4 !== undefined)) return failure(404, 'presign names a credential of this instance\'s that signs with sigv4() alone');
   const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), ...countsOf(name, (signer ?? credential!).limit) });
   if (caller instanceof Response) return caller;
-  const run = (who: User, at: string) => (!serves((signer ?? credential)!, at) ? notServed(name, at) : operation === 'presign' ? presign(coffre, proxy, at, who, credential!, given) : operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : verify(coffre, proxy, at, who, name, signer as Hmac, given));
+  const run = (who: User, at: string) => (!serves((signer ?? credential)!, at) ? notServed(name, at) : operation === 'presign' ? presign(coffre, proxy, at, who, credential!, given, sessionToken(request)) : operation === 'sign' ? sign(coffre, proxy, at, who, name, signer!, given) : verify(coffre, proxy, at, who, name, signer as Hmac, given));
   if (caller !== null) return answering(caller, async () => (caller.path === null ? failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone') : run(caller, caller.path)));
   if (path === null) return failure(405, 'GET only: a handle names its environment, POST /use/<project>/<environment>');
   const handle = bearer(request);
@@ -1525,6 +1525,8 @@ type Computing = {
   kept: string;
   reading: string;
   asked: Pick<RouteAsked, 'named' | 'stable'>;
+  /** The session token the request carries, which no presigned URL may hold; null for a handle's or a binding's request. */
+  token: string | null;
 };
 
 /**
@@ -1551,7 +1553,7 @@ async function uiCompute(request: Request, coffre: PluginContext, proxy: Proxy, 
       if (caller.path === null || caller.place === null) return failure(409, 'name the environment, POST /use/<project>/<environment>: this session reaches none, or several, or one gone');
       const copy = item.copy();
       if (copy instanceof CoffreError) throw copy;
-      const computing = { who: caller, at: caller.path, kept: `w\n${caller.credentialId}\n${caller.place}\n${name}`, reading: `w\n${caller.place}\n${name}`, asked: { named: null, stable: name } };
+      const computing = { who: caller, at: caller.path, kept: `w\n${caller.credentialId}\n${caller.place}\n${name}`, reading: `w\n${caller.place}\n${name}`, asked: { named: null, stable: name }, token: sessionToken(request) };
       return uiMade(coffre, proxy, computing, operation, name, given, copy);
     });
   }
@@ -1568,7 +1570,7 @@ async function uiCompute(request: Request, coffre: PluginContext, proxy: Proxy, 
   const vouched = known !== undefined && known.until > now && (known.paths ?? []).includes(path);
   const copy = last === undefined || held === undefined ? null : { digest: last.digest, definition: held.definition, fresh: vouched && now - last.confirmed < proxy.cacheMs };
   const named = { path, route: name };
-  return uiMade(coffre, proxy, { who: handle, at: path, kept: keptAt(handle, { named }), reading, asked: { named, stable: null } }, operation, name, given, copy);
+  return uiMade(coffre, proxy, { who: handle, at: path, kept: keptAt(handle, { named }), reading, asked: { named, stable: null }, token: null }, operation, name, given, copy);
 }
 
 /** Whether an item is of a kind `operation` takes: a signer signs, an HMAC (a verifier's, or a signer's) verifies, a route presigns. */
@@ -1635,7 +1637,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
       const refused = unfit(kept.definition, operation, bytes);
       if (refused !== null) throw refused;
       const hmac = hmacOf(kept.definition);
-      if (hmac !== null) return hmacMade(kept.path, name, hmac, kept.values, operation, message, given.signature);
+      if (hmac !== null) return hmacMade(kept.path, name, hmac, kept.values, operation, message, given.signature, kept.until);
     }
   }
   // A fresh copy's refusals stand; a copy it admitted makes the decided item's refusal a move.
@@ -1646,7 +1648,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
     if (asked !== null) {
       const resolved = uiCredential(proxy, copy.digest, copy.definition as ProxyRoute);
       if (typeof resolved !== 'string') {
-        const aimed = presignTarget(resolved, asked);
+        const aimed = presignTarget(resolved, asked, computing.token);
         if (aimed instanceof Response) return aimed;
       }
     }
@@ -1674,11 +1676,14 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   } });
   const definition = itemOf(proxy, used.item);
   if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+  // What is made with values decided now answers within the use's window, as a route's request is sent in it
+  // (`WithinWindow`): a signature made later, a slow key's or a stalled isolate's, answers 503 `late` (review r1 of #480).
+  const answerBy = Math.min(now + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
   // Refused before its use opened anything (`refuses`): the item takes the request.
   if (definition.kind === 'route') {
     const resolved = uiCredential(proxy, used.item.digest, definition);
     if (typeof resolved === 'string') return failure(503, resolved, 'unavailable', '1');
-    const aimed = presignTarget(resolved, asked!);
+    const aimed = presignTarget(resolved, asked!, computing.token);
     if (aimed instanceof Response) {
       if (admitted !== null && admitted !== used.item.digest) throw movedItem(name);
       return aimed;
@@ -1687,13 +1692,14 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
       return failure(403, `this narrowed session may not presign ${asked!.method} ${aimed.relative} through ${name}`, 'narrowed');
     }
     if (resolved.keys.some((key) => !Object.hasOwn(used.values, key))) return failure(409, `${used.environment.path} holds no key ${name} signs with`);
-    return presigned(resolved.sigv4!, asked!, aimed.target, used.values, used.expiresAt, who, name);
+    return presigned(resolved.sigv4!, asked!, aimed.target, used.values, used.expiresAt, who, name, answerBy);
   }
   if (definition.kind === 'signer' && definition.signer.kind === 'private-key') {
     const pem = used.values[definition.signer.key];
     if (pem === undefined) return failure(409, `${used.environment.path} holds no ${definition.signer.key}, which ${name} signs with`);
     try {
-      return answer({ signature: base64url(await signWith(pem, message!)) });
+      const signature = base64url(await signWith(pem, message!));
+      return Date.now() > answerBy ? lateMade(name) : answer({ signature });
     } catch (error) {
       // What is wrong with the key is said, never the key: neither the platform's error nor its message goes anywhere.
       return failure(409, `${used.environment.path}'s ${definition.signer.key} ${error instanceof SigningKeyError ? error.message : 'signs nothing'}`);
@@ -1703,18 +1709,21 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   if (proxy.cacheMs > 0) {
     remember(proxy.ui.kept, computing.kept, { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
   }
-  return hmacMade(used.environment.path, name, hmac, used.values, operation, message!, given.signature);
+  return hmacMade(used.environment.path, name, hmac, used.values, operation, message!, given.signature, answerBy);
 }
 
-/** An HMAC's sign or check with its values, by `hmac`, the item they were decided on. */
-async function hmacMade(path: string, name: string, hmac: ProxyHmac, values: Record<string, string>, operation: Operation, message: Uint8Array<ArrayBuffer>, signature: unknown): Promise<Response> {
+/** 503 `late`: what a UI item made was ready after its values' window closed, and goes nowhere (`WithinWindow`). */
+const lateMade = (name: string) => failure(503, `${name}: what it made was ready after its values may be used; send it again`, 'late', '1');
+
+/** An HMAC's sign or check with its values, by `hmac`, the item they were decided on, answered by `answerBy` or 503 `late`. */
+async function hmacMade(path: string, name: string, hmac: ProxyHmac, values: Record<string, string>, operation: Operation, message: Uint8Array<ArrayBuffer>, signature: unknown, answerBy: number): Promise<Response> {
   const secret = values[hmac.key];
   if (secret === undefined) return failure(409, `${path} holds no ${hmac.key}, which ${name} ${operation === 'sign' ? 'signs' : 'checks'} with`);
   // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
   if (secret === '') return failure(409, `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
   const scheme = { encoding: hmac.encoding, prefix: hmac.prefix };
-  if (operation === 'sign') return answer({ signature: await hmacSign(secret, message, scheme) });
-  return answer({ valid: await hmacVerify(secret, message, signature as string, scheme) });
+  const made = operation === 'sign' ? { signature: await hmacSign(secret, message, scheme) } : { valid: await hmacVerify(secret, message, signature as string, scheme) };
+  return Date.now() > answerBy ? lateMade(name) : answer(made);
 }
 
 /**
@@ -1800,7 +1809,7 @@ async function hmacSecret(coffre: PluginContext, proxy: Proxy, path: string, who
  * lasts, never served from the cache. A narrowed session's methods and
  * paths are held to the presigned request's.
  */
-async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, credential: Resolved, given: PresignGiven): Promise<Response> {
+async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: User, credential: Resolved, given: PresignGiven, token: string | null): Promise<Response> {
   const inject = credential.sigv4!;
   const method = given.method ?? 'GET';
   if (method !== 'GET' && method !== 'HEAD') return failure(400, 'a presigned URL is for GET or HEAD: an upload goes through the proxy');
@@ -1811,7 +1820,7 @@ async function presign(coffre: PluginContext, proxy: Proxy, path: string, who: U
   }
   const asked = presignAsked(given);
   if (asked instanceof Response) return asked;
-  const aimed = presignTarget(credential, asked);
+  const aimed = presignTarget(credential, asked, token);
   if (aimed instanceof Response) return aimed;
   const { target, relative } = aimed;
   if (typeof who !== 'string' && !constraintsAllow(who.constraints, { place: path, credential: credential.name, request: { method, url: target } })) {
@@ -1849,9 +1858,10 @@ function presignAsked(given: PresignGiven): PresignAsked | Response {
 
 /**
  * The URL a presign signs, under `credential`'s upstream, or the refusal: its allow list, as for a request through it,
- * and the handle in none of it. A UI route's is built again from the item the use decided on, before anything is signed.
+ * and neither a handle nor the request's session `token` in any of it. A UI route's is built again from the item the
+ * use decided on, before anything is signed.
  */
-function presignTarget(credential: Resolved, asked: PresignAsked): { target: URL; relative: string } | Response {
+function presignTarget(credential: Resolved, asked: PresignAsked, token: string | null): { target: URL; relative: string } | Response {
   const target = new URL(`${credential.base.href.replace(/\/$/, '')}/${asked.segments.join('/')}`);
   for (const [name, value] of Object.entries(asked.query)) target.searchParams.set(name, value);
   const under = credential.base.pathname.replace(/\/$/, '');
@@ -1862,13 +1872,30 @@ function presignTarget(credential: Resolved, asked: PresignAsked): { target: URL
   // Its allow list, as for a request through it: the URL is one.
   const refused = allowed(credential, asked.method, relative);
   if (refused !== null) return refused;
-  // A URL is for sharing: the handle goes in none, its path or its query, encoded or not.
-  if (HANDLE.test(bytesOf(target.href)) || HANDLE.test(target.href)) return failure(400, 'the handle goes in no presigned URL');
+  // A URL is for sharing: neither the handle nor the session's token goes in it, its path or its query, as it is or
+  // decoded however often a server behind may decode it (review r1 of #480: `query: { trace: <token> }`).
+  const readings = decodings(target.href);
+  if (readings.some((text) => HANDLE.test(text))) return failure(400, 'the handle goes in no presigned URL');
+  if (token !== null && readings.some((text) => text.includes(token))) return failure(400, 'the session token goes in no presigned URL');
   return { target, relative };
 }
 
-/** The presigned URL, signed with `values` for at most what was asked, and never past the handle's or the session's own end. */
-async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, values: Record<string, string>, expiresAt: string, who: User, name: string): Promise<Response> {
+/** A URL as it is, then decoded as often as it changes, `climbs`'s 8 times at most: each reading a server behind may see. */
+function decodings(href: string): string[] {
+  const readings = [href];
+  for (let depth = 0; depth < 8; depth += 1) {
+    const next = bytesOf(readings.at(-1)!);
+    if (next === readings.at(-1)) break;
+    readings.push(next);
+  }
+  return readings;
+}
+
+/**
+ * The presigned URL, signed with `values` for at most what was asked, and never past the handle's or the session's own
+ * end; a UI route's answered by `answerBy`, its values' window, or 503 `late`.
+ */
+async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, values: Record<string, string>, expiresAt: string, who: User, name: string, answerBy?: number): Promise<Response> {
   const lasts = Math.min(asked.expiresIn, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000));
   if (lasts < 1) return failure(401, typeof who === 'string' ? 'the handle ends now: run the app with `coffre run` again' : 'the session ends now: renew it');
   let url: URL;
@@ -1881,6 +1908,7 @@ async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, va
   } catch {
     return failure(409, `${name}'s values sign no URL`);
   }
+  if (answerBy !== undefined && Date.now() > answerBy) return lateMade(name);
   return answer({ url: url.href, expiresAt: new Date(Date.now() + lasts * 1000).toISOString() });
 }
 

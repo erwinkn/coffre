@@ -933,6 +933,16 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
   const other = await handle();
   assert.equal((await compute(other, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
   assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `sha256=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  // A kept item's kind holds as a copy's does: the verifier's values, kept by the verify above, sign nothing; a route's,
+  // kept by a request through it, sign nothing either, and it is sent nothing (review r1 of #480).
+  assert.equal((await compute(token, { sign: { credential: 'inbound', message: 'aGk' } })).status, 404);
+  await countingUses(async (uses) => {
+    assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
+    const sent = reached.length;
+    assert.equal((await compute(token, { sign: { credential: 'openai', message: 'aGk' } })).status, 404);
+    assert.equal((await compute(token, { verify: { credential: 'openai', message: 'aGk', signature: 'x' } })).status, 404);
+    assert.deepEqual([uses(), reached.length], [1, sent], 'the route kept: refused with no use, nothing sent');
+  });
   // An isolate that keeps nothing: decided on the newest version.
   deploy(proxyOf({ cacheSeconds: 0 }));
   assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
@@ -1000,5 +1010,73 @@ test("a presign of a route saved in the UI: built and checked again on the decid
     const reinjected = await other('/bucket/report.csv');
     assert.deepEqual([reinjected.status, reinjected.body.reason], [503, 'moved'], JSON.stringify(reinjected.body));
     assert.equal((await other('/bucket/report.csv')).status, 400);
+  });
+});
+
+test("what a UI item makes answers within its values' window: a signature, a check or a URL made after the use's deadline, or after kept values lapse, is 503 late (review r1 of #480)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  const { privateKey } = generateKeyPairSync('ed25519');
+  await root.secrets.set('market/dev', { DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), HOOK_SECRET: 'whsec-0123456789abcdef', AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
+  await save({
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'DFNS_PEM' }, limit: NO_LIMIT },
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    s3: {
+      kind: 'route', name: 's3', upstream: 'https://s3.eu-west-3.example.test/files',
+      inject: [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }],
+      allow: null, limit: NO_LIMIT, placeholder: null, egress: null,
+    },
+  });
+  const token = await handle();
+  const message = b64('transfer 10');
+  // WebCrypto slowed past the window, for the calls `slow` picks: a private key's signature, an HMAC's, its check, SigV4's last HMAC.
+  const slowly = async (slow: (algorithm: unknown, data: BufferSource) => boolean, by: number, ask: Record<string, unknown>) => {
+    const real = { sign: crypto.subtle.sign.bind(crypto.subtle), verify: crypto.subtle.verify.bind(crypto.subtle) };
+    let slowed = 0;
+    const pause = async (algorithm: unknown, data: BufferSource) => {
+      if (slow(algorithm, data)) {
+        slowed += 1;
+        await new Promise((resolve) => setTimeout(resolve, by));
+      }
+    };
+    crypto.subtle.sign = (async (algorithm: AlgorithmIdentifier, key: CryptoKey, data: BufferSource) => {
+      await pause(algorithm, data);
+      return real.sign(algorithm, key, data);
+    }) as typeof crypto.subtle.sign;
+    crypto.subtle.verify = (async (algorithm: AlgorithmIdentifier, key: CryptoKey, signature: BufferSource, data: BufferSource) => {
+      await pause(algorithm, data);
+      return real.verify(algorithm, key, signature, data);
+    }) as typeof crypto.subtle.verify;
+    try {
+      const made = await compute(token, ask);
+      assert.ok(slowed >= 1, `${JSON.stringify(ask)}: nothing slowed`);
+      return made;
+    } finally {
+      crypto.subtle.sign = real.sign;
+      crypto.subtle.verify = real.verify;
+    }
+  };
+  const named = (name: string) => (algorithm: unknown) => (typeof algorithm === 'string' ? algorithm : (algorithm as { name: string }).name) === name;
+  const signing = (data: BufferSource) => new TextDecoder().decode(data as Uint8Array).startsWith('AWS4-HMAC-SHA256\n');
+  const asks: [string, (algorithm: unknown, data: BufferSource) => boolean, Record<string, unknown>][] = [
+    ['a private key', named('Ed25519'), { sign: { credential: 'dfns', message } }],
+    ['an HMAC sign', named('HMAC'), { sign: { credential: 'hooks', message } }],
+    ['an HMAC check', named('HMAC'), { verify: { credential: 'hooks', message, signature: '0'.repeat(64) } }],
+    ['a presign', (algorithm, data) => named('HMAC')(algorithm) && signing(data), { presign: { credential: 's3', path: '/bucket/report.csv', expiresIn: 60 } }],
+  ];
+  for (const [what, slow, ask] of asks) {
+    const late = await slowly(slow, USE_DEADLINE_MS + 500, ask);
+    assert.deepEqual([late.status, late.body.reason, late.retryAfter], [503, 'late', '1'], `${what}: ${JSON.stringify(late.body)}`);
+    assert.equal(late.body.signature ?? late.body.valid ?? late.body.url, undefined, what);
+    // In time, the same ask is made.
+    assert.equal((await compute(token, ask)).status, 200, what);
+  }
+  // Kept values answer by when they lapse: kept for a second, an HMAC made 1.5 s later is late, its values unused.
+  deploy(proxyOf({ cacheSeconds: 1 }));
+  const kept = { sign: { credential: 'hooks', message } };
+  assert.equal((await compute(token, kept)).status, 200);
+  await countingUses(async (uses) => {
+    const late = await slowly(named('HMAC'), 1_500, kept);
+    assert.deepEqual([late.status, late.body.reason], [503, 'late'], JSON.stringify(late.body));
+    assert.equal(uses(), 0, 'made with the kept values, no use');
   });
 });

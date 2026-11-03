@@ -45,7 +45,11 @@
   item, as a UI route's is: on a cold isolate, one `proxyItem` call
   before the gate. An HMAC saved in the UI may take messages up to its
   `maxBytes`, 1 MiB at most, so an editable proxy reads a compute body
-  up to that.
+  up to that. What a UI item makes answers within its values' window: a
+  signature, check or URL ready after the use's deadline, or after kept
+  values lapse, is 503 `late`. No presigned URL, code's or the UI's, may
+  carry the session token of the workload that asks for it, in its path
+  or query, escaped or not (400), as none could carry a handle.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart

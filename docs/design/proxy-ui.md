@@ -1996,6 +1996,18 @@ open:
   entry carrying its item, whose `encoding`, `prefix` and `maxBytes` a
   kept sign takes, never a newer copy's. A private key's signature and a
   presigned URL are a use each, never kept, as code's are.
+- **The window** (`WithinWindow`, review r1 of #480). What a UI item
+  makes is answered by when its values may be used, as a route's request
+  is sent by then: values decided now, within the use's deadline
+  (`USE_DEADLINE_MS`, or `cacheSeconds` if longer, and never past the
+  caller's end); kept values, until they lapse. A signature, a check or a
+  URL ready later, a slow private key's or a stalled isolate's, is 503
+  `late` (`Retry-After: 1`) and goes nowhere.
+- **No token in a URL.** A presigned URL is for sharing, so neither a
+  handle nor the request's own session token may be in it: its path or
+  its query, as it is or decoded as often as it changes (8 times at
+  most), is 400 before anything is signed (review r1 of #480). This holds
+  for code's presign too, which checked the handle alone.
 - **The log.** `RouteAsked.logged` may be a function of the decided
   item: a presign's entry names the decided route's host, never the
   copy's; a private key's sign names the message's SHA-256. Both are the
