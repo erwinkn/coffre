@@ -1384,6 +1384,16 @@ the answer came.
 | The group's watchdog and first check count from when the admission started, not from when its answer came (`watch`'s `admitted`, `AdmitClock`) | the vault decides the old item, the Owner saves it anew, the answer comes three ticks later and the group's clock starts then: the session is still open R + D after the edit (`EditEndsWithinBound`) | `credential-proxy-ui-tunnel.test.ts`, an admission answered late, checked at once; and its watchdog, its first check stalled |
 | An admission answered a whole R + D after it started lets nothing in (`uiDialled`, 503 `late`, `LateAdmitRefused`) | the same, its answer R + D + 2 ticks after its start: a session opens on an item saved anew longer ago than the bound (`EditEndsWithinBound`) | `credential-proxy-ui-tunnel.test.ts`, an admission answered after its whole bound |
 
+Those two admission rows are a UI tunnel's (`uiTunnel`). A code tunnel
+keeps the clock it had before C2b3: its group's watchdog and first check
+count from when the group is made, and an admission answered late is let
+in all the same, as a pool's 32 connections taking turns at a short
+`recheckSeconds` need (`credential-proxy-tunnel-workers.test.ts`). For
+code tunnels the model's guarantee is the one for a group already
+started, an admission whose read and answer share a tick; a revocation
+between a slow admission's read and its answer may outlast R + D by
+that delay.
+
 `StandingStaysOpen` holds for an admission answered within R of its start:
 one answered later is checked at once, and the watchdog, armed from the
 admission, may end the session before that check answers, as it would a

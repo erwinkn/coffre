@@ -19,7 +19,11 @@
 (* the item at some tick, and whose answer may come any time after (review *)
 (* r1 of #485). The group's clock starts from when the admission started,  *)
 (* not from when its answer came, and an answer that came a whole Bound    *)
-(* after its start lets nothing in.                                        *)
+(* after its start lets nothing in. That is a UI tunnel's admission only   *)
+(* (`uiTunnel`). A code tunnel's group keeps main's clock, from when it is *)
+(* made, and lets a slow admission in, as a pool's burst needs: for it,    *)
+(* the bound holds from the group's start, the case with AdmitRead and     *)
+(* AdmitAnswer at the same tick.                                           *)
 (***************************************************************************)
 EXTENDS Naturals
 

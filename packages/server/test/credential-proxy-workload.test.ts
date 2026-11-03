@@ -99,15 +99,15 @@ function proxy(options: { recheckSeconds?: number } = {}) {
   });
 }
 
-function makeRuntime(options: { recheckSeconds?: number; plugins?: ReturnType<typeof checkPlugins> } = {}): CoffreRuntime {
+function makeRuntime(options: { recheckSeconds?: number; plugins?: ReturnType<typeof checkPlugins>; vault?: FixtureDeps['vault'] } = {}): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN,
-    vault: deps.vault,
+    vault: options.vault ?? deps.vault,
     auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }), alert: (alert) => void alerts.push(alert) } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: options.plugins ?? checkPlugins([proxy(options)]),
   });
-  return createRuntime(config, deps.db, deps.vault, transport, (promise) => void background.push(promise), gates);
+  return createRuntime(config, deps.db, options.vault ?? deps.vault, transport, (promise) => void background.push(promise), gates);
 }
 
 before(async () => {
@@ -667,6 +667,55 @@ test("a Cloudflare call is its binding's: every header the calling Worker set go
   assert.equal(sent.status, 200, JSON.stringify(sent.body));
   assert.equal(reached[0]!.headers['x-trace'], 't-1');
   assert.equal(reached[0]!.headers.authorization, `Bearer ${STRIPE_KEY}`);
+});
+
+test("a code workload tunnel's admission answered after a whole bound is let in, and lasts: its clock starts at the group, as a handle's (#485)", { timeout: 30_000 }, async () => {
+  // recheckSeconds 1.5: a bound of 1.5 s. While `holding`, every vault call answers 1.6 s late, so the admission is
+  // answered past the bound however its clock is counted: a refusal as a UI tunnel's (`late`) fails here. A watchdog
+  // armed from the admission's start alone would not: the arming recheck it runs at once answers before it fires.
+  let holding = false;
+  let held = 0;
+  const vault = new Proxy(deps.vault, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== 'function') return value;
+      return async (...args: unknown[]) => {
+        const answer = await value.apply(target, args);
+        if (holding) {
+          held += 1;
+          await sleep(1600);
+        }
+        return answer;
+      };
+    },
+  });
+  runtime = makeRuntime({ recheckSeconds: 1.5, vault });
+  await bind();
+  const who = await session();
+  const server = createServer((_, response) => response.writeHead(404).end());
+  server.on('upgrade', (request, socket, head) => void upgrade(runtime, request, socket, head));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  try {
+    const url = `${ORIGIN}/use/market/prod/db`;
+    const proof = await createProof(who.key, { method: 'GET', url, token: who.token, nonce: await gates(MEMBER).nonce() });
+    holding = true;
+    const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/use/market/prod/db`, { headers: { authorization: `DPoP ${who.token}`, dpop: proof } });
+    const [event] = (await Promise.race([once(ws, 'open').then(() => ['open']), once(ws, 'unexpected-response').then(() => ['refused'])])) as [string];
+    holding = false;
+    assert.equal(event, 'open', 'let in');
+    assert.ok(held >= 1, 'the admission was held');
+    // Past another bound and more, its rechecks answering in time: still open.
+    await sleep(2500);
+    assert.equal(ws.readyState, WebSocket.OPEN, 'still open past a bound');
+    ws.close();
+  } finally {
+    holding = false;
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await sleep(1000);
+    await Promise.all(background);
+  }
 });
 
 test('a workload tunnel ends within one recheck of a freeze, and stands while nothing changes', { timeout: 30_000 }, async () => {
