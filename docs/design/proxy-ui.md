@@ -2114,9 +2114,17 @@ open:
   group was made: an answer that came after a recheck's interval is
   checked again at once. One that came after the whole bound (R + D for a
   handle) lets nothing in, 503 `late`, and the client asks again, by the
-  new item. Code's tunnels take the same clock, and the same refusal:
-  a workload's from before its session's statement, a handle's from
-  before its use (review of #485 by Fable).
+  new item. Code's tunnels keep the clock they had, from when the group
+  is made, and no such refusal: a pool's 32 connections opened at once
+  take turns at their admission, and with `recheckSeconds: 1` the last is
+  answered some 16 s after it asked, which must still be let in
+  (`credential-proxy-tunnel-workers.test.ts`). Fable's review of #485
+  suggested the UI's clock for them, which would refuse those, so C2b3
+  changes no code tunnel's. A UI tunnel pays for its bound under such a
+  burst: a handle's admission, which may take 45 s at most
+  (`ADMISSION_MS`), is late only below the default `recheckSeconds`, but
+  a workload's bound is 15 s, so a workload admission answered later is
+  refused 503 `late` and asks again.
 - **The copy it claims is the copy it holds** (review r1 of #485). The
   open tells the vault the digest it holds a definition for only when it
   does: its copies of definitions (`ui.items`) and of which digest each

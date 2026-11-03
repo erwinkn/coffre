@@ -494,9 +494,11 @@ test('a check the vault never answers is a no, by its deadline: the sessions do 
   }
 });
 
-test("an admission whose opening answered after its whole bound lets nothing in, and the next is let in (review of #485 by Fable)", postgresOnly, async () => {
-  // recheckSeconds 0.2: a bound of 400 ms, from when the admission started. The vault opens the URL, and its answer
-  // comes 600 ms on, as a slow vault or event loop would bring it: the grant may have been lost meanwhile.
+test("a code tunnel's admission answered after a whole bound is let in, and its session lasts: its clock starts at the group, as a pool's burst needs (#485)", postgresOnly, async () => {
+  // recheckSeconds 0.2: a bound of 400 ms. The vault opens the URL, and its answer comes 600 ms on, as a burst of a
+  // pool's connections taking turns brings it (credential-proxy-tunnel-workers.test.ts holds 16 s and 20 s of it). A
+  // UI tunnel's admission is refused past its bound instead (credential-proxy-ui-tunnel.test.ts); a code tunnel's is
+  // let in, and its group's clock starts when it is made: armed from the admission's start, it would end at once.
   const open = opens();
   let held = 0;
   openWith(async (...args) => {
@@ -504,16 +506,17 @@ test("an admission whose opening answered after its whole bound lets nothing in,
     if (held++ === 0) await new Promise((resolve) => setTimeout(resolve, 600));
     return opened;
   });
+  const client = appClientOf();
   try {
-    assert.deepEqual(await upgradeRefusal(), { status: 503, message: 'db: its use answered too late to dial by; ask again' });
+    assert.deepEqual([...(await client.unsafe('SELECT 1 AS one'))], [{ one: 1 }]);
     assert.ok(held >= 1, 'the admission was held');
+    // Past a whole bound since the session began, its rechecks answering in time: still open.
+    assert.equal(await endsWithin(client, 700), false, 'the session lasts past a bound');
+    assert.deepEqual([...(await client.unsafe('SELECT 2 AS two'))], [{ two: 2 }]);
   } finally {
     openWith(open);
+    await client.end();
   }
-  // Asked again, in time.
-  const client = appClientOf();
-  assert.deepEqual([...(await client.unsafe('SELECT 1 AS one'))], [{ one: 1 }]);
-  await client.end();
 });
 
 test("a new group let in on a cached URL decides at once: a grant lost meanwhile ends it, not an interval later", postgresOnly, async () => {
