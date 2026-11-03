@@ -246,6 +246,7 @@ test("an assertion is refused for each of section 7.2's checks, alone, with that
     ["another person's user handle", { response: inner((r) => void (r.userHandle = toBase64url(hex('b2'.repeat(16))))) }, {}, 'user_handle'],
     ['no user handle: a security key that keeps none', { response: inner((r) => void delete r.userHandle) }, {}, 'ok'],
     ['a null user handle', { response: inner((r) => void (r.userHandle = null)) }, {}, 'ok'],
+    ['an empty user handle, which is present and matches nothing', { response: inner((r) => void (r.userHandle = '')) }, {}, 'user_handle'],
     ['a user handle past 64 bytes', { response: inner((r) => void (r.userHandle = toBase64url(new Uint8Array(65)))) }, {}, 'malformed'],
     // 7. the signature
     ['signed by another key', {}, { passkey: { ...(await stored(other)), credentialId: (await authenticator()).credentialId } }, 'signature'],
@@ -312,6 +313,14 @@ test("a registration is refused for each of section 7.2's checks, alone, with th
     ['RS256 of 8192 bits', { publicKey: cose([1, 3], [3, -257], [-1, new Uint8Array([0x80, ...new Uint8Array(1023)])], [-2, Uint8Array.of(1, 0, 1)]) }, {}, 'key'],
     ['RS256 with an even exponent', { publicKey: cose([1, 3], [3, -257], [-1, new Uint8Array([0x80, ...new Uint8Array(255)])], [-2, Uint8Array.of(1, 0, 0)]) }, {}, 'key'],
     ['RS256 on an EC2 key', { publicKey: cose([1, 2], [3, -257], [-1, 1], [-2, x], [-3, y]) }, {}, 'key'],
+    // WebAuthn 6.5.1: no optional parameter but alg.
+    ['a key with key_ops', { publicKey: cose([1, 2], [3, -7], [-1, 1], [-2, x], [-3, y], [4, [1]]) }, {}, 'key'],
+    ['a key with a kid', { publicKey: cose([1, 2], [3, -7], [-1, 1], [-2, x], [-3, y], [2, new Uint8Array(4)]) }, {}, 'key'],
+    ['a key carrying its private part', { publicKey: cose([1, 2], [3, -7], [-1, 1], [-2, x], [-3, y], [-4, new Uint8Array(32)]) }, {}, 'key'],
+    ['an Ed25519 key with a y', { publicKey: cose([1, 1], [3, -8], [-1, 6], [-2, x], [-3, y]) }, {}, 'key'],
+    ['an RSA key with a private exponent', { publicKey: cose([1, 3], [3, -257], [-1, new Uint8Array([0x80, ...new Uint8Array(255)])], [-2, Uint8Array.of(1, 0, 1)], [-3, new Uint8Array(256)]) }, {}, 'key'],
+    // RFC 8949, 3.1: CBOR text keeps a leading byte order mark; `\uFEFFfmt` is no `fmt`.
+    ['fmt spelled with a byte order mark', { attestation: (map) => new Map([['\uFEFFfmt', 'none'], ...[...map].filter(([key]) => key !== 'fmt')]) }, {}, 'malformed'],
   ];
   for (const [name, tweak, expected, wanted] of [...SHARED, ...own]) {
     assert.equal(reason(await register(tweak, expected)), wanted, name);
@@ -391,4 +400,7 @@ test('CBOR reads the subset WebAuthn writes and refuses the rest', () => {
   malformed([0x62, 0xc3, 0x28]); // text that is not UTF-8
   malformed([]);
   malformed(Array.from({ length: 20 }, () => 0x81).concat([0])); // twenty arrays deep
+  // A byte order mark is a character of the text, kept: two keys that differ by one are two keys.
+  assert.deepEqual(readCbor(encodeCbor('\uFEFFhello'))[0], '\uFEFFhello');
+  assert.equal((readCbor(encodeCbor(new Map<CborValue, CborValue>([['x', 1], ['\uFEFFx', 2]])))[0] as Map<string, unknown>).size, 2);
 });

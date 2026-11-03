@@ -9,6 +9,7 @@ await import('../packages/core/test/domain-properties.test.ts');
 await import('../packages/core/test/envelope-properties.test.ts');
 await import('../packages/core/test/dotenv-properties.test.ts');
 await import('../packages/core/test/workload-token-properties.test.ts');
+await import('../packages/core/test/webauthn-properties.test.ts');
 await import('../packages/cli/test/export-properties.test.ts');
 await import('../packages/cli/test/tunnel-properties.test.ts');
 await import('../packages/server/test/tunnel-properties.test.ts');

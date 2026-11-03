@@ -134,7 +134,11 @@ const MAX_USER_HANDLE = 64;
 const MAX_TRANSPORTS = 8;
 const MAX_CBOR_DEPTH = 16;
 
+// clientDataJSON is decoded as WebAuthn says, UTF-8 decode, which drops a
+// leading byte order mark; CBOR text keeps every character it holds
+// (RFC 8949, 3.1), so that `\uFEFFfmt` is never read as `fmt`.
 const UTF8 = new TextDecoder('utf-8', { fatal: true });
+const CBOR_TEXT = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const ENCODER = new TextEncoder();
 
 // --- CBOR, the subset WebAuthn writes ----------------------------------------
@@ -182,7 +186,7 @@ export function readCbor(bytes: Uint8Array, offset = 0, depth = 0): [Cbor, numbe
       const slice = bytes.subarray(at, at + argument);
       if (major === 2) return [slice, at + argument];
       try {
-        return [UTF8.decode(slice), at + argument];
+        return [CBOR_TEXT.decode(slice), at + argument];
       } catch {
         return fail('malformed', 'CBOR text is not UTF-8');
       }
@@ -342,6 +346,10 @@ async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorith
   if (!(allowed as readonly unknown[]).includes(alg)) return fail('algorithm', `algorithm ${String(alg)} was not asked for`);
   const algorithm = alg as PasskeyAlgorithm;
   const kty = key.get(KTY);
+  // WebAuthn 6.5.1: `alg` and each key type's own parameters, and no other
+  // (no `kid`, no `key_ops`, no private part).
+  const labels = { [-8]: [KTY, ALG, -1, -2], [-7]: [KTY, ALG, -1, -2, -3], [-257]: [KTY, ALG, -1, -2] }[algorithm];
+  if (key.size !== labels.length || !labels.every((label) => key.has(label))) return fail('key', `the COSE key has parameters other than ${labels.join(', ')}`);
   try {
     if (algorithm === -8) {
       if (kty !== OKP || key.get(-1) !== 6) return fail('key', 'EdDSA key is not OKP Ed25519');
@@ -463,6 +471,12 @@ export function verifyRegistration(input: unknown, expected: RegistrationExpecta
   });
 }
 
+/** A returned user handle: canonical base64url of 1 to 64 bytes, or, empty, one that matches no passkey. */
+function handleOf(value: unknown): Uint8Array {
+  if (value === '') return fail('user_handle', 'the user handle is empty');
+  return bytesOf({ userHandle: value }, 'userHandle', MAX_USER_HANDLE);
+}
+
 /** A `get()` response, `credential.toJSON()`, held to section 7.2's assertion checks against the stored passkey. */
 export function verifyAssertion(input: unknown, expected: AssertionExpectation): Promise<VerifiedAssertion | PasskeyRefusal> {
   return answer(async () => {
@@ -470,8 +484,8 @@ export function verifyAssertion(input: unknown, expected: AssertionExpectation):
     const clientData = bytesOf(response, 'clientDataJSON', MAX_CLIENT_DATA);
     const authData = bytesOf(response, 'authenticatorData', MAX_AUTHENTICATOR_DATA);
     const signature = bytesOf(response, 'signature', MAX_SIGNATURE);
-    // Absent, null or empty: the authenticator kept no handle (a security key's non-discoverable credential).
-    const handle = response.userHandle === undefined || response.userHandle === null || response.userHandle === '' ? null : bytesOf(response, 'userHandle', MAX_USER_HANDLE);
+    // Absent or null: the authenticator kept no handle (a security key's non-discoverable credential). Present, it is compared.
+    const handle = response.userHandle === undefined || response.userHandle === null ? null : handleOf(response.userHandle);
     const { passkey } = expected;
     if (!equal(id, passkey.credentialId)) return fail('credential', 'the assertion is by another credential');
     if (handle !== null && !equal(handle, passkey.userHandle)) return fail('user_handle', "the user handle is not the passkey's");
