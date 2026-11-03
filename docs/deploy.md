@@ -286,8 +286,9 @@ unset owner_url
 
 ### From 0.14.5 to 0.16
 
-A deployment on 0.14.5 goes to 0.16.0 or later in one upgrade: 0.15.0 is
-not a stop it needs. 0.16 moves the audit log to 0.15's log (the cutover),
+A deployment on 0.14.5 goes to a 0.16 release in one upgrade: 0.15.0 is
+not a stop it needs. For a release after 0.16, follow that release's own
+upgrade notes. 0.16 moves the audit log to 0.15's log (the cutover),
 as 0.15.0 did. Once it has cut over, the database refuses every write of
 0.14's.
 
@@ -331,6 +332,12 @@ Nothing serves 0.16 before step 4.
      `@coffre/server/cloudflare`. The app and the vault now talk through
      one versioned call, and the old type fails the typecheck
      ("Property 'call' is missing").
+   - Optional, on both runtimes: the credential proxy's Proxy tab.
+     `coffre update` adds its route files, but the tab writes nothing until
+     `app/src/coffre.ts`'s `plugins` has `credentialProxy({ credentials:
+     {}, editable: true })`, as `coffre init` now writes. A deployment
+     that already has a `credentialProxy` keeps its `credentials` and adds
+     `editable: true`; one without it serves no `/use` until it adds one.
 
    Commit, but don't push where a push deploys, and don't deploy.
 3. **Migrate, and give the hot path its login**: `pnpm exec coffre
@@ -354,8 +361,8 @@ Nothing serves 0.16 before step 4.
    vault, then the servers: no rolling update. The first request to the
    new app cuts over.
 5. **Check it**: `/readyz` green, `coffre --url <instance> verify
-   instance` passes, the audit page shows a sealed log, and a `/use`
-   through the proxy answers.
+   instance` passes, the audit page shows a sealed log, and, if the
+   deployment has a `credentialProxy`, a `/use` through it answers.
 
 What answers what, step by step, as 0.15.0's rehearsal of the same cutover
 measured it:
@@ -408,7 +415,7 @@ A deployment already on 0.15.0 upgrades to 0.16 as to any release
 ([Upgrading](#upgrading)), with one edit `coffre update` leaves to it: on
 Workers, step 2's `VaultEntry` type for `app/src/coffre.ts`'s `VAULT`
 binding, without which the typecheck fails ("Property 'call' is
-missing"). While on 0.15.0, don't rotate the vault's
+missing"). The Proxy tab is opt-in there too, as step 2 says. While on 0.15.0, don't rotate the vault's
 signing key or a local vault key: every change would fail at its seal.
 0.16 supports the rotation.
 
