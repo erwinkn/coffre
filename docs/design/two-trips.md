@@ -827,7 +827,7 @@ formal/Writing.tla in the same PR.
 
 ## As built: PR 3
 
-The key write's path, on Postgres (`write_inputs`, `write_request` and `hold_inputs`, migration 0060; the vault's
+The key write's path, on Postgres (`write_inputs`, `write_request` and `hold_inputs`, migration 0061; the vault's
 `writeKeys`, packages/vault/src/write.ts; the app's front door, packages/server/src/write-ahead.ts, and its held
 statement, `heldWrite` in api/secrets.ts). `change-cost.test.ts` holds a key write, one key or five, new or not, to
 `{ app: 2, vault: 3 }` (16 and 20 before):

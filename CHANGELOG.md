@@ -61,7 +61,7 @@
   (given or generated), at an environment of its own, by a session, a CLI
   login, a personal or a service token, is served before the router: the
   vault reads everything its decision weighs in one statement under the
-  fence (`write_request`, migration 0060), decides on that read alone,
+  fence (`write_request`, migration 0061), decides on that read alone,
   checking each object's newest change's MAC and seal first, wraps the
   keys and prepares the changes; the app checks the caller's rows on what
   it answered and commits in one transaction of two round trips, which

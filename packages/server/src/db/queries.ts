@@ -2997,7 +2997,7 @@ export async function auditActionCounts(
 /**
  * A key write's writes, held to the vault's read (T179 PR 3; `heldWrite` in api/secrets.ts), each left to `later`, so
  * that they go with what its transaction asks next, its COMMIT at the latest, under one Sync: its credential's last
- * use first, when `verify` left it to the request; then the hold (`hold_inputs`, migration 0060: the issue lock and the
+ * use first, when `verify` left it to the request; then the hold (`hold_inputs`, migration 0061: the issue lock and the
  * fence, then the vault's read again, `coffre_moved` unless it reads as decided); then each new key's row, the
  * versions and each key's current version. Postgres only, as the vault's read is.
  *

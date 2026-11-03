@@ -7,7 +7,7 @@ import { configObject, credentialObject, environmentObject, memberStanding, prin
 
 /**
  * A key write in five round trips (T179 PR 3; docs/design/two-trips.md, "A key write", "The read and its hold";
- * formal/Writing.tla): the vault's side. Its one statement (`write_request`, migration 0060) reads everything the
+ * formal/Writing.tla): the vault's side. Its one statement (`write_request`, migration 0061) reads everything the
  * decision weighs, in one snapshot under the fence shared, and numbers the request; the Worker decides on that read and
  * nothing else (DecideOnRead), and the app's transaction holds the same read again under the fence before it writes
  * (`hold_inputs`, ReadHeld). The read is one text, whose SHA-256 (the digest) the changes the Worker prepares carry.
