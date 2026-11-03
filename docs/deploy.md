@@ -284,42 +284,44 @@ printf '%s' "$owner_url" | pnpm exec coffre migrate --yes
 unset owner_url
 ```
 
-### From 0.14 to 0.16, through 0.15
+### From 0.14.5 to 0.16, and on to 0.17
 
-A deployment on 0.14.5 reaches 0.16 in two upgrades, each deployed and
-checked before the next:
+A deployment on 0.14.5 goes to 0.16 in one upgrade: 0.15.0 is not a stop
+it needs. Every release after it goes through 0.16:
 
-1. **0.14.5 to the newest 0.15.x**, 0.15.1 or later. 0.15 moves the audit
-   log to 0.15's log (the cutover). Once it has cut over, the database
+1. **0.14.5 to 0.16.0 or later.** 0.16 moves the audit log to 0.15's log
+   (the cutover), as 0.15.0 did. Once it has cut over, the database
    refuses every write of 0.14's.
-2. **0.15.1 or later to 0.16.** 0.16 stops writing 0.14's entries for key
-   writes and member adds, and stops taking 0.14's head on a revoke.
+2. **0.16 to 0.17**, the contraction (`docs/design/two-trips.md`, PR 6),
+   once 0.16 serves and `coffre verify instance` passes. 0.17 stops
+   writing 0.14's entries for key writes and member adds, and stops
+   taking 0.14's head on a revoke.
 
-Neither step can be skipped. CI holds the newest published release's code
-to each change's migrations (`pnpm test:compat`), so 0.16's are checked
-against 0.15's code, and nothing checks 0.14.5 against them or 0.14.5 to
-0.16 in one step. And 0.16 trusts that every vault still serving decides about a member from
-0.15's log, not from their newest 0.14 access entry: 0.15.1 is the first
-release whose vault does, so 0.15.0 to 0.16 is not safe either. Example: Ada is
-added under 0.16, so her row has no 0.14 `member.add` entry. A 0.15.0
-vault isolate still serving during the deploy checks her row against that
-entry, finds none and refuses her (it fails closed) until it drains. A
-0.15.1 vault reads her row's seal instead, and serves her.
+0.17 needs 0.16 first because of what 0.16 still writes. 0.16's vault
+decides about a member from 0.15's log, but 0.16 still writes each change's
+0.14 entry, since the releases before it read them: 0.15.0's vault checks
+each member against their newest 0.14 access entry, and a 0.14.5 rolled
+back to serves reads only as long as those entries are there. 0.17 writes
+none, so neither release may serve after it. Example: Ada is added under
+0.17, so no 0.14 `member.add` entry names her. A 0.15.0 vault, still
+serving during the deploy or deployed again in a rollback, finds no entry,
+reads her row as tampered and refuses her. A 0.16 vault reads her row's
+seal and serves her. So don't go from 0.14.5 or 0.15.0 straight to 0.17.
 
-#### 0.14.5 to 0.15
+#### 0.14.5 to 0.16
 
-The steps are those of [0.15.0's release notes](../CHANGELOG.md#0150-2026-11-01)
-("Upgrading a deployment from 0.14"), in order. Nothing serves 0.15 before
-step 4.
+The steps follow [0.15.0's release notes](../CHANGELOG.md#0150-2026-11-01)
+("Upgrading a deployment from 0.14"), with 0.16's setup in step 3.
+Nothing serves 0.16 before step 4.
 
 1. **Back the database up**, `coffre backup` ([restore.md](restore.md)).
    This backup is the only way back to a 0.14.5 that writes.
-2. **Update the code to the 0.15 release you chose**, 0.15.N here.
+2. **Update the code to the 0.16 release you chose**, 0.16.N here.
    `coffre update` always moves to npm's latest release and takes no
-   version, whichever CLI runs it. While 0.15.N is the latest, `pnpm exec
-   coffre update` takes the deployment there. Once 0.16 is out, it would
-   take 0.14.5 straight to 0.16, so don't run it: bring the deployment by
-   hand to that release's `examples/workers` (Git tag `v0.15.N`), which is
+   version, whichever CLI runs it. While 0.16.N is the latest, `pnpm exec
+   coffre update` takes the deployment there. Once 0.17 is out, it would
+   take 0.14.5 straight to 0.17, so don't run it: bring the deployment by
+   hand to that release's `examples/workers` (Git tag `v0.16.N`), which is
    what its `coffre init` writes. That is every `@coffre/*` pin, the Start
    app's packages and `packageManager` in `package.json`, and the pages in
    `app/src/routes/` with `app/src/routeTree.gen.ts`; then `pnpm install`.
@@ -331,30 +333,25 @@ step 4.
      would leave that vault deployed.
    - In `vault/src/worker.ts`, `hotDatabase`, `checkpointer` and the
      `CoffreCheckpointer` export; in `vault/wrangler.jsonc`, the
-     `HOT_HYPERDRIVE` binding and the `CHECKPOINTER` Durable Object with
-     its migration. On Node, `src/vault.ts` takes `HOT_DATABASE_URL` and
-     `CHECKPOINTER_MEMORY`.
-   - On Workers, from 0.15.1, the type of `app/src/coffre.ts`'s `VAULT`
-     binding: `VaultEntry` in place of `Vault`, both imported from
+     `CHECKPOINTER` Durable Object with its migration (step 3 binds
+     `HOT_HYPERDRIVE`). On Node, `src/vault.ts` takes `HOT_DATABASE_URL`
+     and `CHECKPOINTER_MEMORY`.
+   - On Workers, the type of `app/src/coffre.ts`'s `VAULT` binding:
+     `VaultEntry` in place of `Vault`, both imported from
      `@coffre/server/cloudflare`. The app and the vault now talk through
      one versioned call, and the old type fails the typecheck
      ("Property 'call' is missing").
 
    Commit, but don't push where a push deploys, and don't deploy.
 3. **Migrate, and give the hot path its login**: `pnpm exec coffre
-   setup`, as the database's administrator (it needs `CREATEROLE`).
-   Answer "No, I'll do Cloudflare myself", since setup's Cloudflare path
-   ends with a deploy (its "Hyperdrive only" comes in 0.16), and "No" to
-   new passwords for the logins that exist. It makes the
-   `coffre_vault_hot` login, migrates, and prints the `wrangler hyperdrive
-   create` command for its config: run it, and put the id it prints under
-   `HOT_HYPERDRIVE` in `vault/wrangler.jsonc`. The database's connections
-   are now split three ways, so it also prints a `wrangler hyperdrive
-   update <id> --origin-connection-limit=<n>` for the app's and the
-   vault's configs: run those too, before step 4. On a `max_connections`
-   of 25, each config's share drops from 9 to 6; left at 9, the two old
-   configs and the new one could open 24 connections where 22 are free,
-   and calls fail under load. On Node, the URL setup shows is
+   setup`, as the database's administrator (it needs `CREATEROLE`). On
+   Workers, answer "Hyperdrive only, with no deploy", and "No" to new
+   passwords for the logins that exist. It makes the `coffre_vault_hot`
+   login and its Hyperdrive config, binds that config as `HOT_HYPERDRIVE`
+   in `vault/wrangler.jsonc`, and migrates. The database's connections
+   are now split three ways, so it also caps the app's and the vault's
+   configs at their new share: on a `max_connections` of 25, from 9 each
+   to 6. Commit the file. On Node, the URL setup shows is
    `HOT_DATABASE_URL`. 0.14.5 keeps serving on the migrated schema. The
    migrations hold the log's tables for about a second, so migrate at a
    quiet moment.
@@ -370,7 +367,8 @@ step 4.
    instance` passes, the audit page shows a sealed log, and a `/use`
    through the proxy answers.
 
-What answers what, step by step:
+What answers what, step by step, as 0.15.0's rehearsal of the same cutover
+measured it:
 
 | When | How long | What fails |
 | --- | --- | --- |
@@ -392,7 +390,7 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
   included. Migration 0047's trigger refuses any 0.14 entry that 0.15's
   log does not record. One write slips through: a workload's session
   renewal (`/api/auth/workload/renew`), which appends no entry. Its row
-  then no longer matches its 0.15 seal, so once 0.15 is back, that
+  then no longer matches its 0.15 seal, so once 0.16 is back, that
   session is refused as `stale` and its workload must sign in again. On
   Workers, put the code back as 0.14.5 had it (step 2's commit,
   reverted), with two exceptions: keep `vault/wrangler.jsonc` as steps 2
@@ -400,35 +398,40 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
   notes show. Cloudflare refuses a vault without it (code 10064), and
   deleting the class would erase the newest checkpoint its object
   remembers. Then `pnpm install`: the deploy script installs nothing,
-  and without it would bundle 0.15's vault with 0.14.5's configuration,
+  and without it would bundle 0.16's vault with 0.14.5's configuration,
   which lacks the `hotDatabase` and `checkpointer` that vault requires.
   Then `pnpm run deploy`, by hand: a pipeline that migrates first stops
   there, as `coffre migrate` refuses a database a newer release migrated. On
   Node, which has no `deploy` script, put the code and pins back as
   0.14.5 had them, `pnpm install` and `pnpm build`, then stop every
-  process and start the vault, then the servers. In the rehearsal, the
+  process and start the vault, then the servers; leave
+  `CHECKPOINTER_MEMORY`'s file where it is. In 0.15.0's rehearsal, the
   switch back failed requests for 28 s.
 - *Writes back on 0.14.5*: only by restoring step 1's backup, which loses
   everything written since.
-- *Forward again*: deploy 0.15 as in step 4. It serves at once, with its
-  log verified whole.
+- *Forward again*: put step 2's commit back, the real `CoffreCheckpointer`
+  export with it, keeping the Hyperdrive configs and the checkpointer's
+  memory as they are, and `pnpm install`; then step 4 (on Node, from its
+  `pnpm build`). 0.16 serves at once, with its log verified whole.
 
-While on 0.15.0, don't rotate the vault's signing key or a local vault
-key: every change would fail at its seal. 0.15.1 supports the rotation.
+A deployment already on 0.15.0 upgrades to 0.16 as to any release
+([Upgrading](#upgrading)). While on 0.15.0, don't rotate the vault's
+signing key or a local vault key: every change would fail at its seal.
+0.16 supports the rotation.
 
-#### 0.15 to 0.16
+#### 0.16 to 0.17
 
-0.16 is not released yet. What follows is what its design holds it to
+0.17 is not released yet. What follows is what its design holds it to
 (`docs/design/two-trips.md`, PR 6), and its release notes will say so too.
-From 0.15.1 or later, once its cutover has run and `coffre verify
+From 0.16.0 or later, once its cutover has run and `coffre verify
 instance` passes:
 
 1. **Back the database up**, `coffre backup`.
 2. **Update and migrate** as for any release (`coffre update`, then
-   [migrate, then deploy](#upgrading)). Once a release after 0.16 is out,
-   `coffre update` would take that instead: update by hand to 0.16's
-   `examples/workers`, as in step 2 above. 0.16's migrations only add, so
-   0.15.1 keeps serving on them.
+   [migrate, then deploy](#upgrading)). Once a release after 0.17 is out,
+   `coffre update` would take that instead: update by hand to 0.17's
+   `examples/workers`, as in step 2 above. 0.17's migrations only add, so
+   0.16 keeps serving on them.
 3. **Deploy both Workers at once.** While they deploy, an app and a vault
    of different versions don't serve each other: the app answers 503
    `deploying` with a short `Retry-After`, and clients ask again. On Node,
@@ -438,18 +441,18 @@ instance` passes:
 Nothing is read-only during this upgrade, and no cutover runs: 0.15's log
 already holds everything.
 
-**Rolling back to 0.15.1 or later** is a deploy of the release before,
-by hand (on Workers, restore that release's code and pins, `pnpm
-install`, then `pnpm run deploy`, for the reasons above; on Node,
-restore that release's code and pins, `pnpm install`, `pnpm build`, then
-restart the vault, then the servers), with no restore of the database:
-its code reads what 0.16 wrote, from 0.15's log. Two
-things differ while rolled back. Key writes and member adds that 0.16
-made have no 0.14 entry, so a 0.15 audit page that lists entries of
-0.14's omits them, though 0.15's log still holds and seals them. And
-0.15's revoke takes 0.14's head again, which costs a moment and changes
-nothing. Never roll back from 0.16 to 0.15.0 or 0.14.5: 0.15.0 refuses
-the members 0.16 added (above), and 0.14.5 is read-only.
+**Rolling back to 0.16** is a deploy of the release before, by hand (on
+Workers, restore that release's code and pins, `pnpm install`, then `pnpm
+run deploy`, for the reasons above; on Node, restore that release's code
+and pins, `pnpm install`, `pnpm build`, then restart the vault, then the
+servers), with no restore of the database: its code reads what 0.17
+wrote, from 0.15's log. Two things differ while rolled back. Key writes
+and member adds that 0.17 made have no 0.14 entry, so a 0.16 audit page
+that lists entries of 0.14's omits them, though 0.15's log still holds
+and seals them. And 0.16's revoke takes 0.14's head again, which costs a
+moment and changes nothing. Never roll back from 0.17 to 0.15.0 or
+0.14.5: 0.15.0 refuses the members 0.17 added (above), and 0.14.5 serves
+reads only, and not theirs either.
 
 ### From a release before 0.4.0
 
