@@ -56,7 +56,8 @@
   its caller's the same way: each fork level's definitions and
   environment, and its editor's principal (`stale`). A decision does so
   for each environment it reads (`tampered`, in the probe it already
-  makes). The same holds for the writes whose statement holds a row to
+  makes), and so does code's reservation of proxy names before it answers
+  from the set it read ahead of the head. The same holds for the writes whose statement holds a row to
   its newest seal: the app's changes (`prepare`, one statement more per
   call), a sign-in through a binding (one statement more) and an issue or
   binding made on a credential (in the read it already makes). Revokes

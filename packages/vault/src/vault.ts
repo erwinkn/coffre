@@ -4538,7 +4538,7 @@ class VaultService implements Vault {
     // comes before the transaction, as its own statement (review r15 of #467).
     const reads = (await this.#settled()) === null && (await this.#cutOverNow());
     const sqlite = engineOf(this.#db) === 'sqlite';
-    const first = reads && !sqlite ? (tx: Transaction) => this.#reservedAlready(tx, keys.seals, wanted) : undefined;
+    const first = reads && !sqlite ? (tx: Transaction) => this.#reservedAlready(tx, keys, wanted) : undefined;
     // One bound for the call: each attempt's lock waits within what is left of it (review r14 of #467), a call that
     // took the place late never waiting the whole bound again. A no-op attempt, every call of a deploy's herd but one,
     // waits for nothing else; the one that writes waits, after the head, for the issue lock and the fence, each within
@@ -4546,7 +4546,7 @@ class VaultService implements Vault {
     const deadline = Date.now() + this.#prepared.options.codeWaitMs;
     for (let pause = CODE_PAUSE_MS; ; pause = Math.min(2 * pause, CODE_PAUSE_MAX_MS)) {
       if (reads && sqlite) {
-        const found = await this.#reservedAlready(this.#db, keys.seals, wanted);
+        const found = await this.#reservedAlready(this.#db, keys, wanted);
         if (found !== null) return { ok: true, ...found };
       }
       try {
@@ -4563,10 +4563,11 @@ class VaultService implements Vault {
   /**
    * `wanted` reserved, as the sealed set read before the head says, or null: it cannot say, or a name is missing.
    * A set its log does not bear out says nothing, not "none": it decides under the head, which reports it and
-   * refuses, an empty ask's (a deployment of UI routes alone) as much as any (review r12 of #467).
+   * refuses, an empty ask's (a deployment of UI routes alone) as much as any (review r12 of #467). So does a set whose
+   * newest change's MAC does not hold (T190): a row put back with a forged seal never stands for names reserved.
    */
-  async #reservedAlready(db: Queryable, seals: ChangeKeys['seals'], wanted: readonly string[]): Promise<{ reserved: string[]; cleared: ClearedItem[] } | null> {
-    const held = await heldByLog(seals, db, RESERVED_REF).catch((error: unknown) => {
+  async #reservedAlready(db: Queryable, keys: ChangeKeys, wanted: readonly string[]): Promise<{ reserved: string[]; cleared: ClearedItem[] } | null> {
+    const held = await heldByLog(keys, db, RESERVED_REF).catch((error: unknown) => {
       if (error instanceof NotLogged) return null;
       throw error;
     });

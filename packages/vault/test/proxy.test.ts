@@ -18,7 +18,7 @@ import { gaveUp } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
-import { applyOp, indexBytes, sealKey, sealOf, type FrozenHoldings, type ProxyInput, type ProxyItem, type Ref } from '../src/inputs.ts';
+import { applyOp, indexBytes, objectKey, sealKey, sealOf, type FrozenHoldings, type ProxyInput, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { openLocalVault as openEntry } from '../src/local.ts';
 import { replayStored } from '../src/log-replay.ts';
 import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel } from '../src/proxy.ts';
@@ -563,6 +563,23 @@ test('the reserved set forged around the vault refuses every save: fail closed (
     const reserved = await w.vault.reserveProxy({ names });
     assert.equal(reserved.ok, false, `reserveProxy(${JSON.stringify(names)}) on a forged set`);
   }
+});
+
+test('a released name put back with its old seal, the log\'s newest seal forged to match, is no name reserved: code\'s reservation decides under the head and refuses (T190)', ON_015, async () => {
+  const w = await world();
+  assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
+  const [before] = await rows<{ names: unknown; seal: Uint8Array }>(db.owner, sql`SELECT names, seal FROM proxy_reserved`);
+  assert.ok((await w.vault.releaseProxy({ actor: ROOT, caller: 'person', name: 'maps' })).ok);
+  // The row and the newest change's seal agree again, as a seal-only check wants; the change's MAC does not cover them.
+  const names = typeof before!.names === 'string' ? before!.names : JSON.stringify(before!.names);
+  if (ENGINE === 'postgres') await run(db.owner, sql`UPDATE proxy_reserved SET names = ${names}::jsonb, seal = ${before!.seal}`);
+  else await run(db.owner, sql`UPDATE proxy_reserved SET names = ${names}, seal = ${before!.seal}`);
+  const object = objectKey({ kind: 'proxy-reserved', id: 'instance' });
+  await run(db.owner, sql`UPDATE log_changes SET seal = ${before!.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
+  const changes = await count(sql`SELECT count(*) AS n FROM log_changes`);
+  const reserved = await w.vault.reserveProxy({ names: ['maps'] });
+  assert.equal(reserved.ok, false, 'a set its newest change\'s MAC does not bear out answers nothing before the head');
+  assert.equal(await count(sql`SELECT count(*) AS n FROM log_changes`), changes);
 });
 
 test('items or names no change writes fail the seal like any forgery: the tab shows tampered, and code\'s reservation passes them by', ON_015, async () => {
