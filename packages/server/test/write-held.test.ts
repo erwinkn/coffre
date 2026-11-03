@@ -190,6 +190,44 @@ test('the key Ada makes made meanwhile by another, sensitive: her write asks aga
   assert.equal((await versionOf(row.currentVersionId))?.sensitive, true);
 });
 
+test("market/dev renamed and a new market/dev made, Ada's grant moved to it, between the read and the hold: the second try's read is the new one's, and nothing commits at either (review r1 of #469)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  w.between(async () => {
+    await w.root.environments.update('market/dev', { slug: 'old' });
+    await w.root.environments.create('market/dev');
+    await w.root.access.set(`user:${ADA}`, { 'market/old': null, 'market/dev': 'developer' });
+  });
+  const wrote = await w.write({ NEW_KEY: 'fake-ada' });
+  // The second try, by the slugs, read and decided the new market/dev; the route writes to the place it found, the old
+  // one by its ids: that try commits nothing there, and today's path answers, as it does a rename after the router.
+  assert.deepEqual(served(w.answers), ['served', 'served']);
+  assert.ok([403, 404].includes(wrote.status), JSON.stringify(wrote));
+  assert.equal(await keyRow('NEW_KEY'), undefined);
+});
+
+test("API_KEY sensitive when the vault first read it, written again as a secret before the hold: Ada's write, saying nothing, stays sensitive, as today's path keeps it (review r1 of #469)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  await w.root.secrets.set('market/dev', { API_KEY: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
+  w.between(async () => void (await w.root.secrets.set('market/dev', { API_KEY: { value: 'fake-secret', sensitivity: 'secret' } })));
+  const wrote = await w.write({ API_KEY: 'fake-ada' });
+  assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
+  // The second try found it a secret: today's path writes it, sensitive, as the first try found it.
+  assert.deepEqual(served(w.answers), ['served', 'served']);
+  assert.deepEqual(wrote.body.keys, { API_KEY: { version: 4, sensitivity: 'sensitive' } });
+  const row = (await keyRow('API_KEY'))!;
+  assert.equal((await versionOf(row.currentVersionId))?.sensitive, true);
+});
+
+test("a regenerate whose `replaces` names no version's id: 409 `stale`, as today's path answers it, the vault never asked (review r1 of #469)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const before = (await keyRow('API_KEY'))!;
+  const wrote = await w.write({ API_KEY: { value: 'a'.repeat(64), generated: { recipe: 'bytes:32:hex' }, replaces: 'no-such-version' } });
+  assert.equal(wrote.status, 409, JSON.stringify(wrote.body));
+  assert.equal(wrote.body.reason ?? (wrote.body.error as { reason?: string } | undefined)?.reason, 'stale');
+  assert.deepEqual(served(w.answers), []);
+  assert.deepEqual(await keyRow('API_KEY'), before);
+});
+
 test('market/dev archived between the read and the hold: nothing commits there (WritingPlace, arc)', { skip: POSTGRES }, async () => {
   const w = await world();
   const before = (await keyRow('API_KEY'))!;

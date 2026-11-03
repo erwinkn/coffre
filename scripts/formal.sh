@@ -488,8 +488,12 @@ REMOVALS=(
   "WritingForge ChangeMacChecked WritesStandAtCommit"
   "WritingForge ChangeMacChecked AddsStandAtCommit"
   # Today's path without T190 (PR 3's fallback): a request the two-trip path refused for its forged grant goes down a
-  # path that trusts the forged seal, and writes on the grant the log took away.
-  "WritingForge TodayChangeMacChecked WritesStandAtCommit"
+  # path that trusts the forged seal, and decides on the grant the log took away.
+  "WritingForge TodayChangeMacChecked TodayStandsAtDecision"
+  # A key write's credential touch after the hold (WriteLocks.tla, review r1 of #469): it holds the issue lock and the
+  # fence and waits for an issue's shared hold on its credential, that issue queued behind the barrier, which waits
+  # for the write's issue lock.
+  "WriteLocks TouchFirst NoWaitCycle"
   # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
   "WritingFallBack FallBackUncommitted OneWritePerRequest"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
@@ -594,6 +598,11 @@ EXPECTED=(
   # The rotation entry deleted before its first seal, by someone who holds the old key, who signs a pair over its
   # place: the rotation's window, a tick long, which no check sees (Rotation.tla).
   "RotationWindow VerifiedSound"
+  # Today's path decides at the vault's wrap and commits after, weighing only the environment and the key's row again:
+  # a revoke between the two does not stop the write (Writing.tla's WToday, WTodayCommit; review r1 of #469). Every
+  # write has had this window since 0.14; the two-trip path closes it for the writes it serves (WritesStandAtCommit),
+  # 0.16 for every write (docs/design/two-trips.md, PR 6).
+  "WritingFallBack TodayStandsAtCommit"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

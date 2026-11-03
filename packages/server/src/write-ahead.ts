@@ -36,6 +36,9 @@ import type { CoffreRuntime } from './runtime.ts';
 /** The kinds of token whose writes this path serves: a person's session, CLI login and personal token, and a service's token. */
 const WRITE_KINDS: readonly TokenKind[] = ['browser', 'cli', 'personal', 'service'];
 
+/** A version's id, as the vault takes a regenerate's `replaces` (`validateWriteKeys`). */
+const VERSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /** A write as the front door read it: its place's slugs, its patch as the route parses it, and its keys' names, in order. */
 export type WriteAsked = { project: string; environment: string; patch: Record<string, SecretValue>; names: string[] };
 
@@ -70,6 +73,9 @@ export function writeAsked(request: Request, body: Uint8Array): WriteAsked | nul
   for (const [name, value] of Object.entries(parsed.data)) {
     if (value === null) return null;
     if (typeof value !== 'string' && !('generated' in value && value.generated.pair === undefined && value.sensitivity === undefined)) return null;
+    // A regenerate's precondition as a version's id, as the vault takes it: any other string the route takes names no
+    // version, which today's path answers 409 `stale` (review r1 of #469: here, the vault's check of its input, a 500).
+    if (typeof value !== 'string' && 'replaces' in value && value.replaces !== undefined && !VERSION_ID.test(value.replaces)) return null;
     patch[name] = value;
   }
   return { project, environment, patch, names: Object.keys(patch) };
@@ -96,8 +102,12 @@ export class Written {
   #try: WriteTry | null;
   readonly #ask: () => Promise<WriteTry | string>;
   readonly #still: (tried: WriteTry) => Promise<boolean>;
+  readonly #placeOf: (tried: WriteTry) => ResolvedPath | null;
 
-  constructor(asked: WriteAsked, tokenHash: Buffer, first: WriteTry, place: ResolvedPath | null, touched: Touch | null, ask: () => Promise<WriteTry | string>, still: (tried: WriteTry) => Promise<boolean>) {
+  constructor(
+    asked: WriteAsked, tokenHash: Buffer, first: WriteTry, place: ResolvedPath | null, touched: Touch | null,
+    ask: () => Promise<WriteTry | string>, still: (tried: WriteTry) => Promise<boolean>, placeOf: (tried: WriteTry) => ResolvedPath | null,
+  ) {
     this.asked = asked;
     this.tokenHash = tokenHash;
     this.#try = first;
@@ -105,6 +115,17 @@ export class Written {
     this.touched = touched;
     this.#ask = ask;
     this.#still = still;
+    this.#placeOf = placeOf;
+  }
+
+  /**
+   * Whether a try's read found the place at the environment the route writes to, by its ids: a try asks by the
+   * slugs, which a rename and a new environment of the old name may have moved to another since the first (review r1
+   * of #469). Its read and decision are that other's, so it commits nothing at this one.
+   */
+  at(tried: WriteTry, environment: { projectId: string; environmentId: string }): boolean {
+    const place = this.#placeOf(tried);
+    return place?.environment != null && place.project.id === environment.projectId && place.environment.id === environment.environmentId;
   }
 
   /** The try at hand, or null once let go. */
@@ -223,5 +244,5 @@ export async function writeAhead(
       return false;
     }
   };
-  return { identity, written: new Written(asked, tokenHash, first, ahead?.place ?? null, touched, ask, still) };
+  return { identity, written: new Written(asked, tokenHash, first, ahead?.place ?? null, touched, ask, still, (tried) => rows(tried)?.place ?? null) };
 }

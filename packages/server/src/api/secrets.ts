@@ -696,8 +696,12 @@ export async function setSecrets(
 ): Promise<SetResult> {
   // Decided by the vault on one read already, for the patch as the front door read it (`writeAhead`, T179 PR 3):
   // committed holding that read, or, where the vault no longer serves it, as below.
+  // The keys found sensitive by any attempt of this write, which a write that says nothing keeps sensitive: a
+  // reference's source written again as a secret, or a reference retargeted, between attempts makes it no looser.
+  // The vault's tries count too, when the write goes on down this path.
+  const sticky = new Set<string>();
   if (ctx.written !== undefined && stillSo === undefined) {
-    const held = await heldWrite(ctx, place, patch, ctx.written);
+    const held = await heldWrite(ctx, place, patch, ctx.written, sticky);
     if (held !== null) return held;
   }
   const environment = requireLive(place);
@@ -715,9 +719,6 @@ export async function setSecrets(
   const marks = Object.entries(patch).flatMap(([key, value]) => (isMark(value) ? [{ key, to: value.sensitivity }] : []));
   const refs = Object.entries(patch).flatMap(([key, value]) => (value !== null && typeof value === 'object' && 'ref' in value ? [{ key, ref: value.ref }] : []));
   const archives = keysIn.filter((key) => patch[key] === null);
-  // The keys found sensitive by any attempt of this write, which a write that says nothing keeps sensitive: a
-  // reference's source written again as a secret, or a reference retargeted, between attempts makes it no looser.
-  const sticky = new Set<string>();
   const result = await optimistic(ctx, async () => {
     const operationId = randomUUID();
     const heads = await secretHeads(ctx.db, environment.environmentId, { keys: keysIn });
@@ -996,12 +997,23 @@ export async function setSecrets(
  * write is asked of the vault again, a request of its own: three tries in all, then 409 `changed`. Null where the
  * vault no longer serves it: the write goes down today's path.
  */
-async function heldWrite(ctx: ApiContext, place: ResolvedPath, patch: Record<string, SecretValue | null>, written: Written): Promise<SetResult | null> {
+async function heldWrite(
+  ctx: ApiContext, place: ResolvedPath, patch: Record<string, SecretValue | null>, written: Written, sticky: Set<string>,
+): Promise<SetResult | null> {
   const environment = requireLive(place);
   const recipes = recipesOf(patch);
   for (let tries = 1; ; tries += 1) {
     const tried = written.current;
     if (tried === null) return null;
+    // A try whose read found the slugs at another environment (renamed since, another made with the old name): today's
+    // path, which writes to this one's ids or refuses, as it does a rename after the router found the place.
+    // A key a try found sensitive and a later one not (written again meanwhile as a secret): today's path too, which
+    // keeps it sensitive (`sticky`), as the vault's read of the key's current value alone would not.
+    for (const key of tried.answer.keys) if (key.sensitive) sticky.add(key.name);
+    if (!written.at(tried, environment) || tried.answer.keys.some((key) => !key.sensitive && sticky.has(key.name))) {
+      written.wipe();
+      return null;
+    }
     try {
       return await heldOnce(ctx, place, environment, patch, recipes, written, tried);
     } catch (error) {

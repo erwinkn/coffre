@@ -39,10 +39,12 @@ TamperProcs == {"w1", "end", "dbw", "sub", "ck"}
 \* refuse it too.
 ForgeProcs == {"w1", "bob", "end", "rev", "dem", "fsg", "ck"}
 
-\* Ada writes key k twice while her grant is taken away and given back: a
-\* try the vault served whose hold fails, then a refusal, goes down
-\* today's path, which may write once the grant is back (PR 3's fallback).
-FallBackProcs == {"w1", "w2", "rev", "bk", "ck"}
+\* Ada writes key k twice while her grant is taken away and given back, and
+\* the roles redefined: a try the vault served whose hold fails, then a
+\* refusal, goes down today's path, which may write once the grant is back
+\* (PR 3's fallback); a roles change between its decision and its commit
+\* does not stop it (TodayStandsAtCommit, EXPECTED broken).
+FallBackProcs == {"w1", "w2", "rev", "bk", "rol", "ck"}
 
 \* Bob and Cy each add svc while an Owner demotes Bob and changes the
 \* policy so that only Owners add, and a database writer copies a token

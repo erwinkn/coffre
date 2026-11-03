@@ -158,14 +158,17 @@ takes today's.
    costs no round trip of its own. Only then it encrypts: the AAD binds `project|environment|key` by
    id (`envelope.ts`), which it learns from the answer. No round trip. Then
    it sends **one Sync**: BEGIN, 0.14's head `FOR UPDATE` (its first
-   statement, and kept after PR 6 as a lock alone: see "Locks"), **the
+   statement, and kept after PR 6 as a lock alone: see "Locks"), the
+   credential's `last_used_at`, when due (its row before the issue lock,
+   as `issue_token` takes it: see "Locks"), **the
    hold** (`hold_inputs`: the issue lock shared, the fence exclusive, then
    `write_inputs` again, its digest against the changes'), the new rows
    and the key's update, each change through `app_change_strict`, then
    COMMIT. A hold that fails raises `CF001`, Postgres skips the COMMIT, and
-   the write asks again from 2 (`ObjectMoved`), carrying the keys it learnt
-   are sensitive into the new request: at most three tries in all, then
-   409 `changed` (below, "Retries").
+   the write asks again from 2 (`ObjectMoved`): at most three tries in
+   all, then 409 `changed` (below, "Retries"). A key a try found sensitive
+   stays so: a later try that finds it a secret goes down today's path,
+   which keeps it sensitive (its `sticky` set; review r1 of #469).
 5. `waitSealed`, then the answer (R51).
 
 ## The read and its hold
@@ -344,9 +347,18 @@ all, then 409 `changed` with `Retry-After: 1`. A try the vault no longer
 serves takes today's path instead of a fourth trip, as a first read it does
 not serve does: a refusal, an object other than the caller's credential
 not as its log has it (StaleFirst, `stale`; a newest change whose MAC fails,
-`tampered`), a key this path does not write (`shape`). That path reads
-everything again under the head and the fence, and answers and logs as it
-always has (formal/Writing.tla, `WToday`). PR 6's outcome record moves only
+`tampered`), a key this path does not write (`shape`). So does a try whose
+read found the place's slugs at another environment than the first's (a
+rename, and another environment made under the old name: a try asks by
+slugs, and the route writes to the first's ids), and a try that finds a
+key a secret that an earlier one found sensitive (review r1 of #469). That
+path decides at the vault, as it always has, and its transaction commits
+on that decision, weighing again only the environment and the key's row;
+it answers and logs as it always has (formal/Writing.tla, `WToday` and
+`WTodayCommit`). A revoke between its decision and its commit does not
+stop it, the window every write has had since 0.14
+(`TodayStandsAtCommit`, an expected gap in `scripts/formal.sh`), which this
+path closes for the writes it serves and PR 6 for every write. PR 6's outcome record moves only
 the refusals off it; what the two-trip path does not serve (forks until
 PR 3b, references and a key service until PR 7, SQLite) keeps it.
 
@@ -653,8 +665,16 @@ is judged at the vault's clock, at the decision, as today. The hold costs
 no round trip: it is a statement of the same Sync.
 
 **Locks, in the order Migration015's `NoWaitCycle` already checks:**
-- the app's statement: 0.14's head, then the issue lock shared, then the
-  fence, then the hold, then its rows. `audited` takes its rows before the
+- the app's statement: 0.14's head, then (as built in PR 3) its
+  credential's row, the last use's UPDATE when due, then the issue lock
+  shared, then the fence, then the hold, then its rows. The credential's
+  row before the issue lock, as `issue_token` (its row shared, then the
+  issue lock) and `revoke_credential` take it: after them, the write would
+  hold the issue lock and wait for an issue's share of the row, that issue
+  queued for the issue lock behind the checkpointer's barrier, which waits
+  for the write's: a cycle Postgres breaks after `deadlock_timeout`, the
+  fence held and every use waiting meanwhile (review r1 of #469;
+  formal/WriteLocks.tla, which models the lock queue). `audited` takes its rows before the
   issue lock and the fence; here they come after, as `app_change` and
   `change_input` already update a key's row (`secrets.seal`) after the
   fence. That waits for nobody: every statement that locks a key's row
@@ -836,10 +856,15 @@ What it does not build yet, and why that is sound meanwhile:
   the two-trip write refuses it where today's path would not, on both engines (reported with T179 PR 3).
 - **A retry that finds the credential ended answers 401** rather than going down today's path, which would go on
   with the caller the first try checked.
+- **A retry whose read found the place elsewhere, or a key less sensitive, goes down today's path**: its read and
+  decision are of another environment than the one the route writes to, by its ids, or it would write a key looser
+  than an earlier try found it (review r1 of #469). A regenerate whose `replaces` is no version's id goes there
+  from the front door, which today's path answers 409 `stale`.
 
 The regressions (packages/server/test/write-held.test.ts) make each adversary of Writing.tla between the vault's read
 and the app's hold, through the real front door: a revoke, an end, a rename, a key appearing sensitive, an archive, a
 second write, a grant taken and given back, a hold that keeps failing (409 after three tries), a forged seal
-(WritingForge), a row put back (dbw), a token hash moved (sub); and one that the read's digest moves with each.
+(WritingForge), a row put back (dbw), a token hash moved (sub), the environment renamed and another made under its
+name, a key sensitive at the first try and a secret at the next; and one that the read's digest moves with each.
 packages/vault/test/write-cost.test.ts holds both statements' buffers flat from 10k entries to 1M.
 

@@ -39,10 +39,13 @@
 (* Each asks again at most MaxTries times in all, then answers 409.        *)
 (*                                                                         *)
 (* Today's path (PR 3: `served: false`). A key write the vault does not    *)
-(* serve goes as every write went before: one transaction under 0.14's     *)
-(* head and the fence that reads the rows again, checks each object's row  *)
-(* against its newest change, and that change's MAC once T190 is in it     *)
-(* (TodayChangeMacChecked), then writes. One step here (WToday). A write   *)
+(* serve goes as every write went before: the vault decides on the rows    *)
+(* as they are, each object's row held to its newest change, and that      *)
+(* change to its MAC once T190 is in it (TodayChangeMacChecked), and wraps *)
+(* the key; then the app's transaction, under 0.14's head and the fence,   *)
+(* writes on that decision (WToday, then WTodayCommit). A change between   *)
+(* the two does not stop it (TodayStandsAtCommit, EXPECTED broken: the     *)
+(* window every write has had since 0.14; review r1 of #469). A write      *)
 (* goes there from its vault step (an object but the caller's credential   *)
 (* not as the log has it) or from its decision (refused), on its first try *)
 (* or on a later one, after a try the vault served and the app's hold      *)
@@ -324,7 +327,7 @@ Actor(p) == IF ActorFromRead THEN l[p].read[Token].name ELSE names[Token]
 \* A committed change, as the ghosts record it.
 Committed(p, o, stands) ==
     [p |-> p, n |-> next, stands |-> stands, replays |-> Replays(p),
-     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0,
+     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0, today |-> FALSE, decided |-> TRUE,
      t |-> tries[p], wrap |-> IF "wrap" \in DOMAIN l[p] THEN l[p].wrap ELSE tries[p]]
 
 -----------------------------------------------------------------------------
@@ -433,13 +436,17 @@ WCommit(p) ==
        \/ ~FallBackUncommitted /\ Goto(p, "w.today")
     /\ UNCHANGED <<ok, names, svc, putBack, forged, sealedTo, head, tries, trips, requests, admits, answered>>
 
-\* Today's path: one transaction under 0.14's head and the fence, which
-\* reads every row again and writes on what it finds. It holds each object
-\* but the caller's credential to its newest change (the row's seal), and
-\* that change to its MAC once T190 is in it; the credential, to its row's
-\* `auth_mac` alone (the gap the two-trip path closes, which is why the
-\* caller's own credential never comes here). Its write binds no read, so
-\* it replays trivially; its wrap is its own (0).
+\* Today's path, as it goes: the vault decides on the rows as they are and
+\* wraps the key (0.14's `key.wrap`), then the app's transaction, under
+\* 0.14's head and the fence, writes on that decision. Two steps (review r1
+\* of #469): a change may come between them, which today's commit does not
+\* weigh again (TodayStandsAtCommit, a window every write has had since
+\* 0.14, which the two-trip path closes for the writes it serves).
+\*
+\* The decision holds each object but the caller's credential to its newest
+\* change (the row's seal), and that change to its MAC once T190 is in it;
+\* the credential, to its row's `auth_mac` alone (the gap the two-trip path
+\* closes, which is why the caller's own credential never comes here).
 WToday(p) ==
     /\ pc[p] = "w.today"
     /\ head = None /\ held = None
@@ -450,16 +457,38 @@ WToday(p) ==
                       \/ AuthChecked /\ r[Token].name # 0
        IN IF refuses
             THEN /\ Goto(p, "done")
-                 /\ UNCHANGED <<kver, seal, next, l, writes>>
-            ELSE /\ kver' = kver + 1
-                 /\ Numbered("key")
-                 /\ l' = [l EXCEPT ![p] = [n |-> next, read |-> r, seals |-> seal, wrap |-> 0]]
-                 /\ writes' = writes \cup {[p |-> p, n |-> next,
-                                              stands |-> \A o \in WriteObjects \ {"key"} : ok[o],
-                                              replays |-> TRUE, from |-> seal["key"], was |-> seal["key"],
-                                              authentic |-> names[Token] = 0, t |-> 0, wrap |-> 0]}
-                 /\ Goto(p, "t.seal")
-    /\ UNCHANGED <<ok, names, svc, putBack, forged, sealedTo, head, held, tries, trips, requests, admits, answered>>
+                 /\ UNCHANGED l
+            \* What it decided on, and whether the caller stood then, by the log.
+            ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> r, seals |-> seal, wrap |-> 0,
+                                          decided |-> \A o \in WriteObjects \ {"key"} : ok[o]]]
+                 /\ Goto(p, "w.tcommit")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+
+\* ... and the app's transaction: under 0.14's head and the fence, it finds
+\* the environment still live (`checkEnvironment`) and the key's row where
+\* the decision found it (`app_change`, else `ObjectMoved`, asked again);
+\* then the key's next version, its change numbered. Its write binds no
+\* read, so it replays trivially; its wrap is its own (0).
+WTodayCommit(p) ==
+    /\ pc[p] = "w.tcommit"
+    /\ head = None /\ held = None
+    /\ IF ~ok["env"]
+         THEN /\ Goto(p, "done")
+              /\ UNCHANGED <<kver, seal, next, l, tries, writes>>
+       ELSE IF seal["key"] # l[p].seals["key"]
+         THEN /\ Again(p, "w.today")
+              /\ UNCHANGED <<kver, seal, next, l, writes>>
+         ELSE /\ kver' = kver + 1
+              /\ Numbered("key")
+              /\ l' = [l EXCEPT ![p].n = next]
+              /\ writes' = writes \cup {[p |-> p, n |-> next, today |-> TRUE,
+                                           stands |-> \A o \in WriteObjects \ {"key"} : ok[o],
+                                           decided |-> l[p].decided,
+                                           replays |-> TRUE, from |-> seal["key"], was |-> seal["key"],
+                                           authentic |-> names[Token] = 0, t |-> 0, wrap |-> 0]}
+              /\ Goto(p, "t.seal")
+              /\ UNCHANGED tries
+    /\ UNCHANGED <<ok, names, svc, putBack, forged, sealedTo, head, held, trips, requests, admits, answered>>
 
 -----------------------------------------------------------------------------
 (* A member add *)
@@ -589,7 +618,7 @@ Tick ==
     /\ sealedTo' = next
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, next, head, held, pc, l, tries, trips, requests, writes, admits, answered>>
 
-Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p) \/ WCommit(p) \/ WToday(p)
+Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p) \/ WCommit(p) \/ WToday(p) \/ WTodayCommit(p)
         \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ ACommit(p) \/ Answer(p) \/ Change(p)
         \/ GiveBack(p) \/ Tamper(p) \/ Forge(p) \/ Substitute(p) \/ Rename(p)
 
@@ -624,7 +653,18 @@ TypeOK ==
 \* stops every write after it, the one already decided included. A
 \* session's expiry changes nothing in the read: it is judged at the
 \* vault's clock, at its decision, as today.
-WritesStandAtCommit == \A w \in writes : w.stands
+WritesStandAtCommit == \A w \in writes : w.today \/ w.stands
+
+\* Today's path decides on the rows as they are, by the log (each object
+\* held to its newest change, and that change to its MAC), and writes on
+\* that decision: the caller stood when the vault decided.
+TodayStandsAtDecision == \A w \in writes : w.today => w.decided
+
+\* ... not at its commit: a revoke between the vault's wrap and the app's
+\* COMMIT does not stop it (EXPECTED in scripts/formal.sh: the window every
+\* write has had since 0.14, which the two-trip path closes for the writes
+\* it serves, and 0.16 for every write, PR 6).
+TodayStandsAtCommit == \A w \in writes : w.today => w.stands
 
 \* Each key change goes from the object it was made from: two writes from
 \* one version never both commit (EachChangeFlips, for the app's change).
