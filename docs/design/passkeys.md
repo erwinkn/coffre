@@ -815,6 +815,32 @@ keeps working while the migration runs ahead of the deploy.
 
 `pnpm test:compat` keeps the newest release conformant on this schema.
 
+**As built (PR 2).** Postgres `0063_passkeys`, SQLite `0032_passkeys`. As
+above, with these choices:
+
+- The MAC covers the user handle too (it never changes, so it costs
+  nothing), and a row that names a passkey takes the kind
+  `confirmed_<table>` (`packages/server/src/auth-rows.ts`), outermost, so
+  a writer can neither vouch a passkey for an old session nor swap one.
+- The app's `UPDATE` on `passkeys` is by column, as on every sign-in table:
+  the counter, the replay mark, the name, last use, removal and the MAC;
+  never whose a passkey is, its handle, credential or key
+  (`packages/db/test/schema-guarantees.sql`, 22). It also gets `UPDATE
+  (passkey_id)` on `device_authorizations`, which names its passkey when it
+  is decided. `credentials` and `mcp_connections` name theirs when they are
+  inserted, which the app's `INSERT` already covers.
+- Checks beyond 5.1's: a 16-byte user handle and AAGUID, the counter a
+  uint32, transports a JSON array, a name of 1 to 64 characters, `removed_by`
+  exactly when `removed_at`; a credential's `confirmed_at` only with a
+  passkey, and a device login's passkey only on an approval.
+- On Postgres the constraints on the three existing tables are `NOT VALID`,
+  as 0022's seals were: their columns are null everywhere, so nothing is
+  scanned, and each table is locked for a moment only. On SQLite each check
+  rides on its new column, so no table is rebuilt.
+- `APP_KEY` rotation signs `passkeys` again last, after the tables it
+  already had, so that a cursor the previous release wrote still names the
+  table it meant.
+
 ## 6. The session model
 
 ### 6.1 One lock, and revocation, not derived history

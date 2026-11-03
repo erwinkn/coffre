@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { deriveKey } from '@coffre/core/identity';
-import type { credentials, deviceAuthorizations, enrollments, identities, mcpConnections, oauthClients, serviceBindings } from '@coffre/db/schema';
+import type { credentials, deviceAuthorizations, enrollments, identities, mcpConnections, oauthClients, passkeys, serviceBindings } from '@coffre/db/schema';
 
 type Rows = {
   identities: typeof identities.$inferSelect;
@@ -11,6 +11,7 @@ type Rows = {
   oauth_clients: typeof oauthClients.$inferSelect;
   mcp_connections: typeof mcpConnections.$inferSelect;
   enrollments: typeof enrollments.$inferSelect;
+  passkeys: typeof passkeys.$inferSelect;
 };
 export type AuthTable = keyof Rows;
 
@@ -24,6 +25,9 @@ export type AuthTable = keyof Rows;
 // scopes, where codes go, its code and refresh token, and how long it lasts.
 // An enrollment code is all of it but its hint and when it was made: whose
 // binding, its hash, the scope its sessions hold, who minted it, and its end.
+// A passkey is whose it is, its handle, its credential and key, and whether
+// it was removed; its counter, replay mark, name and last use are bookkeeping
+// (docs/design/passkeys.md, section 5.1).
 const FIELDS = {
   identities: ['id', 'provider', 'issuerHash', 'subject', 'principal', 'generation', 'revokedAt'],
   credentials: ['id', 'tokenHash', 'kind', 'principal', 'generation', 'identityId', 'expiresAt', 'revokedAt'],
@@ -35,9 +39,14 @@ const FIELDS = {
     'codeHash', 'codeChallenge', 'codeExpiresAt', 'refreshHash', 'refreshPreviousHash', 'expiresAt', 'revokedAt',
   ],
   enrollments: ['id', 'bindingId', 'codeHash', 'scope', 'createdBy', 'createdWith', 'expiresAt'],
+  passkeys: ['id', 'principal', 'generation', 'userHandle', 'credentialId', 'publicKey', 'algorithm', 'removedAt'],
 } as const satisfies { [K in AuthTable]: readonly (keyof Rows[K])[] };
 
-type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> };
+/** What names a passkey on a sign-in row, when one stands behind it (passkeys.md, section 5.2). */
+const CONFIRMED = { credentials: ['passkeyId', 'confirmedAt'], device_authorizations: ['passkeyId'], mcp_connections: ['passkeyId'] } as const;
+type Confirmed<K extends AuthTable> = K extends keyof typeof CONFIRMED ? Partial<Pick<Rows[K], Extract<typeof CONFIRMED[K][number], keyof Rows[K]>>> : unknown;
+
+type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> & Confirmed<K> };
 
 /**
  * A credential a trust binding issued, for a CI run's ID token, says so in
@@ -78,14 +87,27 @@ const WORKLOAD_FIELDS = [
  * a binding that carries one never checks as one `/api/auth/oidc` takes.
  * A workload's session is its own kind first, whatever else it carries,
  * and so is an enrollment code.
+ *
+ * A row that names a passkey is a kind of its own again, outermost, which
+ * covers it, and a credential's touch with it: the rows from before
+ * passkeys name none and check as they were sealed, and a passkey named,
+ * cleared or swapped since fails either way. Written once, with the row
+ * (passkeys.md, section 5.2), so nothing is signed again for it.
  */
 function kindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
+  const base = baseKindOf(table, row);
+  if (!(table in CONFIRMED) || (row as { passkeyId?: unknown }).passkeyId == null) return base;
+  return { kind: `confirmed_${base.kind}`, fields: [...base.fields, ...CONFIRMED[table as keyof typeof CONFIRMED]] };
+}
+
+function baseKindOf(table: AuthTable, row: object): { kind: string; fields: readonly string[] } {
   const { kind: credentialKind, createdBy, scope, jwks, places, policy } = row as {
     kind?: unknown; createdBy?: unknown; scope?: unknown; jwks?: unknown; places?: unknown; policy?: unknown;
   };
   if (table === 'credentials' && credentialKind === 'workload') return { kind: 'workload_credentials', fields: WORKLOAD_FIELDS };
-  // An enrollment code always has a scope, in its own fields: one kind, which composes with none.
+  // An enrollment code always has a scope, in its own fields: one kind, which composes with none; a passkey too.
   if (table === 'enrollments') return { kind: 'enrollments', fields: FIELDS.enrollments };
+  if (table === 'passkeys') return { kind: 'passkeys', fields: FIELDS.passkeys };
   const exchanged = table === 'credentials' && issuingBinding(createdBy) !== null;
   const uploaded = table === 'service_bindings' && jwks != null;
   const kind = exchanged ? 'exchanged_credentials' : uploaded ? 'uploaded_service_bindings' : table;

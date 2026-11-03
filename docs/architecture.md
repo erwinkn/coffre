@@ -987,12 +987,22 @@ purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
 | `service_bindings` | id, principal, generation, profile, issuer, JWKS URL, claims, revoked at |
 | `oauth_clients` | id, name, redirect URIs, revoked at |
 | `mcp_connections` | id, principal, generation, client id, client name, client host, registration, scopes, redirect URI, code hash, code challenge, code expires at, refresh hash, previous refresh hash, expires at, revoked at |
+| `passkeys` | id, principal, generation, user handle, credential ID, public key, algorithm, removed at |
 
 Dates are integer milliseconds, bytes are hex, and null is distinct from
 any value. Row IDs and the device's short user code bind the MAC to the
 target an approval or revocation selects. `decided_at` is covered because
 clearing it would allow another decision. Display labels, email addresses
 and last-use telemetry do not grant access and are outside the MAC.
+
+A row of `credentials`, `device_authorizations` or `mcp_connections` that
+names the passkey behind it (`passkey_id`, set once, with the row) is a
+kind of its own, `confirmed_<table>`, whose tuple adds that passkey and, on
+a credential, `confirmed_at`, the touch. A row from before passkeys names
+none and checks as it was signed; naming one afterwards, clearing it or
+swapping it fails either way. A passkey's signature counter, replay mark,
+name and transports are bookkeeping, outside its MAC
+([design](design/passkeys.md), section 5).
 
 Every state change checks the old MAC and writes the new one with the
 change, conditional on the old MAC still matching. Listings check the rows
@@ -1007,7 +1017,7 @@ must belong to the same member and generation, enforced by a foreign key.
 
 Changing `auditChainKey` invalidates these rows too, unless a rotation
 signs them again under the new key ([above](#one-log-two-authors)): it does
-so for every table here and `enrollments`, and signs out browser and CLI
+so for every table here (`passkeys` last) and `enrollments`, and signs out browser and CLI
 sessions. A MAC proves a row genuine, not current: see [Limits](#limits).
 
 ### Trust bindings

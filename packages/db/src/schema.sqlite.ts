@@ -550,6 +550,51 @@ export const identities = sqliteTable(
   ],
 );
 
+/** A person's passkeys (schema.ts). */
+export const passkeys = sqliteTable(
+  'passkeys',
+  {
+    id: text().primaryKey(),
+    authMac: bytes('auth_mac').notNull(),
+    principal: text().notNull(),
+    generation: integer().notNull(),
+    userHandle: bytes('user_handle').notNull(),
+    credentialId: bytes('credential_id').notNull(),
+    publicKey: bytes('public_key').notNull(),
+    algorithm: integer().notNull(),
+    signCount: integer('sign_count', { mode: 'number' }).notNull().default(0),
+    lastChallengeAt: time('last_challenge_at'),
+    transports: text().notNull().default('[]'),
+    aaguid: bytes('aaguid'),
+    synced: flag('synced').notNull(),
+    name: text().notNull(),
+    createdAt: createdAt(),
+    createdBy: text('created_by').notNull(),
+    lastUsedAt: time('last_used_at'),
+    removedAt: time('removed_at'),
+    removedBy: text('removed_by'),
+  },
+  (table) => [
+    unique('passkeys_credential_id_key').on(table.credentialId),
+    check('passkeys_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('passkeys_principal_check', sql`${table.principal} LIKE 'user:%'`),
+    check('passkeys_user_handle_check', sql`octet_length(${table.userHandle}) = 16`),
+    check('passkeys_credential_id_check', sql`octet_length(${table.credentialId}) BETWEEN 16 AND 1023`),
+    check('passkeys_algorithm_check', sql`${table.algorithm} IN (-8, -7, -257)`),
+    check('passkeys_sign_count_check', sql`${table.signCount} BETWEEN 0 AND 4294967295`),
+    check('passkeys_transports_check', sql`json_type(${table.transports}) = 'array'`),
+    check('passkeys_aaguid_check', sql`${table.aaguid} IS NULL OR octet_length(${table.aaguid}) = 16`),
+    check('passkeys_name_check', sql`length(${table.name}) BETWEEN 1 AND 64`),
+    check('passkeys_removed_check', sql`(${table.removedAt} IS NULL) = (${table.removedBy} IS NULL)`),
+    foreignKey({
+      name: 'passkeys_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+  ],
+);
+
 export const serviceBindings = sqliteTable(
   'service_bindings',
   {
@@ -683,8 +728,15 @@ export const mcpConnections = sqliteTable(
     revokedBy: text('revoked_by'),
     // 0.15's seal (schema.ts).
     seal: bytes('seal'),
+    // The passkey that confirmed the session that connected it (schema.ts).
+    passkeyId: text('passkey_id'),
   },
   (table) => [
+    foreignKey({
+      name: 'mcp_connections_passkey_id_fkey',
+      columns: [table.passkeyId],
+      foreignColumns: [passkeys.id],
+    }).onDelete('restrict'),
     check('mcp_connections_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('mcp_connections_principal_check', sql`${table.principal} LIKE 'user:%'`),
     check('mcp_connections_registration_check', sql`${table.registration} IN ('cimd', 'dcr')`),
@@ -813,8 +865,17 @@ export const credentials = sqliteTable(
     approvedBy: text('approved_by'),
     // 0.15's seal (schema.ts).
     seal: bytes('seal'),
+    // The passkey that confirmed it, and when it was touched (schema.ts).
+    passkeyId: text('passkey_id'),
+    confirmedAt: time('confirmed_at'),
   },
   (table) => [
+    foreignKey({
+      name: 'credentials_passkey_id_fkey',
+      columns: [table.passkeyId],
+      foreignColumns: [passkeys.id],
+    }).onDelete('restrict'),
+    check('credentials_confirmed_check', sql`${table.confirmedAt} IS NULL OR ${table.passkeyId} IS NOT NULL`),
     check('credentials_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('credentials_token_hash_key').on(table.tokenHash),
     check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload')`),
@@ -869,8 +930,16 @@ export const deviceAuthorizations = sqliteTable(
     // Who approved it, `user:<email>`, once approved.
     principal: text(),
     consumedAt: time('consumed_at'),
+    // The passkey that approved this terminal (schema.ts).
+    passkeyId: text('passkey_id'),
   },
   (table) => [
+    foreignKey({
+      name: 'device_authorizations_passkey_id_fkey',
+      columns: [table.passkeyId],
+      foreignColumns: [passkeys.id],
+    }).onDelete('restrict'),
+    check('device_authorizations_passkey_check', sql`${table.passkeyId} IS NULL OR ${table.decision} = 'approved'`),
     unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
     unique('device_authorizations_user_code_key').on(table.userCode),
     check('device_authorizations_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),

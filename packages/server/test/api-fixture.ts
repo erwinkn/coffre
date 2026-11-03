@@ -578,6 +578,7 @@ export async function resetDatabase(owner: Database): Promise<void> {
     logConfig,
     proxyDefinitions,
     proxyReserved,
+    passkeys,
     logUses,
     logBulk,
     logReads,
@@ -594,6 +595,8 @@ export async function resetDatabase(owner: Database): Promise<void> {
   await owner.delete(cappedAlerts);
   await owner.delete(deviceAuthorizations);
   await owner.delete(identities);
+  // What names a passkey is gone: its passkeys next, before their members.
+  await owner.delete(passkeys);
   // A reference names its vault entry: it goes before the log.
   await owner.delete(secretReferences);
   await emptyLog(owner);

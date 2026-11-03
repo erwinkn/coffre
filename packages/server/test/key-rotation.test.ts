@@ -33,6 +33,7 @@ import {
   credentials,
   deviceAuthorizations,
   enrollments,
+  passkeys,
   identities,
   mcpConnections,
   oauthClients,
@@ -45,7 +46,7 @@ const SERVICE = 'token:ci-deploy';
 const AUTH = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] });
 const [A, B, C] = [Buffer.alloc(32, 0xa1), Buffer.alloc(32, 0xb2), Buffer.alloc(32, 0xc3)];
 const transport: WorkloadTransport = { json: async () => assert.fail('a rotation fetches nothing') };
-const TABLES = { identities, credentials, device_authorizations: deviceAuthorizations, service_bindings: serviceBindings, oauth_clients: oauthClients, mcp_connections: mcpConnections, enrollments };
+const TABLES = { identities, credentials, device_authorizations: deviceAuthorizations, service_bindings: serviceBindings, oauth_clients: oauthClients, mcp_connections: mcpConnections, enrollments, passkeys };
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -113,6 +114,17 @@ beforeEach(async () => {
     id: randomUUID(), principal: `user:${ROOT}`, generation: 1, clientId, clientName: 'Claude', clientHost: null, registration: 'dcr',
     scopes: '["read"]', redirectUri: 'http://127.0.0.1/callback', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt: new Date(Date.now() + 86_400_000),
   });
+  // A passkey of the Owner's, and a connection it confirmed: its MAC covers the passkey it names.
+  const passkey = {
+    id: randomUUID(), principal: `user:${ROOT}`, generation: 1, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
+    algorithm: -7, removedAt: null,
+  };
+  await db.owner.insert(passkeys).values({ ...passkey, synced: true, name: 'YubiKey 5C', createdBy: `user:${ROOT}`, authMac: authMac(A, 'passkeys', passkey) });
+  await insertConnection(deps.db, A, {
+    id: randomUUID(), principal: `user:${ROOT}`, generation: 1, clientId, clientName: 'Claude', clientHost: null, registration: 'dcr',
+    scopes: '["read"]', redirectUri: 'http://127.0.0.1/callback', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt: new Date(Date.now() + 86_400_000),
+    passkeyId: passkey.id,
+  });
   held = { browser: browser.credential.token, cli: cli.credential.token, service: token.token, personal: personal.token };
 });
 
@@ -160,7 +172,8 @@ test('the first start under a new key signs every row again under it, signs peop
     ['key.reseal', appLogKey(B).keyId, appLogKey(A).keyId, 'system:coffre-key-rotation'],
     ['key.rotate', appLogKey(B).keyId, appLogKey(A).keyId, 'system:coffre-key-rotation'],
   ]);
-  assert.deepEqual(JSON.parse(moves[0]!.metadata), { from: appLogKey(A).keyId, resealed: 9, signedOut: 2, later: 0, unsigned: [], unsignedCount: 0, next: null });
+  // Eleven signed again, the passkey and the connection it confirmed among them, and two sessions signed out.
+  assert.deepEqual(JSON.parse(moves[0]!.metadata), { from: appLogKey(A).keyId, resealed: 11, signedOut: 2, later: 0, unsigned: [], unsignedCount: 0, next: null });
   // Another start is settled at once, and writes nothing.
   const again = startUnder(B, [A]);
   assert.equal(await keyReady(again), null);
@@ -232,7 +245,7 @@ test('a rotation cut short goes on from its last step, and every row is signed o
   await settleKey(second);
   assert.equal(second.appKey.settled, true);
   const steps = (await appEntries()).filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { resealed: number; signedOut: number });
-  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 11, JSON.stringify(steps));
+  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 13, JSON.stringify(steps));
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
   assert.equal((await appEntries()).filter((entry) => entry.action === 'key.rotate').length, 1);
   await walked(second);
@@ -248,7 +261,7 @@ test('starts that race each other rotate once, each step going on from the one b
   const entries = await appEntries();
   assert.equal(entries.filter((entry) => entry.action === 'key.rotate').length, 1);
   const steps = entries.filter((entry) => entry.action === 'key.reseal').map((entry) => JSON.parse(entry.metadata) as { resealed: number; signedOut: number; next: unknown });
-  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 11);
+  assert.equal(steps.reduce((sum, step) => sum + step.resealed + step.signedOut, 0), 13);
   assert.equal(new Set(steps.map((step) => JSON.stringify(step.next))).size, steps.length, 'no step went on from where another had');
   assert.ok(Object.values(await signedUnder(B)).every((rows) => rows.every(Boolean)));
   // A start with a third key, racing too late, finds the log under B, a key it does not hold: it serves, as a key replaced without a rotation does.

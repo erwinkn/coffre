@@ -55,6 +55,7 @@ function signedTable(db: Queryable, table: AuthTable) {
     oauth_clients: tables.oauthClients,
     mcp_connections: tables.mcpConnections,
     enrollments: tables.enrollments,
+    passkeys: tables.passkeys,
   }[table];
 }
 

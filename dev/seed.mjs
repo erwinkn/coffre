@@ -73,6 +73,7 @@ await pool.unsafe('DELETE FROM credentials');
 await pool.unsafe('DELETE FROM enrollments');
 await pool.unsafe('DELETE FROM device_authorizations');
 await pool.unsafe('DELETE FROM identities');
+await pool.unsafe('DELETE FROM passkeys');
 await pool.unsafe('DELETE FROM service_bindings');
 await pool.unsafe('DELETE FROM consumed_tokens');
 await pool.unsafe('DELETE FROM capped_alerts');

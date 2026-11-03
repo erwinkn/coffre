@@ -538,4 +538,44 @@ BEGIN
 END
 $$;
 
+-- 22. A passkey is never deleted, never moved to another person, and never
+-- given another credential or key (0063_passkeys): the app writes its
+-- counter, replay mark, name, last use and removal, and signs it again. A
+-- credential's passkey and touch are written once, with it; a device login
+-- names its passkey when it is decided.
+DO $$
+DECLARE
+    statement text;
+BEGIN
+    FOREACH statement IN ARRAY ARRAY[
+        'UPDATE passkeys SET id = id',
+        'UPDATE passkeys SET principal = principal',
+        'UPDATE passkeys SET generation = generation',
+        'UPDATE passkeys SET user_handle = user_handle',
+        'UPDATE passkeys SET credential_id = credential_id',
+        'UPDATE passkeys SET public_key = public_key',
+        'UPDATE passkeys SET algorithm = algorithm',
+        'UPDATE passkeys SET created_by = created_by',
+        'UPDATE passkeys SET created_at = created_at',
+        'DELETE FROM passkeys',
+        'TRUNCATE passkeys',
+        'UPDATE credentials SET passkey_id = passkey_id',
+        'UPDATE credentials SET confirmed_at = confirmed_at',
+        'UPDATE mcp_connections SET passkey_id = passkey_id'
+    ] LOOP
+        BEGIN
+            EXECUTE statement;
+            RAISE EXCEPTION 'FAIL: coffre_app was able to run: %', statement;
+        EXCEPTION
+            WHEN insufficient_privilege THEN NULL;
+        END;
+    END LOOP;
+    PERFORM count(*) FROM passkeys;
+    UPDATE passkeys SET sign_count = sign_count, last_challenge_at = last_challenge_at, name = name,
+        last_used_at = last_used_at, removed_at = removed_at, removed_by = removed_by, auth_mac = auth_mac;
+    UPDATE device_authorizations SET passkey_id = passkey_id;
+    RAISE NOTICE 'PASS: coffre_app keeps a passkey whose it is, with its key, and never deletes one';
+END
+$$;
+
 \echo '--- all schema guarantees held ---'
