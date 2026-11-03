@@ -1067,7 +1067,10 @@ For an assertion:
    read now: another member's passkey, or one removed since the options
    were sent, is unknown here.
 4. `userHandle`, when the authenticator returns one, equals the passkey
-   row's `user_handle`.
+   row's `user_handle`. Absent or null means none; an empty one is refused,
+   since no `user.id` is empty. That is spec fidelity, not a guard (the
+   credential ID already names one person's row): if a real client ever
+   spells "no handle" as an empty buffer, treat it as null.
 5. `clientDataJSON.type` is `webauthn.get`; `challenge` equals the
    state's; origin and `crossOrigin` as in 7.1.
 6. `authenticatorData` is at least 37 bytes; `rpIdHash` is SHA-256 of the
@@ -1083,7 +1086,8 @@ For a registration, steps 1, 2 and 5 (with `webauthn.create`), then:
 attested credential ID 16 to 1023 bytes and unused across the instance and
 by this person (`excludeCredentials` is the browser's courtesy, not a
 check); the COSE key one of the three algorithms asked for, with valid
-parameters (EC2 on P-256, OKP Ed25519, RSA of at least 2048 bits), its
+parameters (EC2 on P-256, OKP Ed25519, RSA of 2048 to 4096 bits: a
+larger modulus would spend a Worker's CPU on one verify), its
 `alg` matching; and the `enroll` or add rules of sections 3.2 and 3.6.
 Attestation is `none`: the attestation statement is ignored, whatever its
 format. Coffre trusts the browser for which key was made, as every relying

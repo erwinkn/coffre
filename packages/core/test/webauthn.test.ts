@@ -350,6 +350,10 @@ test("a registration is refused for each of section 7.2's checks, alone, with th
   assert.equal(reason(await register({}, {}, long)), 'malformed');
   const longest = await SoftAuthenticator.create('ES256', { credentialId: new Uint8Array(1023) });
   assert.equal(reason(await register({}, {}, longest)), 'ok');
+  // A refusal's message never carries the browser's text: an alg of 20,000 characters is named by its type.
+  const wordy = await register({ publicKey: cose([1, 2], [3, 'x\n'.repeat(10_000)], [-1, 1], [-2, x], [-3, y]) });
+  assert.equal(reason(wordy), 'algorithm');
+  assert.ok(!wordy.ok && wordy.message === 'algorithm string was not asked for', !wordy.ok ? wordy.message : '');
 });
 
 function cborMap(bytes: Uint8Array): Map<number | string, unknown> {
@@ -436,4 +440,14 @@ test('CBOR reads the subset WebAuthn writes and refuses the rest', () => {
   // A byte order mark is a character of the text, kept: two keys that differ by one are two keys.
   assert.deepEqual(readCbor(encodeCbor('\uFEFFhello'))[0], '\uFEFFhello');
   assert.equal((readCbor(encodeCbor(new Map<CborValue, CborValue>([['x', 1], ['\uFEFFx', 2]])))[0] as Map<string, unknown>).size, 2);
+});
+
+test("a challenge under WebAuthn's 16 bytes is the caller's mistake, and throws rather than check nothing", async () => {
+  const key = await authenticator();
+  key.userHandle = HANDLE;
+  const empty = new Uint8Array(0);
+  const response = await key.assert({ ...SITE, challenge: empty });
+  await assert.rejects(verifyAssertion(response, { ...SITE, challenge: empty, passkey: await stored(key) }), /at least 16 bytes/);
+  const registration = await key.register({ ...SITE, challenge: empty, userHandle: HANDLE });
+  await assert.rejects(verifyRegistration(registration, { ...SITE, challenge: new Uint8Array(15) }), /at least 16 bytes/);
 });

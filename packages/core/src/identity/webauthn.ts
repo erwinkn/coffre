@@ -36,7 +36,8 @@
  * What it leaves to its caller: the sealed state the challenge came in,
  * which passkey row the ID names and whether it is live, and the counter and
  * replay mark, which one conditional statement moves (section 7.3). It never
- * throws on what a browser sent: every input gets an answer.
+ * throws on what a browser sent: every input gets an answer. It throws on a
+ * challenge under 16 bytes, the caller's mistake.
  */
 import { base64url, fromBase64url } from '@coffre/client/dpop';
 
@@ -143,7 +144,7 @@ const ENCODER = new TextEncoder();
 
 // --- CBOR, the subset WebAuthn writes ----------------------------------------
 
-/** A CBOR value: integers within 2^53, byte and text strings, arrays, maps keyed by integers or text, and true, false and null. */
+/** A CBOR value: safe integers (-2^53 to 2^53 - 1), byte and text strings, arrays, maps keyed by integers or text, and true, false and null. */
 export type Cbor = number | string | boolean | null | Uint8Array | Cbor[] | Map<number | string, Cbor>;
 
 /**
@@ -258,6 +259,16 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
 
 const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((byte, i) => byte === b[i]);
 
+/**
+ * The caller's challenge, held to WebAuthn's 16-byte minimum. Its mistakes
+ * are coffre's, not the browser's, so they throw: an empty challenge, say
+ * from a sealed state missing its field, would otherwise check nothing. (A
+ * wrong origin or RP ID needs no guard: it refuses every response.)
+ */
+function checkExpectation(expected: CeremonyExpectation): void {
+  if (!(expected.challenge instanceof Uint8Array) || expected.challenge.length < 16) throw new Error('a ceremony challenge is at least 16 bytes');
+}
+
 /** Step 2: what the browser says it signed for. */
 function checkClientData(bytes: Uint8Array, type: 'webauthn.create' | 'webauthn.get', expected: CeremonyExpectation): void {
   let data: unknown;
@@ -345,7 +356,7 @@ async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorith
   const key = cborWhole(cose);
   if (!(key instanceof Map)) return fail('key', 'the public key is not a COSE map');
   const alg = key.get(ALG);
-  if (!(allowed as readonly unknown[]).includes(alg)) return fail('algorithm', `algorithm ${String(alg)} was not asked for`);
+  if (!(allowed as readonly unknown[]).includes(alg)) return fail('algorithm', `algorithm ${typeof alg === 'number' ? alg : typeof alg} was not asked for`);
   const algorithm = alg as PasskeyAlgorithm;
   const kty = key.get(KTY);
   // WebAuthn 6.5.1: `alg` and each key type's own parameters, and no other
@@ -384,6 +395,10 @@ async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorith
  * ES256's DER signature, `SEQUENCE { INTEGER r, INTEGER s }`, as the 64
  * bytes WebCrypto verifies. Strict DER: short lengths, minimal positive
  * integers of at most 32 bytes of magnitude, nothing trailing.
+ *
+ * Strict DER does not make a signature unique: `(r, n - s)` verifies as
+ * well as `(r, s)`. Replay is the row's mark (section 7.3); a signature's
+ * bytes must never be a replay or dedup key.
  */
 function derToRaw(der: Uint8Array): Uint8Array<ArrayBuffer> | null {
   if (der.length < 8 || der[0] !== 0x30 || der[1] !== der.length - 2 || der[1] > 0x7f) return null;
@@ -444,6 +459,7 @@ function transportsOf(response: Json): string[] {
 /** A `create()` response, `credential.toJSON()`, held to section 7.2's registration checks. */
 export function verifyRegistration(input: unknown, expected: RegistrationExpectation): Promise<VerifiedRegistration | PasskeyRefusal> {
   return answer(async () => {
+    checkExpectation(expected);
     const { id, response } = envelope(input);
     const clientData = bytesOf(response, 'clientDataJSON', MAX_CLIENT_DATA);
     const attestation = cborWhole(bytesOf(response, 'attestationObject', MAX_ATTESTATION_OBJECT));
@@ -482,6 +498,7 @@ function handleOf(value: unknown): Uint8Array {
 /** A `get()` response, `credential.toJSON()`, held to section 7.2's assertion checks against the stored passkey. */
 export function verifyAssertion(input: unknown, expected: AssertionExpectation): Promise<VerifiedAssertion | PasskeyRefusal> {
   return answer(async () => {
+    checkExpectation(expected);
     const { id, response } = envelope(input);
     const clientData = bytesOf(response, 'clientDataJSON', MAX_CLIENT_DATA);
     const authData = bytesOf(response, 'authenticatorData', MAX_AUTHENTICATOR_DATA);
