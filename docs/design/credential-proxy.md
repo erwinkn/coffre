@@ -1030,14 +1030,18 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   needed. A route with a `path()` rule takes a prefix with no `/`.
 - **What it says, what it logs.** coffre's refusals quote the path as the
   app sent it; the audit's `credential.use` names the upstream's host, as
-  for every rule; no log line has the URL. A redirect under the upstream
-  whose `Location` holds the segment as it went out, compared decoded
-  once (`%3a` and `%41` are `:` and `A`), wherever it is, a relative
-  path's first segment included (`bot123456789%3AAAE…/getMe`), gets the app's segment back, so
-  the app follows it through the proxy with its placeholder
-  (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`);
-  a relative one (`getMe`, `?offset=1`, `#top`, an empty one) resolves
-  against the URL the app sent, never the one the value went out in.
+  for every rule; no log line has the URL. A `Location` is read as a URL
+  first, a relative one (`getMe`, `?offset=1`, `#top`, an empty one)
+  against the URL the app sent, never the one the value went out in. If
+  it is under the upstream, each segment of its path that is the segment
+  as it went out, compared decoded once (`%3a` and `%41` are `:` and
+  `A`), gets the app's segment back, so the app follows it through the
+  proxy with its placeholder
+  (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`).
+  Only the path's segments: swapped in the text before it is read,
+  `bot123456789%3AAAE…/getMe` would become the scheme `bot123456789:`,
+  and a value that is the upstream's own `host:port` would replace its
+  authority.
   The value anywhere else in it, or in an answer's headers or text body,
   is redacted as any value is (section 4), its encoded form and the whole
   segment included; and a `Location` that still holds it once decoded,

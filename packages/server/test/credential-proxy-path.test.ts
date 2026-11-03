@@ -51,6 +51,8 @@ before(async () => {
         const [segment, way] = url.split('/').at(-1)!.split('?first=') as [string, string];
         response.writeHead(302, { location: `${segment.replace(':', way === 'upper' ? '%3A' : '%3a')}/getMe` }).end();
       }
+      // An absolute redirect to the path as it came, where the value is the upstream's own host and port (review r3 of #483).
+      else if (url.endsWith('/loop')) response.writeHead(302, { location: `${upstreamUrl}${url.replace(/loop$/, 'getMe')}` }).end();
       // An error page that quotes the request, as a framework's 404 may: as it came, and decoded.
       else if (url.endsWith('/echo')) response.writeHead(404, { 'content-type': 'text/plain', 'x-path': url }).end(`no route for ${url} (${decodeURIComponent(url)})`);
       else if (url.includes('/file/')) response.writeHead(200, { 'content-type': 'image/jpeg' }).end(Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
@@ -81,6 +83,8 @@ function options(): CredentialProxyOptions {
       // the template frames (`bots`, `bot{…}`), and a key alone under a long base path.
       bots: { upstream: upstreamUrl, inject: path('bot{TELEGRAM_BOT_TOKEN}') },
       bare: { upstream: `${upstreamUrl}/a/long/base/path/for/the/bot`, inject: path('{TELEGRAM_BOT_TOKEN}') },
+      // A plain key that is the upstream's own authority, `127.0.0.1:<port>`, in a redirect's host as in its path.
+      host: { upstream: `${upstreamUrl}/host`, inject: [header('x-api-key', '{TENANT_KEY}'), path('{AUTHORITY}')] },
       // A template whose text and a value make a segment that goes as none: `..` and `.` is `...`.
       dots: { upstream: `${upstreamUrl}/dots`, inject: path('..{BOT_VALUE}'), allow: [{ methods: ['GET'], path: '/*/getMe' }] },
     },
@@ -96,7 +100,7 @@ useMcp(async () => {
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' } });
+  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -249,11 +253,26 @@ test("the token's segment, encoded otherwise in a redirect, gets the placeholder
     assert.equal(moved.status, 302, way);
     assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/telegram/x/bot${handle}/getMe`, way);
   }
+  // The same, for a shaped token: `bot987654321%3a…` swapped back before the URL is read would be the scheme
+  // `bot987654321:` (review r3 of #483).
+  const { env } = await run();
+  const shaped = await route(`/use/aiogram/x/bot${env.AIOGRAM_TOKEN}?first=lower`);
+  assert.equal(shaped.status, 302, await shaped.clone().text());
+  assert.equal(shaped.headers.get('location'), `${ORIGIN}/use/market/dev/aiogram/x/bot${env.AIOGRAM_TOKEN}/getMe`);
   // In the query, a form no redaction names: decoded once it is the token, so nothing of the answer goes.
   const quoted = await route(`/use/telegram/bot${handle}/quoted`);
   assert.equal(quoted.status, 502);
   assert.equal(quoted.headers.get('location'), null);
   assert.ok(free(await quoted.text()));
+});
+
+test("a redirect's host is never swapped: only the path's segments get the app's back, the value its upstream's own host", async () => {
+  const { handle } = await run();
+  const host = new URL(upstreamUrl).host;
+  const moved = await route('/use/host/coffre/loop', { headers: { 'x-api-key': handle } });
+  assert.equal(reached.at(-1)!.url, `/host/${host}/loop`);
+  assert.equal(moved.status, 302, await moved.clone().text());
+  assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/host/coffre/getMe`);
 });
 
 test("the stable URL finds the handle in the segment under each credential's own upstream", async () => {

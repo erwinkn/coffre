@@ -2699,17 +2699,20 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     return failure(502, `${target.host} did not answer${credential.egress === undefined ? '' : ` through ${credential.name}'s egress`}: ${message}`);
   }
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
-  // Redacted as the bytes it came in, before a URL encodes them again.
   const raw = upstream.headers.get('location');
-  const location = raw === null ? null : redact.whole(swap === null ? raw : swappedBack(raw, swap));
   let at: string | null = null;
-  if (location !== null) {
+  if (raw !== null) {
+    // Read as a URL before anything in it changes, so a swap never makes a scheme or a host of it. Each byte beyond ASCII
+    // as its `%XX`, the same bytes to a URL, which would encode the character instead: decoded once, below, it is as it came.
+    const bytes = raw.replace(/[\u0080-\u00ff]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
     // A `Location` no URL reads, `//` say, is nowhere under the upstream. A relative one is the app's URL's, not the target's.
-    const to = URL.canParse(location, asSent) ? new URL(location, asSent) : null;
+    const to = URL.canParse(bytes, asSent) ? new URL(bytes, asSent) : null;
     const inside = to !== null && to.origin === credential.base.origin && (to.pathname === under || to.pathname.startsWith(`${under}/`));
     if (inside) {
-      // The proxy's URL for it, and a query rule's parameter, kept or not, the app's placeholder, for it to follow and be let in.
-      const moved = new URL(`${out.proxied}${to.pathname.slice(under.length)}${to.search}`);
+      // The proxy's URL for it, a path rule's segment and a query rule's parameter, kept or not, the app's placeholder, for
+      // it to follow and be let in.
+      const path = swap === null ? to.pathname.slice(under.length) : swappedBack(to.pathname.slice(under.length), swap);
+      const moved = new URL(`${out.proxied}${path}${to.search}`);
       for (const [name, value] of out.back) moved.searchParams.set(name, value);
       // Redacted again as the URL it now is, which no value reached through the steps above: should one have, it is masked.
       at = redact.whole(moved.href);
@@ -2717,7 +2720,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       await upstream.body?.cancel();
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
       return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
-    } else at = location;
+    } else at = redact.whole(raw);
     // Decoded once, as the app's HTTP client reads it, it holds no value either: a form no list above names (`%3a` for
     // `%3A`, `%41` for `A`) goes nowhere.
     if (at !== null && redact.whole(bytesOf(at)) !== bytesOf(at)) {
@@ -2734,15 +2737,17 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
 }
 
 /**
- * A `Location` with each segment that is the one a path rule sent, decoded once, the app's again, so a redirect it
- * follows goes through the proxy with its placeholder: `https://api.telegram.org/bot123:AAE…/getMe`, or
- * `…/bot123%3aAAE…/getMe` and `…/bot%31%323:AAE…/getMe`, which decode to the same, is
- * `https://api.telegram.org/botcoffre_use_…/getMe`, and a relative `bot123%3aAAE…/getMe` is `botcoffre_use_…/getMe`. Any other copy of the value is then redacted, as any answer's.
+ * A redirect's path, under the upstream and parsed, with each segment that is the one a path rule sent, decoded once,
+ * the app's again, so a redirect it follows goes through the proxy with its placeholder: `/bot123:AAE…/getMe`, or
+ * `/bot123%3aAAE…/getMe` and `/bot%31%323:AAE…/getMe`, which decode to the same, is `/botcoffre_use_…/getMe`. Only the
+ * path: a host or a scheme that happens to spell the value stays as it is. Any other copy of the value is then redacted.
  */
-function swappedBack(location: string, { sent, app }: { sent: string; app: string }): string {
+function swappedBack(path: string, { sent, app }: { sent: string; app: string }): string {
   const value = bytesOf(sent);
-  // Each segment, the first of a relative path's included (`bot123%3AAAE…/getMe`): what follows `/`, or the start.
-  return location.replace(/(?<=^|\/)[^/?#]*(?=[/?#]|$)/g, (segment) => (bytesOf(segment) === value ? app : segment));
+  return path
+    .split('/')
+    .map((segment) => (bytesOf(segment) === value ? app : segment))
+    .join('/');
 }
 
 /**
