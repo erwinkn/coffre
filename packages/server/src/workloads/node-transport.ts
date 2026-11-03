@@ -1,7 +1,9 @@
 import { lookup as dnsLookup, type LookupAddress } from 'node:dns';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { LookupFunction } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
+
+import { Agent, fetch as undiciFetch } from 'undici';
 
 import { isPublicAddress } from './addresses.ts';
 import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, type WorkloadTransport } from './transport.ts';
@@ -17,11 +19,17 @@ import { FETCH_DEADLINE_MS, FetchRefused, MAX_BODY_BYTES, parsed, USER_AGENT, ty
  */
 export function nodeTransport(): WorkloadTransport {
   return {
+    fetch: publicFetch(),
     json: (url) =>
       new Promise((resolve, reject) => {
         const loopback = url.protocol === 'http:';
         if (loopback && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
           reject(new FetchRefused(url, 'plain HTTP reaches only loopback'));
+          return;
+        }
+        const literal = loopback ? null : literalRefusal(url);
+        if (literal !== null) {
+          reject(new FetchRefused(url, 'could not be fetched', { cause: literal }));
           return;
         }
         const request = (loopback ? httpRequest : httpsRequest)(
@@ -39,6 +47,41 @@ export function nodeTransport(): WorkloadTransport {
         request.end();
       }),
   };
+}
+
+/**
+ * A fetch that dials only public addresses, for a host an Owner typed (a UI route's upstream; docs/design/proxy-ui.md,
+ * section 5): undici's, whose connections resolve their name through `lookup` as they open, so a name that resolves to
+ * `10.0.0.5` sends no byte, however it resolved a moment before, and a pooled connection is one to a checked address.
+ * TLS still checks the certificate against the name.
+ *
+ *   https://api.openai.com/v1/models, resolving to 162.159.140.245    sent
+ *   https://internal.acme.example/x, resolving to 10.0.0.5               refused before the SYN: ENOTPUBLIC
+ */
+export function publicFetch(lookup: LookupFunction = publicLookup, tls: { ca?: string } = {}): NonNullable<WorkloadTransport['fetch']> {
+  // `tls.ca`, a test's own authority for its fake upstream: the system's roots otherwise, and the name is checked either way.
+  const dispatcher = new Agent({ connect: { ...tls, lookup } });
+  return async (url, init) => {
+    // Node asks no resolver for an address written as one: `lookup` never sees `https://240.0.0.1` (review r3 of #467).
+    const literal = literalRefusal(new URL(url));
+    if (literal !== null) throw new TypeError('fetch failed', { cause: literal });
+    return (await undiciFetch(url, { ...(init as Parameters<typeof undiciFetch>[1]), dispatcher })) as unknown as Response;
+  };
+}
+
+/**
+ * Why a URL whose host is an IP address may not be dialled, or null: Node connects to an address as written, without
+ * the lookup, so the address is checked here, as the lookup checks a name's answers.
+ *
+ *   https://162.159.140.245/v1    null
+ *   https://240.0.0.1/x           ENOTPUBLIC (reserved)
+ *   https://[::ffff:a00:5]/x      ENOTPUBLIC (10.0.0.5, written as IPv6)
+ *   https://api.openai.com/v1     null: a name, checked by the lookup as the connection opens
+ */
+function literalRefusal(url: URL): Error | null {
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host) === 0 || isPublicAddress(host)) return null;
+  return Object.assign(new Error(`${host} is an address that is not public`), { code: 'ENOTPUBLIC' });
 }
 
 /** `dns.lookup`, refusing a name with any answer that is not public. */

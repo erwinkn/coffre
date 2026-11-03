@@ -1,6 +1,6 @@
 import { hashToken, tokenKind, type TokenKind } from '@coffre/core/identity';
 import { personalOf } from '@coffre/core/schemas';
-import { newUseRequestId, USE_DEADLINE_MS, type CredentialAcceptance, type Purpose } from '@coffre/core/vault';
+import { newUseRequestId, USE_DEADLINE_MS, type CredentialAcceptance, type Purpose, type RouteUseInput, type RouteUseOutcome } from '@coffre/core/vault';
 
 import { authenticateRequest, refusedByKind, type AuthenticatedIdentity } from './auth.ts';
 import { namesMany, uses015 } from './api/changes.ts';
@@ -132,4 +132,39 @@ export async function useManyByName(
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
   });
   return { identity, ahead, decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, place: answered.place };
+}
+
+/**
+ * A UI route's use by a handle (0.16, T186 PR C; docs/design/proxy-ui.md, section 3): the vault's one call (two on a
+ * map miss), which reads the URL both ways it may be read, finds the route at the place, and decides each of its keys
+ * for the caller and for the route's editor. As `useManyByName`, nothing is read here first: the credential is checked
+ * on the rows the vault answered, and the read decides on them (`reveal`). Null where the vault serves the place not by
+ * name (a handle of several environments at the stable URL, a place that is none), which the proxy answers itself.
+ */
+export async function useRouteByName(
+  runtime: CoffreRuntime,
+  request: Request,
+  sourceIp: string | null,
+  token: string,
+  asked: Pick<RouteUseInput, 'named' | 'stable' | 'digests'>,
+): Promise<
+  | { credential: true; identity: AuthenticatedIdentity | Response }
+  | { credential: false; identity: AuthenticatedIdentity | Response; ahead: ReadAhead | null; decided: DecidedMany; answered: Extract<RouteUseOutcome, { route: 'name' }> }
+  | null
+> {
+  if (tokenKind(token) !== 'handle') return null;
+  if (refusedByKind(runtime, token, { handle: true }) !== null) return { credential: true, identity: await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, { handle: true }) };
+  const at = Date.now();
+  const answered = await runtime.vault.useRoute({
+    caller: { kind: 'handle', tokenHash: hashToken(token).toString('base64'), accepts: acceptance(runtime) }, ...asked, purpose: 'use', at, deadline: at + USE_DEADLINE_MS,
+  });
+  if (!answered.served) return null;
+  if (answered.route === 'busy') throw refusedUse(answered.outcome);
+  // No credential its seals bear out: the credential's own check answers, as ever (401).
+  if (answered.route === 'credential') return { credential: true, identity: await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, { handle: true }) };
+  const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal: false });
+  const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
+    handle: true, standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
+  });
+  return { credential: false, identity, ahead, decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, answered };
 }

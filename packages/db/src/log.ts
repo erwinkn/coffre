@@ -236,13 +236,14 @@ export async function lockLogHeadIfFree(tx: Transaction): Promise<boolean> {
  * beyond them answers in one round trip rather than seconds later, holding
  * a connection all the while. One statement: the place, then, only if one
  * was free, the head; refused, one more says whether the head is there at
- * all. SQLite's transactions hold the whole file.
+ * all. SQLite's transactions hold the whole file. `line`, whose places:
+ * each line's are its own.
  */
-export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promise<{ nextSeq: bigint; headHash: Buffer }> {
+export async function lockLogHeadQueued(tx: Transaction, waiters: number, line: HeadLine = 'reads'): Promise<{ nextSeq: bigint; headHash: Buffer }> {
   if (engineOf(tx) === 'sqlite') return lockLogHead(tx);
   const rows = await rowsOf<{ next_seq: string; head_hash: Buffer }>(tx, sql`
     SELECT next_seq, head_hash FROM audit_chain_head
-    WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINE}, place) LIMIT 1)
+    WHERE only_row AND (SELECT true FROM generate_series(1, ${waiters}::int) AS place WHERE pg_try_advisory_xact_lock(${HEAD_LINES[line]}, place) LIMIT 1)
     FOR UPDATE`);
   const [head] = rows;
   if (head === undefined) {
@@ -256,11 +257,16 @@ export async function lockLogHeadQueued(tx: Transaction, waiters: number): Promi
 }
 
 /**
- * The first key of the head's places in line, Postgres's advisory locks:
- * the second is the place. A space apart from the members' queues and the
- * migrator's key.
+ * The first key of each line of the head's places, Postgres's advisory
+ * locks: the second is the place. The reads' (the vault's
+ * `READ_HEAD_WAITERS`), and the code's proxy names' (`reserveProxy`), a
+ * line of its own, so that neither takes the other's places. A space apart
+ * from the members' queues and the migrator's key.
  */
-const HEAD_LINE = 0x636f6668;
+const HEAD_LINES = { reads: 0x636f6668, code: 0x636f6670 } as const;
+
+/** Which line of the head's places a wait takes one in (`lockLogHeadQueued`). */
+export type HeadLine = keyof typeof HEAD_LINES;
 
 const lockedHead = prepared((db) => {
   const { auditChainHead } = tablesOf(db);

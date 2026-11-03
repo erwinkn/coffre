@@ -521,7 +521,9 @@ call, a route use, whose contract is:
 
 The plan's placeholder shaping is not a route use. To copy a JWT's claims
 into its placeholder, the plan opens the key's value for the caller alone,
-purpose `expose`, as it does for a code route. That value goes into the
+purpose `expose`, so the claims show the caller nothing they may not read
+(a code route's opens it as a use: the deployment's code chose its claims,
+an editor chose a UI route's). That value goes into the
 caller's own environment and never to the definition's upstream, so the
 editor is not decided there, and the plan's `proxyItem` call is what holds
 it to the vault-checked item. Code routes keep today's shapes unchanged.
@@ -1154,7 +1156,26 @@ they outlive the deployment that reserved them:
   newest change's seal, with no lock, as it reads `bulk.limit` at its
   start), and most isolates find their names there and go on. The isolate
   keeps the settled answer, never the pending call (AGENTS.md, "What an
-  isolate keeps").
+  isolate keeps"), so its concurrent first requests each make the call: only
+  a name missing from the read, or a read that cannot say (unsealed, torn by a
+  change), decides under the head, which reports it and refuses: an empty ask,
+  from a deployment of UI routes alone, as much as any. Under the head every time, as the first
+  cut did, those calls queued one behind the other and every use behind them,
+  up to 147 s for one use in #467's bench at 1,000 a second. The deploy that
+  adds a name sends them all there at once, each finding it missing: so only
+  one waits for the head, in a place in line of the code's own (the reads'
+  places, `READ_HEAD_WAITERS`, are apart). The others, refused that place at
+  once, pause (25 ms, doubled each time, up to 400 ms) and try again, and
+  read the name the one wrote; their waits, for the place and for the head,
+  within one bound of 15 s for the call. The one that writes waits besides
+  for the issue lock and the fence, each within what was left when its
+  attempt began, as every change waits for each lock it takes. Each waiting
+  its turn instead, 3,080 no-op decisions queued 200 s in the same bench. On
+  Postgres the read is the decision's first statement, on its connection,
+  before any lock: in a read of its own, a Node deployment's pool of 8
+  queued the first call's decision behind every other call's read, and the
+  last answered after 15 s. On SQLite, whose every transaction queues for the
+  file's one writer and a plain read not, it is a read of its own.
 - **One release at a time.** The gate's call is a vault call like any
   other: from an app on another release it is 503 `deploying` before the
   vault reads the reserved set (section 3, "One version at a time"). What
@@ -1695,6 +1716,163 @@ Where C1 settles what this section left open, or reads it otherwise:
   a route of six letters.
   No CHECK on it: on the partitioned table it would scan every day under
   an exclusive lock while the previous release serves.
+
+**PR C as built, the app's half for handles (C2a, W312).** C2 ships as
+two PRs: C2a, the gate and a handle's routes, with the plan; C2b,
+workloads (their counts, section 3), signers, verifiers, presign and
+tunnels of UI items, and `/use/<a>/<b>` in one call. Until C2b, a
+workload, sign, verify or tunnel naming a UI item finds none: 404, as
+before PR C. Where C2a settles what this section left open:
+- **The gate** (`proxy-gate.ts`) keeps, per isolate and vault, the code
+  names it reserved, settled answers only. A gate that fails answers the
+  request itself, before the plugin: 503 `unavailable` (`proxy_gate`,
+  `Retry-After: 1`), or `deploying` for a vault on another release, and
+  keeps nothing, so the next request asks again. The tests' database
+  reset forgets it with the log (`forgetProxyGates`). A vault of 0.14's
+  log holds no proxy definitions and has nothing to reserve: the gate
+  passes it without a call (`keeps015`, settled per vault, whose log is
+  fixed when it is made). Nor is the proxy given `useRoute` or
+  `proxyItem` there (`servesUi`: 0.15's uses, log and hot login), which
+  that vault throws on: an editable proxy's plan on 0.14's log is code's,
+  and a UI route's URL is 404 (review r5 of #467).
+- **The handle on a cold isolate** is found by its shape before any item
+  says where it rides: any header (`x-api-key: <handle>`, SigV4's
+  `Credential=<handle>/…`, a Basic pair decoded), the query, then the body
+  (64 KiB). The query and the body are read as sent and as decoded, every
+  way a rule reads its slot: `?key=coffre%5Fuse_…`, a form's percent escapes
+  and a JSON string's `\u005f` find the handle `sendAs` reads there (review
+  r7 of #467). A body is decoded only as its Content-Type lets a rule read
+  it (`bodyKind`, `fieldsIn`'s own test): a JSON note holding
+  `coffre%5Fuse_…` is text there, as `sendAs` reads it, not a second handle,
+  and a form's `"…\u005f…"` the same. JSON's strings are found in one pass
+  (`jsonStrings`), which discovery and a JSON rule's fields share: the regex
+  before it, retried from each quote, took about 3.7 s of CPU on 64 KiB of
+  escaped quotes that never close (`"\"\"…`), before any check, on `main`'s
+  JSON rules too (review r8 of #467). Two different handles: 400. The decided item must then find it
+  where it takes its key (`sendAs`), or nothing is sent. Bearer,
+  `x-coffre-handle` and the query alone missed SigV4 and every header
+  rule but `authorization`.
+- **The send's window** (review r1 of #467). A UI route's values are
+  decided before the body is read, since on a cold isolate the item that
+  says how to carry it comes with them. So each send carries a send-by
+  time, checked just before it goes: a kept entry's `until`, or, decided
+  now, the use's deadline (3 s), or `cacheSeconds` if longer. A body that
+  stalls past it is 503 `late` and nothing is sent: values decided before
+  an edit or a revocation never ride a request that came after it. The
+  check is the fetch's own first step, after the body's digest and every
+  signature (SigV4's) are made, so slow signing is late too (review r3 of
+  #467).
+- **The handle decides the reading before code's precedence.** For
+  `/use/<a>/<b>` and for `/use/<a>/<b>/<a code name>/…` (`<a>` no code
+  name), the handle's made-for list says whether the URL is the place's
+  (the plan or compute; code's credential) or route `<a>` at `/<b>…`:
+  `/use/openai/models/maps` from a `market/dev` handle is UI route
+  `openai` at `/models/maps`. The handle is found outside the body or,
+  for a form or JSON route, in it. Under `cacheSeconds: 0` that list is
+  one more call; C2b's route use answers the reading itself.
+- **Only readings whose name can be a route's.** `/use/s3/bucket/report.csv`
+  is route `s3` at `/bucket/report.csv`; `report.csv` is no route name, so
+  no place reading is offered. The vault takes a malformed name as the
+  app's bug and fails the call.
+- **A copy's refusal** stands only for the reading the vault would take:
+  the place reading where the handle's kept made-for list names `<a>/<b>`,
+  else the stable one. The place reading's copy is keyed by place and
+  route, not by handle, so another handle's copy says nothing of this
+  URL; with no list kept, the use's answer decides. That holds for a URL
+  with the place reading alone too (`/use/123/dev/openai/files`, `123`
+  being no route name; review r2 of #467): a list is kept only once the
+  vault checked the handle, so a stranger's handle-shaped token is the
+  use's 401, never the copy's 403 telling them the route and its allow
+  list.
+- **A service binding's call** carries no handle and is served no UI route
+  until C2b: the proxy tells it by `PluginContext.binding`, before it
+  looks at any copy, since a handle's kept values would otherwise answer
+  a binding's request that carries the same handle, skipping the
+  binding's own checks (review r2 of #467). It gets code's answer, 404 for
+  a name code lacks.
+- **An Owner's upstream on Node** (section 5, "No private targets"; review
+  r2 of #467). A UI route's request goes out through the runtime's
+  `publicFetch` (`PluginContext.publicFetch`, from the platform's
+  transport): on Node, undici's fetch on an `Agent` whose connections
+  resolve the name through `publicLookup` as they open, so
+  `internal.acme.example` resolving to `10.0.0.5` is refused before the
+  SYN, however it resolved at save; on Workers, the platform's fetch. A
+  runtime without one (a hand-built one) answers 503 before the use, so no
+  use is logged for a request that is never sent. `insecureUpstreams`
+  keeps the global fetch, for local fakes. Code's routes are unchanged:
+  their upstream is the deployment's, reviewed and deployed.
+  `@coffre/server` depends on `undici` (7.30.1, Node 24's own) for it;
+  only the Node entry imports it. Node dials an address written as one
+  (`https://240.0.0.1/x`) without asking the lookup, so `publicFetch`
+  checks such a host itself, as the lookup checks a name's answers, and
+  refuses one that is not public before undici is called (review r3 of
+  #467).
+- **A project named as code's credential is.** With code's `maps` and an
+  environment `maps/dev`, `/use/maps/dev/openai/models` from a handle made
+  for `maps/dev` is the place reading: its third segment is code's
+  credential if code has it, else the environment's UI route `openai`
+  (review r2 of #467; the opposite collision, a third segment code names,
+  was r1's). Where code's `maps` finds no handle where it takes its key,
+  the handle is looked for wherever a UI item may take it
+  (`x-openai-key`, a form field), and the made-for list decides as
+  before. Under `cacheSeconds: 0`, code's `maps` reads the body before
+  the vault's one call says the handle is `maps/dev`'s; the UI route then
+  sends those same bytes (review r3 of #467). Code's reading reads a copy
+  of the request, so the body stays whole for the UI route even where code
+  refuses it: a JSON body that code's form rule calls no form still
+  reaches route `openai` (review r4 of #467).
+- **Values are kept by the reading the vault took, never by the URL**, as
+  section 3 keys them (caller, place and route). A `market/dev` handle's
+  `/use/openai/models/gpt-a` and `/use/openai/models/gpt-b` are both the
+  stable reading of `openai`: one use, then one kept copy for every path
+  under it within `cacheSeconds`. That copy never answers a URL whose
+  `<a>/<b>` is the handle's environment (`/use/market/dev/openai/…`),
+  which section 6 reads as the place; a stable answer means a handle of
+  one environment, so that is the only such `<a>/<b>`. The app's
+  `credential.use` entry, which a route of plain keys alone keeps, names
+  the route of that reading too (`openai`, never `gpt-a`) (review r4 of
+  #467).
+- **One key, one placeholder**, across code's and the UI's routes: two
+  that read `OPENAI_API_KEY` with different placeholders (`a_`, `b_`)
+  would give the app one value that one of them refuses. Startup refuses
+  this of code alone; the plan refuses it (409 `conflict`, naming both) of
+  the routes the environment serves, code's and its UI's together (review
+  r2 of #467). A code signer's or verifier's key is the handle as it is,
+  so a UI route shaping it with a placeholder is refused the same way
+  (review r3 of #467).
+- **Refusals.** A key the item's editor no longer routes is 403
+  `route_not_cleared`, the vault's reason naming them: the caller may
+  read the key, so D153's single 404 hides nothing here. A refusal of the
+  caller's own standing stays the read's 404 `not_available`. A handle
+  made for `market/dev` reads `/use/market/dev@me/openai` as route
+  `market` (404); one made for `market/dev@me` reads the place, and is
+  409 `route_not_personal`.
+- **The plan** makes one `proxyItem` call with no name before its
+  `expose` read. Routes the proxy can read join the covering set; the
+  keys of any other item (a signer's, verifier's or tunnel's, which C2a
+  does not serve, or a route the proxy cannot take) are the handle too,
+  and no URL is listed for them. A `tampered` or `stale` level, or an
+  item answered without its definition, is 503 and no environment. A
+  name code holds is left out; a personal config shapes nothing (the
+  vault answers `personal` with no items, checked before the items are).
+  A generated environment's plan (`generate`) reads `market/dev@me` once
+  the person has a value of their own there: the read's answer says so,
+  and the base environment's items are then dropped, so the plan gives
+  their own `OPENAI_API_KEY`, never a handle and route `openai`'s URL,
+  which would send the base key (review r5 of #467). Decided on each
+  attempt's answer: a read the app retries (`AccessChanged`) that first
+  resolved the personal config and then, the config deleted between the
+  two, the base environment gives the base's items again, the handle and
+  the URL, never the base key (review r6). A UI route's JWT
+  placeholder copies claims through an `expose` read (section 3): a
+  Contributor's plan, or anyone's on a sensitive key, is 403
+  `placeholder_unread`, nothing of it opened.
+- **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
+  map): the place URL and a stable URL of three segments or more are one
+  `use_route` statement and nothing of the app's; `/use/<a>/<b>` is the
+  handle's made-for list (`use_credential`) and then the use, one call
+  once C2b's route use can answer "the plan" for a place reading. The
+  same rows with 256 definitions in the environment as with one.
 
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.

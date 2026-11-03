@@ -187,6 +187,13 @@ else is needed.
   then `use` answer it. The stable URL's, with the cache off.
 - `routes.socket`: a WebSocket under the plugin's prefix, its bytes and TCP
   out, on Node through `createCoffre(…).upgrade`.
+- `binding` (T186 PR C2a): whether the request came through a Cloudflare
+  service binding (`bindingRoute`, below), so that the proxy serves it
+  nothing it keeps for a handle. Which service is coffre's to know.
+- `publicFetch` (T186 PR C2a): the fetch for an upstream an Owner typed in
+  the Proxy tab. On Node it dials only public addresses, checked as each
+  connection opens; on Workers it is the platform's. It carries no
+  authority: it reaches less than the global fetch.
 
 **Added since, for workload access** ([workload-access.md](workload-access.md), its PR 1a):
 

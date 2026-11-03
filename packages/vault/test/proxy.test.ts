@@ -13,7 +13,8 @@ import { DEFAULT_POLICY, type Holdings, type Scope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProxyInput } from '@coffre/core/vault';
 import { createDatabase, tablesOf } from '@coffre/db';
-import { postgresClient } from '@coffre/db/connect';
+import { postgresClient, postgresSession } from '@coffre/db/connect';
+import { gaveUp } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
@@ -23,7 +24,7 @@ import { replayStored } from '../src/log-replay.ts';
 import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel } from '../src/proxy.ts';
 import type { Reader } from '../src/decide.ts';
 import { newestChange, readObject } from '../src/store.ts';
-import { emptyDatabase, ENGINE, LOG, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const NOBODY: FrozenHoldings = { role: 'member', scope: { projects: 'all', environments: 'all' }, instance: { normal: [], protected: [] }, grants: [] };
@@ -51,9 +52,9 @@ function route(name: string, host = 'api.openai.com', key = 'OPENAI_API_KEY'): P
 }
 
 /** A vault keeping 0.15's log, a project with `dev`, Ada a Developer there. */
-async function world() {
+async function world(options: Parameters<typeof openLocalVault>[2] = {}) {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, ...options });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const dev = await newEnvironment(db.owner, project);
@@ -407,6 +408,146 @@ test("code reserves its names: each UI item of one deleted, whole in its entry; 
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
 });
 
+test("names code reserved already are found so without the head, which every isolate's first requests would queue on, and every use behind them; a name to add waits for it (#467's bench)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world();
+  assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A change under way: the head held, not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    const late = (ms: number) => new Promise<'waited'>((resolve) => setTimeout(() => resolve('waited'), ms));
+    const again = await Promise.race([w.vault.reserveProxy({ names: ['stripe'] }), late(1_000)]);
+    assert.deepEqual(again, { ok: true, reserved: ['maps', 'stripe'], cleared: [] });
+    let added = false;
+    const adding = w.vault.reserveProxy({ names: ['maps', 'openai'] }).then((outcome) => ((added = true), outcome));
+    await late(200);
+    assert.equal(added, false, 'a name to add is reserved under the head');
+    await holder.unsafe('COMMIT');
+    const outcome = await adding;
+    assert.ok(outcome.ok && outcome.reserved.join() === 'maps,openai,stripe');
+  } finally {
+    await holder.end();
+  }
+});
+
+test("a deploy's herd of first requests, each finding its code's name missing, waits for the head in one place, not one each, and reads the name the one wrote (#467's bench)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world();
+  const holder = postgresSession(OWNER_URL);
+  // The code's place in line, and every lock a session of this database waits for.
+  const inPlace = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${0x636f6670} AND granted`);
+  const waiting = () => locksHere(db.owner, sql`NOT granted`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    // A change under way: the head held, not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    // As many isolates' first requests, each asking for `openai`, none reserved yet.
+    const herd = Array.from({ length: 8 }, () => w.vault.reserveProxy({ names: ['openai'] }));
+    for (const started = Date.now(); (await inPlace()) < 1; await pause(20)) {
+      assert.ok(Date.now() - started < 5_000, 'no reservation took the code\'s place in line');
+    }
+    // Long enough for the rest, refused the place, to pause and read again more than once: none of them waits.
+    await pause(300);
+    assert.equal(await waiting(), 1, 'one reservation waits for the head, the rest wait for nothing');
+    await holder.unsafe('COMMIT');
+    for (const outcome of await Promise.all(herd)) assert.deepEqual(outcome, { ok: true, reserved: ['openai'], cleared: [] });
+    assert.equal(await count(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'proxy.code'`), 1);
+  } finally {
+    await holder.end();
+  }
+});
+
+test("a reservation waits for the head within one bound, however late it took the code's place (review r14 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world({ codeWaitMs: 1_000 });
+  const holder = postgresSession(OWNER_URL);
+  const PLACE = 0x636f6670;
+  const inPlace = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${PLACE} AND granted`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    // A change under way, and the code's one place taken by another: the reservation, refused it, pauses and asks again.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.unsafe(`SELECT pg_advisory_lock(${PLACE}, 1)`);
+    const started = Date.now();
+    const reserving = w.vault.reserveProxy({ names: ['openai'] }).then(() => 'reserved' as const, (error: unknown) => error);
+    await pause(300);
+    // The place free, the head still held: the reservation takes the place, and waits for the head only what is left.
+    await holder.unsafe(`SELECT pg_advisory_unlock(${PLACE}, 1)`);
+    for (; (await inPlace()) < 1; await pause(10)) assert.ok(Date.now() - started < 1_000, 'the reservation never took the place');
+    const ended = await Promise.race([reserving, pause(3_000).then(() => 'still waiting' as const)]);
+    const ms = Date.now() - started;
+    assert.ok(gaveUp(ended), `the reservation ended ${ended instanceof Error ? ended.message : String(ended)}`);
+    assert.ok(ms < 1_500, `the reservation gave up after ${ms} ms, past its bound of 1,000`);
+  } finally {
+    await holder.end();
+  }
+});
+
+test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world({ codeWaitMs: 1_000 });
+  // Two changes, as appends: each locks the head's row and writes a new version of it.
+  const first = postgresSession(OWNER_URL);
+  const second = postgresSession(OWNER_URL);
+  const waiting = () => locksHere(db.owner, sql`NOT granted`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (what: string, done: () => Promise<boolean>) => {
+    for (const started = Date.now(); !(await done()); await pause(10)) assert.ok(Date.now() - started < 5_000, what);
+  };
+  const LOCK = 'SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE';
+  const WRITE = 'UPDATE audit_chain_head SET next_seq = next_seq WHERE only_row';
+  try {
+    await first.unsafe('BEGIN');
+    await first.unsafe(LOCK);
+    await first.unsafe(WRITE);
+    // The next change in line, waiting for the first: it is ahead of the reservation, whatever the load.
+    await second.unsafe('BEGIN');
+    const secondHolds = second.unsafe(LOCK).then(() => Date.now());
+    await until('the second change never waited for the head', async () => (await waiting()) >= 1);
+    const started = Date.now();
+    // When the reservation ends, read as it ends, not after the holders' own statements, which may run late under load.
+    let endedAt = Number.NaN;
+    const reserving = w.vault.reserveProxy({ names: ['openai'] }).then(
+      () => ((endedAt = Date.now()), 'reserved' as const),
+      (error: unknown) => ((endedAt = Date.now()), error),
+    );
+    await until('the reservation never waited for the head', async () => (await waiting()) >= 2);
+    // Each wait shorter than the bound, both together longer: the first change holds 600 ms of it, the second 800 more.
+    await pause(Math.max(0, started + 600 - Date.now()));
+    await first.unsafe('COMMIT');
+    const held = await secondHolds;
+    await second.unsafe(WRITE);
+    const ended = await Promise.race([reserving, pause(Math.max(0, held + 800 - Date.now())).then(() => 'still waiting' as const)]);
+    const ms = (Number.isNaN(endedAt) ? Date.now() : endedAt) - started;
+    await second.unsafe('COMMIT');
+    assert.ok(gaveUp(ended), `the reservation ended ${ended instanceof Error ? ended.message : String(ended)} after ${ms} ms`);
+    assert.ok(ms < 1_400, `the reservation gave up after ${ms} ms, past its bound of 1,000`);
+  } finally {
+    await Promise.all([first.end(), second.end()]);
+  }
+});
+
+test("names reserved already are found so while another transaction holds SQLite's one writer, which a read waits for not (review r15 of #467)", ON_015, async () => {
+  const w = await world({ codeWaitMs: 1_000 });
+  assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
+  let end!: () => void;
+  const ended = new Promise<void>((resolve) => (end = resolve));
+  // A change under way, holding its transaction (on SQLite, the file's writer queue) for 3 s at most.
+  const holding = db.vault.transaction(async () => {
+    await Promise.race([ended, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    assert.deepEqual(await w.vault.reserveProxy({ names: ['stripe'] }), { ok: true, reserved: ['maps', 'stripe'], cleared: [] });
+    const ms = Date.now() - started;
+    assert.ok(ms < 1_000, `found after ${ms} ms, behind the transaction`);
+  } finally {
+    end();
+    await holding;
+  }
+});
+
 test('the reserved set forged around the vault refuses every save: fail closed (R64)', ON_015, async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);
@@ -415,6 +556,12 @@ test('the reserved set forged around the vault refuses every save: fail closed (
   assert.equal((await w.view()).reservedState, 'tampered');
   const outcome = await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } });
   assert.equal(outcome.ok, false);
+  // Nor does code's reservation pass on it, an empty ask (a deployment of UI routes alone) as much as a full one: a set
+  // the log does not bear out is no set of none, so the gate serves nothing (review r12 of #467).
+  for (const names of [[], ['maps']]) {
+    const reserved = await w.vault.reserveProxy({ names });
+    assert.equal(reserved.ok, false, `reserveProxy(${JSON.stringify(names)}) on a forged set`);
+  }
 });
 
 test('items or names no change writes fail the seal like any forgery: the tab shows tampered, and code\'s reservation passes them by', ON_015, async () => {

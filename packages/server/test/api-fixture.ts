@@ -15,6 +15,7 @@ import { localVault, runCheckpointer, spoken, type SpokenVault, type VaultConfig
 
 import { memoryAnchor, type AnchorStore } from '../src/anchor.ts';
 import { auditWatch } from '../src/plugins/audit-watch.ts';
+import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { watchContext, watcherOf } from '../src/watch.ts';
 import { loadCaller, type Caller } from '../src/api/caller.ts';
 import type { ApiContext } from '../src/api/context.ts';
@@ -357,6 +358,9 @@ export function testVault(
     reserveProxy: call('reserveProxy'),
     releaseProxy: call('releaseProxy'),
     proxySavedBy: call('proxySavedBy'),
+    // And the route use of a UI definition, and its items read as a use finds them (T186 PR C).
+    useRoute: call('useRoute'),
+    proxyItem: call('proxyItem'),
     // As the app's runtime speaks to it, through `versioned`: each call to this vault's methods as they are then, a
     // test's replacements included. The release it answers is the caller's: the vault it opens gates on its own.
     call: async (release: string, method: keyof Vault, args: readonly unknown[]) => ({ release, result: await (vault[method] as (...given: unknown[]) => Promise<unknown>)(...args) }),
@@ -507,6 +511,8 @@ export function testDeps(db: Database, owners: readonly string[], extra: Partial
 export async function resetDatabase(owner: Database): Promise<void> {
   await drainBackgroundTasks();
   for (const reset of anchors) reset();
+  // The vault's log starts over, the names code reserved in it with it.
+  forgetProxyGates();
   const {
     credentials,
     deviceAuthorizations,

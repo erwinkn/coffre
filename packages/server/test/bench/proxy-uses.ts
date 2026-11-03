@@ -52,6 +52,11 @@ export type ProxyLoad = {
   secret?: string;
   /** The vault's named batch hidden from the app (`about().namedBatches`), as a vault older than the app: several keys read by the app, then used by ids (T167). */
   unnamed?: boolean;
+  /**
+   * `api` a route saved in the place's Proxy tab, at this upstream, the proxy's code naming none (T186 PR C,
+   * `--proxy-ui`): each request a path of its own, so that no map keys on the URL.
+   */
+  ui?: { upstream: string };
 };
 
 const load = workerData as ProxyLoad;
@@ -91,9 +96,10 @@ const config = resolveConfig({
   auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }),
   auditChainKey: load.chainKey,
   plugins: [credentialProxy({
-    credentials: { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}') } },
+    credentials: load.ui !== undefined ? {} : { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}') } },
     insecureUpstreams: true,
     cacheSeconds: load.cacheSeconds,
+    ...(load.ui === undefined ? {} : { editable: true }),
   })],
 });
 const runtime = createRuntime(config, createDatabase(appPool), vault, { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
@@ -108,13 +114,17 @@ let current = null as Phase | null;
 let running = true;
 const inflight = new Set<Promise<void>>();
 let next = 0;
+// Each request's own number, however its handle was picked: a UI route's path differs every time (review r2 of #467).
+let requests = 0;
 
 const use = async (phase: Phase, due: number) => {
+  const nth = requests++;
   // At random under a map smaller than the handles: in turn, each would be the one just dropped.
   const handle = load.handles[load.names === undefined ? next++ % load.handles.length : Math.floor(Math.random() * load.handles.length)]!;
   try {
     // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
-    const url = load.stable ? `${load.origin}/use/api/v1/thing` : `${load.origin}/use/${load.path}/api/v1/thing`;
+    const rest = load.ui === undefined ? 'v1/thing' : `v1/thing/${nth}`;
+    const url = load.stable ? `${load.origin}/use/api/${rest}` : `${load.origin}/use/${load.path}/api/${rest}`;
     const response = await answer(new Request(url, { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
       const why = `${response.status} ${(await response.text()).slice(0, 80)}`;

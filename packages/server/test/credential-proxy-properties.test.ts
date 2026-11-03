@@ -27,6 +27,7 @@ function coffre(values: Record<string, string>, plain: readonly string[] = []): 
   };
   return {
     publicUrl: PUBLIC,
+    binding: false,
     api: unused,
     exchange: unused,
     signOut: unused,

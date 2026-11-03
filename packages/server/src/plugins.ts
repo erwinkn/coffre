@@ -4,6 +4,7 @@
 // as whoever a request's credential names, through the API: the same route
 // table, checks, vault and audit log as the CLI.
 import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
+import { USE_DEADLINE_MS, type DecidedItem, type RouteFound, type RouteUseOutcome, type Vault } from '@coffre/core/vault';
 import type { CredentialScope } from '@coffre/core/access';
 import { ACCESS_JWT_HEADER, CREDENTIAL_NAME, hashToken, tokenKind, type BindingPolicy, type Constraints, type WorkloadCaller } from '@coffre/core/identity';
 
@@ -21,11 +22,14 @@ import { readAhead, type ReadAhead } from './db/read-ahead.ts';
 import { uses015 } from './api/changes.ts';
 import { callBindings, frozenTargets } from './db/workloads.ts';
 import { reveal, type PickKeys } from './api/secrets.ts';
+import { refusedUse } from './api/keys.ts';
 import { fetchApi } from './fetch-api.ts';
-import { useByName, useManyByName } from './named-use.ts';
+import { acceptance, useByName, useManyByName, useRouteByName } from './named-use.ts';
 import { errorResponse } from './http.ts';
 import { limitAlert, raiseAlert } from './alerts.ts';
 import { logged } from './logged.ts';
+import { proxyCodeOf } from './proxy-code.ts';
+import { gateProxy } from './proxy-gate.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { dpopToken, gateOf, namedPlace, SessionRefused, sessionScope, sessionStands, standingSession, type GateCounts, type StandingSession } from './workload-sessions.ts';
 
@@ -72,6 +76,20 @@ export type SocketSession = (client: Pipe, connect: Connect) => Promise<void>;
 /** What a plugin's route answers with: where coffre is, and its API as a credential's holder. */
 export type PluginContext = {
   publicUrl: string;
+  /**
+   * Whether the request came through a Cloudflare service binding
+   * (`bindingRoute`): its service's call, carrying no handle, token or
+   * session, which `workload` answers for. Which service is coffre's to
+   * know, never the plugin's.
+   */
+  binding: boolean;
+  /**
+   * A request to a host an Owner typed in a web page, a UI route's upstream:
+   * on Node, one that dials only public addresses, whatever the name
+   * resolves to; on Workers, the platform's fetch. Absent, the plugin sends
+   * none (docs/design/proxy-ui.md, section 5).
+   */
+  publicFetch?: (url: URL, init: RequestInit) => Promise<Response>;
   /**
    * The API as whoever `token` names, which the plugin read from its
    * request: a service, personal or CLI token with coffre's sign-in, Access's
@@ -152,6 +170,52 @@ export type PluginContext = {
    * False for a caller this context did not make.
    */
   recheck(caller: WorkloadUse): Promise<boolean>;
+  /**
+   * A UI definition's use (0.16, T186 PR C; docs/design/proxy-ui.md, section 3): the vault's one call finds the item
+   * `asked` names at the place, a handle's URL read the way section 6 says (`named`, the place reading, taken when the
+   * handle was made for that environment; `stable`, the route at the handle's one environment), and uses every key it
+   * sends, each decided for the caller and for the item's editor. It answers the values
+   * and the item they were decided on (its definition left out where `digests` names its digest: the copy's), which
+   * the proxy sends by, never by a copy of its own. Refused: a `CoffreError` (404 no such item, 409 a personal config,
+   * 403 a key its editor may not route, 503 an item a writer changed). The app's `credential.use` entry records it, with
+   * `logged`, as `use`'s does, under the name of the route the vault's reading took (review r4 of #467). A handle's
+   * alone: a workload's UI items wait for C2b (section 10).
+   */
+  useRoute?(handle: string, asked: RouteAsked): Promise<RouteUsed>;
+  /**
+   * A place's UI items as a use would find them, using nothing (section 3, `proxyItem`): the caller checked first, then
+   * `name`'s item, or, with none, every item the place serves. `place`, a handle's by path, null for its own. A
+   * handle's alone, as `useRoute`. Refused: a `CoffreError`.
+   */
+  proxyItem?(handle: string, asked: { place: string | null; name: string | null }): Promise<ItemsFound>;
+};
+
+/** What a UI route's use names (`PluginContext.useRoute`). */
+export type RouteAsked = {
+  named: { path: string; route: string } | null;
+  stable: string | null;
+  digests: readonly string[];
+  logged: Record<string, unknown>;
+  /**
+   * Why the proxy would serve no request on the item the vault found, or null: `GET /use/signing/x`, a signer, reaches
+   * no upstream. Asked before the read opens what the vault answered, so the app reads no value of it and keeps none
+   * (404; Fable's review of #467), and only of a use the vault allowed: a key the caller may not use is the read's one
+   * "no" whatever the item's kind (review r10). The vault's call has logged its use already: C2b's uses of these kinds decide them.
+   */
+  refuses?: (item: DecidedItem) => string | null;
+};
+
+/** A UI route's use, answered: the values, by key, and those of them plain; the item they were decided on; where. */
+export type RouteUsed = {
+  values: Record<string, string>; plain: string[]; keys: string[];
+  item: DecidedItem; seals: string[]; reading: 'named' | 'stable';
+  environment: { path: string }; expiresAt: string;
+};
+
+/** A place's UI items as `proxyItem` found them: one, or every one, each with its digest; or a level a writer changed. */
+export type ItemsFound = {
+  fault: 'tampered' | 'stale' | null; personal: boolean;
+  item: (DecidedItem & { level: number }) | null; items: (DecidedItem & { level: number })[] | null;
 };
 
 /** What a workload's request uses (`PluginContext.workload`): where and which credential, the body line `req` signs, and the counts its limits take. */
@@ -208,6 +272,20 @@ type Standings = WeakMap<WorkloadUse, Standing>;
  */
 export type UseAsked = { path: string; keys: readonly string[] | PickKeys; purpose: 'use' | 'expose'; logged: Record<string, unknown>; only?: boolean };
 
+/** A UI item's lookup refused: none at the place (404), or a level a writer changed, which serves nothing (503). */
+function foundRefusal(found: RouteFound, name: string): CoffreError | null {
+  if (found.found) return null;
+  if (found.fault === null) return new CoffreError(404, 'not_found', `this instance has no credential ${JSON.stringify(name)} here: neither its deployment's code nor this environment's definitions name it`);
+  return new CoffreError(503, 'unavailable', `${name}: this environment's proxy definitions are not as the vault sealed them (${found.fault}): an Owner saves them again`, found.fault, '1');
+}
+
+/** A route use's answer as the proxy takes it: the values the read opened, the item, and where. */
+function routeUsed(answered: Extract<RouteUseOutcome, { route: 'name' }>, read: { values: Record<string, string>; plain: string[]; keys: string[]; environment: { path: string } }, expiresAt: string): RouteUsed {
+  const found = answered.found;
+  if (found === null || !found.found) throw new Error('a route use answered values with no item');
+  return { values: read.values, plain: read.plain, keys: read.keys, item: found.item, seals: found.seals, reading: answered.reading, environment: { path: read.environment.path }, expiresAt };
+}
+
 /** A refusal as a plugin throws it, its response kept to forward. */
 async function workloadRefused(response: Response, limit: WorkloadRefused['limit'] = null): Promise<WorkloadRefused> {
   const body = (await response.clone().json()) as { error?: string; message?: string; reason?: string };
@@ -255,8 +333,39 @@ export function checkPlugins(plugins: readonly CoffrePlugin[]): readonly CoffreP
 
 /** The plugin's answer to a request under its prefix; null when no plugin takes the path. */
 export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response> | null {
-  const routes = routesFor(request, runtime);
-  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, sourceIp));
+  const plugin = pluginFor(request, runtime);
+  return plugin === undefined ? null : gated(runtime, plugin, (ui) => plugin.routes!.fetch(request, pluginContext(request, runtime, sourceIp, null, ui)));
+}
+
+/**
+ * A plugin's route, behind the proxy's gate when the plugin is the credential proxy (proxy-gate.ts; T186 PR C): its
+ * code's names reserved before its first request in this isolate, every request of it, `GET /use` and the plan among
+ * them, and its WebSockets: nothing it serves or shows gets past it. A gate that fails answers the request itself.
+ */
+async function gated<T>(runtime: CoffreRuntime, plugin: CoffrePlugin, serve: (ui: boolean) => Promise<T>): Promise<T | Response> {
+  const code = proxyCodeOf([plugin]);
+  let ui = false;
+  try {
+    await gateProxy(runtime.vault, code);
+    // Whether the vault serves UI items at all (`servesUi`): asked of the proxy alone, once per vault, kept settled.
+    ui = code !== null && (await servesUi(runtime.vault));
+  } catch (error) {
+    // Not passed: 503, `deploying` or `unavailable` with Retry-After, the plugin never asked; the next request asks again.
+    return errorResponse(error);
+  }
+  return serve(ui);
+}
+
+/**
+ * Whether the vault decides UI items (`useRoute`, `proxyItem`): only on 0.15's uses, its log and the hot path's login.
+ * A vault of 0.14's log, a deployment's supported mode, holds no proxy definitions and throws on either call; the proxy
+ * is then given neither, and serves code's items as ever (review r5 of #467).
+ *
+ *   log '0.15', hotDatabase set    useRoute, proxyItem given: the plan asks the place's UI items
+ *   log '0.14'                     neither: `GET /use/market/dev` is code's plan, no vault call for UI items
+ */
+async function servesUi(vault: Vault): Promise<boolean> {
+  return vault.useRoute !== undefined && vault.proxyItem !== undefined && (await uses015(vault));
 }
 
 /**
@@ -269,8 +378,8 @@ export function pluginRoute(request: Request, runtime: CoffreRuntime, sourceIp: 
  * principal, and no plugin can ask for one.
  */
 export function bindingRoute(request: Request, runtime: CoffreRuntime, principal: string): Promise<Response> | null {
-  const routes = routesFor(request, runtime);
-  return routes === undefined ? null : routes.fetch(request, pluginContext(request, runtime, null, principal));
+  const plugin = pluginFor(request, runtime);
+  return plugin === undefined ? null : gated(runtime, plugin, (ui) => plugin.routes!.fetch(request, pluginContext(request, runtime, null, principal, ui)));
 }
 
 /**
@@ -452,13 +561,14 @@ async function workloadIdentity(
 
 /** A plugin's answer to a WebSocket asked for under its prefix; null when no plugin takes it. */
 export function pluginSocket(request: Request, runtime: CoffreRuntime, sourceIp: string | null): Promise<Response | SocketSession> | null {
-  const routes = routesFor(request, runtime);
-  return routes?.socket === undefined ? null : routes.socket(request, pluginContext(request, runtime, sourceIp));
+  const plugin = pluginFor(request, runtime);
+  const socket = plugin?.routes?.socket;
+  return socket === undefined ? null : gated(runtime, plugin!, (ui) => socket(request, pluginContext(request, runtime, sourceIp, null, ui)));
 }
 
 /** Whether a plugin takes WebSockets at `request`'s path, deciding nothing about the request itself. */
 export function takesSocket(request: Request, plugins: readonly CoffrePlugin[]): boolean {
-  return routesFor(request, { plugins })?.socket !== undefined;
+  return pluginFor(request, { plugins })?.routes?.socket !== undefined;
 }
 
 /** A use's path, `market/dev`, as `use` parses it; undefined for one it would refuse. */
@@ -470,9 +580,9 @@ function parsedPlace(path: string): Path | undefined {
   }
 }
 
-function routesFor(request: Request, runtime: Pick<CoffreRuntime, 'plugins'>) {
+function pluginFor(request: Request, runtime: Pick<CoffreRuntime, 'plugins'>): CoffrePlugin | undefined {
   const { pathname } = new URL(request.url);
-  return runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix))?.routes;
+  return runtime.plugins.find((plugin) => plugin.routes !== undefined && under(pathname, plugin.routes.prefix));
 }
 
 function pluginContext(
@@ -480,6 +590,7 @@ function pluginContext(
   runtime: CoffreRuntime,
   sourceIp: string | null,
   binding: string | null = null,
+  ui = false,
 ): PluginContext {
   // The token where the API looks for it in this instance's mode: a header either way, so never ambient.
   const carrying = (token: string): Record<string, string> => (runtime.auth.mode === 'cloudflare' ? { [ACCESS_JWT_HEADER]: token } : { authorization: `Bearer ${token}` });
@@ -618,8 +729,86 @@ function pluginContext(
       throw new CoffreError(error.status, error.code, error.message, error.reason, error.retryAfter);
     }
   };
+  /** The route the vault's reading looked up: `/use/openai/models/gpt`'s stable reading is `openai`, never `gpt`. */
+  const readName = (answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): string => (answered.reading === 'named' ? asked.named?.route : asked.stable) ?? '';
+  /**
+   * A UI route's answer refused before any value is opened: a personal config, no such item or one a writer changed,
+   * or a key its editor no longer routes (`route_not_cleared`, decision 5: 403 naming who must save again, as the
+   * caller may read the key and only the route may not send it). Null otherwise: allowed, or refused by the caller's
+   * own standing, which the read answers as every read does (D153). `name` is the route the vault's reading looked up.
+   */
+  const routeRefusal = (answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): CoffreError | null => {
+    const name = readName(answered, asked);
+    if (answered.personal) {
+      return new CoffreError(409, 'conflict', `${name} is defined in the UI, and a personal config serves no UI definition: name its environment${answered.place === null ? '' : `, ${answered.place.project}/${answered.place.environment.replace(/@me$/, '')}`}`, 'route_not_personal');
+    }
+    if (!answered.stands || answered.found === null) return null;
+    const missing = foundRefusal(answered.found, name);
+    if (missing !== null) return missing;
+    const { outcome } = answered;
+    if (!outcome.ok && 'code' in outcome && outcome.code === 'route_not_cleared') {
+      return new CoffreError(403, 'forbidden', `${name} is defined in the UI, and ${outcome.why ?? 'its editor no longer holds a key it sends'}: someone who reads its keys saves it again`, 'route_not_cleared');
+    }
+    return null;
+  };
+  /** A UI route's use: the vault's call, the read on what it decided, and the item the values go by. */
+  const routeUse = async (handle: string, asked: RouteAsked): Promise<RouteUsed> => {
+    const name = asked.named?.route ?? asked.stable ?? '';
+    const named = asked.named === null ? null : (() => {
+      const [project, environment] = asked.named.path.split('/');
+      return { place: { project: project!, environment: environment! }, route: asked.named.route };
+    })();
+    try {
+      if (binding !== null) throw noCredential();
+      const used = await useRouteByName(runtime, request, sourceIp, handle, { named, stable: asked.stable, digests: asked.digests });
+      if (used === null) throw new CoffreError(409, 'conflict', `this handle stands in for several environments, or none, and the stable URL is for a run of one: name it, ${runtime.publicUrl}/use/<project>/<environment>/${name}`, 'no_environment');
+      if (used.identity instanceof Response) await answer(used.identity);
+      const identity = used.identity as AuthenticatedIdentity;
+      if (used.credential) throw new CoffreError(401, 'unauthenticated', 'that handle is unknown, expired or revoked');
+      const { answered } = used;
+      const refused = routeRefusal(answered, asked);
+      if (refused !== null) throw refused;
+      if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
+      // Only an allowed use's item is asked: a refusal of the caller's own (a key they may not use, busy, the bulk limit)
+      // is the read's to answer, as every read's is, whatever kind the item is (review r10 of #467).
+      const unserved = answered.found?.found === true && answered.outcome.ok ? asked.refuses?.(answered.found.item) ?? null : null;
+      if (unserved !== null) throw new CoffreError(404, 'not_found', unserved);
+      const read = await reveal(apiContext(runtime, identity), answered.place, {
+        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
+      });
+      return routeUsed(answered, read, identity.credentialExpiresAt!);
+    } catch (error) {
+      return rethrown(error);
+    }
+  };
+  const proxyItem: PluginContext['proxyItem'] & {} = async (handle, asked) => {
+    try {
+      if (binding !== null) throw noCredential();
+      if (tokenKind(handle) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
+      const at = Date.now();
+      const place = asked.place === null ? null : (() => {
+        const [project, environment] = asked.place.split('/');
+        return { project: project!, environment: environment! };
+      })();
+      const input = { caller: { kind: 'handle' as const, tokenHash: hashToken(handle).toString('base64'), accepts: acceptance(runtime) }, place, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
+      const found = await runtime.vault.proxyItem(input);
+      if (!found.ok && 'busy' in found && found.busy !== undefined) throw refusedUse(found as never);
+      if (!found.ok) {
+        const code = (found as { code: string }).code;
+        if (code === 'credential') throw new CoffreError(401, 'unauthenticated', 'that credential is unknown, expired or revoked');
+        throw refusedUse({ ok: false, code: code as never, number: null });
+      }
+      return { fault: found.fault, personal: found.personal, item: found.item, items: found.items };
+    } catch (error) {
+      return rethrown(error);
+    }
+  };
   return {
+    // A vault that decides no UI item (`servesUi`): neither, and the proxy serves code's items alone.
+    ...(ui ? { useRoute: routeUse, proxyItem } : {}),
     publicUrl: runtime.publicUrl,
+    binding: binding !== null,
+    ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),
     workload: (asked, at) => (binding === null ? sessionWorkload(asked, runtime, sourceIp, at, standings) : bindingWorkload(runtime, binding, at, standings)),
     recheck: (caller) => rechecked(runtime, caller, standings),
     handle: async (handle) => {

@@ -164,9 +164,9 @@ import {
   type SaveProxyInput,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
+import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { everyProjectConversion, newestAccess, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, HeadBusy, holdFence, holdIssues, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { Changes, heldByLog, heldFrom, keptObjects, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
@@ -208,6 +208,8 @@ export type VaultOptions = {
   clockOffset?: () => number;
   /** How far one call walks the log (`WALKS`); tests shorten them. */
   walks?: Partial<Walks>;
+  /** How long a reservation of code's proxy names (`reserveProxy`) waits for the log's head in all; `LOCK_TIMEOUT_MS` unless set. Tests shorten it. */
+  codeWaitMs?: number;
   /**
    * Which log the vault keeps (0.15's plan, "Behind one switch"): 0.15's,
    * the default since its flip (plan PR 10), where each decision that
@@ -321,7 +323,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
   return {
     config,
     ...(await keysOf(config.signingKeys)),
-    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
+    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, codeWaitMs: options.codeWaitMs ?? LOCK_TIMEOUT_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing) : null,
     limited: false,
     cutover: false,
@@ -405,14 +407,24 @@ export const READ_DEADLINE_MS = 5_000;
  */
 export const READ_HEAD_WAITERS = 16;
 
+/** The reads' places in line for the head. */
+const READ_QUEUE: HeadQueue = { waiters: READ_HEAD_WAITERS, line: 'reads' };
+
+/** The code's proxy names' one place in line for the head (`reserveProxy`): one call of a deploy's herd waits; the rest read again. */
+const CODE_QUEUE: HeadQueue = { waiters: 1, line: 'code' };
+
+/** How long a reservation refused the code's place pauses before it reads again, at first; doubled each time, up to the most. */
+const CODE_PAUSE_MS = 25;
+const CODE_PAUSE_MAX_MS = 400;
+
 /** How many releases a checkpoint prunes at most: one short statement, a few each scheduled run. */
 const RELEASES_PRUNED = 10_000;
 
-/** A read's call past its deadline (`READ_DEADLINE_MS`): unavailable, as a statement past its bound (57014) is. */
+/** A call past its deadline (a read's `READ_DEADLINE_MS`, a reservation's `codeWaitMs`): unavailable, as a statement past its bound (57014) is. */
 class Overdue extends Error {
   readonly code = '57014';
   constructor() {
-    super('this read took longer than it may: ask again shortly');
+    super('this call took longer than it may: ask again shortly');
     this.name = 'Overdue';
   }
 }
@@ -622,11 +634,24 @@ type Reads = Pick<Asked, 'environments' | 'references'> & { released?: { princip
  * of them (`#decide`).
  */
 /**
- * How a decision is made. `deadline`, a read's (`reads`): when its whole
- * call must have answered, every wait in every transaction it takes
- * included (`READ_DEADLINE_MS`).
+ * How a decision is made. `deadline`, a read's (`reads`) or a reservation's
+ * of code's names: when its whole call must have answered, every wait in
+ * every transaction it takes included (`READ_DEADLINE_MS`, `codeWaitMs`).
  */
-type How = { late?: boolean; asked?: Reads; reads?: boolean; deadline?: number };
+type How<T = unknown> = {
+  late?: boolean; asked?: Reads; reads?: boolean; deadline?: number;
+  /** Held by another, wait for the head only in one of this line's places, else refuse at once (`HeadBusy`): a read's always. */
+  queue?: HeadQueue;
+  /**
+   * Read first, in the decision's transaction, before any lock: an answer ends it there, the head never taken and
+   * nothing written; null decides. On the decision's own connection, so that the read and the decision it may lead to
+   * take one turn of the pool, never two (`reserveProxy`).
+   */
+  first?: (tx: Transaction) => Promise<T | null>;
+};
+
+/** A line of places to wait for the log's head in, and how many (`lockLogHeadQueued`). */
+type HeadQueue = { waiters: number; line?: HeadLine };
 
 /** The actions of the entries the vault writes about keys. */
 type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
@@ -782,15 +807,15 @@ class VaultService implements Vault {
   }
 
   /** What a decision about `principals` reads, and `asked` besides, in one statement: under the head when `head` is set. */
-  #snapshot(tx: Transaction, principals: readonly string[], asked: Reads, head: boolean, reading = false): Promise<Snapshot> {
+  #snapshot(tx: Transaction, principals: readonly string[], asked: Reads, head: boolean, queue?: HeadQueue): Promise<Snapshot> {
     const { released, ...rest } = asked;
     return snapshot(tx, {
       ...rest,
       principals,
       head,
       seals: this.#checksSeals(),
-      // A read waits for the head in one of a few places in line, or is refused at once.
-      ...(reading ? { waiters: READ_HEAD_WAITERS } : {}),
+      // A read waits for the head in one of a few places in line, or is refused at once; a code's names in one (`reserveProxy`).
+      ...(queue === undefined ? {} : { waiters: queue.waiters, line: queue.line }),
       ...(released === undefined ? {} : { released: { ...released, windowMs: this.#config.bulkLimit.windowMs, clockOffsetMs: this.#prepared.options.clockOffset(), cap: this.#config.bulkLimit.count } }),
     });
   }
@@ -809,14 +834,14 @@ class VaultService implements Vault {
    * A read (`reads`) changes no member: it takes their rows shared, so
    * that one member's reads decide side by side (`lockMembers`).
    */
-  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How = {}): Promise<Outcome<T>> {
+  async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How<T> = {}): Promise<Outcome<T>> {
     const superseded = await this.#settled();
     if (superseded !== null) return { ok: false, refusal: refusal('wrong_kek', superseded) };
     return this.#decideNow(principals, decide, how);
   }
 
   /** `#decide`, once the vault is settled. */
-  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How = {}): Promise<Outcome<T>> {
+  async #decideNow<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How<T> = {}): Promise<Outcome<T>> {
     // Every decision of 0.15's log's after its cutover, whichever path it comes by (`#declare`, `#convert`, `#limit`).
     await this.#cutOverYet();
     const reports: NewEntry[] = [];
@@ -835,17 +860,21 @@ class VaultService implements Vault {
     }
   }
 
-  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline }: How): Promise<Outcome<T>> {
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline, queue, first }: How<T>): Promise<Outcome<T>> {
     // The changes of the attempt under way, whose failure, heard as the transaction's, they say (`Changes.failed`).
     let staged: Changes | null = null;
     try {
       const committed = await this.#db.transaction(async (tx) => {
+        const answered = first === undefined ? null : await first(tx);
+        if (answered !== null) return { result: answered, numbers: null };
         // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
         // (`snapshot` says why it holds): asked together, they go in that order under one Sync (postgres-js's `gather`).
         const [, members, reads] = await Promise.all([
-          store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared),
+          // A call with a deadline bounds each statement too: a queue for the head, which each holder updates, starts a
+          // waiter's lock clock over at every holder (`boundLockWaits`; review r16 of #467).
+          store.boundLockWaits(tx, within(deadline, shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS), shared || deadline !== undefined),
           principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
-          this.#snapshot(tx, principals, asked, !late, shared),
+          this.#snapshot(tx, principals, asked, !late, shared ? READ_QUEUE : queue),
         ]);
         const log015 = this.#prepared.log015;
         const d: Decision = {
@@ -1958,7 +1987,7 @@ class VaultService implements Vault {
           // A read through a reference: its holder's place too, which a deletion may have taken.
           // And as the policy is now, under the head every change to it takes: an environment protected, or a role narrowed,
           // since the check above is seen here, and nothing it refuses now is released. All of it read again, holding the head.
-          d.reads = await this.#snapshot(d.tx, [principal], reads, true, true);
+          d.reads = await this.#snapshot(d.tx, [principal], reads, true, READ_QUEUE);
           d.at = this.#at(d.reads);
           await decided(d);
           const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
@@ -4418,39 +4447,91 @@ class VaultService implements Vault {
    * over: it serves nothing (R64), and its item, should a writer put it back,
    * stays shadowed by the name, which no deploy drops.
    */
-  reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>> {
-    this.#log015();
+  async reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>> {
+    const keys = this.#log015();
     const problem = reservedProblem(input?.names);
     if (problem !== null) throw new Error(problem);
     const wanted = [...new Set(input.names)].sort();
-    return this.#decide([], async (d) => {
-      const changes = d.changes!;
-      const reserved = await changes.held(d.tx, RESERVED_REF);
-      const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
-      const adding = wanted.filter((name) => !names.includes(name));
-      if (adding.length === 0) return { reserved: [...names], cleared: [] };
-      changes.stage(RESERVED_REF, { op: 'proxy.code', names: adding }, CODE_ACTOR);
-      const cleared: ClearedItem[] = [];
-      for (const environmentId of await store.proxiesNaming(d.tx, adding)) {
-        const ref = { kind: 'proxy' as const, id: environmentId };
-        const held = await changes.held(d.tx, ref).catch((error: unknown) => {
-          if (error instanceof NotLogged) return null;
-          throw error;
-        });
-        if (held?.log !== 'live' || held.object.kind !== 'proxy') continue;
-        const { items } = held.object;
-        const gone = Object.fromEntries(adding.filter((name) => Object.hasOwn(items, name)).map((name) => [name, items[name]!]));
-        if (Object.keys(gone).length === 0) continue;
-        changes.stage(ref, { op: 'proxy.code', names: adding, cleared: gone }, CODE_ACTOR);
-        cleared.push(...Object.keys(gone).map((name) => ({ environmentId, name })));
+    // Every isolate's call after the deploy that added its names finds them reserved, and writes nothing (Routing.tla's
+    // LogCode, its ELSE): the object read as the log holds it says so, first in the decision's transaction, before the
+    // head. A read that cannot say, unsealed, torn by a change between its two statements or short of a name, decides
+    // under the head.
+    //
+    // The gate keeps no pending call, so the deploy that adds a name sends every isolate's first requests here at once,
+    // each finding it missing. Each deciding in turn under the head, 3,080 no-op decisions queued 200 s in #467's bench
+    // at 1,000 a second, and every use behind them; each reading in one turn of a Node deployment's pool (8) and
+    // deciding in another, the first call's decision waited behind 780 calls' reads, and the last answered after 15 s.
+    // So the read and the decision take one turn, and only one call waits for the head, in the code's one place in line;
+    // the others, refused that place at once (`HeadBusy`), try again after a pause, and read the names it wrote. On
+    // SQLite, whose every transaction queues for the file's one writer (`WriteQueue`) and a plain read not, the read
+    // comes before the transaction, as its own statement (review r15 of #467).
+    const reads = (await this.#settled()) === null && (await this.#cutOverNow());
+    const sqlite = engineOf(this.#db) === 'sqlite';
+    const first = reads && !sqlite ? (tx: Transaction) => this.#reservedAlready(tx, keys.seals, wanted) : undefined;
+    // One bound for the call: each attempt's lock waits within what is left of it (review r14 of #467), a call that
+    // took the place late never waiting the whole bound again. A no-op attempt, every call of a deploy's herd but one,
+    // waits for nothing else; the one that writes waits, after the head, for the issue lock and the fence, each within
+    // what was left when its attempt began, as every change waits for each lock it takes.
+    const deadline = Date.now() + this.#prepared.options.codeWaitMs;
+    for (let pause = CODE_PAUSE_MS; ; pause = Math.min(2 * pause, CODE_PAUSE_MAX_MS)) {
+      if (reads && sqlite) {
+        const found = await this.#reservedAlready(this.#db, keys.seals, wanted);
+        if (found !== null) return { ok: true, ...found };
       }
-      d.log.push({
-        actor: CODE_ACTOR, action: PROXY_CODE, decision: 'allow', code: null,
-        operationId: input.operationId ?? null, requestId: input.requestId ?? null,
-        metadata: JSON.stringify({ proxy: { reserved: adding, cleared } }),
-      });
-      return { reserved: [...new Set([...names, ...adding])].sort(), cleared };
+      try {
+        return await this.#decide([], (d) => this.#reserve(d, wanted, input), { queue: CODE_QUEUE, deadline, ...(first === undefined ? {} : { first }) });
+      } catch (error) {
+        if (!(error instanceof HeadBusy)) throw error;
+        const wait = pause * (0.5 + Math.random());
+        if (Date.now() + wait >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+  }
+
+  /**
+   * `wanted` reserved, as the sealed set read before the head says, or null: it cannot say, or a name is missing.
+   * A set its log does not bear out says nothing, not "none": it decides under the head, which reports it and
+   * refuses, an empty ask's (a deployment of UI routes alone) as much as any (review r12 of #467).
+   */
+  async #reservedAlready(db: Queryable, seals: ChangeKeys['seals'], wanted: readonly string[]): Promise<{ reserved: string[]; cleared: ClearedItem[] } | null> {
+    const held = await heldByLog(seals, db, RESERVED_REF).catch((error: unknown) => {
+      if (error instanceof NotLogged) return null;
+      throw error;
     });
+    if (held === null) return null;
+    const names = held.log === 'live' && held.object.kind === 'proxy-reserved' ? held.object.names : [];
+    return wanted.every((name) => names.includes(name)) ? { reserved: [...names], cleared: [] } : null;
+  }
+
+  /** `reserveProxy`'s decision, under the head: the names missing added, and the UI items of those names deleted. */
+  async #reserve(d: Decision, wanted: readonly string[], input: ReserveProxyInput): Promise<{ reserved: string[]; cleared: ClearedItem[] }> {
+    const changes = d.changes!;
+    const reserved = await changes.held(d.tx, RESERVED_REF);
+    const names = reserved.log === 'live' && reserved.object.kind === 'proxy-reserved' ? reserved.object.names : [];
+    const adding = wanted.filter((name) => !names.includes(name));
+    if (adding.length === 0) return { reserved: [...names], cleared: [] };
+    changes.stage(RESERVED_REF, { op: 'proxy.code', names: adding }, CODE_ACTOR);
+    const cleared: ClearedItem[] = [];
+    for (const environmentId of await store.proxiesNaming(d.tx, adding)) {
+      const ref = { kind: 'proxy' as const, id: environmentId };
+      const held = await changes.held(d.tx, ref).catch((error: unknown) => {
+        if (error instanceof NotLogged) return null;
+        throw error;
+      });
+      if (held?.log !== 'live' || held.object.kind !== 'proxy') continue;
+      const { items } = held.object;
+      const gone = Object.fromEntries(adding.filter((name) => Object.hasOwn(items, name)).map((name) => [name, items[name]!]));
+      if (Object.keys(gone).length === 0) continue;
+      changes.stage(ref, { op: 'proxy.code', names: adding, cleared: gone }, CODE_ACTOR);
+      cleared.push(...Object.keys(gone).map((name) => ({ environmentId, name })));
+    }
+    d.log.push({
+      actor: CODE_ACTOR, action: PROXY_CODE, decision: 'allow', code: null,
+      operationId: input.operationId ?? null, requestId: input.requestId ?? null,
+      metadata: JSON.stringify({ proxy: { reserved: adding, cleared } }),
+    });
+    return { reserved: [...new Set([...names, ...adding])].sort(), cleared };
   }
 
   /**

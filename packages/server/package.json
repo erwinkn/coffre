@@ -74,6 +74,7 @@
     "@coffre/db": "workspace:*",
     "@tanstack/router-core": "1.171.15",
     "drizzle-orm": "0.45.2",
+    "undici": "7.30.1",
     "ws": "8.21.3",
     "zod": "4.4.3"
   },

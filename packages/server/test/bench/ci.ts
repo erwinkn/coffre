@@ -27,6 +27,8 @@
 // `--proxy-pair` gives the proxy's credential two keys, `API_KEY` and `API_SECRET` in one header: each `/use` a request of
 // several keys, the vault's named batch (T165, PR 2); `--proxy-unnamed` hides that batch from the app, as a vault older
 // than it: the app reads the keys, then uses them by ids (T167), the path before.
+// `--proxy-ui` saves `api` in ci/dev's Proxy tab instead, the proxy's code naming none (T186 PR C): each `/use` a route
+// use, at a path of its own, so that the vault's map keys on no URL.
 // `--proxy-fork` makes every handle for ci/feature, a fork of ci/dev that inherits its `API_KEY` (T165): what a fork's
 // `/use` costs, by the vault's one call by name or, before T165, by the app's own path.
 // `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
@@ -44,13 +46,15 @@
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
-//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed]
+//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed] [--proxy-ui]
 //     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Worker } from 'node:worker_threads';
 
 import { github, signin } from '@coffre/core/identity';
@@ -68,6 +72,9 @@ import { createRuntime } from '../../src/runtime.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transport.ts';
 import { auditWatch } from '../../src/plugins/audit-watch.ts';
+import { credentialProxy } from '../../src/plugins/credential-proxy.ts';
+import { checkPlugins } from '../../src/plugins.ts';
+import { proxyCodeOf } from '../../src/proxy-code.ts';
 import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, testDeps, testVault } from '../api-fixture.ts';
 import { answer, type Pages } from '../start-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from '../db/connections.ts';
@@ -100,6 +107,7 @@ const { values } = parseArgs({
     'proxy-fork': { type: 'boolean', default: false },
     'proxy-pair': { type: 'boolean', default: false },
     'proxy-unnamed': { type: 'boolean', default: false },
+    'proxy-ui': { type: 'boolean', default: false },
     'proxy-names': { type: 'string' },
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
@@ -220,6 +228,8 @@ const memory = mkdtempSync(join(tmpdir(), 'coffre-ci-bench-'));
 let checkpointer: RunningCheckpointer | null = null;
 let loader: Worker | null = null;
 let proxies: Worker[] = [];
+/** `--proxy-ui`'s upstream, the route's: one for every thread. */
+let uiUpstream: Server | null = null;
 try {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
@@ -428,6 +438,19 @@ try {
     };
     // The proxy injects `API_KEY`: ci/dev's first key under that name; and `API_SECRET` beside it, `--proxy-pair`.
     await root.secrets.set('ci/dev', { API_KEY: load.value, ...(load.secret === undefined ? {} : { API_SECRET: load.secret }) });
+    if (values['proxy-ui']) {
+      // One upstream for every thread's proxy, as the route names one: 200 for the real key, 403 for anything else.
+      const expected = load.secret === undefined ? load.value : `${load.value}:${load.secret}`;
+      uiUpstream = createServer((request, response) => void response.writeHead(request.headers['x-api-key'] === expected ? 200 : 403).end());
+      await new Promise<void>((resolve) => uiUpstream!.listen(0, '127.0.0.1', resolve));
+      load.ui = { upstream: `http://127.0.0.1:${(uiUpstream.address() as AddressInfo).port}/v1` };
+      deps.proxy = proxyCodeOf(checkPlugins([credentialProxy({ credentials: {}, editable: true, insecureUpstreams: true })]));
+      const items = { api: {
+        kind: 'route' as const, name: 'api', upstream: load.ui.upstream, inject: [{ kind: 'header' as const, name: 'x-api-key', template: load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}' }],
+        allow: null, limit: { perMinute: null, perDay: null }, placeholder: null, egress: null,
+      } };
+      await root.proxy.save(place, { seal: (await root.proxy.get(place)).seal, items });
+    }
     // Several threads, each an app and a vault of its own, as Workers runs many isolates: one Node thread is the
     // bottleneck well below 1,000 requests a second, as the thread CPU per request below says.
     const threads = Number(values.threads);
@@ -535,6 +558,7 @@ try {
   if (sampling !== null) clearInterval(sampling);
   await loader?.terminate();
   await Promise.all(proxies.map((worker) => worker.terminate()));
+  if (uiUpstream !== null) await new Promise<void>((resolve) => uiUpstream!.close(() => resolve()));
   await Promise.all(idle.map(({ vault, pool, hot }) => vault.close().then(() => Promise.all([pool.end(), hot?.end()]))));
   await Promise.all([farApp.close(), farVault.close(), farHot.close()]);
   await checkpointer?.stop();
