@@ -2254,14 +2254,18 @@ the policy changes so that only Owners add, a database writer copies a
 token hash onto Bob's credential and the adders' session is revoked
 (`WritingAdd`; PR 5: the add's read holds the adder's session, and an add
 the vault leaves, refused or not served, goes down today's add, one step:
-`AToday`); Bob, no admin, sets up svc with a first grant while the
+`AToday`); Bob adds svc while an Owner removes him and restores him as an
+admin, his session's row not yet revoked, which his removal ended all the
+same, its generation no longer his membership's (`WritingRejoin`, review r1
+of #474: `GenerationChecked`, the add's `credentialEnded`); Bob, no admin, sets up svc with a first grant while the
 roles are redefined, the services setting is closed and the grant's place
 archived (`WritingSetUp`), or on a whole project while one of its
 environments is protected, a protected fork is made in it, the project is
 renamed and another made under its slug, and the scope's project likewise
 (`WritingProtect`). Each review round's P1 is one of these adversaries:
 rounds 1 and 2 in Revoke, Place and Fork, round 3 in Names, round 5 in
-Protect, rounds 6 and 7 in Tamper and Add, T190's in Forge. Every other change is one atomic step; the checkpointer seals
+Protect, rounds 6 and 7 in Tamper and Add, T190's in Forge, #474's
+round 1 in Rejoin. Every other change is one atomic step; the checkpointer seals
 whatever has committed at each tick. A hold that fails asks again, three
 tries in all, then gives up (409).
 

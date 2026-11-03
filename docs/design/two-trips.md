@@ -925,11 +925,21 @@ How it holds, and what it leaves to later PRs:
 
 - **The read holds the caller's session**, as a key write's does (formal/Writing.tla, the add's `cred`): a session
   revoked between the read and the write moves the digest, and the read again answers 401, as does one revoked or
-  put back before the read (`ended`, `forged`), never sent down today's path.
+  put back before the read (`ended`, `forged`), never sent down today's path. So is a session of the caller's
+  membership before a removal, its generation not the row's (`credentialEnded`), whose own row says live until the
+  app's sweep revokes it: Bob removed and restored as an admin between two tries adds nothing with his old session
+  (`WritingRejoin`, review r1 of #474).
+- **The caller's row is held to its 0.4 MAC too**, before its seal, as today's path holds it (`#integrity`): the MAC
+  covers columns the 0.15 object does not (`created_by`, `status_changed_by`), so a row edited in those alone is
+  `tampered` and goes down today's path, which answers 401. A key write's read (PR 3) checks it the same way, through
+  the same caller helpers (review r1 of #474).
 - **The prepared add is a ticket**: the vault's MAC (its change key's, domain-separated from every log MAC) over
   what the write writes, the read it holds (its arguments and digest) and who the add is by, by ids, the credential
   and identity the checked read resolved (ActorFromRead). The app carries it from the read to the write and can
-  neither change it nor make one; the write takes it for 30 seconds.
+  neither change it nor make one; the write takes it for 30 seconds. The writing isolate may not be the reading
+  one, nor run the same config (a rollout between the calls, the same keys): it settles its keys as `admitRead` does,
+  and leaves an add of a member its own config names an Owner to today's path (`unserved`), whatever the ticket says
+  (review r1 of #474).
 - **The write's locks**: the members' rows, then 0.14's head, in the write's first statement, as every flow that
   takes both takes them (formal/WriteLocks.tla, `AddLocks`, MembersFirst: the head first waits in a circle with a
   demotion); then `admit_hold` takes the issue lock shared and the fence, as `change_input` does, and holds the read
@@ -948,8 +958,10 @@ The regressions (packages/server/test/admit-held.test.ts) make each adversary of
 read and its write, through the real front door: the adder demoted, their session revoked, the roles redefined,
 another add of the member first, a hold that keeps failing (409 after three tries); before the add, a session revoked
 and its row put back (dbw), the adder's row put back and its seal written into the demotion's change (WritingForge),
-a token hash copied onto an Owner's session (sub); a ticket edited; a change naming a read its transaction did not
-hold; and one that the read's digest moves with each. Each fails with its protection taken out. The refusals (a
+a token hash copied onto an Owner's session (sub), the adder's row edited in its `created_by` alone; the adder removed
+and restored between the tries, his session's row not yet revoked (WritingRejoin); a ticket edited, or written by a
+vault whose config names the member an Owner; a change naming a read its transaction did not hold; and one that the
+read's digest moves with each. Each fails with its protection taken out. The refusals (a
 caller who runs no instance, a project no slug names, an Owner asked of an admin) answer as a vault that serves no
 `admitRead` answers them. packages/vault/test/write-cost.test.ts holds both statements' buffers flat as the log grows
 by a million entries (R48).

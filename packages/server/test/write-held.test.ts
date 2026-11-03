@@ -436,7 +436,7 @@ async function bothWays(arrange: (w: Awaited<ReturnType<typeof world>>) => Promi
   return { fast: await attempt(true), today: await attempt(false) };
 }
 
-test("a refusal the vault's read finds (a forged change's MAC, a row its newest change does not seal) is answered as today's path answers it, status and body, and the vault's call adds nothing to either log (T190; StaleFirst)", { skip: POSTGRES }, async () => {
+test("a refusal the vault's read finds (a forged change's MAC, a row its newest change does not seal, a row its 0.4 MAC does not cover) is answered as today's path answers it, status and body, and the vault's call adds nothing to either log (T190; StaleFirst)", { skip: POSTGRES }, async () => {
   const cases: [string, string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>][] = [
     ["Ada's grant taken, her rows put back and the revoke's seal forged (WritingForge)", 'tampered', async (w) => {
       const [member] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`));
@@ -454,6 +454,10 @@ test("a refusal the vault's read finds (a forged change's MAC, a row its newest 
       await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, `user:${ADA}`));
       await db.owner.insert(vaultGrants).values(grants);
       await db.owner.update(vaultMembers).set(member!).where(eq(vaultMembers.principal, `user:${ADA}`));
+    }],
+    // A column only the row's 0.4 MAC covers, which today's path checks first (`#integrity`; review r1 of #474).
+    ["Ada's member row edited in its `created_by` alone", 'tampered', async () => {
+      await db.owner.update(vaultMembers).set({ createdBy: 'user:someone@acme.example' }).where(eq(vaultMembers.principal, `user:${ADA}`));
     }],
     ['API_KEY written again, then its row put back to its first version (StaleFirst)', 'stale', async (w) => {
       const [first] = await db.owner.select().from(secrets).where(eq(secrets.key, 'API_KEY'));

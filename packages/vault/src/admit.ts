@@ -4,10 +4,10 @@ import { EVERYWHERE, isInstanceRole, isScope, normalScope, ownsInstance, runsIns
 import { PRINCIPAL } from '@coffre/core/vault';
 import type { Access, AdmitReadInput, CredentialAcceptance } from '@coffre/core/vault';
 
-import { readerOf, type Reader } from './decide.ts';
+import { credentialEnded, readerOf, type Reader } from './decide.ts';
 import { noEdits, type CredentialInput, type PrincipalInput, type SealKeys } from './inputs.ts';
 import type { ChangeRow, LogMacKey } from './log-entry.ts';
-import { bytes, callerFirst, callerInputs, changeOf, holds, oldOf, stands, writeStanding, type CallerInputs, type RawCaller, type ReadObject, type Unserved } from './write.ts';
+import { bytes, callerFirst, callerInputs, changeOf, holds, memberHolds, oldOf, stands, writeStanding, type MemberSealed, type CallerInputs, type RawCaller, type ReadObject, type Unserved } from './write.ts';
 
 /**
  * A member add in three round trips (T179 PR 5; docs/design/two-trips.md, "A member add", "As built: PR 5";
@@ -91,7 +91,7 @@ export type AdmitDecided = {
  * `shape`: today's path refuses it, logged.
  */
 export function decideAdmit(
-  keys: { seals: SealKeys; macs: readonly LogMacKey[] },
+  keys: { seals: SealKeys; macs: readonly LogMacKey[]; members: MemberSealed },
   read: AdmitInputs,
   request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[]; asked: AdmitAsked; listed: boolean },
 ): AdmitDecided | Unserved {
@@ -110,7 +110,8 @@ export function decideAdmit(
     // The member asked for, no row: its object none, which its newest change must leave (none, or an end).
     { held: { row: null, seal: null, newest: subject.newest } as ReadObject['held'], ref: { kind: 'principal', id: subject.principal } },
   ];
-  if (!objects.every((object) => holds(keys, object))) return 'tampered';
+  // The caller's row under its 0.4 MAC too, as today's path checks it first (`#integrity`; review r1 of #474).
+  if (!objects.every((object) => holds(keys, object)) || !memberHolds(keys, principal)) return 'tampered';
   if (!objects.every((object) => stands(keys, object))) return 'stale';
   // 0.14's newest access entry about the caller, which its newest change must account for (UsesSeeOldWrites); and none
   // about a principal with no row, nor a grant: 0.14's rows of a member its log never made.
@@ -118,6 +119,10 @@ export function decideAdmit(
   if (principal.access !== null && (old === null || principal.access > old)) return 'stale';
   if (subject.access !== null || subject.grants > 0) return 'stale';
   if (principal.row === null || policy.row === null) return 'credential';
+  // A session of the caller's membership before a removal (its generation not the row's): ended, whatever its own row
+  // says until the app's sweep revokes it, 401 as on every other path, on a retry too (review r1 of #474: removed and
+  // restored as an admin between two tries, the old session added).
+  if (credentialEnded(caller.row, principal.row, request.at)) return 'ended';
   const reader = readerOf(principal.row, caller.row, roles.row ?? noEdits(), [], request.at);
   if (reader.status !== 'active') return 'refused';
   // Who runs the instance adds anyone (`admit`); anyone else only sets a service account up, with what the setting

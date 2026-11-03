@@ -3898,7 +3898,7 @@ class VaultService implements Vault {
     });
     if (read.state === 'ahead') return unserved('clock');
     const inputs = parseInputs(read.inputs);
-    const decided = decideWrite({ seals: log015.seals, macs: log015.macs }, inputs, { at, accepts: input.accepts, kinds: WRITE_KINDS, asked: input.keys });
+    const decided = decideWrite({ seals: log015.seals, macs: log015.macs, members: (row, grants) => this.#sealed(row, grants) }, inputs, { at, accepts: input.accepts, kinds: WRITE_KINDS, asked: input.keys });
     if (typeof decided === 'string') return unserved(decided);
     const { credential, environment } = decided;
     const principal = credential.principal;
@@ -3960,7 +3960,7 @@ class VaultService implements Vault {
     const read = await callAdmit(this.#db, { at, tokenHash: Buffer.from(input.tokenHash, 'base64'), principal: input.principal, scope: slugs });
     if (read.state === 'ahead') return unserved('clock');
     const inputs = parseAdmitInputs(read.inputs, input.principal);
-    const decided = decideAdmit({ seals: log015.seals, macs: log015.macs }, inputs, { at, accepts: input.accepts, kinds: ADMIT_KINDS, asked, listed: this.#listed(input.principal) });
+    const decided = decideAdmit({ seals: log015.seals, macs: log015.macs, members: (row, grants) => this.#sealed(row, grants) }, inputs, { at, accepts: input.accepts, kinds: ADMIT_KINDS, asked, listed: this.#listed(input.principal) });
     if (typeof decided === 'string') return unserved(decided);
     const ticket: AdmitTicket = {
       v: 1, until: at + TICKET_MS, at, digest: read.digest, tokenHash: input.tokenHash, principal: input.principal, scopeSlugs: slugs,
@@ -3981,7 +3981,8 @@ class VaultService implements Vault {
    * MembersFirst, formal/WriteLocks.tla's AddLocks); then, left to `later` and sent with the COMMIT, the hold
    * (`admit_hold`: the issue lock, the fence, the read again, as decided or `coffre_moved`), 0.14's `member.add` entry,
    * the member's row, sealed as `#seal` seals one, and its change (`change_input_strict`, the read's digest in its
-   * payload). Then the seal wait (R51). A hold that fails writes nothing: `moved`, and the app reads again.
+   * payload). Then the seal wait (R51). A hold that fails writes nothing: `moved`, and the app reads again. First, as
+   * `admitRead`, this isolate's keys settled and its config's Owners weighed: else `unserved`, today's path.
    */
   async admitWrite(input: AdmitWriteInput): Promise<AdmitWriteOutcome> {
     const log015 = this.#prepared.log015;
@@ -3991,6 +3992,10 @@ class VaultService implements Vault {
     if (opened === null) throw new Error("an add's ticket is the vault's own, as admitRead answered it: this one is not");
     const ticket = opened;
     const { principal, actor } = ticket;
+    // This isolate's own keys and config, which may not be the reading one's (review r1 of #474): settled as
+    // `admitRead` settles them, and an Owner its config names left to today's path, which decides on their row as
+    // `admitRead` would have (`listed`). A rollout between the two calls changes neither digest nor ticket.
+    if ((await this.#settled()) !== null || this.#listed(principal)) return { written: false, why: 'unserved' };
     const { role, scope } = asStored(ticket.role, ticket.scope);
     const correlation = { operationId: ticket.operationId, requestId: ticket.requestId, ...(ticket.personal ? { credentialId: ticket.credential } : {}) };
     const entry = accessEntry(actor, 'member.add', principal, 'allow', correlation, { role, scope });

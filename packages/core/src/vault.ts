@@ -806,7 +806,8 @@ export type AdmitWriteInput = { ticket: string };
 /** The add written and sealed (its change's number), or not: `moved`, the read no longer as decided; `expired`, the ticket's time past. */
 export type AdmitWriteOutcome =
   | { written: true; number: string; admitted: Admitted }
-  | { written: false; why: 'moved' | 'expired' };
+  /** `moved`: the read held no longer, read again; `expired`: the ticket's time past; `unserved`: this vault leaves the add to today's path (its config names the member an Owner, or its keys are not settled). */
+  | { written: false; why: 'moved' | 'expired' | 'unserved' };
 
 export type PrepareInput = {
   /** Who makes the changes, as their entries name them: `user:…`, `token:…`, or the app's own (`coffre`). */

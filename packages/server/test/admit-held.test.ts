@@ -19,8 +19,10 @@ import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, entryOf, LOG, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
-import { TEST_ENGINE } from './db/engine.ts';
+import { localVault, spoken } from '@coffre/vault/node';
+
+import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
+import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -44,7 +46,8 @@ const { vaultMembers, credentials } = tablesOf(db.owner);
  */
 async function world({ fast = true }: { fast?: boolean } = {}) {
   await resetDatabase(db.owner);
-  const vault = testVault([ROOT], {}, { kek: randomBytes(32) }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  const kek = randomBytes(32);
+  const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
@@ -97,7 +100,7 @@ async function world({ fast = true }: { fast?: boolean } = {}) {
     }), runtime, { sourceIp: null });
     assert.ok(response.ok, await response.text());
   };
-  return { deps, root, runtime, bob, session, add, signOut, answers, between: (adversary: () => Promise<void>) => void (next = adversary) };
+  return { kek, deps, root, runtime, bob, session, add, signOut, answers, between: (adversary: () => Promise<void>) => void (next = adversary) };
 }
 
 /** A member's row, by principal: its role and scope columns, or none. */
@@ -203,6 +206,58 @@ test('a hold that keeps failing gives up after three tries: 409 `changed`, asked
   assert.equal(added.retryAfter, '1');
   assert.deepEqual(served(w.answers), ['served', 'served', 'served']);
   assert.equal(await memberRow(NEW), undefined);
+});
+
+test("Bob removed and restored as an admin between the read and the write, his session's row not yet revoked: the read again finds it of his earlier membership, 401, nothing added (WritingRejoin; review r1 of #474)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  // The vault's removal alone: the app's sweep, which revokes the session's row, has not run yet.
+  w.between(async () => {
+    assert.equal((await w.deps.vault.remove({ actor: `user:${ROOT}`, principal: `user:${BOB}` })).ok, true);
+    assert.equal((await w.deps.vault.admit({ actor: `user:${ROOT}`, principal: `user:${BOB}`, role: 'admin' })).ok, true);
+    const [row] = await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, w.bob.id));
+    assert.equal(row!.revokedAt, null);
+  });
+  const added = await w.add();
+  assert.equal(added.status, 401, JSON.stringify(added.body));
+  assert.deepEqual(served(w.answers), ['served', 'ended']);
+  assert.equal(await memberRow(NEW), undefined);
+  // And on a first try: the session of the earlier membership is ended there too, never down today's path.
+  const again = await w.add();
+  assert.equal(again.status, 401, JSON.stringify(again.body));
+  assert.deepEqual(served(w.answers), ['served', 'ended', 'ended']);
+  assert.equal(await memberRow(NEW), undefined);
+});
+
+test("Bob's member row edited in a column only its 0.4 MAC covers (`created_by`): the read refuses it, and today's path answers it as ever, 401, nothing added (review r1 of #474)", { skip: POSTGRES }, async () => {
+  const attempt = async (fast: boolean) => {
+    const w = await world({ fast });
+    await db.owner.update(vaultMembers).set({ createdBy: 'user:someone@acme.example' }).where(eq(vaultMembers.principal, `user:${BOB}`));
+    const made = await since(() => w.add());
+    return { served: served(w.answers), status: made.result.status, body: made.result.body, entries: made.entries, row: await memberRow(NEW) };
+  };
+  const fast = await attempt(true);
+  const today = await attempt(false);
+  assert.deepEqual(fast.served, ['tampered']);
+  assert.equal(fast.status, 401, JSON.stringify(fast.body));
+  assert.equal(fast.row, undefined);
+  assert.deepEqual({ ...fast, served: [] }, { ...today, served: [] });
+});
+
+test("a ticket another vault read, written by one whose config names the member an Owner: that vault leaves the add to today's path, nothing written (review r1 of #474)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  // A cold isolate of the deployment after a rollout that names new@ an Owner: its own config, the same keys.
+  const rolled = spoken(await localVault(
+    { database: await openVaultDatabase(), hotDatabase: hotDatabaseUrl(), kek: { id: 'test-kek-1', key: w.kek.toString('base64') }, owners: ['new@acme.example'] },
+    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+  ));
+  let written: unknown;
+  w.between(async () => {
+    const ticket = (w.answers.at(-1) as Extract<AdmitReadOutcome, { served: true }>).ticket;
+    written = await rolled.admitWrite!({ ticket });
+    assert.equal(await memberRow(NEW), undefined);
+  });
+  await w.add();
+  assert.deepEqual(written, { written: false, why: 'unserved' });
 });
 
 test("Bob's token hash copied onto the Owner's session: the vault reads the Owner, and the app's check of the row's MAC refuses it before anything is written (WritingAdd, sub; round 6)", { skip: ANY }, async () => {

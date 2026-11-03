@@ -1,9 +1,11 @@
 import type { Access, CredentialAcceptance, SecretColumns, WriteKeysInput } from '@coffre/core/vault';
+import { storedRole } from '@coffre/db/grants';
 
 import { credentialEnded, keyRefusals, readerOf, sensitiveRefusals, useOnlyRefusals, type Reader } from './decide.ts';
 import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
 import { changeHolds, type ChangeRow, type LogMacKey } from './log-entry.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
+import type { GrantRow, Member } from './store.ts';
 
 /**
  * A key write in five round trips (T179 PR 3; docs/design/two-trips.md, "A key write", "The read and its hold";
@@ -46,7 +48,12 @@ export type ReadKey = {
  */
 export type CallerInputs = {
   credential: Held<CredentialInput> & { kind: string | null; createdBy: string | null; identityId: string | null; identity: { provider: string; issuerHash: string; revoked: boolean } | null };
-  principal: Held<PrincipalInput> & { access: bigint | null };
+  /**
+   * The member's object, with 0.14's newest access entry about it, and its row and grants as stored (`legacy`): what
+   * the row's 0.4 MAC covers, columns the object does not among them (`created_by`, `status_changed_by`), which
+   * today's path checks first (`#integrity`) and so does this one (`memberHolds`).
+   */
+  principal: Held<PrincipalInput> & { access: bigint | null; legacy: { row: Member; grants: GrantRow[] } | null };
   roles: Held<RolesInput>;
   policy: Held<PolicyInput>;
 };
@@ -91,6 +98,24 @@ function memberObjectOf(principal: string, m: Record<string, unknown>, grants: r
   );
 }
 
+/** A member's row and grants as stored (`to_jsonb`), as the vault's store reads them: what its 0.4 MAC is over. */
+function storedOf(principal: string, m: Record<string, unknown>, grants: readonly Record<string, unknown>[]): { row: Member; grants: GrantRow[] } {
+  const big = (value: unknown): bigint => BigInt(value as number | string);
+  return {
+    row: {
+      principal, status: String(m.status) as Member['status'], generation: Number(m.generation),
+      ...storedRole({ owner: m.owner === true, role: m.role as string | null, scope: m.scope as string | null }),
+      createdAt: Number(m.created_at), createdBy: String(m.created_by), statusChangedAt: Number(m.status_changed_at), statusChangedBy: String(m.status_changed_by),
+      accessSeq: big(m.access_seq), mac: bytes(m.mac as string) ?? Buffer.alloc(0),
+    },
+    grants: grants.map((g) => ({
+      principal, projectId: g.project_id == null ? null : String(g.project_id), environmentId: g.environment_id == null ? null : String(g.environment_id),
+      environmentSlug: g.environment_slug == null ? null : String(g.environment_slug), role: String(g.role),
+      expiresAt: g.expires_at == null ? null : Number(g.expires_at), grantedAt: Number(g.granted_at), grantedBy: String(g.granted_by),
+    })),
+  };
+}
+
 /** The caller's part of a read, parsed. */
 export function callerInputs(raw: RawCaller): CallerInputs {
   const c = raw.credential?.row ?? null;
@@ -115,6 +140,7 @@ export function callerInputs(raw: RawCaller): CallerInputs {
     seal: m === null ? null : bytes(m.seal as string | null),
     newest: changeOf(raw.principal?.newest),
     access: raw.principal?.access == null ? null : BigInt(raw.principal.access),
+    legacy: m === null || principalId === null ? null : storedOf(principalId, m, raw.principal?.grants ?? []),
   };
   const config = <T extends Input>(part: RawCaller['roles']): Held<T> => ({ row: part.value === null ? null : (configObject(part.value) as T), seal: bytes(part.seal), newest: changeOf(part.newest) });
   return { credential, principal, roles: config<RolesInput>(raw.roles), policy: config<PolicyInput>(raw.policy) };
@@ -198,6 +224,18 @@ export function holds(keys: { macs: readonly LogMacKey[] }, { held }: ReadObject
   return held.newest === null || changeHolds(keys.macs, held.newest);
 }
 
+/**
+ * The caller's member row under its 0.4 MAC (`#sealed`), as today's path checks it before its seal (`#integrity`):
+ * the MAC covers columns the 0.15 object does not, so a row edited there alone (its `created_by`) passes `holds` and
+ * `stands` and fails only this (review r1 of #474). No row: nothing to check, which the decision refuses on its own.
+ */
+export function memberHolds(keys: { members: MemberSealed }, { legacy }: Pick<CallerInputs['principal'], 'legacy'>): boolean {
+  return legacy === null || keys.members(legacy.row, legacy.grants);
+}
+
+/** Whether a member's row and grants carry the vault's 0.4 MAC, under the keys it checks them with now (`#sealed`). */
+export type MemberSealed = (row: Member, grants: readonly GrantRow[]) => boolean;
+
 export function stands(keys: { seals: SealKeys }, { held, ref }: ReadObject): boolean {
   const newest = held.newest?.seal ?? null;
   const valid = held.row === null ? held.seal === null : sealed(keys.seals, ref, held.row, held.seal);
@@ -236,7 +274,7 @@ export function callerFirst(
 }
 
 export function decideWrite(
-  keys: { seals: SealKeys; macs: readonly LogMacKey[] },
+  keys: { seals: SealKeys; macs: readonly LogMacKey[]; members: MemberSealed },
   read: WriteInputs,
   request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[]; asked: readonly { name: string; id: string; replaces?: string | null }[] },
 ): WriteDecided | Unserved {
@@ -255,7 +293,7 @@ export function decideWrite(
   ];
   // A key whose object this path does not rebuild (archived, a reference): today's path, before its seal is weighed.
   if (read.keys.some((key) => key.id !== null && key.object.row === null)) return 'shape';
-  if (!objects.every((object) => holds(keys, object))) return 'tampered';
+  if (!objects.every((object) => holds(keys, object)) || !memberHolds(keys, principal)) return 'tampered';
   if (!objects.every((object) => stands(keys, object))) return 'stale';
   // 0.14's newest access entry about the principal, which its newest change must account for (UsesSeeOldWrites).
   const old = oldOf(principal.newest);

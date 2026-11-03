@@ -801,6 +801,8 @@ async function admitHeld(ctx: ApiContext): Promise<{ admitted: Admitted; project
     if (tried === null) break;
     const written = await ctx.vault.admitWrite!({ ticket: tried.ticket });
     if (written.written) return { admitted: written.admitted, projects: tried.projects };
+    // The writing vault leaves it to today's path (its config names the member an Owner: review r1 of #474).
+    if (written.why === 'unserved') break;
     if (tries >= 3) throw new ObjectMoved('1');
     const again = await admission.again();
     // Its credential no longer the caller's: as the credential's own check answers it.

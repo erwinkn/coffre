@@ -466,6 +466,9 @@ REMOVALS=(
   'WritingAdd Unheld={"svc"} AddsFlip'
   # The add's read holding the adder's session (PR 5): revoked between the read and the write, the add still commits.
   'WritingAdd Unheld={"cred"} AddsStandAtCommit'
+  # The add's session not held to its membership's generation (review r1 of #474): Bob removed and restored before
+  # his session's row is revoked, the retry's read finds it live and him an admin again, and adds with it.
+  "WritingRejoin GenerationChecked AddsStandAtCommit"
   # The decision weighing anything but the read (the roles from its isolate's cache): the hold holds the read, and
   # the role redefined before both is missed.
   "WritingPlace DecideOnRead WritesStandAtCommit"

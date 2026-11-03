@@ -5,7 +5,8 @@
 (* Revoke, Place and Fork, round 3 in Names, round 5 in Protect, round 6   *)
 (* in Tamper and Add, T190's forged seal in Forge, PR 3's fallback to      *)
 (* today's path in FallBack and Forge, its caller in Caller (r2 of #469);  *)
-(* PR 5's add, its session and its fallback, in Add and Forge.             *)
+(* PR 5's add, its session and its fallback, in Add and Forge, its         *)
+(* session's generation in Rejoin (r1 of #474).                            *)
 (***************************************************************************)
 EXTENDS Writing
 
@@ -60,6 +61,12 @@ CallerProcs == {"w1", "rev", "bk", "end", "ck"}
 \* onto Bob's credential (round 6), and the adders' session is revoked
 \* (PR 5: the add's read holds it). A refused add goes down today's path.
 AddProcs == {"bob", "cy", "dem", "pol", "sub", "end", "ck"}
+
+\* Bob adds svc while an Owner removes him and restores him as an admin, his
+\* session's row not yet revoked: his removal ended it all the same (its
+\* generation is no longer his membership's), so neither a first try nor a
+\* retry after the hold fails adds with it (review r1 of #474).
+RejoinProcs == {"bob", "rmb", "ck"}
 
 \* Bob, no admin, sets up svc with a first grant at a place, as the services
 \* setting lets him, while an Owner redefines the roles and closes the
