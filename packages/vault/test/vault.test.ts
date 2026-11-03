@@ -1,4 +1,4 @@
-import test, { after, before, beforeEach } from 'node:test';
+import test, { after, afterEach, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
@@ -81,6 +81,8 @@ before(async () => {
 });
 after(() => db.close());
 beforeEach(() => emptyDatabase(db.owner));
+// Each test's second instances go with it (`release`).
+afterEach(() => db.release());
 
 type World = Awaited<ReturnType<typeof places>> & {
   vault: LocalVault;
