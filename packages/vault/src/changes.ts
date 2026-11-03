@@ -213,8 +213,10 @@ export class Changes {
     // section 8): from no object, whatever its row holds, moved on from its newest change's seal, which `change_input`
     // holds it to under the fence. Nothing of the row is weighed, so nothing forged is carried on.
     if (whole) {
-      // Its seal whatever the change's MAC: nothing of the change or the row is carried on, and a whole save is how an
-      // Owner replaces an object whose log a writer forged too.
+      // Its seal whatever the change's MAC: nothing of the change or the row is carried on, so a forged change gains a
+      // writer nothing here. Whether the save repairs the object is the checkpointer's: a forged change it already signed
+      // over stays below its pair, and the save seals past it; one still in its window halts every tick with an alert
+      // (`its MAC does not hold`), so the save commits but its seal wait fails, until an operator puts the log right.
       const newest = await newestChange(db, ref, macsOf(this.#keys));
       return { logged: true, seal: newest?.seal ?? null, now: null, afters: [] };
     }

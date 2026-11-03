@@ -19,7 +19,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { openLocalVault as openEntry, spoken } from '../src/local.ts';
 import { objectKey } from '../src/inputs.ts';
-import { newestSeals, newestSealsQuery } from '../src/store.ts';
+import { newestChanges, newestChangesQuery, newestSeals, newestSealsQuery } from '../src/store.ts';
 import { changePlace, emptyDatabase, ENGINE, OWNER_URL, postgresOnly, newEnvironment, newProject, openLocalVault, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, speaking, storedVersions, type LocalVault, type TestDatabase } from './database.ts';
 
 /** A vault in this process, spoken to through the version gate's envelope (`spoken`). */
@@ -301,14 +301,19 @@ test('unprotecting a place whose tombstone a writer set around the log is refuse
 
 test('on SQLite, the newest changes of several places are one probe each, however long their histories (R48, review r1)', { skip: ENGINE === 'sqlite' ? false : 'SQLite only: Postgres reads them in the snapshot' }, async () => {
   const refs = [randomUUID(), randomUUID(), randomUUID()].map((id) => ({ kind: 'environment' as const, id }));
-  const plan = await sqlitePlan(newestSealsQuery(refs));
-  // Each newest number by the index's `max`, then its row by its number: never every change of an object in turn.
-  assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
-  assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
-  assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
+  // Both statements: the seals alone (a place deleted, `loggedEnvironments`) and each change whole, its MAC to check
+  // (the places read, `newestChanges`; T190, review by Fable).
+  for (const query of [newestSealsQuery, newestChangesQuery]) {
+    const plan = await sqlitePlan(query(refs));
+    // Each newest number by the index's `max`, then its row by its number: never every change of an object in turn.
+    assert.ok(plan.some((step) => /^SEARCH d USING COVERING INDEX log_changes_object_idx \(object=\?\)/.test(step)), plan.join('\n'));
+    assert.ok(plan.some((step) => /^SEARCH c USING INTEGER PRIMARY KEY/.test(step)), plan.join('\n'));
+    assert.deepEqual(plan.filter((step) => /^SCAN (c|d|log_changes)\b|^SEARCH c USING (COVERING )?INDEX/.test(step)), [], plan.join('\n'));
+  }
   // However many: a member with 600 grants on places is read as one with 6 (review r2: a compound SELECT stops at 500).
   const many = Array.from({ length: 600 }, () => ({ kind: 'environment' as const, id: randomUUID() }));
   assert.deepEqual(await newestSeals(db.vault, many), new Map());
+  assert.deepEqual(await newestChanges(db.vault, many), new Map());
 });
 
 test('a protected place in a project whose tombstone a writer set around the log stays protected: its own object says it lives (review r2)', async () => {

@@ -420,10 +420,15 @@ export function newestRowOf(read: NewestColumns | string | null | undefined): Om
 /** `newestSeals`, each change whole (`NewestColumns`), its MAC to check: by its key in the log. One probe of each object's changes. */
 export async function newestChanges(db: Queryable, refs: readonly Ref[]): Promise<Map<string, NewestColumns>> {
   if (refs.length === 0) return new Map();
-  const keys = JSON.stringify([...new Set(refs.map((ref) => objectKey(ref)))]);
-  const rows = await rowsOf<NewestColumns & { key: string }>(db, sql`SELECT k.value AS key, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac FROM json_each(${keys}) k
-    JOIN log_changes c ON c.object = k.value AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.value)`);
+  const rows = await rowsOf<NewestColumns & { key: string }>(db, newestChangesQuery(refs));
   return new Map(rows.map(({ key, ...row }) => [key, row]));
+}
+
+/** `newestChanges`' statement, on SQLite: `newestSealsQuery`'s probe, each change whole. */
+export function newestChangesQuery(refs: readonly Ref[]): SQL {
+  const keys = JSON.stringify([...new Set(refs.map((ref) => objectKey(ref)))]);
+  return sql`SELECT k.value AS key, c.at, c.request_id, c.object, c.actor, c.payload, c.seal AS newest, c.mac FROM json_each(${keys}) k
+    JOIN log_changes c ON c.object = k.value AND c.number = (SELECT max(d.number) FROM log_changes d WHERE d.object = k.value)`;
 }
 
 /**
