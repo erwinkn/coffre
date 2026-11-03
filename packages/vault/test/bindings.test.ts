@@ -12,7 +12,7 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import type { ChangeBindingsInput, CredentialColumns, MadeBinding, SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
 import { loggedChange, type ChangeKeys } from '../src/changes.ts';
@@ -20,7 +20,7 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey } from '../src/inputs.ts';
 import { authentic, changeEntry, logMacKey } from '../src/log-entry.ts';
 import { replay } from '../src/log-replay.ts';
-import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, ENGINE, type TestDatabase } from './database.ts';
+import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, sealed, nothingHeld, ENGINE, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
@@ -234,6 +234,23 @@ test('a binding 0.14 made, which the log never held, or one whose row was edited
     appKey: APP_KEY, spent: randomBytes(32).toString('base64'), validUntil: now + 60_000, record: { proof: 'oidc', issuer: ISSUER, run: {} }, idToken: null, dpop: null,
   });
   assert.deepEqual(asSealed, { ok: false, refused: 'unbound' });
+});
+
+test("a sign-in through the binding of an account whose newest change was edited around the vault is refused, its finding naming that change (T179 PR 4a)", async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  // The account's newest change, its actor edited: its MAC no longer holds.
+  const object = objectKey({ kind: 'principal', id: CI });
+  const [newest] = await rows<{ n: string; mac: Uint8Array }>(db.owner, sql`SELECT CAST(number AS text) AS n, mac FROM log_changes WHERE object = ${object} ORDER BY number DESC LIMIT 1`);
+  await rows(db.owner, sql`UPDATE log_changes SET actor = 'user:mallory@acme.example' WHERE number = ${newest!.n}`);
+  assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
+  // Found where the sign-in holds the account to the log (`#notLogged`), which names no change: the finding is given
+  // the account's newest as it appends (`#weigh`), by its MAC (`changeName`).
+  const findings = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'vault.tampered'), eq(auditLog.subjectPrincipal, CI), inArray(auditLog.code, ['mac', 'stale'])));
+  assert.deepEqual(findings.map((finding) => (JSON.parse(finding.metadata) as { change?: string }).change), [Buffer.from(newest!.mac).toString('hex')]);
 });
 
 test("an unbind ends the binding and every live credential it issued, each a change, in one statement; a sign-in after is none", async () => {

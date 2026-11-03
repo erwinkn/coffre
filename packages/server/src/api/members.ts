@@ -532,7 +532,10 @@ export async function memberReport(ctx: ApiContext, member: MemberRef): Promise<
     keeps015(ctx.vault).then((log) => (log ? ctx.vault.proxySavedBy({ member: formatMember(member) }) : { items: [] })),
   ]);
   const reads = await readsReported(ctx, standing);
-  const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member));
+  // Not in the list, which finds those with no row by 0.14's access entries alone: one whose change 0.15's log holds,
+  // with no row, is missing all the same (`missingMembers` of one; T179 PR 4a), as an add of 0.16 writes no such entry.
+  const listed = everyone.find((entry) => formatMember(entry.member) === formatMember(member))
+    ?? ((await missingMembers(ctx.db, member)).length > 0 ? { member, row: null, status: 'tampered' as const, grants: [] } : undefined);
   if (listed === undefined) throw notFound('no such member');
   const { row, status } = listed;
 

@@ -2426,6 +2426,58 @@ use. 28,408 states.
 |---|---|
 | the add locks the members' rows before the head, as every flow that takes both does (MembersFirst) | `NoWaitCycle`: the add holds the head and waits for the adder's row, which a demotion holds while it waits for the head |
 
+### Findings.tla
+
+When the vault's finding that a member's row was changed around it
+(`vault.tampered`, `mac` or `stale`) stands, as the member list, the member
+page, `coffre migrate` and the vault's conversion read it (T179 PR 4a;
+`findingStands` in packages/db/src/grants.ts). The vault changes a member
+only once its own check passes their row, so a change made after a
+finding's check means the row checked out since. 0.14's rule compares the
+finding with the member's newest access entry, which every change wrote;
+0.16 writes none, and that watermark would freeze. Under 0.15's log a
+finding names the member's newest change its check weighed, by the
+change's MAC (`{"change": "<its MAC, hex>"}` in its metadata, `changeName`),
+and stands while that change is still their newest. Not by its number: a
+change's MAC covers every column but its number, which a database writer
+can change (review r1 of #476).
+
+**The model.** The member's row, good or bad (`Tamper`, `Restore`); the
+vault's changes, made in order and only of a row that checks out against
+the newest, each taking the log's next number; a writer who gives a change
+any number no other holds (`Renumber`); checks of a bad row, each naming the
+change it read (`#onLog`, `#integrity`), or, for one that read none, the
+newest as its finding appends (`#weigh`: `#seal`, `#notLogged`); 0.14's
+checks, which name none and, like a late one, append after their check,
+in a transaction of their own (`CheckOld`: `access`, then `#record`;
+`Findings015.cfg` only: the 0.15 reader is both rules at once); and
+findings appended in any order. The readers take the change numbered highest as the newest. When
+that is an older change put above the newest (`Honest` false), the vault's
+check finds the row stale and refuses; what a finding says then is outside
+the invariants: an entry replayed or deleted whole, its MAC intact, is the
+checkpoints' to catch (docs/design/merkle-checkpoints.md). `StandsUnchanged`:
+a finding whose check read the vault's newest change, none made since,
+stands. `Settles`: a change after every finding's check settles them.
+`Findings.cfg` has no access entries (0.16), 82,200 states;
+`Findings015.cfg` writes one beside each change, and 0.14's findings beside
+0.15's, 408,314.
+
+| protection | turned off, TLC finds |
+|---|---|
+| a finding of 0.15's is weighed against the changes (WeighsChanges) | `Settles`, under 0.16: no access entry follows the change that settles the finding, which then stands for good |
+| any finding naming the newest change counts, not the newest finding alone (EveryFinding) | `StandsUnchanged`: a check that read before a change commits after one that read past it, and hides the other's |
+| a finding names its change by MAC, not number (NamesChange) | `StandsUnchanged`: the writer renumbers the change a finding names up, and it settles with no change since; `Settles`: renumbered up before the check and back after, the finding names a number no later change reaches |
+
+A finding that reads its change as it appends, not as its check read the
+row, weighs any change committed between the two: it then stands until the
+next change, as 0.14's rule held one past the access entry that change
+wrote. The model allows it (`Check(TRUE)`); it errs only toward standing.
+So does 0.14's own finding, weighed by where it appends: a change between
+its check and its append leaves it after that change's access entry, and it
+stands until the next. The model takes what such a finding says as of its
+append; taken as of its check, TLC finds `Settles` broken by exactly that
+trace (review r2 of #476).
+
 ## 0.16: proxy definitions in the UI
 
 ### Routing.tla
