@@ -1036,7 +1036,12 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   is redacted as any value is (section 4), its encoded form and the whole
   segment included. As with `query()`, the URL that goes out holds the
   value, and so does what a platform records of outgoing requests
-  (Workers' tracing, which what `coffre init` writes leaves off).
+  (Workers' tracing, which what `coffre init` writes leaves off). The
+  other way, the handle rides in the URL the app sends, as a `query()`
+  rule's does, so a log of incoming URLs (Workers Logs, which `coffre
+  init` turns on) holds the handle, never the value; a handle reaches only
+  the environments it was made for, until it ends or is revoked. A
+  workload's session puts nothing of its own in the path.
 - **In the UI.** The Proxy tab's routes take a Path rule, its template
   checked by the vault's save as code's is at startup.
 

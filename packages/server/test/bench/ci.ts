@@ -29,6 +29,8 @@
 // than it: the app reads the keys, then uses them by ids (T167), the path before.
 // `--proxy-ui` saves `api` in ci/dev's Proxy tab instead, the proxy's code naming none (T186 PR C): each `/use` a route
 // use, at a path of its own, so that the vault's map keys on no URL.
+// `--proxy-path` puts `API_KEY` in a segment of the path instead, `path('bot{API_KEY}')`, the handle in the app's path
+// alone, as Telegram's Bot API takes its token (T208).
 // `--proxy-fork` makes every handle for ci/feature, a fork of ci/dev that inherits its `API_KEY` (T165): what a fork's
 // `/use` costs, by the vault's one call by name or, before T165, by the app's own path.
 // `--cgroup <dir>`, the Postgres container's cgroup, adds its CPU per use of each level (cpu.stat's usage_usec over
@@ -46,7 +48,7 @@
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
-//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed] [--proxy-ui]
+//     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed] [--proxy-ui] [--proxy-path]
 //     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -108,6 +110,7 @@ const { values } = parseArgs({
     'proxy-pair': { type: 'boolean', default: false },
     'proxy-unnamed': { type: 'boolean', default: false },
     'proxy-ui': { type: 'boolean', default: false },
+    'proxy-path': { type: 'boolean', default: false },
     'proxy-names': { type: 'string' },
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
@@ -435,6 +438,7 @@ try {
       ...(values['proxy-names'] === undefined ? {} : { names: Number(values['proxy-names']) }),
       ...(values['proxy-pair'] ? { secret: 'api-secret-value' } : {}),
       ...(values['proxy-unnamed'] ? { unnamed: true } : {}),
+      ...(values['proxy-path'] ? { inPath: true } : {}),
     };
     // The proxy injects `API_KEY`: ci/dev's first key under that name; and `API_SECRET` beside it, `--proxy-pair`.
     await root.secrets.set('ci/dev', { API_KEY: load.value, ...(load.secret === undefined ? {} : { API_SECRET: load.secret }) });

@@ -16,7 +16,7 @@ import { localVault, spoken } from '@coffre/vault/node';
 
 import { resolveConfig } from '../../src/config.ts';
 import { checkPlugins } from '../../src/plugins.ts';
-import { credentialProxy, header } from '../../src/plugins/credential-proxy.ts';
+import { credentialProxy, header, path as inPath } from '../../src/plugins/credential-proxy.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { answer, type Pages } from '../start-fixture.ts';
 import { farPostgres } from './far.ts';
@@ -57,6 +57,8 @@ export type ProxyLoad = {
    * `--proxy-ui`): each request a path of its own, so that no map keys on the URL.
    */
   ui?: { upstream: string };
+  /** `API_KEY` in a segment of the path, `path('bot{API_KEY}')`, as Telegram takes its token (T208, `--proxy-path`): the handle in the app's path alone. */
+  inPath?: boolean;
 };
 
 const load = workerData as ProxyLoad;
@@ -69,7 +71,8 @@ await Promise.all(pools.flatMap((pool, i) => Array.from({ length: sizes[i]! }, (
 const [appPool, vaultPool, hotPool] = pools as [ReturnType<typeof postgresClient>, ReturnType<typeof postgresClient>, ReturnType<typeof postgresClient>];
 
 const upstream = createServer((request, response) => {
-  response.writeHead(request.headers['x-api-key'] === (load.secret === undefined ? load.value : `${load.value}:${load.secret}`) ? 200 : 403);
+  const real = load.inPath === true ? request.url === `/v1/bot${load.value}/thing` : request.headers['x-api-key'] === (load.secret === undefined ? load.value : `${load.value}:${load.secret}`);
+  response.writeHead(real ? 200 : 403);
   response.end();
 });
 await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
@@ -96,7 +99,7 @@ const config = resolveConfig({
   auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }),
   auditChainKey: load.chainKey,
   plugins: [credentialProxy({
-    credentials: load.ui !== undefined ? {} : { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: header('x-api-key', load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}') } },
+    credentials: load.ui !== undefined ? {} : { api: { upstream: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`, inject: load.inPath === true ? inPath('bot{API_KEY}') : header('x-api-key', load.secret === undefined ? '{API_KEY}' : '{API_KEY}:{API_SECRET}') } },
     insecureUpstreams: true,
     cacheSeconds: load.cacheSeconds,
     ...(load.ui === undefined ? {} : { editable: true }),
@@ -123,9 +126,10 @@ const use = async (phase: Phase, due: number) => {
   const handle = load.handles[load.names === undefined ? next++ % load.handles.length : Math.floor(Math.random() * load.handles.length)]!;
   try {
     // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
-    const rest = load.ui === undefined ? 'v1/thing' : `v1/thing/${nth}`;
+    // Through a path rule, the handle in the path alone, as Telegram's SDKs put the token there: `/bot<handle>/thing`.
+    const rest = load.inPath === true ? `bot${handle}/thing` : load.ui === undefined ? 'v1/thing' : `v1/thing/${nth}`;
     const url = load.stable ? `${load.origin}/use/api/${rest}` : `${load.origin}/use/${load.path}/api/${rest}`;
-    const response = await answer(new Request(url, { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
+    const response = await answer(new Request(url, load.inPath === true ? {} : { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
       const why = `${response.status} ${(await response.text()).slice(0, 80)}`;
       phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
