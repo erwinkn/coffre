@@ -486,26 +486,39 @@ test("a reservation waits for the head within one bound, however late it took th
 
 test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
   const w = await world({ codeWaitMs: 1_000 });
+  // Two changes, as appends: each locks the head's row and writes a new version of it.
+  const first = postgresSession(OWNER_URL);
+  const second = postgresSession(OWNER_URL);
+  const waiting = () => locksHere(db.owner, sql`NOT granted`);
   const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-  // A change holding the head, as an append does: the row locked and updated, its version a new one, for `ms`.
-  const change = (ms: number) => db.owner.transaction(async (tx) => {
-    await run(tx, sql`SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE`);
-    await run(tx, sql`UPDATE audit_chain_head SET next_seq = next_seq WHERE only_row`);
-    await pause(ms);
-  });
-  const first = change(600);
-  await pause(50);
-  // The next in line, behind the first.
-  const second = change(800);
-  await pause(50);
-  const started = Date.now();
+  const until = async (what: string, done: () => Promise<boolean>) => {
+    for (const started = Date.now(); !(await done()); await pause(10)) assert.ok(Date.now() - started < 5_000, what);
+  };
+  const LOCK = 'SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE';
+  const WRITE = 'UPDATE audit_chain_head SET next_seq = next_seq WHERE only_row';
   try {
-    const ended = await w.vault.reserveProxy({ names: ['openai'] }).then(() => 'reserved' as const, (error: unknown) => error);
+    await first.unsafe('BEGIN');
+    await first.unsafe(LOCK);
+    await first.unsafe(WRITE);
+    // The next change in line, waiting for the first: it is ahead of the reservation, whatever the load.
+    await second.unsafe('BEGIN');
+    const secondHolds = second.unsafe(LOCK).then(() => Date.now());
+    await until('the second change never waited for the head', async () => (await waiting()) >= 1);
+    const started = Date.now();
+    const reserving = w.vault.reserveProxy({ names: ['openai'] }).then(() => 'reserved' as const, (error: unknown) => error);
+    await until('the reservation never waited for the head', async () => (await waiting()) >= 2);
+    // Each wait shorter than the bound, both together longer: the first change holds 600 ms of it, the second 800 more.
+    await pause(Math.max(0, started + 600 - Date.now()));
+    await first.unsafe('COMMIT');
+    const held = await secondHolds;
+    await second.unsafe(WRITE);
+    const ended = await Promise.race([reserving, pause(Math.max(0, held + 800 - Date.now())).then(() => 'still waiting' as const)]);
     const ms = Date.now() - started;
+    await second.unsafe('COMMIT');
     assert.ok(gaveUp(ended), `the reservation ended ${ended instanceof Error ? ended.message : String(ended)} after ${ms} ms`);
     assert.ok(ms < 1_400, `the reservation gave up after ${ms} ms, past its bound of 1,000`);
   } finally {
-    await Promise.all([first, second]);
+    await Promise.all([first.end(), second.end()]);
   }
 });
 
