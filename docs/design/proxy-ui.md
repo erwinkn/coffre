@@ -1161,7 +1161,13 @@ they outlive the deployment that reserved them:
   change), decides under the head, which reports it and refuses: an empty ask,
   from a deployment of UI routes alone, as much as any. Under the head every time, as the first
   cut did, those calls queued one behind the other and every use behind them,
-  up to 147 s for one use in #467's bench at 1,000 a second.
+  up to 147 s for one use in #467's bench at 1,000 a second. The deploy that
+  adds a name sends them all there at once, each finding it missing: so only
+  one waits for the head, in a place in line of the code's own (the reads'
+  places, `READ_HEAD_WAITERS`, are apart). The others, refused that place at
+  once, pause (25 ms, doubled each time, up to 400 ms, within the decision's
+  15 s) and read again, and find the name the one wrote. Each waiting its
+  turn instead, 3,080 no-op decisions queued 200 s in the same bench.
 - **One release at a time.** The gate's call is a vault call like any
   other: from an app on another release it is 503 `deploying` before the
   vault reads the reserved set (section 3, "One version at a time"). What

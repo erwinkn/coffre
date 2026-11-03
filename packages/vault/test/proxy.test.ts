@@ -23,7 +23,7 @@ import { replayStored } from '../src/log-replay.ts';
 import { frozenAllows, frozenHoldings, frozenOwns, proxyLookup, type ProxyLevel } from '../src/proxy.ts';
 import type { Reader } from '../src/decide.ts';
 import { newestChange, readObject } from '../src/store.ts';
-import { emptyDatabase, ENGINE, LOG, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
+import { emptyDatabase, ENGINE, LOG, locksHere, newEnvironment, newProject, nothingHeld, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, rows, run, sealed, sealPlaces, VAULT_URL, type LocalVault, type TestDatabase } from './database.ts';
 
 const ROOT = 'user:root@acme.example';
 const NOBODY: FrozenHoldings = { role: 'member', scope: { projects: 'all', environments: 'all' }, instance: { normal: [], protected: [] }, grants: [] };
@@ -425,6 +425,33 @@ test("names code reserved already are found so without the head, which every iso
     await holder.unsafe('COMMIT');
     const outcome = await adding;
     assert.ok(outcome.ok && outcome.reserved.join() === 'maps,openai,stripe');
+  } finally {
+    await holder.end();
+  }
+});
+
+test("a deploy's herd of first requests, each finding its code's name missing, waits for the head in one place, not one each, and reads the name the one wrote (#467's bench)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world();
+  const holder = postgresSession(OWNER_URL);
+  // The code's place in line, and every lock a session of this database waits for.
+  const inPlace = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${0x636f6670} AND granted`);
+  const waiting = () => locksHere(db.owner, sql`NOT granted`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    // A change under way: the head held, not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    // As many isolates' first requests, each asking for `openai`, none reserved yet.
+    const herd = Array.from({ length: 8 }, () => w.vault.reserveProxy({ names: ['openai'] }));
+    for (const started = Date.now(); (await inPlace()) < 1; await pause(20)) {
+      assert.ok(Date.now() - started < 5_000, 'no reservation took the code\'s place in line');
+    }
+    // Long enough for the rest, refused the place, to pause and read again more than once: none of them waits.
+    await pause(300);
+    assert.equal(await waiting(), 1, 'one reservation waits for the head, the rest wait for nothing');
+    await holder.unsafe('COMMIT');
+    for (const outcome of await Promise.all(herd)) assert.deepEqual(outcome, { ok: true, reserved: ['openai'], cleared: [] });
+    assert.equal(await count(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'proxy.code'`), 1);
   } finally {
     await holder.end();
   }
