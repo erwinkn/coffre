@@ -47,7 +47,7 @@
 (* revoke, a database writer) is what the hold, after the fence, weighs.   *)
 (* AWrite is the second statement; whether the first's locks can close a   *)
 (* cycle is WriteLocks.tla's (AddLocks). TwoTrips is the target's shape    *)
-(* (0.16, PR 6), as for a key write.                                       *)
+(* (PR 6), as for a key write.                                             *)
 (* The read holds the adder's session too (`cred`): ended, or not as its   *)
 (* log has it, the add answers 401 there and then, as a key write's does.  *)
 (* An add the vault leaves to today's path (refused, an object not as its  *)
@@ -93,7 +93,7 @@
 (* steps by the app's statement only when its hold runs before the fence)  *)
 (* and the fence; from a hold to its COMMIT, both (`held`), which a        *)
 (* database writer ignores. A session's revoke takes the fence, not the    *)
-(* head: 0.16's, once 0047's head in `revoke_credential` is contracted     *)
+(* head: PR 6's, once 0047's head in `revoke_credential` is contracted     *)
 (* away.                                                                   *)
 (* Today's revoke takes the head too, which only adds order, so this is    *)
 (* the stronger adversary.                                                 *)
@@ -838,7 +838,7 @@ TodayPolicyStandsAtCommit == \A w \in writes \cup admits : w.today => w.policy
 \* ... not at its commit: a revoke or a session's end between the vault's
 \* wrap and the app's COMMIT does not stop it (EXPECTED in scripts/formal.sh: the window every
 \* write has had since 0.14, which the two-trip path closes for the writes
-\* it serves, and 0.16 for every write, PR 6).
+\* it serves, and PR 6 for every write).
 TodayStandsAtCommit == \A w \in writes \cup admits : w.today => w.stands
 
 \* Each key change goes from the object it was made from: two writes from

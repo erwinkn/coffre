@@ -406,10 +406,17 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
   switch back failed requests for 28 s.
 - *Writes back on 0.14.5*: only by restoring step 1's backup, which loses
   everything written since.
-- *Forward again*: put step 2's commit back, the real `CoffreCheckpointer`
-  export with it, keeping the Hyperdrive configs and the checkpointer's
-  memory as they are, and `pnpm install`; then step 4 (on Node, from its
-  `pnpm build`). 0.16 serves at once, with its log verified whole.
+- *Forward again, from a read-only rollback* (the database as 0.16 left
+  it): put step 2's commit back, the real `CoffreCheckpointer` export with
+  it, keeping the Hyperdrive configs and the checkpointer's memory as they
+  are, and `pnpm install`; then step 4 (on Node, from its `pnpm build`).
+  0.16 serves at once, with its log verified whole.
+- *Forward again, after restoring the backup*: the database is 0.14.5's
+  again, without 0.16's migrations or 0.15's log, so start over from
+  step 1, step 3 included; 0.16 on that schema answers 503 `migrating`.
+  Before step 4, reset the checkpointer's memory, as
+  [restore.md](restore.md#on-015s-log) says: it remembers pairs the
+  restored database no longer holds, and refuses that log until reset.
 
 A deployment already on 0.15.0 upgrades to 0.16 as to any release
 ([Upgrading](#upgrading)), with one edit `coffre update` leaves to it: on
