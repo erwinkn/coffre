@@ -1156,7 +1156,11 @@ they outlive the deployment that reserved them:
   newest change's seal, with no lock, as it reads `bulk.limit` at its
   start), and most isolates find their names there and go on. The isolate
   keeps the settled answer, never the pending call (AGENTS.md, "What an
-  isolate keeps").
+  isolate keeps"), so its concurrent first requests each make the call: only
+  a name missing from the read, or a read that cannot say (unsealed, torn by a
+  change), decides under the head. Under the head every time, as the first
+  cut did, those calls queued one behind the other and every use behind them,
+  up to 147 s for one use in #467's bench at 1,000 a second.
 - **One release at a time.** The gate's call is a vault call like any
   other: from an app on another release it is 503 `deploying` before the
   vault reads the reserved set (section 3, "One version at a time"). What

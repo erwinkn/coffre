@@ -4418,11 +4418,21 @@ class VaultService implements Vault {
    * over: it serves nothing (R64), and its item, should a writer put it back,
    * stays shadowed by the name, which no deploy drops.
    */
-  reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>> {
-    this.#log015();
+  async reserveProxy(input: ReserveProxyInput): Promise<Outcome<{ reserved: string[]; cleared: ClearedItem[] }>> {
+    const keys = this.#log015();
     const problem = reservedProblem(input?.names);
     if (problem !== null) throw new Error(problem);
     const wanted = [...new Set(input.names)].sort();
+    // Every isolate's call after the deploy that added its names finds them reserved, and writes nothing (Routing.tla's
+    // LogCode, its ELSE): the object read as the log holds it says so without the head. Taken exclusive, as a change
+    // takes it, the head queued every isolate's first requests one behind the other, each a call of its own (the gate
+    // keeps no pending call), and every use behind them: a use waited 147 s in #467's bench at 1,000 a second. A read
+    // that cannot say, unsealed, torn by a change between its two statements or short of a name, decides under the head.
+    if ((await this.#settled()) === null && (await this.#cutOverNow())) {
+      const held = await heldByLog(keys.seals, this.#db, RESERVED_REF).catch(notLogged);
+      const names = held.log === 'live' && held.object.kind === 'proxy-reserved' ? held.object.names : [];
+      if (wanted.every((name) => names.includes(name))) return { ok: true, reserved: [...names], cleared: [] };
+    }
     return this.#decide([], async (d) => {
       const changes = d.changes!;
       const reserved = await changes.held(d.tx, RESERVED_REF);

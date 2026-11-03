@@ -13,7 +13,7 @@ import { DEFAULT_POLICY, type Holdings, type Scope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProxyInput } from '@coffre/core/vault';
 import { createDatabase, tablesOf } from '@coffre/db';
-import { postgresClient } from '@coffre/db/connect';
+import { postgresClient, postgresSession } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
@@ -405,6 +405,29 @@ test("code reserves its names: each UI item of one deleted, whole in its entry; 
   assert.equal(again.ok ? 'released' : again.refusal.code, 'invalid');
   saved(await w.save({ seal: (await w.view()).seal, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } }));
   assert.deepEqual((await replayStored(db.owner, w.config.signingKeys)).faults, []);
+});
+
+test("names code reserved already are found so without the head, which every isolate's first requests would queue on, and every use behind them; a name to add waits for it (#467's bench)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world();
+  assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A change under way: the head held, not yet committed.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    const late = (ms: number) => new Promise<'waited'>((resolve) => setTimeout(() => resolve('waited'), ms));
+    const again = await Promise.race([w.vault.reserveProxy({ names: ['stripe'] }), late(1_000)]);
+    assert.deepEqual(again, { ok: true, reserved: ['maps', 'stripe'], cleared: [] });
+    let added = false;
+    const adding = w.vault.reserveProxy({ names: ['maps', 'openai'] }).then((outcome) => ((added = true), outcome));
+    await late(200);
+    assert.equal(added, false, 'a name to add is reserved under the head');
+    await holder.unsafe('COMMIT');
+    const outcome = await adding;
+    assert.ok(outcome.ok && outcome.reserved.join() === 'maps,openai,stripe');
+  } finally {
+    await holder.end();
+  }
 });
 
 test('the reserved set forged around the vault refuses every save: fail closed (R64)', ON_015, async () => {
