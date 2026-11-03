@@ -332,7 +332,7 @@ back).
 A plan modifier (`ModifyPlan`) makes `version` and `version_id` unknown in
 the first two rows and keeps them from state in the others
 (`UseStateForUnknown`). A `value_wo_version` not yet known at plan (an
-upstream ID that the same apply makes, as in section 7) plans the first
+upstream ID that the same apply makes, as in section 1) plans the first
 row; at apply, the provider writes only if the now-known value differs
 from the state's. No other input schedules a write: not drift, not a
 refresh (below).
@@ -370,7 +370,7 @@ current `version` and `version_id` in state, and compares:
 cannot tell whether that version holds the value its source has now (a
 person may have rotated a leaked key in coffre and upstream both), and
 writing `value_wo` again outside a version change would break section 7's
-rule. So the warning repeats on every plan until Terraform writes again,
+guarantee 2. So the warning repeats on every plan until Terraform writes again,
 and says how: change `value_wo_version`. If the hand-written value matters,
 rotate in Terraform anyway: a value rotated only in coffre leaves the old
 key live upstream.
@@ -473,142 +473,102 @@ removed {
 
 ## 7. The source side
 
-`coffre_secret` keeps the value out of its own state. The resource that
-made the value may still put it in state, as the Scaleway key does unless
-told otherwise. So each source needs a look:
+`coffre_secret` keeps the value out of its own state and plans. The
+resource that made the value may still put it in its own, so a source is
+usable only if it gives every guarantee below. A source here is whatever
+feeds `value_wo`; a destination is each resource that takes the value
+(`coffre_secret`, a database user's `password_wo`, …).
 
-| Source | Value lands in state? | Use |
-|---|---|---|
-| Scaleway `scaleway_iam_api_key`, plain | yes, `secret_key` | avoid |
-| Scaleway `scaleway_iam_api_key` with `secret_id` | no: `secret_key` goes to a Scaleway Secret Manager secret as a new version | **recommended**, with ephemeral `scaleway_secret_version` feeding `value_wo` (section 1) |
-| Scaleway ephemeral `scaleway_iam_api_key` (experimental) | no, but each plan and apply makes a new key, deleted when the run ends unless `delete_on_close = false` (v2.90) | unusable for a key that must outlive the run |
-| A generated password, ephemeral `random_password` (hashicorp/random 3.7+) | no | never fed to two destinations directly: it is a new value on every run. Store it once in Secret Manager (`scaleway_secret_version.data_wo`), and feed both destinations from there (below) |
-| Any resource with a plain `sensitive` output | yes | coffre_secret still removes the GitHub or Kubernetes copy, but state stays as sensitive as before |
+1. **No copy in Terraform's files.** The value is in no state, no plan,
+   and no plan's private data: an SDKv2 provider's `PlannedPrivate`,
+   `_new_extra_shim` included, which keeps a raw input next to a
+   `StateFunc`'s output. `terraform show -json` does not print private
+   data, so it cannot prove this.
+2. **One durable value per generation.** A generation (one key, one
+   rotation of a password) has one stored value, which every destination
+   reads. Nothing feeds two destinations straight from a source that mints
+   a new value each run (an ephemeral `random_password`): a retry after a
+   partial apply would give the second destination a value the first
+   never got.
+3. **Reads pinned to the written revision.** Each run reads the exact
+   revision that generation wrote, never `latest`, so a version added
+   between a failed apply and its retry is not handed to the destinations
+   still missing the value.
+4. **Triggers follow the source version's identity.** Each destination's
+   version trigger changes exactly when the source version does, a
+   recreated source included: an ID, never a counter (a recreated source
+   resets it) or a creation time (to the second, it can repeat). A
+   destination whose trigger is an int gets one that fits a signed 32-bit
+   int, which SDKv2 providers' `int` is on their 386 and arm builds.
+5. **Checked on the saved plan.** Before a source is recommended, a run
+   saves a plan and an apply's state with a known value, and the value is
+   searched for in the raw files: the state, and the plan file unzipped,
+   private data included. Section 8's acceptance tests do the same for
+   `coffre_secret`.
 
-A database password, never in any state:
+| Source | Gives all five? |
+|---|---|
+| Scaleway `scaleway_iam_api_key`, plain | no: `secret_key` lands in state |
+| Scaleway `scaleway_iam_api_key` with `secret_id`, read through ephemeral `scaleway_secret_version` (section 1) | 1 to 4, as section 1 builds it (below); check 5 is still to run |
+| Scaleway ephemeral `scaleway_iam_api_key` (experimental) | no: a new key every plan and apply, deleted when the run ends unless `delete_on_close = false` |
+| Ephemeral `random_password` stored through Scaleway `scaleway_secret_version.data_wo` (v2.90.0) | **no, fails 1**: `data_wo` has a `StateFunc`, so SDKv2 keeps the raw password in the saved plan's private data. Waits on an upstream fix |
+| Any resource with a plain `sensitive` output | no: state holds the value; `coffre_secret` still removes the GitHub or Kubernetes copy |
+
+**Section 1's API key.** Scaleway's key writes its `secret_key` to the
+secret it names, as a new version, and keeps neither the value (1) nor
+which revision it wrote. So each generation gets a secret of its own:
+every argument that replaces the key goes through
+`terraform_data.backup_key`, whose change replaces the secret as well,
+and the read pins revision `"1"` (2, 3). A key made again within one
+generation (deleted in Scaleway's console, or `-replace`) writes revision
+2 to the old secret; the read's precondition, one version only, stops the
+run before coffre is written, and the fix is to bump `rotation`, never to
+`-replace` the key. The precondition can stop a safe run (a version added
+by hand trips it too), never let a wrong value through. `value_wo_version`
+is the key's ID (4). The secret must stay readable while Terraform manages
+the key, since every plan and apply reads it; deleting it makes Terraform
+recreate the secret, which replaces the key.
+
+**Not usable yet: a database password with two destinations.** Shown for
+its shape only, until Scaleway's `data_wo` passes guarantee 1:
 
 ```hcl
-locals { app_db_rotation = 1 } # bump to rotate: a new source version, which both destinations follow
+ephemeral "random_password" "app_db" { length = 40 }
 
-ephemeral "random_password" "app_db" {
-  length = 40
-}
-
-resource "scaleway_secret_version" "app_db" {
+resource "scaleway_secret_version" "app_db" { # fails guarantee 1 in v2.90.0
   secret_id       = scaleway_secret.app_db.id
   data_wo         = ephemeral.random_password.app_db.result
-  data_wo_version = local.app_db_rotation # written once per rotation; later runs' new randoms are ignored
+  data_wo_version = 1 # bump to rotate
 }
 
 ephemeral "scaleway_secret_version" "app_db" {
-  secret_id  = scaleway_secret.app_db.id
-  revision   = scaleway_secret_version.app_db.revision # the revision Terraform wrote, never "latest"
-  depends_on = [scaleway_secret_version.app_db]
+  secret_id = scaleway_secret.app_db.id
+  revision  = scaleway_secret_version.app_db.revision
 }
 
-resource "scaleway_rdb_user" "app" {
-  instance_id         = scaleway_rdb_instance.main.id
-  name                = "app"
-  password_wo         = base64decode(ephemeral.scaleway_secret_version.app_db.data)
-  # The source version's ID, as the int this argument takes: 60 bits of its
-  # SHA-256, new whenever the source is written, by a rotation or by recreating it.
-  password_wo_version = parseint(substr(sha256(scaleway_secret_version.app_db.id), 0, 15), 16)
-}
-
-resource "coffre_secret" "app_db_password" {
-  project          = "infra"
-  environment      = "prod"
-  key              = "APP_DB_PASSWORD"
-  sensitivity      = "sensitive"
-  value_wo         = base64decode(ephemeral.scaleway_secret_version.app_db.data)
-  value_wo_version = scaleway_secret_version.app_db.id # likewise: a new source version, a new write
-}
+# scaleway_rdb_user.password_wo and coffre_secret.value_wo both read
+# base64decode(ephemeral.scaleway_secret_version.app_db.data); their triggers
+# follow scaleway_secret_version.app_db.id (guarantee 4).
 ```
 
-Why the detour through Secret Manager: each destination writes its value
-only when its own version changes, so feeding both from an ephemeral
-`random_password` directly would let them part. Say the apply that rotates
-writes the database user and then fails on coffre: the retry generates a
-new password, which coffre takes (its version still differs) and the
-database does not (its version already moved). With one stored value read
-by both, a retry writes the same value wherever it is still missing, and
-section 5's rules (no write on drift, a looser nature only with a new
-version) never send a value one destination lacks.
+**Known upstream limits.** What this design depends on from other
+providers, and does not fix:
 
-**Follow the source, not the counter.** Both destinations' versions
-come from the source version itself (its ID for coffre; for the database
-user, whose version must be an int, 60 bits of that ID's SHA-256), not from
-`app_db_rotation`. `data_wo_version` replaces the source version when it
-changes, so a rotation makes a new one and both destinations follow it.
-The same holds when the source is lost. Say the rotation writes password
-A to the database, coffre fails, and the source secret is deleted before
-the retry: Scaleway's refresh drops a missing secret from state, so the
-retry makes it again, with a fresh password B. A destination keyed on the
-counter would split: the database, its counter already recorded, keeps A,
-and coffre writes B. Keyed on the source, both see a new version and both
-take B. The ID, not the version's creation time: Scaleway reports times to
-the second, and two versions made within one would look alike to the
-database while coffre took the new one. Two IDs share a 60-bit prefix with
-odds of one in 2^60, and only consecutive versions must differ.
-
-**Pin the revision.** Scaleway resolves `latest` afresh each time the
-ephemeral resource opens. Say the rotation writes the database, coffre
-fails, and someone adds a newer Secret Manager version before the retry:
-reading `latest`, the retry would hand coffre that newer password, which
-the database never got (its version already moved). Naming
-`scaleway_secret_version.app_db.revision` reads the value Terraform wrote,
-whatever came after it.
-
-**One secret per API key.** The Scaleway key's resource writes its
-`secret_key` as a new version of the secret it names and keeps no record
-of which revision that was, so nothing exports a revision to pin. Section
-1 pins `"1"` and makes it true: the key's every argument that replaces it
-(`application_id` here, `expires_at` if set) goes through
-`terraform_data.backup_key`, whose change replaces the secret too, and
-`secret_id` replaces the key. Each key generation gets a fresh secret, whose
-revision 1 is that key's. Say Scaleway makes key A, the coffre write fails,
-and someone adds revision 2 before the retry: reading `latest`, the retry
-would write revision 2 into coffre against `value_wo_version` = key A's ID,
-a credential that matches no key, and succeed. Pinned, it writes A's.
-
-A key can still be made again without its generation changing: deleted
-in Scaleway's console (refresh drops it, the next apply makes key B), or
-`terraform apply -replace=scaleway_iam_api_key.backup`. B's value lands
-as revision 2, and revision 1 is A's, now dead. The secret cannot be
-replaced along with the key (`replace_triggered_by` on the key would make
-a cycle, the key naming the secret), so the read checks instead: its
-precondition requires the secret to hold exactly one version, counted by
-the `scaleway_secret` data source, which `depends_on` reads after the key
-when the key is made in the same run. For B there are two, and the read
-stops before coffre is written, with an error that says what to do: bump
-`rotation`, which replaces the secret and the key. Rotate that way, never
-with `-replace` on the key. The count says nothing about which key wrote,
-only that one did: a version added by hand trips it too, and a retry
-that pinning alone would have saved stops instead. That is the trade:
-the check may stop a run that was safe, never let one write a wrong
-value. (Timestamps cannot do this: Scaleway reports them to the second,
-from two services' clocks.) A computed `secret_revision` on Scaleway's
-key, a small upstream change, would replace the generation and the check
-with one pinned revision; until then, both are part of the pattern, not
-decoration.
-
-**The source's copy stays.** Ephemeral `scaleway_secret_version` reads that
-revision on every plan and apply, so it must stay readable while
-Terraform manages the destinations. Deleting it does not stop the next
-run: Terraform makes the source again, a password source with a fresh
-value that both destinations take (above), an API key's a new secret,
-which replaces the key (`secret_id` does), so revision 1 is again the
-new key's. That
-copy lives in the same Scaleway account that made the value, readable by
-whoever holds Secret Manager rights there, which is the same as for the
-API key in section 1. On the first apply, the ephemeral
-`scaleway_secret_version` must open only after the version is written:
-`depends_on` orders it so, as Scaleway's own examples do. Whether the
-first plan also defers it, rather than failing on a secret with no version
-yet, is Terraform's behaviour and Infra's configuration, not this
-provider's; that first apply is where to check it (`-target` on the
-version first, if not). The secret's payload is base64, hence
-`base64decode`.
+- Scaleway v2.90.0, `scaleway_secret_version.data_wo`: its `StateFunc`
+  makes SDKv2 keep the raw input in `PlannedPrivate` (`_new_extra_shim`).
+  The fix is upstream: drop the `StateFunc` and read the value from the
+  raw configuration, as write-only arguments should. The database pattern
+  waits on a release with it, pinned.
+- Scaleway's `scaleway_iam_api_key` exposes no revision for the
+  `secret_key` it writes. A computed `secret_revision` would replace
+  section 1's secret per generation and its precondition with one pinned
+  read.
+- Whether the first plan defers an ephemeral read that `depends_on` a
+  resource the same apply makes, rather than failing on a secret with no
+  version yet, is Terraform's behaviour; the first apply is where to check
+  it (`-target` on the source first, if not).
+- Ephemeral `scaleway_secret_version` returns its payload base64-encoded,
+  hence `base64decode`.
 
 ## 8. The code, its release and its tests
 
@@ -644,7 +604,7 @@ mirror.
 
 - Unit tests (`go test`): the plan logic of section 5's two tables, the
   credential choice of section 3, `replaces` from the prior state, the
-  re-exchange on 401, the `replayed` error's message, and that no code path writes `value_wo` into state, a diagnostic or
+  re-exchange on 401, the `replayed` error's message, and that no code path writes `value_wo` into state, private state, a diagnostic or
   a log line.
 - Acceptance tests (`TF_ACC=1`, terraform-plugin-testing), against a local
   coffre that the test harness boots as `pnpm conformance:node` does: the
@@ -665,8 +625,9 @@ mirror.
     version change). After each step the verifier reads the value back
     and checks it, and Terraform's own credential is refused the same
     read. The Owner's session is refused it while the key is `sensitive`,
-    and reads it at `secret` and `plain`, as coffre's natures say. Neither the state file nor `terraform show
-    -json` of the saved plan contains the value;
+    and reads it at `secret` and `plain`, as coffre's natures say. Neither the state file nor the saved
+    plan file, unzipped and searched raw (private data included, not only
+    `terraform show -json`), contains the value;
   - the write rule: an `on_destroy`-only change and a refresh call no
     `PATCH` (the fake records calls), and `version` stays;
   - drift: a version written by hand gives a warning, no write, and the
@@ -676,22 +637,20 @@ mirror.
     Terraform's own, before any list, still gives the warning on the next
     plan (the receipt, not a list, names Terraform's version); a key gone
     from coffre is made again; an archived key fails the plan;
-  - two destinations: section 7's configuration against a fake upstream
-    provider, with the apply failing after one destination; the retry
-    leaves both holding the same value, also when a newer source version
-    was added between the failure and the retry (the pinned revision),
-    and when the source secret was deleted between them (both take the
-    recreated source's value), also when the old and the recreated
-    source versions report the same creation second (the database's
-    version still changes); and section 1's API key, whose coffre
-    write fails, gets a revision 2 added by hand between the retry's
-    plan and its apply, and whose retry still writes revision 1's value;
-    which, with that revision added before the plan, fails the read's
-    precondition and writes nothing; whose application change plans its
-    secret's replacement with it; and which, deleted upstream or forced
-    with `-replace`, fails the read's precondition before any coffre
-    write, however close the two keys' creation times, then writes the
-    new key's value once `rotation` is bumped;
+  - two destinations: section 7's sketch against a fake upstream
+    provider that gives guarantees 1 to 4, with the apply failing after
+    one destination; the retry leaves both holding the same value, also
+    when a newer source version was added between the failure and the
+    retry (the pinned revision), and when the source was deleted between
+    them (both take the recreated source's value); and section 1's API
+    key, whose coffre write fails, gets a revision 2 added by hand
+    between the retry's plan and its apply, and whose retry still writes
+    revision 1's value; which, with that revision added before the plan,
+    fails the read's precondition and writes nothing; whose application
+    change plans its secret's replacement with it; and which, deleted
+    upstream or forced with `-replace`, fails the read's precondition
+    before any coffre write, then writes the new key's value once
+    `rotation` is bumped;
   - forks: a key Terraform overrides in a fork, then reset to the
     parent's between applies, gives a warning and no write; a
     sensitivity-only change then fails at plan; a changed
@@ -736,12 +695,16 @@ mirror.
    written by others are reported with a warning, never overwritten
    unasked. Every update sends `replaces` with the version its plan saw,
    whenever the list showed one.
-   A value with two destinations comes from one stored source, read at
-   the revision Terraform wrote, and both destinations' versions follow
-   that source version's ID, not a counter or a time; an API key's source
-   is a secret of its own per key, read at revision 1, which a
-   precondition holds to being the secret's only version. In a fork, a key reset to its parent's
-   is reported like a hand-written version, and a removed one fails the plan.
+   A value source must give section 7's five guarantees: no copy in
+   state, plans or their private data; one stored value per generation
+   that every destination reads; reads pinned to the written revision;
+   triggers that follow the source version's ID (an int one within 32
+   bits); and a check of the raw saved plan. Section 1's API key gives
+   the first four, its raw-plan check still to run; Scaleway's `data_wo`
+   fails the first, so the database-password pattern waits on an
+   upstream fix. In a fork, a key reset to its
+   parent's is reported like a hand-written version, and a removed one
+   fails the plan.
 6. Destroy keeps the key (`on_destroy = "keep"`). Archiving takes
    `on_destroy = "archive"` in a reviewed apply, and a credential made for
    a custom role holding `secret.archive`, which `contributor` lacks.
