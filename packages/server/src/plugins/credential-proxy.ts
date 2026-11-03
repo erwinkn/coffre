@@ -704,7 +704,7 @@ async function uiHandle(request: Request, url: URL): Promise<string | null | Res
   const copy = request.clone();
   try {
     const bytes = await boundedBody(copy, MAX_FIELD_BODY);
-    const inside = bytes == null ? new Set<string>() : handlesInBody(bytes);
+    const inside = bytes == null ? new Set<string>() : handlesInBody(bytes, bodyKind(request));
     if (inside.size > 1) return failure(400, 'the request carries two different handles: a route takes one');
     return inside.values().next().value ?? null;
   } finally {
@@ -739,18 +739,23 @@ function handlesOutside(request: Request, url: URL): Set<string> {
 }
 
 /**
- * The handles a body carries, read every way a form or JSON rule could read its field (review r7 of #467): the bytes as
- * sent, the body as a form decodes it (`client_secret=coffre%5Fuse_…`), and each JSON string with its escapes undone
- * (`"coffre\u005fuse_…"`). A body that is neither still counts as sent.
+ * The handles a body carries: its bytes as sent, and the body as the one rule kind its Content-Type lets read it
+ * (`bodyKind`, as `fieldsIn` does) decodes it (review r7 of #467): a form's pairs (`client_secret=coffre%5Fuse_…`),
+ * or each JSON string with its escapes undone (`"coffre\u005fuse_…"`). Never the other kind's: a JSON note holding
+ * `coffre%5Fuse_…` is text, which `handleIn` reads as text, not a second handle (review r8 of #467).
  */
-function handlesInBody(bytes: Uint8Array): Set<string> {
+function handlesInBody(bytes: Uint8Array, kind: BodyRule['kind'] | null): Set<string> {
   const found = new Set<string>(LATIN1.decode(bytes).match(HANDLES) ?? []);
+  if (kind === null) return found;
   const text = new TextDecoder().decode(bytes);
-  for (const [name, value] of new URLSearchParams(text)) for (const handle of `${name}\n${value}`.match(HANDLES) ?? []) found.add(handle);
-  for (const match of text.matchAll(/"[^"\\]*(?:\\.[^"\\]*)*"/g)) {
-    if (!match[0].includes('\\')) continue;
+  if (kind === 'form') {
+    for (const [name, value] of new URLSearchParams(text)) for (const handle of `${name}\n${value}`.match(HANDLES) ?? []) found.add(handle);
+    return found;
+  }
+  for (const { raw } of jsonStrings(text)) {
+    if (!raw.includes('\\')) continue;
     try {
-      for (const handle of (JSON.parse(match[0]) as string).match(HANDLES) ?? []) found.add(handle);
+      for (const handle of (JSON.parse(raw) as string).match(HANDLES) ?? []) found.add(handle);
     } catch {
       // No JSON string: its bytes counted as sent.
     }
@@ -2413,13 +2418,22 @@ function fieldsIn(request: Request, body: Uint8Array | undefined, name: string, 
   const said = named.join(' and ');
   const type = kind === 'form' ? 'application/x-www-form-urlencoded' : 'application/json';
   if (body === undefined || body.length === 0) return failure(400, `${name} takes its key in the ${said} field${named.length > 1 ? 's' : ''} of the body: send one, ${type}, with a POST or the like`);
-  const [media, ...parameters] = (request.headers.get('content-type') ?? '').split(';').map((part) => part.trim().toLowerCase());
-  const charset = parameters.find((parameter) => parameter.startsWith('charset='))?.slice('charset='.length).replace(/^"(.*)"$/, '$1');
-  if (media !== type || (charset !== undefined && charset !== 'utf-8') || !/^(identity)?$/i.test(request.headers.get('content-encoding') ?? '')) {
+  if (bodyKind(request) !== kind) {
     return failure(415, `${name} takes its key in the ${said} field${named.length > 1 ? 's' : ''} of an ${type} body, UTF-8 and not compressed`);
   }
   const found = (kind === 'form' ? formFields : jsonFields)(body, named);
   return typeof found === 'string' ? failure(400, `the body ${found}, where ${name} takes its key`) : found;
+}
+
+/**
+ * The rule kind whose fields a body can hold, by its Content-Type: a form's or JSON's, in UTF-8 and not compressed;
+ * else none, which `fieldsIn` refuses (415).
+ */
+function bodyKind(request: Request): BodyRule['kind'] | null {
+  const [media, ...parameters] = (request.headers.get('content-type') ?? '').split(';').map((part) => part.trim().toLowerCase());
+  const charset = parameters.find((parameter) => parameter.startsWith('charset='))?.slice('charset='.length).replace(/^"(.*)"$/, '$1');
+  if ((charset !== undefined && charset !== 'utf-8') || !/^(identity)?$/i.test(request.headers.get('content-encoding') ?? '')) return null;
+  return media === 'application/x-www-form-urlencoded' ? 'form' : media === 'application/json' ? 'json' : null;
 }
 
 /**
@@ -2497,13 +2511,13 @@ function jsonFields(bytes: Uint8Array, wanted: readonly string[]): Fields | stri
   };
   let parsed: unknown;
   try {
-    for (const match of text.matchAll(/"[^"\\]*(?:\\.[^"\\]*)*"/g)) {
+    for (const match of jsonStrings(text)) {
       const gap = text.slice(from, match.index);
       if (deeper(gap)) return `nests deeper than ${MAX_DEPTH}`;
       // A name and a value each.
       if (++strings > 2 * MAX_FIELDS) return `has more than ${MAX_FIELDS} fields`;
-      from = match.index + match[0].length;
-      const string = match[0].includes('\\') ? (JSON.parse(match[0]) as string) : match[0].slice(1, -1);
+      from = match.index + match.raw.length;
+      const string = match.raw.includes('\\') ? (JSON.parse(match.raw) as string) : match.raw.slice(1, -1);
       if (named !== -1) {
         if (!/^\s*:\s*$/.test(gap)) return `gives ${wanted[named]} as no string`;
         found[named] = { start: match.index, end: from, value: string };
@@ -2538,6 +2552,22 @@ function jsonFields(bytes: Uint8Array, wanted: readonly string[]): Fields | stri
       return new TextEncoder().encode(out);
     },
   };
+}
+
+/**
+ * Each string of a JSON document, in order, as written and where it starts: a quote outside a string opens one, a
+ * backslash takes the character after it, and a string that never closes ends the scan. Each character is read once,
+ * so 64 KiB of escaped quotes that never close (`"\"\"\"…`) cost their length; the regex this replaced, retried
+ * from each quote, cost their square, seconds of CPU before any check (review r8 of #467).
+ */
+function* jsonStrings(text: string): Generator<{ index: number; raw: string }> {
+  for (let at = text.indexOf('"'); at !== -1; ) {
+    let end = at + 1;
+    while (end < text.length && text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
+    if (end >= text.length) return;
+    yield { index: at, raw: text.slice(at, end + 1) };
+    at = text.indexOf('"', end + 1);
+  }
 }
 
 /** A form or JSON rule's body, read whole, and its fields in it. */

@@ -1722,7 +1722,14 @@ before PR C. Where C2a settles what this section left open:
   (64 KiB). The query and the body are read as sent and as decoded, every
   way a rule reads its slot: `?key=coffre%5Fuse_…`, a form's percent escapes
   and a JSON string's `\u005f` find the handle `sendAs` reads there (review
-  r7 of #467). Two different handles: 400. The decided item must then find it
+  r7 of #467). A body is decoded only as its Content-Type lets a rule read
+  it (`bodyKind`, `fieldsIn`'s own test): a JSON note holding
+  `coffre%5Fuse_…` is text there, as `sendAs` reads it, not a second handle,
+  and a form's `"…\u005f…"` the same. JSON's strings are found in one pass
+  (`jsonStrings`), which discovery and a JSON rule's fields share: the regex
+  before it, retried from each quote, took about 3.7 s of CPU on 64 KiB of
+  escaped quotes that never close (`"\"\"…`), before any check, on `main`'s
+  JSON rules too (review r8 of #467). Two different handles: 400. The decided item must then find it
   where it takes its key (`sendAs`), or nothing is sent. Bearer,
   `x-coffre-handle` and the query alone missed SigV4 and every header
   rule but `authorization`.

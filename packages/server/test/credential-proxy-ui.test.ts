@@ -425,6 +425,45 @@ test("a handle escaped as its slot's own encoding allows: a query's or a form's 
   assert.equal((await route(`/use/search/models/list?key=${escaped}&q=${other}`)).status, 400);
 });
 
+test("a body decoded only as its Content-Type reads it: a JSON note's percent escapes, a form value's backslashes, are text, no second handle (review r8 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  const post = [{ methods: ['POST'], path: '/token' }];
+  await save({
+    login: { ...uiRoute('login', '/login'), inject: [{ kind: 'form', name: 'client_secret', template: '{OPENAI_API_KEY}' }], allow: post } as ProxyDefinition,
+    hook: { ...uiRoute('hook', '/hook'), inject: [{ kind: 'json', name: 'secret', template: '{OPENAI_API_KEY}' }], allow: post } as ProxyDefinition,
+  });
+  const token = await handle();
+  const other = await handle();
+  // JSON: `%5F` is three characters of a string, as the item's slot reads it; a form's decoding would make it `_`.
+  const note = other.replace('_', '%5F');
+  const json = await route('/use/hook/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ secret: token, note }) });
+  assert.equal(json.status, 200, await json.clone().text());
+  assert.deepEqual(JSON.parse(reached.at(-1)!.body), { secret: OPENAI, note });
+  // A form: a quoted value whose `\u005f` is six characters; a JSON string's decoding would make it `_`.
+  const slashed = `"${other.replace('_', '\\u005f')}"`;
+  const form = await route('/use/login/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `client_secret=${token}&note=${slashed}` });
+  assert.equal(form.status, 200, await form.clone().text());
+  assert.equal(reached.at(-1)!.body, `client_secret=${encodeURIComponent(OPENAI)}&note=${slashed}`);
+});
+
+test("64 KiB of escaped quotes that never close cost their length, not their square: found no handle in, read as no JSON (review r8 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ hook: { ...uiRoute('hook', '/hook'), inject: [{ kind: 'json', name: 'secret', template: '{OPENAI_API_KEY}' }], allow: [{ methods: ['POST'], path: '/v1/token' }] } as ProxyDefinition });
+  const body = `"${'\\"'.repeat(32_000)}`;
+  const sent = { method: 'POST', headers: { 'content-type': 'application/json' }, body };
+  // A regex retried from each quote took seconds of CPU on this body; one pass takes a few milliseconds.
+  let started = performance.now();
+  const first = await route('/use/hook/v1/token', sent);
+  assert.equal(first.status, 401, await first.clone().text());
+  assert.ok(performance.now() - started < 1_000, `the handle's search took ${performance.now() - started} ms`);
+  // With the handle beside it, the JSON rule's own read of its field: refused as no JSON, as fast.
+  const token = await handle();
+  started = performance.now();
+  const answer = await route('/use/hook/v1/token', { ...sent, headers: { ...sent.headers, 'x-coffre-handle': token } });
+  assert.equal(answer.status, 400, await answer.clone().text());
+  assert.ok(performance.now() - started < 1_000, `the field's read took ${performance.now() - started} ms`);
+});
+
 test("a service binding's call is never served a handle's kept values: no UI route for it before C2b, the copy unread (review r2 of #467)", ON_015, async () => {
   await save({ openai: uiRoute('openai', '/openai') });
   const token = await handle();

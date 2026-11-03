@@ -37,6 +37,12 @@
   before. Workloads, service bindings, signers,
   verifiers, presign and tunnels of UI items answer 404 until PR C2b.
 
+- **A JSON rule's body costs its length to read.** The proxy found a
+  JSON body's strings with a regex that, on 64 KiB of escaped quotes that
+  never close, took about 3.7 s of CPU before any check, for a code
+  credential's JSON rule as for a UI route's handle. It now reads each
+  character once.
+
 - **The vault decides about a member from 0.15's log, not 0.14's (T179
   PR 2).** Once the cutover is written, a decision checks a member's row
   as a use does: the row's seal is the vault's over it and its newest
