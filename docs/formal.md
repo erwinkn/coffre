@@ -29,7 +29,7 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
     heartbeats, checkpoints, anchor and readiness against someone who
     writes the database ([below](#the-audit-chain-the-app-key-and-the-tunnel));
   - [`formal/Tunnel.tla`](../formal/Tunnel.tla), how long a revoked
-    handle's tunnel session lives;
+    handle's tunnel session lives, or one whose item an Owner saved anew;
   - [`formal/AppKey.tla`](../formal/AppKey.tla), the app key's rotation,
     against instances still under the old key and someone who holds it
     ([below](#appkeytla)).
@@ -1365,12 +1365,18 @@ How long a revoked handle's tunnel session lives
 answered by its deadline, D = min(R, 10 s), is a no. A watchdog ends the
 sessions once the newest check that answered yes, or the admission,
 started R + D ago. Timers due at the same tick fire in any order, and a
-check may take any time or never answer.
+check may take any time or never answer. A tunnel saved in the Proxy tab
+(T186 PR C2b3) is an item an Owner may save anew mid-session, narrowing its
+hosts, or save another item of the environment beside it, each at any
+tick: its check is a route use of the item by name, which passes only on
+the item the session dialled.
 
 | Protection, in the code | Turned off, TLC finds | Found by |
 |---|---|---|
 | A check that has not answered by its deadline is a no (`late`), and the watchdog (`arm`): each covers for the other | a session open forever behind a check that never answers (`EndsWithinBound`) | |
 | The deadline | without it, a yes that comes late, the timer skipped meanwhile, and the watchdog ends a session whose handle stands (`StandingStaysOpen`, in `TunnelShort`) | |
+| A UI tunnel's check passes only if the decided item's digest is the one dialled (`uiDialled`'s `run`, `DigestRecheck`) | a session whose item was saved anew still open past R + D, behind checks that see the key still there (`EditEndsWithinBound`) | `credential-proxy-ui-tunnel.test.ts`, the narrowed hosts |
+| The digest is the item's own, never the object seal (`DecidedItem.digest`, `ItemDigest`) | another item's save ends a session whose own item stands (`StandingStaysOpen`) | `credential-proxy-ui-tunnel.test.ts`, another item saved |
 
 The bound is R + D, and no shorter. With the deadline alone, TLC finds a
 session still open R + D ticks after its revocation, none later: the
@@ -1435,7 +1441,8 @@ anchor, outside the database, is sealed again by compare-and-set before
 | `AnchorNeverBack` | The anchor's checkpoint and the app's progress never move back |
 | `RepairGoesGreen` | In `Repair`, once the edit is put back and five beats have walked with no edit in place, readiness is green |
 | `EndsWithinBound` | A revoked handle's tunnel session ends within R + D of its revocation |
-| `StandingStaysOpen` | A session whose handle stands stays open while every check answers before its deadline |
+| `EditEndsWithinBound` | A tunnel session whose item was saved anew ends within R + D of the save |
+| `StandingStaysOpen` | A session whose handle stands, and whose item nobody saved anew, stays open while every check answers before its deadline, whatever else of the environment is saved |
 
 ### Their scenarios
 
@@ -1447,8 +1454,8 @@ anchor, outside the database, is sealed again by compare-and-set before
 | `Rows` | Someone edits and puts back any entry, heartbeat rows among them, twice, at any step, while two beats run and a monitor asks | 2.0 million |
 | `Walking` | From a checkpoint past a backlog of four entries: walks between beats go on with it, two entries a walk, while two beats run at once, someone edits an entry in the backlog, and a monitor asks | 2.4 million |
 | `Repair` | From the anchor's finding of an edited entry, more than a walk behind the head: someone puts it back when they like, while beats run one after another | 1,063 |
-| `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked at any tick | 1 thousand |
-| `TunnelShort` | The same, with as long to answer as between checks | 2 thousand |
+| `Tunnel` | A check every 4 ticks, each with 2 to answer, the handle revoked, its item saved anew and another item saved, each at any tick | 853 thousand |
+| `TunnelShort` | The same, with as long to answer as between checks | 1.4 million |
 | `AppKeyRotation` | Two starts under the new key step a rotation of two rows at once, while an instance under the old key writes a row, and someone who holds it writes rows and an entry under it | 146 thousand |
 
 ## 0.15: the hot path, sealing and the cutover

@@ -14,6 +14,8 @@ import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
+import { WebSocket } from 'ws';
+
 import { bodyDigest, contentDigest, createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
 import { github, hashToken, signin } from '@coffre/core/identity';
 import type { ProxyDefinition, Vault } from '@coffre/core/vault';
@@ -23,6 +25,7 @@ import { eq, sql, type SQL } from 'drizzle-orm';
 import { allowed, audited } from '../src/api/context.ts';
 import { resolveConfig } from '../src/config.ts';
 import { processGates, type Gates } from '../src/gate.ts';
+import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
@@ -75,10 +78,10 @@ const transport: WorkloadTransport = {
 };
 
 /** The deployment: code's `stripe`, the Proxy tab writing, local fakes allowed. */
-function makeRuntime(cacheSeconds = 0): CoffreRuntime {
+function makeRuntime(cacheSeconds = 0, recheckSeconds?: number): CoffreRuntime {
   const plugins = checkPlugins([credentialProxy({
     credentials: { stripe: { upstream: `${upstreamAt}/stripe`, inject: header('authorization', 'Bearer {OPENAI_API_KEY}') } },
-    editable: true, insecureUpstreams: true, cacheSeconds,
+    editable: true, insecureUpstreams: true, cacheSeconds, ...(recheckSeconds === undefined ? {} : { recheckSeconds }),
   })]);
   const config = resolveConfig({
     publicUrl: ORIGIN,
@@ -562,4 +565,50 @@ test("a session's UI route with a path rule: the segment its SDK wrote, whatever
   assert.equal((await use(held, 'GET', '/use/telegram/botcoffre/sendMessage')).status, 405);
   assert.equal((await use(held, 'GET', '/use/telegram/file/x/y')).status, 400);
   assert.equal(reached.length, before);
+});
+
+test("a session's tunnel to a database saved in the Proxy tab: dialled by the decided item, ended within a recheck of an edit to it, and not of another's (C2b3)", { ...ON_015, timeout: 30_000 }, async () => {
+  runtime = makeRuntime(0, 1);
+  await clientFor(deps, ROOT).secrets.set('market/prod', { DATABASE_URL: 'postgres://app:pw@127.0.0.1:5432/app?sslmode=disable' });
+  const database = (hosts: string[]): ProxyDefinition => ({ kind: 'tunnel', name: 'db', key: 'DATABASE_URL', hosts, network: null });
+  await save({ db: database(['127.0.0.1']) });
+  await bind();
+  const held = await session();
+  // The plan lists it as code's tunnels are.
+  const plan = await use(held, 'GET', '/use/market/prod');
+  assert.deepEqual(plan.body.tunnels, { db: { key: 'DATABASE_URL', url: 'wss://secrets.acme.example/use/market/prod/db' } });
+  const server = createServer((_, response) => response.writeHead(404).end());
+  server.on('upgrade', (request, socket, head) => void upgrade(runtime, request, socket, head));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    const open = async () => {
+      const url = `${ORIGIN}/use/market/prod/db`;
+      const proof = await createProof(held.key, { method: 'GET', url, token: held.token, nonce: await gates(MEMBER).nonce() });
+      const ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/use/market/prod/db`, { headers: { authorization: `DPoP ${held.token}`, dpop: proof } });
+      const opened = await Promise.race([once(ws, 'open').then(() => true), once(ws, 'unexpected-response').then(([, response]) => (response as IncomingMessage).statusCode)]);
+      return { ws, opened };
+    };
+    const first = await open();
+    assert.equal(first.opened, true);
+    const closed = once(first.ws, 'close').then(() => Date.now());
+    // Another item of the environment saved, and the rechecks of three bounds: it stands.
+    await save({ openai: uiRoute('openai', '/openai') });
+    await sleep(3000);
+    assert.equal(first.ws.readyState, WebSocket.OPEN, 'still open: another item changed, not its own');
+    // Its own item saved anew: ended within a recheck and its deadline.
+    await save({ db: database(['db.acme.example']) });
+    const editedAt = Date.now();
+    const at = await closed;
+    assert.ok(at - editedAt <= 2000 + 300, `ended ${at - editedAt} ms after the edit`);
+    // The reconnect dials by the new item, which reaches no 127.0.0.1.
+    const again = await open();
+    assert.equal(again.opened, 403);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    // A recheck still being written would meet the next test's reset: let it land first.
+    await sleep(1000);
+  }
 });

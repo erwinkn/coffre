@@ -48,7 +48,7 @@ import { constraintsAllow, CREDENTIAL_NAME, type GateCount } from '@coffre/core/
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
-import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod } from '@coffre/core/vault';
+import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod, ProxyTunnel } from '@coffre/core/vault';
 import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteAsked, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
@@ -1020,7 +1020,7 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   // routes (review r5 of #467). On each attempt's answer: a read the vault retries (`AccessChanged`) may resolve the base
   // environment after a personal config, deleted between the two, and its items are the base's again (review r6).
   const items = await uiPlanItems(coffre, proxy, handle, path);
-  const none = { routes: [], held: new Set<string>() };
+  const none = { routes: [], tunnels: [], held: new Set<string>() };
   let ui = items;
   // The credentials the environment holds every key of, of those that serve it, code's and the UI's routes: their keys
   // are placeholders, whoever may read them.
@@ -1106,8 +1106,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
     env[key] = value;
     covered.add(key);
   }
-  // The keys of a UI item this release serves no request of yet (a signer, verifier or tunnel), or of a route this proxy
-  // cannot read: the handle, never the value, and no URL of it.
+  // The keys of a UI item that sends its key nowhere the app reaches (a signer, verifier or tunnel), or of a route this
+  // proxy cannot read: the handle, never the value, and no URL of it.
   for (const key of ui.held) {
     if (!held.keys.includes(key) || covered.has(key)) continue;
     env[key] = handle;
@@ -1125,6 +1125,13 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
   for (const [name, tunnel] of tunnels) {
     if (!held.keys.includes(tunnel.key)) continue;
     dialled[name] = { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` };
+    delete env[tunnel.key];
+    covered.add(tunnel.key);
+  }
+  // And the place's databases saved in the Proxy tab, dialled as code's (C2b3).
+  for (const tunnel of ui.tunnels) {
+    if (!held.keys.includes(tunnel.key)) continue;
+    dialled[tunnel.name] = { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${tunnel.name}` };
     delete env[tunnel.key];
     covered.add(tunnel.key);
   }
@@ -1154,9 +1161,9 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
 /**
  * The UI items a handle's plan shapes (T186 PR C; docs/design/proxy-ui.md, section 6, "The plan shapes UI items as it
  * shapes code's"): one `proxyItem` call with no name, as the handle, which answers every item the place serves, fork
- * chain included, each checked as a use checks it. Its routes, read as code's (`resolve`), join the covering set; every
- * other key an item sends (a signer's, verifier's or tunnel's, which this release serves no request of yet, or a
- * route's this proxy cannot read) is the handle too, so that no UI item's value reaches the app. A name code holds is
+ * chain included, each checked as a use checks it. Its routes, read as code's (`resolve`), join the covering set, and its
+ * databases the plan's tunnels (C2b3); every other key an item sends (a signer's or verifier's, or a route's this proxy
+ * cannot read) is the handle too, so that no UI item's value reaches the app. A name code holds is
  * left out, as no use reaches it. Nothing here is kept as a copy to send by: only a use's answer is (`CopyFromVault`).
  * Fails closed: a level a writer changed answers 503, never a plan shaped from code alone, which would hand the app the
  * values of the forged route's keys. A personal config serves no UI item (decision 7): none.
@@ -1164,8 +1171,8 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
  *   market/dev, UI route `openai` sending {OPENAI_API_KEY}, which its person reads   OPENAI_API_KEY=<the handle>
  *   the same, one of the 256 items forged                                            503, no environment
  */
-async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, path: string): Promise<{ routes: Resolved[]; held: Set<string> }> {
-  const none = { routes: [], held: new Set<string>() };
+async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, path: string): Promise<{ routes: Resolved[]; tunnels: ProxyTunnel[]; held: Set<string> }> {
+  const none = { routes: [], tunnels: [], held: new Set<string>() };
   if (!proxy.editable || coffre.proxyItem === undefined) return none;
   const found = await coffre.proxyItem(handle, { place: path, name: null });
   const forged = (fault: string) => new CoffreError(503, 'unavailable', `${path}'s proxy definitions are not as the vault sealed them (${fault}): an Owner saves them again; until then no plan is given`, fault, '1');
@@ -1174,9 +1181,11 @@ async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, 
   if (found.personal) return none;
   if (found.items === null || found.items.some((item) => item.definition === null)) throw forged('incomplete');
   const routes: Resolved[] = [];
+  const tunnels: ProxyTunnel[] = [];
   const held = new Set<string>();
   for (const { definition } of found.items) {
     if (definition === null || coded(proxy, definition.name)) continue;
+    if (definition.kind === 'tunnel') tunnels.push(definition);
     if (definition.kind === 'route') {
       try {
         routes.push(resolve(definition.name, credentialOf(definition), proxy.insecure));
@@ -1187,7 +1196,7 @@ async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, 
     }
     for (const key of definitionKeys(definition)) held.add(key);
   }
-  return { routes, held };
+  return { routes, tunnels, held };
 }
 
 /**
@@ -1197,12 +1206,14 @@ async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, 
  * coffre, and its tunnels, each with the key whose URL the local listener
  * stands in for, as a handle's plan has them; and every key it holds but
  * does not read, `useOnly`. No placeholder: its requests carry its proof,
- * never a value in a slot. Its environment's UI routes too (T186 PR C2b):
+ * never a value in a slot. Its environment's UI routes and databases too (T186 PR C2b):
  * one `proxyItem` call as the workload, failing closed as a handle's plan
  * does (a level a writer changed: 503, no plan).
  */
 async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<Response> {
-  const routes = await uiRoutesOf(coffre, proxy, caller, path);
+  const items = await uiItemsOf(coffre, proxy, caller, path);
+  const routes = items.filter((item): item is ProxyRoute => item.kind === 'route');
+  const databases = items.filter((item): item is ProxyTunnel => item.kind === 'tunnel');
   const held = await coffre.use(caller, { path, purpose: 'expose', logged: { plan: true }, keys: (_, rows) => rows.filter((row) => row.plain || row.reads).map((row) => row.key) });
   // The items that serve its environment, whose keys it holds every one of.
   const holds = (item: { environments?: readonly string[] }, keys: readonly string[]) => serves(item, path) && keys.every((key) => held.keys.includes(key));
@@ -1214,24 +1225,27 @@ async function workloadPlan(coffre: PluginContext, proxy: Proxy, caller: Workloa
       ...keyed(proxy).filter(([, signer]) => holds(signer, [signer.key])).map(([name]) => name),
       ...routes.filter((route) => holds({}, definitionKeys(route))).map((route) => route.name),
     ],
-    tunnels: Object.fromEntries([...proxy.tunnels].filter(([, tunnel]) => holds(tunnel, [tunnel.key])).map(([name, tunnel]) => [name, { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` }])),
+    tunnels: Object.fromEntries([
+      ...[...proxy.tunnels].filter(([, tunnel]) => holds(tunnel, [tunnel.key])),
+      ...databases.filter((tunnel) => holds({}, [tunnel.key])).map((tunnel) => [tunnel.name, tunnel] as const),
+    ].map(([name, tunnel]) => [name, { key: tunnel.key, url: `${coffre.publicUrl.replace(/^http/, 'ws')}/use/${path}/${name}` }])),
     useOnly: held.keys.filter((key) => !Object.hasOwn(held.values, key)),
     mints: [],
   });
 }
 
 /**
- * A workload's environment's UI routes, as its plan lists them: one `proxyItem` call with no name, as the workload, at
- * the place its statement checked; a name code holds left out. A level a writer changed, or an item answered without
+ * A workload's environment's UI routes and databases, as its plan lists them: one `proxyItem` call with no name, as the
+ * workload, at the place its statement checked; a name code holds left out. A level a writer changed, or an item answered without
  * its definition, is 503, as a handle's plan (`uiPlanItems`).
  */
-async function uiRoutesOf(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<ProxyRoute[]> {
+async function uiItemsOf(coffre: PluginContext, proxy: Proxy, caller: WorkloadUse, path: string): Promise<(ProxyRoute | ProxyTunnel)[]> {
   if (!proxy.editable || coffre.proxyItem === undefined) return [];
   const found = await coffre.proxyItem(caller, { place: null, name: null });
   const forged = (fault: string) => new CoffreError(503, 'unavailable', `${path}'s proxy definitions are not as the vault sealed them (${fault}): an Owner saves them again; until then no plan is given`, fault, '1');
   if (found.fault !== null) throw forged(found.fault);
   if (found.items === null || found.items.some((item) => item.definition === null)) throw forged('incomplete');
-  return found.items.flatMap(({ definition }) => (definition !== null && definition.kind === 'route' && !coded(proxy, definition.name) ? [definition] : []));
+  return found.items.flatMap(({ definition }) => (definition !== null && (definition.kind === 'route' || definition.kind === 'tunnel') && !coded(proxy, definition.name) ? [definition] : []));
 }
 
 /**
@@ -1308,8 +1322,10 @@ async function open(request: Request, coffre: PluginContext, proxy: Proxy): Prom
   }
   const name = place[2]!;
   const tunnel = proxy.tunnels.get(name);
-  if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
   const path = `${place[0]}/${place[1]}`;
+  // A name code lacks, of any kind (R66): the environment's database saved in the Proxy tab (C2b3).
+  if (tunnel === undefined && proxy.editable && coffre.useRoute !== undefined && CREDENTIAL_NAME.test(name) && !coded(proxy, name)) return uiTunnel(request, coffre, proxy, path, name);
+  if (tunnel === undefined) return failure(404, `this instance has no tunnel ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
   if (!serves(tunnel, path)) return notServed(name, path);
   const caller = await workloadOf(request, coffre, { place: path, credential: name });
   if (caller instanceof Response) return caller;
@@ -1387,6 +1403,114 @@ async function workloadTunnel(request: Request, coffre: PluginContext, proxy: Pr
     database: db,
     stands: async () => (await coffre.recheck(caller)) && (proxy.groups.get(key)?.stands ?? true),
     watch: (end) => watch(proxy, key, { checks, bound, until: null }, end),
+  });
+}
+
+/** Who dials a UI tunnel, and where (`uiTunnel`): a handle's place reading, or a workload's place, as a sign's (`Computing`). */
+type Dialling = { who: User; at: string; reading: string; asked: Pick<RouteAsked, 'named' | 'stable'> };
+
+/**
+ * A tunnel to a database saved in the Proxy tab, a name code lacks (T186 PR C2b3; docs/design/proxy-ui.md, section 3,
+ * "Tunnels"; formal/Tunnel.tla). The open is a route use of the item by name (`useRoute`), decided for the caller and
+ * for the item's editor, and dials the decided item's hosts, never a copy's; the session keeps that item's digest. Each
+ * recheck is the same use, which passes only if the item the vault decides on is the one dialled (`DigestRecheck`):
+ * an Owner who narrows `hosts` mid-session ends it within `recheckSeconds` plus the check's deadline, and the client's
+ * reconnect dials by the new item. The item's own digest, never the object seal, which another item's edit changes
+ * (`ItemDigest`): that edit ends nothing. Every connection is a use of its own, its values never kept: a database's
+ * URL is used once, at the login.
+ *
+ *   handle, market/dev's `db` saved with hosts [db.acme.example]   one use, dialled; one use a recheck
+ *   an Owner saves `db` with hosts [replica.acme.example]          the next recheck: no, the session ends
+ *   an Owner saves `openai` beside it                              nothing ends
+ */
+async function uiTunnel(request: Request, coffre: PluginContext, proxy: Proxy, path: string, name: string): Promise<Response | SocketSession> {
+  const caller = await workloadOf(request, coffre, { place: path, credential: name });
+  if (caller instanceof Response) return caller;
+  if (caller !== null) {
+    if (sessionToken(request) === null || caller.path === null || caller.place === null) return nonced(failure(403, 'a tunnel is a session\'s, which names its environment'), caller);
+    if (!constraintsAllow(caller.constraints, { place: caller.path, credential: name })) return nonced(failure(403, `this narrowed session may not open ${name}`, 'narrowed'), caller);
+    try {
+      // As code's workload tunnel: its statement every two thirds of the bound, which arms, and the item's use every
+      // `recheckSeconds`, whose no ends the group.
+      const dialling = { who: caller, at: caller.path, reading: `w\n${caller.place}\n${name}`, asked: { named: null, stable: name } };
+      const bound = Math.min(proxy.recheckMs, WORKLOAD_RECHECK_MS);
+      return await uiDialled(coffre, proxy, dialling, name, {
+        checks: (run) => [
+          { every: (bound * 2) / 3, deadline: bound / 3, arms: true, now: false, run: () => coffre.recheck(caller) },
+          { every: proxy.recheckMs, deadline: Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS), arms: false, now: false, run },
+        ],
+        bound,
+        until: () => null,
+        stands: () => coffre.recheck(caller),
+        handle: null,
+      });
+    } catch (error) {
+      if (!(error instanceof CoffreError)) throw error;
+      return nonced(failure(error.status, error.message, error.reason ?? error.code, error.retryAfter), caller);
+    }
+  }
+  const handle = bearer(request);
+  if (handle === null || !HANDLE.test(handle)) return failure(401, 'send the handle `coffre run` made as a bearer token');
+  const dialling = { who: handle, at: path, reading: `n\n${path}\n${name}`, asked: { named: { path, route: name }, stable: null } };
+  const deadline = Math.min(proxy.recheckMs, RECHECK_DEADLINE_MS);
+  return uiDialled(coffre, proxy, dialling, name, {
+    checks: (run) => [{ every: proxy.recheckMs, deadline, arms: true, now: false, run }],
+    bound: proxy.recheckMs + deadline,
+    until: (expiresAt) => Date.parse(expiresAt),
+    stands: () => coffre.handle(handle).then(() => true, () => false),
+    handle,
+  });
+}
+
+/** How a UI tunnel's group is checked, by caller (`uiTunnel`): its checks around the item's recheck, their bound, its end, and the check just before a login. */
+type UiChecks = { checks: (run: () => Promise<boolean>) => Check[]; bound: number; until: (expiresAt: string) => number | null; stands: () => Promise<boolean>; handle: string | null };
+
+/** Why a UI item is no database this proxy dials, or null: its kind, or a network binding this deployment's code does not declare. */
+function undialled(definition: ProxyDefinition): CoffreError | null {
+  if (definition.kind !== 'tunnel') return new CoffreError(404, 'not_found', `${definition.name} is a ${definition.kind}, which is no database: a tunnel saved in the Proxy tab, or the deployment's code, names one`);
+  // A network is a binding only code declares, none yet (as an egress): never a direct dial in its place.
+  if (definition.network !== null) return new CoffreError(503, 'unavailable', `${definition.name} dials through the network ${definition.network}, which this deployment's code does not declare`, 'unavailable', '1');
+  return null;
+}
+
+/** A UI tunnel's open once its caller is known: the use, the decided item's database, and its session, checked by that item's digest. */
+async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling, name: string, checked: UiChecks): Promise<Response | SocketSession> {
+  const { who, at, reading, asked } = dialling;
+  const last = proxy.ui.last.get(reading);
+  const used = await coffre.useRoute!(who, { ...asked, digests: last === undefined ? [] : [last.digest], logged: { ui: true, tunnel: true }, refuses: (decided) => {
+    const definition = itemOf(proxy, decided);
+    if (definition === null) return null;
+    // The vault's item is this isolate's copy now (`CopyFromVault`).
+    remember(proxy.ui.last, reading, { digest: decided.digest, confirmed: Date.now() });
+    return undialled(definition);
+  } });
+  const definition = itemOf(proxy, used.item);
+  if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
+  const unfit = undialled(definition);
+  if (unfit !== null) return failure(unfit.status, unfit.message, unfit.reason ?? unfit.code, unfit.retryAfter);
+  const item = definition as ProxyTunnel;
+  // Own values only: a key named `toString` reads no prototype (review r3 of #480).
+  if (!Object.hasOwn(used.values, item.key)) return failure(409, `${used.environment.path} holds no ${item.key}, which ${name} dials`);
+  const tunnel: Tunnel = { kind: 'postgres', key: item.key, hosts: item.hosts };
+  const db = dialled(proxy, used.environment.path, name, tunnel, used.values[item.key]!);
+  if (db instanceof Response) return db;
+  const digest = used.item.digest;
+  // By the item dialled: a session dialled by a newer item never joins a group whose checks hold it to an older one.
+  const key = `${cacheKey(who, at, name)}\u0000ui\u0000${digest}`;
+  // Every `recheckSeconds`, the same use: it passes only on the item dialled, by its own digest, its key still held.
+  const run = () => coffre.useRoute!(who, { ...asked, digests: [digest], logged: { ui: true, tunnel: true, recheck: true }, refuses: (decided) => {
+    if (decided.digest === digest) return null;
+    const definition = itemOf(proxy, decided);
+    if (definition !== null) remember(proxy.ui.last, reading, { digest: decided.digest, confirmed: Date.now() });
+    return new CoffreError(503, 'unavailable', `${name} was saved anew since this session dialled it`, 'moved', '1');
+  } }).then((again) => again.item.digest === digest && Object.hasOwn(again.values, item.key));
+  return session(tunnel, {
+    handle: checked.handle,
+    group: key,
+    database: db,
+    // Just before a login: the caller afresh, opening nothing, and the group's last word on the item.
+    stands: async () => (await checked.stands()) && (proxy.groups.get(key)?.stands ?? true),
+    watch: (end) => watch(proxy, key, { checks: checked.checks(run), bound: checked.bound, until: checked.until(used.expiresAt) }, end),
   });
 }
 

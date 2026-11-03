@@ -2050,6 +2050,50 @@ open:
 - **Cost**: a handle, one vault call (`useRoute`); a workload, one warm
   and two cold; a kept HMAC, none.
 
+**PR C as built, tunnels (C2b3, W312).** Where C2b3 settles what section
+3's "Tunnels" left open:
+- **The model first** (R45). `Tunnel.tla` gains an edit of the session's
+  item and an edit of another item of the environment, each at any tick,
+  and an invariant, `EditEndsWithinBound`: a session whose item was saved
+  anew ends within R + D of the save, the bound a revocation has. Two
+  protections, each shown necessary: the recheck compares the decided
+  item's digest with the one dialled (`DigestRecheck`; without it, TLC
+  finds a session open past the bound behind checks that see the key and
+  nothing else), and that digest is the item's own, never the object
+  seal (`ItemDigest`; comparing the seal, another item's save ends a
+  session whose item stands, `StandingStaysOpen`). No lock is added: the
+  check is the use a route makes.
+- **Where:** `/use/<project>/<env>/<name>` as a WebSocket, a name code
+  lacks (R66), for a handle (the place reading) or a workload (its stable
+  reading at the place its statement checked), each as code's tunnel
+  authenticates it. The vault's one call decides the item and its key;
+  the item is checked before the read opens any value (`refuses`): a
+  route, signer or verifier is no database (404), and a database naming
+  a network is 503, never dialled directly, since no deployment's code
+  declares networks yet (the Proxy tab refuses one at save, 400). Then
+  the decided item's hosts and section 5's checks (`dialled`, code's).
+- **The session's group is the item's.** A session is grouped by caller,
+  place, name and the digest it dialled, so one opened on a newer item
+  never joins the checks that hold the older one's sessions: an edit
+  that keeps the host ends the sessions of the item before it, and those
+  dialled since stand.
+- **The recheck** is the same use, the item's digest given as the copy's
+  so the vault sends no definition back, and refuses a decided item of
+  another digest before the read (503 `moved`): the check is a no and
+  the group ends. A deleted item, a revoked handle or a lost grant is a
+  no the same way. A handle's group keeps code's one check, which arms
+  the watchdog; a workload's, code's two: its statement every two thirds
+  of the bound, and the item's use every `recheckSeconds`.
+- **Each connection is a use.** A UI tunnel keeps no values: unlike
+  code's, whose open may take the value cache's URL and decide at once,
+  every connection asks the vault, as a private key's sign does. A pool
+  of connections is a use each, at the connect, never a query.
+- **The plan** names the place's UI databases under `tunnels`, as code's,
+  with the key the listener stands in for and never the URL; a
+  workload's plan the same, from its one `proxyItem` call.
+- **Cost**: the open, one vault call (`useRoute`); a recheck, one.
+
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

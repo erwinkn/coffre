@@ -202,6 +202,9 @@ REMOVALS=(
   "AppKeyRotation WalkCutoff NothingForgedAccepted"
   "Tunnel Watchdog+DeadlineCountsAsNo EndsWithinBound"
   "TunnelShort DeadlineCountsAsNo StandingStaysOpen"
+  # A tunnel saved in the Proxy tab (T186 PR C2b3): an edit of its item ends it within a recheck, another item's edit ends nothing.
+  "Tunnel DigestRecheck EditEndsWithinBound"
+  "Tunnel ItemDigest StandingStaysOpen"
   # Proxy definitions edited in the UI (Routing.tla, T186): where a key may go when its route is a row an Owner edits.
   "Routing FencedRead EverySendAllowed"
   "Routing SealChecked EverySendAllowed"
