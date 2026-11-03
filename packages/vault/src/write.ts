@@ -2,6 +2,7 @@ import type { Access, CredentialAcceptance, SecretColumns, WriteKeysInput } from
 import { storedRole } from '@coffre/db/grants';
 
 import { credentialEnded, keyRefusals, readerOf, sensitiveRefusals, useOnlyRefusals, type Reader } from './decide.ts';
+import { exactly } from './exact.ts';
 import { noEdits, sealed, type CredentialInput, type EnvironmentInput, type Input, type PolicyInput, type PrincipalInput, type Ref, type RolesInput, type SealKeys, type SecretInput } from './inputs.ts';
 import { changeHolds, type ChangeRow, type LogMacKey } from './log-entry.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
@@ -154,7 +155,7 @@ type Raw = RawCaller & {
 
 /** The read's text as the decision takes it. */
 export function parseInputs(text: string): WriteInputs {
-  const raw = JSON.parse(text) as Raw;
+  const raw = exactly(text) as Raw;
   const caller = callerInputs(raw);
   const e = raw.environment?.row ?? null;
   const environment: Held<EnvironmentInput> = {

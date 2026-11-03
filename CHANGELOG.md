@@ -96,6 +96,18 @@
   credential's JSON rule as for a UI route's handle. It now reads each
   character once.
 
+- **Numbers past 2^53 read exactly where a key write, a member add and a
+  decision read them as JSON.** The vault's read for a fast key write
+  (`write_inputs`) and for a fast add (`admit_inputs`) carries a member's
+  `access_seq`, their newest 0.14 access entry's number and each object's
+  newest change's number as JSON numbers, and so does SQLite's snapshot,
+  the log's last entry's among them. `JSON.parse` rounds one past 2^53 to
+  an even number, so a genuine row's MAC failed and the write or add went
+  down today's path (Postgres), or every decision failed on the log's head
+  (SQLite, a 500). Each such number is now read from its own text
+  (Node 24 and workerd have `JSON.parse`'s source text; a runtime without
+  it refuses rather than misreads). Text with no run of 16 digits parses
+  as before. No migration; 0061 and 0062 are unchanged.
 - **A finding that a member's row was tampered with is settled by the
   member's next change in 0.15's log (T179 PR 4a).** Under 0.15's log the
   vault's `vault.tampered` about a member's row names the member's newest

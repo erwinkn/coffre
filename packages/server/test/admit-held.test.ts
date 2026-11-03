@@ -21,7 +21,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { localVault, spoken } from '@coffre/vault/node';
 
-import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
+import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -44,7 +44,7 @@ const { vaultMembers, credentials } = tablesOf(db.owner);
  * A fresh instance: projects market and billing, Bob an admin of the whole instance, and his browser session. `fast:
  * false`: a vault that serves no `admitRead`, every add down today's path, to answer as the two-trip path's refusals must.
  */
-async function world({ fast = true }: { fast?: boolean } = {}) {
+async function world({ fast = true, past = 0n }: { fast?: boolean; past?: bigint } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
   const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
@@ -52,6 +52,8 @@ async function world({ fast = true }: { fast?: boolean } = {}) {
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
   await root.projects.create('billing', { name: 'Billing' });
+  // From here on, numbers from `past`: the log's entries and 0.15's changes, bigints no JS number holds past 2^53.
+  if (past > 0n) await numbersFrom(db.owner, past, deps.chainKey);
   await root.members.add(`user:${BOB}`, { role: 'admin' });
   // Each `admitRead` answer, and what runs once, right after the next one, before the app hands the add back.
   const answers: AdmitReadOutcome[] = [];
@@ -109,6 +111,15 @@ async function memberRow(principal: string): Promise<{ role: string | null; crea
   return row;
 }
 
+/** A member's `access_seq`, exactly. */
+async function accessSeq(principal: string): Promise<bigint> {
+  const [row] = await run(db.owner, sql`SELECT CAST(access_seq AS TEXT) AS seq FROM vault_members WHERE principal = ${principal}`) as { seq: string }[];
+  return BigInt(row!.seq);
+}
+
+/** Whether a JS number holds `value` exactly, as `JSON.parse` would read it. */
+const exactAsNumber = (value: bigint) => BigInt(Number(value)) === value;
+
 const served = (answers: readonly AdmitReadOutcome[]) => answers.map((answer) => (answer.served ? 'served' : answer.why));
 const reason = (body: Record<string, unknown>) => body.reason ?? (body.error as { reason?: string } | undefined)?.reason;
 
@@ -143,6 +154,20 @@ test("a first add the vault decided on its read commits in its write, no app sta
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
 
+
+test("numbers past 2^53 (Bob's newest access entry, his rows' newest changes): his add is served and commits, each read exactly, none through a JS number", async () => {
+  // Past 2^53 a double holds only every other whole number: started one further on if Bob's access_seq lands on one.
+  const past = 2n ** 53n + 1n;
+  let w = await world({ past });
+  if (exactAsNumber(await accessSeq(`user:${BOB}`))) w = await world({ past: past + 1n });
+  const seq = await accessSeq(`user:${BOB}`);
+  assert.ok(seq > past && !exactAsNumber(seq), `Bob's access_seq ${seq} is past 2^53, and no JS number holds it`);
+  const added = await w.add();
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  // On Postgres the two-trip path served it; SQLite's adds take today's path.
+  if (TEST_ENGINE === 'postgres' && LOG === '0.15') assert.deepEqual(served(w.answers), ['served']);
+  assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
+});
 test('a service account and a person with no role are added the same way, each in one try', { skip: POSTGRES }, async () => {
   const w = await world();
   for (const [member, body] of [['token:ci', {}], ['user:plain@acme.example', {}], ['user:everywhere@acme.example', { role: 'auditor' }]] as const) {

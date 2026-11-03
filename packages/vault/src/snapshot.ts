@@ -6,6 +6,7 @@ import type { GrantRow } from '@coffre/db/grants';
 
 import { snapshotQuery as postgres } from './snapshot.postgres.ts';
 import { snapshotQuery as sqlite } from './snapshot.sqlite.ts';
+import { exactly } from './exact.ts';
 import { objectKey } from './inputs.ts';
 import * as store from './store.ts';
 import type { EnvironmentRow, Member, MemberLog, NewestColumns } from './store.ts';
@@ -138,7 +139,7 @@ async function readOnce(db: Queryable, asked: Asked): Promise<Snapshot> {
   const query = (engine === 'postgres' ? postgres : sqlite)(asked);
   const statement = async (on: Queryable) => {
     const [row] = await rowsOf<{ snapshot: string | Raw }>(on, query);
-    return typeof row!.snapshot === 'string' ? (JSON.parse(row!.snapshot) as Raw) : row!.snapshot;
+    return typeof row!.snapshot === 'string' ? (exactly(row!.snapshot) as Raw) : row!.snapshot;
   };
   if (engine === 'postgres' || asked.seals !== true) return snapshotOf(asked, await statement(db), null, null);
   // SQLite has no `log_object`: the environments' newest changes in a statement of their own, by the keys the vault
