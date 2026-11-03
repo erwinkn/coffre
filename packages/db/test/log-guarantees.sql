@@ -68,28 +68,31 @@ BEGIN
 END
 $$;
 
--- A page of reads plans each call for its own values (0054, R48): a generic plan spans every day's partition. A
--- CREATE OR REPLACE of either function drops the setting unless it restates it.
+-- Every function plans and runs at the server's planner settings (T207): none sets jit, plan_cache_mode or an enable_*.
+-- A query whose plan must prune by its values (a day's partition) is planned each call by EXECUTE, in its body.
 DO $$
+DECLARE
+    set_by text;
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_proc
-               WHERE oid IN ('log_reads_by(text, bigint, bigint, integer)'::regprocedure,
-                             'log_reads_at(uuid, text, bigint, bigint, integer)'::regprocedure)
-                 AND NOT coalesce('plan_cache_mode=force_custom_plan' = ANY (proconfig), false)) THEN
-        RAISE EXCEPTION 'FAIL: a page of reads may plan for any values';
+    SELECT string_agg(format('%s: %s', p.oid::regprocedure, c), '; ') INTO set_by
+      FROM pg_proc p, unnest(p.proconfig) AS c
+     WHERE p.pronamespace = 'public'::regnamespace AND split_part(c, '=', 1) ~ '^(jit|jit_.*|plan_cache_mode|enable_.*)$';
+    IF set_by IS NOT NULL THEN
+        RAISE EXCEPTION 'FAIL: a function sets the planner''s settings: %', set_by;
     END IF;
-    RAISE NOTICE 'PASS: a page of reads plans each call for its own values';
+    RAISE NOTICE 'PASS: every function plans at the server''s settings';
 END
 $$;
 
--- A use names no day of the log (0057, R48, T187): the hot login plans its statements once for any values, and such a
--- plan of `log_uses` names, and locks at every use, each day's partition. Its cover's probe is `use_covered`'s, planned
--- each call for its own values; the use functions only insert into `log_uses`.
+-- A use names no day of the log (0057, R48, T187): a plan of the use functions' statements may be one for any values,
+-- and such a plan of `log_uses` names, and locks at every use, each day's partition. Its cover's probe is `use_covered`'s,
+-- planned each call for its own values by EXECUTE (0063); the use functions only insert into `log_uses`.
 DO $$
 BEGIN
     -- By its name, whatever its arguments: a release that changes them must not leave the pin on an overload no use calls.
     IF (SELECT count(*) FROM pg_proc WHERE proname = 'use_covered' AND pronamespace = 'public'::regnamespace) <> 1
-       OR NOT (SELECT 'plan_cache_mode=force_custom_plan' = ANY (coalesce(proconfig, '{}')) FROM pg_proc
+       -- Its one read of `log_uses`, inside the text it EXECUTEs.
+       OR NOT (SELECT prosrc ~ '\mEXECUTE\s+''[^'']*public\.log_uses\M' AND (SELECT count(*) FROM regexp_matches(prosrc, 'public\.log_uses\M', 'g')) = 1 FROM pg_proc
                WHERE proname = 'use_covered' AND pronamespace = 'public'::regnamespace) THEN
         RAISE EXCEPTION 'FAIL: a use''s cover may be probed by a plan for any values';
     END IF;
@@ -211,7 +214,7 @@ BEGIN
        IS DISTINCT FROM ARRAY['coffre_vault admin=f inherit=t set=f'] THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot must be a member of coffre_vault alone, inheriting it, never setting it';
     END IF;
-    IF NOT (SELECT setconfig @> ARRAY['lock_timeout=1s', 'statement_timeout=2s', 'plan_cache_mode=force_generic_plan']
+    IF NOT (SELECT setconfig @> ARRAY['lock_timeout=1s', 'statement_timeout=2s']
               FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0) THEN
         RAISE EXCEPTION 'FAIL: coffre_vault_hot lacks the hot path''s settings';
     END IF;

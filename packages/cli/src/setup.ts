@@ -655,7 +655,7 @@ const BOUNDARY = [
 ] as const;
 
 /** The settings 0022 gives the hot path's login, which bound a use, as Postgres reports them. */
-const HOT_SETTINGS = { lock_timeout: '1s', statement_timeout: '2s', plan_cache_mode: 'force_generic_plan' } as const;
+const HOT_SETTINGS = { lock_timeout: '1s', statement_timeout: '2s' } as const;
 
 /**
  * A hot path's URL without the administrator's own values of its settings:

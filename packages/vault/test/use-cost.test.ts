@@ -160,7 +160,7 @@ test("D153: a named use reads what it names by index, its buffers the same at 1k
     made += count;
     await run(db.owner, sql`VACUUM ANALYZE`);
   };
-  // As the hot login runs it, its plans generic (`force_generic_plan`): the least of several runs, as above.
+  // As the hot login runs it, on the plans its cache settles on after its first five (T207): the least of several runs, as above.
   const client = postgresClient(HOT_URL, { max: 1 });
   const buffers = async (mapped: boolean): Promise<number> => {
     let least = Infinity;

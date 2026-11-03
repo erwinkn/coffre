@@ -94,7 +94,7 @@ export async function vaultLogin(deployment: Deployment): Promise<string> {
 /**
  * The hot path's login, which every use runs as:
  * the one the harness was given logs in, as coffre_vault_hot, with the
- * timeouts and generic plans 0022 gives it, and holds what the vault's
+ * timeouts 0022 gives it, and holds what the vault's
  * login holds, no more.
  */
 export async function hotLogin(deployment: Deployment): Promise<string> {
@@ -102,13 +102,13 @@ export async function hotLogin(deployment: Deployment): Promise<string> {
   expect(deployment.hotRuntime !== null, 'the hot path login is missing');
   const appTables = await vaultReadOnly(deployment);
   return using(deployment.hotRuntime(), async (sql) => {
-    const [login] = await sql.query<{ name: string; lock: string; statement: string; plans: string; members: boolean }>(`SELECT current_user AS name,
-      current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement, current_setting('plan_cache_mode') AS plans,
+    const [login] = await sql.query<{ name: string; lock: string; statement: string; members: boolean }>(`SELECT current_user AS name,
+      current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement,
       has_table_privilege(current_user, 'vault_members', 'INSERT') AS members`);
     expect(login.name === 'coffre_vault_hot', `the hot path's URL logs in as ${login.name}, not coffre_vault_hot`);
-    expect(login.lock === '1s' && login.statement === '2s' && login.plans === 'force_generic_plan', "the hot path's login lacks its timeouts or generic plans", login);
+    expect(login.lock === '1s' && login.statement === '2s', "the hot path's login lacks its timeouts", login);
     expect(login.members, "the hot path's login cannot write members, as the vault's can");
-    return `as coffre_vault_hot, lock 1s, statement 2s, generic plans; ${await vaultRefuses(sql, appTables)}`;
+    return `as coffre_vault_hot, lock 1s, statement 2s; ${await vaultRefuses(sql, appTables)}`;
   });
 }
 

@@ -108,6 +108,30 @@
   takes `placeholder: prefix('<bot id>:')`. A use is still one vault call
   (docs/design/credential-proxy.md, section 5, "A segment of the path").
 
+- **Postgres plans every statement at its own settings (T207).** Coffre
+  sets no `jit`, `plan_cache_mode` or `enable_*` on any function or
+  login. `0063_planner_defaults` resets them on the functions; `coffre
+  migrate` resets the `jit = off` and `force_generic_plan` that 0.15.0
+  set on the runtime logins, where its login has `CREATEROLE` and `ADMIN`
+  on them, and leaves an administrator's own values. What the settings
+  hid was one estimate: `use_credential` joined `log_fence`, a table of
+  one row, which Postgres puts at 590 rows until it has statistics (a new
+  database, a restored one, a small one that autovacuum never reaches).
+  That made the statement cost about 40,000 (100,000 in 0029, past
+  `jit_above_cost`), and the plan for any values lost to the plan for each
+  call's, so every use planned again: 4.4 ms of Postgres CPU a use at
+  1,000 a second instead of 1.6. The fence is now read with `LIMIT 1`:
+  226 with or without statistics, the plan kept after five calls. The day
+  reads (`use_covered`, `log_reads_by`, `log_reads_at`) plan per call with
+  `EXECUTE`, which prunes to their day, as the forced custom plans did.
+  At 1,000 uses a second, three rounds alternating with 0.15.0's
+  settings: the same Postgres CPU (1.60 to 1.75 ms against 1.70 to 1.74),
+  p50 and busy refusals; flat at 5, 100 and 365 days of log. The lock
+  and statement timeouts, and `bytea_output = 'hex'` where a function
+  answers bytes in text (a server set to `escape` would have every use
+  refused as tampered), stay
+  ([planner-defaults.md](docs/design/planner-defaults.md)).
+
 - **The proxy serves UI routes to workloads (T186, PR C2b1).** A
   key-bound session (`coffre serve`, `@coffre/client/workload`) or a
   Cloudflare service binding's call now reaches a route saved in the

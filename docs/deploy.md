@@ -123,17 +123,23 @@ it a password after, and the vault reaches it through a pool of its own:
 as it: a vault without it refuses to start.
 
 Every migrate run gives `coffre_vault_hot` its group and settings again
-when it lacks them, as a role dropped and made again does. It also sets
-`jit = off` on the three runtime logins
-(`ALTER ROLE … SET jit = off`), when they lack it. Past
-`jit_above_cost` Postgres compiles a statement's plan at every execution, and a
-statement's estimate grows with its tables: a use that costs 2 ms took 150.
-The setting is the login's own, as a group's never reaches its members, and
-sits on the server, where a pooler such as Hyperdrive cannot drop it. Setting it
-takes a login with `CREATEROLE` and `ADMIN` on each of them, as `coffre setup`'s
-administrator is, once per server; migrate says what to run when the login
-that migrates is not and nobody has. A `jit` setting of one of them for the
-database alone, which would outrank it, is refused the same way.
+when it lacks them, as a role dropped and made again does: its lock and
+statement timeouts, and no planner setting. From 0.15.1 every statement
+plans and runs at the server's own settings, JIT included. 0.15.0's migrate
+set `jit = off` on the three runtime logins and
+`plan_cache_mode = force_generic_plan` on the hot one, where its login could;
+migrate now resets those values, and only those (an administrator's own
+setting of either stays), when its login has `CREATEROLE` and `ADMIN` on
+each role, as `coffre setup`'s administrator does. A login that only
+migrates leaves them as they are, which 0.15.1 runs with as well; such an
+administrator clears them once per server:
+
+```sql
+ALTER ROLE coffre_runtime RESET jit;
+ALTER ROLE coffre_vault_runtime RESET jit;
+ALTER ROLE coffre_vault_hot RESET jit;
+ALTER ROLE coffre_vault_hot RESET plan_cache_mode;
+```
 
 `coffre setup` makes `coffre_backup_login` and grants it the group.
 `coffre migrate --backup-login <role>` grants `coffre_backup` to that
@@ -914,9 +920,8 @@ the app's database URL, as `DATABASE_URL`. `vault.env` takes the vault ID,
 its hot path's, as `HOT_DATABASE_URL`. The URLs name one database, through
 different logins, with the TLS settings the administrator's connection
 string had. The hot path's leaves out the administrator's own
-`lock_timeout`, `statement_timeout` and `plan_cache_mode`, which would
-outrank its login's at every connection, and setup refuses one whose
-`options` still set them:
+`lock_timeout` and `statement_timeout`, which would outrank its login's at
+every connection, and setup refuses one whose `options` still set them:
 
 ```dotenv
 # .env

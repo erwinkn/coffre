@@ -440,7 +440,7 @@ function hotRole(name: string) {
     )],
     settings: [...(await client.unsafe<{ setconfig: string[] }[]>(
       "SELECT setconfig FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0",
-    ))[0]?.setconfig ?? []].filter((setting) => !setting.startsWith('jit=')).sort(),
+    ))[0]?.setconfig ?? []].sort(),
   }));
 }
 
@@ -481,7 +481,7 @@ for (const as of ['superuser', 'owner'] as const) {
     // The hot path's login, made before the migrations, which took it as a host's: the vault's, with the hot path's settings.
     assert.equal(new URL(shown.vault.HOT_DATABASE_URL!).username, 'coffre_vault_hot');
     assert.ok(await connects(shown.vault.HOT_DATABASE_URL!));
-    assert.deepEqual(await hotRole(`setup_${as}`), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
+    assert.deepEqual(await hotRole(`setup_${as}`), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'statement_timeout=2s'] });
     assert.equal(new URL(shown.backup.DATABASE_URL!).username, 'coffre_backup_login');
     assert.ok(await connects(shown.backup.DATABASE_URL!));
     assert.deepEqual(await membership(`setup_${as}`), [{ admin: false, inherit: true, set: false }], 'a member of coffre_backup, as --backup-login grants it');
@@ -662,7 +662,7 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   assert.ok(await connects(shown.vault.HOT_DATABASE_URL!));
   assert.ok(await connects(first.app.DATABASE_URL!), 'the app keeps its password');
   assert.ok(await connects(first.vault.DATABASE_URL!), 'the vault keeps its password');
-  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
+  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'statement_timeout=2s'] });
 
   // Dropped after 0022 ran, which never runs again: setup makes it, and the migrate run gives it its group and settings, so every new password works.
   await asSuperuser('setup_hot', (client) => client.unsafe('DROP ROLE coffre_vault_hot'));
@@ -671,7 +671,7 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   assert.match(remade.stderr, /coffre_vault_hot\s+can read the log and write members; cannot delete log entries or create tables\n/);
   assert.equal(again.logins.coffre_vault_hot!.password, 'created');
   for (const each of [again.app.DATABASE_URL!, again.vault.DATABASE_URL!, again.vault.HOT_DATABASE_URL!]) assert.ok(await connects(each));
-  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'plan_cache_mode=force_generic_plan', 'statement_timeout=2s'] });
+  assert.deepEqual(await hotRole('setup_hot'), { member: [{ admin: false, inherit: true, set: false }], settings: ['lock_timeout=1s', 'statement_timeout=2s'] });
 
   // Remade with a setting for this database alone, which would outrank the hot path's at login: refused, as 0022 refuses it, saying what to run.
   await asSuperuser('setup_hot', async (client) => {
@@ -682,7 +682,7 @@ test("a deployment migrated before setup made the hot path's login: 0022 made it
   });
   const outranked = setup(['--json'], { stdin: `${url}\n` });
   assert.equal(outranked.status, 1);
-  assert.match(outranked.stderr, /✗ Checking the database is up to date\n\s+the database is at the migrated schema, but reasserting its privileges failed: coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path's: run ALTER ROLE coffre_vault_hot IN DATABASE setup_hot RESET ALL/);
+  assert.match(outranked.stderr, /✗ Checking the database is up to date\n\s+the database is at the migrated schema, but reasserting its privileges failed: coffre_vault_hot has its own lock_timeout or statement_timeout in this database, over the hot path's: run ALTER ROLE coffre_vault_hot IN DATABASE setup_hot RESET ALL/);
   assert.equal(outranked.stdout, '', 'no URL shown for a login without its bounds');
 
   // Remade with a membership that may grant coffre_vault, to the app's login say: refused, as 0022 refuses it.
@@ -727,10 +727,10 @@ test("the hot path's URL logs in under its own bounds: the administrator's sessi
   }
   // A setting in its options, which a URL's own parameters cannot say apart from a host's: refused before anything is shown.
   const options = new URL(url);
-  options.searchParams.set('options', '-c plan_cache_mode=auto');
+  options.searchParams.set('options', '-c statement_timeout=0');
   const refused = setup(['--reset-passwords', '--json'], { stdin: `${options.href}\n` });
   assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /coffre_vault_hot logs in with plan_cache_mode auto, not the hot path's plan_cache_mode force_generic_plan/);
+  assert.match(refused.stderr, /coffre_vault_hot logs in with statement_timeout 0, not the hot path's statement_timeout 2s/);
   assert.equal(refused.stdout, '');
 });
 

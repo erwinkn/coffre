@@ -12,11 +12,11 @@ import { verifyEntries, type StoredEntry } from '@coffre/core/audit';
 import { decrypt } from '@coffre/core/envelope';
 import { leafHash, pairSigners, pairVerifiers, verifyInclusion, verifyLog } from '@coffre/core/merkle';
 import type { UseOutcome } from '@coffre/core/vault';
-import { tablesOf, type Database, type Queryable } from '@coffre/db';
+import { createDatabase, tablesOf, type Database, type Queryable } from '@coffre/db';
 import { newestAccess } from '@coffre/db/grants';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
-import { postgresSession } from '@coffre/db/connect';
+import { postgresClient, postgresSession } from '@coffre/db/connect';
 
 import { logOrigin } from '../src/checkpointer.ts';
 import { objectKey, sealOf, type Input, type Ref } from '../src/inputs.ts';
@@ -26,9 +26,10 @@ import { authentic, entryMac } from '../src/log-entry.ts';
 import { purposeCode } from '../src/log-replay.ts';
 import { logStore } from '../src/log-store.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
+import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
-import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
+import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
 /** The hot path's login, as an isolate's uses run on it. */
@@ -459,22 +460,36 @@ test('RefreshShared after a rollback: the uses that waited elect one to move the
   assert.ok(await replayAgrees() >= 2);
 });
 
-test('no function run as its owner compiles its statements (0029): JIT cost a use through a reference ~150 ms', postgresOnly('JIT'), async () => {
-  // Past jit_above_cost (100,000 by default), Postgres compiles a plan's expressions at every execution of it, a cached
-  // generic plan's included. 0028's use through a reference was past it (150 ms a use against 3.4), its probing use
-  // just under, and estimates grow with the tables: each function says no JIT itself, whatever the server's default.
+test('every function plans and runs at the server\'s planner settings (T207): none sets jit, plan_cache_mode or an enable_*', postgresOnly('the planner'), async () => {
+  // 0029 to 0062 turned JIT off on every function run as its owner, and held a few to a plan mode or away from a scan:
+  // each statement is now one whose plan stands at the defaults, its estimate far below jit_above_cost
+  // (docs/design/planner-defaults.md). A function that sets one of them again hides a plan that does not.
   const fns = await rows<{ fn: string; config: string[] | null }>(db.owner, sql`SELECT oid::regprocedure::text AS fn, proconfig AS config FROM pg_proc
-    WHERE pronamespace = 'public'::regnamespace AND prosecdef`);
+    WHERE pronamespace = 'public'::regnamespace`);
   assert.ok(fns.some((f) => f.fn.startsWith('use_credential(')), 'use_credential among them');
-  // R69 (Erwin 11-03) forbids planner and JIT overrides: 0064's issue_token, both signatures, and 0067's log_refusal
-  // (T179 PR 6) set none, and T207 (#482) turns this test around for every function. Until then the rest keep theirs,
-  // and those alone are held to none.
-  const issue = (f: { fn: string }) => f.fn.startsWith('issue_token(');
-  const none = (f: { fn: string }) => issue(f) || f.fn.startsWith('log_refusal(');
-  assert.deepEqual(fns.filter((f) => !none(f) && !f.config?.includes('jit=off')).map((f) => f.fn), []);
-  assert.deepEqual(fns.filter((f) => none(f) && f.config?.some((c) => c.startsWith('jit='))).map((f) => f.fn), []);
-  assert.equal(fns.filter(issue).length, 2, 'the old signature and the overload with a passkey');
-  assert.equal(fns.filter((f) => f.fn.startsWith('log_refusal(')).length, 1, 'the refusals\' record');
+  const set = fns.flatMap((f) => (f.config ?? []).filter((c) => /^(jit|plan_cache_mode|enable_[a-z]+)=/.test(c)).map((c) => `${f.fn}: ${c}`));
+  assert.deepEqual(set, []);
+});
+
+test('a use on a server whose bytes are written `escape` is decided as on any: the functions that answer text write them hex (T207)', postgresOnly('bytea_output'), async () => {
+  // The vault reads every seal and MAC in the functions' JSON as hex (`bytes`, write.ts). Postgres writes a bytea in
+  // JSON as the session's `bytea_output` says, which a server, database or login may set to `escape`: "\\000\\377A"
+  // where hex is "\\x00ff41". The functions set it for themselves; without, this use is refused as tampered.
+  const w = await world();
+  const id = await w.key();
+  const client = postgresClient(HOT_URL, { max: 1, connection: { bytea_output: 'escape' } });
+  try {
+    const [held] = await client.unsafe<{ setting: string }[]>(`SELECT current_setting('bytea_output') AS setting`);
+    assert.equal(held!.setting, 'escape');
+    const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(client));
+    const at = onePeriod();
+    const first = heard(await vault.use!(ask(w, id, { at, deadline: at + 3000 })));
+    assert.ok(first.ok && !first.covered, JSON.stringify(first));
+    const repeat = heard(await vault.use!(ask(w, id, { at, deadline: at + 3000 })));
+    assert.ok(repeat.ok && repeat.covered, JSON.stringify(repeat));
+  } finally {
+    await client.end();
+  }
 });
 
 test('a session\'s first call plans its four statements before it takes the fence (T131)', postgresOnly('the fence'), async () => {
@@ -483,8 +498,7 @@ test('a session\'s first call plans its four statements before it takes the fenc
   const fence = postgresSession(OWNER_URL);
   const fresh = postgresSession(OWNER_URL);
   try {
-    // The hot login's generic plans, and a lock wait cut short.
-    await fresh.unsafe(`SET plan_cache_mode = force_generic_plan`);
+    // A lock wait cut short.
     await fresh.unsafe(`SET lock_timeout = '200ms'`);
     await fence.unsafe('BEGIN');
     await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
@@ -493,9 +507,10 @@ test('a session\'s first call plans its four statements before it takes the fenc
       fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
       { code: '55P03' },
     );
-    // The call never held the fence, and yet the session holds a plan of each of its four statements (the contexts name
-    // them by their first 1,024 bytes): made before the fence.
-    const [plans] = await fresh.unsafe<{ n: string }[]>(`SELECT count(*) AS n FROM pg_backend_memory_contexts WHERE name = 'CachedPlan' AND ident LIKE 'WITH i AS MATERIALIZED%'`);
+    // The call never held the fence, and yet the session holds each of its four statements, parsed and planned (the
+    // contexts name them by their first 1,024 bytes): made before the fence. The plan cache keeps the source; the plans
+    // its first calls make, each for its values, it frees after them (T207: no plan mode of the login's).
+    const [plans] = await fresh.unsafe<{ n: string }[]>(`SELECT count(*) AS n FROM pg_backend_memory_contexts WHERE name = 'CachedPlanSource' AND ident LIKE 'WITH i AS MATERIALIZED%'`);
     assert.equal(Number(plans!.n), 4);
     await fence.unsafe('ROLLBACK');
     // Its next call, now the fence is free, is answered; the setting says the plans are made.
@@ -505,7 +520,7 @@ test('a session\'s first call plans its four statements before it takes the fenc
       [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
     assert.equal(answer!.use.state, null);
     const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0060');
+    assert.equal(setting!.planned, '0063');
   } finally {
     await fence.end();
     await fresh.end();

@@ -44,12 +44,14 @@
 // says neither): the app's own transactions under 0.14's head, as before T149, to compare with.
 // `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own: a binding
 // takes at most 60 sign-ins a minute, so 100 at once are two bindings' (with 0.15's log, each serializes on its row).
+// `--days <n>` attaches the log's days back to n days ago, empty, as an instance that keeps every day has them attached
+// (T187's measure): what a use costs as the log ages (R48, T207).
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
 //
 //   COFFRE_TEST_DATABASE=<db> node --conditions=coffre:source packages/server/test/bench/ci.ts \
 //     [--rtt 20] [--rounds 5] [--jobs 1,3,10] [--log 0.15] [--uses 1000 | --proxy 1000] [--use-pool 100] [--idle 5]
 //     [--principals 100] [--keys 7] [--use-cold 0] [--window 1] [--signin-only] [--proxy-cache 60] [--proxy-stable] [--proxy-names 0] [--proxy-fork] [--proxy-pair] [--proxy-unnamed] [--proxy-ui] [--proxy-path]
-//     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope]
+//     [--cgroup /sys/fs/cgroup/system.slice/docker-<id>.scope] [--days 365]
 import { generateKeyPairSync, randomBytes, sign as signWith } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -114,6 +116,7 @@ const { values } = parseArgs({
     'proxy-names': { type: 'string' },
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
+    days: { type: 'string', default: '0' },
   },
 });
 const RTT = Number(values.rtt);
@@ -416,6 +419,11 @@ try {
   // `/use` beside, `--proxy` a second (proxy-uses.ts): 100 people, each a Developer of ci/dev with a handle of their own,
   // so that no one principal's bulk row serializes them, as with `--uses`.
   if (PROXY > 0) {
+    if (Number(values.days) > 0) {
+      await db.owner.execute(sql`SELECT make_day(current_date - k) FROM generate_series(1, ${Number(values.days)}) AS k`);
+      const [{ n }] = await db.owner.execute<{ n: number }>(sql`SELECT count(*)::integer AS n FROM pg_inherits WHERE inhparent = 'log_uses'::regclass`);
+      console.log(`${n} days of the log attached`);
+    }
     const handles: string[] = [];
     const place = values['proxy-fork'] ? 'ci/feature' : 'ci/dev';
     if (values['proxy-fork']) await root.environments.create('ci/feature', { from: 'dev', inherit: true });

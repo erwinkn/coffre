@@ -228,21 +228,23 @@ test(
 );
 
 test(
-  'the runtime logins run with jit off',
-  postgresOnly('SQLite has no JIT'),
+  "the runtime logins run at the server's planner settings, none of their own",
+  postgresOnly('SQLite has no planner settings'),
   async () => {
-    // Past jit_above_cost, a statement's plan is compiled at every execution, 150 ms where a use costs 2 (0029): whatever the server's default.
+    // T207: every statement coffre runs is one whose plan stands at the defaults (docs/design/planner-defaults.md).
+    // Every run reasserts the logins; then each, as it logs in, takes no planner setting from its role.
+    await migrateDatabase(TEST_OWNER_DATABASE_URL);
     const logins = { coffre_runtime: TEST_RUNTIME_DATABASE_URL, coffre_vault_runtime: TEST_VAULT_DATABASE_URL, coffre_vault_hot: TEST_HOT_DATABASE_URL };
     for (const [role, url] of Object.entries(logins)) {
       const client = postgresClient(url, { max: 1 });
       try {
-        const [row] = await client.unsafe<{ jit: string }[]>("SELECT current_setting('jit') AS jit");
-        assert.equal(row!.jit, 'off', role);
+        const own = await client.unsafe<{ name: string }[]>(
+          "SELECT name FROM pg_settings WHERE source IN ('user', 'database', 'database user') AND (name IN ('jit', 'plan_cache_mode') OR name LIKE 'enable\\_%')",
+        );
+        assert.deepEqual(own.map((row) => row.name), [], role);
       } finally {
         await client.end();
       }
     }
-    // Every run reasserts it, with nothing to change on the second.
-    await migrateDatabase(TEST_OWNER_DATABASE_URL);
   },
 );

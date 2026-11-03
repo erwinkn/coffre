@@ -18,12 +18,10 @@ import { postgresSession, quoteIdentifier, type PostgresClient } from './postgre
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
 
-/** The logins that run coffre's own statements: the app's, the vault's, and 0.15's hot path's. */
-const RUNTIME_LOGINS = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'];
 
 /**
- * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry, the hot path's login's
- * group and settings, and the runtime logins' `jit = off`.
+ * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry and the hot path's login's
+ * group and timeouts, and clear the planner settings 0.15.0 gave the runtime logins.
  */
 export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): Promise<void> {
   await client.unsafe(`DO $$ BEGIN
@@ -33,13 +31,13 @@ export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): 
     );
   END $$`);
   await holdHotLogin(client);
-  await turnJitOff(client, RUNTIME_LOGINS);
+  await clearPlannerSettings(client);
 }
 
 /**
  * What 0022 gives `coffre_vault_hot`, given again when it lacks it: its
  * membership in coffre_vault, inherited, and its lock and statement
- * timeouts and generic plans. A role dropped and made again, as `coffre
+ * timeouts. A role dropped and made again, as `coffre
  * setup` makes a missing one, has none of them, and 0022 never runs
  * twice. So whatever 0022 refuses, this refuses too: a role made again
  * may be anyone's. Unsafe attributes, objects it owns, a membership in
@@ -73,11 +71,11 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
     IF EXISTS (
       SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
        WHERE s.setrole = 'coffre_vault_hot'::regrole AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
-         AND split_part(setting, '=', 1) IN ('lock_timeout', 'statement_timeout', 'plan_cache_mode')
+         AND split_part(setting, '=', 1) IN ('lock_timeout', 'statement_timeout')
     ) THEN
-      RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
+      RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout or statement_timeout in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
     END IF;
-    -- The role is the server's, as turnJitOff's logins are: a run on another database may be changing it too, and fails the second change.
+    -- The role is the server's, as clearPlannerSettings' logins are: a run on another database may be changing it too, and fails the second change.
     FOR attempt IN 1..5 LOOP
       BEGIN
         SELECT setconfig INTO held FROM pg_db_role_setting WHERE setrole = 'coffre_vault_hot'::regrole AND setdatabase = 0;
@@ -86,7 +84,6 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
         END IF;
         IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
         IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
-        IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
         IF NOT EXISTS (
           SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
         ) THEN
@@ -95,7 +92,7 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
         EXIT;
       EXCEPTION
         WHEN insufficient_privilege THEN
-          RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+          RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
         WHEN internal_error OR unique_violation THEN
           IF attempt = 5 THEN RAISE; END IF;
           PERFORM pg_sleep(0.2);
@@ -105,50 +102,43 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
 }
 
 /**
- * Set `jit = off` on `logins`, when they lack it.
+ * Clear what 0.15.0's migrations set on the runtime logins, server-wide:
+ * `jit = off` on each, and `plan_cache_mode = force_generic_plan` on the hot
+ * login (`logins`: the tests' own roles). From 0.15.1 every statement plans
+ * and runs at the server's settings (0063, docs/design/planner-defaults.md).
  *
- * Past `jit_above_cost` (100,000 by default) Postgres compiles a plan's
- * expressions at every execution of it: 150 ms where a use costs under 2 ms
- * (0029), and a statement's estimate grows with its tables. The functions that
- * run as their owner say no JIT themselves (0029); the setting here covers
- * every other statement of these logins, now and to come. A role's settings
- * apply to the role that logs in, never through a group, and a pooler such as
- * Hyperdrive may not pass a startup option on, so it is the login's own, on
- * the server. It is the server's, not the database's, as the logins are (and
- * as 0022 sets the hot login's): made once by a login with CREATEROLE and
- * ADMIN on them, and found set by any other that migrates after.
- *
- * Only when it differs, whatever way the boolean is spelled: altering a role
- * takes CREATEROLE and its ADMIN, which a login that only migrates may lack.
- * The row is the server's, and the migration lock each database's, so a run
- * on another database may be changing it too: Postgres fails the second
- * change (a concurrent update, or a duplicate key), and it looks again once
- * the first has committed. A setting of the login's for this database alone
- * outranks the server-wide one at login, so it is refused, as 0022 does.
+ * Only those values, which coffre set (an administrator's own setting of
+ * either stays), and only when this login may alter the role: CREATEROLE and
+ * ADMIN on it, as `coffre setup`'s administrator has. A login that only
+ * migrates leaves them, as 0.15.0 ran with them, and docs/deploy.md says
+ * what to run. The rows are the server's, and the migration lock each
+ * database's, so a run on another database may be changing them too:
+ * Postgres fails the second change (a concurrent update, or a duplicate
+ * key), and it looks again once the first has committed.
  */
-export async function turnJitOff(client: Pick<PostgresClient, 'unsafe'>, logins: readonly string[]): Promise<void> {
-  // Whether the login has a jit setting, in `database` (0 for the server's), that is `value`; the cast is only of a jit row's.
-  const jit = (database: string, value: 'TRUE' | 'FALSE') => `EXISTS (
-        SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
-         WHERE s.setrole = login::regrole AND s.setdatabase = ${database}
-           AND (CASE WHEN split_part(setting, '=', 1) = 'jit' THEN substr(setting, 5)::boolean END) IS ${value})`;
+export async function clearPlannerSettings(
+  client: Pick<PostgresClient, 'unsafe'>,
+  logins: readonly string[] = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'],
+): Promise<void> {
   await client.unsafe(
     `DO $$ DECLARE
-      login text;
-      here oid := (SELECT oid FROM pg_database WHERE datname = current_database());
+      held record;
     BEGIN
-      FOREACH login IN ARRAY ARRAY[${logins.map((login) => `'${login}'`).join(', ')}] LOOP
-        IF ${jit('here', 'TRUE')} THEN
-          RAISE EXCEPTION '% has its own jit setting in this database, over the server-wide one: run ALTER ROLE % IN DATABASE % RESET jit, then migrate again', login, login, quote_ident(current_database());
-        END IF;
+      FOR held IN SELECT * FROM unnest(ARRAY[${logins.map((login) => `'${login}'`).join(', ')}]) AS login, unnest(ARRAY['jit', 'plan_cache_mode']) AS setting LOOP
+        CONTINUE WHEN to_regrole(held.login) IS NULL;
         FOR attempt IN 1..5 LOOP
-          EXIT WHEN ${jit('0', 'FALSE')};
+          -- The cast is only of a jit row's: off however the boolean is spelled.
+          EXIT WHEN NOT EXISTS (
+            SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS entry
+             WHERE s.setrole = held.login::regrole AND s.setdatabase = 0
+               AND CASE WHEN held.setting = 'jit' AND split_part(entry, '=', 1) = 'jit' THEN substr(entry, 5)::boolean IS FALSE
+                        WHEN held.setting = 'plan_cache_mode' THEN entry = 'plan_cache_mode=force_generic_plan'
+                        ELSE false END);
           BEGIN
-            EXECUTE format('ALTER ROLE %I SET jit = off', login);
+            EXECUTE format('ALTER ROLE %I RESET %I', held.login, held.setting);
             EXIT;
           EXCEPTION
-            WHEN insufficient_privilege THEN
-              RAISE EXCEPTION '% may not set jit = off on %, whose statements Postgres would compile at every run: have a login with CREATEROLE and ADMIN on it run ALTER ROLE % SET jit = off, then migrate again', current_user, login, login;
+            WHEN insufficient_privilege THEN EXIT;
             WHEN internal_error OR unique_violation THEN
               IF attempt = 5 THEN RAISE; END IF;
               PERFORM pg_sleep(0.2);
