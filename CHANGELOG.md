@@ -113,7 +113,11 @@
   login. `0063_planner_defaults` resets them on the functions; `coffre
   migrate` resets the `jit = off` and `force_generic_plan` that 0.15.0
   set on the runtime logins, where its login has `CREATEROLE` and `ADMIN`
-  on them, and leaves an administrator's own values. What the settings
+  on them, and leaves an administrator's own values. 0022 no longer gives
+  the hot login generic plans, so a login without `ADMIN` on it migrates
+  a new database even once another's migrate has reset them; a database
+  that ran 0022 before keeps it, and its ledger's hash of it is accepted.
+  What the settings
   hid was one estimate: `use_credential` joined `log_fence`, a table of
   one row, which Postgres puts at 590 rows until it has statistics (a new
   database, a restored one, a small one that autovacuum never reaches).

@@ -173,6 +173,12 @@ conformance() {
         # The hot path's login, for a release whose harness takes it, as it requires it; one before refuses the flag.
         local hot=()
         if grep -rqs -- 'hot-runtime' "$project/node_modules/@coffre/conformance/dist"; then hot=(--hot-runtime "$hot_runtime"); fi
+        # 0.15.0's conformance holds the hot login to generic plans, which 0.16.0's migrations no longer give it
+        # (T207, docs/design/planner-defaults.md): its URL asks for them, as that release's database did, so the
+        # release is held to everything else. The driver sends a URL's `options` as the session's settings.
+        if [[ ${#hot[@]} -gt 0 ]] && grep -rqs -- 'force_generic_plan' "$project/node_modules/@coffre/conformance/dist"; then
+            hot=(--hot-runtime "$hot_runtime?options=-c%20plan_cache_mode%3Dforce_generic_plan")
+        fi
         pnpm --dir "$project" conformance --postgres "$postgres" --runtime "$runtime" --vault-runtime "$vault_runtime" ${hot[@]+"${hot[@]}"} --port "$port" >"$log" 2>&1 || code=$?
     else
         pnpm --dir "$project" conformance --port "$port" >"$log" 2>&1 || code=$?

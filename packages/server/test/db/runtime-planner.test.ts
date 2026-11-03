@@ -53,25 +53,26 @@ const setting = async (owner: PostgresClient, role: string) =>
   )).flatMap((row) => row.setconfig);
 
 test(
-  "0.15.0's planner settings are cleared from a login once, however they are spelled and however many migrations of other databases race to, and an administrator's own stay",
+  "0.15.0's planner settings are cleared from a login once, however they are spelled and however many migrations of other databases race to, and an administrator's own stay, generic plans on a login other than the hot one included",
   postgresOnly('SQLite has no planner settings'),
   async () => {
     await withRoles(async (owner, [hot, spelled, own]) => {
-      // As 0.15.0's migrations left the hot login; `false` as an administrator may have spelled it; and settings coffre never made.
+      // As 0.15.0's migrations left the hot login; `false` as an administrator may have spelled it, beside generic plans of its own; and settings coffre never made.
       await owner.unsafe(`ALTER ROLE ${hot!} SET jit = off`);
       await owner.unsafe(`ALTER ROLE ${hot!} SET plan_cache_mode = force_generic_plan`);
       await owner.unsafe(`ALTER ROLE ${hot!} SET statement_timeout = '30s'`);
       await owner.unsafe(`ALTER ROLE ${spelled!} SET jit = false`);
+      await owner.unsafe(`ALTER ROLE ${spelled!} SET plan_cache_mode = force_generic_plan`);
       await owner.unsafe(`ALTER ROLE ${own!} SET jit = on`);
       await owner.unsafe(`ALTER ROLE ${own!} SET plan_cache_mode = force_custom_plan`);
       const racers = Array.from({ length: 8 }, () => postgresClient(TEST_OWNER_DATABASE_URL, { max: 1 }));
       try {
-        await Promise.all(racers.map((racer) => clearPlannerSettings(racer, [hot!, spelled!, own!])));
+        await Promise.all(racers.map((racer) => clearPlannerSettings(racer, { logins: [hot!, spelled!, own!], hot: hot! })));
       } finally {
         await Promise.all(racers.map((racer) => racer.end()));
       }
       assert.deepEqual(await setting(owner, hot!), ['statement_timeout=30s']);
-      assert.deepEqual(await setting(owner, spelled!), []);
+      assert.deepEqual(await setting(owner, spelled!), ['plan_cache_mode=force_generic_plan']);
       assert.deepEqual((await setting(owner, own!)).sort(), ['jit=on', 'plan_cache_mode=force_custom_plan']);
       // A fresh connection of the cleared login takes the server's own: none of the role's.
       const planner = await plannerOf(hot!, 'local-plan-only');
@@ -89,7 +90,7 @@ test(
       await owner.unsafe(`ALTER ROLE ${hot!} SET plan_cache_mode = force_generic_plan`);
       const migrator = postgresClient(asLogin(login, password), { max: 1 });
       try {
-        await clearPlannerSettings(migrator, [hot!]);
+        await clearPlannerSettings(migrator, { logins: [hot!], hot: hot! });
       } finally {
         await migrator.end();
       }

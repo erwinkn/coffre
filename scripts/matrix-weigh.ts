@@ -10,17 +10,19 @@ export type HotCall = { query: string; args: unknown[] };
 export type WeighingSession = ReturnType<typeof postgresClient>;
 
 /**
- * A session to weigh calls in (`weigh`), at `url`, the hot login's: one connection, whose plan cache `weigh` lets settle
- * on each statement before it weighs it, so that every call after weighs the same plans. With no sequential scan where an index serves,
- * as an instance's tables grown past a few pages are planned: a test's are a page or three, where a scan that stops at
- * its first match reads as many pages as precede the row it finds (T194: the `credentials` heap, read 2 to 20 rows
- * deep, as each world's credential fell), and where a key's rows read before its standing was decided would cost no
- * more than any key's, the table's every page whatever the key. Without JIT: the scans refused cost so much more that
- * a statement's estimate passes `jit_above_cost`, and compiling it took past the hot login's 2 s `statement_timeout`
- * (T207); JIT reads no buffer.
+ * A session to weigh calls in (`weigh`), at `url`, the hot login's: one connection, planned as an instance's tables
+ * grown past a few pages are. With no sequential scan where an index serves: a test's tables are a page or three, where
+ * a scan that stops at its first match reads as many pages as precede the row it finds (T194: the `credentials` heap,
+ * read 2 to 20 rows deep, as each world's credential fell), and where a key's rows read before its standing was decided
+ * would cost no more than any key's, the table's every page whatever the key. With the plans for any values that the
+ * server's plan cache keeps for the use statements at its own settings, within a session's first few calls (T207,
+ * docs/design/planner-defaults.md), which its first call makes, for every call after it: refusing sequential scans
+ * costs those plans so much more than each call's own that the cache would never keep them, and each call would be
+ * weighed on a plan for its own values. Without JIT, which those costs would reach (past the hot login's 2 s
+ * `statement_timeout`) and which reads no buffer. These are the weighing's own, never a login's or a function's.
  */
 export function weighingSession(url: string): WeighingSession {
-  return postgresClient(url, { max: 1, connection: { enable_seqscan: 'off', jit: 'off' } });
+  return postgresClient(url, { max: 1, connection: { enable_seqscan: 'off', plan_cache_mode: 'force_generic_plan', jit: 'off' } });
 }
 
 /**
@@ -51,22 +53,14 @@ export type Weighed = { buffers: number; keyBlocks: number; blocks: Record<strin
  * The shared buffers `call` reads in `session`, of them the key's relations' blocks, and each relation's: a call's
  * own, the counters' change across its `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled back
  * (`pg_stat_get_xact_blocks_fetched` answers what the backend has not yet flushed, runs and calls before included).
- * After runs unweighed, which plan what the session had not: six the first time the session weighs a statement, one
- * after. Postgres's plan cache plans a function's statement for each call's values its first five times, and its
- * planning reads catalog and index pages, which count in the call's buffers; from the sixth, it keeps the plan for any
- * values that costs no more, and makes no plan more (T207: a refusal weighed on its fourth plan read 7 buffers more than
- * its twin weighed on the kept one). Then the run of the fewest buffers of a few. Its time and deadline are now's, so
- * that it is not refused `late`; whatever it would write is rolled back.
+ * After a run unweighed, which plans what the session had not; then the run of the fewest buffers of a few. Its time
+ * and deadline are now's, so that it is not refused `late`; whatever it would write is rolled back.
  */
 export async function weigh(session: WeighingSession, call: HotCall): Promise<Weighed> {
   const counters = `SELECT c.relname AS name, pg_stat_get_xact_blocks_fetched(c.oid)::int AS n FROM pg_class c
     WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'i', 'p')`;
-  const seen = settled.get(session) ?? new Set<string>();
-  settled.set(session, seen);
-  const unweighed = seen.has(call.query) ? 1 : 6;
-  seen.add(call.query);
   let least: Weighed | null = null;
-  for (let run = 0; run < unweighed + 3; run += 1) {
+  for (let run = 0; run < 4; run += 1) {
     const args = [...call.args];
     const now = Date.now();
     // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
@@ -85,16 +79,13 @@ export async function weigh(session: WeighingSession, call: HotCall): Promise<We
       if (error instanceof RolledBack) return error.read;
       throw error;
     });
-    if (run < unweighed) continue;
+    if (run === 0) continue;
     const buffers = read!.plan['Shared Hit Blocks'] + read!.plan['Shared Read Blocks'];
     if (least !== null && least.buffers <= buffers) continue;
     least = { buffers, keyBlocks: keyBlocksOf(read!.blocks), blocks: read!.blocks };
   }
   return least!;
 }
-
-/** The statements each session has weighed, whose plans its cache has settled on (`weigh`). */
-const settled = new WeakMap<WeighingSession, Set<string>>();
 
 /**
  * The blocks of the key's relations among a call's: `KEY_TABLES`, their indexes and partitions (named for their table),

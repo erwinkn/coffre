@@ -115,7 +115,7 @@ runtime logins additional roles.
 
 They also make `coffre_vault_hot`, the third runtime login, when it is
 missing: a member of `coffre_vault` with its own lock and statement
-timeouts (1 s and 2 s) and generic plans, for 0.15's hot path, which
+timeouts (1 s and 2 s), for 0.15's hot path, which
 answers a use within those bounds or not at all. The migrations make it
 unable to log in; `coffre setup` makes it beforehand as a login, or gives
 it a password after, and the vault reaches it through a pool of its own:
@@ -124,14 +124,14 @@ as it: a vault without it refuses to start.
 
 Every migrate run gives `coffre_vault_hot` its group and settings again
 when it lacks them, as a role dropped and made again does: its lock and
-statement timeouts, and no planner setting. From 0.15.1 every statement
+statement timeouts, and no planner setting. From 0.16.0 every statement
 plans and runs at the server's own settings, JIT included. 0.15.0's migrate
 set `jit = off` on the three runtime logins and
 `plan_cache_mode = force_generic_plan` on the hot one, where its login could;
 migrate now resets those values, and only those (an administrator's own
 setting of either stays), when its login has `CREATEROLE` and `ADMIN` on
 each role, as `coffre setup`'s administrator does. A login that only
-migrates leaves them as they are, which 0.15.1 runs with as well; such an
+migrates leaves them as they are, which 0.16.0 runs with as well; such an
 administrator clears them once per server:
 
 ```sql

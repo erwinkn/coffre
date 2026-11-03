@@ -102,13 +102,14 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
 }
 
 /**
- * Clear what 0.15.0's migrations set on the runtime logins, server-wide:
- * `jit = off` on each, and `plan_cache_mode = force_generic_plan` on the hot
- * login (`logins`: the tests' own roles). From 0.15.1 every statement plans
+ * Clear what 0.15.0 set on the runtime logins, server-wide: `jit = off` on
+ * each, and `plan_cache_mode = force_generic_plan` on the hot login alone
+ * (`logins` and `hot`: the tests' own roles). From 0.16.0 every statement plans
  * and runs at the server's settings (0063, docs/design/planner-defaults.md).
  *
- * Only those values, which coffre set (an administrator's own setting of
- * either stays), and only when this login may alter the role: CREATEROLE and
+ * Only those values on those logins, which coffre set (an administrator's
+ * own setting of either stays, generic plans on another login included),
+ * and only when this login may alter the role: CREATEROLE and
  * ADMIN on it, as `coffre setup`'s administrator has. A login that only
  * migrates leaves them, as 0.15.0 ran with them, and docs/deploy.md says
  * what to run. The rows are the server's, and the migration lock each
@@ -118,13 +119,14 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
  */
 export async function clearPlannerSettings(
   client: Pick<PostgresClient, 'unsafe'>,
-  logins: readonly string[] = ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'],
+  { logins, hot }: { logins: readonly string[]; hot: string } = { logins: ['coffre_runtime', 'coffre_vault_runtime', 'coffre_vault_hot'], hot: 'coffre_vault_hot' },
 ): Promise<void> {
+  const held = [...logins.map((login) => [login, 'jit']), [hot, 'plan_cache_mode']];
   await client.unsafe(
     `DO $$ DECLARE
       held record;
     BEGIN
-      FOR held IN SELECT * FROM unnest(ARRAY[${logins.map((login) => `'${login}'`).join(', ')}]) AS login, unnest(ARRAY['jit', 'plan_cache_mode']) AS setting LOOP
+      FOR held IN SELECT * FROM (VALUES ${held.map(([login, setting]) => `('${login}', '${setting}')`).join(', ')}) AS held(login, setting) LOOP
         CONTINUE WHEN to_regrole(held.login) IS NULL;
         FOR attempt IN 1..5 LOOP
           -- The cast is only of a jit row's: off however the boolean is spelled.
@@ -353,6 +355,18 @@ export class DatabaseAhead extends Error {
 /** The release whose baseline every database since was made from. */
 const CLEAN_BREAK = '0.4.0';
 
+/**
+ * Migrations rewritten after a release, by tag: the hashes of their earlier
+ * texts, which a database that applied one keeps in its ledger. A rewrite
+ * changes only what a database yet to apply it would do. 0022 gave the hot
+ * login generic plans until 0.16.0; once a run had cleared them, a login
+ * without ADMIN on the role could no longer migrate another database of the
+ * server through it (T207, docs/design/planner-defaults.md).
+ */
+const REWRITTEN: Readonly<Record<string, readonly string[]>> = {
+  '0022_log_015': ['738dd033a0339eac8218494a5cc43568c1b06ad363cd2aa3c0dfc9c82570a2da'],
+};
+
 function verifyHistory(
   expected: ExpectedMigration[],
   applied: AppliedMigration[] | null,
@@ -361,7 +375,7 @@ function verifyHistory(
   const rows = applied ?? [];
   rows.slice(0, expected.length).forEach((row, index) => {
     const local = expected[index]!;
-    if (row.created_at !== local.createdAt || row.hash !== local.hash) {
+    if (row.created_at !== local.createdAt || (row.hash !== local.hash && !REWRITTEN[local.tag]?.includes(row.hash))) {
       // 0.4.0 began again from one baseline: a database from before it is not upgraded, but made afresh.
       if (index === 0) throw new Error(`the database was made by a coffre before ${CLEAN_BREAK}, which is a clean break: deploy afresh, on a new database (docs/deploy.md)`);
       throw new Error(

@@ -1,6 +1,6 @@
-# Planner defaults (0.15.1, T207)
+# Planner defaults (0.16.0, T207)
 
-From 0.15.1 coffre sets no planner setting anywhere: no `jit`, no
+From 0.16.0 coffre sets no planner setting anywhere: no `jit`, no
 `plan_cache_mode`, no `enable_seqscan`, `enable_sort` or
 `enable_bitmapscan`, on no function, login or connection. Every statement
 plans and runs at the server's own settings. Timeouts (`lock_timeout`,
@@ -86,6 +86,55 @@ prunes to the day and plans the index read newest first, the same plan the
 settings forced. Planning a covered use's probe costs about 0.09 ms
 (686 calls, 64 ms of planning), as the custom plan did before.
 
+## Planning before the fence (T131)
+
+`use_credential` takes a shared advisory lock, the fence, which a
+checkpoint's barrier takes exclusively: a barrier waits for every use
+holding it, and every later use waits for the barrier. So a session's
+first call runs each of its four statements once dry, before the fence,
+and only then takes it. 0.15.0's hot login forced generic plans, so that
+dry run built the very plans every call after reused: no use planned
+under the fence.
+
+At the default `plan_cache_mode = auto`, Postgres makes a custom plan for
+each of a statement's first five runs in a session, then a generic one,
+which it keeps when it costs no more than the custom ones did. The dry
+run's own plan is trivial, since `WHERE NOT dry` folds to false for its
+values, but making it still opens every table and index the statement
+names and reads their statistics: the cold work, most of a new
+connection's first planning (66 to 71 ms under load in T187's
+measurements). Measured on an idle fresh session (Postgres 16.14):
+
+| call | `auto` (0.16.0) | `force_generic_plan` (0.15.0) |
+|---|---|---|
+| first (dry runs, then the call) | 5 plans, 17.3 ms | 4 plans, 16.0 ms |
+| second to fifth | 1 plan each, about 1.7 ms, under the fence | none |
+| sixth and after | none: the generic plan is kept | none |
+
+A use holds the fence about as long as it runs, a few ms, so four warm
+plans of about 1.7 ms are within what a barrier already waits for; the
+cold work stays before it. `use.test.ts` (T131) holds the dry run to
+having opened the statements' indexes before the fence, and a session
+told its plans are made to having opened none.
+
+## 0022, rewritten
+
+0022 made the hot login, with its timeouts and generic plans, and asked a
+login without `ADMIN` on the role to have an administrator set them first.
+Role settings are the server's, but each database runs 0022 itself: once
+a migrate had reset the generic plans, a login without `ADMIN` could no
+longer migrate another database of the same server through 0022, and
+`coffre setup` no longer sets them. 0022 now gives the timeouts alone. A
+database that applied it before keeps its earlier hash in its ledger, which
+the migrator accepts for that migration alone (`REWRITTEN` in
+[migrate.ts](../../packages/db/src/migrate.ts)); for such a database
+nothing changes, since the migration has already run.
+
+0.15.0's conformance requires generic plans on the hot login, so
+`pnpm test:compat` gives that release's hot login them in its URL, as
+its own database did, and holds it to every other check
+([compat-check.sh](../../scripts/compat-check.sh)).
+
 ## What stays
 
 - **`bytea_output = 'hex'`** on the functions whose answer is text, and in
@@ -108,9 +157,16 @@ settings forced. Planning a covered use's probe costs about 0.09 ms
 - Measured at 5, 100 and 365 days attached, at 1,000 uses a second: 1.62,
   1.70 and 1.66 ms of Postgres CPU a use, about 50 buffers, the generic
   plan kept (estimate 222 to 237, far below `jit_above_cost`).
-- Tests that weigh a call's buffers (`scripts/matrix-weigh.ts`) let the
-  plan cache settle on each statement before they weigh it, since a
-  custom plan's planning reads catalog and index pages that count in the
-  call's buffers. Their session refuses sequential scans, as before, and
-  so turns JIT off for itself: refused scans cost so much that an estimate
-  passes `jit_above_cost`, and JIT reads no buffer.
+- Tests that weigh a call's buffers (`scripts/matrix-weigh.ts`) refuse
+  sequential scans in their session, as before, to plan a test's tables of
+  a few pages as an instance's grown ones are. Refused scans cost the plan
+  for any values so much more than each call's own that the plan cache
+  would never keep it there, and each call would be weighed on a plan for
+  its own values: a key never made read 22 blocks where every other key
+  read 26. At the server's settings the cache keeps that plan within a
+  session's first few calls (a probe alternating a key and a key never
+  made: 6, 2 and 1 plans on the first three calls, none after), so the
+  weighing session asks for it, and for no JIT, which those costs would
+  reach. These are the weighing's own session settings, never a login's
+  or a function's. A session's first calls, before the cache keeps its
+  plan, plan for their own values, as any Postgres client's do.

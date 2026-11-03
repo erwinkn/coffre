@@ -492,38 +492,56 @@ test('a use on a server whose bytes are written `escape` is decided as on any: t
   }
 });
 
-test('a session\'s first call plans its four statements before it takes the fence (T131)', postgresOnly('the fence'), async () => {
+test('a session\'s first call does its planning\'s cold work before it takes the fence (T131)', postgresOnly('the fence'), async () => {
   const w = await world();
   const id = await w.key();
+  // The indexes the four statements' plans choose among, which a session opens when it first plans them: its cold work,
+  // tens of milliseconds on a new connection, which no use may do holding the fence a barrier waits for.
+  const opened = ['credentials_token_hash_key', 'environments_pkey', 'log_bulk_pkey', 'log_config_pkey', 'log_fence_pkey',
+    'secret_versions_pkey', 'secrets_pkey', 'vault_grants_on_project', 'vault_members_pkey'];
   const fence = postgresSession(OWNER_URL);
-  const fresh = postgresSession(OWNER_URL);
+  // Whether a fresh session's first call, cut short at the fence, has parsed the four statements and opened those indexes.
+  const beforeFence = async (planned: boolean) => {
+    const fresh = postgresSession(OWNER_URL);
+    try {
+      await fresh.unsafe(`SET lock_timeout = '200ms'`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0063', false)`);
+      const at = Date.now();
+      await assert.rejects(
+        fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
+        { code: '55P03' },
+      );
+      // The contexts name a statement by its first 1,024 bytes, and an index by its name.
+      const [parsed] = await fresh.unsafe<{ n: string }[]>(`SELECT count(*) AS n FROM pg_backend_memory_contexts WHERE name = 'CachedPlanSource' AND ident LIKE 'WITH i AS MATERIALIZED%'`);
+      const indexes = await fresh.unsafe<{ ident: string }[]>(`SELECT ident FROM pg_backend_memory_contexts WHERE name = 'index info' AND ident = ANY($1)`, [opened]);
+      return { parsed: Number(parsed!.n), indexes: indexes.map((row) => row.ident).sort() };
+    } finally {
+      await fresh.end();
+    }
+  };
   try {
-    // A lock wait cut short.
-    await fresh.unsafe(`SET lock_timeout = '200ms'`);
     await fence.unsafe('BEGIN');
     await fence.unsafe('SELECT pg_advisory_xact_lock(1668244070, 0)');
-    const at = Date.now();
-    await assert.rejects(
-      fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
-      { code: '55P03' },
-    );
-    // The call never held the fence, and yet the session holds each of its four statements, parsed and planned (the
-    // contexts name them by their first 1,024 bytes): made before the fence. The plan cache keeps the source; the plans
-    // its first calls make, each for its values, it frees after them (T207: no plan mode of the login's).
-    const [plans] = await fresh.unsafe<{ n: string }[]>(`SELECT count(*) AS n FROM pg_backend_memory_contexts WHERE name = 'CachedPlanSource' AND ident LIKE 'WITH i AS MATERIALIZED%'`);
-    assert.equal(Number(plans!.n), 4);
+    // The call never held the fence, and yet it has planned each of the four statements: their dry runs, before it.
+    assert.deepEqual(await beforeFence(false), { parsed: 4, indexes: opened });
+    // Told its statements are planned, the same call does none of that before the fence: it would all be under it.
+    assert.deepEqual(await beforeFence(true), { parsed: 0, indexes: [] });
     await fence.unsafe('ROLLBACK');
-    // Its next call, now the fence is free, is answered; the setting says the plans are made.
-    await fresh.unsafe(`SET lock_timeout = 0`);
-    const again = Date.now();
-    const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, p_decided => true) AS use`,
-      [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
-    assert.equal(answer!.use.state, null);
-    const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-    assert.equal(setting!.planned, '0063');
+    // Under the fence, a call plans warm (about 2 ms) until the plan cache settles on a plan, by a session's sixth call
+    // of a form (docs/design/planner-defaults.md). A fresh session's first call is answered, and says the plans are made.
+    const fresh = postgresSession(OWNER_URL);
+    try {
+      const again = Date.now();
+      const [answer] = await fresh.unsafe<{ use: { state: string | null } }[]>(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6, p_decided => true) AS use`,
+        [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
+      assert.equal(answer!.use.state, null);
+      const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
+      assert.equal(setting!.planned, '0063');
+    } finally {
+      await fresh.end();
+    }
   } finally {
     await fence.end();
-    await fresh.end();
   }
 });
 

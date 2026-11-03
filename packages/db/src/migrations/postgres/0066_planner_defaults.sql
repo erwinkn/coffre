@@ -1,4 +1,4 @@
--- 0.15.1, T207: every function plans and runs with the server's planner settings (R69). 0029 to 0062 set `jit = off` on every function that runs as its owner, `plan_cache_mode` (generic on `app_read`, custom on `use_covered`, `log_reads_by` and `log_reads_at`), and `enable_seqscan`, `enable_sort` or `enable_bitmapscan` off on three of them, each to keep a plan the planner would otherwise not have chosen. Each statement is now one whose plan stands at the defaults: its estimates far below `jit_above_cost`, the day queries planned per call by `EXECUTE` where they must prune (below), and `use_credential`'s fence read as the one row it is (below). This resets those settings and only those: `search_path`, the lock timeouts, and `bytea_output` and `TimeZone` on the functions whose answer is text, stay. Additive (AGENTS.md, "expand, then contract"): every signature and answer is 0.15.0's, and 0.15.0 runs on them.
+-- 0.16.0, T207: every function plans and runs with the server's planner settings (R69). 0029 to 0062 set `jit = off` on every function that runs as its owner, `plan_cache_mode` (generic on `app_read`, custom on `use_covered`, `log_reads_by` and `log_reads_at`), and `enable_seqscan`, `enable_sort` or `enable_bitmapscan` off on three of them, each to keep a plan the planner would otherwise not have chosen. Each statement is now one whose plan stands at the defaults: its estimates far below `jit_above_cost`, the day queries planned per call by `EXECUTE` where they must prune (below), and `use_credential`'s fence read as the one row it is (below). This resets those settings and only those: `search_path`, the lock timeouts, and `bytea_output` and `TimeZone` on the functions whose answer is text, stay. Additive (AGENTS.md, "expand, then contract"): every signature and answer is 0.15.0's, and 0.15.0 runs on them.
 -- The settings, reset on every other function that had them: their bodies are unchanged.
 ALTER FUNCTION public.prune_consumed_tokens(integer) RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.vault_releases_keep() RESET jit;--> statement-breakpoint
@@ -215,7 +215,9 @@ BEGIN
     -- Its Worker's clock ahead by over a minute (0022 says why): checked here at no cost, and again in the statement.
     IF p_at > (extract(epoch FROM clock_timestamp()) * 1000)::bigint + 60000 THEN r.state := 'ahead'; RETURN to_json(r); END IF;
     IF dry THEN
-        -- Each form first runs dry, outside the fence, so that its plan is made before this call holds the fence.
+        -- Each form first runs dry, outside the fence, so that its planning's cold work (the catalog, the statistics, the
+        -- indexes: tens of ms on a new connection) is done before this call holds the fence (T131). Under it, a call plans
+        -- warm, about 2 ms, until the plan cache settles on a plan, by the session's sixth call of a form.
         first_probe := probe;
         first_whole := whole;
         probe := true;
@@ -227,7 +229,7 @@ BEGIN
         IF NOT dry AND NOT resolved THEN
             -- What the request names, by its names, under the fence, which no change moves (as `use_resolve` reads it):
             -- the credential of its token's hash; the place of its slugs, or a handle's one place; its key there by name.
-            -- Each by an index, its plan generic (the hot login's `force_generic_plan`): a handle's place by its id, a
+            -- Each by an index, whatever plan the cache settles on: a handle's place by its id, a
             -- named one by its slugs, never one plan for both, which no index serves (review r1 of D153). The dry run
             -- skips this block: these statements, the gate's among them, are planned on a session's first named call,
             -- under the fence, which hangs on nothing a request names.
