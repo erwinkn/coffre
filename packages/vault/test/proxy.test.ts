@@ -14,6 +14,7 @@ import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { RELEASE, versioned, type ProxyDefinition, type ProxyView, type SaveProxyInput } from '@coffre/core/vault';
 import { createDatabase, tablesOf } from '@coffre/db';
 import { postgresClient, postgresSession } from '@coffre/db/connect';
+import { gaveUp } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
@@ -51,9 +52,9 @@ function route(name: string, host = 'api.openai.com', key = 'OPENAI_API_KEY'): P
 }
 
 /** A vault keeping 0.15's log, a project with `dev`, Ada a Developer there. */
-async function world() {
+async function world(options: Parameters<typeof openLocalVault>[2] = {}) {
   const config = configure();
-  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
+  const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld, ...options });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   const project = await newProject(db.owner);
   const dev = await newEnvironment(db.owner, project);
@@ -452,6 +453,32 @@ test("a deploy's herd of first requests, each finding its code's name missing, w
     await holder.unsafe('COMMIT');
     for (const outcome of await Promise.all(herd)) assert.deepEqual(outcome, { ok: true, reserved: ['openai'], cleared: [] });
     assert.equal(await count(sql`SELECT count(*) AS n FROM audit_log WHERE action = 'proxy.code'`), 1);
+  } finally {
+    await holder.end();
+  }
+});
+
+test("a reservation waits for the head within one bound, however late it took the code's place (review r14 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world({ codeWaitMs: 1_000 });
+  const holder = postgresSession(OWNER_URL);
+  const PLACE = 0x636f6670;
+  const inPlace = () => locksHere(db.owner, sql`locktype = 'advisory' AND classid::bigint = ${PLACE} AND granted`);
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    // A change under way, and the code's one place taken by another: the reservation, refused it, pauses and asks again.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');
+    await holder.unsafe(`SELECT pg_advisory_lock(${PLACE}, 1)`);
+    const started = Date.now();
+    const reserving = w.vault.reserveProxy({ names: ['openai'] }).then(() => 'reserved' as const, (error: unknown) => error);
+    await pause(300);
+    // The place free, the head still held: the reservation takes the place, and waits for the head only what is left.
+    await holder.unsafe(`SELECT pg_advisory_unlock(${PLACE}, 1)`);
+    for (; (await inPlace()) < 1; await pause(10)) assert.ok(Date.now() - started < 1_000, 'the reservation never took the place');
+    const ended = await Promise.race([reserving, pause(3_000).then(() => 'still waiting' as const)]);
+    const ms = Date.now() - started;
+    assert.ok(gaveUp(ended), `the reservation ended ${ended instanceof Error ? ended.message : String(ended)}`);
+    assert.ok(ms < 1_500, `the reservation gave up after ${ms} ms, past its bound of 1,000`);
   } finally {
     await holder.end();
   }

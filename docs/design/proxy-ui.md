@@ -1165,9 +1165,13 @@ they outlive the deployment that reserved them:
   adds a name sends them all there at once, each finding it missing: so only
   one waits for the head, in a place in line of the code's own (the reads'
   places, `READ_HEAD_WAITERS`, are apart). The others, refused that place at
-  once, pause (25 ms, doubled each time, up to 400 ms, within the decision's
-  15 s) and read again, and find the name the one wrote. Each waiting its
-  turn instead, 3,080 no-op decisions queued 200 s in the same bench.
+  once, pause (25 ms, doubled each time, up to 400 ms) and try again, and
+  read the name the one wrote; every wait of the call, for the place and for
+  the head, within one bound of 15 s. Each waiting its turn instead, 3,080
+  no-op decisions queued 200 s in the same bench. The read is the decision's
+  first statement, on its connection, before any lock: in a read of its own,
+  a Node deployment's pool of 8 queued the first call's decision behind every
+  other call's read, and the last answered after 15 s.
 - **One release at a time.** The gate's call is a vault call like any
   other: from an app on another release it is 503 `deploying` before the
   vault reads the reserved set (section 3, "One version at a time"). What
