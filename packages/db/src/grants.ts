@@ -373,8 +373,14 @@ export async function newestChangeNames(db: Queryable, principals: readonly stri
   const rows = await rowsOf<{ object: string; name: string }>(db, engineOf(db) === 'postgres'
     ? sql`SELECT k.object, ${newestNamed(db, sql`k.object::uuid`)} AS name FROM unnest(${sql.param(keys)}::text[]) AS k (object)`
     : sql`SELECT k.value AS object, ${newestNamed(db, sql`k.value`)} AS name FROM json_each(${JSON.stringify(keys)}) k`);
-  const names = new Map(rows.map((row) => [String(row.object).toLowerCase(), row.name] as const));
-  return new Map(principals.map((principal, i) => [principal, names.get(keys[i]!) ?? NO_CHANGE] as const));
+  const names = new Map(rows.map((row) => [String(row.object), row.name] as const));
+  return new Map(principals.map((principal, i) => {
+    // Each engine hands back the key it was given; a key that came back otherwise would name "none" for a member
+    // with changes, which the member page (`findingsOf`, in SQL) would not.
+    const name = names.get(keys[i]!);
+    if (name === undefined) throw new Error(`newestChangeNames: no row for ${keys[i]}`);
+    return [principal, name] as const;
+  }));
 }
 
 /**
