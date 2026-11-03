@@ -9,6 +9,7 @@
 // `pnpm bench:workers` measures the CPU itself (packages/conformance/scripts/bench.ts).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { createHmac, generateKeyPairSync, randomBytes, randomUUID, sign as signWith } from 'node:crypto';
 import * as hegel from '@hegeldev/hegel';
 import * as gs from '@hegeldev/hegel/generators';
@@ -1320,7 +1321,29 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     SELECT ${from} + g, ${options.at ?? from} + g, 'planted-' || (${from} + g), ${options.object ?? sql`gen_random_uuid()`}, ${actor}, ${payloads[kind](actor)},
       decode(repeat('00', 16), 'hex')
     FROM generate_series(1, ${count}) g`);
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) log_changes`);
+  /**
+   * The log as autovacuum leaves it once its rounds have caught up: every page all-visible, so that an index-only scan
+   * reads no heap, and its statistics fresh. VACUUM marks a page all-visible only once no snapshot in the database may
+   * still see its rows in progress, and a snapshot's horizon is the oldest transaction running anywhere in the cluster:
+   * one taken here while the last rows were planted (an autovacuum's ANALYZE, a request's work left to the background)
+   * left the newest of them to the heap on CI, the service's counted page reading 52 pages, not 14 (T199). So it
+   * vacuums again until no page is left, as autovacuum's next round would, and names what held them past a minute.
+   */
+  const settle = async () => {
+    for (const until = Date.now() + 60_000; ; await sleep(100)) {
+      await db.owner.execute(sql`VACUUM log_changes`);
+      const [{ pages, visible }] = await db.owner.execute<{ pages: number; visible: number }>(sql`
+        SELECT relpages AS pages, relallvisible AS visible FROM pg_class WHERE oid = 'log_changes'::regclass`);
+      if (visible === pages) break;
+      if (Date.now() > until) {
+        const held = await db.owner.execute(sql`
+          SELECT pid, backend_type, state, backend_xmin::text AS xmin, left(query, 80) AS query FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid() AND (backend_xmin IS NOT NULL OR backend_xid IS NOT NULL)`);
+        assert.fail(`${pages - visible} of the log's ${pages} pages not all-visible after a minute of vacuums; snapshots here: ${JSON.stringify(held)}`);
+      }
+    }
+    await db.owner.execute(sql`ANALYZE log_changes`);
+  };
   try {
     // A log whose indexes are as deep as they get for long (a probe of each is its depth's pages): 60,000 changes of
     // members, 20,000 sign-ins of another service, 20,000 records of another person's, and the service's and Ada's own.

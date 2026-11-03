@@ -40,11 +40,12 @@ if [ "${1:-}" = --files ]; then
     node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@"
     exit
 fi
-# Then the files that run alone (`*.alone.ts`), one at a time, once the others are done: those that hold one
-# backend's work to the same call by call, and so its caches. A commit of thousands of catalog changes anywhere in
-# the cluster (a test's migration, in a database of its own) overflows Postgres's invalidation queue, 4,096 messages
-# shared by every database, and resets every backend's caches: the call it lands in plans everything again, as a
-# connection's first does (use-days.alone.ts). Both runs run; either failing fails the suite.
+# Then the files that run alone (`*.alone.ts`), one at a time, once the others are done: those that hold a
+# statement's work to a budget or to the same call by call, and so its backend's caches. A commit of thousands of
+# catalog changes anywhere in the cluster (a test's migration, in a database of its own) overflows Postgres's
+# invalidation queue, 4,096 messages shared by every database, and resets every backend's caches: the call it lands
+# in plans everything again, as a connection's first does (use-days.alone.ts, request-cost.alone.ts). Both runs run;
+# either failing fails the suite.
 status=0
 node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=4 "$@" "${files[@]}" || status=$?
 node --conditions=coffre:source --import ./scripts/test-database-worker.mjs --test --test-concurrency=1 "$@" "packages/*/test/*.alone.ts" || status=$?

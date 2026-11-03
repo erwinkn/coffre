@@ -153,7 +153,7 @@ private clone too.
   reaches anyone the rules forbid it to (R8, R15, R16, R20, R23, R24, R30,
   R32). Every value is a unique token, so a scan of each answer finds it
   wherever it is.
-- **Request cost** (`request-cost.test.ts`): after any growth Hegel draws
+- **Request cost** (`request-cost.alone.ts`): after any growth Hegel draws
   (writes elsewhere, other projects and forks, members, the reader's role
   flipped, protection, roles, references in, sensitivity, tokens), each hot
   request runs the same statements and reads the same rows. Postgres only.

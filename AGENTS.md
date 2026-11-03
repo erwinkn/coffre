@@ -217,8 +217,8 @@ unsupported diff select full validation.
   `COFFRE_TEST_DATABASE` sets the scratch name prefix; a random suffix isolates
   simultaneous runs and other checkouts sharing compose Postgres. `pnpm test:schema`
   still recreates the exact database it names. Then the files that run alone
-  (`packages/*/test/*.alone.ts`), one at a time: those that hold one backend's
-  work to the same call by call. Any commit of thousands of catalog changes in
+  (`packages/*/test/*.alone.ts`), one at a time: those that hold a statement's
+  work, its pages or its locks, to a budget or to the same call by call. Any commit of thousands of catalog changes in
   the cluster (a test's migration) resets every backend's caches, and the call
   it lands in plans everything again; a run beside another checkout's on the
   same Postgres can still land one, a Postgres of your own cannot. Needs Postgres.
@@ -287,7 +287,7 @@ unsupported diff select full validation.
   new isolate or process) and warm, read from Linux's per-thread counters: on Workers,
   the workerd that runs both Workers, not wrangler's own; on Node, the server and the
   vault apart. `--entries` and `--members` grow the instance first. Workers' Free plan
-  gives an invocation 10 ms of CPU; `request-cost.test.ts` holds a request's
+  gives an invocation 10 ms of CPU; `request-cost.alone.ts` holds a request's
   statements and rows to the same however the instance grows.
 - `pnpm formal` model-checks the locking protocol, `formal/Coffre.tla`, and
   the credentials, issuing, bulk-limit, audit-chain and tunnel protocols

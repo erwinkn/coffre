@@ -262,8 +262,27 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   });
   const prepared = await prepareVault(CONFIG, LOG_015);
   const vault = openVault(db.vault, prepared, createDatabase(pool));
-  // `connect`: the pool's connection opened, by a statement no count or delay sees, so that a measured call's time is its own.
-  const connect = async () => { await client.unsafe('SELECT 1'); };
+  // `connect`: the pool's connection opened, and the hot path's plans made on it, by statements no count or delay sees,
+  // so that a measured call's time is its own: an isolate's first, as cold as its row makes it, on a connection that has
+  // served before. A connection's first call plans every form of the use functions (T131). On CI's runners, beside the
+  // other cells and matrices, a cold connection's first statement took 135 ms past its delay at the median, 377 ms at
+  // p90 and 585 ms at most (636 calls); a two-statement answer then took up to 2.48 s, and a slower one crossed the 3 s
+  // deadline (T198). Warmed, the same took 10 ms, 51 ms and 218 ms (756 calls), and answers at most 2.15 s: that the
+  // difference is planning is inferred from this comparison, not measured apart. An isolate of its
+  // own makes that call, by a token no credential has: it writes nothing, and the measured isolate's map stays as its
+  // row set it. It knows the log cut over, so that its call is the one statement on this connection and reads nothing
+  // on the vault's pool: one that checked the cutover there, every cell at once, left the matrices unfinished on CI.
+  const connect = async () => {
+    await client.unsafe('SELECT 1');
+    const at = Date.now();
+    const prepared = await prepareVault(CONFIG, LOG_015);
+    prepared.cutover = true;
+    const warming = openVault(db.vault, prepared, createDatabase(client));
+    await warming.useNamedMany!({
+      tokenHash: randomBytes(32).toString('base64'), place: { project: 'warm', environment: 'dev' }, keys: ['WARM'],
+      accepts: { signin: true, issuers: [] }, purpose: 'use', at, deadline: at + 3000,
+    });
+  };
   return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 

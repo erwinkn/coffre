@@ -1,6 +1,6 @@
 // Postgres behind a proxy that counts what crosses it, for the tests that
 // hold a Worker's database to its round trips (packages/db/test/hyperdrive.test.ts,
-// packages/server/test/request-cost.test.ts), and that can stand in for a
+// packages/server/test/request-cost.alone.ts), and that can stand in for a
 // slow network.
 import { once } from 'node:events';
 import { connect, createServer, type Socket } from 'node:net';
