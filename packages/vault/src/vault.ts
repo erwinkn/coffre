@@ -870,7 +870,9 @@ class VaultService implements Vault {
         // The bound on lock waits, the members' rows, then the head and everything the decision reads, in one statement
         // (`snapshot` says why it holds): asked together, they go in that order under one Sync (postgres-js's `gather`).
         const [, members, reads] = await Promise.all([
-          store.boundLockWaits(tx, within(deadline, shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS), shared),
+          // A call with a deadline bounds each statement too: a queue for the head, which each holder updates, starts a
+          // waiter's lock clock over at every holder (`boundLockWaits`; review r16 of #467).
+          store.boundLockWaits(tx, within(deadline, shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS), shared || deadline !== undefined),
           principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
           this.#snapshot(tx, principals, asked, !late, shared ? READ_QUEUE : queue),
         ]);

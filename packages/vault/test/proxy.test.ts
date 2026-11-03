@@ -484,6 +484,31 @@ test("a reservation waits for the head within one bound, however late it took th
   }
 });
 
+test("a reservation's wait for the head ends within its bound, however many changes hold the head in turn (review r16 of #467)", { skip: ON_015.skip || postgresOnly('the head is a row lock of Postgres').skip }, async () => {
+  const w = await world({ codeWaitMs: 1_000 });
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  // A change holding the head, as an append does: the row locked and updated, its version a new one, for `ms`.
+  const change = (ms: number) => db.owner.transaction(async (tx) => {
+    await run(tx, sql`SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE`);
+    await run(tx, sql`UPDATE audit_chain_head SET next_seq = next_seq WHERE only_row`);
+    await pause(ms);
+  });
+  const first = change(600);
+  await pause(50);
+  // The next in line, behind the first.
+  const second = change(800);
+  await pause(50);
+  const started = Date.now();
+  try {
+    const ended = await w.vault.reserveProxy({ names: ['openai'] }).then(() => 'reserved' as const, (error: unknown) => error);
+    const ms = Date.now() - started;
+    assert.ok(gaveUp(ended), `the reservation ended ${ended instanceof Error ? ended.message : String(ended)} after ${ms} ms`);
+    assert.ok(ms < 1_400, `the reservation gave up after ${ms} ms, past its bound of 1,000`);
+  } finally {
+    await Promise.all([first, second]);
+  }
+});
+
 test("names reserved already are found so while another transaction holds SQLite's one writer, which a read waits for not (review r15 of #467)", ON_015, async () => {
   const w = await world({ codeWaitMs: 1_000 });
   assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
