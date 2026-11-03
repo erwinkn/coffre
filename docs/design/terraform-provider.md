@@ -32,15 +32,19 @@ resource "scaleway_iam_api_key" "backup" {
   secret_id      = scaleway_secret.backup_key.id # secret_key goes to Secret Manager, not state
 }
 
-ephemeral "scaleway_secret_version" "backup_key" {
+data "scaleway_secret" "backup_key" { # read after the key is made, when it is made in this run
   secret_id  = scaleway_secret.backup_key.id
-  revision   = "1" # this key's secret_key: its secret holds no other, and "latest" may be anyone's
   depends_on = [scaleway_iam_api_key.backup]
+}
+
+ephemeral "scaleway_secret_version" "backup_key" {
+  secret_id = scaleway_secret.backup_key.id
+  revision  = "1" # this key's secret_key: its secret holds no other, and "latest" may be anyone's
 
   lifecycle {
-    postcondition { # revision 1 was written by this key's creation, not a previous key's (section 7)
-      condition     = timecmp(self.created_at, scaleway_iam_api_key.backup.created_at) >= 0
-      error_message = "The key was made again outside its generation: bump rotation in terraform_data.backup_key."
+    precondition { # one version: only this key wrote to its secret (section 7)
+      condition     = data.scaleway_secret.backup_key.version_count == 1
+      error_message = "The key's secret holds more than its value (the key was made again, or a version added): bump rotation in terraform_data.backup_key."
     }
   }
 }
@@ -506,9 +510,9 @@ resource "scaleway_rdb_user" "app" {
   instance_id         = scaleway_rdb_instance.main.id
   name                = "app"
   password_wo         = base64decode(ephemeral.scaleway_secret_version.app_db.data)
-  # The source version's creation time as a number (an int here): it changes
-  # whenever the source is written, by a rotation or by recreating it.
-  password_wo_version = parseint(formatdate("YYYYMMDDhhmmss", scaleway_secret_version.app_db.created_at), 10)
+  # The source version's ID, as the int this argument takes: 60 bits of its
+  # SHA-256, new whenever the source is written, by a rotation or by recreating it.
+  password_wo_version = parseint(substr(sha256(scaleway_secret_version.app_db.id), 0, 15), 16)
 }
 
 resource "coffre_secret" "app_db_password" {
@@ -532,8 +536,8 @@ section 5's rules (no write on drift, a looser nature only with a new
 version) never send a value one destination lacks.
 
 **Follow the source, not the counter.** Both destinations' versions
-come from the source version itself (its ID for coffre, its creation time
-for the database user, whose version must be an int), not from
+come from the source version itself (its ID for coffre; for the database
+user, whose version must be an int, 60 bits of that ID's SHA-256), not from
 `app_db_rotation`. `data_wo_version` replaces the source version when it
 changes, so a rotation makes a new one and both destinations follow it.
 The same holds when the source is lost. Say the rotation writes password
@@ -542,7 +546,10 @@ the retry: Scaleway's refresh drops a missing secret from state, so the
 retry makes it again, with a fresh password B. A destination keyed on the
 counter would split: the database, its counter already recorded, keeps A,
 and coffre writes B. Keyed on the source, both see a new version and both
-take B.
+take B. The ID, not the version's creation time: Scaleway reports times to
+the second, and two versions made within one would look alike to the
+database while coffre took the new one. Two IDs share a 60-bit prefix with
+odds of one in 2^60, and only consecutive versions must differ.
 
 **Pin the revision.** Scaleway resolves `latest` afresh each time the
 ephemeral resource opens. Say the rotation writes the database, coffre
@@ -569,14 +576,18 @@ in Scaleway's console (refresh drops it, the next apply makes key B), or
 `terraform apply -replace=scaleway_iam_api_key.backup`. B's value lands
 as revision 2, and revision 1 is A's, now dead. The secret cannot be
 replaced along with the key (`replace_triggered_by` on the key would make
-a cycle, the key naming the secret), so the ephemeral read checks
-instead: its postcondition requires revision 1 to be no older than the
-key. For B it fails, before coffre is written, and the error says what to
-do: bump `rotation`, which replaces the secret and the key. Rotate that
-way, never with `-replace` on the key. Both times are Scaleway's, and
-the version is written after the key's creation returns, so only clocks
-apart by more than that round trip could stop a good run; that would
-stop it, never write a wrong value. A computed `secret_revision` on Scaleway's
+a cycle, the key naming the secret), so the read checks instead: its
+precondition requires the secret to hold exactly one version, counted by
+the `scaleway_secret` data source, which `depends_on` reads after the key
+when the key is made in the same run. For B there are two, and the read
+stops before coffre is written, with an error that says what to do: bump
+`rotation`, which replaces the secret and the key. Rotate that way, never
+with `-replace` on the key. The count says nothing about which key wrote,
+only that one did: a version added by hand trips it too, and a retry
+that pinning alone would have saved stops instead. That is the trade:
+the check may stop a run that was safe, never let one write a wrong
+value. (Timestamps cannot do this: Scaleway reports them to the second,
+from two services' clocks.) A computed `secret_revision` on Scaleway's
 key, a small upstream change, would replace the generation and the check
 with one pinned revision; until then, both are part of the pattern, not
 decoration.
@@ -670,12 +681,17 @@ mirror.
     leaves both holding the same value, also when a newer source version
     was added between the failure and the retry (the pinned revision),
     and when the source secret was deleted between them (both take the
-    recreated source's value); and section 1's API key, whose coffre
-    write fails, gets a revision 2 added by hand, and whose retry still
-    writes revision 1's value; whose application change plans its
+    recreated source's value), also when the old and the recreated
+    source versions report the same creation second (the database's
+    version still changes); and section 1's API key, whose coffre
+    write fails, gets a revision 2 added by hand between the retry's
+    plan and its apply, and whose retry still writes revision 1's value;
+    which, with that revision added before the plan, fails the read's
+    precondition and writes nothing; whose application change plans its
     secret's replacement with it; and which, deleted upstream or forced
-    with `-replace`, fails the read's postcondition before any coffre
-    write, then writes the new key's value once `rotation` is bumped;
+    with `-replace`, fails the read's precondition before any coffre
+    write, however close the two keys' creation times, then writes the
+    new key's value once `rotation` is bumped;
   - forks: a key Terraform overrides in a fork, then reset to the
     parent's between applies, gives a warning and no write; a
     sensitivity-only change then fails at plan; a changed
@@ -722,9 +738,9 @@ mirror.
    whenever the list showed one.
    A value with two destinations comes from one stored source, read at
    the revision Terraform wrote, and both destinations' versions follow
-   that source version, not a counter; an API key's source is a secret of
-   its own per key, read at revision 1, which a postcondition holds to
-   being no older than the key. In a fork, a key reset to its parent's
+   that source version's ID, not a counter or a time; an API key's source
+   is a secret of its own per key, read at revision 1, which a
+   precondition holds to being the secret's only version. In a fork, a key reset to its parent's
    is reported like a hand-written version, and a removed one fails the plan.
 6. Destroy keeps the key (`on_destroy = "keep"`). Archiving takes
    `on_destroy = "archive"` in a reviewed apply, and a credential made for
