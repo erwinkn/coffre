@@ -272,7 +272,7 @@ test("a placeholder shapes the one rule the handle rides in: Stripe's key prefix
   await clientFor(deps, ROOT).secrets.set('market/dev', { STRIPE_ACCOUNT: { value: STRIPE_ACCOUNT, sensitivity: 'secret' } });
   const refused = await route('/use/market/dev', { headers: { authorization: `Bearer ${handle}` } });
   assert.equal(refused.status, 409);
-  assert.match(((await refused.json()) as { message: string }).message, /stripe's placeholder shapes the one key a header, query, form or JSON rule carries, and market\/dev's keys that are no plain ones sit in 2 of its rules/);
+  assert.match(((await refused.json()) as { message: string }).message, /stripe's placeholder shapes the one key a header, query, form, JSON or path rule carries, and market\/dev's keys that are no plain ones sit in 2 of its rules/);
 });
 
 test('a code item scoped to market/prod: absent from market/dev\'s plan and refused there by name, served in market/prod', async () => {

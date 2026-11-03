@@ -28,7 +28,7 @@ import { insertSession } from '../src/db/workloads.ts';
 import { processGates, type Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
-import { credentialProxy, form, header, hmac, json, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, form, header, hmac, json, path, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -790,5 +790,27 @@ test("a form or JSON rule fills its field whatever the app put there, once the p
   }
   const encoded = await use(held, 'POST', '/use/gather/token', { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: `refresh_token=x&note=${held.token.replace('_', '%5F')}` });
   assert.equal(encoded.status, 400, JSON.stringify(encoded.body));
+  assert.equal(reached.length, 2);
+});
+
+test("a path rule fills the first segment its template frames, whatever the app put there; the session token anywhere in the URL is refused", async () => {
+  runtime = makeRuntime({
+    plugins: checkPlugins([credentialProxy({
+      credentials: { telegram: { upstream: `${upstreamAt}/tg`, inject: path('bot{STRIPE_KEY}') } },
+      insecureUpstreams: true,
+    })]),
+  });
+  await bind();
+  const held = await session();
+  const sent = await use(held, 'POST', '/use/telegram/botcoffre/sendMessage', { headers: { 'content-type': 'application/json' }, body: '{"chat_id":1}' });
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(reached[0]!.url, `/tg/bot${STRIPE_KEY}/sendMessage`);
+  assert.equal((await use(held, 'GET', '/use/market/prod/telegram/file/bot0:coffre/photos/file_0.jpg')).status, 200);
+  assert.equal(reached[1]!.url, `/tg/file/bot${STRIPE_KEY}/photos/file_0.jpg`);
+  const none = await use(held, 'GET', '/use/telegram/getMe');
+  assert.equal(none.status, 400, JSON.stringify(none.body));
+  const leaked = await use(held, 'GET', `/use/telegram/botcoffre/getMe?note=${held.token}`);
+  assert.equal(leaked.status, 400, JSON.stringify(leaked.body));
+  assert.match(leaked.body.message as string, /session token/);
   assert.equal(reached.length, 2);
 });

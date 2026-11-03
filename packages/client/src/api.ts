@@ -1810,6 +1810,9 @@ export type Api = {
             name: string;
             template: string;
           } | {
+            kind: "path";
+            template: string;
+          } | {
             kind: "basic";
             user: string;
             password: string;
@@ -1889,6 +1892,9 @@ export type Api = {
           inject: ({
             kind: "form" | "header" | "json" | "query";
             name: string;
+            template: string;
+          } | {
+            kind: "path";
             template: string;
           } | {
             kind: "basic";
@@ -1985,6 +1991,9 @@ export type Api = {
           inject: ({
             kind: "form" | "header" | "json" | "query";
             name: string;
+            template: string;
+          } | {
+            kind: "path";
             template: string;
           } | {
             kind: "basic";
@@ -2082,6 +2091,9 @@ export type Api = {
             name: string;
             template: string;
           } | {
+            kind: "path";
+            template: string;
+          } | {
             kind: "basic";
             user: string;
             password: string;
@@ -2176,6 +2188,9 @@ export type Api = {
           inject: ({
             kind: "form" | "header" | "json" | "query";
             name: string;
+            template: string;
+          } | {
+            kind: "path";
             template: string;
           } | {
             kind: "basic";
@@ -2893,6 +2908,9 @@ export type ProxyPage = {
         name: string;
         template: string;
       } | {
+        kind: "path";
+        template: string;
+      } | {
         kind: "basic";
         user: string;
         password: string;
@@ -2987,6 +3005,9 @@ export type ProxyPage = {
       inject: ({
         kind: "form" | "header" | "json" | "query";
         name: string;
+        template: string;
+      } | {
+        kind: "path";
         template: string;
       } | {
         kind: "basic";

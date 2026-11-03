@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **A key in the path: `path()` (T208).** Telegram's Bot API takes its
+  token in the URL's path (`/bot<token>/sendMessage`, and files under
+  `/file/bot<token>/…`), so a credential may now name a segment's
+  template: `inject: path('bot{TELEGRAM_BOT_TOKEN}')`, in code or as a
+  Path rule in the Proxy tab. The app's SDK points its base URL at
+  `/use/telegram` and holds its placeholder as the token; coffre puts the
+  value, percent-encoded, in the first segment under the upstream that the
+  template frames, after routing and the allow list have read the path as
+  the app sent it (`allow: [{ methods: ['POST'], path: '/*/sendMessage' }]`).
+  A value a server could read as another path (empty, or with `/`, `\`,
+  `?`, `#`, `%`, `;`, `..`, whitespace or a control character) is a 409
+  naming the key, with nothing sent; a path with no such segment is a
+  400. A redirect under the upstream that quotes the segment gets the
+  app's back, and the value is redacted from answers, its encoded form
+  and the segment included. aiogram, which checks the token's shape,
+  takes `placeholder: prefix('<bot id>:')`. A use is still one vault call
+  (docs/design/credential-proxy.md, section 5, "A segment of the path").
+
 - **The proxy serves UI routes to workloads (T186, PR C2b1).** A
   key-bound session (`coffre serve`, `@coffre/client/workload`) or a
   Cloudflare service binding's call now reaches a route saved in the

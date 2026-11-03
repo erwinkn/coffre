@@ -57,15 +57,16 @@ import { database, tunnel as tunnelPostgres, type Database } from './postgres-tu
 import { hmacSign, hmacVerify, type Encoding } from './hmac.ts';
 import { signWith, SigningKeyError } from './sign.ts';
 import { presignV4, signV4 } from './sigv4.ts';
-import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, methodsFor, PARAMETER_NAME, PLACEHOLDER_PREFIX, readPattern, requestSegments, SIGNATURE_PREFIX } from '@coffre/core/proxy-match';
+import { type AllowEntry, alike, allows, bytesOf, climbs, FIELD_NAME, HANDLE_CLAIM, MAX_MESSAGE_BYTES, methodsFor, PARAMETER_NAME, pathSlot, pathTemplate, pathValue, PLACEHOLDER_PREFIX, readPattern, requestSegments, SIGNATURE_PREFIX } from '@coffre/core/proxy-match';
 import { workersSocket, type WorkersSocket } from '../workers-socket.ts';
 import { logged } from '../logged.ts';
 
-/** How a credential's values reach its upstream: in a header, a query parameter, a field of a form or JSON body, Basic authentication, or an AWS signature. */
+/** How a credential's values reach its upstream: in a header, a query parameter, a field of a form or JSON body, a segment of the path, Basic authentication, or an AWS signature. */
 export type Inject =
   | { kind: 'header'; name: string; template: string }
   | { kind: 'query'; name: string; template: string }
   | { kind: 'form' | 'json'; name: string; template: string }
+  | { kind: 'path'; template: string }
   | { kind: 'basic'; user: string; password: string }
   | ({ kind: 'sigv4' } & SigV4);
 
@@ -101,6 +102,19 @@ export function form(name: string, template: string): Inject {
  */
 export function json(name: string, template: string): Inject {
   return { kind: 'json', name, template };
+}
+
+/**
+ * A segment of the path the upstream reads its key from, as Telegram's Bot
+ * API does: `path('bot{TELEGRAM_BOT_TOKEN}')`. The app's SDK puts what it
+ * holds for the key there (`/botcoffre_use_…/sendMessage`); coffre puts the
+ * value in its place, percent-encoded, in the first segment under the
+ * upstream that the template frames, after the allow list has read the path
+ * as the app sent it. A value a server might read as another path (`/`,
+ * `..`, `?`, `%`, …) goes nowhere. One per credential.
+ */
+export function path(template: string): Inject {
+  return { kind: 'path', template };
 }
 
 /** HTTP Basic authentication: `basic('{TWILIO_SID}', '{TWILIO_TOKEN}')`. */
@@ -197,7 +211,7 @@ export type Credential = {
    * for every environment and fork alike.
    */
   identifiers?: 'gone in 0.10: mark each key plain instead, coffre set <env>/<KEY> <value> --plain';
-  /** The shape of what the app holds for its key, `jwt(…)` or `prefix(…)`, where a header, query, form or JSON rule carries that one key: the handle as it is, unless set. */
+  /** The shape of what the app holds for its key, `jwt(…)` or `prefix(…)`, where a header, query, form, JSON or path rule carries that one key: the handle as it is, unless set. */
   placeholder?: Placeholder;
   /**
    * Which requests it takes, each entry its methods and path (`Allow`):
@@ -405,8 +419,14 @@ const DROPPED = new Set([
 ]);
 const DROPPED_ANSWER = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'set-cookie', 'content-length', 'content-encoding', 'trailer']);
 
-/** One rule of a credential's, read: the keys it names, and, with a placeholder, what its slot must be, the handle its one group. */
-type Rule = Inject & { keys: readonly string[]; shape?: RegExp };
+/**
+ * One rule of a credential's, read: the keys it names, and, with a placeholder, what its slot must be, the handle its
+ * one group. A path rule's slot is always that exactly, the bare handle in the key's place without a placeholder, and it
+ * keeps its template's text around the key (`framed`).
+ */
+type Rule = Inject & { keys: readonly string[]; shape?: RegExp; framed?: { before: string; after: string } };
+
+type PathRule = Extract<Rule, { kind: 'path' }>;
 
 /** A rule that fills a field of the body, a form's or a JSON object's. */
 type BodyRule = Extract<Rule, { kind: 'form' | 'json' }>;
@@ -425,6 +445,8 @@ type Resolved = Omit<Credential, 'inject' | 'allow'> & {
   rules: readonly Rule[];
   body: readonly BodyRule[];
   sigv4: SigV4Rule | undefined;
+  /** Its `path()` rule, one at most. */
+  path: PathRule | undefined;
   allowed: readonly AllowEntry[] | null;
 };
 
@@ -720,12 +742,14 @@ async function uiHandle(request: Request, url: URL): Promise<string | null | Res
 
 /**
  * The handles a request carries outside its body, found by their shape before any definition says where one rides:
- * in any header (a custom one such as `x-api-key`, SigV4's `Credential=`, Basic's pair decoded) or the query. The
- * item the use decides on then checks that the handle sits where it takes its key (`sendAs`).
+ * in any header (a custom one such as `x-api-key`, SigV4's `Credential=`, Basic's pair decoded), the query or the
+ * path (a path rule's segment, `/botcoffre_use_…/sendMessage`). The item the use decides on then checks that the
+ * handle sits where it takes its key (`sendAs`).
  */
 function handlesOutside(request: Request, url: URL): Set<string> {
-  // As sent and as decoded: `?key=coffre%5Fuse_…` is the handle `handleIn` reads from `searchParams` (review r7 of #467).
-  const found = new Set<string>(url.search.match(HANDLES) ?? []);
+  // As sent and as decoded: `?key=coffre%5Fuse_…` is the handle `handleIn` reads from `searchParams` (review r7 of #467),
+  // and a segment is read decoded once, as `appSegment` reads it.
+  const found = new Set<string>([...(url.search.match(HANDLES) ?? []), ...(url.pathname.match(HANDLES) ?? []), ...(bytesOf(url.pathname).match(HANDLES) ?? [])]);
   for (const [name, value] of url.searchParams) for (const handle of `${name}\n${value}`.match(HANDLES) ?? []) found.add(handle);
   for (const [name, value] of request.headers) {
     for (const handle of value.match(HANDLES) ?? []) found.add(handle);
@@ -928,6 +952,7 @@ function credentialOf(route: ProxyRoute): Credential {
       case 'basic': return basic(rule.user, rule.password);
       case 'sigv4': return sigv4({ accessKeyId: rule.accessKeyId, secretAccessKey: rule.secretAccessKey, ...(rule.sessionToken === null ? {} : { sessionToken: rule.sessionToken }), region: rule.region, service: rule.service });
       case 'header': return header(rule.name, rule.template);
+      case 'path': return { kind: 'path', template: rule.template };
       default: return { kind: rule.kind, name: rule.name, template: rule.template };
     }
   });
@@ -1064,10 +1089,10 @@ async function plan(request: Request, coffre: PluginContext, proxy: Proxy, path:
       const ride = riding(credential, (key) => plainKeys.has(key));
       const rule = ride.length === 1 ? ride[0] : undefined;
       if (rule !== undefined && rule.shape === undefined) {
-        throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form or JSON rule carries, and in ${held.environment.path} the handle rides in its ${rule.kind}() rule, which no placeholder shapes: drop the placeholder, or mark that rule's keys plain`);
+        throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form, JSON or path rule carries, and in ${held.environment.path} the handle rides in its ${rule.kind}() rule, which no placeholder shapes: drop the placeholder, or mark that rule's keys plain`);
       }
       if (rule === undefined) {
-        throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form or JSON rule carries, and ${held.environment.path}'s keys that are no plain ones sit in ${ride.length} of its rules: mark the others plain, or drop the placeholder`);
+        throw new CoffreError(409, 'conflict', `${credential.name}'s placeholder shapes the one key a header, query, form, JSON or path rule carries, and ${held.environment.path}'s keys that are no plain ones sit in ${ride.length} of its rules: mark the others plain, or drop the placeholder`);
       }
       placeholder = await shaped(coffre, credential, rule.keys[0]!, handle, readOf(proxy, path), ui.routes.includes(credential) ? resolved : null);
     }
@@ -1923,7 +1948,8 @@ async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, va
 }
 
 /** Where a request through a credential goes, under its upstream, once its path is checked: the URL, the upstream's own path, and the request's within it. */
-type Aim = { target: URL; under: string; relative: string };
+/** Where a request goes: its target, the upstream's path, the path under it as the app sent it, and, through a `path()` rule, the index of its segment there (`pathSlot`). */
+type Aim = { target: URL; under: string; relative: string; slot: number };
 
 /**
  * The upstream URL a request through `credential` goes to, or the refusal:
@@ -1946,6 +1972,9 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   const relative = target.pathname.slice(under.length) || '/';
   const refused = allowed(credential, request.method, relative);
   if (refused !== null) return refused;
+  // A path rule's segment, found in the path as the app sent it, before anything is opened: the value never decides it.
+  const slot = credential.path === undefined ? -1 : pathSlot(credential.path.framed!, relative);
+  if (credential.path !== undefined && slot === -1) return failure(400, `${credential.name} takes its key in a segment of the path, ${credential.path.template}, and this path has none`);
   if (credential.sigv4 !== undefined) {
     if (target.searchParams.has('X-Amz-Signature') || target.searchParams.has('X-Amz-Credential')) return failure(400, `a presigned URL signs with the real key: ${credential.name} takes requests the SDK signs in their headers`);
     const hash = request.headers.get('x-amz-content-sha256') ?? '';
@@ -1954,7 +1983,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
     }
     if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
   }
-  return { target, under, relative };
+  return { target, under, relative, slot };
 }
 
 /**
@@ -2117,6 +2146,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
     const ride = riding(credential, (key) => opened.plain.includes(key));
     if (credential.body.some((rule, at) => ride.includes(rule) && handleOf(rule, fields.values[at]!) !== handle)) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
   }
+  const unheld = pathHeld(credential, target, handle, opened.plain);
+  if (unheld !== null) return unheld;
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   // Where its redirects stay: the environment's URL, the stable one's included. Under the stable URL, a path that begins
@@ -2161,6 +2192,8 @@ async function sendAs(request: Request, coffre: PluginContext, credential: Resol
     const ride = riding(credential, (key) => opened.plain.includes(key));
     if (credential.body.some((rule, at) => ride.includes(rule) && handleOf(rule, fields.values[at]!) !== handle)) return failure(400, `the handle is not in the field where ${credential.name} takes its key`);
   }
+  const unheld = pathHeld(credential, target, handle, opened.plain);
+  if (unheld !== null) return unheld;
   const headers = new Headers();
   for (const [name, value] of request.headers) if (sent(name)) headers.set(name, value);
   return send(request, credential, { ...aimed, ...content, opened, headers, proxied: `${coffre.publicUrl}/use/${route}`, back, fields, secret: { pattern: HANDLE, length: HANDLE_LENGTH, what: 'the handle' }, sendBy, ...(through === undefined ? {} : { through }) });
@@ -2539,8 +2572,10 @@ type Sending = Aim & Carried & {
  * authenticated the request to coffre goes nowhere upstream.
  */
 async function send(request: Request, credential: Resolved, out: Sending): Promise<Response> {
-  const { target, under, streamed, declared, digest, headers, opened: { values, plain }, secret } = out;
+  const { target, under, slot, streamed, declared, digest, headers, opened: { values, plain }, secret } = out;
   let { body } = out;
+  // A path rule's segment as it went out and as the app sent it: a redirect that quotes the one gets the other back.
+  let swap: { sent: string; app: string } | null = null;
   // A streamed body says its length itself, which S3 requires of a PutObject.
   if (streamed) headers.set('content-length', declared);
   // Each rule in order: the headers the rules before SigV4 set, which it signs too, so none is swapped on the way.
@@ -2565,6 +2600,23 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       } else if (rule.kind === 'query') {
         assembled = render(rule.template, values);
         target.searchParams.set(rule.name, assembled);
+      } else if (rule.kind === 'path') {
+        // The value as a segment's part, or nothing goes: a value a server might read as another path, encoded or not.
+        const key = rule.keys[0]!;
+        const encoded = pathValue(values[key]!);
+        const segment = encoded === null ? null : `${rule.framed!.before}${encoded}${rule.framed!.after}`;
+        if (segment === null || climbs(segment)) return failure(409, `${credential.name}'s ${key} is no segment of a path: empty, or with a /, \\, ?, #, %, ;, .., a space or a control character in it`);
+        // The path as the app sent it, that one segment changed, and nothing else: the URL setter encodes nothing more of it.
+        const segments = target.pathname.slice(under.length).split('/');
+        const app = segments[slot]!;
+        segments[slot] = segment;
+        const pathname = `${under}${segments.join('/')}`;
+        target.pathname = pathname;
+        if (target.pathname !== pathname) return failure(409, `${credential.name}'s ${key} is no segment of a path`);
+        swap = { sent: segment, app };
+        assembled = segment;
+        // Its encoded form, which the segment alone would not catch quoted apart from the text around it.
+        if (!plain.includes(key)) made.push(encoded!);
       } else if (inBody(rule)) {
         assembled = render(rule.template, values);
         filled.push(assembled);
@@ -2587,7 +2639,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     if (filled.length > 0) body = out.fields!.fill(filled);
   } catch {
     // The platform's error quotes the value it refused: neither it nor its message goes anywhere, a log included.
-    return failure(409, `${credential.name}'s value is no valid ${filling === 'query' ? 'query parameter' : 'header value'}: a line break in it, say`);
+    return failure(409, `${credential.name}'s value is no valid ${filling === 'query' ? 'query parameter' : filling === 'path' ? 'path segment' : 'header value'}: a line break in it, say`);
   }
   // The body changed: a digest of it is made again, of what goes out, and Content-Length is fetch's.
   if (out.fields !== null) {
@@ -2635,7 +2687,7 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   // A redirect stays on the proxy: under the upstream, it is the proxy's URL for it; anywhere else, the app never learns of it.
   // Redacted as the bytes it came in, before a URL encodes them again.
   const raw = upstream.headers.get('location');
-  const location = raw === null ? null : redact.whole(raw);
+  const location = raw === null ? null : redact.whole(swap === null ? raw : swappedBack(raw, swap));
   let at: string | null = null;
   if (location !== null) {
     // A `Location` no URL reads, `//` say, is nowhere under the upstream.
@@ -2658,6 +2710,15 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     return failure(400, refused);
   }
   return redacted(upstream, redact, at);
+}
+
+/**
+ * A `Location` with each segment that is the one a path rule sent, exactly, the app's again, so a redirect it follows
+ * goes through the proxy with its placeholder: `https://api.telegram.org/bot123:AAE…/getMe` is
+ * `https://api.telegram.org/botcoffre_use_…/getMe`. Any other copy of the value is then redacted, as any answer's.
+ */
+function swappedBack(location: string, { sent, app }: { sent: string; app: string }): string {
+  return location.replace(new RegExp(`(?<=/)${sent.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[/?#]|$)`, 'g'), () => app);
 }
 
 /**
@@ -2896,7 +2957,7 @@ function handleIn(request: Request, credential: Resolved, target: URL, fields: r
   for (const rule of credential.rules) {
     // Basic's and SigV4's Authorization header as sent: a handle in it outside the pair or the signature counts too.
     if ((rule.kind === 'basic' || rule.kind === 'sigv4') && authorization !== null) for (const handle of authorization.match(HANDLES) ?? []) seen.add(handle);
-    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : null)) {
+    for (const slot of slotsOf(request, rule, target, inBody(rule) ? (fields[field++] ?? null) : rule.kind === 'path' ? appSegment(credential, target) : null)) {
       for (const handle of slot.match(HANDLES) ?? []) seen.add(handle);
       const handle = handleOf(rule, slot);
       if (handle !== null) taken.add(handle);
@@ -2906,11 +2967,11 @@ function handleIn(request: Request, credential: Resolved, target: URL, fields: r
   return taken.values().next().value ?? null;
 }
 
-/** What the app put where a rule takes its key, each time it put it: a header, a parameter, a field (given), Basic's pair, or SigV4's access key id. */
+/** What the app put where a rule takes its key, each time it put it: a header, a parameter, a field or a path's segment (given), Basic's pair, or SigV4's access key id. */
 function slotsOf(request: Request, rule: Rule, target: URL, field: string | null): string[] {
   if (rule.kind === 'header') return [request.headers.get(rule.name)].filter((slot) => slot !== null);
   if (rule.kind === 'query') return target.searchParams.getAll(rule.name);
-  if (rule.kind === 'form' || rule.kind === 'json') return field === null ? [] : [field];
+  if (rule.kind === 'form' || rule.kind === 'json' || rule.kind === 'path') return field === null ? [] : [field];
   const authorization = request.headers.get('authorization');
   if (authorization === null) return [];
   // The SDK's `Credential=<access key id>/…`: the handle, as the access key it signed with.
@@ -2929,6 +2990,29 @@ function slotsOf(request: Request, rule: Rule, target: URL, field: string | null
 /** The handle in what the app put where a rule takes its key: a shaped placeholder's slot is that shape exactly; the handle alone is found wherever the rule frames it. */
 function handleOf(rule: Rule, slot: string): string | null {
   return rule.shape === undefined ? (HANDLE.exec(slot)?.[0] ?? null) : (rule.shape.exec(slot)?.[1] ?? null);
+}
+
+/**
+ * The segment a credential's `path()` rule takes its key in, as the app sent it, decoded once (`pathSlot`, as `aim`
+ * found it): `botcoffre_use_…`; null for none, or no such rule.
+ */
+function appSegment(credential: Resolved, target: URL): string | null {
+  if (credential.path === undefined) return null;
+  const relative = target.pathname.slice(credential.base.pathname.replace(/\/$/, '').length) || '/';
+  const at = pathSlot(credential.path.framed!, relative);
+  return at === -1 ? null : bytesOf(relative.split('/')[at]!);
+}
+
+/**
+ * Whether a handle's request carries its handle where the credential's `path()` rule takes its key, when the handle
+ * rides there (`riding`): the segment exactly, in its shape, as a field the handle rides in must hold it, x-coffre-handle's
+ * handle too. A segment of plain keys alone holds what the app put, which the value replaces.
+ */
+function pathHeld(credential: Resolved, target: URL, handle: string, plain: readonly string[]): Response | null {
+  const rule = credential.path;
+  if (rule === undefined || !riding(credential, (key) => plain.includes(key)).includes(rule)) return null;
+  const segment = appSegment(credential, target);
+  return segment !== null && handleOf(rule, segment) === handle ? null : failure(400, `the handle is not in the segment of the path where ${credential.name} takes its key, ${rule.template}`);
 }
 
 function bearer(request: Request): string | null {
@@ -3294,24 +3378,34 @@ function resolve(name: string, credential: Credential, insecure: boolean): Resol
   if (credential.placeholder !== undefined) {
     const placeholder = credential.placeholder;
     checkPlaceholder(name, placeholder);
+    // It may shape the path's one segment (`riding`), which a slash would make two.
+    if (placeholder.kind === 'prefix' && placeholder.prefix.includes('/') && rules.some((rule) => rule.kind === 'path')) throw new Error(`credentialProxy: ${name}'s prefix() has a /, and its path() rule takes the placeholder in one segment`);
     // Each rule that carries one key, once, may be the one the placeholder shapes: which one, the environment's plain keys say (`riding`).
     for (const [at, rule] of rules.entries()) if (shapeable(rule)) rules[at] = { ...rule, shape: placeholderShape(placeholder, rule) };
     if (!rules.some((rule) => rule.shape !== undefined)) {
       const kinds = [...new Set(rules.map((rule) => (rule.kind === 'basic' || rule.kind === 'sigv4' ? `a ${rule.kind}() rule` : 'a template with several keys, or one twice')))];
-      throw new Error(`credentialProxy: ${name}'s placeholder shapes the one key a header, query, form or JSON rule carries, header('authorization', 'Bearer {TOKEN}'), not ${kinds.join(' or ')}`);
+      throw new Error(`credentialProxy: ${name}'s placeholder shapes the one key a header, query, form, JSON or path rule carries, header('authorization', 'Bearer {TOKEN}'), not ${kinds.join(' or ')}`);
     }
   }
   limited(name, credential.limit);
   const { inject: _inject, allow: _allow, ...rest } = credential;
   const body = rules.filter((rule): rule is BodyRule => inBody(rule));
   const sigv4 = rules.find((rule): rule is SigV4Rule => rule.kind === 'sigv4');
-  return { ...rest, name, base, keys, rules, body, sigv4, allowed: allowList(name, credential), ...checkScope(name, 'credential', credential.environments) };
+  const path = rules.find((rule): rule is PathRule => rule.kind === 'path');
+  return { ...rest, name, base, keys, rules, body, sigv4, path, allowed: allowList(name, credential), ...checkScope(name, 'credential', credential.environments) };
 }
 
 /** A rule as written, checked: its names and the keys its templates name, at least one. */
 function checkRule(name: string, inject: Inject): Rule {
-  if (typeof inject !== 'object' || inject === null || !['header', 'query', 'form', 'json', 'basic', 'sigv4'].includes(inject.kind)) {
-    throw new Error(`credentialProxy: ${name}'s inject is header(…), query(…), form(…), json(…), basic(…) or sigv4(…), or a list of them`);
+  if (typeof inject !== 'object' || inject === null || !['header', 'query', 'form', 'json', 'path', 'basic', 'sigv4'].includes(inject.kind)) {
+    throw new Error(`credentialProxy: ${name}'s inject is header(…), query(…), form(…), json(…), path(…), basic(…) or sigv4(…), or a list of them`);
+  }
+  if (inject.kind === 'path') {
+    // One segment, its key once, the text around it going out as written (`PATH_TEMPLATE`, the vault's save's too).
+    const read = typeof inject.template === 'string' ? pathTemplate(inject.template) : null;
+    if (read === null) throw new Error(`credentialProxy: ${name}'s path() is one segment naming one key once, path('bot{TELEGRAM_BOT_TOKEN}'), the text around it letters, digits and -._~!$&'()*+,=:@; got ${JSON.stringify(inject.template)}`);
+    const framed = { before: read.before, after: read.after };
+    return { ...inject, keys: [read.key], framed, shape: placeholderShape(undefined, { ...inject, keys: [read.key] }) };
   }
   if ((inject.kind === 'header' || inject.kind === 'query') && !PARAMETER_NAME.test(inject.name)) throw new Error(`credentialProxy: ${name} injects into ${JSON.stringify(inject.name)}, which is no header or parameter name`);
   if (inBody(inject) && !FIELD_NAME.test(inject.name)) throw new Error(`credentialProxy: ${name} fills the field ${JSON.stringify(inject.name)}, which is no field name: letters, digits and _.-, a letter or digit among them, at the top of the body`);
@@ -3339,7 +3433,7 @@ function templatesOf(inject: Inject): string[] {
 function checkRules(name: string, rules: readonly Rule[]): void {
   const seen = new Map<string, Rule>();
   for (const rule of rules) {
-    const slot = rule.kind === 'header' ? `the header ${rule.name}` : rule.kind === 'query' ? `the parameter ${rule.name}` : inBody(rule) ? `the field ${rule.name}` : `${rule.kind}()`;
+    const slot = rule.kind === 'header' ? `the header ${rule.name}` : rule.kind === 'query' ? `the parameter ${rule.name}` : inBody(rule) ? `the field ${rule.name}` : rule.kind === 'path' ? 'a segment of the path' : `${rule.kind}()`;
     // A field as an upstream's parser may read it (`alike`): `secret` and `SECRET` are one.
     const id = rule.kind === 'header' ? `header ${rule.name}` : rule.kind === 'query' ? `query ${alike(rule.name)}` : inBody(rule) ? `field ${alike(rule.name)}` : rule.kind;
     if (seen.has(id)) throw new Error(`credentialProxy: ${name} sets ${slot} twice: one rule each`);
@@ -3360,7 +3454,7 @@ function checkRules(name: string, rules: readonly Rule[]): void {
   if (rules.some(inBody)) throw new Error(`credentialProxy: ${name}'s sigv4() signs the body's hash, which a form or JSON rule would change after`);
 }
 
-/** Whether a placeholder may shape a rule's slot: a header, query, form or JSON rule that names one key, once. */
+/** Whether a placeholder may shape a rule's slot: a header, query, form, JSON or path rule that names one key, once. */
 function shapeable(rule: Rule): rule is Extract<Rule, { template: string }> {
   return rule.kind !== 'basic' && rule.kind !== 'sigv4' && [...rule.template.matchAll(TEMPLATE_KEY)].length === 1;
 }
@@ -3432,7 +3526,8 @@ function codeItems(credentials: Record<string, Credential>, tunnels: ReadonlyMap
       const rules = (Array.isArray(credential.inject) ? credential.inject : [credential.inject]) as readonly Inject[];
       const inject = rules.map((rule): ProxyInject => (rule.kind === 'sigv4'
         ? { kind: 'sigv4', accessKeyId: rule.accessKeyId, secretAccessKey: rule.secretAccessKey, sessionToken: rule.sessionToken ?? null, region: rule.region, service: rule.service }
-        : rule.kind === 'basic' ? { kind: 'basic', user: rule.user, password: rule.password } : { kind: rule.kind, name: rule.name, template: rule.template }));
+        : rule.kind === 'basic' ? { kind: 'basic', user: rule.user, password: rule.password }
+        : rule.kind === 'path' ? { kind: 'path', template: rule.template } : { kind: rule.kind, name: rule.name, template: rule.template }));
       // Code takes any HTTP method (`PROPFIND`), the tab's own items only its seven: a code item's methods go out as code wrote
       // them, upper-cased, and the tab reads a code item's as strings (`MethodsMenu`, the sample call), never as its seven.
       const methods = (given: readonly string[] | undefined) => (given ?? []).map((method) => method.toUpperCase() as ProxyMethod);
@@ -3479,13 +3574,14 @@ function checkPlaceholder(name: string, placeholder: Placeholder): void {
 /**
  * The slot a shaped placeholder fills, as a pattern: the rule's template, the
  * placeholder where its key goes, the handle its one group. Only a header, a
- * query parameter or a body's field that carries one key, once, takes a shaped placeholder:
- * Basic's pair, and an AWS key pair, are no one token to shape.
+ * query parameter, a body's field or a path's segment that carries one key, once, takes a shaped placeholder:
+ * Basic's pair, and an AWS key pair, are no one token to shape. A path rule's slot is always one exactly, the bare
+ * handle where no placeholder shapes it (`undefined`).
  */
-function placeholderShape(placeholder: Placeholder, rule: Extract<Rule, { template: string }>): RegExp {
+function placeholderShape(placeholder: Placeholder | undefined, rule: Extract<Rule, { template: string }>): RegExp {
   const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const handle = `(${HANDLE.source})`;
-  const token = placeholder.kind === 'jwt' ? `[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.${handle}` : `${escape(placeholder.prefix)}${handle}`;
+  const token = placeholder === undefined ? handle : placeholder.kind === 'jwt' ? `[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.${handle}` : `${escape(placeholder.prefix)}${handle}`;
   const [before, after] = rule.template.split(TEMPLATE_KEY).filter((_, at) => at % 2 === 0);
   return new RegExp(`^${escape(before!)}${token}${escape(after!)}$`);
 }

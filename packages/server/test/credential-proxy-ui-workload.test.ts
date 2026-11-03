@@ -543,3 +543,23 @@ test("a Cloudflare call signs with a UI signer as its binding, at the one enviro
     assert.deepEqual([sent.status, sent.body.signature], [200, createHmac('sha256', HOOK).update('hi').digest('hex')], `${path}: ${JSON.stringify(sent.body)}`);
   }
 });
+
+test("a session's UI route with a path rule: the segment its SDK wrote, whatever it holds, gets the value; one vault call warm", ON_015, async () => {
+  // Telegram's shape: the token in `/bot<token>/…`, here OPENAI_API_KEY's value, which goes as it is.
+  await save({ telegram: uiRoute('telegram', '/tg', { inject: [{ kind: 'path', template: 'bot{OPENAI_API_KEY}' }], allow: [{ methods: ['POST'], path: '/*/sendMessage' }, { methods: ['GET'], path: '/file/*/**' }] }) });
+  await bind();
+  const held = await session();
+  // As `new Bot('coffre', …)` sends it: the stand-in an SDK wanted, replaced.
+  assert.equal((await use(held, 'POST', '/use/telegram/botcoffre/sendMessage', { headers: { 'content-type': 'application/json' }, body: '{"text":"hi"}' })).status, 200);
+  assert.equal(reached.at(-1)!.url, `/tg/bot${OPENAI}/sendMessage`);
+  const from = new Map(calls);
+  const file = await use(held, 'GET', '/use/market/prod/telegram/file/bot0:coffre/photos/file_0.jpg');
+  assert.equal(file.status, 200, JSON.stringify(file.body));
+  assert.equal(reached.at(-1)!.url, `/tg/file/bot${OPENAI}/photos/file_0.jpg`);
+  assert.deepEqual(since(from), { useRoute: 1 }, 'warm, cache off: one vault call');
+  // The allow list reads the path as sent, and a path with no such segment goes nowhere.
+  const before = reached.length;
+  assert.equal((await use(held, 'GET', '/use/telegram/botcoffre/sendMessage')).status, 405);
+  assert.equal((await use(held, 'GET', '/use/telegram/file/x/y')).status, 400);
+  assert.equal(reached.length, before);
+});

@@ -27,6 +27,7 @@ import {
   routedInWords,
   rowsOf,
   sampleCall,
+  samplePath,
   saveOf,
   type Drafts,
   type ProxyDefinition,
@@ -371,4 +372,26 @@ test('a sample call reads its path as the proxy does: encoded, without its query
   const about: ProxyRoute = { ...route('site'), allow: [{ methods: [], path: '/%C3%80-propos' }] };
   assert.equal(sampleCall(about, 'GET', '/À-propos').refusal, null);
   assert.equal(sampleCall(open, 'GET', '/Á/b').refusal, null);
+});
+
+test('a path rule: its segment in the sample call, the path the proxy would take it from, and its code', () => {
+  const telegram: ProxyRoute = {
+    ...route('telegram'), upstream: 'https://api.telegram.org', inject: [{ kind: 'path', template: 'bot{TELEGRAM_BOT_TOKEN}' }],
+    allow: [{ methods: ['POST'], path: '/*/sendMessage' }, { methods: ['GET'], path: '/file/*/**' }],
+  };
+  assert.equal(samplePath(telegram), '/bot{TELEGRAM_BOT_TOKEN}/sendMessage');
+  assert.equal(samplePath({ ...telegram, allow: [{ methods: ['GET'], path: '/file/*/**' }] }), '/file/bot{TELEGRAM_BOT_TOKEN}/x');
+  assert.equal(samplePath({ ...telegram, allow: null }), '/bot{TELEGRAM_BOT_TOKEN}');
+  // The URL shows the template where the value goes, whatever the app holds in its place.
+  assert.deepEqual(sampleCall(telegram, 'POST', '/botcoffre_use_x/sendMessage'), { url: 'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage', refusal: null });
+  assert.deepEqual(sampleCall(telegram, 'GET', '/file/bot{TELEGRAM_BOT_TOKEN}/photos/a.jpg'), { url: 'https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/photos/a.jpg', refusal: null });
+  assert.deepEqual(sampleCall({ ...telegram, allow: null }, 'GET', '/bot1/getMe?offset=2'), { url: 'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe?offset=2', refusal: null });
+  // Allowed, but with no such segment: the proxy's 400.
+  assert.match(sampleCall({ ...telegram, allow: null }, 'GET', '/getMe').refusal!, /^400: no segment of this path is bot\{TELEGRAM_BOT_TOKEN\}/);
+  assert.match(sampleCall(telegram, 'GET', '/getMe').refusal!, /^40[35]/);
+  assert.match(codeOf(telegram), /inject: path\('bot\{TELEGRAM_BOT_TOKEN\}'\),/);
+  // The vault's words land under the rule's field.
+  assert.deepEqual(fieldOf("telegram: inject[0].template is one path segment naming one key once, bot{TELEGRAM_BOT_TOKEN}, the text around it letters, digits and -._~!$&'()*+,=:@", 'telegram', 'route'), {
+    field: 'inject.0', words: "Template is one path segment naming one key once, bot{TELEGRAM_BOT_TOKEN}, the text around it letters, digits and -._~!$&'()*+,=:@",
+  });
 });

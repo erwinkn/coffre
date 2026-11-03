@@ -1240,3 +1240,21 @@ test("a UI HMAC takes a message up to 1 MiB in an editable deployment, and a byt
   assert.equal(code.status, 413, JSON.stringify(code.body));
   assert.match(code.body.message as string, /64 KiB/);
 });
+
+test('a UI route with a path rule: saved as code writes it, its token in the segment the app put its placeholder in; a bad template refused at save', ON_015, async () => {
+  const telegram: ProxyDefinition = { ...uiRoute('telegram', '/tg'), inject: [{ kind: 'path', template: 'bot{OPENAI_API_KEY}' }], allow: [{ methods: ['POST'], path: '/*/sendMessage' }] } as ProxyDefinition;
+  await save({ telegram });
+  const token = await handle();
+  // As an SDK sends it: the handle in the path alone.
+  const sent = await route(`/use/telegram/bot${token}/sendMessage`, { method: 'POST', body: '{}' });
+  assert.equal(sent.status, 200, await sent.clone().text());
+  assert.equal(reached.at(-1)!.url, `/tg/bot${OPENAI}/sendMessage`);
+  assert.ok(!reached.at(-1)!.url.includes(token) && reached.at(-1)!.headers.authorization === undefined);
+  const before = reached.length;
+  assert.equal((await route(`/use/telegram/bot${token}/getMe`, { method: 'POST' })).status, 403);
+  assert.equal(reached.length, before);
+  // The vault's save refuses what code's startup refuses: two segments, two keys.
+  for (const template of ['bot/{OPENAI_API_KEY}', 'bot{OPENAI_API_KEY}{MAPS_KEY}']) {
+    await assert.rejects(save({ telegram: { ...telegram, inject: [{ kind: 'path', template }] } as ProxyDefinition }), /one path segment naming one key once/, template);
+  }
+});
