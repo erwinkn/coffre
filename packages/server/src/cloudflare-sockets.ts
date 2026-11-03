@@ -173,7 +173,7 @@ export function socketsObject<Env>(admission: (env: Env, state: ObjectState) => 
         const client = fromWebSocket(server);
         // A session that throws before it is under way, as one that fails after, closes its client and frees the slot.
         session = Promise.resolve()
-          .then(() => answer(client, connect))
+          .then(() => answer(client, workersConnect))
           .catch(() => undefined)
           .finally(() => {
             this.#open -= 1;
@@ -346,7 +346,7 @@ export function fromWebSocket(ws: WorkersWebSocket): Pipe {
  * TLS once Postgres has said it will. Imported when first used, so that
  * Node, where tests load this module, never resolves `cloudflare:sockets`.
  */
-const connect: Connect = async (host, port, signal) => {
+export const workersConnect: Connect = async (host, port, signal) => {
   if (signal?.aborted) throw new Error('the session ended');
   const { connect: tcp } = (await import('cloudflare:sockets' as string)) as { connect: (address: { hostname: string; port: number }, options: { secureTransport: 'starttls' }) => WorkersSocket };
   return workersSocket(tcp({ hostname: host, port }, { secureTransport: 'starttls' }), signal);

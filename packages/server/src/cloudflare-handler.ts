@@ -7,7 +7,7 @@ import { cloudflareSourceIp } from './auth.ts';
 import { resolveConfig, type CoffreConfig, type ResolvedConfig } from './config.ts';
 import { anchorObject, type AnchorNamespace } from './cloudflare-anchor.ts';
 import { CoffreGates, workersGates, type GatesNamespace } from './cloudflare-gates.ts';
-import { forwardSocket, IDLE_DATABASE_MS, socketsObject, type SocketsNamespace } from './cloudflare-sockets.ts';
+import { forwardSocket, IDLE_DATABASE_MS, socketsObject, workersConnect, type SocketsNamespace } from './cloudflare-sockets.ts';
 import { CoffreWorkload } from './cloudflare-workload.ts';
 import type { Gates } from './gate.ts';
 import { takesSocket } from './plugins.ts';
@@ -128,7 +128,9 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     Sockets: socketsObject<Env>((env, state) => {
       const { config, resolved, gates } = configured(env);
       const pool = new HyperdrivePool(config.database.hyperdrive.connectionString, { closeIdleMs: IDLE_DATABASE_MS });
-      const runtime = createRuntime(resolved, createDatabase(pool), versioned(config.vault), fetchTransport(), (promise) => state.waitUntil(promise), gates);
+      // Tunnels are admitted here: a UI tunnel's database, a host an Owner typed, goes out through `connect()`, whose
+      // network reaches no private address (`WorkloadTransport.connect`).
+      const runtime = createRuntime(resolved, createDatabase(pool), versioned(config.vault), { ...fetchTransport(), connect: workersConnect }, (promise) => state.waitUntil(promise), gates);
       return (request, sourceIp, hold) => admitSocket(request, runtime, sourceIp, hold);
     }),
     Gates: CoffreGates,

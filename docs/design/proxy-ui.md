@@ -2050,6 +2050,96 @@ open:
 - **Cost**: a handle, one vault call (`useRoute`); a workload, one warm
   and two cold; a kept HMAC, none.
 
+**PR C as built, tunnels (C2b3, W312).** Where C2b3 settles what section
+3's "Tunnels" left open:
+- **The model first** (R45). `Tunnel.tla` gains an edit of the session's
+  item and an edit of another item of the environment, each at any tick,
+  and an invariant, `EditEndsWithinBound`: a session whose item was saved
+  anew ends within R + D of the save, the bound a revocation has. Two
+  protections, each shown necessary: the recheck compares the decided
+  item's digest with the one dialled (`DigestRecheck`; without it, TLC
+  finds a session open past the bound behind checks that see the key and
+  nothing else), and that digest is the item's own, never the object
+  seal (`ItemDigest`; comparing the seal, another item's save ends a
+  session whose item stands, `StandingStaysOpen`). No lock is added: the
+  check is the use a route makes.
+- **Where:** `/use/<project>/<env>/<name>` as a WebSocket, a name code
+  lacks (R66), for a handle (the place reading) or a workload (its stable
+  reading at the place its statement checked), each as code's tunnel
+  authenticates it. The vault's one call decides the item and its key;
+  the item is checked before the read opens any value (`refuses`): a
+  route, signer or verifier is no database (404), and a database naming
+  a network is 503, never dialled directly, since no deployment's code
+  declares networks yet (the Proxy tab refuses one at save, 400). Then
+  the decided item's hosts and section 5's checks (`dialled`, code's).
+- **The session's group is the item's.** A session is grouped by caller,
+  place, name and the digest it dialled, so one opened on a newer item
+  never joins the checks that hold the older one's sessions: an edit
+  that keeps the host ends the sessions of the item before it, and those
+  dialled since stand.
+- **The recheck** is the same use, the item's digest given as the copy's
+  so the vault sends no definition back, and refuses a decided item of
+  another digest before the read (503 `moved`): the check is a no and
+  the group ends. A deleted item, a revoked handle or a lost grant is a
+  no the same way. A handle's group keeps code's one check, which arms
+  the watchdog; a workload's, code's two: its statement every two thirds
+  of the bound, and the item's use every `recheckSeconds`.
+- **Each connection is a use.** A UI tunnel keeps no values: unlike
+  code's, whose open may take the value cache's URL and decide at once,
+  every connection asks the vault, as a private key's sign does. A pool
+  of connections is a use each, at the connect, never a query.
+- **The plan** names the place's UI databases under `tunnels`, as code's,
+  with the key the listener stands in for and never the URL; a
+  workload's plan the same, from its one `proxyItem` call.
+- **An Owner's database on Node** (section 5; review r1 of #485). The
+  hosts are an Owner's, so a name they typed may resolve to the server's
+  own network: `dialled` checks the URL's host against them by spelling,
+  and the session then dials through the runtime's `publicConnect`
+  (`PluginContext.publicConnect`, from the platform's transport), never
+  the platform's plain TCP. On Node it resolves the name through
+  `publicLookup` as the connection opens, so `db.attacker.example`
+  resolving to `10.0.1.5` gets no SYN, and Postgres's SSL request never
+  reaches it; an address written as one is checked as written. TLS, once
+  Postgres says it will, still checks the certificate against the name.
+  On Workers it is `connect()`, whose network reaches no private address
+  (the Sockets object's runtime carries it). A runtime without one answers
+  503 before the use; `insecureUpstreams` keeps the platform's, for a
+  local database. Code's tunnels are unchanged: their hosts are the
+  deployment's.
+- **The clock starts at the admission** (review r1 of #485;
+  `Tunnel.tla`'s `AdmitClock` and `LateAdmitRefused`). The vault may
+  decide the item well before its answer reaches the proxy, and an Owner
+  may save the item anew in between. The group's watchdog and its first
+  check count from when the admission's use started, not from when the
+  group was made: an answer that came after a recheck's interval is
+  checked again at once. One that came after the whole bound (R + D for a
+  handle) lets nothing in, 503 `late`, and the client asks again, by the
+  new item. Code's tunnels keep the clock they had, from when the group
+  is made, and no such refusal: a pool's 32 connections opened at once
+  take turns at their admission, and with `recheckSeconds: 1` the last is
+  answered some 16 s after it asked, which must still be let in
+  (`credential-proxy-tunnel-workers.test.ts`). Fable's review of #485
+  suggested the UI's clock for them, which would refuse those, so C2b3
+  changes no code tunnel's. A UI tunnel pays for its bound under such a
+  burst: a handle's admission, which may take 45 s at most
+  (`ADMISSION_MS`), is late only below the default `recheckSeconds`, but
+  a workload's bound is 15 s, so a workload admission answered later is
+  refused 503 `late` and asks again.
+- **The copy it claims is the copy it holds** (review r1 of #485). The
+  open tells the vault the digest it holds a definition for only when it
+  does: its copies of definitions (`ui.items`) and of which digest each
+  reading last had (`ui.last`) turn over apart, past ten thousand
+  entries, and claiming a digest whose definition is gone would have the
+  vault leave the definition out, and every open answer 503 `moved` until
+  something else brought it back. The copy claimed is kept through the
+  use, so the answer finds it however the isolate's copies turned over
+  meanwhile, and a decided item whose definition neither has is refused
+  before any value opens (`refuses`).
+- **A workload's refusals carry its nonce**, the ones the open returns as
+  its thrown ones (`nonced`), so the next proof signs the current nonce.
+- **Cost**: the open, one vault call (`useRoute`); a recheck, one.
+
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

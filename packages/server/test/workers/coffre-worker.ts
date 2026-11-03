@@ -8,6 +8,7 @@ import { github, signin } from '@coffre/core/identity';
 import { checkpointer, postgres as vaultDatabase, vault, type ObjectNamespace } from '@coffre/vault/cloudflare';
 
 import { createCoffre, postgres, type SocketsNamespace, type VaultEntry as VaultBinding } from '../../src/cloudflare.ts';
+import type { CoffrePlugin } from '../../src/plugins.ts';
 import { credentialProxy, postgres as tunnel } from '../../src/plugins/credential-proxy.ts';
 
 type Env = {
@@ -30,6 +31,17 @@ export const Vault = vault((env: Env) => ({
 }));
 export const CoffreCheckpointer = checkpointer();
 
+// What a plugin's WebSocket admission is handed to dial a host an Owner typed, a UI tunnel's database: the object's
+// `connect()` (cloudflare-handler.ts), which the suite asks for under `/probe`.
+const probe: CoffrePlugin = {
+  name: 'probe',
+  routes: {
+    prefix: '/probe',
+    fetch: async () => new Response('a WebSocket only', { status: 404 }),
+    socket: async (_, context) => Response.json({ connect: typeof context.publicConnect }),
+  },
+};
+
 const coffre = createCoffre((env: Env) => ({
   publicUrl: 'https://secrets.acme.example',
   database: postgres(env.HYPERDRIVE as never),
@@ -37,7 +49,7 @@ const coffre = createCoffre((env: Env) => ({
   auth: signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] }),
   auditChainKey: env.APP_KEY,
   // The suite's database is on loopback; a check a second, so the suite sees one.
-  plugins: [credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 1 })],
+  plugins: [credentialProxy({ credentials: {}, tunnels: { db: tunnel('DATABASE_URL') }, insecureUpstreams: true, recheckSeconds: 1 }), probe],
   sockets: env.SOCKETS,
 }));
 

@@ -194,6 +194,12 @@ else is needed.
   the Proxy tab. On Node it dials only public addresses, checked as each
   connection opens; on Workers it is the platform's. It carries no
   authority: it reaches less than the global fetch.
+- `publicConnect` (T186 PR C2b3): TCP out to a database an Owner typed, a
+  tunnel saved in the Proxy tab. On Node it resolves the name through
+  `publicLookup` as the connection opens and refuses one with any answer
+  that is not public, and checks an address written as one; on Workers it
+  is `connect()`, whose network reaches no private address. As
+  `publicFetch`, it reaches less than the session's own `connect`.
 
 **Added since, for workload access** ([workload-access.md](workload-access.md), its PR 1a):
 

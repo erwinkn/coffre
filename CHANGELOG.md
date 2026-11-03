@@ -42,8 +42,8 @@
   item again. A workload's plan names its environment's UI routes, and
   answers 503 when one of them was changed around the vault. Its
   two-segment URLs (`/use/<a>/<b>`) stay the plan and compute (signers,
-  verifiers and presign of UI items: PR C2b2, below); tunnels of UI
-  items still answer 404, until PR C2b3.
+  verifiers and presign of UI items: PR C2b2, below; tunnels: PR C2b3,
+  below).
 - **Signers, verifiers and presigned URLs saved in the Proxy tab
   (T186, PR C2b2).** `POST /use/<project>/<env>` (and a workload's
   `POST /use`) now signs, verifies and presigns with an item saved in the
@@ -77,6 +77,32 @@
   named like a property every object has (`toString`, `constructor`)
   and is missing is refused (409), never made with what the object's
   prototype lends.
+- **Tunnels to databases saved in the Proxy tab (T186, PR C2b3).** A
+  database saved in the UI (its key, the hosts it may dial) is tunnelled
+  to as code's is: `coffre run`'s plan, a handle's or a workload's,
+  names it under `tunnels`, never the URL, and `/use/<project>/<env>/<name>`
+  opens it. Each connection is a route use of the item by name, decided
+  for the caller and for the item's editor, and dials only the hosts of
+  the item the vault decided on. Each recheck, every `recheckSeconds`, is
+  the same use, and passes only if the item decided on is the one the
+  session dialled: an Owner who narrows the hosts, or deletes the item,
+  ends its sessions within `recheckSeconds` plus the check's deadline
+  (70 s by default), and the reconnect dials by the new item. Saving
+  another item of the environment ends nothing. A UI route is no
+  database (404). A database naming a network, which no deployment's
+  code declares yet and the Proxy tab refuses at save, answers 503 and
+  is never dialled directly. Each connection is a use of its own: its
+  values are never kept. The hosts are an Owner's, so on Node the
+  connection resolves the name as it opens and dials only a public
+  address (`publicConnect`, as a UI route's `publicFetch`): a name that
+  resolves to `10.0.1.5` gets no SYN; a runtime without such a connect
+  dials none, 503, and `insecureUpstreams` keeps the platform's, for a
+  local database. A session's clock starts when its admission's use
+  started, so one whose answer came late is checked at once, and one
+  that came after the whole bound lets nothing in (503 `late`). Code's
+  tunnels keep counting from when their session's group is made, and let
+  a slow admission in: a pool's burst of connections, taking turns, has
+  some answered well past a short `recheckSeconds`.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart
@@ -137,8 +163,8 @@
   caller may read (403 `placeholder_unread` otherwise); a plan read from
   the person's own personal config takes no UI route of the base
   environment; and on 0.14's log an editable proxy's plan is code's, as
-  before. Tunnels of UI items answer 404 until PR C2b3 (workloads'
-  routes: PR C2b1; signers, verifiers and presign: PR C2b2, above); a
+  before. (Workloads' routes: PR C2b1; signers, verifiers and presign:
+  PR C2b2; tunnels: PR C2b3, above.) A
   handle's request to a signer, verifier or tunnel saved in the UI is
   refused before the app reads its key's value, and keeps none.
 

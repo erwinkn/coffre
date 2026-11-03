@@ -3,7 +3,7 @@
 // session, and TCP out for that session, TLS once its protocol says so.
 // Node only: `node:net` and `node:tls` stay out of the Workers build.
 import type { IncomingMessage } from 'node:http';
-import { connect as tcp, type Socket as NetSocket } from 'node:net';
+import { connect as tcp, type LookupFunction, type Socket as NetSocket } from 'node:net';
 import { connect as tls } from 'node:tls';
 import type { Duplex } from 'node:stream';
 
@@ -12,6 +12,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Connect, Pipe, Socket } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { admitSocket } from './socket-admission.ts';
+import { literalRefusal, publicLookup } from './workloads/node-transport.ts';
 
 const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
 
@@ -97,10 +98,31 @@ function fromWebSocket(ws: WebSocket): Pipe {
 }
 
 /** TCP out, on Node: a socket, which `startTls` hands over to TLS as it stands, nothing read beyond what was asked. */
-const connect: Connect = (host, port, signal) =>
-  new Promise<Socket>((resolve, reject) => {
+const connect: Connect = (host, port, signal) => dial({ host, port }, signal);
+
+/**
+ * TCP out to a host an Owner typed, a UI tunnel's database (docs/design/proxy-ui.md, section 5): its name resolved
+ * through `lookup` as the connection opens, which refuses a name with any answer that is not public, so a name that
+ * resolves to `10.0.1.5` gets no SYN, however it resolved a moment before; an address written as one, which Node
+ * dials without asking a resolver, is checked as written. TLS, once Postgres says it will, still checks the
+ * certificate against the name (review r1 of #485).
+ *
+ *   db.acme.example:5432, resolving to 34.117.1.2       dialled
+ *   db.attacker.example:5432, resolving to 10.0.1.5     refused before the SYN: ENOTPUBLIC
+ *   [::ffff:a00:105]:5432                               refused: 10.0.1.5, written as IPv6
+ */
+export function publicConnect(lookup: LookupFunction = publicLookup): Connect {
+  return (host, port, signal) => {
+    const refused = literalRefusal(host);
+    if (refused !== null) return Promise.reject(refused);
+    return dial({ host: host.replace(/^\[|\]$/g, ''), port, lookup }, signal);
+  };
+}
+
+function dial(options: { host: string; port: number; lookup?: LookupFunction }, signal: AbortSignal | undefined): Promise<Socket> {
+  return new Promise<Socket>((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('the session ended'));
-    const socket = tcp({ host, port });
+    const socket = tcp(options);
     const abort = () => {
       socket.destroy();
       reject(new Error('the session ended'));
@@ -113,6 +135,7 @@ const connect: Connect = (host, port, signal) =>
       resolve(fromNetSocket(socket));
     });
   });
+}
 
 function fromNetSocket(socket: NetSocket | ReturnType<typeof tls>): Socket {
   // Each event's own arguments.

@@ -1,3 +1,5 @@
+import type { Connect } from '../plugins.ts';
+
 /**
  * How coffre fetches what an issuer publishes for its bindings: its
  * discovery document, then its keys (docs/design/oidc.md, section 4). One
@@ -18,6 +20,13 @@ export type WorkloadTransport = {
    * private one. Absent, such a request is refused (`insecureUpstreams` aside), never sent through the global fetch.
    */
   fetch?(url: URL, init: RequestInit): Promise<Response>;
+  /**
+   * TCP out to a host an Owner typed in a web page, a UI tunnel's database (docs/design/proxy-ui.md, section 5): on
+   * Node, one that dials only public addresses (`publicConnect`); on Workers, the platform's `connect()`, whose network
+   * reaches no private one. Absent, such a tunnel is refused (`insecureUpstreams` aside), never dialled through the
+   * platform's own.
+   */
+  connect?: Connect;
 };
 
 /** Everything, from DNS to the last byte. */
