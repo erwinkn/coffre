@@ -295,6 +295,47 @@ test("BoundToDefinition: kept values go where the item they were decided on says
   assert.deepEqual(reached.map((one) => one.url), ['/v7/v1/models/1', '/v8/v1/models/2', '/v7/v1/models/3']);
 });
 
+test("kept values answer to their own item's allow list alone, not to a newer copy another session's use brought", ON_015, async () => {
+  // Version 7 allows /v1/**, version 8 /v2/**, both /health/**. A keeps 7's values; B's use brings 8's copy. A's requests are
+  // held to 7 alone: /v1 goes, /v2 is refused, never both refused nor both let through to the kept check (review r1 of #477).
+  runtime = makeRuntime(60);
+  const allow = (path: string) => [{ methods: ['GET' as const], path: '/health/**' }, { methods: ['GET' as const], path }];
+  await save({ openai: uiRoute('openai', '/openai', { allow: allow('/v1/**') }) });
+  await bind();
+  const a = await session();
+  const b = await session();
+  assert.equal((await use(a, 'GET', '/use/openai/v1/models/1')).status, 200);
+  await save({ openai: uiRoute('openai', '/openai', { allow: allow('/v2/**') }) });
+  const health = await use(b, 'GET', '/use/openai/health/live');
+  assert.equal(health.status, 200, JSON.stringify(health.body));
+  const kept = await use(a, 'GET', '/use/openai/v1/models/2');
+  assert.equal(kept.status, 200, JSON.stringify(kept.body));
+  assert.equal((await use(a, 'GET', '/use/openai/v2/models/3')).status, 403);
+  // B, deciding on 8, is held to 8.
+  assert.equal((await use(b, 'GET', '/use/openai/v2/models/4')).status, 200);
+  assert.equal((await use(b, 'GET', '/use/openai/v1/models/5')).status, 403);
+  assert.deepEqual(reached.map((one) => one.url), ['/openai/v1/models/1', '/openai/health/live', '/openai/v1/models/2', '/openai/v2/models/4']);
+});
+
+test("a freeze stops warm requests at the place's URL too, a session's and a binding's: the credential frozen is the route, not the project", ON_015, async () => {
+  runtime = makeRuntime(60);
+  await save({ openai: uiRoute('openai', '/openai') });
+  await bind();
+  await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
+  const held = await session();
+  const viaBinding = async (path: string) => read((await bindingRoute(new Request(`${ORIGIN}${path}`), runtime, MEMBER))!);
+  assert.equal((await use(held, 'GET', '/use/market/prod/openai/v1/models/1')).status, 200);
+  assert.equal((await viaBinding('/use/market/prod/openai/v1/models/2')).status, 200);
+  const ctx = { caller: { principal: { type: 'user', id: ROOT } }, requestId: randomUUID(), sourceIp: null } as never;
+  const target = `credential:${await prodId()}/openai`;
+  await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (_tx, log) => void log.push(allowed(ctx, 'workload.freeze', { metadata: { target } })));
+  const frozen = await use(held, 'GET', '/use/market/prod/openai/v1/models/3');
+  assert.deepEqual([frozen.status, frozen.body.reason], [403, 'frozen']);
+  const bound = await viaBinding('/use/market/prod/openai/v1/models/4');
+  assert.deepEqual([bound.status, bound.body.reason], [403, 'frozen']);
+  assert.equal(reached.length, 2, 'nothing more sent');
+});
+
 test('a freeze, or the session revoked, stops the next request whatever the value cache holds', ON_015, async () => {
   runtime = makeRuntime(60);
   await save({ openai: uiRoute('openai', '/openai') });

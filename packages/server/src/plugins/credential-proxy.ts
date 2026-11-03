@@ -2108,15 +2108,6 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
     const rest = raw.slice(named ? 3 : 1);
     const found = copy as typeof copy;
     if (found instanceof CoffreError) throw found;
-    // The copy's refusals before any use, standing when it is fresh (provisional otherwise: the use's answer decides).
-    if (found !== null && found.fresh) {
-      if (found.definition.kind !== 'route') return failure(404, unrouted(found.definition)!);
-      const read = uiCredential(proxy, found.digest, found.definition);
-      if (typeof read !== 'string') {
-        const aimed = aim(request, read, [...rest], url.search);
-        if (aimed instanceof Response) return aimed;
-      }
-    }
     const keptAt = `w\n${caller.credentialId}\n${caller.place}\n${name}`;
     const nowAt = Date.now();
     let kept = proxy.ui.kept.get(keptAt);
@@ -2126,6 +2117,17 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
     }
     let sendBy: number;
     if (kept === undefined) {
+      // No values kept: the copy's refusals before any use, standing when it is fresh (provisional otherwise: the use's
+      // answer decides). Kept values answer to their own item alone, never to a newer copy another session's use
+      // brought, which would hold the request to both versions' rules at once (P2, review r1 of #477).
+      if (found !== null && found.fresh) {
+        if (found.definition.kind !== 'route') return failure(404, unrouted(found.definition)!);
+        const read = uiCredential(proxy, found.digest, found.definition);
+        if (typeof read !== 'string') {
+          const aimed = aim(request, read, [...rest], url.search);
+          if (aimed instanceof Response) return aimed;
+        }
+      }
       const used = await coffre.useRoute!(caller, { named: null, stable: name, digests: found === null ? [] : [found.digest], logged: { ui: true }, refuses: (item) => {
         const definition = itemOf(proxy, item);
         return definition === null ? null : unrouted(definition);
