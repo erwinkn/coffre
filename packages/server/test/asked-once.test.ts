@@ -138,6 +138,20 @@ async function advance(clock: Clock, ms: number, step = 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
+/**
+ * The polls' jitter held at its middle, so mocked time alone says when each poll comes (1, 3, 7, 15, 31 ms, then every
+ * 20 ms); past `budget` jitters drawn, a poll throws, so a request that loops without waiting fails rather than hangs
+ * the event loop (review r3 of T201).
+ */
+function steadyJitter(t: { mock: { method: (object: object, name: string, impl: () => number) => unknown } }, budget = 10_000) {
+  const drawn = { count: 0 };
+  t.mock.method(Math, 'random', () => {
+    drawn.count += 1;
+    if (drawn.count > budget) throw new Error(`${drawn.count} polls: a request polls without waiting`);
+    return 0.5;
+  });
+  return drawn;
+}
 /** `answer`, and whether it has settled yet. */
 function watched<T>(answer: Promise<T>) {
   const seen = { settled: null as { value: T } | { error: unknown } | null };
@@ -206,16 +220,50 @@ test("a request that took a call over takes another's answer meanwhile: its own 
 
 test("a request that took a call over answers as soon as its own call does, not on its next poll", async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  steadyJitter(t);
   const kept = askedOnce<string>();
   void askOnce(kept, () => new Promise<string>(() => {}));
   const mine = call<string>();
-  const waiting = watched(askOnce(kept, () => mine.promise, { takeOverMs: 100, waitMs: 300 }));
+  let asked = false;
+  const waiting = watched(askOnce(kept, () => ((asked = true), mine.promise), { takeOverMs: 100, waitMs: 300 }));
+  // Its poll at 111 ms finds the call 100 ms old and takes it over (review r3 of T201: the jitter drawn, it might not
+  // have by 120 ms).
   await advance(t.mock.timers, 120);
+  assert.equal(asked, true, 'it took the call over');
   assert.equal(waiting.settled, null);
   mine.resolve('mine');
   // No time passes: its own call settled, it answers.
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(waiting.settled, { value: 'mine' });
+});
+
+test("a request whose own call fails after it joined a newer attempt waits on that one, polling on its timers: its call's settling wakes it once (review r3 of T201)", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const drawn = steadyJitter(t);
+  const kept = askedOnce<string>();
+  void askOnce(kept, () => new Promise<string>(() => {}));
+  const mine = call<string>();
+  let asked = 0;
+  const ask = () => ((asked += 1), asked === 1 ? mine.promise : new Promise<string>(() => {}));
+  // It polls at 1, 3, 7, ... 91, 111 ms, and takes the first call over at 111 ms.
+  const waiting = watched(askOnce(kept, ask, { takeOverMs: 100, waitMs: 300 }));
+  await advance(t.mock.timers, 120);
+  assert.equal(asked, 1, 'it took the first call over');
+  // Another request, trusting a call 20 ms, takes its call over at 135 ms; it joins that one on its poll at 151 ms.
+  let taken = false;
+  void askOnce(kept, () => ((taken = true), new Promise<string>(() => {})), { takeOverMs: 20, waitMs: 1_000 }).catch(() => {});
+  await advance(t.mock.timers, 50);
+  assert.equal(taken, true, 'its call was taken over');
+  // Its own call fails now: not the outcome of the attempt it waits on.
+  mine.reject(new Error('its own call, superseded'));
+  const before = drawn.count;
+  await advance(t.mock.timers, 60);
+  assert.equal(waiting.settled, null, 'it waits on the attempt it joined');
+  assert.ok(drawn.count - before <= 10, `it polled ${drawn.count - before} times in 60 ms: about one every 20 ms for each request`);
+  // At 235 ms, the newer call 100 ms old, it takes that one over too, a call of its own that hangs; at 300 ms, 503.
+  await advance(t.mock.timers, 300 - 230 + 1);
+  refusedStarting(waiting);
+  assert.equal(asked, 2, 'its second call: the newer attempt taken over, never its own failure taken for an answer');
 });
 
 test("the gate's reservation, waiting its deadline on the vault's about() another request asks: 503 `starting`, as asked-once answers it, not the gate's own reason (review r2 of T201)", async (t) => {

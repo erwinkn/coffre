@@ -86,8 +86,12 @@ export async function askOnce<T>(
       joined = null;
       continue;
     }
+    // Its own call, once it made one, wakes it as soon as it settles; another's only on its next poll. Once its own call
+    // has settled, in an attempt it no longer waits on (taken over meanwhile, it joined the newer one), its wake has
+    // fired for good: raced again, it would answer every poll at once, a loop of microtasks that never yields to a timer
+    // or I/O until the deadline (review r3 of T201). Its rejection stays handled: `settles` caught it.
+    if (mine?.attempt.settled) mine = null;
     const polled = new Promise((resolve) => setTimeout(resolve, Math.min(pause * (0.5 + Math.random()), deadline - now)));
-    // Its own call, once it made one, wakes it as soon as it settles; another's only on its next poll.
     await (mine === null ? polled : Promise.race([polled, mine.settles]));
   }
 }
