@@ -506,12 +506,20 @@ feeds `value_wo`; a destination is each resource that takes the value
    a raw search can miss it: the state's `private` field is base64, and
    inside it the plugin framework's private data is a JSON map whose
    values are base64 again (`Private.SetKey` takes JSON, so a value kept
-   there is base64 of JSON). The checker reads the state's `private` and
-   each resource's private bytes in the plan file (`tfplan`, unzipped),
-   decodes every layer it finds (base64, then JSON, then each map value's
-   base64), and searches every layer for the value, its JSON-escaped form
-   and its base64. It must first catch a fixture provider that keeps a
-   value through `Private.SetKey` on purpose, or it proves nothing.
+   there is base64 of JSON). The plan file is a zip that holds, beside
+   the configuration and the lock file, three records, and the checker
+   reads all of them: each resource's private bytes in `tfplan`, and
+   every instance's `private` in the two state snapshots
+   the plan embeds, `tfstate` (as refreshed) and `tfstate-prev` (before
+   refresh), as in the apply's state file. A refresh can keep the value
+   in private data that planning then clears, so `tfplan` and the final
+   state come out clean while `tfstate` still holds it. The checker
+   decodes every layer it finds (base64, then JSON, then each map
+   value's base64), and searches every layer for the value, its
+   JSON-escaped form and its base64. It must first catch a fixture
+   provider that keeps a value through `Private.SetKey` on purpose, in
+   two cases: kept through plan and apply, and kept only by a refresh
+   whose plan and apply clear it. Otherwise it proves nothing.
    Section 8's acceptance tests run the same checker on `coffre_secret`.
 
 | Source | Gives all five? |
@@ -634,10 +642,11 @@ mirror.
     and checks it, and Terraform's own credential is refused the same
     read. The Owner's session is refused it while the key is `sensitive`,
     and reads it at `secret` and `plain`, as coffre's natures say. Section 7's checker finds the value
-    in neither the state file nor the saved plan file, private data
-    decoded layer by layer (not only `terraform show -json`, nor only a
-    raw search), and it first catches the fixture provider that leaks a
-    value through `Private.SetKey`;
+    in neither the state file nor any of the saved plan file's records
+    (`tfplan`, `tfstate`, `tfstate-prev`), private data decoded layer by
+    layer (not only `terraform show -json`, nor only a raw search), and it
+    first catches the fixture provider that leaks a value through
+    `Private.SetKey`, once through plan and apply and once only at refresh;
   - the write rule: an `on_destroy`-only change and a refresh call no
     `PATCH` (the fake records calls), and `version` stays;
   - drift: a version written by hand gives a warning, no write, and the
