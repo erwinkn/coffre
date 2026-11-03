@@ -14,7 +14,7 @@ import type { Input, Op } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { twinOf, weigh, weighInTurn, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
+import { absentOf, twinOf, weigh, weighInTurn, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
 
@@ -286,7 +286,7 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 
-export { keyBlocksOf, turnsApart, twinOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
+export { absentOf, keyBlocksOf, turnsApart, twinOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
 
 /**
  * The shared buffers `call` reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled
@@ -312,12 +312,12 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
 
 /**
  * What `call` reads at each of a new session's first calls, at the server's planner settings (`weighInTurn`), and what
- * its twin, of a key its world never made (`twinOf`), reads at each in a new session of its own; null on SQLite, or for
- * no call.
+ * its controls read at each, each in a new session of its own: its twin, of a key its world never made (`twinOf`), and
+ * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call.
  */
-export async function weighedInTurn(call: HotCall | null): Promise<{ asked: Weighed[]; twin: Weighed[] } | null> {
+export async function weighedInTurn(call: HotCall | null): Promise<{ asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null> {
   if (ENGINE !== 'postgres' || call === null) return null;
-  return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, twinOf(call)) };
+  return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, twinOf(call)), absent: await weighInTurn(HOT_URL, absentOf(call)) };
 }
 
 /** A session of the hot login's to weigh calls in alike (`bufferedBy`): its plans made once, by the first. */

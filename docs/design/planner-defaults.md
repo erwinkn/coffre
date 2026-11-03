@@ -197,7 +197,13 @@ its own database did, and holds it to every other check
     world's rows put it: CI once read 9 blocks for a key held before
     against 8 for every other world, at call 1 only. The same caller
     naming any key reads the same, so the check holds each key to its
-    own world's twin, not to the other worlds.
+    own world's twin, not to the other worlds. The twin changes only the
+    key's name, and keeps what the isolate remembered of the key: its id,
+    a cover. A read by that id would cost the twin as much as the key, so
+    each refusal is also held to a second control (`absentOf`), the twin
+    with no id, cover or seal, its caller and place unchanged (Sol's
+    review r4). A dry run made to read by the id passed fails against it,
+    and passes against the twin alone.
 
   These are the weighing's own session settings, never a login's or a
   function's.

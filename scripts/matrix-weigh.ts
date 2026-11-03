@@ -113,19 +113,38 @@ export function twinOf<T extends HotCall>(call: T): T {
 }
 
 /**
- * Where a key's refusal, weighed in turn in a session of its own (`weighInTurn`), fetched blocks of the key's relations
- * apart from its twin's (`twinOf`, weighed so too) at the same call: one line a call, both counts and what they are made
- * of. Held to its own world's twin, not to another key's world: a session's first call plans and runs each form once
- * for no key (0063's dry run, T131), whose probe of the caller's own row of the cap's (`log_bulk`, by principal) falls
- * where that world's rows put it, a block more or less from one world to another (CI read 9 beside 8 for a key held
- * once, in one row of 144), the same for every key the caller names.
+ * A named call's control of no key: its twin (`twinOf`), and nothing the isolate kept of the key it asked of (Sol's
+ * review r4): no id (`p_secret`, the 2nd argument), no cover (the 9th to 11th), no seals or cap (the 12th to 15th), its
+ * caller, place and every other input as they were. `twinOf`'s twin keeps the key's id, and reads by it whatever the call
+ * does: a dry run planned for the id passed (T207 r2) reads as many blocks for a held key's twin as for the key, and only
+ * this one shows them.
  */
-export function turnsApart(key: string, asked: readonly Weighed[], twin: readonly Weighed[]): string[] {
-  return Array.from({ length: Math.max(asked.length, twin.length) }, (_, n) => n).flatMap((n) => {
-    const [a, t] = [asked[n], twin[n]];
-    if (a === undefined || t === undefined) return [`call ${n + 1} of a new session, ${key} weighed ${a === undefined ? 'not' : 'but not its twin'}`];
-    if (a.keyBlocks === t.keyBlocks) return [];
-    return [`call ${n + 1} of a new session, ${key}: blocks of the key's tables ${a.keyBlocks} beside ${t.keyBlocks} for a key its world never made; blocks apart (twin/${key}): ${blocksApart(t.blocks, a.blocks).join(', ')}`];
+export function absentOf<T extends HotCall>(call: T): T {
+  const { args } = twinOf(call);
+  args[1] = null;
+  for (let n = 8; n <= 14; n += 1) args[n] = null;
+  return { ...call, args } as T;
+}
+
+/**
+ * Where a key's refusal, weighed in turn in a session of its own (`weighInTurn`), fetched blocks of the key's relations
+ * apart from a control's, weighed so too, at the same call: its twin, of a key never made (`twinOf`), and its twin with
+ * nothing of the key the isolate kept (`absentOf`). One line a call and control, both counts and what they are made of.
+ * Held to its own world's controls, not to another key's world: a session's first call plans and runs each form once for
+ * no key (0063's dry run, T131), whose probe of the caller's own row of the cap's (`log_bulk`, by principal) falls where
+ * that world's rows put it, a block more or less from one world to another (CI read 9 beside 8 for a key held once, in
+ * one row of 144), the same for every key the caller names.
+ */
+export function turnsApart(key: string, asked: readonly Weighed[], controls: { twin: readonly Weighed[]; absent: readonly Weighed[] }): string[] {
+  return (['twin', 'absent'] as const).flatMap((of) => {
+    const control = controls[of];
+    const kind = of === 'twin' ? 'a key its world never made' : 'a key never made, asked with no id, cover or seal';
+    return Array.from({ length: Math.max(asked.length, control.length) }, (_, n) => n).flatMap((n) => {
+      const [a, t] = [asked[n], control[n]];
+      if (a === undefined || t === undefined) return [`call ${n + 1} of a new session, ${key} weighed ${a === undefined ? 'not' : `but not ${kind}`}`];
+      if (a.keyBlocks === t.keyBlocks) return [];
+      return [`call ${n + 1} of a new session, ${key}: blocks of the key's tables ${a.keyBlocks} beside ${t.keyBlocks} for ${kind}; blocks apart (${of}/${key}): ${blocksApart(t.blocks, a.blocks).join(', ')}`];
+    });
   });
 }
 
