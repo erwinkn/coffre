@@ -58,8 +58,9 @@ export function nodeTransport(): WorkloadTransport {
  *   https://api.openai.com/v1/models, resolving to 162.159.140.245    sent
  *   https://internal.acme.example/x, resolving to 10.0.0.5               refused before the SYN: ENOTPUBLIC
  */
-export function publicFetch(lookup: LookupFunction = publicLookup): NonNullable<WorkloadTransport['fetch']> {
-  const dispatcher = new Agent({ connect: { lookup } });
+export function publicFetch(lookup: LookupFunction = publicLookup, tls: { ca?: string } = {}): NonNullable<WorkloadTransport['fetch']> {
+  // `tls.ca`, a test's own authority for its fake upstream: the system's roots otherwise, and the name is checked either way.
+  const dispatcher = new Agent({ connect: { ...tls, lookup } });
   return async (url, init) => {
     // Node asks no resolver for an address written as one: `lookup` never sees `https://240.0.0.1` (review r3 of #467).
     const literal = literalRefusal(new URL(url));

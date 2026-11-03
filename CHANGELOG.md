@@ -35,7 +35,9 @@
   the person's own personal config takes no UI route of the base
   environment; and on 0.14's log an editable proxy's plan is code's, as
   before. Workloads, service bindings, signers,
-  verifiers, presign and tunnels of UI items answer 404 until PR C2b.
+  verifiers, presign and tunnels of UI items answer 404 until PR C2b; a
+  handle's request to a signer, verifier or tunnel saved in the UI is
+  refused before the app reads its key's value, and keeps none.
 
 - **A JSON rule's body costs its length to read.** The proxy found a
   JSON body's strings with a regex that, on 64 KiB of escaped quotes that

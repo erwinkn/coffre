@@ -173,20 +173,21 @@ export type PluginContext = {
   /**
    * A UI definition's use (0.16, T186 PR C; docs/design/proxy-ui.md, section 3): the vault's one call finds the item
    * `asked` names at the place, a handle's URL read the way section 6 says (`named`, the place reading, taken when the
-   * handle was made for that environment; `stable`, the route at the handle's one environment), a workload's at its
-   * place, and uses every key it sends, each decided for the caller and for the item's editor. It answers the values
+   * handle was made for that environment; `stable`, the route at the handle's one environment), and uses every key it
+   * sends, each decided for the caller and for the item's editor. It answers the values
    * and the item they were decided on (its definition left out where `digests` names its digest: the copy's), which
    * the proxy sends by, never by a copy of its own. Refused: a `CoffreError` (404 no such item, 409 a personal config,
    * 403 a key its editor may not route, 503 an item a writer changed). The app's `credential.use` entry records it, with
-   * `logged`, as `use`'s does, under the name of the route the vault's reading took (review r4 of #467).
+   * `logged`, as `use`'s does, under the name of the route the vault's reading took (review r4 of #467). A handle's
+   * alone: a workload's UI items wait for C2b (section 10).
    */
-  useRoute?(caller: string | WorkloadUse, asked: RouteAsked): Promise<RouteUsed>;
+  useRoute?(handle: string, asked: RouteAsked): Promise<RouteUsed>;
   /**
    * A place's UI items as a use would find them, using nothing (section 3, `proxyItem`): the caller checked first, then
-   * `name`'s item, or, with none, every item the place serves. `place`, a handle's by path, null for its own; a
-   * workload's is its session's. Refused: a `CoffreError`.
+   * `name`'s item, or, with none, every item the place serves. `place`, a handle's by path, null for its own. A
+   * handle's alone, as `useRoute`. Refused: a `CoffreError`.
    */
-  proxyItem?(caller: string | WorkloadUse, asked: { place: string | null; name: string | null }): Promise<ItemsFound>;
+  proxyItem?(handle: string, asked: { place: string | null; name: string | null }): Promise<ItemsFound>;
 };
 
 /** What a UI route's use names (`PluginContext.useRoute`). */
@@ -195,6 +196,12 @@ export type RouteAsked = {
   stable: string | null;
   digests: readonly string[];
   logged: Record<string, unknown>;
+  /**
+   * Why the proxy would serve no request on the item the vault found, or null: `GET /use/signing/x`, a signer, reaches
+   * no upstream. Asked before the read opens what the vault answered, so the app reads no value of it and keeps none
+   * (404; Fable's review of #467). The vault's call has logged its use already: C2b's uses of these kinds decide them.
+   */
+  refuses?: (item: DecidedItem) => string | null;
 };
 
 /** A UI route's use, answered: the values, by key, and those of them plain; the item they were decided on; where. */
@@ -744,69 +751,43 @@ function pluginContext(
     return null;
   };
   /** A UI route's use: the vault's call, the read on what it decided, and the item the values go by. */
-  const routeUse = async (caller: string | WorkloadUse, asked: RouteAsked): Promise<RouteUsed> => {
+  const routeUse = async (handle: string, asked: RouteAsked): Promise<RouteUsed> => {
     const name = asked.named?.route ?? asked.stable ?? '';
     const named = asked.named === null ? null : (() => {
       const [project, environment] = asked.named.path.split('/');
       return { place: { project: project!, environment: environment! }, route: asked.named.route };
     })();
     try {
-      if (typeof caller === 'string') {
-        if (binding !== null) throw noCredential();
-        const used = await useRouteByName(runtime, request, sourceIp, caller, { named, stable: asked.stable, digests: asked.digests });
-        if (used === null) throw new CoffreError(409, 'conflict', `this handle stands in for several environments, or none, and the stable URL is for a run of one: name it, ${runtime.publicUrl}/use/<project>/<environment>/${name}`, 'no_environment');
-        if (used.identity instanceof Response) await answer(used.identity);
-        const identity = used.identity as AuthenticatedIdentity;
-        if (used.credential) throw new CoffreError(401, 'unauthenticated', 'that handle is unknown, expired or revoked');
-        const { answered } = used;
-        const refused = routeRefusal(answered, asked);
-        if (refused !== null) throw refused;
-        if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
-        const read = await reveal(apiContext(runtime, identity), answered.place, {
-          purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
-        });
-        return routeUsed(answered, read, identity.credentialExpiresAt!);
-      }
-      // A workload caller this request's context made, and no other.
-      const made = await workloadIdentity(runtime, caller, sourceIp, standings);
-      if (made === null || !made.identity.registered || caller.place === null) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-      const way = made.identity.bindingId != null ? { credential: made.identity.bindingId, way: 'binding' as const } : { credential: made.identity.credentialId!, way: 'credential' as const };
-      const at = Date.now();
-      const answered = await runtime.vault.useRoute({
-        caller: { kind: 'workload', credential: way.credential, ...(way.way === 'credential' ? {} : { way: way.way }), place: caller.place }, named: null, stable: asked.stable, digests: asked.digests,
-        purpose: 'use', at, deadline: at + USE_DEADLINE_MS,
-      });
-      if (!answered.served || answered.route === 'credential') throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-      if (answered.route === 'busy') throw refusedUse(answered.outcome);
+      if (binding !== null) throw noCredential();
+      const used = await useRouteByName(runtime, request, sourceIp, handle, { named, stable: asked.stable, digests: asked.digests });
+      if (used === null) throw new CoffreError(409, 'conflict', `this handle stands in for several environments, or none, and the stable URL is for a run of one: name it, ${runtime.publicUrl}/use/<project>/<environment>/${name}`, 'no_environment');
+      if (used.identity instanceof Response) await answer(used.identity);
+      const identity = used.identity as AuthenticatedIdentity;
+      if (used.credential) throw new CoffreError(401, 'unauthenticated', 'that handle is unknown, expired or revoked');
+      const { answered } = used;
       const refused = routeRefusal(answered, asked);
       if (refused !== null) throw refused;
-      const decided = { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at };
-      const read = await reveal(apiContext(runtime, made.identity), parsePath(caller.path!, [2]), {
-        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, environmentId: caller.place, decided,
+      if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
+      const unserved = answered.found?.found === true ? asked.refuses?.(answered.found.item) ?? null : null;
+      if (unserved !== null) throw new CoffreError(404, 'not_found', unserved);
+      const read = await reveal(apiContext(runtime, identity), answered.place, {
+        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
       });
-      return routeUsed(answered, read, made.expiresAt);
+      return routeUsed(answered, read, identity.credentialExpiresAt!);
     } catch (error) {
       return rethrown(error);
     }
   };
-  const proxyItem: PluginContext['proxyItem'] & {} = async (caller, asked) => {
+  const proxyItem: PluginContext['proxyItem'] & {} = async (handle, asked) => {
     try {
-      let input: Parameters<Required<typeof runtime.vault>['proxyItem']>[0];
+      if (binding !== null) throw noCredential();
+      if (tokenKind(handle) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
       const at = Date.now();
-      if (typeof caller === 'string') {
-        if (binding !== null) throw noCredential();
-        if (tokenKind(caller) !== 'handle') throw new CoffreError(401, 'unauthenticated', 'send the handle `coffre run` gave your app');
-        const place = asked.place === null ? null : (() => {
-          const [project, environment] = asked.place.split('/');
-          return { project: project!, environment: environment! };
-        })();
-        input = { caller: { kind: 'handle', tokenHash: hashToken(caller).toString('base64'), accepts: acceptance(runtime) }, place, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
-      } else {
-        const made = await workloadIdentity(runtime, caller, sourceIp, standings);
-        if (made === null || caller.place === null) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
-        const way = made.identity.bindingId != null ? { credential: made.identity.bindingId, way: 'binding' as const } : { credential: made.identity.credentialId!, way: 'credential' as const };
-        input = { caller: { kind: 'workload', credential: way.credential, ...(way.way === 'credential' ? {} : { way: way.way }), place: caller.place }, place: null, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
-      }
+      const place = asked.place === null ? null : (() => {
+        const [project, environment] = asked.place.split('/');
+        return { project: project!, environment: environment! };
+      })();
+      const input = { caller: { kind: 'handle' as const, tokenHash: hashToken(handle).toString('base64'), accepts: acceptance(runtime) }, place, name: asked.name, at, deadline: at + USE_DEADLINE_MS };
       const found = await runtime.vault.proxyItem(input);
       if (!found.ok && 'busy' in found && found.busy !== undefined) throw refusedUse(found as never);
       if (!found.ok) {

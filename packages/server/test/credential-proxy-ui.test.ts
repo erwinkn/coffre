@@ -7,12 +7,18 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, type Hash, type Hmac } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { createServer as createTlsServer } from 'node:https';
+import type { AddressInfo, LookupFunction } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { SignatureV4 } from '@smithy/signature-v4';
 
 import { createClient, type CoffreClient } from '@coffre/client';
+import { bodyDigest, contentDigest } from '@coffre/client/dpop';
 import { Deploying, USE_DEADLINE_MS, type ProxyDefinition, type Vault } from '@coffre/core/vault';
 
 import { sql, type SQL } from 'drizzle-orm';
@@ -25,6 +31,7 @@ import { bindingRoute, checkPlugins } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
 import { forgetProxyGates } from '../src/proxy-gate.ts';
 import { credentialProxy, form, header, privateKey, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
+import { publicFetch } from '../src/workloads/node-transport.ts';
 
 const OPENAI = 'sk-openai-dev-0123456789abcdef';
 const MAPS = 'maps-key-0123456789abcdef';
@@ -182,7 +189,7 @@ test('code wins its names: reserved before an isolate first serves, the UI item 
   assert.equal((await route('/use/maps/models', as(token))).status, 404);
 });
 
-test('a name no definition holds is 404; a signer saved in the UI reaches no upstream; a personal config serves no UI route (409)', ON_015, async () => {
+test('a name no definition holds is 404; a signer saved in the UI reaches no upstream, its values neither read nor kept; a personal config serves no UI route (409)', ON_015, async () => {
   const token = await handle();
   assert.equal((await route('/use/nothing/x', as(token))).status, 404);
   await save({ openai: uiRoute('openai', '/openai') });
@@ -195,7 +202,25 @@ test('a name no definition holds is 404; a signer saved in the UI reaches no ups
   assert.equal(personal.status, 409, await personal.clone().text());
   assert.match((await personal.json() as { message: string }).message, /market\/dev\b(?!@)/);
   await save({ signer: { kind: 'signer', name: 'signer', signer: { kind: 'private-key', key: 'OPENAI_API_KEY' }, limit: { perMinute: null, perDay: null } } });
-  assert.equal((await route('/use/signer/x', as(token))).status, 404);
+  // Refused before the app reads the values the vault answered: none kept, so the next request asks the vault again
+  // (Fable's review of #467).
+  const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
+  const real = vault.useRoute;
+  let uses = 0;
+  try {
+    vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
+      uses += 1;
+      return real.apply(runtime.vault, args);
+    }) as Vault['useRoute'];
+    for (let round = 0; round < 2; round++) {
+      const signer = await route('/use/signer/x', as(token));
+      assert.equal(signer.status, 404, await signer.clone().text());
+      assert.match((await signer.json() as { message: string }).message, /signer is a signer, which reaches no upstream/);
+    }
+    assert.equal(uses, 2);
+  } finally {
+    vault.useRoute = real;
+  }
 });
 
 test("the plan gives a UI route's key as the handle, never its value, and names its URL; one forged item answers 503 and no environment", ON_015, async () => {
@@ -639,6 +664,71 @@ test("a UI route's upstream goes out through the runtime's public fetch, and a r
   } finally {
     if (kept === undefined) delete runtime.publicFetch;
     else runtime.publicFetch = kept;
+  }
+});
+
+test("a UI route through undici's public fetch, as a Node deployment sends one: a TLS upstream by its name, a body, a streamed digested body, a redirect brought back to the proxy (Fable's review of #467)", ON_015, async () => {
+  // The fake upstream is `api.openai.example` over TLS, its certificate from an authority of this test's own. The lookup
+  // is the one seam: it resolves the name to the fake, as DNS resolves a public name to its server; the rest is the
+  // production fetch, undici's, its Headers, bodies and Response wrapped by the proxy as they come.
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-tls-'));
+  const kept = runtime.publicFetch;
+  const seen: { method: string; url: string; authorization: string | undefined; digest: string | undefined; body: Buffer }[] = [];
+  let port = 0;
+  const tls = createTlsServer();
+  try {
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=api.openai.example', '-addext', 'subjectAltName=DNS:api.openai.example', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
+    const cert = readFileSync(join(dir, 'cert.pem'), 'utf8');
+    tls.setSecureContext({ key: readFileSync(join(dir, 'key.pem')), cert });
+    tls.on('request', (request: IncomingMessage, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        const body = Buffer.concat(chunks);
+        seen.push({ method: request.method!, url: request.url!, authorization: request.headers.authorization, digest: request.headers['content-digest'] as string | undefined, body });
+        if (request.url === '/v1/models/moved') return void response.writeHead(302, { location: `https://api.openai.example:${port}/v1/models/next` }).end();
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ got: body.length }));
+      });
+    });
+    await new Promise<void>((resolve) => tls.listen(0, '127.0.0.1', resolve));
+    port = (tls.address() as AddressInfo).port;
+    const lookup: LookupFunction = (_host, options, callback) => {
+      if (options.all) (callback as unknown as (error: null, addresses: { address: string; family: number }[]) => void)(null, [{ address: '127.0.0.1', family: 4 }]);
+      else callback(null, '127.0.0.1', 4);
+    };
+    runtime.publicFetch = publicFetch(lookup, { ca: cert });
+    deploy(proxyOf({ insecureUpstreams: false, cacheSeconds: 0 }, false));
+    await save({ openai: { ...uiRoute('openai', ''), upstream: `https://api.openai.example:${port}/v1` } as ProxyDefinition });
+    const token = await handle();
+
+    // A GET, its answer's body read through undici's Response.
+    const models = await route('/use/openai/models', as(token));
+    assert.equal(models.status, 200, await models.clone().text());
+    assert.deepEqual(await models.json(), { got: 0 });
+    // A body the proxy read whole.
+    const chat = JSON.stringify({ model: 'gpt', messages: [{ role: 'user', content: 'hi' }] });
+    const answered = await route('/use/openai/chat/completions', as(token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: chat }));
+    assert.equal(answered.status, 200, await answered.clone().text());
+    assert.equal(seen.at(-1)!.body.toString(), chat);
+    // A body streamed through as it comes, its digest declared and checked on the way: a ReadableStream, `duplex: 'half'`.
+    const upload = new Uint8Array(100_000).map((_, i) => i % 251);
+    const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(upload.slice(0, 40_000)); controller.enqueue(upload.slice(40_000)); controller.close(); } });
+    const digest = contentDigest(await bodyDigest(upload));
+    const streamed = await route('/use/openai/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream', 'content-length': String(upload.length), 'content-digest': digest }, body: stream, duplex: 'half' } as RequestInit);
+    assert.equal(streamed.status, 200, await streamed.clone().text());
+    assert.deepEqual([seen.at(-1)!.body.equals(Buffer.from(upload)), seen.at(-1)!.digest], [true, digest]);
+    // A redirect under the upstream: the proxy's own URL for it, at the place the item was decided at, undici having followed nothing.
+    const moved = await route('/use/openai/models/moved', as(token));
+    assert.equal(moved.status, 302, await moved.clone().text());
+    assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/openai/models/next`);
+
+    assert.deepEqual(seen.map((request) => `${request.method} ${request.url}`), ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/chat/completions', 'GET /v1/models/moved']);
+    assert.ok(seen.every((request) => request.authorization === `Bearer ${OPENAI}`));
+  } finally {
+    if (kept === undefined) delete runtime.publicFetch;
+    else runtime.publicFetch = kept;
+    await new Promise<void>((resolve) => (tls.listening ? tls.close(() => resolve()) : resolve()));
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

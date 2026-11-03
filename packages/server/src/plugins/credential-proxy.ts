@@ -823,7 +823,10 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
       const last = proxy.ui.last.get(key);
       return last === undefined || !proxy.ui.items.has(last.digest) ? [] : [last.digest];
     });
-    const used = await coffre.useRoute!(handle, { named, stable, digests, logged: { ui: true } });
+    const used = await coffre.useRoute!(handle, { named, stable, digests, logged: { ui: true }, refuses: (item) => {
+      const definition = itemOf(proxy, item);
+      return definition === null ? null : unrouted(definition);
+    } });
     const definition = itemOf(proxy, used.item);
     if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
     remember(proxy.ui.last, used.reading === 'named' ? readings[0]! : `s\n${handle}\n${stable!}`, { digest: used.item.digest, confirmed: now });
@@ -833,14 +836,23 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
   } else {
     sendBy = kept.until;
   }
-  if (kept.definition.kind !== 'route') {
-    const kind = kept.definition.kind;
-    return failure(404, `${kept.definition.name} is a ${kind}, which reaches no upstream${kind === 'tunnel' ? ': `coffre run` tunnels to it' : `: credential(${JSON.stringify(kept.definition.name)}).${kind === 'signer' ? 'sign(message)' : 'verify(message, signature)'}`}`);
-  }
+  // Refused before its use opened anything (`refuses`): no item kept is any other kind.
+  if (kept.definition.kind !== 'route') return failure(404, unrouted(kept.definition)!);
   const credential = uiCredential(proxy, kept.digest, kept.definition);
   if (typeof credential === 'string') return failure(503, credential, 'unavailable', '1');
   const rest = kept.reading === 'named' ? raw.slice(3) : raw.slice(1);
   return sendAs(request, coffre, credential, [...rest], url.search, handle, { values: kept.values, plain: kept.plain }, `${kept.path}/${credential.name}`, sendBy, through);
+}
+
+/**
+ * Why a UI item serves no request at `/use`, or null for a route: a signer, verifier or tunnel reaches no upstream.
+ *
+ *   signer `signing`   signing is a signer, which reaches no upstream: credential("signing").sign(message)
+ */
+function unrouted(definition: ProxyDefinition): string | null {
+  const { kind, name } = definition;
+  if (kind === 'route') return null;
+  return `${name} is a ${kind}, which reaches no upstream${kind === 'tunnel' ? ': `coffre run` tunnels to it' : `: credential(${JSON.stringify(name)}).${kind === 'signer' ? 'sign(message)' : 'verify(message, signature)'}`}`;
 }
 
 /**
@@ -1124,7 +1136,7 @@ async function uiPlanItems(coffre: PluginContext, proxy: Proxy, handle: string, 
   const none = { routes: [], held: new Set<string>() };
   if (!proxy.editable || coffre.proxyItem === undefined) return none;
   const found = await coffre.proxyItem(handle, { place: path, name: null });
-  const forged = (fault: string) => new CoffreError(503, 'unavailable', `${path}'s proxy definitions are not as the vault sealed them (${fault}): an Owner saves them again; until then no plan is given`, found.fault ?? 'stale', '1');
+  const forged = (fault: string) => new CoffreError(503, 'unavailable', `${path}'s proxy definitions are not as the vault sealed them (${fault}): an Owner saves them again; until then no plan is given`, fault, '1');
   if (found.fault !== null) throw forged(found.fault);
   // A personal config serves no UI item, and the vault reads none there (decision 7).
   if (found.personal) return none;
