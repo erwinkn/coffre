@@ -224,7 +224,12 @@ else is needed.
   route's limit as the workload (`proxyItem`); and `or`, the URL's other
   reading (`/use/<project>/<env>/<route>/…`), which the checks take,
   before the gate, when the workload reaches several environments or its
-  one is that path.
+  one is that path. A use's `refuses(item)`, asked of the decided item
+  before the read opens a value, answers a reason (404) or a
+  `CoffreError` as it is (a sign's 503 `moved`, C2b2); its `logged` may
+  be a function of that item, async, asked after `refuses` and before the
+  read (a presigned URL's decided host; a private key's sign hashes its
+  message there, for a caller the vault knows, never before).
 
 **Capabilities to add later**, each when its first plugin needs it (none is
 built):

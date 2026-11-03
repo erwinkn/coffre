@@ -6,7 +6,7 @@
 // the key stops their route (EditorStillHolds).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, type Hash, type Hmac } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync, verify as verifyWith, type Hash, type Hmac } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
@@ -864,4 +864,379 @@ test("0.14's log too: an editable proxy's plan is code's, the vault asked for no
   assert.equal(plan.credentials.maps, `${ORIGIN}/use/market/dev/maps`);
   // The UI route's stable URL is no credential either: 404, never the vault's throw.
   if (LOG === '0.14') assert.equal((await route('/use/openai/models', as(token))).status, 404);
+});
+
+/** The vault's `useRoute`, counted while `work` runs. */
+async function countingUses(work: (uses: () => number) => Promise<void>): Promise<void> {
+  const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
+  const real = vault.useRoute;
+  let uses = 0;
+  vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
+    uses += 1;
+    return real.apply(runtime.vault, args);
+  }) as Vault['useRoute'];
+  try {
+    await work(() => uses);
+  } finally {
+    vault.useRoute = real;
+  }
+}
+
+const NO_LIMIT = { perMinute: null, perDay: null };
+
+/** `POST /use/market/dev` with `body` as JSON, the handle as its bearer token: a sign, verify or presign. */
+async function compute(token: string, body: unknown): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | null; proxy: string | null }> {
+  const answer = await route('/use/market/dev', as(token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+  return { status: answer.status, body: await answer.json() as Record<string, unknown>, retryAfter: answer.headers.get('retry-after'), proxy: answer.headers.get('coffre-proxy') };
+}
+
+/** A refusal in the proxy's own shape, which apps tell from the upstream's by its header (docs/design/credential-proxy.md). */
+function proxyRefused(answer: Awaited<ReturnType<typeof compute>>, status: number): void {
+  assert.deepEqual([answer.status, answer.body.error, answer.proxy], [status, 'credential_proxy', 'refused'], JSON.stringify(answer.body));
+}
+
+const b64 = (text: string) => Buffer.from(text).toString('base64url');
+
+test("a signer and a verifier saved in the UI: a private key's signature and an HMAC's, each made by the item the use decided on, an HMAC's values kept with it (C2b2)", ON_015, async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const HOOK = 'whsec-0123456789abcdef';
+  await root.secrets.set('market/dev', { DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), HOOK_SECRET: HOOK });
+  const hooks = (prefix: string): ProxyDefinition => ({ kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix, maxBytes: null }, limit: NO_LIMIT });
+  await save({
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'DFNS_PEM' }, limit: NO_LIMIT },
+    hooks: hooks('sha256='),
+    inbound: { kind: 'verifier', name: 'inbound', hmac: { key: 'HOOK_SECRET', encoding: 'base64', prefix: 'v1,', maxBytes: 16 }, limit: NO_LIMIT },
+    openai: uiRoute('openai', '/openai'),
+  });
+  const token = await handle();
+  const message = Buffer.from('transfer 10');
+  await countingUses(async (uses) => {
+    // A private key's: each signature a use of its own, never kept (0.15's row is slim, R53, naming no message).
+    for (let round = 0; round < 2; round++) {
+      const signed = await compute(token, { sign: { credential: 'dfns', message: message.toString('base64url') } });
+      assert.equal(signed.status, 200, JSON.stringify(signed.body));
+      assert.ok(verifyWith(null, message, publicKey, Buffer.from(signed.body.signature as string, 'base64url')));
+    }
+    assert.equal(uses(), 2);
+    // An HMAC's: its scheme's signature, its values kept for cacheSeconds (60 here), so the second asks nothing.
+    const expected = (prefix: string, encoding: 'hex' | 'base64') => `${prefix}${createHmac('sha256', HOOK).update(message).digest(encoding)}`;
+    for (let round = 0; round < 2; round++) {
+      const signed = await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } });
+      assert.deepEqual([signed.status, signed.body.signature], [200, expected('sha256=', 'hex')]);
+    }
+    assert.equal(uses(), 3);
+    // A verifier: valid or not, no more; a message longer than its maxBytes, 413.
+    assert.deepEqual((await compute(token, { verify: { credential: 'inbound', message: message.toString('base64url'), signature: expected('v1,', 'base64') } })).body, { valid: true });
+    assert.deepEqual((await compute(token, { verify: { credential: 'inbound', message: message.toString('base64url'), signature: expected('v1,', 'hex') } })).body, { valid: false });
+    assert.equal((await compute(token, { verify: { credential: 'inbound', message: b64('seventeen bytes!!'), signature: 'v1,x' } })).status, 413);
+    // An HMAC signer verifies too, by its own scheme.
+    assert.deepEqual((await compute(token, { verify: { credential: 'hooks', message: message.toString('base64url'), signature: expected('sha256=', 'hex') } })).body, { valid: true });
+  });
+  // BoundToDefinition: the prefix edited, another handle's use brings the new item to this isolate; the first handle's
+  // kept values still sign by the item they were decided on, never the newer copy's prefix.
+  await save({ hooks: hooks('v2=') });
+  const other = await handle();
+  assert.equal((await compute(other, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `sha256=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  // A kept item's kind holds as a copy's does: the verifier's values, kept by the verify above, sign nothing; a route's,
+  // kept by a request through it, sign nothing either, and it is sent nothing (review r1 of #480).
+  // Thrown from the kept entry, answered in the proxy's shape as the decided item's refusal is (Fable's review of #480).
+  proxyRefused(await compute(token, { sign: { credential: 'inbound', message: 'aGk' } }), 404);
+  await countingUses(async (uses) => {
+    assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
+    const sent = reached.length;
+    proxyRefused(await compute(token, { sign: { credential: 'openai', message: 'aGk' } }), 404);
+    proxyRefused(await compute(token, { verify: { credential: 'openai', message: 'aGk', signature: 'x' } }), 404);
+    assert.deepEqual([uses(), reached.length], [1, sent], 'the route kept: refused with no use, nothing sent');
+  });
+  // An isolate that keeps nothing: decided on the newest version.
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `v2=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
+  // Each item takes what its kind does: a verifier signs nothing, a private key checks nothing, a route signs nothing
+  // and presigns only with sigv4 its one rule; a name nothing defines, 404.
+  for (const [ask, status] of [
+    [{ sign: { credential: 'inbound', message: 'aGk' } }, 404],
+    [{ verify: { credential: 'dfns', message: 'aGk', signature: 'x' } }, 404],
+    [{ sign: { credential: 'openai', message: 'aGk' } }, 404],
+    [{ presign: { credential: 'openai', path: '/models' } }, 400],
+    [{ presign: { credential: 'dfns', path: '/models' } }, 404],
+    [{ sign: { credential: 'nothing', message: 'aGk' } }, 404],
+  ] as const) {
+    const refused = await compute(token, ask);
+    assert.equal(refused.status, status, `${JSON.stringify(ask)}: ${JSON.stringify(refused.body)}`);
+  }
+});
+
+test("a message longer than the decided item takes is refused before its values open: cold, by the use's own check; under a copy that took it, 503 moved, then 413 (review r2 of #480)", ON_015, async () => {
+  await root.secrets.set('market/dev', { HOOK_SECRET: 'whsec-0123456789abcdef' });
+  const hmac = (maxBytes: number) => ({ key: 'HOOK_SECRET', encoding: 'hex' as const, prefix: '', maxBytes });
+  await save({
+    inbound: { kind: 'verifier', name: 'inbound', hmac: hmac(32), limit: NO_LIMIT },
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', ...hmac(8) }, limit: NO_LIMIT },
+  });
+  const token = await handle();
+  const verify = (text: string) => compute(token, { verify: { credential: 'inbound', message: b64(text), signature: 'x' } });
+  await countingUses(async (uses) => {
+    // Cold, no copy: the use decides the item, whose own check refuses the message before any value is read.
+    const signed = await compute(token, { sign: { credential: 'hooks', message: b64('nine byte') } });
+    assert.deepEqual([signed.status, signed.body.reason], [413, 'too_large'], JSON.stringify(signed.body));
+    const checked = await verify('x'.repeat(33));
+    assert.deepEqual([checked.status, checked.body.reason], [413, 'too_large'], JSON.stringify(checked.body));
+    assert.equal(uses(), 2);
+    // The copy those uses brought takes 20 bytes; the Owner cuts the verifier to 16. The copy admits, the decided item
+    // refuses: 503 moved, nothing made; then the copy is the decided item's, and refuses it with no use.
+    await save({ inbound: { kind: 'verifier', name: 'inbound', hmac: hmac(16), limit: NO_LIMIT } });
+    const moved = await verify('x'.repeat(20));
+    assert.deepEqual([moved.status, moved.body.reason, moved.retryAfter], [503, 'moved', '1'], JSON.stringify(moved.body));
+    assert.equal(uses(), 3);
+    const refused = await verify('x'.repeat(20));
+    assert.deepEqual([refused.status, refused.body.reason], [413, 'too_large'], JSON.stringify(refused.body));
+    // The fresh copy's refusal, thrown before any use, in the proxy's shape too.
+    proxyRefused(refused, 413);
+    assert.equal(uses(), 3);
+  });
+});
+
+test("a copy past cacheSeconds refuses nothing: the use decides, and a private key's sign logs its message's SHA-256, hashed once the vault decided (Fable's review of #480)", ON_015, async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  // Plain keys, so that the app writes the credential.use entry this test reads (a secret's use is the vault's slim row, R53).
+  await root.secrets.set('market/dev', {
+    STAMP_PEM: { value: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), sensitivity: 'plain' },
+    STAMP_SECRET: { value: 'whsec-0123456789abcdef', sensitivity: 'plain' },
+  });
+  // An isolate that keeps nothing: every copy it holds is past cacheSeconds the moment it is made.
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ stamp: { kind: 'verifier', name: 'stamp', hmac: { key: 'STAMP_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT } });
+  const token = await handle();
+  const message = Buffer.from('transfer 10');
+  await countingUses(async (uses) => {
+    // The verify brings this isolate a copy of the verifier, which would refuse a sign were it fresh.
+    assert.deepEqual((await compute(token, { verify: { credential: 'stamp', message: message.toString('base64url'), signature: '0'.repeat(64) } })).body, { valid: false });
+    await save({ stamp: { kind: 'signer', name: 'stamp', signer: { kind: 'private-key', key: 'STAMP_PEM' }, limit: NO_LIMIT } });
+    // Stale, the copy refuses nothing: the use decides on the signer, which signs.
+    const signed = await compute(token, { sign: { credential: 'stamp', message: message.toString('base64url') } });
+    assert.equal(signed.status, 200, JSON.stringify(signed.body));
+    assert.ok(verifyWith(null, message, publicKey, Buffer.from(signed.body.signature as string, 'base64url')));
+    assert.equal(uses(), 2);
+  });
+  const signs = (await entries('credential.use')).filter((entry) => entry.metadata.ui === true && entry.metadata.sign !== undefined).map((entry) => entry.metadata.sign);
+  assert.deepEqual(signs, [{ sha256: createHash('sha256').update(message).digest('hex') }]);
+});
+
+test("a presign of a route saved in the UI: built and checked again on the decided item, signed with its pair, its entry logging the decided host; a copy that admitted what the decided item refuses is 503 moved (C2b2)", ON_015, async () => {
+  // Plain keys, so that the app writes its credential.use entry, whose host this test reads: a secret's use is the
+  // vault's slim row alone (R53), which names the route, and the item by the object's seal.
+  await root.secrets.set('market/dev', { AWS_ACCESS_KEY_ID: { value: AWS_ID, sensitivity: 'plain' }, AWS_SECRET_ACCESS_KEY: { value: AWS_SECRET, sensitivity: 'plain' } });
+  const s3 = (upstream: string, allow: string, inject: 'sigv4' | 'header' = 'sigv4'): ProxyDefinition => ({
+    kind: 'route', name: 's3', upstream,
+    inject: inject === 'sigv4'
+      ? [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }]
+      : [{ kind: 'header', name: 'authorization', template: 'Bearer {AWS_SECRET_ACCESS_KEY}' }],
+    allow: [{ methods: ['GET', 'HEAD'], path: allow }], limit: NO_LIMIT, placeholder: null, egress: null,
+  });
+  await save({ s3: s3('https://s3.eu-west-3.example.test/files', '/bucket/**') });
+  const token = await handle();
+  const presign = (path: string) => compute(token, { presign: { credential: 's3', path, expiresIn: 60 } });
+  await countingUses(async (uses) => {
+    const made = await presign('/bucket/report.csv');
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    const url = new URL(made.body.url as string);
+    assert.equal(`${url.origin}${url.pathname}`, 'https://s3.eu-west-3.example.test/files/bucket/report.csv');
+    assert.match(url.searchParams.get('X-Amz-Credential')!, new RegExp(`^${AWS_ID}/\\d{8}/eu-west-3/s3/aws4_request$`));
+    assert.equal(url.searchParams.get('X-Amz-Expires'), '60');
+    assert.ok(!made.body.url!.toString().includes(AWS_SECRET) && !made.body.url!.toString().includes(token));
+    assert.equal(uses(), 1);
+    // Its allow list, the decided item's: 403, a fresh copy's refusal standing with no use.
+    assert.equal((await presign('/other/report.csv')).status, 403);
+    assert.equal(uses(), 1);
+    // The handle in none of the URL, encoded seven times over in its query (an eighth by the URL), or eight, past what is
+    // checked: each 400, nothing signed (review r2 of #480).
+    const encoded = (layers: number) => compute(token, { presign: { credential: 's3', path: '/bucket/report.csv', expiresIn: 60, query: { trace: token.replaceAll('_', `%${'25'.repeat(layers - 1)}5F`) } } });
+    assert.deepEqual([(await encoded(7)).status, (await encoded(7)).body.message], [400, 'the handle goes in no presigned URL']);
+    assert.deepEqual([(await encoded(8)).status, (await encoded(8)).body.message], [400, 'the URL is encoded too many times over to check']);
+    assert.equal(uses(), 1);
+    // The upstream moves: the copy admits, the use decides on the new item, and the URL is built from its upstream.
+    await save({ s3: s3('https://s3-new.example.test/files', '/bucket/**') });
+    const moved = await presign('/bucket/report.csv');
+    assert.equal(moved.status, 200, JSON.stringify(moved.body));
+    assert.equal(new URL(moved.body.url as string).host, 's3-new.example.test');
+    const hosts = (await entries('credential.use')).filter((entry) => entry.metadata.presign !== undefined).map((entry) => entry.metadata.host);
+    assert.deepEqual(hosts, ['s3.eu-west-3.example.test', 's3-new.example.test']);
+    // An allow-list edit the copy did not see: it admits the path, the decided item refuses it, 503 moved, nothing signed;
+    // then the copy is the decided item's, and refuses it as it is.
+    await save({ s3: s3('https://s3-new.example.test/files', '/archive/**') });
+    const narrowed = await presign('/bucket/report.csv');
+    assert.deepEqual([narrowed.status, narrowed.body.reason, narrowed.retryAfter], [503, 'moved', '1'], JSON.stringify(narrowed.body));
+    assert.equal((await presign('/bucket/report.csv')).status, 403);
+    // An inject edit under a copy that admits the path (another route, as a fresh copy's refusal stands for
+    // cacheSeconds): the decided route no longer signs with sigv4 alone, refused before its values are read, 503 moved;
+    // then 400 by the copy it brought.
+    const other = (path: string) => compute(token, { presign: { credential: 'backup', path, expiresIn: 60 } });
+    await save({ backup: { ...s3('https://backup.example.test/files', '/bucket/**'), name: 'backup' } as ProxyDefinition });
+    assert.equal((await other('/bucket/report.csv')).status, 200);
+    await save({ backup: { ...s3('https://backup.example.test/files', '/bucket/**', 'header'), name: 'backup' } as ProxyDefinition });
+    const reinjected = await other('/bucket/report.csv');
+    assert.deepEqual([reinjected.status, reinjected.body.reason], [503, 'moved'], JSON.stringify(reinjected.body));
+    assert.equal((await other('/bucket/report.csv')).status, 400);
+  });
+});
+
+test("what a UI item makes answers within its values' window: a signature, a check or a URL made after the use's deadline, or after kept values lapse, is 503 late (review r1 of #480)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  const { privateKey } = generateKeyPairSync('ed25519');
+  await root.secrets.set('market/dev', { DFNS_PEM: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), HOOK_SECRET: 'whsec-0123456789abcdef', AWS_ACCESS_KEY_ID: AWS_ID, AWS_SECRET_ACCESS_KEY: AWS_SECRET });
+  await save({
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'DFNS_PEM' }, limit: NO_LIMIT },
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    s3: {
+      kind: 'route', name: 's3', upstream: 'https://s3.eu-west-3.example.test/files',
+      inject: [{ kind: 'sigv4', accessKeyId: '{AWS_ACCESS_KEY_ID}', secretAccessKey: '{AWS_SECRET_ACCESS_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }],
+      allow: null, limit: NO_LIMIT, placeholder: null, egress: null,
+    },
+  });
+  const token = await handle();
+  const message = b64('transfer 10');
+  // WebCrypto slowed past the window, for the calls `slow` picks: a private key's signature, an HMAC's, its check, SigV4's last HMAC.
+  const slowly = async (slow: (algorithm: unknown, data: BufferSource) => boolean, by: number, ask: Record<string, unknown>) => {
+    const real = { sign: crypto.subtle.sign.bind(crypto.subtle), verify: crypto.subtle.verify.bind(crypto.subtle) };
+    let slowed = 0;
+    const pause = async (algorithm: unknown, data: BufferSource) => {
+      if (slow(algorithm, data)) {
+        slowed += 1;
+        await new Promise((resolve) => setTimeout(resolve, by));
+      }
+    };
+    crypto.subtle.sign = (async (algorithm: AlgorithmIdentifier, key: CryptoKey, data: BufferSource) => {
+      await pause(algorithm, data);
+      return real.sign(algorithm, key, data);
+    }) as typeof crypto.subtle.sign;
+    crypto.subtle.verify = (async (algorithm: AlgorithmIdentifier, key: CryptoKey, signature: BufferSource, data: BufferSource) => {
+      await pause(algorithm, data);
+      return real.verify(algorithm, key, signature, data);
+    }) as typeof crypto.subtle.verify;
+    try {
+      const made = await compute(token, ask);
+      assert.ok(slowed >= 1, `${JSON.stringify(ask)}: nothing slowed`);
+      return made;
+    } finally {
+      crypto.subtle.sign = real.sign;
+      crypto.subtle.verify = real.verify;
+    }
+  };
+  const named = (name: string) => (algorithm: unknown) => (typeof algorithm === 'string' ? algorithm : (algorithm as { name: string }).name) === name;
+  const signing = (data: BufferSource) => new TextDecoder().decode(data as Uint8Array).startsWith('AWS4-HMAC-SHA256\n');
+  const asks: [string, (algorithm: unknown, data: BufferSource) => boolean, Record<string, unknown>][] = [
+    ['a private key', named('Ed25519'), { sign: { credential: 'dfns', message } }],
+    ['an HMAC sign', named('HMAC'), { sign: { credential: 'hooks', message } }],
+    ['an HMAC check', named('HMAC'), { verify: { credential: 'hooks', message, signature: '0'.repeat(64) } }],
+    ['a presign', (algorithm, data) => named('HMAC')(algorithm) && signing(data), { presign: { credential: 's3', path: '/bucket/report.csv', expiresIn: 60 } }],
+  ];
+  for (const [what, slow, ask] of asks) {
+    const late = await slowly(slow, USE_DEADLINE_MS + 500, ask);
+    assert.deepEqual([late.status, late.body.reason, late.retryAfter], [503, 'late', '1'], `${what}: ${JSON.stringify(late.body)}`);
+    assert.equal(late.body.signature ?? late.body.valid ?? late.body.url, undefined, what);
+    // In time, the same ask is made.
+    assert.equal((await compute(token, ask)).status, 200, what);
+  }
+  // Kept values answer by when they lapse: kept for a second, an HMAC made 1.5 s later is late, its values unused.
+  deploy(proxyOf({ cacheSeconds: 1 }));
+  const kept = { sign: { credential: 'hooks', message } };
+  assert.equal((await compute(token, kept)).status, 200);
+  await countingUses(async (uses) => {
+    const late = await slowly(named('HMAC'), 1_500, kept);
+    assert.deepEqual([late.status, late.body.reason], [503, 'late'], JSON.stringify(late.body));
+    assert.equal(uses(), 0, 'made with the kept values, no use');
+  });
+});
+
+test("an item naming a key the environment does not hold, or one gone before the read, signs, checks and sends nothing: never a value the object's prototype lends a key named toString or constructor (review r3 of #480)", ON_015, async () => {
+  const { privateKey: pair } = generateKeyPairSync('ed25519');
+  const SECRET = 'whsec-0123456789abcdef';
+  const PEM = pair.export({ format: 'pem', type: 'pkcs8' }).toString();
+  await save({
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'toString', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    inbound: { kind: 'verifier', name: 'inbound', hmac: { key: 'toString', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'constructor' }, limit: NO_LIMIT },
+    openai: uiRoute('openai', '/openai', 'toString'),
+  });
+  const token = await handle();
+  const message = b64('transfer 10');
+  // What the prototype would lend: `String(Object.prototype.toString)`, so a MAC anyone computes.
+  const lent = createHmac('sha256', String(Object.prototype.toString)).update('transfer 10').digest('hex');
+  const asks = [
+    { sign: { credential: 'hooks', message } },
+    { verify: { credential: 'hooks', message, signature: lent } },
+    { verify: { credential: 'inbound', message, signature: lent } },
+    { sign: { credential: 'dfns', message } },
+  ];
+  // Neither key held: the read refuses what the vault decided on (409 changed), nothing made. The proxy's own-value
+  // check behind it (Object.hasOwn, as code's valuesFor) is defence in depth: the read answers an ordinary object.
+  for (const ask of asks) {
+    const refused = await compute(token, ask);
+    assert.deepEqual([refused.status, refused.body.signature, refused.body.valid], [409, undefined, undefined], `${JSON.stringify(ask)}: ${JSON.stringify(refused.body)}`);
+  }
+  let sent = reached.length;
+  assert.equal((await route('/use/market/dev/openai/models/x', as(token))).status, 409);
+  assert.equal(reached.length, sent, 'nothing sent with the prototype\'s value');
+  // Each gone once the vault decided on it, before the app reads it, a key of its own a round: refused (SQLite's read,
+  // 404), or made with the value decided on (Postgres's, by ID), never with the prototype's.
+  const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
+  const real = vault.useRoute;
+  let gone: string | null = null;
+  vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
+    const answered = await real.apply(runtime.vault, args);
+    // Gone from under its name by a write around the app (R64): what fails closed on both engines.
+    if (gone !== null) await run(sql`UPDATE secrets SET key = ${`gone_${gone}`} WHERE key = ${gone}`);
+    return answered;
+  }) as Vault['useRoute'];
+  const hmacOn = (key: string) => ({ key, encoding: 'hex' as const, prefix: '', maxBytes: null });
+  const mac = (secret: string) => createHmac('sha256', secret).update('transfer 10').digest('hex');
+  try {
+    for (const [key, item, ask] of [
+      ['valueOf', { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', ...hmacOn('valueOf') }, limit: NO_LIMIT }, { sign: { credential: 'hooks', message } }],
+      ['hasOwnProperty', { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', ...hmacOn('hasOwnProperty') }, limit: NO_LIMIT }, { verify: { credential: 'hooks', message, signature: mac(String(Object.prototype.hasOwnProperty)) } }],
+      ['isPrototypeOf', { kind: 'verifier', name: 'inbound', hmac: hmacOn('isPrototypeOf'), limit: NO_LIMIT }, { verify: { credential: 'inbound', message, signature: mac(String(Object.prototype.isPrototypeOf)) } }],
+      ['propertyIsEnumerable', { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'propertyIsEnumerable' }, limit: NO_LIMIT }, { sign: { credential: 'dfns', message } }],
+    ] as const) {
+      await save({ [item.name]: item as ProxyDefinition });
+      await root.secrets.set('market/dev', { [key]: item.name === 'dfns' ? PEM : SECRET });
+      gone = key;
+      const made = await compute(token, ask);
+      gone = null;
+      const lent = String((Object.prototype as unknown as Record<string, unknown>)[key]);
+      if (made.status === 200) {
+        if ('verify' in ask) assert.deepEqual(made.body, { valid: false }, `${key}: the lent MAC checks as nothing`);
+        else if (item.name === 'hooks') assert.deepEqual(made.body, { signature: mac(SECRET) }, key);
+        else assert.ok(verifyWith(null, Buffer.from('transfer 10'), pair, Buffer.from(made.body.signature as string, 'base64url')), key);
+      } else {
+        assert.deepEqual([made.body.signature, made.body.valid], [undefined, undefined], `${key}: ${JSON.stringify(made.body)}`);
+      }
+      assert.notEqual(made.body.signature, mac(lent), key);
+    }
+    await save({ openai: uiRoute('openai', '/openai', 'toLocaleString') });
+    await root.secrets.set('market/dev', { toLocaleString: SECRET });
+    gone = 'toLocaleString';
+    sent = reached.length;
+    const routed = await route('/use/market/dev/openai/models/x', as(token));
+    gone = null;
+    if (routed.status === 200) assert.equal(reached.at(-1)!.headers.authorization, `Bearer ${SECRET}`);
+    else assert.equal(reached.length, sent, await routed.text());
+  } finally {
+    vault.useRoute = real;
+  }
+});
+
+test("a UI HMAC takes a message up to 1 MiB in an editable deployment, and a byte more is 413; code's private-key signer beside it still takes 64 KiB (review r3 of #480)", ON_015, async () => {
+  const SECRET = 'whsec-0123456789abcdef';
+  await root.secrets.set('market/dev', { HOOK_SECRET: SECRET });
+  await save({ hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: 1024 ** 2 }, limit: NO_LIMIT } });
+  const token = await handle();
+  const most = Buffer.alloc(1024 ** 2, 7);
+  const signed = await compute(token, { sign: { credential: 'hooks', message: most.toString('base64url') } });
+  assert.deepEqual([signed.status, signed.body.signature], [200, createHmac('sha256', SECRET).update(most).digest('hex')], JSON.stringify(signed.body).slice(0, 300));
+  const over = await compute(token, { sign: { credential: 'hooks', message: Buffer.alloc(1024 ** 2 + 1, 7).toString('base64url') } });
+  assert.deepEqual([over.status, over.body.reason], [413, 'too_large'], JSON.stringify(over.body));
+  const code = await compute(token, { sign: { credential: 'signing', message: Buffer.alloc(64 * 1024 + 1, 7).toString('base64url') } });
+  assert.equal(code.status, 413, JSON.stringify(code.body));
+  assert.match(code.body.message as string, /64 KiB/);
 });
