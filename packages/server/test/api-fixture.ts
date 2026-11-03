@@ -370,6 +370,8 @@ export function testVault(
     verifyLog: call('verifyLog'),
     prepare: call('prepare'),
     writeKeys: call('writeKeys'),
+    admitRead: call('admitRead'),
+    admitWrite: call('admitWrite'),
     waitSealed: call('waitSealed'),
     signIn: call('signIn'),
     revokeCredential: call('revokeCredential'),

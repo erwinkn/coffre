@@ -533,7 +533,7 @@ function sameObject(key: Buffer, ref: Ref, a: Input | null, b: Input | null): bo
  * Canonical JSON, so that a retry sends the same bytes (`change_input`
  * finds its entry by request id and payload).
  */
-export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: WriteRequestPart; inputs: string }): string {
+export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: WriteRequestPart | AdmitRequestPart; inputs: string }): string {
   return canonical({ ...op, ref: { kind: ref.kind, id: ref.id }, ...(old === undefined ? {} : { old: old.toString() }), ...(extra ?? {}) });
 }
 
@@ -542,6 +542,26 @@ export type WriteRequest = { number: bigint; credential: string; identity: strin
 
 /** What a change's payload says of its request: its number, and the credential and identity it was decided for. */
 type WriteRequestPart = { number: string; credential: string; identity: string | null };
+
+/** What an add's change says of its request, which no number names (its read numbers nothing): the credential and identity it was decided for. */
+type AdmitRequestPart = { credential: string; identity: string | null };
+
+/**
+ * A member's first add's change (T179 PR 5, admit.ts), made from the read its decision weighed: from no object (no row,
+ * no seal) to the member's, `member.add`, the 0.14 entry it accounts for (`old`) and its request in its payload (the
+ * credential and identity it was decided for, the read's digest, `inputs`, which `change_input_strict` holds to the read
+ * its transaction held), sealed and MAC'd by the vault's keys. As `Changes.commit` makes a decision's.
+ */
+export function admitChange(
+  keys: Pick<ChangeKeys, 'seals' | 'mac'>,
+  add: { at: number; actor: string; principal: string; after: Input; op: Op; old: bigint; credential: string; identity: string | null; inputs: string },
+): ChangeCall {
+  const ref: Ref = { kind: 'principal', id: add.principal };
+  const seal = sealOf(keys.seals[0]!, ref, add.after);
+  const payload = payloadOf(ref, add.op, add.old, { request: { credential: add.credential, identity: add.identity }, inputs: add.inputs });
+  const row = { at: add.at, requestId: randomUUID(), object: objectKey(ref), actor: add.actor, payload, seal };
+  return { ref, ...row, value: writes(ref) ? rowValue(add.after) : null, sealFrom: null, mac: entryMac(keys.mac, { tree: 'changes', row }) };
+}
 
 function requestPart(request: WriteRequest): { request: WriteRequestPart; inputs: string } {
   return { request: { number: request.number.toString(), credential: request.credential, identity: request.identity }, inputs: request.inputs };

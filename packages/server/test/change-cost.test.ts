@@ -230,6 +230,8 @@ const CASES: Case[] = [
     run: (i) => owner.environments.update(`market/old-${i}`, { archived: true }),
   },
   { name: 'member added', run: (i) => owner.members.add(`user:new-${i}@acme.example`) },
+  { name: 'member added, a role', run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
+  { name: 'service account added', run: (i) => owner.members.add(`token:ci-${i}`) },
   {
     name: 'access granted',
     setup: async (i) => void (await owner.members.add(`user:granted-${i}@acme.example`)),
@@ -294,7 +296,12 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'environment renamed': { app: 6, vault: 2 },
   'environment protected': { app: 5, vault: 9 },
   'environment archived': { app: 10, vault: 2 },
-  'member added': { app: 8, vault: 6 },
+  // A first add decided on one read (T179 PR 5; docs/design/two-trips.md, "A member add"): the vault's read; then its
+  // write, the members' rows and 0.14's head (read for its `member.add` entry's MAC, until 0.16 stops it), then the hold,
+  // the entry, the row, the change and the COMMIT. No app statement. 0.16's contraction makes it { app: 0, vault: 2 }.
+  'member added': { app: 0, vault: 3 },
+  'member added, a role': { app: 0, vault: 3 },
+  'service account added': { app: 0, vault: 3 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },

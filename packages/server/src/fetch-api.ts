@@ -24,6 +24,7 @@ import {
 import { errorResponse, jsonResponse, methodNotAllowed, parseJsonBody, readLimitedBytes } from './http.ts';
 import { useByName, useManyByName } from './named-use.ts';
 import { writeAhead, writeAsked, type Written } from './write-ahead.ts';
+import { admitAhead, admitAsked, type Admission } from './admit-ahead.ts';
 import { apiContext, type CoffreRuntime } from './runtime.ts';
 import { publicProviders } from './signin.ts';
 
@@ -315,6 +316,26 @@ export async function fetchApi(
         }
       }
     }
+    // A member's first add with a coffre credential: the vault's read, which decides on the caller as they are and
+    // prepares the add, that the route then hands back to the vault's write of two round trips (`admitAhead`, T179 PR 5).
+    let admission: Admission | undefined;
+    if (body === null && !recall && !shows && options.authenticate === undefined && request.method === 'PUT' && runtime.vault.admitRead !== undefined) {
+      const credential = apiCredential(request, runtime.auth);
+      if (credential !== null) {
+        const read = await bytes();
+        if (read instanceof Response) return read;
+        body = read;
+        const asked = admitAsked(request, body);
+        if (asked !== null) {
+          authenticate = async (token) => {
+            const ahead = await admitAhead(runtime, request, options.sourceIp, token, asked);
+            if (ahead === null) return authenticateRequest(request, runtime, crypto.randomUUID(), token, options.sourceIp);
+            if (ahead.admission !== null) admission = ahead.admission;
+            return ahead.identity;
+          };
+        }
+      }
+    }
     const identity = await apiCaller(request, runtime, options.sourceIp, authenticate, options.inProcess).catch((error: unknown) => {
       written?.wipe();
       throw error;
@@ -338,7 +359,7 @@ export async function fetchApi(
       served = replay();
       if (identity.caller.recalled !== undefined) again = replay();
     }
-    const response = await serveApi(served, { ...apiContext(runtime, identity, options.render), ...(named === undefined ? {} : { named }), ...(written === undefined ? {} : { written }) })
+    const response = await serveApi(served, { ...apiContext(runtime, identity, options.render), ...(named === undefined ? {} : { named }), ...(written === undefined ? {} : { written }), ...(admission === undefined ? {} : { admission }) })
       .finally(() => written?.wipe());
     // Nothing goes back on a kept answer the vault has not vouched for this request.
     await identity.caller.recalled?.confirm();
