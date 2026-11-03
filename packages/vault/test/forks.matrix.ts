@@ -156,6 +156,7 @@ async function cell(row: Row, key: Key) {
       const capRows = () => count(sql`SELECT count(*) AS n FROM log_bulk WHERE principal = ${w.principal}`);
       if (row.window === 'passed') await run(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${w.principal}`);
       const [beforeEntries, beforeCap] = [await entries(), await capRows()];
+      await measured.connect();
       measured.slow(delayOf());
       const before = measured.statements();
       const now = Date.now();

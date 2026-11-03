@@ -2,7 +2,7 @@
 // default, Warsaw's Worker to a Paris database through Hyperdrive, T141): the app's statements on a connection of the
 // render's own (`HyperdrivePool`, its reads asked together under one Sync), the vault's on its pool, each through a
 // relay that holds each Sync that long (`postgresProxy`). Prints each page's time, p50 and p90, and its Syncs, as
-// Owner and as viewer, in an instance as request-cost.test.ts makes it: a reference into the environment and a
+// Owner and as viewer, in an instance as request-cost.alone.ts makes it: a reference into the environment and a
 // project with a fork. Not a test: run with the test database's settings, on a database migrated as the tests' are,
 //
 //   COFFRE_TEST_DATABASE=<a migrated scratch database> node --conditions=coffre:source packages/server/test/bench/pages.ts
@@ -68,7 +68,7 @@ for (const [persona, email] of [['owner', ROOT], ['viewer', READER]] as const) {
   sessions.set(persona, signed.credential.token);
 }
 
-/** One render, as request-cost.test.ts's: its own connection, its Syncs counted. */
+/** One render, as request-cost.alone.ts's: its own connection, its Syncs counted. */
 async function render(as: Persona, path: string, calls: (client: CoffreClient) => Promise<unknown>): Promise<{ ms: number; app: number; vault: number }> {
   const pool = new HyperdrivePool(app.url, { groupReads: true });
   const renderDb = createDatabase(pool);

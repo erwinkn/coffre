@@ -35,4 +35,4 @@ node --conditions=coffre:source packages/server/test/forks-properties.test.ts "$
 node --conditions=coffre:source packages/server/test/audit-visibility-properties.test.ts "$@"
 node --conditions=coffre:source packages/server/test/natures-properties.test.ts "$@"
 # Its growth property, and its fixed budgets beside it; Postgres only.
-node --conditions=coffre:source packages/server/test/request-cost.test.ts "$@"
+node --conditions=coffre:source packages/server/test/request-cost.alone.ts "$@"
