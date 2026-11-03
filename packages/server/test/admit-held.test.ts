@@ -12,7 +12,7 @@ import { github, signin } from '@coffre/core/identity';
 import type { AdmitReadInput, AdmitReadOutcome, Vault } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
-import { logObject } from '@coffre/db/log';
+import { lockLogHead, logObject } from '@coffre/db/log';
 import { eq, sql } from 'drizzle-orm';
 
 import { sessionCookieName } from '../src/auth.ts';
@@ -170,6 +170,32 @@ test("Bob's session revoked between the read and the write: the hold fails, and 
   assert.equal(added.status, 401, JSON.stringify(added.body));
   assert.deepEqual(served(w.answers), ['served', 'ended']);
   assert.equal(await memberRow(NEW), undefined);
+});
+
+test("the head held and every place in the reads' line taken when the write comes: it waits for the head, as today's add does, and adds in one try (Fable's review of #474)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  let release = () => {};
+  let holding: Promise<void> = Promise.resolve();
+  w.between(async () => {
+    let held = () => {};
+    const taken = new Promise<void>((resolve) => (held = resolve));
+    holding = db.owner.transaction(async (tx) => {
+      await lockLogHead(tx);
+      // The reads' places in line (`READ_HEAD_WAITERS`, 16 of them, `lockLogHeadQueued`), and more.
+      await run(tx, sql`SELECT pg_advisory_xact_lock(${0x636f6668}, place) FROM generate_series(1, 64) AS place`);
+      held();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await Promise.race([taken, holding]);
+    setTimeout(() => release(), 400);
+  });
+  const started = Date.now();
+  const added = await w.add();
+  await holding;
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.ok(Date.now() - started >= 400, `added after ${Date.now() - started} ms, before the head was free`);
+  assert.deepEqual(served(w.answers), ['served']);
+  assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
 
 test('the roles redefined between the read and the write: the hold fails, and the add goes again on the roles as they are (WritingAdd, pol)', { skip: POSTGRES }, async () => {

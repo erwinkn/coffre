@@ -12,7 +12,7 @@ import { github, signin } from '@coffre/core/identity';
 import type { Vault, WriteKeysInput, WriteKeysOutcome } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
-import { laterChanges, logObject } from '@coffre/db/log';
+import { laterChanges, lockLogHead, logObject } from '@coffre/db/log';
 import { eq, sql } from 'drizzle-orm';
 
 import { sessionCookieName } from '../src/auth.ts';
@@ -153,6 +153,29 @@ test('a key write the vault decided on its read commits in two of the app\'s rou
   const wraps = entries.filter((entry) => entry.action === 'key.wrap').slice(-2).map((entry) => String(entry.seq));
   const writes = entries.filter((entry) => entry.action === 'secret.write').slice(-2).map((entry) => String(entry.related_seq));
   assert.deepEqual(writes.sort(), wraps.sort());
+});
+
+test("the head held and every place in the reads' line taken when Ada writes: the vault's wrap waits for the head, as today's does, and the write commits in one try (Fable's review of #474)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  let release = () => {};
+  let held = () => {};
+  const taken = new Promise<void>((resolve) => (held = resolve));
+  const holding = db.owner.transaction(async (tx) => {
+    await lockLogHead(tx);
+    // The reads' places in line (`READ_HEAD_WAITERS`, 16 of them, `lockLogHeadQueued`), and more.
+    await run(tx, sql`SELECT pg_advisory_xact_lock(${0x636f6668}, place) FROM generate_series(1, 64) AS place`);
+    held();
+    await new Promise<void>((resolve) => (release = resolve));
+  });
+  await Promise.race([taken, holding]);
+  const started = Date.now();
+  setTimeout(() => release(), 400);
+  const wrote = await w.write({ API_KEY: 'fake-again' });
+  await holding;
+  assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
+  assert.ok(Date.now() - started >= 400, `written after ${Date.now() - started} ms, before the head was free`);
+  assert.deepEqual(served(w.answers), ['served']);
+  assert.deepEqual(wrote.body.keys, { API_KEY: { version: 2, sensitivity: 'secret' } });
 });
 
 test("Ada's grant taken between the vault's read and the hold: the hold fails, the write asks again, and the vault's refusal answers, nothing written (WritingRevoke, rev)", { skip: POSTGRES }, async () => {

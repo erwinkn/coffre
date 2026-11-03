@@ -944,7 +944,10 @@ How it holds, and what it leaves to later PRs:
   takes both takes them (formal/WriteLocks.tla, `AddLocks`, MembersFirst: the head first waits in a circle with a
   demotion); then `admit_hold` takes the issue lock shared and the fence, as `change_input` does, and holds the read
   after them. A hold that fails writes nothing (CF001, the transaction rolled back); the app reads again, three
-  tries in all, then 409 `changed` with `Retry-After: 1`.
+  tries in all, then 409 `changed` with `Retry-After: 1`. The head held by another, the write waits for it within
+  the lock bound, as today's add does, not in one of the reads' places in line (`READ_HEAD_WAITERS`), which a burst
+  of reads may all hold, and which would refuse it at once, 503. So does a key write's `key.wrap` append (PR 3)
+  (Fable's review of #474).
 - **Two adds of one member**: the second's hold finds the first's row, its change and its 0.14 entry; read again, it
   is no first add, and today's path answers it as it answers an add of a member (`created: false`). The members'
   primary key backs it: a unique violation is read again too.
@@ -958,7 +961,8 @@ The regressions (packages/server/test/admit-held.test.ts) make each adversary of
 read and its write, through the real front door: the adder demoted, their session revoked, the roles redefined,
 another add of the member first, a hold that keeps failing (409 after three tries); before the add, a session revoked
 and its row put back (dbw), the adder's row put back and its seal written into the demotion's change (WritingForge),
-a token hash copied onto an Owner's session (sub), the adder's row edited in its `created_by` alone; the adder removed
+a token hash copied onto an Owner's session (sub), the adder's row edited in its `created_by` alone; the head held,
+with every place in the reads' line, when the write comes (and when a key write's wrap does); the adder removed
 and restored between the tries, his session's row not yet revoked (WritingRejoin); a ticket edited, or written by a
 vault whose config names the member an Owner; a change naming a read its transaction did not hold; and one that the
 read's digest moves with each. Each fails with its protection taken out. The refusals (a

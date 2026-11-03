@@ -3922,8 +3922,9 @@ class VaultService implements Vault {
     const correlation = { operationId: input.operationId ?? null, requestId: input.requestId ?? null, ...(inputs.credential.kind === 'personal' ? { credentialId: credential.id } : {}) };
     const entries = secrets.map((secret) => keyEntry('key.wrap', principal, secret, 'allow', null, correlation));
     // Two round trips: BEGIN, the head locked and read in one statement (`snapshot`, as a decision takes it), then the
-    // append with the COMMIT.
-    const appended = await this.#db.transaction(async (tx) => this.#append(tx, entries, [], await snapshot(tx, { principals: [], head: true, waiters: READ_HEAD_WAITERS }), { final: true }));
+    // append with the COMMIT. A write's: it waits for the head within the bound, as today's wrap does, not in the reads'
+    // line (Fable's review of #474, on the add's).
+    const appended = await this.#db.transaction(async (tx) => this.#append(tx, entries, [], await snapshot(tx, { principals: [], head: true }), { final: true }));
     // Each key's change, from its object as read (none for a key the write makes) to its new version.
     const changes = prepareChanges(log015, at, principal, decided.keys.map((key, i): ObjectChange => ({
       kind: 'secret', id: key.id,
@@ -4003,10 +4004,12 @@ class VaultService implements Vault {
     try {
       numbers = await this.#db.transaction(async (tx) => {
         // One Sync: the bound, the members' rows, then the head and its read, in that order (as `#decideOnce` asks them).
+        // A write waits for the head within the bound, as today's add does, not in the reads' line, whose places a burst
+        // of reads may all take (Fable's review of #474).
         const [, , reads] = await Promise.all([
           store.boundLockWaits(tx, LOCK_TIMEOUT_MS),
           store.lockMembers(tx, [actor, principal]),
-          snapshot(tx, { principals: [], head: true, waiters: READ_HEAD_WAITERS }),
+          snapshot(tx, { principals: [], head: true }),
         ]);
         // The rest, nothing awaited: the hold first, which every write after it rests on.
         holdAdmit(tx, { tokenHash: Buffer.from(ticket.tokenHash, 'base64'), principal, scope: ticket.scopeSlugs, digest: Buffer.from(ticket.digest, 'hex') });
