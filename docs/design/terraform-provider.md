@@ -17,13 +17,24 @@ fills the key in. What is missing is the step that puts the value into
 coffre, without a person copying it by hand.
 
 ```hcl
+resource "terraform_data" "backup_key" {
+  # Everything that replaces the key, so that a new key always gets a new secret (section 7).
+  input = { rotation = 1, application_id = scaleway_iam_application.backup.id }
+}
+
+resource "scaleway_secret" "backup_key" {
+  name = "backup-key"
+  lifecycle { replace_triggered_by = [terraform_data.backup_key] }
+}
+
 resource "scaleway_iam_api_key" "backup" {
-  application_id = scaleway_iam_application.backup.id
+  application_id = terraform_data.backup_key.output.application_id
   secret_id      = scaleway_secret.backup_key.id # secret_key goes to Secret Manager, not state
 }
 
 ephemeral "scaleway_secret_version" "backup_key" {
-  secret_id  = scaleway_secret.backup_key.id   # revision defaults to "latest"
+  secret_id  = scaleway_secret.backup_key.id
+  revision   = "1" # this key's secret_key: its secret holds no other, and "latest" may be anyone's
   depends_on = [scaleway_iam_api_key.backup]
 }
 
@@ -204,7 +215,8 @@ None of these calls returns a secret value. The list
 returns the values of `plain` keys, which anyone who can list the
 environment sees already: the provider drops them and never stores them.
 From the list it keeps, for its key, `version`, `versionId`, `updatedBy`,
-`sensitivity`, `archived` and `reference`. The dry run (`?dryRun=1`), which
+`sensitivity`, `archived`, `reference` and, in a fork, `parent.state`
+(section 5). The dry run (`?dryRun=1`), which
 would say whether a value changed, is not used: it decrypts the stored
 value to compare and needs `secret.read` (section 5).
 
@@ -272,7 +284,7 @@ Terraform cannot see `value_wo` in its state. It compares
 ```hcl
 value_wo_version = "1"                                   # by hand: bump to write again
 value_wo_version = scaleway_iam_api_key.backup.id       # a new key, replaced upstream
-value_wo_version = time_rotating.backup_key.id          # every 90 days, with a key that rotates on the same clock
+value_wo_version = time_rotating.backup_key.id          # every 90 days, with the key's generation (section 7) on the same clock
 ```
 
 It is a string, not a number: the commonest trigger is an upstream
@@ -302,6 +314,7 @@ back).
 | `value_wo_version` (with or without `sensitivity`) | update, `version` known after apply | writes `value_wo` at the configured nature, `replaces` guarded |
 | `sensitivity` stricter only | update, `version` known after apply | marks the current value stricter (`{ sensitivity, replaces }`), a new version holding the same value; `value_wo` is not sent |
 | `sensitivity` looser only | an error: "making KEY looser writes its value again; change value_wo_version in the same apply" | |
+| `sensitivity` only, on a fork's key that inherits (below) | an error: "KEY has no value of its own in infra/prod-eu to mark; change value_wo_version to write one" | |
 | `on_destroy` only | update, `version` and `version_id` kept | calls nothing |
 | none | nothing | |
 
@@ -336,6 +349,8 @@ current `version` and `version_id` in state, and compares:
 | no such key | the resource leaves state | create |
 | the key, archived | an error: archived in coffre; unarchive it there, or remove the resource | |
 | the key as a reference | an error: a reference is not Terraform's to overwrite | |
+| in a fork, the key inheriting its parent's (`parent.state` `inherited`): Terraform's override was reset | state takes the inherited `version` and `version_id`, null where the credential is not told the parent's, and keeps its `sensitivity`; a warning says the fork reads the parent's value now | nothing to write |
+| in a fork, the key removed (`parent.state` `removed`) | an error: removed in this fork; restore it there, or remove the resource | |
 
 **A version written by hand is reported, not overwritten.** The provider
 cannot tell whether that version holds the value its source has now (a
@@ -345,6 +360,22 @@ rule. So the warning repeats on every plan until Terraform writes again,
 and says how: change `value_wo_version`. If the hand-written value matters,
 rotate in Terraform anyway: a value rotated only in coffre leaves the old
 key live upstream.
+
+**In a fork, a key can stop being the fork's own.** Say Terraform writes
+`APP_DB_PASSWORD` into `infra/prod-eu`, a fork of `infra/prod`, and someone
+then resets it to the parent's: coffre archives the override and lists
+the key as `inherited`, unarchived, no reference, so the rows above would
+not catch it. The provider keeps `parent.state` from each list in private
+state and treats a reset like a hand-written version: reported, not
+overwritten, since the person may have meant the fork to follow its
+parent. Terraform takes the key back only on a changed `value_wo_version`,
+which writes a new override (coffre brings the reset row back for it).
+Until then the key has no value of its own, so a sensitivity-only change
+fails at plan instead of at coffre's mark ("KEY is inherited: mark it
+where it is held"), and the state keeps the nature Terraform wrote, not
+the parent's, so a parent's nature never plans a mark here. A removal
+(`removed`) is the fork deciding to do without the key, so it fails the
+plan as an archive does: a write would end the removal unasked.
 
 **A write never overwrites a version its plan did not see.** An update,
 a value write or a mark alike, sends `replaces` with the `version_id` of the prior state, which is what
@@ -357,9 +388,16 @@ is not possible today (`replaces` names an existing version), so a create
 checks that the key is absent at plan and again at apply, and a create
 racing another writer between that check and the write may still win. The
 other writer's version stays in the history, and the audit log shows both.
+A write over an inherited key sends the inherited version's ID as
+`replaces`, which coffre checks against the parent's current version; when
+the list hid it (the credential is not told the parent's versions), the
+write has no `replaces` and is checked at plan and at apply, as a create.
 
 **Adopting a key that exists.** A create refuses a key already live in
-coffre ("exists; import it"). `terraform import coffre_secret.backup_key
+coffre ("exists; import it"). In a fork, a key it inherits is not its own:
+a create over it writes an override, which the plan shows as a create of
+`infra/prod-eu/APP_DB_PASSWORD`, and a key the fork removed is refused at plan
+("removed in infra/prod-eu; restore it there first"), as is its import. `terraform import coffre_secret.backup_key
 infra/prod/SCW_BACKUP_SECRET_KEY` (or an `import` block) adopts it; the
 next apply writes Terraform's value as a new version, since the imported
 state has no `value_wo_version`.
@@ -489,6 +527,22 @@ the database never got (its version already moved). Naming
 `scaleway_secret_version.app_db.revision` reads the value Terraform wrote,
 whatever came after it.
 
+**One secret per API key.** The Scaleway key's resource writes its
+`secret_key` as a new version of the secret it names and keeps no record
+of which revision that was, so nothing exports a revision to pin. Section
+1 pins `"1"` and makes it true: the key's every argument that replaces it
+(`application_id` here, `expires_at` if set) goes through
+`terraform_data.backup_key`, whose change replaces the secret too, and
+`secret_id` replaces the key. Each key generation gets a fresh secret, whose
+revision 1 is that key's. Say Scaleway makes key A, the coffre write fails,
+and someone adds revision 2 before the retry: reading `latest`, the retry
+would write revision 2 into coffre against `value_wo_version` = key A's ID,
+a credential that matches no key, and succeed. Pinned, it writes A's. A
+computed `secret_revision` on Scaleway's key, a small upstream change,
+would make the generation unnecessary; until then, a key replaced around
+it (an `expires_at` set on the key directly) leaves revision 1 naming the
+old key, so the generation input is part of the pattern, not decoration.
+
 **The source's copy stays.** Ephemeral `scaleway_secret_version` reads that
 revision on every plan and apply, so it must stay readable while
 Terraform manages the destinations; deleting it fails the next run. That
@@ -543,7 +597,8 @@ mirror.
   coffre that the test harness boots as `pnpm conformance:node` does: the
   Node example on SQLite in a temp directory, on ports of its own, with no
   shared Postgres. A seed made through the API: projects `infra` and
-  `market`, each with an environment `prod`, a service account with
+  `market`, each with an environment `prod`, `infra/prod` with an
+  inheriting fork `prod-eu`, a service account with
   `contributor` on `infra/prod` and `contributor` on `market/prod` too
   (more than any credential the tests give it), service tokens and an OIDC binding all
   scoped to `infra/prod=contributor`, with uploaded keys whose ID tokens
@@ -572,6 +627,15 @@ mirror.
     provider, with the apply failing after one destination; the retry
     leaves both holding the same value, also when a newer source version
     was added between the failure and the retry (the pinned revision);
+    and section 1's API key, whose coffre write fails, gets a revision 2
+    added by hand, and whose retry still writes revision 1's value, and
+    whose application change plans its secret's replacement with it;
+  - forks: a key Terraform overrides in a fork, then reset to the
+    parent's between applies, gives a warning and no write; a
+    sensitivity-only change then fails at plan; a changed
+    `value_wo_version` writes the override back, with `replaces` the
+    inherited version, and with none from a credential scoped to the fork
+    alone; a key removed in the fork fails the plan, and its import;
   - destroy with `keep` (the key and its versions stay) and with
     `archive`, without `secret.archive` (403, the resource stays in state)
     and with a credential scoped to a `terraform-archiver` role (archived);
@@ -608,9 +672,12 @@ mirror.
 5. `value_wo` is sent only on create and on a changed `value_wo_version`.
    A stricter nature is a mark; a looser one needs a new version. Versions
    written by others are reported with a warning, never overwritten
-   unasked. Every update sends `replaces` with the version its plan saw.
+   unasked. Every update sends `replaces` with the version its plan saw,
+   whenever the list showed one.
    A value with two destinations comes from one stored source, read at
-   the revision Terraform wrote.
+   the revision Terraform wrote; an API key's source is a secret of its
+   own per key, read at revision 1. In a fork, a key reset to its parent's
+   is reported like a hand-written version, and a removed one fails the plan.
 6. Destroy keeps the key (`on_destroy = "keep"`). Archiving takes
    `on_destroy = "archive"` in a reviewed apply, and a credential made for
    a custom role holding `secret.archive`, which `contributor` lacks.
