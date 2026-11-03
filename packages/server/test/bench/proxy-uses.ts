@@ -128,6 +128,12 @@ const use = async (phase: Phase, due: number, first: boolean) => {
   const nth = requests++;
   // At random under a map smaller than the handles: in turn, each would be the one just dropped.
   const handle = load.handles[load.names === undefined ? next++ % load.handles.length : Math.floor(Math.random() * load.handles.length)]!;
+  // A refusal, an HTTP one or a thrown one, counted once in its total and once in the bucket it was due in.
+  const refuse = (why: string) => {
+    phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
+    const bucket = Math.floor((due - phase.started) / 250);
+    phase.timeline[bucket] = (phase.timeline[bucket] ?? 0) + 1;
+  };
   try {
     // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
     // Through a path rule, the handle in the path alone, as Telegram's SDKs put the token there: `/bot<handle>/thing`.
@@ -135,14 +141,10 @@ const use = async (phase: Phase, due: number, first: boolean) => {
     const url = load.stable ? `${load.origin}/use/api/${rest}` : `${load.origin}/use/${load.path}/api/${rest}`;
     const response = await answer(new Request(url, load.inPath === true ? {} : { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
-      const why = `${response.status} ${(await response.text()).slice(0, 80)}`;
-      phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
-      const bucket = Math.floor((due - phase.started) / 250);
-      phase.timeline[bucket] = (phase.timeline[bucket] ?? 0) + 1;
+      refuse(`${response.status} ${(await response.text()).slice(0, 80)}`);
     } else await response.arrayBuffer();
   } catch (error) {
-    const why = String((error as Error).message).slice(0, 80);
-    phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
+    refuse(String((error as Error).message).slice(0, 80));
   } finally {
     phase.latencies.push(performance.now() - due);
     if (first) phase.first = performance.now() - due;
