@@ -1979,13 +1979,16 @@ export type RouteCaller =
 /**
  * A route use as the request names it (`Vault.useRoute`). A handle's URL may be read two ways (section 6): `named`, the
  * place reading `/use/<project>/<environment>/<route>/…`, taken when the handle was made for that environment; `stable`,
- * the stable reading `/use/<route>/…`, at the handle's one environment. A workload names its route as `stable`, at its
+ * the stable reading `/use/<route>/…`, at the handle's one environment. A place reading of no route (`route` null) is the
+ * place itself, `/use/<project>/<environment>`, the plan or compute, or code's credential under it (C2b4): taken, it reads
+ * nothing of a route and opens nothing, its reading the whole answer, so that the URL's stable reading costs no call
+ * of its own to rule the place out. A workload names its route as `stable`, at its
  * place. `digests`: the items the app's isolate holds copies of, by digest, base64: the answer leaves out the item it
  * decided on when its digest is one of them, and the app sends by that copy.
  */
 export type RouteUseInput = {
   caller: RouteCaller;
-  named: { place: { project: string; environment: string }; route: string } | null;
+  named: { place: { project: string; environment: string }; route: string | null } | null;
   stable: string | null;
   digests: readonly string[];
   purpose: 'use';
@@ -2015,7 +2018,7 @@ export type RouteFound =
  * serves no UI route (decision 7: 409 `route_not_personal`, nothing of the route read); `route`, what the place's
  * definitions say of it; `keys`, the route's keys in the order its item names them, each resolved; and, all or nothing,
  * each one's value, or the first refused, by its index (`route_not_cleared`: its editor's decision, `why` naming them),
- * or busy.
+ * or busy. The place itself taken (a `named` reading of no route): `found` null, no keys, no values, nothing used.
  */
 export type RouteUseOutcome =
   | { served: false }

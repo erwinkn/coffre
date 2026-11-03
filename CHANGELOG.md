@@ -263,6 +263,20 @@
   tunnels keep counting from when their session's group is made, and let
   a slow admission in: a pool's burst of connections, taking turns, has
   some answered well past a short `recheckSeconds`.
+- **`/use/<a>/<b>` from a handle is one vault call (T186, PR C2b4).**
+  Under `editable: true`, a two-segment URL whose `<a>` code lacks is
+  either the handle's place (`GET /use/market/dev`, the plan; `POST`,
+  compute) or UI route `<a>` at `/<b>` (`GET /use/openai/models`), and so
+  is `/use/<a>/<b>/<code's name>/…`. Which one used to cost a call of its
+  own, the handle's made-for list, before the route use: two calls with
+  `cacheSeconds: 0`. Now the route use offers both readings and its
+  statement picks one from the handle's rows, under the fence: route
+  `<a>`'s values in that one call, or, for the place, an answer that
+  uses nothing, after which the plan, compute or code's credential make
+  their own calls as before. With `cacheSeconds`, the place's answer is
+  kept, by handle, as the made-for list was, and route `<a>`'s values
+  serve its two-segment URLs with no call. No migration: 0060's
+  `use_route` takes the place itself as a place reading of no route.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart
@@ -309,8 +323,8 @@
   `credentialProxy({ editable: true })`, a name the deployment's code
   lacks is looked up in the environment's Proxy tab: `GET
   /use/openai/models` from a `coffre run` handle, or
-  `/use/market/dev/openai/models`, is the vault's one route use (two
-  for `/use/<a>/<b>` with `cacheSeconds: 0`, which may be the plan), and
+  `/use/market/dev/openai/models`, is the vault's one route use (for
+  `/use/<a>/<b>` too, which may be the plan, since PR C2b4, above), and
   the request goes by the item the vault decided on. Values kept for
   `cacheSeconds` go only by the item they were decided on, and serve every
   path under the route: `/use/openai/models/a` and `/models/b` are one

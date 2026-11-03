@@ -321,6 +321,36 @@ test('the stable reading: a handle made for dev reads `/use/openai/…` at dev; 
   assert.deepEqual(moved.found, { found: false, fault: null, seals: [''] });
 });
 
+test('the place itself (C2b4): `/use/<project>/dev` read both ways, the place for a handle made for dev, answered with nothing of a route read or used; the stable reading otherwise, in the same call', async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // A route named as the project is: what the stable reading of `/use/<project>/dev` would send.
+  await w.save({ [w.slug]: { definition: route(w.slug, [name]), editor: ada } });
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const { vault } = await isolate();
+  const itself = () => w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: w.slug });
+  // Cold, then warm (the map holding the handle's made-for list): the place each time, one statement, nothing written.
+  for (const round of ['cold', 'warm']) {
+    const place = answered(await vault.useRoute(itself()));
+    assert.equal(place.reading, 'named', round);
+    assert.deepEqual([place.stands, place.found, place.keys, place.outcome], [true, null, [], { ok: true, values: [] }], round);
+    assert.deepEqual(place.place, { project: w.slug, environment: 'dev' }, round);
+  }
+  assert.equal(await count('log_uses'), 0, 'nothing used');
+  // Made for another environment since: the same URL is route `<project>` at that one, its values in the same call.
+  const other = await w.environment('other');
+  await w.grantAt(other, 'developer');
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: other }])} WHERE id = ${w.credentialId}`);
+  await w.save({ [w.slug]: { definition: route(w.slug, [name]), editor: ada } }, other);
+  const stable = answered(await vault.useRoute(itself()));
+  assert.equal(stable.reading, 'stable');
+  assert.ok(stable.found?.found, JSON.stringify(stable.found));
+  // A place reading of no route and no stable one decides nothing: the app's bug.
+  await assert.rejects(vault.useRoute(w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: null })), /names its route/);
+});
+
 test('a workload by its way in at its place: the same route use, its caller decided by ids', async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');

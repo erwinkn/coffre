@@ -1808,8 +1808,8 @@ before PR C. Where C2a settles what this section left open:
   (the plan or compute; code's credential) or route `<a>` at `/<b>…`:
   `/use/openai/models/maps` from a `market/dev` handle is UI route
   `openai` at `/models/maps`. The handle is found outside the body or,
-  for a form or JSON route, in it. Under `cacheSeconds: 0` that list is
-  one more call; C2b's route use answers the reading itself.
+  for a form or JSON route, in it. Under `cacheSeconds: 0` that list was
+  one more call; since C2b4 the route use answers the reading itself.
 - **Only readings whose name can be a route's.** `/use/s3/bucket/report.csv`
   is route `s3` at `/bucket/report.csv`; `report.csv` is no route name, so
   no place reading is offered. The vault takes a malformed name as the
@@ -1909,9 +1909,9 @@ before PR C. Where C2a settles what this section left open:
   `placeholder_unread`, nothing of it opened.
 - **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
   map): the place URL and a stable URL of three segments or more are one
-  `use_route` statement and nothing of the app's; `/use/<a>/<b>` is the
+  `use_route` statement and nothing of the app's; `/use/<a>/<b>` was the
   handle's made-for list (`use_credential`) and then the use, one call
-  once C2b's route use can answer "the plan" for a place reading. The
+  since C2b4, whose route use answers "the place" for a place reading. The
   same rows with 256 definitions in the environment as with one.
 
 **PR C as built, workloads (C2b1, W312).** C2b ships as a stack: C2b1,
@@ -2138,6 +2138,44 @@ open:
 - **A workload's refusals carry its nonce**, the ones the open returns as
   its thrown ones (`nonced`), so the next proof signs the current nonce.
 - **Cost**: the open, one vault call (`useRoute`); a recheck, one.
+
+**PR C as built, `/use/<a>/<b>` in one call (C2b4, W312).** Where C2b4
+settles section 6's "URLs of one or two segments" for handles:
+- **The model is unchanged.** The reading was already picked by the route
+  use's statement, under the fence, from the handle's rows, and picked
+  again there if a rename moved it in between (review r2 of #464). C2b4
+  only offers that statement one more place reading, the place itself,
+  which uses nothing: no lock, recheck or order of the use changes, and
+  the plan, compute and code's credential that follow make their own
+  calls, each deciding for itself, as they did after the made-for list.
+- **Both readings in the one call** (`useRouteOrPlace`). `/use/<a>/<b>`,
+  and `/use/<a>/<b>/<code's name>/…`, `<a>` a name code lacks, send
+  `{ place: <a>/<b>, route: none }` and `{ stable: <a> }`. The statement
+  takes the place for a handle made for `<a>/<b>`, and answers it with
+  nothing of a route read or used (`found` null, no keys); otherwise
+  route `<a>` at the handle's one environment, its values in that call.
+  0060's `use_route` takes a place reading only with a route named
+  (`p_named`), so the place itself is `''` to it, a name no item may
+  have; no migration.
+- **What is kept.** A made-for list this isolate keeps (`madeFor`, which
+  code's stable URLs still ask) decides first, no call. Without one, with
+  `cacheSeconds`, a place answer is kept by handle and path for
+  `cacheSeconds` (`placeKept`), as the list was: the next plan or sign
+  asks nothing to tell its URL, and a place copy's refusal stands for
+  that handle as the list let it (`uiCompute`). Route `<a>`'s values,
+  kept for its stable reading, serve `/use/<a>/<b>` for any `<b>` but
+  when `<a>/<b>` is the environment they were decided at, which is the
+  place's (`keptFor`): a route named as the handle's project is never
+  sent the plan's request.
+- **A runtime without a public fetch** asks the made-for list, as before:
+  the vault would otherwise log a use of route `<a>` for a request never
+  sent (section 5).
+- **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
+  map): `GET /use/<a>/<b>` of a UI route is one `use_route` statement and
+  nothing of the app's. A plan, a sign or code's credential under the
+  place is the place's answer, a `use_route` reading the place's
+  definitions' rows where the list's `use_credential` read none, then
+  their own calls: as many calls as before.
 
 
 **PR B: matching and injection, for code definitions first.** Server only,

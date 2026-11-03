@@ -451,6 +451,112 @@ test("the URL's reading decides before code's precedence: `/use/openai/models/ma
   assert.equal(reached.at(-1)!.url, '/maps/geocode');
 });
 
+/** The vault's calls of a use, by method, while `work` runs: what a request costs it, whatever path the proxy takes. */
+async function countingVault(work: (calls: () => Record<string, number>) => Promise<void>): Promise<void> {
+  const vault = runtime.vault as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const methods = ['use', 'useNamed', 'useMany', 'useNamedMany', 'useRoute', 'proxyItem'] as const;
+  const real = Object.fromEntries(methods.map((name) => [name, vault[name]!]));
+  const calls: Record<string, number> = {};
+  for (const name of methods) {
+    vault[name] = (...args: unknown[]) => {
+      calls[name] = (calls[name] ?? 0) + 1;
+      return real[name]!.apply(runtime.vault, args);
+    };
+  }
+  try {
+    await work(() => {
+      const now = { ...calls };
+      for (const name of Object.keys(calls)) delete calls[name];
+      return now;
+    });
+  } finally {
+    for (const name of methods) vault[name] = real[name]!;
+  }
+}
+
+test("`/use/<a>/<b>` is one vault call that reads both ways: route `<a>` at `/<b>`, or the place itself, the plan, compute or code's credential, which then go on as they did (C2b4)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  const HOOK = 'whsec-0123456789abcdef';
+  await root.secrets.set('market/dev', { HOOK_SECRET: HOOK });
+  await save({
+    openai: uiRoute('openai', '/openai'),
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+  });
+  const token = await handle();
+  await countingVault(async (calls) => {
+    // The stable reading, the handle made for market/dev: the route use alone, no made-for list asked first.
+    const routed = await route('/use/openai/models', as(token));
+    assert.equal(routed.status, 200, await routed.clone().text());
+    assert.equal(reached.at(-1)!.url, '/openai/models');
+    assert.deepEqual(calls(), { useRoute: 1 });
+    // The place itself: the same call answers the place's reading, nothing used, and the plan reads as it did.
+    const sent = reached.length;
+    const planned = await route('/use/market/dev', as(token));
+    assert.equal(planned.status, 200, await planned.clone().text());
+    assert.equal(((await planned.json()) as { env: Record<string, string> }).env.OPENAI_API_KEY, token);
+    assert.equal(reached.length, sent, 'the plan sends nothing');
+    const plan = calls();
+    assert.equal(plan.useRoute, 1, JSON.stringify(plan));
+    assert.equal(plan.proxyItem, 1, JSON.stringify(plan));
+    // Compute: the place's answer, then the sign's own use.
+    const signed = await compute(token, { sign: { credential: 'hooks', message: b64('transfer 10') } });
+    assert.deepEqual([signed.status, signed.body.signature], [200, createHmac('sha256', HOOK).update('transfer 10').digest('hex')], JSON.stringify(signed.body));
+    assert.deepEqual(calls(), { useRoute: 2 });
+    // Code's credential under the place (`market` no name of code's): the place's answer, then code's named use there.
+    assert.equal((await route('/use/market/dev/maps/geocode', { headers: { 'x-api-key': token } })).status, 200);
+    assert.equal(reached.at(-1)!.url, '/maps/geocode');
+    const coded = calls();
+    assert.equal(coded.useRoute, 1, JSON.stringify(coded));
+    assert.equal(Object.values(coded).reduce((a, b) => a + b, 0), 2, JSON.stringify(coded));
+  });
+  // A handle of two environments: the stable reading is for a run of one (409), the place still its plan.
+  await root.environments.create('market/prod');
+  const session = await sessionFor(DEV);
+  const api = createClient({ url: ORIGIN, headers: () => ({ authorization: `Bearer ${session}` }), transport: (request) => coffreRoute(request, runtime, '203.0.113.7').then((response) => response!) });
+  const both = (await api.handles.create({ label: 'coffre run', paths: ['market/dev', 'market/prod'] })).token;
+  const several = await route('/use/openai/models', as(both));
+  assert.equal(several.status, 409, await several.clone().text());
+  assert.equal((await route('/use/market/dev', as(both))).status, 200);
+});
+
+test("with cacheSeconds, a URL found the place's is kept as a made-for list is, by handle: the next asks nothing to tell it, and another handle's same URL is read for itself (C2b4)", ON_015, async () => {
+  // Route `market`, any method and path, named as the handles' project is.
+  const market = { ...uiRoute('market', '/market'), allow: null } as ProxyDefinition;
+  await save({ openai: uiRoute('openai', '/openai'), market });
+  await root.environments.create('market/prod');
+  await root.secrets.set('market/prod', { OPENAI_API_KEY: 'sk-openai-prod-0123456789abcdef' });
+  await save({ market }, root, 'market/prod');
+  const token = await handle();
+  const other = await handle('market/prod');
+  await countingUses(async (uses, places) => {
+    for (let round = 0; round < 2; round++) assert.equal((await route('/use/market/dev', as(token))).status, 200);
+    assert.deepEqual([places(), uses()], [1, 0], 'the place found once, then kept');
+    // Values kept for route openai's stable reading serve its two-segment URLs too, no call, and never the place's.
+    for (let round = 0; round < 2; round++) assert.equal((await route('/use/openai/models', as(token))).status, 200);
+    assert.deepEqual([places(), uses()], [1, 1]);
+    assert.equal((await route('/use/market/dev', as(token))).status, 200);
+    assert.deepEqual([places(), uses()], [1, 1], 'still the plan');
+    // A route named as the handle's project is (`market`): its values kept from `/use/market/models`, by a handle that
+    // has found no place yet, never answer `/use/market/dev`, the handle's place, whose URL is the plan's.
+    const fresh = await handle();
+    assert.equal((await route('/use/market/models', as(fresh))).status, 200);
+    assert.equal(reached.at(-1)!.url, '/market/models');
+    assert.deepEqual([places(), uses()], [1, 2]);
+    const sent = reached.length;
+    const planned = await route('/use/market/dev', as(fresh));
+    assert.equal(planned.status, 200);
+    assert.ok('env' in (await planned.json() as object), 'the plan');
+    assert.equal(reached.length, sent);
+    assert.deepEqual([places(), uses()], [2, 2], 'the place asked of the vault');
+    // market/prod's handle: `/use/market/dev` is route `market` at `/dev`, market/prod's, whatever this isolate keeps of
+    // the dev handle's: the place found is kept by handle.
+    const stranger = await route('/use/market/dev', as(other));
+    assert.equal(stranger.status, 200, await stranger.clone().text());
+    assert.equal(reached.at(-1)!.url, '/market/dev');
+    assert.deepEqual([places(), uses()], [2, 3]);
+  });
+});
+
 test('a two-segment stable URL whose handle rides only in the body: the UI route, not compute (review r1 of #467)', ON_015, async () => {
   deploy(proxyOf({ cacheSeconds: 0 }));
   await save({
@@ -866,17 +972,23 @@ test("0.14's log too: an editable proxy's plan is code's, the vault asked for no
   if (LOG === '0.14') assert.equal((await route('/use/openai/models', as(token))).status, 404);
 });
 
-/** The vault's `useRoute`, counted while `work` runs. */
-async function countingUses(work: (uses: () => number) => Promise<void>): Promise<void> {
+/**
+ * The vault's `useRoute` calls while `work` runs: the route uses (`uses`), and apart from them those that only said the
+ * URL is the place's (`places`: a place reading of no route taken, nothing used; C2b4).
+ */
+async function countingUses(work: (uses: () => number, places: () => number) => Promise<void>): Promise<void> {
   const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
   const real = vault.useRoute;
   let uses = 0;
+  let places = 0;
   vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
-    uses += 1;
-    return real.apply(runtime.vault, args);
+    const answered = await real.apply(runtime.vault, args);
+    if (args[0].named?.route === null && answered.served && answered.route === 'name' && answered.reading === 'named') places += 1;
+    else uses += 1;
+    return answered;
   }) as Vault['useRoute'];
   try {
-    await work(() => uses);
+    await work(() => uses, () => places);
   } finally {
     vault.useRoute = real;
   }

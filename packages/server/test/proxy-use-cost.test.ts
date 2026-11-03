@@ -235,7 +235,7 @@ test("a handle's /use reads as many rows and pages however the log and the insta
   }
 });
 
-test("a handle's /use of a UI route is the vault's one call too, at either URL, the app running nothing; it answers as many rows whether its environment holds one definition or 256 (T186 PR C, R44, R48)", POSTGRES, async () => {
+test("a handle's /use of a UI route is the vault's one call too, at either URL and of two segments, the app running nothing; it answers as many rows whether its environment holds one definition or 256 (T186 PR C, R44, R48)", POSTGRES, async () => {
   const root = clientFor(deps, ROOT);
   const upstreamUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`;
   const route = (name: string): ProxyDefinition => ({
@@ -262,13 +262,11 @@ test("a handle's /use of a UI route is the vault's one call too, at either URL, 
     assert.deepEqual(ran.app, [], `${url}: no statement of the app`);
     assert.deepEqual(ran.vault, [], `${url}: nothing of the vault's but the use's statement`);
   }
-  // The place's URL and a stable one of three segments or more: the route use alone, which picks the reading itself.
-  assert.deepEqual(one[`${ORIGIN}/use/market/dev/ui/charges`]!.hot, [route1]);
-  assert.deepEqual(one[`${ORIGIN}/use/ui/v1/charges`]!.hot, [route1]);
-  // Two segments, `/use/<a>/<b>`, which may be the plan: the handle's made-for list first, kept for `cacheSeconds` and
-  // so asked on each request here, then the use. One call needs a route use whose place reading is the plan, a vault
-  // change PR C2b makes (docs/design/proxy-ui.md, section 6, "URLs of one or two segments").
-  assert.deepEqual(one[`${ORIGIN}/use/ui/charges`]!.hot, ['SELECT use_credential( $1::uuid,', route1]);
+  // The place's URL and a stable one, whatever its segments: the route use alone, which picks the reading itself. Two
+  // segments, `/use/<a>/<b>`, may be the plan: the use offers the place itself as its place reading, and takes the
+  // stable one here, the handle made for market/dev, no made-for list asked first (C2b4; docs/design/proxy-ui.md,
+  // section 6, "URLs of one or two segments").
+  for (const url of [`${ORIGIN}/use/market/dev/ui/charges`, `${ORIGIN}/use/ui/v1/charges`, `${ORIGIN}/use/ui/charges`]) assert.deepEqual(one[url]!.hot, [route1], url);
   // 255 more definitions in the environment, each its own route: the use reads its own item, as many rows.
   await save(Object.fromEntries([['ui', route('ui')], ...Array.from({ length: 255 }, (_, i) => [`route-${i}`, route(`route-${i}`)] as const)]));
   assert.deepEqual(await measure(), one);
