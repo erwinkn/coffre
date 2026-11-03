@@ -1114,3 +1114,95 @@ test("what a UI item makes answers within its values' window: a signature, a che
     assert.equal(uses(), 0, 'made with the kept values, no use');
   });
 });
+
+test("an item naming a key the environment does not hold, or one gone before the read, signs, checks and sends nothing: never a value the object's prototype lends a key named toString or constructor (review r3 of #480)", ON_015, async () => {
+  const { privateKey: pair } = generateKeyPairSync('ed25519');
+  const SECRET = 'whsec-0123456789abcdef';
+  const PEM = pair.export({ format: 'pem', type: 'pkcs8' }).toString();
+  await save({
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'toString', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    inbound: { kind: 'verifier', name: 'inbound', hmac: { key: 'toString', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT },
+    dfns: { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'constructor' }, limit: NO_LIMIT },
+    openai: uiRoute('openai', '/openai', 'toString'),
+  });
+  const token = await handle();
+  const message = b64('transfer 10');
+  // What the prototype would lend: `String(Object.prototype.toString)`, so a MAC anyone computes.
+  const lent = createHmac('sha256', String(Object.prototype.toString)).update('transfer 10').digest('hex');
+  const asks = [
+    { sign: { credential: 'hooks', message } },
+    { verify: { credential: 'hooks', message, signature: lent } },
+    { verify: { credential: 'inbound', message, signature: lent } },
+    { sign: { credential: 'dfns', message } },
+  ];
+  // Neither key held: the read refuses what the vault decided on (409 changed), nothing made. The proxy's own-value
+  // check behind it (Object.hasOwn, as code's valuesFor) is defence in depth: the read answers an ordinary object.
+  for (const ask of asks) {
+    const refused = await compute(token, ask);
+    assert.deepEqual([refused.status, refused.body.signature, refused.body.valid], [409, undefined, undefined], `${JSON.stringify(ask)}: ${JSON.stringify(refused.body)}`);
+  }
+  let sent = reached.length;
+  assert.equal((await route('/use/market/dev/openai/models/x', as(token))).status, 409);
+  assert.equal(reached.length, sent, 'nothing sent with the prototype\'s value');
+  // Each gone once the vault decided on it, before the app reads it, a key of its own a round: refused (SQLite's read,
+  // 404), or made with the value decided on (Postgres's, by ID), never with the prototype's.
+  const vault = runtime.vault as unknown as { useRoute: Vault['useRoute'] };
+  const real = vault.useRoute;
+  let gone: string | null = null;
+  vault.useRoute = (async (...args: Parameters<Vault['useRoute']>) => {
+    const answered = await real.apply(runtime.vault, args);
+    // Gone from under its name by a write around the app (R64): what fails closed on both engines.
+    if (gone !== null) await run(sql`UPDATE secrets SET key = ${`gone_${gone}`} WHERE key = ${gone}`);
+    return answered;
+  }) as Vault['useRoute'];
+  const hmacOn = (key: string) => ({ key, encoding: 'hex' as const, prefix: '', maxBytes: null });
+  const mac = (secret: string) => createHmac('sha256', secret).update('transfer 10').digest('hex');
+  try {
+    for (const [key, item, ask] of [
+      ['valueOf', { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', ...hmacOn('valueOf') }, limit: NO_LIMIT }, { sign: { credential: 'hooks', message } }],
+      ['hasOwnProperty', { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', ...hmacOn('hasOwnProperty') }, limit: NO_LIMIT }, { verify: { credential: 'hooks', message, signature: mac(String(Object.prototype.hasOwnProperty)) } }],
+      ['isPrototypeOf', { kind: 'verifier', name: 'inbound', hmac: hmacOn('isPrototypeOf'), limit: NO_LIMIT }, { verify: { credential: 'inbound', message, signature: mac(String(Object.prototype.isPrototypeOf)) } }],
+      ['propertyIsEnumerable', { kind: 'signer', name: 'dfns', signer: { kind: 'private-key', key: 'propertyIsEnumerable' }, limit: NO_LIMIT }, { sign: { credential: 'dfns', message } }],
+    ] as const) {
+      await save({ [item.name]: item as ProxyDefinition });
+      await root.secrets.set('market/dev', { [key]: item.name === 'dfns' ? PEM : SECRET });
+      gone = key;
+      const made = await compute(token, ask);
+      gone = null;
+      const lent = String((Object.prototype as unknown as Record<string, unknown>)[key]);
+      if (made.status === 200) {
+        if ('verify' in ask) assert.deepEqual(made.body, { valid: false }, `${key}: the lent MAC checks as nothing`);
+        else if (item.name === 'hooks') assert.deepEqual(made.body, { signature: mac(SECRET) }, key);
+        else assert.ok(verifyWith(null, Buffer.from('transfer 10'), pair, Buffer.from(made.body.signature as string, 'base64url')), key);
+      } else {
+        assert.deepEqual([made.body.signature, made.body.valid], [undefined, undefined], `${key}: ${JSON.stringify(made.body)}`);
+      }
+      assert.notEqual(made.body.signature, mac(lent), key);
+    }
+    await save({ openai: uiRoute('openai', '/openai', 'toLocaleString') });
+    await root.secrets.set('market/dev', { toLocaleString: SECRET });
+    gone = 'toLocaleString';
+    sent = reached.length;
+    const routed = await route('/use/market/dev/openai/models/x', as(token));
+    gone = null;
+    if (routed.status === 200) assert.equal(reached.at(-1)!.headers.authorization, `Bearer ${SECRET}`);
+    else assert.equal(reached.length, sent, await routed.text());
+  } finally {
+    vault.useRoute = real;
+  }
+});
+
+test("a UI HMAC takes a message up to 1 MiB in an editable deployment, and a byte more is 413; code's private-key signer beside it still takes 64 KiB (review r3 of #480)", ON_015, async () => {
+  const SECRET = 'whsec-0123456789abcdef';
+  await root.secrets.set('market/dev', { HOOK_SECRET: SECRET });
+  await save({ hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: 1024 ** 2 }, limit: NO_LIMIT } });
+  const token = await handle();
+  const most = Buffer.alloc(1024 ** 2, 7);
+  const signed = await compute(token, { sign: { credential: 'hooks', message: most.toString('base64url') } });
+  assert.deepEqual([signed.status, signed.body.signature], [200, createHmac('sha256', SECRET).update(most).digest('hex')], JSON.stringify(signed.body).slice(0, 300));
+  const over = await compute(token, { sign: { credential: 'hooks', message: Buffer.alloc(1024 ** 2 + 1, 7).toString('base64url') } });
+  assert.deepEqual([over.status, over.body.reason], [413, 'too_large'], JSON.stringify(over.body));
+  const code = await compute(token, { sign: { credential: 'signing', message: Buffer.alloc(64 * 1024 + 1, 7).toString('base64url') } });
+  assert.equal(code.status, 413, JSON.stringify(code.body));
+  assert.match(code.body.message as string, /64 KiB/);
+});

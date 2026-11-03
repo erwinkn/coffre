@@ -1996,6 +1996,16 @@ open:
   entry carrying its item, whose `encoding`, `prefix` and `maxBytes` a
   kept sign takes, never a newer copy's. A private key's signature and a
   presigned URL are a use each, never kept, as code's are.
+- **Own values only** (review r3 of #480). The read answers its values
+  as an ordinary object, so an item's key is taken only as the object's
+  own (`Object.hasOwn`, as code's `valuesFor` does): a key named
+  `toString` or `constructor` that the read does not hold is 409, never
+  the function the prototype lends, which would sign, or check as
+  valid, with a key anyone can compute. `routeUsed` holds every key the
+  vault decided on to the same before any kind is served. In practice
+  the read refuses first: a key the environment does not hold is 409
+  `changed`; one gone after the decision is 404 on SQLite, and on
+  Postgres the read serves the value decided on, by ID.
 - **The window** (`WithinWindow`, review r1 of #480). What a UI item
   makes is answered by when its values may be used, as a route's request
   is sent by then: values decided now, within the use's deadline

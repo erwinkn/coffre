@@ -313,6 +313,10 @@ function unservedError(unserved: string | CoffreError): CoffreError {
 function routeUsed(answered: Extract<RouteUseOutcome, { route: 'name' }>, read: { values: Record<string, string>; plain: string[]; keys: string[]; environment: { path: string } }, expiresAt: string): RouteUsed {
   const found = answered.found;
   if (found === null || !found.found) throw new Error('a route use answered values with no item');
+  // Every key the vault decided on, an own value of the read: one archived between the two leaves nothing, and a key
+  // named `toString` or `constructor` would otherwise read the object's prototype as its value (review r3 of #480).
+  const missing = answered.keys.map((key) => key.key).filter((key) => !Object.hasOwn(read.values, key));
+  if (missing.length > 0) throw new CoffreError(409, 'conflict', `${read.environment.path} holds no ${missing.join(', ')}, which ${found.item.name} needs`);
   return { values: read.values, plain: read.plain, keys: read.keys, item: found.item, seals: found.seals, reading: answered.reading, environment: { path: read.environment.path }, expiresAt };
 }
 

@@ -53,7 +53,11 @@
   one still escaped after eight decodings, which no check could read
   through (400). A workload's request to a UI item counts against the
   item's limit whatever its kind, so a session's kept signer still counts
-  after the name is saved over as a verifier.
+  after the name is saved over as a verifier. A UI item signs, checks and
+  sends only with values the read holds as its own: an item whose key is
+  named like a property every object has (`toString`, `constructor`)
+  and is missing is refused (409), never made with what the object's
+  prototype lends.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart

@@ -1695,7 +1695,8 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
     return presigned(resolved.sigv4!, asked!, aimed.target, used.values, used.expiresAt, who, name, answerBy);
   }
   if (definition.kind === 'signer' && definition.signer.kind === 'private-key') {
-    const pem = used.values[definition.signer.key];
+    // Own values only: a key named `toString` reads no prototype (review r3 of #480).
+    const pem = Object.hasOwn(used.values, definition.signer.key) ? used.values[definition.signer.key] : undefined;
     if (pem === undefined) return failure(409, `${used.environment.path} holds no ${definition.signer.key}, which ${name} signs with`);
     try {
       const signature = base64url(await signWith(pem, message!));
@@ -1706,6 +1707,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
     }
   }
   const hmac = hmacOf(definition)!;
+  if (!Object.hasOwn(used.values, hmac.key)) return failure(409, `${used.environment.path} holds no ${hmac.key}, which ${name} ${operation === 'sign' ? 'signs' : 'checks'} with`);
   if (proxy.cacheMs > 0) {
     remember(proxy.ui.kept, computing.kept, { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
   }
@@ -1717,7 +1719,7 @@ const lateMade = (name: string) => failure(503, `${name}: what it made was ready
 
 /** An HMAC's sign or check with its values, by `hmac`, the item they were decided on, answered by `answerBy` or 503 `late`. */
 async function hmacMade(path: string, name: string, hmac: ProxyHmac, values: Record<string, string>, operation: Operation, message: Uint8Array<ArrayBuffer>, signature: unknown, answerBy: number): Promise<Response> {
-  const secret = values[hmac.key];
+  const secret = Object.hasOwn(values, hmac.key) ? values[hmac.key] : undefined;
   if (secret === undefined) return failure(409, `${path} holds no ${hmac.key}, which ${name} ${operation === 'sign' ? 'signs' : 'checks'} with`);
   // WebCrypto takes no empty HMAC key: said as what is wrong with the value, not the platform's error.
   if (secret === '') return failure(409, `${path}'s ${hmac.key} is empty, and ${name} signs and checks nothing with an empty secret`);
@@ -1748,7 +1750,7 @@ async function sign(coffre: PluginContext, proxy: Proxy, path: string, who: User
   }
   const sha256 = hex(await crypto.subtle.digest('SHA-256', message));
   const used = await coffre.use(who, { path: readOf(proxy, path, who), keys: [signer.key], purpose: 'use', only: true, logged: { credential: name, sign: { sha256 } } });
-  const pem = used.values[signer.key];
+  const pem = Object.hasOwn(used.values, signer.key) ? used.values[signer.key] : undefined;
   if (pem === undefined) return failure(409, `${used.environment.path} holds no ${signer.key}, which ${name} signs with`);
   try {
     return answer({ signature: base64url(await signWith(pem, message)) });
