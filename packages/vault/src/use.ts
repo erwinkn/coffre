@@ -244,6 +244,11 @@ export type UseCall = {
   decided?: true;
   /** A route use's (T186, 0058): the UI route its entry names, which its cover must name too. */
   route?: string | null;
+  /**
+   * A route use's light gate (T200, 0060's `p_gate`): a handle's named call of no key that, for a caller who stands at a
+   * live place whose chain is whole, answers `stood` and its names, nothing more read; else it reads on as any.
+   */
+  gate?: true;
 };
 
 /**
@@ -259,6 +264,11 @@ export type RouteCall = {
   at: number; purpose: number; deadline: number; mac: Buffer;
   keys: readonly (UseCall | null)[] | null;
   offset: number; limit: number; lock: string | null; use: boolean;
+  /**
+   * The gate light (T200, 0060's `p_light`): a handle's statement with the map's ids, whose keys' uses' rows the vault
+   * decides the caller on; where it makes none, it answers the whole gate.
+   */
+  light: boolean;
 };
 
 /**
@@ -687,7 +697,7 @@ function ready(path: UsePath, input: Asked, request: UseRequest, names: Names | 
 }
 
 /** A use by ids refused on its cover, nothing written of it: made again as an entry of its own, or answered as it is (a batch's). */
-type Uncovered = { uncovered: true; outcome: Extract<UseOutcome, { code: UseCode }> };
+type Uncovered = { uncovered: true; outcome: Extract<UseOutcome, { code: UseCode }>; checked: CheckedView };
 
 /**
  * The decision on a call's row (`useOnce`, after the statement): a use allowed with its key yet to open (`Allowed`), or
@@ -755,7 +765,7 @@ function settle(path: UsePath, input: Asked, names: Names | undefined, decided: 
     // is answered as it is, in its one call, as a key the place does not hold is, and the app's entry records it: a
     // second call would tell a key held from one never made (T158; Probing.tla, CoveredRefusalAnswered).
     cache.covers.delete(coverKey);
-    if (names === undefined) return { uncovered: true, outcome: { ok: false, code, number: null } };
+    if (names === undefined) return { uncovered: true, outcome: { ok: false, code, number: null }, checked };
   }
   if (code !== null) {
     cache.covers.delete(coverKey);
@@ -1663,6 +1673,7 @@ async function routeStatement(
     // An empty slice is no ids: `use_route` refuses an empty list, and a statement asked none is a miss.
     keys: keys.asked === null || keys.asked.length === 0 ? null : keys.asked.map((made) => made.call),
     offset: keys.offset, limit: cache.limits.batch, lock: keys.lock, use: ask.use,
+    light: ask.handle !== null && ask.use && keys.asked !== null && keys.asked.length > 0,
   };
   return raced(path, ask.deadline, () => routeCallOf(path.db)(path.db, call), async (rows, starts) => {
     const forgedOf = forgedOnce(path, starts);
@@ -1732,6 +1743,36 @@ function gateOf(path: UsePath, ask: RouteAsk, round: RouteRound, seals: typeof s
   return { checked, request: used.request, stands, code };
 }
 
+/**
+ * The gate's decision on a statement whose gate was light (T200; 0060's `p_gate`): the statement decided the caller's
+ * standing first, from rows no key decides (`use_stands`), then read the route and made the keys' uses by the map's
+ * ids, all under the fence the gate took, the first key's row reading every row the whole gate's would: the caller's
+ * credential, account and grants, the roles, the policy, and the place. So it is decided as the whole gate's is, on
+ * that row's checked view with the key taken out: the caller's use of no key at the place (`decideChecked`, `missing`
+ * for one who stands). The key's settling stands for `decideRoute`, which settles every other key, so that the row is
+ * settled once.
+ */
+function lightGate(path: UsePath, ask: RouteAsk, round: RouteRound, prepared: readonly Ready[] | null): { gate: Gate; settled: { index: number; used: Used | Allowed | Uncovered } } {
+  const { rows } = round;
+  const index = rows.rows.findIndex((row) => row !== null);
+  if (!rows.made || prepared === null || index !== 0) throw new Error("a route use's light gate answered with no use of its first key made");
+  const made = prepared[index]!;
+  const used = settle(path, routeAskOf(ask, made), undefined, false, made, rows.rows[index]!, round.keysForged[index]!);
+  const settled = { index, used };
+  if ('unknown' in used || 'nowhere' in used) throw new Error('a use by ids answered a named state');
+  if ('outcome' in used && 'busy' in used.outcome) return { gate: used.outcome, settled };
+  const checked = used.checked ?? null;
+  if (checked === null) throw new Error('a use answered with no rows decided on');
+  const { gate: stood } = rows;
+  // The whole gate's request: the caller's use of no key at the place its names name.
+  const request: UseRequest = { credential: stood.n_credential!, secretId: '', place: stood.n_place, purpose: 'use', keepsSensitive: false, at: ask.at, plain: true };
+  const view: CheckedView = { ...checked, secret: { row: null, valid: true, current: true }, source: null };
+  const code = decideChecked(view, request);
+  if (code === null) throw new Error('a use of no key was allowed');
+  if (routeOf(view, ask.at) === 'credential') return { gate: { credential: { ok: false, code, number: null } }, settled };
+  return { gate: { checked: view, request, stands: stood.n_standing === true && stood.n_cut === false && code === 'missing', code }, settled };
+}
+
 /** The route's editor's principal as the statement read it, its seals checked: theirs now, or a row a writer changed. */
 function editorOf(path: UsePath, rows: RouteRows, forged: boolean): { principal: PrincipalInput | null } | { fault: 'tampered' | 'stale' } {
   const editor = rows.editor;
@@ -1757,13 +1798,18 @@ function levelsOf(rows: RouteRows): RouteLevel[] {
   return rows.levels.map((level) => ({ environmentId: level.environment, row: level.row, item: level.item, digests: level.digests, seal: level.seal, newest: level.number === null ? undefined : level.newest }));
 }
 
+/** The row a statement read its caller's rows in: the gate's, or, the gate light (T200), its first key's use's. */
+function callerOf(rows: RouteRows): UseRow {
+  return rows.gate.state === 'stood' ? rows.rows.find((row) => row !== null) ?? rows.gate : rows.gate;
+}
+
 /** What every statement of one use must read alike (`OneVersion`): the levels' seals, the item, and its editor's newest change. */
 function versionOf(rows: RouteRows, found: RouteFound): string {
   const seal = (value: Buffer | null | undefined) => value?.toString('base64') ?? null;
   // The roles and the policy too, which the editor's decision weighs as the first statement read them (review r1), and
   // every level's environment, which the keys resolve through (review r2).
   return JSON.stringify([
-    found.seals, found.found ? found.item.digest : null, seal(rows.editor?.last), seal(rows.gate.r_last), seal(rows.gate.p_last),
+    found.seals, found.found ? found.item.digest : null, seal(rows.editor?.last), seal(callerOf(rows).r_last), seal(callerOf(rows).p_last),
     rows.levels.map((level) => [level.environment, seal(level.env?.last)]),
   ]);
 }
@@ -1844,7 +1890,9 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     const first = await routeStatement(path, ask, guess, { offset: 0, asked: prepared === null ? null : prepared.slice(0, chunk), lock: null });
     if ('busy' in first) return busyFor(first);
     keepRoute(cache, ask, first.rows);
-    const gate = gateOf(path, ask, first, seals);
+    // Light (T200): decided on the first key's row, its use made under the gate's fence, whose settling stands.
+    const light = first.rows.gate.state === 'stood' ? lightGate(path, ask, first, prepared) : null;
+    const gate = light?.gate ?? gateOf(path, ask, first, seals);
     if ('unknown' in gate) {
       if (handle !== null) cache.madeFor.delete(handle.token);
       return { served: true, route: 'credential', outcome: { ok: false, code: 'credential', number: null } };
@@ -1921,7 +1969,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
       continue;
     }
     if (answered.length !== rows.keys.length || answered.some((one) => one.row === null)) throw new Error('a route use made no use of a key its statement was asked');
-    const decided = decideRoute(path, ask, prepared, answered, item, editor.principal, gate.checked, rows.keys, false);
+    const decided = decideRoute(path, ask, prepared, answered, item, editor.principal, gate.checked, rows.keys, false, undefined, light?.settled);
     if ('refused' in decided) return { ...named, outcome: decided.refused };
     // Keys that take their principal's lock: made in a second round, decided again on what it reads, each statement under
     // the lock and read as the first round read it (OneVersion).
@@ -1993,6 +2041,8 @@ function routeRefusal(index: number, used: Used | Allowed | Uncovered): Extract<
 function decideRoute(
   path: UsePath, ask: RouteAsk, prepared: readonly Ready[], answered: readonly { row: UseRow | null; forged: boolean }[], item: ProxyItem, editor: PrincipalInput | null,
   gate: CheckedView, names: readonly string[], decided: boolean, only?: ReadonlySet<number>,
+  /** A key the light gate settled already (T200), its settling taken as it is. */
+  settled?: { index: number; used: Used | Allowed | Uncovered },
 ): { refused: Extract<RouteUseOutcome, { route: 'name' }>['outcome'] } | { allowed: Map<number, Allowed>; plain: Map<number, NamedValue>; again: number[] } {
   const allowed = new Map<number, Allowed>();
   const plain = new Map<number, NamedValue>();
@@ -2002,8 +2052,7 @@ function decideRoute(
     if (only !== undefined && !only.has(i)) continue;
     const { row, forged } = answered[i]!;
     if (row === null) throw new Error('a route use answered no row for a key it made');
-    const asked = routeAskOf(ask, made);
-    const used = settle(path, asked, undefined, decided, made, row, forged);
+    const used = settled?.index === i ? settled.used : settle(path, routeAskOf(ask, made), undefined, decided, made, row, forged);
     if ('unknown' in used || 'nowhere' in used) throw new Error('a use by ids answered a named state');
     // Refused on a cover: answered as it is, its request logged by the app, as a named use's is.
     if ('uncovered' in used) return { refused: { ok: false, index: i, code: used.outcome.code, number: null } };

@@ -1655,7 +1655,32 @@ Where C1 settles what this section left open, or reads it otherwise:
   after the gate: if a rename moved it in between, it asks the gate again
   by the new one (review r2: `/use/market/dev/openai`, dev renamed to
   stage meanwhile, would otherwise answer `served: false` where the rule
-  now picks the stable route `market`).
+  now picks the stable route `market`). A session whose first call
+  planned it (`coffre.route_planned`, 0060) takes the fence first and
+  picks once, under it: the pick the second round would make. The
+  made-for paths are answered only where the statement makes no use (a
+  use made by the map's ids was made at the reading the map picked).
+- **The gate light (T200, 0060).** A statement made with the map's ids
+  (`p_light`, which the vault passes then) asks `use_credential` for a
+  light gate (`p_gate`): its named resolution and `use_stands`, as
+  before, and for one who stands at a live place whose chain is whole,
+  `stood` with its names and the app's rows of the place, nothing more
+  read. The route is then read and each key's use made by the ids, as
+  before; the first key's row, read under the same fence, carries every
+  row the whole gate's would (the credential, the account and its
+  grants, the roles, the policy, the place), and the vault decides the
+  caller on it: its checked view with the key taken out, the caller's use
+  of no key at the place (`lightGate` in `use.ts`). A statement that
+  makes no use (a personal config, a chain cut, no item, ids that moved)
+  asks the whole gate before it answers, under the fence still held. One
+  who stands nowhere reads on as before, the whole gate's row. So the
+  order is the same (standing first, from rows no key decides, then the
+  route, then the keys, all under one fence) and only the caller's rows
+  are read once instead of twice. Measured at 1,000 uses a second, cache
+  off: Postgres CPU 2.95 ms a UI use against 1.52 for a code route
+  before, 2.16 to 2.23 against main's 1.49 to 1.53 after (1.45x; the
+  rest is the route's own reads and a second function call; T200's
+  1.3x is a follow-up's, the route read inside the named call).
 - **Quiet uses.** A route use's key that the place does not hold, or that
   is plain, writes no entry and takes no lock (`v_quiet`, as a named call's),
   and a plain value goes back as its text. A workload's gate is such a use

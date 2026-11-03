@@ -3,7 +3,7 @@
 // NoKeyBeforeStanding: a caller standing nowhere reads no key, so as many buffers whatever the key).
 import { postgresClient } from '@coffre/db/connect';
 
-/** A `use_credential` (or `use_named_batch`) call as it was sent: its text and its arguments, `$1` first. */
+/** A `use_credential` (or `use_named_batch`, or `use_route`) call as it was sent: its text and its arguments, `$1` first. */
 export type HotCall = { query: string; args: unknown[] };
 
 /** A Postgres session of the hot login's, whose plans, made by its first call, weigh every call after it alike. */
@@ -60,8 +60,9 @@ export async function weigh(session: WeighingSession, call: HotCall): Promise<We
     const args = [...call.args];
     const now = Date.now();
     // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
-    // first, then at, purpose and deadline.
+    // first, then at, purpose and deadline; `callRoute`'s, its caller and route first, then at, purpose and deadline.
     if (call.query.includes('use_named_batch')) [args[8], args[10]] = [String(now), String(now + 3000)];
+    else if (call.query.includes('use_route')) [args[13], args[15]] = [String(now), String(now + 3000)];
     else [args[3], args[7]] = [String(now), String(now + 3000)];
     const read = await session.begin(async (tx) => {
       const before = await tx.unsafe(counters) as unknown as { name: string; n: number }[];

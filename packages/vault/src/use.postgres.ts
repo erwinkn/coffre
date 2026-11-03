@@ -174,7 +174,7 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     ${list((one) => (one === null || one.requestId === '' ? null : one.requestId))}::bigint[], ${list((one) => (one === null || one.requestId === '' ? null : one.mac))}::bytea[],
     ${list((one) => one?.cover?.number ?? null)}::bigint[], ${list((one) => (one?.cover === undefined ? null : String(one.cover.at)))}::bigint[], ${list((one) => one?.cover?.requestId ?? null)}::bigint[],
     ${list((one) => one?.decided === true)}::boolean[],
-    ${call.offset}::integer, ${call.limit}::integer, ${call.lock}::text, ${call.use}::boolean
+    ${call.offset}::integer, ${call.limit}::integer, ${call.lock}::text, ${call.use}::boolean, ${call.light}::boolean
   )::text AS route`);
   type Read = Omit<RouteRows, 'gate' | 'rows' | 'levels' | 'editor' | 'madeFor'> & {
     gate: Record<string, unknown>; rows: (Record<string, unknown> | null)[] | null; levels: Record<string, unknown>[] | null; editor: Record<string, unknown> | null; made_for: string[] | null;
