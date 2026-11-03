@@ -52,9 +52,13 @@
 (* abandoned: that try's request number and its wrap stay (0.14's          *)
 (* `key.wrap` entry), a gap the checkpointer seals past and a record of a  *)
 (* wrap no change names. The caller's own credential, not as its log has   *)
-(* it or ended, answers 401 and never goes there: today's path reads the   *)
-(* row again, holds it to its MAC alone, and would take one a database     *)
-(* writer put back meanwhile.                                              *)
+(* it or ended, answers 401 and never goes there: the credential's own     *)
+(* check holds its row to its MAC alone, and would take one a database     *)
+(* writer put back meanwhile. Nor is it weighed there again (review r2 of  *)
+(* #469): today's path goes on with the caller the app authenticated, on   *)
+(* the first try's read or by that check (Auth), and a session revoked     *)
+(* after does not stop the write (TodayCallerStandsAtDecision, EXPECTED    *)
+(* broken, as today's front door to its wrap; WritingCaller).              *)
 (*                                                                         *)
 (* Every other change (a revoke, a role or policy change, an archive, a    *)
 (* demotion, a rename) is one atomic step here, as each is one statement   *)
@@ -261,6 +265,10 @@ Refused(k) == \E o \in ObjectsOf(k) : Unsound(o)
 \* roles from the isolate's cache.
 Weighed(r) == IF DecideOnRead THEN r ELSE [r EXCEPT !["roles"].val = TRUE]
 WriteAllowed(r) == \A o \in WriteObjects \ {"key"} : r[o].val
+\* What today's wrap weighs: the same, but for the caller's credential,
+\* which the app checked before (Auth), and does not again.
+WrapObjects == WriteObjects \ {"key", "cred"}
+WrapAllowed(r) == \A o \in WrapObjects : r[o].val
 \* Cy is an admin nobody demotes; Bob stands while his object does. Either
 \* adds only a principal that is no member yet.
 AddAllowed(p, r) == /\ \A o \in AddObjects \ {"bob", "svc"} : r[o].val
@@ -327,7 +335,7 @@ Actor(p) == IF ActorFromRead THEN l[p].read[Token].name ELSE names[Token]
 \* A committed change, as the ghosts record it.
 Committed(p, o, stands) ==
     [p |-> p, n |-> next, stands |-> stands, replays |-> Replays(p),
-     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0, today |-> FALSE, decided |-> TRUE,
+     from |-> l[p].seals[o], was |-> seal[o], authentic |-> Actor(p) = 0, today |-> FALSE, decided |-> TRUE, caller |-> TRUE,
      t |-> tries[p], wrap |-> IF "wrap" \in DOMAIN l[p] THEN l[p].wrap ELSE tries[p]]
 
 -----------------------------------------------------------------------------
@@ -341,6 +349,16 @@ Truth == [o \in Parts("write") |->
              ELSE [num |-> seal[o], val |-> IF o = "key" THEN kver ELSE ok[o]]]
 Request(p, r) == [p |-> p, n |-> next, live |-> Decide(p, r), replay |-> Decide(p, Truth)]
 
+\* Who the request is by, as the app authenticated it: on the first try,
+\* from that try's read (the two-trip path's rows, AppChecks) or, the try
+\* not served, by the credential's own check just after (conservatively,
+\* here, at the read); on a later try, kept: each later try the vault
+\* serves is checked to be the same credential (`Written.again`), and
+\* today's path, after one, goes on with the caller the first checked
+\* (review r2 of #469). Only the token's resolution is kept: the caller's
+\* standing is the read's, and no step after rechecks it on today's path.
+Auth(p) == IF tries[p] = 1 THEN [tok |-> names[Token]] ELSE l[p].auth
+
 \* The vault's statement: the read under the fence shared, the request
 \* numbered. One round trip. The caller's own credential not as its log
 \* has it (`forged`), or revoked (`ended`): 401, the end. Another object
@@ -353,8 +371,9 @@ WVault(p) ==
               /\ UNCHANGED <<next, l, requests>>
        ELSE IF \E o \in WriteObjects \ {"cred"} : Unsound(o)
          THEN /\ Goto(p, "w.today")
-              /\ UNCHANGED <<next, l, requests>>
-         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("write"), seals |-> seal, wrap |-> 0]]
+              /\ l' = [l EXCEPT ![p] = [n |-> 0, auth |-> Auth(p)]]
+              /\ UNCHANGED <<next, requests>>
+         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("write"), seals |-> seal, wrap |-> 0, auth |-> Auth(p)]]
               /\ IF RequestUnderFence
                    THEN /\ next' = next + 1
                         /\ requests' = requests \cup {Request(p, Read("write"))}
@@ -444,23 +463,32 @@ WCommit(p) ==
 \* 0.14, which the two-trip path closes for the writes it serves).
 \*
 \* The decision holds each object but the caller's credential to its newest
-\* change (the row's seal), and that change to its MAC once T190 is in it;
-\* the credential, to its row's `auth_mac` alone (the gap the two-trip path
-\* closes, which is why the caller's own credential never comes here).
+\* change (the row's seal), and that change to its MAC once T190 is in it.
+\* The caller's credential it does not weigh at all (review r2 of #469):
+\* the request comes with the caller the app authenticated (Auth), on the
+\* first try's read or by the credential's own check, and the wrap decides
+\* for that caller's member and roles, not its session. A session revoked
+\* after that check, before the wrap, does not stop the write
+\* (TodayCallerStandsAtDecision, EXPECTED broken: today's path between its
+\* front door and its wrap, a window every write has had since 0.14; here
+\* it spans the tries before, a few round trips).
 WToday(p) ==
     /\ pc[p] = "w.today"
     /\ head = None /\ held = None
     /\ LET r == Read("write")
            refuses == \/ \E o \in WriteObjects \ {"cred"} :
                             StaleRow(o) \/ (TodayChangeMacChecked /\ o \in forged)
-                      \/ ~WriteAllowed(r)
-                      \/ AuthChecked /\ r[Token].name # 0
+                      \/ ~WrapAllowed(r)
+                      \* The caller as authenticated: a token hash copied onto
+                      \* another credential fails its `auth_mac` there (401).
+                      \/ AuthChecked /\ l[p].auth.tok # 0
        IN IF refuses
             THEN /\ Goto(p, "done")
                  /\ UNCHANGED l
             \* What it decided on, and whether the caller stood then, by the log.
-            ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> r, seals |-> seal, wrap |-> 0,
-                                          decided |-> \A o \in WriteObjects \ {"key"} : ok[o]]]
+            ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> r, seals |-> seal, wrap |-> 0, auth |-> l[p].auth,
+                                          decided |-> \A o \in WrapObjects : ok[o],
+                                          caller |-> ok["cred"]]]
                  /\ Goto(p, "w.tcommit")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
 
@@ -483,9 +511,10 @@ WTodayCommit(p) ==
               /\ l' = [l EXCEPT ![p].n = next]
               /\ writes' = writes \cup {[p |-> p, n |-> next, today |-> TRUE,
                                            stands |-> \A o \in WriteObjects \ {"key"} : ok[o],
-                                           decided |-> l[p].decided,
+                                           decided |-> l[p].decided, caller |-> l[p].caller,
                                            replays |-> TRUE, from |-> seal["key"], was |-> seal["key"],
-                                           authentic |-> names[Token] = 0, t |-> 0, wrap |-> 0]}
+                                           authentic |-> IF ActorFromRead THEN l[p].auth.tok = 0 ELSE names[Token] = 0,
+                                           t |-> 0, wrap |-> 0]}
               /\ Goto(p, "t.seal")
               /\ UNCHANGED tries
     /\ UNCHANGED <<ok, names, svc, putBack, forged, sealedTo, head, held, trips, requests, admits, answered>>
@@ -657,8 +686,14 @@ WritesStandAtCommit == \A w \in writes : w.today \/ w.stands
 
 \* Today's path decides on the rows as they are, by the log (each object
 \* held to its newest change, and that change to its MAC), and writes on
-\* that decision: the caller stood when the vault decided.
+\* that decision: every object the wrap weighs (the caller's member, roles,
+\* policy, place, parent) stood when the vault decided.
 TodayStandsAtDecision == \A w \in writes : w.today => w.decided
+
+\* ... but not the caller's session, which the app checked before and the
+\* wrap does not weigh again (EXPECTED in scripts/formal.sh, review r2 of
+\* #469: revoked after the first try's check, the write still goes).
+TodayCallerStandsAtDecision == \A w \in writes : w.today => w.caller
 
 \* ... not at its commit: a revoke between the vault's wrap and the app's
 \* COMMIT does not stop it (EXPECTED in scripts/formal.sh: the window every

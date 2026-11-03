@@ -369,6 +369,19 @@ answers a credential it finds ended, there and then. Today's path reads
 the row again and holds it to its `auth_mac` alone, so a session revoked,
 then put back by a database writer between the two reads, would pass it.
 
+Once a request has gone down today's path, nothing rechecks the caller's
+session: the path goes on with the caller the request authenticated (the
+first try's read, or the credential's own check when the first try was not
+served), and the vault's wrap weighs the caller's member and grants, not
+the session. So a session revoked after that check still writes. Example
+(review r2 of #469): the first try is served; Ada's grant is taken, so the
+hold fails; the retry is refused; her grant is given back and her session
+revoked; today's path then writes version 2, 200. Today's front door has
+the same window between its check and its wrap; after a served try it
+spans those tries too, a few round trips. `write-held.test.ts` pins this
+(it flips when 0.16 closes the window, PR 6), and formal/Writing.tla's
+`TodayCallerStandsAtDecision` is an expected gap (`WritingCaller`).
+
 What an abandoned try leaves behind, with nothing waiting on it:
 
 - **its number**, drawn from `log_number` by `write_request`: a gap in the

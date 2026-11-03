@@ -603,6 +603,11 @@ EXPECTED=(
   # write has had this window since 0.14; the two-trip path closes it for the writes it serves (WritesStandAtCommit),
   # 0.16 for every write (docs/design/two-trips.md, PR 6).
   "WritingFallBack TodayStandsAtCommit"
+  # Today's path after a try the vault served goes on with the caller that try's read checked, and its wrap weighs the
+  # caller's member and roles, not its session: a session revoked between that check and the wrap does not stop the
+  # write (Writing.tla's Auth, WToday; review r2 of #469). Today's front door has had the same window before its wrap
+  # since 0.14; after a served try it spans those tries too. 0.16 closes it (docs/design/two-trips.md, PR 6).
+  "WritingCaller TodayCallerStandsAtDecision"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

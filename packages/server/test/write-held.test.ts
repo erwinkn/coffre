@@ -449,6 +449,28 @@ test("Ada's session revoked before her write: 401, as today's path answers it, a
   assert.deepEqual(fast.entries, today.entries);
 });
 
+test("a try the vault served, abandoned at its hold, then refused; Ada's grant given back and her session revoked before today's path: it writes, for the caller the first try checked (WritingCaller, TodayCallerStandsAtDecision, an expected gap; review r2 of #469)", { skip: POSTGRES }, async () => {
+  // Pinned as it is, not as it should be: today's path goes on with the caller the request authenticated, and its
+  // wrap weighs her grant, not her session, as today's front door has always done between its check and its wrap.
+  // Here the window spans the tries before it. 0.16 closes it (docs/design/two-trips.md, PR 6); this test then flips.
+  const w = await world();
+  w.between(async () => {
+    await w.root.access.set(`user:${ADA}`, { 'market/dev': null });
+    w.between(async () => {
+      await w.root.access.set(`user:${ADA}`, { 'market/dev': 'developer' });
+      await w.signOut();
+    });
+  });
+  const wrote = await w.write({ API_KEY: 'fake-ada' });
+  assert.deepEqual(served(w.answers), ['served', 'refused']);
+  assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
+  const row = (await keyRow('API_KEY'))!;
+  assert.equal(row.currentVersion, 2);
+  assert.equal((await versionOf(row.currentVersionId))?.createdBy, ADA);
+  const [session] = await db.owner.select({ revokedAt: credentials.revokedAt }).from(credentials).where(eq(credentials.id, w.ada.id));
+  assert.notEqual(session?.revokedAt, null, 'her session was revoked before the write committed');
+});
+
 test("a try the vault served, abandoned at its hold, then refused StaleFirst: today's path refuses it as it would have alone, and the abandoned try leaves only its `key.wrap`, which no write names (WToday)", { skip: POSTGRES }, async () => {
   /** API_KEY written again, and a way to put its row back to its first version, as a database writer would. */
   const rewritten = async (w: Awaited<ReturnType<typeof world>>) => {

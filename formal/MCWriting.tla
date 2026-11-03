@@ -3,8 +3,8 @@
 (* The scenarios TLC checks of Writing.tla. Each review round's P1 is an   *)
 (* adversary of one of them, so each stays pinned: rounds 1 and 2 in       *)
 (* Revoke, Place and Fork, round 3 in Names, round 5 in Protect, round 6   *)
-(* in Tamper and Add, T190's forged seal in Forge, PR 3's fallback to     *)
-(* today's path in FallBack and Forge.                                     *)
+(* in Tamper and Add, T190's forged seal in Forge, PR 3's fallback to      *)
+(* today's path in FallBack and Forge, its caller in Caller (r2 of #469).  *)
 (***************************************************************************)
 EXTENDS Writing
 
@@ -45,6 +45,13 @@ ForgeProcs == {"w1", "bob", "end", "rev", "dem", "fsg", "ck"}
 \* (PR 3's fallback); a roles change between its decision and its commit
 \* does not stop it (TodayStandsAtCommit, EXPECTED broken).
 FallBackProcs == {"w1", "w2", "rev", "bk", "rol", "ck"}
+
+\* Ada writes key k while her grant is taken away and given back and her
+\* session revoked: a try the vault served whose hold fails, a refusal,
+\* then today's path once the grant is back, the session revoked before it
+\* (review r2 of #469). Today's path goes on with the caller the first try
+\* checked: it writes (TodayCallerStandsAtDecision, EXPECTED broken).
+CallerProcs == {"w1", "rev", "bk", "end", "ck"}
 
 \* Bob and Cy each add svc while an Owner demotes Bob and changes the
 \* policy so that only Owners add, and a database writer copies a token

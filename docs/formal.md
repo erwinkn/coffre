@@ -2247,7 +2247,9 @@ the log, or her grant taken and her member row put back so, and Bob's row
 put back so after his demotion while he adds svc (`WritingForge`, T190),
 her two writes while her grant is taken away and given back and the roles
 redefined, a try the vault served abandoned at its hold and the next
-refused, down today's path (`WritingFallBack`, PR 3). Bob and Cy each add svc while Bob is demoted,
+refused, down today's path (`WritingFallBack`, PR 3), or while her grant
+is taken and given back and her session revoked before that path
+(`WritingCaller`, review r2 of #469). Bob and Cy each add svc while Bob is demoted,
 the policy changes so that only Owners add, and a database writer copies a
 token hash onto Bob's credential (`WritingAdd`); Bob, no admin, sets up svc with a first grant while the
 roles are redefined, the services setting is closed and the grant's place
@@ -2268,13 +2270,22 @@ but the credential to its newest change's seal, and that change to its
 MAC once T190 is in it (TodayChangeMacChecked), and wraps the key; then the
 app's transaction, under 0.14's head and the fence, finds the environment
 still live and the key's row where the decision found it, and writes on
-that decision (`WTodayCommit`). The credential it holds to its `auth_mac`
-alone, which is why a caller's own credential, not as its log has it or
-revoked, answers 401 at the vault's read and never goes there. A write
+that decision (`WTodayCommit`). The caller's credential it does not weigh:
+the request goes on with the caller the app authenticated (`Auth`), on the
+first try's read or by the credential's own check, which holds the row to
+its `auth_mac` alone; that is why a caller's own credential, not as its log
+has it or revoked, answers 401 at the vault's read and never goes there. A
+session revoked after that check does not stop the write
+(`TodayCallerStandsAtDecision`, which TLC must find broken in
+`WritingCaller`: today's front door has had that window before its wrap
+since 0.14, and after a try the vault served it spans those tries too;
+review r2 of #469 found the r1 model rechecked the session at the wrap,
+which the code does not). A write
 reaches it on any try: after a try the vault served and whose hold failed,
 the abandoned try's number and wrap stay, a gap the tick seals past and a
-wrap no change names. `TodayStandsAtDecision`: its caller stood, by the
-log, when the vault decided. Not at its commit: a revoke or a role
+wrap no change names. `TodayStandsAtDecision`: everything the wrap weighs
+(the caller's member, roles, policy, place, parent) stood, by the log,
+when the vault decided. Not at its commit: a revoke or a role
 redefined between the two does not stop it, the window every write has
 had since 0.14 (`TodayStandsAtCommit`, which TLC must find broken in
 `WritingFallBack`: listed under EXPECTED in `scripts/formal.sh`). The
