@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **An isolate's first requests ask the vault once (T201).** Each
+  concurrent first request reserved the proxy code's names on its own,
+  and settled the vault through `about()` on its own: a Node
+  deployment's start at 1,000 `/use` a second queued 200 to 270
+  reservations a thread on the vault's pool of 8, for 2 s, and
+  stretched its cold start to 3 s. Now the first request makes each
+  call, and the others wait for its settled answer on timers of their
+  own, never its pending promise, taking over a call not settled in
+  3 s; each takes the outcome of the call it joined, and after 6 s of
+  waiting in all, its own take-over's call included, answers 503
+  `starting`, Retry-After 1. One reservation and one `about()` a thread; the cold start ends
+  by 0.9 s.
 - **A UI route's use reads its caller once (T200).** `use_route`
   decided its caller with a whole named call of no key, then read the
   same rows again in each key's use: a UI route cost Postgres about
