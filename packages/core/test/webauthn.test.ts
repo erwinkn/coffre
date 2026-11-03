@@ -207,6 +207,8 @@ const SHARED: Case[] = [
   ['clientDataJSON past 4 KiB', { clientData: { padding: 'x'.repeat(4096) } }, {}, 'malformed'],
   ['ED set with nothing after', { flags: FLAGS.UP | FLAGS.UV | FLAGS.ED }, {}, 'malformed'],
   ['extensions that are no map', { extensions: encodeCbor([1, 2]) }, {}, 'malformed'],
+  ['extensions keyed by an integer, not a name', { extensions: encodeCbor(new Map<CborValue, CborValue>([[1, true]])) }, {}, 'malformed'],
+  ['extensions in a map head wider than it needs', { extensions: Uint8Array.of(0xb8, 0x01, 0x61, 0x78, 0xf5) }, {}, 'malformed'],
   ['bytes after the authenticator data', { authenticatorData: append(0) }, {}, 'malformed'],
   // 5. clientDataJSON
   ['a challenge sent for something else', {}, { challenge: hex('5d'.repeat(32)) }, 'challenge'],
@@ -252,7 +254,6 @@ test("an assertion is refused for each of section 7.2's checks, alone, with that
     ['signed by another key', {}, { passkey: { ...(await stored(other)), credentialId: (await authenticator()).credentialId } }, 'signature'],
     ['a bit of the signature flipped', { signature: flip(40) }, {}, 'signature'],
     ['the signature raw, not DER', { signature: (der) => der.subarray(der.length - 64) }, {}, 'signature'],
-    ['a DER integer with a needless leading zero', { signature: (der) => derPadded(der) }, {}, 'signature'],
     ['bytes after the DER', { signature: append(0) }, {}, 'signature'],
     ['the authenticator data changed after signing', { response: inner((r) => void (r.authenticatorData = toBase64url(flip(34)(b64(String(r.authenticatorData)))))) }, {}, 'signature'],
     ['the stored key of another algorithm than the row says', {}, { passkey: { ...(await stored(await authenticator())), algorithm: -8 } }, 'algorithm'],
@@ -262,13 +263,25 @@ test("an assertion is refused for each of section 7.2's checks, alone, with that
   }
 });
 
-/** The first DER integer re-encoded with a leading zero it does not need: one more byte, the same number. */
-function derPadded(der: Uint8Array): Uint8Array {
-  const rLength = der[3];
-  const r = der.subarray(4, 4 + rLength);
-  const body = new Uint8Array([0x02, rLength + 1, 0, ...r, ...der.subarray(4 + rLength)]);
-  return new Uint8Array([0x30, body.length, ...body]);
-}
+test('a DER integer with a needless leading zero is refused, though it is the same number', async () => {
+  // A fixed signature whose r is 32 bytes and starts below 0x80: padded, it
+  // is 33 bytes, within the length an integer may have, so only the
+  // minimality check refuses it. (A generated r may already be 33 bytes.)
+  const v = (vectors.w3c as W3cVector[]).find((vector) => vector.id === 'packed-self-es256')!;
+  const der = hex(v.authentication.signature);
+  assert.equal(der[3], 32);
+  assert.ok(der[4] < 0x80);
+  const body = [0x02, 33, 0, ...der.subarray(4)];
+  const padded = Uint8Array.from([0x30, body.length, ...body]);
+  const registered = await verifyRegistration(asRegistration(v), { ...W3C_SITE, challenge: hex(v.registration.challenge), requireUserVerification: false });
+  assert.ok(registered.ok);
+  const passkey = { credentialId: registered.credentialId, publicKey: registered.publicKey, algorithm: registered.algorithm, userHandle: new Uint8Array(16) };
+  const expected = { ...W3C_SITE, challenge: hex(v.authentication.challenge), passkey, requireUserVerification: false };
+  assert.equal(reason(await verifyAssertion(asAssertion(v), expected)), 'ok');
+  const sent = asAssertion(v);
+  sent.response.signature = toBase64url(padded);
+  assert.equal(reason(await verifyAssertion(sent, expected)), 'signature');
+});
 
 /** A COSE key, from a map an authenticator could have written. */
 const cose = (...entries: [CborValue, CborValue][]) => () => encodeCbor(new Map<CborValue, CborValue>(entries));
@@ -288,6 +301,11 @@ test("a registration is refused for each of section 7.2's checks, alone, with th
     ['a transport that is no name', { response: inner((r) => void (r.transports = ['USB 3'])) }, {}, 'malformed'],
     // The attestation object
     ['attestationObject missing', { response: inner((r) => void delete r.attestationObject) }, {}, 'malformed'],
+    ['the attestation object in a map head wider than it needs', { response: inner((r) => {
+      const bytes = b64(String(r.attestationObject));
+      assert.equal(bytes[0], 0xa3);
+      r.attestationObject = toBase64url(Uint8Array.from([0xb8, 0x03, ...bytes.subarray(1)]));
+    }) }, {}, 'malformed'],
     ['an attestation object with a fourth key', { attestation: attestationMap((map) => void map.set('epAtt', true)) }, {}, 'malformed'],
     ['an attestation object without fmt', { attestation: attestationMap((map) => void map.delete('fmt')) }, {}, 'malformed'],
     ['fmt not text', { attestation: attestationMap((map) => void map.set('fmt', 1)) }, {}, 'malformed'],
@@ -398,6 +416,21 @@ test('CBOR reads the subset WebAuthn writes and refuses the rest', () => {
   malformed([0xa2, 1, 1, 1, 2]); // a key twice
   malformed([0xa1, 0x80, 1]); // a key that is an array
   malformed([0x62, 0xc3, 0x28]); // text that is not UTF-8
+  // Each argument in its shortest head (CTAP2's canonical form).
+  assert.deepEqual(readCbor(Uint8Array.of(0x17)), [23, 1]);
+  assert.deepEqual(readCbor(Uint8Array.of(0x18, 0x18)), [24, 2]);
+  assert.deepEqual(readCbor(Uint8Array.of(0x19, 0x01, 0x00)), [256, 3]);
+  assert.deepEqual(readCbor(Uint8Array.of(0x1a, 0, 1, 0, 0)), [65536, 5]);
+  assert.deepEqual(readCbor(Uint8Array.of(0x1b, 0, 0, 0, 1, 0, 0, 0, 0)), [2 ** 32, 9]);
+  malformed([0x18, 0x17]); // 23 in a byte of its own
+  malformed([0x19, 0, 0xff]); // 255 in two
+  malformed([0x1a, 0, 0, 0xff, 0xff]); // 65535 in four
+  malformed([0x1b, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]); // 2^32 - 1 in eight
+  malformed([0x38, 0x00]); // -1, likewise
+  malformed([0x58, 0x01, 0x00]); // a byte string's length
+  malformed([0x78, 0x01, 0x61]); // a text's
+  malformed([0x98, 0x01, 0x00]); // an array's
+  malformed([0xb8, 0x01, 0x01, 0x01]); // a map's
   malformed([]);
   malformed(Array.from({ length: 20 }, () => 0x81).concat([0])); // twenty arrays deep
   // A byte order mark is a character of the text, kept: two keys that differ by one are two keys.

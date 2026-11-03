@@ -148,8 +148,8 @@ export type Cbor = number | string | boolean | null | Uint8Array | Cbor[] | Map<
 
 /**
  * Reads one CBOR item at `offset` and answers it with where it ends.
- * Definite lengths only; no tags, floats or `undefined`; no duplicate map
- * keys; text that is UTF-8. A length longer than what is left is refused
+ * Definite lengths only, each in its shortest head; no tags, floats or
+ * `undefined`; no duplicate map keys; text that is UTF-8. A length longer than what is left is refused
  * before anything is allocated for it.
  */
 export function readCbor(bytes: Uint8Array, offset = 0, depth = 0): [Cbor, number] {
@@ -173,6 +173,8 @@ export function readCbor(bytes: Uint8Array, offset = 0, depth = 0): [Cbor, numbe
     argument = 0;
     for (let i = 0; i < size; i++) argument = argument * 256 + bytes[at + i];
     if (!Number.isSafeInteger(argument)) fail('malformed', 'CBOR integer past 2^53');
+    // CTAP2's canonical form: the shortest head that holds the argument.
+    if (argument < (info === 24 ? 24 : 2 ** (4 * size))) fail('malformed', 'CBOR argument wider than it needs');
     at += size;
   } else return fail('malformed', 'CBOR indefinite length or reserved value');
   switch (major) {
@@ -309,7 +311,7 @@ async function readAuthenticatorData(bytes: Uint8Array, attested: boolean, expec
   }
   if (flags & ED) {
     const [extensions, end] = readCbor(bytes, at);
-    if (!(extensions instanceof Map)) return fail('malformed', 'extensions are not a map');
+    if (!(extensions instanceof Map) || ![...extensions.keys()].every((key) => typeof key === 'string')) return fail('malformed', 'extensions are not a map keyed by name');
     at = end;
   }
   if (at !== bytes.length) return fail('malformed', 'bytes trail the authenticator data');
