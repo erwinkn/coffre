@@ -502,6 +502,12 @@ REMOVALS=(
   # A member add taking 0.14's head before the members' rows (AddLocks, T179 PR 5): a demotion holds the row and
   # waits for the head, which the add holds while it waits for the row.
   "AddLocks MembersFirst NoWaitCycle"
+  # A finding about a member weighed by 0.14's rule (Findings.tla, T179 PR 4a): under 0.16 no access entry follows a
+  # change, and a change above the finding settles nothing.
+  "Findings WeighsChanges Settles"
+  # The newest finding's weighed change, not the most any weighed: a check that read before a change commits after
+  # one that read past it, and hides it.
+  "Findings MostWeighed StandsUnchanged"
   # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
   "WritingFallBack FallBackUncommitted OneWritePerRequest"
   # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its

@@ -6,7 +6,7 @@ import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { logObject, newestSeqQuery, newestVaultSeq, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
-import { readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
+import { findingsOf, findingStands, newestChangeOf, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -921,9 +921,10 @@ export type MemberRow = {
   grants: StoredGrant[];
   /**
    * Whether the vault has found their row or grants changed around it
-   * since it last changed what they hold: its newest `vault.tampered`
-   * about them is newer than its newest access entry. The vault refuses
-   * them until an owner removes them.
+   * since it last changed what they hold (`tamperedMembers`): no change of
+   * theirs in 0.15's log is numbered above the one its finding weighed, or,
+   * for a finding of 0.14's, its newest is newer than its newest access
+   * entry. The vault refuses them while their row fails its check.
    */
   tampered: boolean;
   /** Live credentials: neither revoked nor expired. */
@@ -969,8 +970,9 @@ export type MemberAccessRows = {
 
 /**
  * One member's access in one query, whatever they hold: their row (and
- * whether the vault's newest finding about it is newer than its newest
- * change, as `tamperedMembers` says), each live grant with the slugs of
+ * whether the vault's findings about it stand, as `tamperedMembers` says:
+ * the most a finding weighed against their newest change's number, the
+ * newest of 0.14's against their newest access entry), each live grant with the slugs of
  * its place, and, when their scope names projects, every project's slug,
  * to name them by. A member page reads this once, not one list per project.
  *
@@ -986,11 +988,11 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   const { vaultMembers: m, vaultGrants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
   const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
   const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
+  const found = findingsOf(db, sql`${m.principal}`);
   const query = sql`
     SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
-      (SELECT max(${log.seq}) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.action} = 'vault.tampered'
-        AND ${log.code} IN ('mac', 'stale') AND ${log.subjectPrincipal} = ${m.principal}) AS found_seq,
-      (SELECT max(${log.seq}) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
+      ${found.legacy} AS found_seq, ${found.weighed} AS found_change, ${newestChangeOf(principal)} AS changed_number,
+      (SELECT CAST(max(${log.seq}) AS text) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
         AND ${log.action} IN (${actions}) AND ${log.subjectPrincipal} = ${m.principal}) AS changed_seq,
       x.kind, x.project_id, x.project_slug, x.environment_id, x.environment_slug, x.role, x.expires_at
     FROM ${m}
@@ -1009,19 +1011,19 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
     WHERE ${m.principal} = ${principal}`;
   type Row = {
     status: string; owner: boolean | number; member_role: string | null; scope: string | null; status_changed_by: string;
-    found_seq: string | number | null; changed_seq: string | number | null;
+    found_seq: string | null; found_change: string | null; changed_seq: string | null; changed_number: string | null;
     kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
     environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
   };
   const rows = await dialect.rowsOf<Row>(db, query);
   const [first] = rows;
   if (first === undefined) return { member: null, grants: [], projectSlugs: new Map() };
-  const seq = (value: string | number | null) => (value === null ? -1n : BigInt(value));
+  const big = (value: string | null) => (value === null ? null : BigInt(value));
   return {
     member: {
       status: first.status as 'active' | 'removed',
       ...storedRole({ owner: first.owner === true || first.owner === 1, role: first.member_role, scope: first.scope }),
-      tampered: seq(first.found_seq) > seq(first.changed_seq),
+      tampered: findingStands({ legacy: big(first.found_seq), access: big(first.changed_seq), weighed: big(first.found_change), change: big(first.changed_number) }),
       admittedBy: first.status_changed_by,
     },
     grants: rows.flatMap((row) =>
@@ -1041,27 +1043,27 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
 }
 
 /**
- * The vault retains removed members too: an access entry without its row
- * means tampering. Of one member, through the log's subject index; of
+ * The vault retains removed members too: a member the log has changed
+ * with no row means tampering. Of one member, a change of theirs in 0.15's
+ * log (one probe of its object's index) or an access entry of 0.14's
+ * (through the log's subject index), as the vault's check weighs both
+ * (`#onLog`): the adds of 0.16 write no access entry (T179 PR 4a). Of
  * everyone, by the principals the vault's entries name, each found by one
  * step down that index (a skip scan), and an access entry looked for only
  * of those without a row: as many steps as there are principals, however
- * long their histories grow (R48).
+ * long their histories grow (R48). A change's object names its member by
+ * a hash alone, which a scan cannot turn back into a principal: the list
+ * of everyone reads 0.14's entries alone, until PR 4b (with PR 6).
  */
 export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
-  const { auditLog, vaultMembers } = tablesOf(db);
   if (member !== undefined) {
-    const rows = await db.selectDistinct({ principal: auditLog.subjectPrincipal })
-      .from(auditLog)
-      .leftJoin(vaultMembers, eq(vaultMembers.principal, auditLog.subjectPrincipal))
-      .where(and(
-        eq(auditLog.author, 'vault'),
-        eq(auditLog.subjectPrincipal, principalOf(member)),
-        eq(auditLog.decision, 'allow'),
-        inArray(auditLog.action, [...ACCESS_ACTIONS]),
-        isNull(vaultMembers.principal),
-      ));
-    return rows.map((row) => row.principal!);
+    const principal = principalOf(member);
+    const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
+      WHERE NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = ${principal})
+        AND (EXISTS (SELECT 1 FROM log_changes WHERE log_changes.object = ${logObject('principal', principal)})
+          OR EXISTS (SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = ${principal} AND decision = 'allow'
+            AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})))`);
+    return rows.map((row) => row.principal);
   }
   const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE author = 'vault' AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
   // A plain read, `select …`, which a page's other reads may go with (`groupReads`, @coffre/db/hyperdrive).

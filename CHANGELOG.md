@@ -68,6 +68,20 @@
   credential's JSON rule as for a UI route's handle. It now reads each
   character once.
 
+- **A finding that a member's row was tampered with is settled by the
+  member's next change in 0.15's log (T179 PR 4a).** Under 0.15's log the
+  vault's `vault.tampered` about a member's row names the number of the
+  member's newest change its check weighed (`{"change": "<number>"}` in
+  its metadata), and the member list, their page, their report, `coffre
+  migrate` and the vault's conversion read it as standing until a change
+  of theirs is numbered above the most any finding weighed. Until now
+  each compared the finding with the member's newest 0.14 access entry,
+  which 0.16 stops writing: a member found tampered after it would have
+  read tampered for good. Findings without a number, 0.14's, keep that
+  rule. The same row found again after a change is logged again, where a
+  process logged it once. A member's report finds them missing (tampered)
+  by a change of theirs with no row, as well as by an access entry; the
+  list of everyone still goes by access entries. No migration.
 - **A member add makes three round trips, not fourteen (T179 PR 5).**
   On Postgres with 0.15's log, `PUT /members/<member>` adding someone
   new (a person, with an instance role and its scope or none, or a

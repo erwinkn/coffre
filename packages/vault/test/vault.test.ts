@@ -5,7 +5,7 @@ import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { deriveLogKey, entryHash, entryMac, type LogKey, type StoredEntry } from '@coffre/core/audit';
+import { deriveLogKey, entryHash, entryMac, verifyEntries, type LogKey, type StoredEntry } from '@coffre/core/audit';
 import {
   awsKms,
   KEY_CHECK,
@@ -19,12 +19,12 @@ import {
   type KeyOperation,
 } from '@coffre/core/kek';
 import { EVERYWHERE, type Scope } from '@coffre/core/access';
-import { checkpointMessage, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, checkpointMessage, USE_METADATA_LENGTH, verifyCheckpoint, type Checkpoint, type SecretRef, type WrappedKey } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
-import { everyProjectPreview } from '@coffre/db/grants';
+import { everyProjectPreview, findingMetadata, reportStands, tamperedMembers } from '@coffre/db/grants';
 import { isUnavailable, SNAPSHOT } from '@coffre/db/dialect';
 import { appendEntries, BATCH_BYTES, forgetLogHeads, lockLogHead, LogHeadMismatch, LogRewound, logObject } from '@coffre/db/log';
-import { and, asc, desc, eq, gt, gte, lte, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 
 import { checkOwners, derivedSigningKey, resolveVaultConfig, type ResolvedVaultConfig, type VaultConfig } from '../src/config.ts';
 import { signer } from '../src/checkpoint.ts';
@@ -2491,6 +2491,8 @@ test('a grant written around the vault while it decides about its member is refu
   // The decision finds the table holds more than it decided, and is refused; the finding is logged.
   assert.equal(!change.ok && change.refusal.code, 'tampered');
   assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
+  // Under 0.15's log it names her newest change, read as it appends: her check had found her row as it was (T179 PR 4a).
+  if (LOG === '0.15') assert.deepEqual(await weighedFindings(ADA), [String(await newestNumber(ADA))]);
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
   assert.equal(!read.ok && read.refusal.code, 'tampered', 'a grant the database owner wrote is not honoured');
   assert.ok(!(await w.vault.access(ADA)).grants.some((grant) => grant.environmentId === w.prod));
@@ -3046,6 +3048,121 @@ test('under 0.15\'s log, an old member row put back with the newest change\'s se
   const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems([{ secret, wrapped: await wrapped(w, secret) }]) });
   assert.equal(!read.ok && read.refusal.code, 'tampered');
   assert.deepEqual(await tamperings(w), [[ADA, 'mac']]);
+});
+
+// --- findings against 0.15's log (T179 PR 4a) -------------------------------------------------------
+
+const LOG_015_ONLY = { skip: LOG === '0.15' ? false : "0.15's log only: a finding names a change only under it" } as const;
+
+/** The number of `principal`'s newest change in 0.15's log, 0 for none. */
+async function newestNumber(principal: string): Promise<bigint> {
+  const [row] = await rows<{ n: string | null }>(db.owner, sql`SELECT CAST(max(number) AS text) AS n FROM log_changes WHERE object = ${logObject('principal', principal)}`);
+  return row?.n == null ? 0n : BigInt(row.n);
+}
+
+/** The change each `vault.tampered` about `principal`'s row names (`findingMetadata`), oldest first: undefined for none. */
+async function weighedFindings(principal: string): Promise<(string | undefined)[]> {
+  const { auditLog } = tablesOf(db.owner);
+  const found = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
+    .where(and(eq(auditLog.action, 'vault.tampered'), eq(auditLog.subjectPrincipal, principal), sql`${auditLog.code} IN ('mac', 'stale')`))
+    .orderBy(asc(auditLog.seq));
+  return found.map((row) => (JSON.parse(row.metadata) as { change?: string }).change);
+}
+
+/** The vault's own check of an entry, as `reportStands` takes it: its MAC under the vault's key. */
+const vaultCheck = {
+  authentic: (entry: StoredEntry) => verifyEntries([entry], { startSeq: entry.seq, startPrevHash: entry.prevHash, keys: [VAULT_KEY] }).ok,
+  forged: () => {},
+};
+
+/** A `vault.tampered` about `principal`'s row naming `change`, linked to the chain: under the vault's MAC, or `forged`, a made-up one. */
+async function appendFinding(principal: string, change: bigint, { forged = false } = {}): Promise<void> {
+  const { auditLog, auditChainHead } = tablesOf(db.owner);
+  const [head] = await db.owner.select().from(auditChainHead);
+  const fields = {
+    seq: head.nextSeq, author: 'vault' as const, keyId: VAULT_KEY.keyId, occurredAt: Date.now(), actor: 'system:vault',
+    action: 'vault.tampered', decision: 'deny', code: 'stale', subjectPrincipal: principal, projectId: null, environmentId: null,
+    secretId: null, secretVersionId: null, operationId: null, requestId: null, sourceIp: null, relatedSeq: null, metadata: findingMetadata(change),
+  };
+  const mac = forged ? Buffer.alloc(32, 7) : entryMac(VAULT_KEY.key, head.headHash, fields);
+  const hash = entryHash(head.headHash, fields, mac);
+  await db.owner.insert(auditLog).values({ ...fields, prevHash: head.headHash, mac, hash, log015: true });
+  await db.owner.update(auditChainHead).set({ nextSeq: head.nextSeq + 1n, headHash: hash });
+}
+
+/** Whether `principal` reads tampered, to a reader with no key (`tamperedMembers`) and to the vault (`reportStands`). */
+async function standing(principal: string): Promise<[boolean, boolean]> {
+  return [(await tamperedMembers(db.owner, principal)).has(principal), await reportStands(db.owner, principal, vaultCheck)];
+}
+
+test('under 0.15\'s log, a finding names the newest change it weighed and stands until a change above it; the same row found again after one is found again', LOG_015_ONLY, async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const first = await snapshot(ADA);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] })).ok);
+  const second = await snapshot(ADA);
+  const one = await newestNumber(ADA);
+
+  // Her row from before that change, put back: genuine, but not her newest change's. The finding names that change.
+  await first();
+  assert.equal((await w.vault.access(ADA)).status, 'tampered');
+  assert.deepEqual(await weighedFindings(ADA), [String(one)]);
+  assert.deepEqual(await standing(ADA), [true, true]);
+
+  // Her newest row back: the vault serves her, but nothing has changed what she holds since the finding, which stands.
+  await second();
+  assert.equal((await w.vault.access(ADA)).status, 'active');
+  assert.deepEqual(await standing(ADA), [true, true]);
+
+  // A change above the one it weighed, which the vault made only once her row checked out, settles it.
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })).ok);
+  const two = await newestNumber(ADA);
+  assert.ok(two > one);
+  assert.deepEqual(await standing(ADA), [false, false]);
+
+  // The same row put back again, found the same way: another finding, naming the newer change, not one this process
+  // took for logged already.
+  await second();
+  assert.equal((await w.vault.access(ADA)).status, 'tampered');
+  assert.deepEqual(await weighedFindings(ADA), [String(one), String(two)]);
+  assert.deepEqual(await standing(ADA), [true, true]);
+});
+
+test('under 0.15\'s log, a finding is settled by a change with no access entry of 0.14\'s, as 0.16\'s are: the watermark does not freeze', LOG_015_ONLY, async () => {
+  const w = await world();
+  const { auditLog } = tablesOf(db.owner);
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const putBack = await snapshot(ADA);
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] })).ok);
+  const newest = await snapshot(ADA);
+  await putBack();
+  assert.equal((await w.vault.access(ADA)).status, 'tampered');
+  await newest();
+  const [finding] = await db.owner.select({ seq: auditLog.seq }).from(auditLog).where(eq(auditLog.action, 'vault.tampered')).orderBy(desc(auditLog.seq)).limit(1);
+
+  // The change that settles it, then its 0.14 access entries taken out, as 0.16 writes none: only the change says so.
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] })).ok);
+  await withLogUnlocked(db.owner, (owner) => owner.delete(auditLog).where(and(
+    eq(auditLog.author, 'vault'), eq(auditLog.subjectPrincipal, ADA), gt(auditLog.seq, finding!.seq), inArray(auditLog.action, [...ACCESS_ACTIONS]),
+  )));
+  assert.deepEqual(await standing(ADA), [false, false]);
+});
+
+test('under 0.15\'s log, the most any finding weighed counts, not the newest finding\'s; and one forged in the vault\'s name is the vault\'s only to a reader with no key', LOG_015_ONLY, async () => {
+  const w = await world();
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const newest = await newestNumber(ADA);
+
+  // Two of the vault's findings, committed out of the order they read in: the later weighed less (MostWeighed).
+  await appendFinding(ADA, newest);
+  await appendFinding(ADA, newest - 1n);
+  assert.deepEqual(await standing(ADA), [true, true]);
+
+  // Settled by the next change; then a finding forged above it, which only the vault's MAC tells from its own.
+  assert.ok((await w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] })).ok);
+  assert.deepEqual(await standing(ADA), [false, false]);
+  await appendFinding(ADA, await newestNumber(ADA), { forged: true });
+  assert.deepEqual(await standing(ADA), [true, false]);
 });
 
 test('an entry forged in the vault\'s name about a member is passed over and reported, not obeyed', async () => {

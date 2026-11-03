@@ -2426,6 +2426,40 @@ use. 28,408 states.
 |---|---|
 | the add locks the members' rows before the head, as every flow that takes both does (MembersFirst) | `NoWaitCycle`: the add holds the head and waits for the adder's row, which a demotion holds while it waits for the head |
 
+### Findings.tla
+
+When the vault's finding that a member's row was changed around it
+(`vault.tampered`, `mac` or `stale`) stands, as the member list, the member
+page, `coffre migrate` and the vault's conversion read it (T179 PR 4a;
+`findingStands` in packages/db/src/grants.ts). The vault changes a member
+only once its own check passes their row, so a change made after a
+finding's check means the row checked out since. 0.14's rule compares the
+finding with the member's newest access entry, which every change wrote;
+0.16 writes none, and that watermark would freeze. Under 0.15's log a
+finding names the number of the member's newest change its check weighed
+(`{"change": "<number>"}` in its metadata), and stands while no change is
+numbered above the most any finding weighed.
+
+**The model.** The member's row, good or bad (`Tamper`, `Restore`); the
+vault's changes, numbered, made only of a good row; checks of a bad row,
+each naming the number it read (`#onLog`, `#integrity`), or, for one that
+read none, the newest as its finding appends (`#weigh`: `#seal`,
+`#notLogged`); and findings appended in any order. `StandsUnchanged`: a
+finding whose weighed change is still the member's newest stands.
+`Settles`: a change above every number the findings weighed settles them.
+`Findings.cfg` has no access entries (0.16), 2,344 states;
+`Findings015.cfg` writes one beside each change, 3,920.
+
+| protection | turned off, TLC finds |
+|---|---|
+| a finding of 0.15's is weighed against the changes (WeighsChanges) | `Settles`, under 0.16: no access entry follows the change that settles the finding, which then stands for good |
+| the most any finding weighed counts, not the newest finding's (MostWeighed) | `StandsUnchanged`: a check that read before a change commits after one that read past it, and its lower number hides the other's |
+
+A finding that reads its number as it appends, not as its check read the
+row, weighs any change committed between the two: it then stands until the
+next change, as 0.14's rule held one past the access entry that change
+wrote. The model allows it (`Check(TRUE)`); it errs only toward standing.
+
 ## 0.16: proxy definitions in the UI
 
 ### Routing.tla

@@ -19,8 +19,8 @@ import { and, asc, desc, eq, gt, inArray, isNull, like, lt, or, sql, type SQL } 
 
 import { tablesOf, type Queryable } from './database.ts';
 import { prepared } from './prepared.ts';
-import { tombstone, truth } from './dialect.ts';
-import { entryColumns, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
+import { engineOf, rowsOf, tombstone, truth } from './dialect.ts';
+import { entryColumns, logObject, newestAuthentic, newestVaultEntries, type Authenticity, type Newest } from './log.ts';
 
 /**
  * One grant, as `vault_grants` holds it: on a project (`environmentId`
@@ -254,56 +254,160 @@ export async function unsealedCredentials(db: Queryable, at: Date): Promise<Unse
  * The members the vault has found changed around it, and not started over
  * since, as a reader without its key can tell: `reportStands`' rule, taking
  * every entry in the vault's name as its own, for everyone at once, where
- * the app lists members and `coffre migrate` marks them. Their newest
- * `vault.tampered`, for their row (`mac`) or an older one put back
- * (`stale`), is newer than the newest entry changing what they hold. Both
- * reads go by the log's (author, action, seq) and (author, subject, seq)
- * indexes, and findings are few.
+ * the app lists members and `coffre migrate` marks them. A finding about
+ * their row (`mac`) or an older one put back (`stale`) stands by
+ * `findingStands`: one 0.15's log weighed, while no change of theirs is
+ * numbered above the one it names; one of 0.14's, while it is newer than
+ * their newest access entry. Two rounds: the findings, by the log's
+ * (author, action, seq) and (author, subject, seq) indexes (findings are
+ * few), then for those they name their newest access entry and their
+ * newest change, one probe each (R48).
  */
 export async function tamperedMembers(db: Queryable, principal?: string): Promise<Set<string>> {
   const { auditLog } = tablesOf(db);
-  const newest = (actions: readonly string[], extra?: SQL) =>
-    db
-      .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`max(${auditLog.seq})`.mapWith(BigInt) })
-      .from(auditLog)
-      .where(
-        and(
-          eq(auditLog.author, 'vault'),
-          inArray(auditLog.action, [...actions]),
-          principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal),
-          extra,
-        ),
-      )
-      .groupBy(auditLog.subjectPrincipal);
-  const found = await newest(['vault.tampered'], inArray(auditLog.code, [...TAMPER_CODES]));
+  const weighed = weighedBy(db);
+  const found = await db
+    .select({
+      principal: auditLog.subjectPrincipal,
+      legacy: sql<string | null>`CAST(max(CASE WHEN ${weighed} IS NULL THEN ${auditLog.seq} END) AS text)`,
+      weighed: sql<string | null>`CAST(max(${weighed}) AS text)`,
+    })
+    .from(auditLog)
+    .where(and(
+      eq(auditLog.author, 'vault'),
+      eq(auditLog.action, 'vault.tampered'),
+      inArray(auditLog.code, [...TAMPER_CODES]),
+      principal === undefined ? undefined : eq(auditLog.subjectPrincipal, principal),
+    ))
+    .groupBy(auditLog.subjectPrincipal);
   if (found.length === 0) return new Set();
-  const changed = new Map(
-    (await newest(ACCESS_ACTIONS, and(eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, found.map((row) => row.principal!)))))
-      .map((row) => [row.principal!, row.seq]),
-  );
-  return new Set(found.filter((row) => row.seq > (changed.get(row.principal!) ?? -1n)).map((row) => row.principal!));
+  const legacy = found.flatMap((row) => (row.legacy === null ? [] : [row.principal!]));
+  const numbered = found.flatMap((row) => (row.weighed === null ? [] : [row.principal!]));
+  const [access, changes] = await Promise.all([
+    legacy.length === 0
+      ? []
+      : db
+          .select({ principal: auditLog.subjectPrincipal, seq: sql<string>`CAST(max(${auditLog.seq}) AS text)` })
+          .from(auditLog)
+          .where(and(eq(auditLog.author, 'vault'), inArray(auditLog.action, [...ACCESS_ACTIONS]), eq(auditLog.decision, 'allow'), inArray(auditLog.subjectPrincipal, legacy)))
+          .groupBy(auditLog.subjectPrincipal),
+    newestChanges(db, numbered),
+  ]);
+  const accessOf = new Map(access.map((row) => [row.principal!, BigInt(row.seq)]));
+  return new Set(found.filter((row) => findingStands({
+    legacy: row.legacy === null ? null : BigInt(row.legacy),
+    access: accessOf.get(row.principal!) ?? null,
+    weighed: row.weighed === null ? null : BigInt(row.weighed),
+    change: changes.get(row.principal!) ?? null,
+  })).map((row) => row.principal!));
 }
 
 /** The codes of the vault's reports that a member's row was changed around it: their row's MAC fails (`mac`), or an older one was put back (`stale`). */
 const TAMPER_CODES = ['mac', 'stale'] as const;
 
 /**
+ * Under 0.15's log, a `vault.tampered` about a member names, in its
+ * metadata, the newest change of theirs it weighed: `{"change": "<its
+ * number>"}`, decimal text (a JSON number loses digits past 2^53), "0" when
+ * the log held none (T179 PR 4a). A finding without it is 0.14's.
+ */
+export function findingMetadata(change: bigint): string {
+  return JSON.stringify({ change: change.toString() });
+}
+
+/**
+ * The change a finding names (`findingMetadata`), as a bigint, in SQL: null
+ * for 0.14's, and for one whose `change` is no number, written around the
+ * vault, which is then weighed by 0.14's rule (a reader with no key takes
+ * every entry in the vault's name as its own; the vault's MAC tells them
+ * apart, `reportStands`). Only digits are cast, so a forged value never
+ * fails the read.
+ */
+function weighedBy(db: Queryable): SQL<string | null> {
+  const { auditLog } = tablesOf(db);
+  return engineOf(db) === 'postgres'
+    ? sql`(CASE WHEN (${auditLog.metadata}::jsonb ->> 'change') ~ '^[0-9]{1,18}$' THEN (${auditLog.metadata}::jsonb ->> 'change')::bigint END)`
+    : sql`(CASE WHEN json_type(${auditLog.metadata}, '$.change') = 'text' AND json_extract(${auditLog.metadata}, '$.change') GLOB '[0-9]*'
+        AND NOT json_extract(${auditLog.metadata}, '$.change') GLOB '*[^0-9]*' AND length(json_extract(${auditLog.metadata}, '$.change')) <= 18
+        THEN CAST(json_extract(${auditLog.metadata}, '$.change') AS INTEGER) END)`;
+}
+
+/**
+ * Whether a member's findings stand, from the newest of each kind: the
+ * newest finding of 0.14's (`legacy`, its seq) is newer than their newest
+ * access entry (`access`); or the most any finding of 0.15's log weighed
+ * (`weighed`, a change's number) is at least their newest change's
+ * (`change`, null for none). A change above every number the findings
+ * weighed is one the vault made after checking their row, which only a
+ * row that checks out passes: what clears them, as 0.14's access entry
+ * did. The most, not the newest finding's: findings commit in an order of
+ * their own, so a later one may have weighed less (formal/Findings.tla,
+ * MostWeighed).
+ */
+export function findingStands(newest: { legacy: bigint | null; access: bigint | null; weighed: bigint | null; change: bigint | null }): boolean {
+  const { legacy, access, weighed, change } = newest;
+  return (legacy !== null && legacy > (access ?? -1n)) || (weighed !== null && weighed >= (change ?? 0n));
+}
+
+/**
+ * The number of each member's newest change in 0.15's log, of those that
+ * have one: one probe of `log_changes_object_idx` each (its `max`), however
+ * long their histories (R48).
+ */
+export async function newestChanges(db: Queryable, principals: readonly string[]): Promise<Map<string, bigint>> {
+  if (principals.length === 0) return new Map();
+  const keys = principals.map((principal) => logObject('principal', principal));
+  const rows = await rowsOf<{ object: string; number: string | null }>(db, engineOf(db) === 'postgres'
+    ? sql`SELECT k.object, (SELECT max(c.number) FROM log_changes c WHERE c.object = k.object::uuid)::text AS number
+        FROM unnest(${sql.param(keys)}::text[]) AS k (object)`
+    : sql`SELECT k.value AS object, CAST((SELECT max(c.number) FROM log_changes c WHERE c.object = k.value) AS TEXT) AS number
+        FROM json_each(${JSON.stringify(keys)}) k`);
+  const numbers = new Map(rows.flatMap((row) => (row.number === null ? [] : [[String(row.object).toLowerCase(), BigInt(row.number)] as const])));
+  return new Map(principals.flatMap((principal, i) => {
+    const number = numbers.get(keys[i]!);
+    return number === undefined ? [] : [[principal, number] as const];
+  }));
+}
+
+/** `newestChanges` of one member, in SQL: what a statement that reads them reads beside the rest (`memberAccess`). */
+export function newestChangeOf(principal: string): SQL<string | null> {
+  return sql`(SELECT CAST(max(c.number) AS text) FROM log_changes c WHERE c.object = ${logObject('principal', principal)})`;
+}
+
+/** Of a member's findings, as `findingStands` weighs them, in SQL: the newest of 0.14's (its seq), and the most a finding of 0.15's log weighed. */
+export function findingsOf(db: Queryable, principal: SQL | string): { legacy: SQL<string | null>; weighed: SQL<string | null> } {
+  const { auditLog: log } = tablesOf(db);
+  const weighed = weighedBy(db);
+  const of = sql`${log.author} = 'vault' AND ${log.action} = 'vault.tampered' AND ${log.code} IN ('mac', 'stale') AND ${log.subjectPrincipal} = ${principal}`;
+  return {
+    legacy: sql`(SELECT CAST(max(CASE WHEN ${weighed} IS NULL THEN ${log.seq} END) AS text) FROM ${log} WHERE ${of})`,
+    weighed: sql`(SELECT CAST(max(${weighed}) AS text) FROM ${log} WHERE ${of})`,
+  };
+}
+
+/**
  * Whether the vault's report that `principal`'s row was changed around it
- * stands: one of its own is newer than its newest entry changing what they
- * hold, and only starting them over, or another change, settles it. While
+ * stands (`findingStands`), each finding as `check`, the vault's MACs,
+ * tells them apart, passing over those forged in its name; a reader
+ * without its key takes them all as the vault's (`tamperedMembers`). While
  * one stands the vault leaves their grants on every project of 0.4 as they
- * are. Both entries as `check`, the vault's MACs, tells them apart,
- * passing over those forged in its name; a reader without its key takes
- * them all as the vault's (`tamperedMembers`). Only reports after that
- * entry are read, so older ones, forged or not, never hide one. From
- * LOOK_BACK forged entries on, of either kind, one may stand, so it is
- * taken to.
+ * are. One of 0.15's log stands while no change of theirs is numbered above
+ * the one it names: only those naming their newest change or later are
+ * read. One of 0.14's, while it is newer than their newest access entry
+ * changing what they hold: only those after that entry are read. So older
+ * ones, forged or not, never hide one. From LOOK_BACK forged entries on, of
+ * either kind, one may stand, so it is taken to. Their newest change is
+ * read unchecked: the decision that asks checked it with their row
+ * (`#onLog`), under their lock.
  */
 export async function reportStands(db: Queryable, principal: string, check: Authenticity): Promise<boolean> {
+  const change = (await newestChanges(db, [principal])).get(principal) ?? 0n;
+  const numbered = await newestAuthentic((limit, before) => tamperReportsAbout(db, principal, limit, { weighed: change }, before), check);
+  if (numbered === 'unreached' || typeof numbered !== 'string') return true;
   const access = await newestAccess(db, principal, check);
   if (access === 'unreached') return true;
   const after = typeof access === 'string' ? -1n : access.seq;
-  const report = await newestAuthentic((limit, before) => tamperReportsAbout(db, principal, limit, after, before), check);
+  const report = await newestAuthentic((limit, before) => tamperReportsAbout(db, principal, limit, { after }, before), check);
   return report === 'unreached' || typeof report !== 'string';
 }
 
@@ -348,11 +452,15 @@ const accessEntriesBefore = prepared((db) => accessEntries(db, lt(tablesOf(db).a
 
 /**
  * Up to `limit` of the vault's reports that `principal`'s row was changed
- * around it (`TAMPER_CODES`), after `after` and before `before` (the newest
- * when undefined), newest first.
+ * around it (`TAMPER_CODES`), before `before` (the newest when undefined),
+ * newest first: of 0.15's log, those that weighed `weighed` or a later
+ * change; of 0.14's, those after seq `after`.
  */
-async function tamperReportsAbout(db: Queryable, principal: string, limit: number, after: bigint, before?: bigint): Promise<StoredEntry[]> {
+async function tamperReportsAbout(
+  db: Queryable, principal: string, limit: number, which: { weighed: bigint } | { after: bigint }, before?: bigint,
+): Promise<StoredEntry[]> {
   const { auditLog } = tablesOf(db);
+  const weighed = weighedBy(db);
   const rows = await db
     .select(entryColumns(db))
     .from(auditLog)
@@ -362,7 +470,8 @@ async function tamperReportsAbout(db: Queryable, principal: string, limit: numbe
         eq(auditLog.subjectPrincipal, principal),
         eq(auditLog.action, 'vault.tampered'),
         inArray(auditLog.code, [...TAMPER_CODES]),
-        gt(auditLog.seq, after),
+        // The number as a bigint on both engines: SQLite compares a CASE's integer with text as text.
+        'weighed' in which ? sql`${weighed} >= CAST(${which.weighed.toString()} AS bigint)` : and(sql`${weighed} IS NULL`, gt(auditLog.seq, which.after)),
         before === undefined ? undefined : lt(auditLog.seq, before),
       ),
     )
