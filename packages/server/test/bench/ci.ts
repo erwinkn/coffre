@@ -534,6 +534,11 @@ try {
       for (const { refused: by } of each) for (const [why, n] of Object.entries(by)) refused.set(why, (refused.get(why) ?? 0) + n);
       const app = each.reduce((sum, { cpuUs }) => sum + cpuUs, 0) / 1000 / Math.max(1, sent);
       const used = cpu.get(name);
+      if (sorted.length === 0) {
+        // A phase that answered nothing (`--warm 0`, say) has no latencies to rank.
+        console.log(`  ${name.padEnd(8)} ${String(sent).padStart(6)} uses  no answers  refused: ${[...refused].map(([why, n]) => `${why} ${n}`).join(', ') || 'none'}`);
+        continue;
+      }
       console.log(
         `  ${name.padEnd(8)} ${String(sent).padStart(6)} uses  p50 ${percentile(sorted, 50).toFixed(1).padStart(6)}  p90 ${percentile(sorted, 90).toFixed(1).padStart(6)}  p99 ${percentile(sorted, 99).toFixed(1).padStart(6)}  ` +
           `max ${sorted.at(-1)!.toFixed(1).padStart(7)}  app CPU ${app.toFixed(2)} ms/use${cpuShown(used, sent)}  refused: ${[...refused].map(([why, n]) => `${why} ${n}`).join(', ') || 'none'}`,
