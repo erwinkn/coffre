@@ -1157,9 +1157,12 @@ they outlive the deployment that reserved them:
   start), and most isolates find their names there and go on. The isolate
   keeps settled values only, never the pending call (AGENTS.md, "What an
   isolate keeps"): its first request makes the call, and its other first
-  requests wait for that call's answer on timers of their own, polling, and
-  take over a call not settled in 3 s (`packages/server/src/asked-once.ts`,
-  T201). Each making its own call instead, a Node deployment's start at
+  requests join that call's attempt and wait for its outcome on timers of
+  their own, polling, take over a call not settled in 3 s, and answer 503
+  `starting` to ask again once they have waited 6 s in all
+  (`packages/server/src/asked-once.ts`, T201). An outcome is its attempt's:
+  a retry's followers never take the failure before it, nor a superseded
+  call's late one. Each making its own call instead, a Node deployment's start at
   1,000 requests a second queued 200 to 270 calls a thread on its vault's
   pool of 8 for 2 s, and the uses held behind them burst into the in-flight
   cap. Only a name missing from the read, or a read that cannot say (unsealed, torn by a

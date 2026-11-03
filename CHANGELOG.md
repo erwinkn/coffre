@@ -10,7 +10,8 @@
   stretched its cold start to 3 s. Now the first request makes each
   call, and the others wait for its settled answer on timers of their
   own, never its pending promise, taking over a call not settled in
-  3 s. One reservation and one `about()` a thread; the cold start ends
+  3 s; each takes the outcome of the call it joined, and after 6 s of
+  waiting in all answers 503 `starting`, Retry-After 1. One reservation and one `about()` a thread; the cold start ends
   by 0.9 s.
 - **A UI route's use reads its caller once (T200).** `use_route`
   decided its caller with a whole named call of no key, then read the
