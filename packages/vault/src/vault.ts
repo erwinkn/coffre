@@ -709,19 +709,23 @@ type Standing = {
   log?: MemberLog;
 };
 
-/** What a call's start reads first, asked together (`#start`): each step's first read, by the step. */
+/**
+ * What a call's start reads first, asked together (`#start`): each step's
+ * first read, by the step, and only for a step still due (undefined
+ * otherwise; a step that finds none reads for itself).
+ */
 type StartReads = {
   /** `#settle`'s: the vault's newest `key.rotate`, its newest entry, and its first under its current key. */
-  rotation: Promise<StoredEntry | undefined>;
-  newest: Promise<StoredEntry | undefined>;
-  first: Promise<bigint | undefined>;
-  /** The cutover's change, null for none, and the newest checkpoint, its seal's (`#cutoverSealed`): null unless still to know. */
-  cutover: Promise<bigint | null>;
-  checkpoint: Promise<StoredPair | null>;
+  rotation?: Promise<StoredEntry | undefined>;
+  newest?: Promise<StoredEntry | undefined>;
+  first?: Promise<bigint | undefined>;
+  /** The cutover's change, null for none (the cutover mark's, and `#cutoverSealed`'s), and the newest checkpoint, its seal's (the Owners' declaration's). */
+  cutover?: Promise<bigint | null>;
+  checkpoint?: Promise<StoredPair | null>;
   /** `#convert`'s: who holds a grant on every project of 0.4. */
-  holders: Promise<string[]>;
+  holders?: Promise<string[]>;
   /** `#limit`'s: the policy as 0.15's log holds it. */
-  policy: Promise<HeldObject>;
+  policy?: Promise<HeldObject>;
 };
 
 /**
@@ -1321,17 +1325,16 @@ class VaultService implements Vault {
   async #settled(): Promise<string | null> {
     const prepared = this.#prepared;
     if (prepared.superseded !== null) return prepared.superseded;
-    const log015 = prepared.log015 !== null;
-    if (prepared.since !== null && prepared.converted && (!log015 || prepared.cutover || prepared.marked) && (!log015 || prepared.limited)) return null;
     // Each call that finds it unsettled reads for itself, over its own
     // database; calls that race settle it alike, and a rotation they race
     // to write goes in once (`#rotate`).
     const start = this.#start();
+    if (start === null) return null;
     if (prepared.since === null) await this.#settle(start);
     // Under 0.15's log, nothing of its own before the cutover (`cutover`): the conversion and the Owners it names, and
     // the bulk cap, after it, as decisions of 0.15's log.
     if (prepared.superseded === null && prepared.log015 !== null && !prepared.cutover && !prepared.marked) {
-      if ((await start.cutover) === null) return prepared.superseded;
+      if ((await (start.cutover ?? store.cutoverNumber(this.#db))) === null) return prepared.superseded;
       prepared.marked = true;
     }
     // A log with no entry of the vault's holds nothing to convert, and stays empty until someone acts.
@@ -1351,22 +1354,31 @@ class VaultService implements Vault {
    * steps between, none of which writes what another of them reads. A
    * step that reads again, a retry or under a lock, reads the database.
    * Local to the call, as an isolate keeps no pending promise (AGENTS.md).
+   * Only the reads of steps still due, and null when none is: the vault is
+   * settled.
    */
-  #start(): StartReads {
+  #start(): StartReads | null {
     const db = this.#db;
-    const log015 = this.#prepared.log015 !== null && !this.#prepared.cutover;
+    const prepared = this.#prepared;
+    const log015 = prepared.log015 !== null;
+    const settle = prepared.since === null;
+    const convert = !prepared.converted;
+    // The cutover mark's, until the cutover or the mark; the Owners' declaration's, until the conversion lands.
+    const cutover = log015 && !prepared.cutover && (!prepared.marked || convert);
+    const limit = log015 && !prepared.limited;
+    if (!settle && !convert && !cutover && !limit) return null;
     const asked: StartReads = {
-      rotation: store.latestVaultEntry(db, [KEY_ROTATE]),
-      newest: store.vaultPage(db, undefined, 1).then(([entry]) => entry),
+      rotation: settle ? store.latestVaultEntry(db, [KEY_ROTATE]) : undefined,
+      newest: settle ? store.vaultPage(db, undefined, 1).then(([entry]) => entry) : undefined,
       // None once a rotation to the key is logged (R48): `#settle` reads it again if it needs it after all.
-      first: store.firstVaultEntryUnder(db, this.#prepared.logKey.keyId, { unlessRotated: true }),
-      cutover: log015 ? store.cutoverNumber(db) : Promise.resolve(null),
-      checkpoint: log015 ? logStore(db).newest() : Promise.resolve(null),
-      holders: store.everyProjectHolders(db),
-      policy: this.#prepared.log015 !== null ? store.readObject(db, POLICY_REF as Ref & { kind: 'policy' }) : Promise.resolve({ row: null, seal: null }),
+      first: settle ? store.firstVaultEntryUnder(db, prepared.logKey.keyId, { unlessRotated: true }) : undefined,
+      cutover: cutover ? store.cutoverNumber(db) : undefined,
+      checkpoint: cutover && convert ? logStore(db).newest() : undefined,
+      holders: convert ? store.everyProjectHolders(db) : undefined,
+      policy: limit ? store.readObject(db, POLICY_REF as Ref & { kind: 'policy' }) : undefined,
     };
     // A step that returns first leaves the reads after it unawaited: their failures are the call's own, not unhandled.
-    for (const read of Object.values(asked)) (read as Promise<unknown>).catch(() => {});
+    for (const read of Object.values(asked)) (read as Promise<unknown> | undefined)?.catch(() => {});
     return asked;
   }
 
@@ -1392,7 +1404,7 @@ class VaultService implements Vault {
    * reads once nothing is.
    */
   async #convert(start: StartReads): Promise<void> {
-    const holders = await start.holders;
+    const holders = await (start.holders ?? store.everyProjectHolders(this.#db));
     for (const principal of holders) {
       await this.#decideNow([principal], (d) => this.#replaceEveryProject(d, principal));
     }
@@ -1411,7 +1423,7 @@ class VaultService implements Vault {
    * for it, which every other start would queue behind (PR 5b's bench).
    */
   async #limit(start: StartReads): Promise<void> {
-    const { row: logged } = await start.policy;
+    const { row: logged } = await (start.policy ?? store.readObject(this.#db, POLICY_REF as Ref & { kind: 'policy' }));
     if (limitChange(logged?.kind === 'policy' ? logged : null, this.#config.bulkLimit) === null) {
       this.#prepared.limited = true;
       return;
