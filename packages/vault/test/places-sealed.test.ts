@@ -1,6 +1,7 @@
 // The vault decides on no environment row 0.15's log does not hold (T159; R53, every decision input sealed; R64, fail
-// closed): a place re-parented, renamed, or brought back from its deletion around the log, its seal kept, is checked
-// against its object's seal and its newest change's before anything is decided on it. `access` holds no grant on it,
+// closed): a place re-parented, renamed, or brought back from its deletion around the log, its seal kept, or put back
+// after a change with that change's seal column forged (T190, T191: its MAC does not hold), is checked against its
+// object's seal and its newest change's before anything is decided on it. `access` holds no grant on it,
 // and keeps it protected with its slug unknown; an issue that names it, an issue to a service account that holds a
 // grant on it, a change of that account by its manager, a grant there and a key's wrap there are refused. Uses decide on the place's seal too (use.test.ts, use-named.test.ts).
 // Both engines, whatever the suite's log.
@@ -98,19 +99,32 @@ const TAMPERS: Record<string, { tamper: (w: World) => Promise<void>; projectOf: 
     },
     projectOf: (w) => w.project,
   },
-  // Archived as the app archives it, a change the log holds, MAC and all; then the row as it was before, its old seal
-  // valid, and the archive's seal column made that seal (not its MAC): the seal comparison alone passes (T190, review r3).
+  // Moved as the app moves it, a change the log holds, MAC and all; then the row put back as it was before, and that
+  // change's seal column made the old seal (`putBack`): the seal comparison alone passes (T190, review r3; T191).
   'put back after its archive, the archive\'s seal column made the old one': {
-    tamper: async (w) => {
-      const [{ seal }] = await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM environments WHERE id = ${w.dev}`) as [{ seal: Buffer }];
-      await changePlace(db.owner, w.dev, { archived: true });
-      await run(db.owner, sql`UPDATE environments SET archived_at = NULL, seal = ${seal} WHERE id = ${w.dev}`);
-      const object = objectKey({ kind: 'environment', id: w.dev });
-      await run(db.owner, sql`UPDATE log_changes SET seal = ${seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
-    },
+    tamper: (w) => putBack(w.dev, { archived: true }),
+    projectOf: (w) => w.project,
+  },
+  'put back after its rename, the rename\'s seal column made the old one': {
+    tamper: (w) => putBack(w.dev, { slug: 'renamed' }),
     projectOf: (w) => w.project,
   },
 };
+
+/**
+ * What a writer with the database does to place `id` once an honest change has moved it (`honest`, made as the app
+ * makes one, `changePlace`): the row put back as it was before, its old seal the vault's, and that change's seal column
+ * made the old seal. Row and newest seal agree; only the change's MAC, which covers its seal, says the log never left
+ * the row so (T190, review r3; T191).
+ */
+async function putBack(id: string, honest: { slug?: string; archived?: boolean }): Promise<void> {
+  const [row] = await rows<{ slug: string; archived_at: unknown; seal: Buffer }>(db.owner, sql`SELECT slug, archived_at, seal FROM environments WHERE id = ${id}`);
+  assert.ok(row !== undefined, `no environment ${id}`);
+  await changePlace(db.owner, id, honest);
+  await run(db.owner, sql`UPDATE environments SET slug = ${row.slug}, archived_at = ${row.archived_at}, seal = ${row.seal} WHERE id = ${id}`);
+  const object = objectKey({ kind: 'environment', id });
+  await run(db.owner, sql`UPDATE log_changes SET seal = ${row.seal} WHERE number = (SELECT max(number) FROM log_changes WHERE object = ${object})`);
+}
 
 /** The vault's reports of a row that fails its seal, no member's (`log.environment:<id>`): its code, `mac`, for each. */
 async function placeReports(): Promise<string[]> {
@@ -256,8 +270,9 @@ for (const [how, { tamper, projectOf, regrants }] of Object.entries(TAMPERS)) {
 }
 
 // A place that holds keys moves to another project only with them, whose own rows then fail theirs (`secrets`'s foreign
-// key names its environment and project together): renamed, or brought back from its deletion, it holds them still.
-for (const how of ['renamed', 'brought back from its deletion']) {
+// key names its environment and project together): renamed, brought back from its deletion, or put back after a change
+// with that change's seal column forged, it holds them still.
+for (const how of ['renamed', 'brought back from its deletion', 'put back after its archive, the archive\'s seal column made the old one', 'put back after its rename, the rename\'s seal column made the old one']) {
   test(`a key's wrap in a place ${how} around the log is refused, as tampered`, async () => {
     const w = await world();
     const id = randomUUID();
@@ -287,6 +302,45 @@ test('a new process\'s first call, a read through a fork renamed around the log,
   assert.equal((await read(fresh)).ok, false);
   assert.equal((await read(fresh)).ok, false);
 });
+
+test('a read through a place archived, then put back unarchived with the archive\'s seal column forged, is refused, warm and fresh: the archive\'s MAC does not hold (T191)', async () => {
+  const w = await world();
+  const id = randomUUID();
+  await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.prod, key: 'DATABASE_URL' });
+  const secret = { projectId: w.project, environmentId: w.prod, secretId: id, version: 1, path: 'p/prod/DATABASE_URL' };
+  const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key: randomBytes(32).toString('base64') }] });
+  assert.ok(wrapped.ok);
+  const [item] = await storedVersions(db.owner, [{ secret, wrapped: wrapped.wrapped[0]! }]);
+  const read = (vault: LocalVault) => vault.unwrap({ principal: ADA, caller: 'person', purpose: 'reveal', items: [{ ...item!, through: w.dev }] });
+  assert.ok((await read(w.vault)).ok, 'read through dev, another place of its project');
+  // Archived, dev is no place to read through; put back, its row and newest seal say it is one again.
+  await putBack(w.dev, { archived: true });
+  assert.equal((await read(w.vault)).ok, false);
+  const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
+  assert.equal((await read(fresh)).ok, false);
+  assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
+});
+
+// A key held in the forged place itself, read once so the vault keeps the answer: the kept answer does not outlive the
+// place's MAC, warm or fresh (T191, review r2).
+for (const how of ['put back after its archive, the archive\'s seal column made the old one', 'put back after its rename, the rename\'s seal column made the old one']) {
+  test(`a read of a key held in a place ${how} around the log is refused, warm and fresh, and reported as a MAC (T191)`, async () => {
+    const w = await world();
+    const id = randomUUID();
+    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.dev, key: 'DATABASE_URL' });
+    const secret = { projectId: w.project, environmentId: w.dev, secretId: id, version: 1, path: 'p/dev/DATABASE_URL' };
+    const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key: randomBytes(32).toString('base64') }] });
+    assert.ok(wrapped.ok);
+    const [item] = await storedVersions(db.owner, [{ secret, wrapped: wrapped.wrapped[0]! }]);
+    const read = (vault: LocalVault) => vault.unwrap({ principal: ADA, caller: 'person', purpose: 'reveal', items: [item!] });
+    assert.ok((await read(w.vault)).ok, 'a Developer of dev reads there');
+    await TAMPERS[how]!.tamper(w);
+    assert.equal((await read(w.vault)).ok, false);
+    const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
+    assert.equal((await read(fresh)).ok, false);
+    assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
+  });
+}
 
 test('unprotecting a place whose tombstone a writer set around the log is refused: the protection\'s end is its object\'s too (review r1)', async () => {
   const w = await world();
@@ -335,6 +389,19 @@ test('a person scoped to a slug no place has sets up no service account once a w
   await run(db.owner, sql`UPDATE environments SET slug = 'staging' WHERE id = ${w.dev}`);
   const again = await w.vault.admit({ actor: MAYA, caller: 'person', principal: CI });
   assert.equal(!again.ok && again.refusal.code, 'not_allowed');
+});
+
+test('a person scoped to a slug sets up no service account once its place, renamed away, is put back with the rename\'s seal column forged (T191)', async () => {
+  const w = await world();
+  assert.ok((await w.vault.admit({ actor: ROOT, caller: 'person', principal: MAYA, role: 'developer', scope: { projects: 'all', environments: { only: ['staging'] } } })).ok);
+  // A place named staging, made so as the app renames one: Maya sets up a service account.
+  await changePlace(db.owner, w.dev, { slug: 'staging' });
+  assert.ok((await w.vault.admit({ actor: MAYA, caller: 'person', principal: CI })).ok, 'a place in her scope');
+  // Renamed away as the app renames, then put back as staging, the rename's seal column made staging's seal.
+  await putBack(w.dev, { slug: 'qa' });
+  const again = await w.vault.admit({ actor: MAYA, caller: 'person', principal: 'token:ci-2' });
+  assert.equal(!again.ok && again.refusal.code, 'not_allowed');
+  assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
 });
 
 test("an issue weighed on the account's places by slug is refused when one is renamed while its write waits: those slugs are held under the issue lock too (review r2)", postgresOnly('row locks'), async () => {

@@ -266,6 +266,20 @@ whole, in the same probe, and `#placeFault` refuses the row `tampered`
 when its MAC does not hold, before the seal comparison (review r3: an
 archived place put back, the archive's seal column forged, otherwise had
 grants on it hold, its old protection weighed and an issue on it made).
+Every reader that hands a decision an environment row carries that change
+(`snapshot` and `environmentsById`, on each engine), and a place whose row
+is gone carries no seal, which no check passes. T191, filed for this hole,
+found it closed and added the tests: a place put back after an archive or
+a rename, its change's seal column forged, is refused by every decision
+on it (`access`, a kept answer, a grant, an issue, a service account's
+manager, a key's wrap, a read of a key held there, kept or fresh, a read
+through it, a scoped person's setup of a service account). Measured on
+each engine: with `#placeFault`'s MAC check removed, 16 of the file's
+tests fail; with the MAC dropped from `snapshot`'s rows alone, 12; from
+`environmentsById`'s alone, 4. The two tests that keep an answer on the
+place left untouched pass either way: they show a forged place costs the
+rest nothing; the reads of a key held in the forged place show it is
+refused.
 The route use reads proxy definitions through the same check (above).
 
 ## The bulk cap
@@ -343,7 +357,9 @@ the same.
   forged over a row put back, refused on a warm isolate and a fresh one,
   and by every way a use is asked; and a change on such a row refused
   ([`change-path.test.ts`](../../packages/vault/test/change-path.test.ts)).
-  Each serves the value on 0.15.0.
+  Each serves the value on 0.15.0. The decision path's the same, for a
+  place ([`places-sealed.test.ts`](../../packages/vault/test/places-sealed.test.ts),
+  `putBack`) and a member (`vault.test.ts`, T179 PR 2).
 - **Lean** (`pnpm formal:lean`): `decideUse` and `bulkRule` against the
   model on 26,000 cases, and the theorems in [`docs/formal.md`](../formal.md).
 
