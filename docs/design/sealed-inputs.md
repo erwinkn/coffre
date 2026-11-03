@@ -273,8 +273,11 @@ found it closed and added the tests: a place put back after an archive or
 a rename, its change's seal column forged, is refused by every decision
 on it (`access`, a kept answer, a grant, an issue, a service account's
 manager, a key's wrap, a read through it, a scoped person's setup of a
-service account), and each of those tests fails with the MAC check
-removed, from either reader (measured, both engines).
+service account). Measured on each engine: with `#placeFault`'s MAC check
+removed, 14 of the file's tests fail; with the MAC dropped from
+`snapshot`'s rows alone, 10; from `environmentsById`'s alone, 4. The two
+kept-answer tests pass either way: they read the place left untouched,
+which shows a forged place costs the rest nothing, not that it is refused.
 The route use reads proxy definitions through the same check (above).
 
 ## The bulk cap
