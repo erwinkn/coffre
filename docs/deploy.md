@@ -334,6 +334,11 @@ step 4.
      `HOT_HYPERDRIVE` binding and the `CHECKPOINTER` Durable Object with
      its migration. On Node, `src/vault.ts` takes `HOT_DATABASE_URL` and
      `CHECKPOINTER_MEMORY`.
+   - On Workers, from 0.15.1, the type of `app/src/coffre.ts`'s `VAULT`
+     binding: `VaultEntry` in place of `Vault`, both imported from
+     `@coffre/server/cloudflare`. The app and the vault now talk through
+     one versioned call, and the old type fails the typecheck
+     ("Property 'call' is missing").
 
    Commit, but don't push where a push deploys, and don't deploy.
 3. **Migrate, and give the hot path its login**: `pnpm exec coffre
@@ -389,13 +394,16 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
   renewal (`/api/auth/workload/renew`), which appends no entry. Its row
   then no longer matches its 0.15 seal, so once 0.15 is back, that
   session is refused as `stale` and its workload must sign in again. On
-  Workers, put the pins and `vault/src/worker.ts`
-  back as 0.14.5 had them, keep `vault/wrangler.jsonc` as steps 2 and 3
-  left it, and add the idle `CoffreCheckpointer` class 0.15.0's notes
-  show. Cloudflare refuses a vault without it (code 10064), and deleting
-  the class would erase the newest checkpoint its object remembers. Then
-  `pnpm run deploy`, by hand: a pipeline that migrates first stops there,
-  as `coffre migrate` refuses a database a newer release migrated. On
+  Workers, put the code back as 0.14.5 had it (step 2's commit,
+  reverted), with two exceptions: keep `vault/wrangler.jsonc` as steps 2
+  and 3 left it, and add the idle `CoffreCheckpointer` class 0.15.0's
+  notes show. Cloudflare refuses a vault without it (code 10064), and
+  deleting the class would erase the newest checkpoint its object
+  remembers. Then `pnpm install`: the deploy script installs nothing,
+  and without it would bundle 0.15's vault with 0.14.5's configuration,
+  which lacks the `hotDatabase` and `checkpointer` that vault requires.
+  Then `pnpm run deploy`, by hand: a pipeline that migrates first stops
+  there, as `coffre migrate` refuses a database a newer release migrated. On
   Node, which has no `deploy` script, put the code and pins back as
   0.14.5 had them, `pnpm install` and `pnpm build`, then stop every
   process and start the vault, then the servers. In the rehearsal, the
@@ -431,7 +439,8 @@ Nothing is read-only during this upgrade, and no cutover runs: 0.15's log
 already holds everything.
 
 **Rolling back to 0.15.1 or later** is a deploy of the release before,
-by hand (on Workers `pnpm run deploy`, for the reason above; on Node,
+by hand (on Workers, restore that release's code and pins, `pnpm
+install`, then `pnpm run deploy`, for the reasons above; on Node,
 restore that release's code and pins, `pnpm install`, `pnpm build`, then
 restart the vault, then the servers), with no restore of the database:
 its code reads what 0.16 wrote, from 0.15's log. Two
