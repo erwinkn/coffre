@@ -1910,6 +1910,61 @@ before PR C. Where C2a settles what this section left open:
   once C2b's route use can answer "the plan" for a place reading. The
   same rows with 256 definitions in the environment as with one.
 
+**PR C as built, workloads (C2b1, W312).** C2b ships as a stack: C2b1,
+workloads' UI routes; C2b2, signers, verifiers and presign; C2b3,
+tunnels; C2b4, `/use/<a>/<b>` in one call. Where C2b1 settles what this
+section and section 3 left open:
+- **The model is unchanged.** `Routing.tla`'s value cache is per caller
+  and its copy per route, whoever the caller is; a workload is one more
+  caller. What C2b1 adds before the use (the reading, the counts) takes no
+  lock and decides nothing the use does not decide again.
+- **The URL's readings, as the workload's client writes them**
+  (`url(name)` in `@coffre/client/workload`: `/use/<name>` with one place,
+  `/use/<project>/<env>/<name>` with several). `/use/<a>/<b>/<c>/…`, `<a>`
+  and `<c>` names code lacks, is route `<a>` at the one environment the
+  workload reaches, unless it reaches several or none, or that one is
+  `<a>/<b>`: then route `<c>` there (`WorkloadAt.or`). The session's
+  checks decide it before the gate (`OtherReading`), so the proof is spent
+  once, by the reading taken: the client's own URLs cost one statement,
+  and only a place URL from a workload of one environment costs two.
+  `/use/<a>/<b>` stays the plan and compute (C2b2 and C2b4).
+- **The counts** are a function of the caller, made after the proof's
+  nonce, just before the gate takes them (`GateCounts`, `CountsAt`): the
+  service, the place by ID, the credential named and the way in, as the
+  vault names a workload. The proxy counts a UI route's limit from this
+  isolate's copy of the item at that place (`w` readings), or, on a cold
+  isolate, `proxyItem`'s, asked as the workload; a refusal there is
+  answered after the gate. Section 3 left one case out: a limit an Owner
+  raises. A request the copy's lower limit refuses brings no use's answer,
+  so the copy would refuse until the window ends (a day, for `perDay`).
+  So a limit refusal counted on a kept copy asks `proxyItem` for the item
+  again: one refusal more at most.
+- **The body** is carried by its headers alone (`carriedAs` with `sigv4`
+  and no field: the client's `bodyLine` rule), and the decided item takes
+  it or refuses it (`uiCarried`): a declared `x-amz-content-sha256` binds a
+  body only through a `sigv4` item, else 503 `moved`, nothing sent, the
+  kept values evicted; a form or JSON item reached by a streamed body
+  reads it whole (64 KiB) and holds it to the digest the proof bound. A
+  client that sends `x-amz-content-sha256` to a route of another kind
+  signs a line this rule reads otherwise, and is refused: no client of
+  coffre's does.
+- **The use** is `useRoute` as the workload (`RouteCaller` `workload`: the
+  session's credential, or the binding's ID with `way: 'binding'`, at the
+  place its statement checked). The vault's answer carries its standing
+  there (`standing`), which the read takes in place of `access()`: one
+  call a use. The values are kept per session (or binding), place and
+  route, each entry with its item; every check runs again on that item
+  before the send: aim, the allow list, `uiCarried`, the `narrow`
+  constraints on the URL its upstream makes. A narrowed child reaches no
+  UI route in a test yet: 0.15's log refuses one planted around the app,
+  and `/api/auth/workload/narrow` answers 501 until its PR.
+- **The plan** (`workloadPlan`) names the place's UI routes whose keys the
+  environment holds, from one `proxyItem` call with no name, and answers
+  503 on a forged level, as a handle's plan does. Values are given only as
+  the workload reads them, for code's and the UI's routes alike.
+- **Cost**: warm, cache off, one vault call (`useRoute`); cold, two
+  (`proxyItem`, then `useRoute`); a kept entry, none. No `access()`.
+
 **PR B: matching and injection, for code definitions first.** Server only,
 no storage.
 - The path rules and the allow list (section 7), code's `/` and trailing-slash forms kept; several inject rules with

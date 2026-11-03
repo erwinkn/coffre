@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+- **The proxy serves UI routes to workloads (T186, PR C2b1).** A
+  key-bound session (`coffre serve`, `@coffre/client/workload`) or a
+  Cloudflare service binding's call now reaches a route saved in the
+  Proxy tab, as a handle does: `/use/openai/v1/models` at the one
+  environment it reaches, `/use/market/prod/openai/v1/models` when it
+  reaches several, as its client writes the URL. The vault's one route
+  use decides the values, the item and the workload's standing at once
+  (no `access()` call): one vault call a warm use with `cacheSeconds: 0`,
+  and on a cold isolate one more, `proxyItem`, which finds the route's
+  limit for the gate. The body is carried by its headers alone (a
+  declared `Content-Digest` or `x-amz-content-sha256` streams), and the
+  item decided on then takes it or answers 503 `moved`, nothing sent:
+  an `x-amz-content-sha256` for a route no longer SigV4, say. A form or
+  JSON route reached by a body that streams reads it whole, still held
+  to the digest the proof bound. Kept values go by the item they were
+  decided on; a freeze or a revoked session stops the next request
+  whatever they hold. A limit an Owner raises refuses one request more at
+  most: a refusal counted on the isolate's copy asks the vault for the
+  item again. A workload's plan names its environment's UI routes, and
+  answers 503 when one of them was changed around the vault. Its
+  two-segment URLs (`/use/<a>/<b>`) stay the plan and compute; signers,
+  verifiers, presign and tunnels of UI items still answer 404, until
+  PR C2b2 and C2b3.
+- **The `/use` bench reports its warm-up.** `ci.ts` measured its first
+  `--warm` seconds and then left them out; it now prints them as their
+  own `warm-up` line, so a cold start's busy refusals are counted apart
+  from the measured window's.
+
 - **An isolate's first requests ask the vault once (T201).** Each
   concurrent first request reserved the proxy code's names on its own,
   and settled the vault through `about()` on its own: a Node
@@ -57,8 +85,8 @@
   caller may read (403 `placeholder_unread` otherwise); a plan read from
   the person's own personal config takes no UI route of the base
   environment; and on 0.14's log an editable proxy's plan is code's, as
-  before. Workloads, service bindings, signers,
-  verifiers, presign and tunnels of UI items answer 404 until PR C2b; a
+  before. Signers, verifiers, presign and tunnels of UI items answer
+  404 until PR C2b (workloads' routes: PR C2b1, above); a
   handle's request to a signer, verifier or tunnel saved in the UI is
   refused before the app reads its key's value, and keeps none.
 

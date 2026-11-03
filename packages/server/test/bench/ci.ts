@@ -482,7 +482,8 @@ try {
   };
   // Every connection's plans made, and every key's bulk row written, before the first level.
   // `--warm` seconds: long enough that each pooled connection has planned its statements, as Hyperdrive's have.
-  await usesIn('warm');
+  // Reported apart, first: a cold start's window (new isolates, unplanned statements), held to nothing.
+  await usesIn('warm-up');
   await new Promise((resolve) => setTimeout(resolve, Number(values.warm) * 1000));
   await usesIn(null);
   for (const jobs of JOBS) {
@@ -525,7 +526,7 @@ try {
       return new Promise<ProxyPhase[]>((resolve) => worker.on('message', (message: { phases?: ProxyPhase[] }) => message.phases && resolve(message.phases)));
     }));
     console.log(`/use, ${PROXY}/s beside over ${proxies.length} threads, the whole app on ${values.log}'s log (ms; refused: any answer but the upstream's 200, and errors):`);
-    for (const name of reports[0]!.map(({ phase }) => phase).filter((phase) => phase !== 'warm')) {
+    for (const name of reports[0]!.map(({ phase }) => phase)) {
       const each = reports.map((phases) => phases.find(({ phase }) => phase === name)!);
       const sorted = each.flatMap(({ latencies }) => latencies).sort((a, b) => a - b);
       const sent = each.reduce((sum, { sent: n }) => sum + n, 0);
@@ -543,7 +544,7 @@ try {
     loader.postMessage({ report: true });
     const { phases } = await new Promise<{ phases: UsePhase[] }>((resolve) => loader!.on('message', (message: { phases?: UsePhase[] }) => message.phases && resolve(message as { phases: UsePhase[] })));
     console.log(`uses, ${USES}/s beside, each one round trip (ms; refused: the database's own answers and errors):`);
-    for (const use of phases.filter(({ phase }) => phase !== 'warm')) {
+    for (const use of phases) {
       const refused = Object.entries(use.refused).map(([why, n]) => `${why} ${n}`).join(', ') || 'none';
       const used = cpu.get(use.phase);
       console.log(

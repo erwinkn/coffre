@@ -86,6 +86,12 @@ export type SessionAsk = {
   place: string | null;
   credential: string | null;
   /**
+   * With `place` null, the path the URL's other reading names (`/use/<a>/<b>/<c>/…`, a UI route's, T186 PR C2b): the
+   * session's one environment is the one it uses unless it reaches none or several, or that one is at this path, when
+   * the request is refused as `OtherReading`, before its gate, for the caller to ask again by that reading.
+   */
+  unless?: string;
+  /**
    * The body line `req` signs, for a request coffre forwards (`bodyDigest`,
    * a declared digest, or `UNSIGNED_BODY`, which only a binding that says
    * `unsignedUploads` takes); left out for one that signs no content.
@@ -110,8 +116,30 @@ export type SessionAsk = {
   ending?: boolean;
 };
 
-/** A request's counts, as they are or for the service that turns out to send it (`token:<name>`). */
-export type GateCounts = readonly GateCount[] | ((service: string) => readonly GateCount[]);
+/**
+ * A request's counts, as they are, or made once authentication says who sends it and where (`CountsAt`): a limit per
+ * workload needs the service (`token:<name>`), and a UI route's limit the place, whose item says it (T186 PR C2b;
+ * docs/design/proxy-ui.md, section 3, "Workloads"). Made only for a proof that carries the gate's nonce, just before
+ * the gate takes them: a request refused before costs nothing a function does.
+ */
+export type GateCounts = readonly GateCount[] | ((at: CountsAt) => readonly GateCount[] | Promise<readonly GateCount[]>);
+
+/**
+ * Who a request's counts are made for: its service, the environment it uses, by ID, the credential it names there
+ * (`SessionAsk.credential`), and its way in, as the vault names it (`credential`, the session's ID or the binding's).
+ */
+export type CountsAt = { service: string; place: string | null; name: string | null; credential: string; way?: 'binding' };
+
+/**
+ * A request whose URL `SessionAsk.unless` reads the other way: its gate not asked, nothing spent. Thrown by the checks
+ * of a session or a Cloudflare call, for the caller to ask again.
+ */
+export class OtherReading extends Error {
+  constructor() {
+    super("the URL names the workload's environment: read it as /use/<project>/<environment>/<credential>");
+    this.name = 'OtherReading';
+  }
+}
 
 /** A place as a request names it: an environment's ID, or its path's two slugs; null for neither, a string that is neither. */
 export function namedPlace(place: string): string | { project: string; environment: string } | null {
@@ -239,9 +267,10 @@ export async function standingSession(
   if (!verified.ok) throw proofRefused(verified.reason, verified.message);
   const { policy, places, place, path } = clauses(runtime, workloads, own, rows, ask, sourceIp);
 
-  // The gate: the nonce it gave, the `jti` once, and the counts, in one call.
+  // The gate: the nonce it gave, the `jti` once, and the counts, in one call. Counts a function makes are made once the
+  // proof carries the nonce, the place known: a UI route's may ask the vault for its item (`GateCounts`).
   const gate = gateOf(runtime, row.principal);
-  const counts = typeof ask.counts === 'function' ? ask.counts(row.principal) : ask.counts;
+  const counts = typeof ask.counts !== 'function' ? ask.counts : verified.nonce === null ? undefined : await ask.counts({ service: row.principal, place, name: ask.credential, credential: row.id });
   let nonce: string;
   try {
     if (verified.nonce === null) throw useNonce(await gate.nonce());
@@ -365,6 +394,8 @@ function clauses(
   const places = placesOf(row.places);
   if (ask.place !== null && own.place === null) throw refusal(new ApiError('not_found', `${ask.place} names no environment`));
   const place = own.place;
+  // `/use/<a>/<b>/<c>/…` read as route `<a>` at the session's one environment, but that one is `<a>/<b>`, or there is none.
+  if (ask.place === null && ask.unless !== undefined && (place === null || own.placePath === ask.unless)) throw new OtherReading();
   if (ask.credential !== null && place === null) {
     throw refusal(new ApiError('bad_request', 'name the environment it uses, /use/<project>/<environment>/<credential>: this session reaches none, or several'));
   }
