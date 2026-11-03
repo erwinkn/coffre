@@ -284,6 +284,148 @@ printf '%s' "$owner_url" | pnpm exec coffre migrate --yes
 unset owner_url
 ```
 
+### From 0.14.5 to 0.16
+
+A deployment on 0.14.5 goes to a 0.16 release in one upgrade: 0.15.0 is
+not a stop it needs. For a release after 0.16, follow that release's own
+upgrade notes. 0.16 moves the audit log to 0.15's log (the cutover),
+as 0.15.0 did. Once it has cut over, the database refuses every write of
+0.14's.
+
+0.16's vault decides about a member from 0.15's log alone, but 0.16 still
+writes each change's 0.14 entry too, because the releases before it read
+them. A 0.14.5 rolled back to serves reads only as long as those entries
+are there (below). And 0.15.0's vault checks each member against their
+newest 0.14 access entry: without one, as for a member added by a release
+that wrote none, it reads their row as tampered and refuses them. A later
+release stops writing them (the contraction, `docs/design/two-trips.md`,
+PR 6); its release notes will say which release it upgrades from.
+
+The steps follow [0.15.0's release notes](../CHANGELOG.md#0150-2026-11-01)
+("Upgrading a deployment from 0.14"), with 0.16's setup in step 3.
+Nothing serves 0.16 before step 4.
+
+1. **Back the database up**, `coffre backup` ([restore.md](restore.md)).
+   This backup is the only way back to a 0.14.5 that writes.
+2. **Update the code to the 0.16 release you chose**, 0.16.N here.
+   `coffre update` always moves to npm's latest release and takes no
+   version, whichever CLI runs it. While 0.16.N is the latest, `pnpm exec
+   coffre update` takes the deployment there. Once a later release is out,
+   it would take 0.14.5 straight there, so don't run it: bring the
+   deployment by hand to that release's `examples/workers` (Git tag
+   `v0.16.N`), which is what its `coffre init` writes. That is every `@coffre/*` pin, the Start
+   app's packages and `packageManager` in `package.json`, and the pages in
+   `app/src/routes/` with `app/src/routeTree.gen.ts`; then `pnpm install`.
+
+   Either way, then bring to that example what `coffre update` leaves:
+   - `package.json`'s `deploy` script, which now builds the app before it
+     deploys the vault. 0.14.5's deploys the vault first, so the old app
+     would call the new vault for the whole build, and a build that fails
+     would leave that vault deployed.
+   - In `vault/src/worker.ts`, `hotDatabase`, `checkpointer` and the
+     `CoffreCheckpointer` export; in `vault/wrangler.jsonc`, the
+     `CHECKPOINTER` Durable Object with its migration (step 3 binds
+     `HOT_HYPERDRIVE`). On Node, `src/vault.ts` takes `HOT_DATABASE_URL`
+     and `CHECKPOINTER_MEMORY`.
+   - On Workers, the type of `app/src/coffre.ts`'s `VAULT` binding:
+     `VaultEntry` in place of `Vault`, both imported from
+     `@coffre/server/cloudflare`. The app and the vault now talk through
+     one versioned call, and the old type fails the typecheck
+     ("Property 'call' is missing").
+   - Optional, on both runtimes: the credential proxy's Proxy tab.
+     `coffre update` adds its route files, but the tab writes nothing until
+     `app/src/coffre.ts`'s `plugins` has `credentialProxy({ credentials:
+     {}, editable: true })`, as `coffre init` now writes. A deployment
+     that already has a `credentialProxy` keeps its `credentials` and adds
+     `editable: true`; one without it serves no `/use` until it adds one.
+
+   Commit, but don't push where a push deploys, and don't deploy.
+3. **Migrate, and give the hot path its login**: `pnpm exec coffre
+   setup`, as the database's administrator (it needs `CREATEROLE`). On
+   Workers, answer "Hyperdrive only, with no deploy", and "No" to new
+   passwords for the logins that exist. It makes the `coffre_vault_hot`
+   login and its Hyperdrive config, binds that config as `HOT_HYPERDRIVE`
+   in `vault/wrangler.jsonc`, and migrates. The database's connections
+   are now split three ways, so it also caps the app's and the vault's
+   configs at their new share: on a `max_connections` of 25, from 9 each
+   to 6. Commit the file. On Node, the URL setup shows is
+   `HOT_DATABASE_URL`. 0.14.5 keeps serving on the migrated schema. The
+   migrations hold the log's tables for about a second, so migrate at a
+   quiet moment.
+4. **Deploy both Workers at once**, `pnpm run deploy` (with Workers
+   Builds, start both builds together). On Node, first `pnpm build`:
+   `pnpm start` serves the built app, which `pnpm install` leaves as 0.14.5
+   built it, and an old app cannot cut over. Then stop every 0.14 process,
+   set `HOT_DATABASE_URL` and `CHECKPOINTER_MEMORY` (a path on persistent
+   storage only the vault's user writes) in `vault.env`, and start the
+   vault, then the servers: no rolling update. The first request to the
+   new app cuts over.
+5. **Check it**: `/readyz` green, `coffre --url <instance> verify
+   instance` passes, the audit page shows a sealed log, and, if the
+   deployment has a `credentialProxy`, a `/use` through it answers.
+
+What answers what, step by step, as 0.15.0's rehearsal of the same cutover
+measured it:
+
+| When | How long | What fails |
+| --- | --- | --- |
+| Step 3, migrating | about a second | Nothing, though a request may wait; one sign-in failed with a 500 on a deadlock in the rehearsal |
+| Step 4, between the vault's deploy and the app's | about 15 s, the app's upload | The old app's calls on the new vault answer 500: reveals, exports, writes, sign-ins, uses an isolate had not kept. A CI run then must run again |
+| The cutover, on the first request | about 0.4 s at 1,000 keys, 3 s at 10,000 | Every request but `/livez` and `/readyz` answers 503 with `Retry-After`, uses included |
+| After | once | A workload session an old isolate renews is refused once: that workload signs in again for a new session. A principal may read up to twice the bulk cap within one window |
+
+In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
+10 s), 16 requests answered 500 and 194 uses 503, over 20 s.
+
+**Rolling back to 0.14.5.**
+
+- *Before step 4*: deploy nothing. Every migration only adds, and 0.14.5
+  serves on the schema as it is.
+- *After the cutover*: 0.14.5 serves **reads only**. Values open and uses
+  work for the sessions and tokens already held, but every write is
+  refused with a 500, sign-ins, token exchanges and session renewals
+  included. Migration 0047's trigger refuses any 0.14 entry that 0.15's
+  log does not record. One write slips through: a workload's session
+  renewal (`/api/auth/workload/renew`), which appends no entry. Its row
+  then no longer matches its 0.15 seal, so once 0.16 is back, that
+  session is refused as `stale` and its workload must sign in again. On
+  Workers, put the code back as 0.14.5 had it (step 2's commit,
+  reverted), with two exceptions: keep `vault/wrangler.jsonc` as steps 2
+  and 3 left it, and add the idle `CoffreCheckpointer` class 0.15.0's
+  notes show. Cloudflare refuses a vault without it (code 10064), and
+  deleting the class would erase the newest checkpoint its object
+  remembers. Then `pnpm install`: the deploy script installs nothing,
+  and without it would bundle 0.16's vault with 0.14.5's configuration,
+  which lacks the `hotDatabase` and `checkpointer` that vault requires.
+  Then `pnpm run deploy`, by hand: a pipeline that migrates first stops
+  there, as `coffre migrate` refuses a database a newer release migrated. On
+  Node, which has no `deploy` script, put the code and pins back as
+  0.14.5 had them, `pnpm install` and `pnpm build`, then stop every
+  process and start the vault, then the servers; leave
+  `CHECKPOINTER_MEMORY`'s file where it is. In 0.15.0's rehearsal, the
+  switch back failed requests for 28 s.
+- *Writes back on 0.14.5*: only by restoring step 1's backup, which loses
+  everything written since.
+- *Forward again, from a read-only rollback* (the database as 0.16 left
+  it): put step 2's commit back, the real `CoffreCheckpointer` export with
+  it, keeping the Hyperdrive configs and the checkpointer's memory as they
+  are, and `pnpm install`; then step 4 (on Node, from its `pnpm build`).
+  0.16 serves at once, with its log verified whole.
+- *Forward again, after restoring the backup*: the database is 0.14.5's
+  again, without 0.16's migrations or 0.15's log, so start over from
+  step 1, step 3 included; 0.16 on that schema answers 503 `migrating`.
+  Before step 4, reset the checkpointer's memory, as
+  [restore.md](restore.md#on-015s-log) says: it remembers pairs the
+  restored database no longer holds, and refuses that log until reset.
+
+A deployment already on 0.15.0 upgrades to 0.16 as to any release
+([Upgrading](#upgrading)), with one edit `coffre update` leaves to it: on
+Workers, step 2's `VaultEntry` type for `app/src/coffre.ts`'s `VAULT`
+binding, without which the typecheck fails ("Property 'call' is
+missing"). The Proxy tab is opt-in there too, as step 2 says. While on 0.15.0, don't rotate the vault's
+signing key or a local vault key: every change would fail at its seal.
+0.16 supports the rotation.
+
 ### From a release before 0.4.0
 
 0.4.0 starts over: its schema is one migration per engine, which only a new

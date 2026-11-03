@@ -7,7 +7,7 @@
 (* passes the row, so a change made after a finding's check means the row  *)
 (* checked out again since. 0.14's rule: a finding stands while it is      *)
 (* newer than the member's newest access entry, which every change wrote.  *)
-(* 0.16 writes none (Writes014 = FALSE): the watermark would freeze, and   *)
+(* The contraction writes none (Writes014 = FALSE), freezing it, and       *)
 (* every later finding read as standing for good. 0.15's: a finding names  *)
 (* the member's newest change its check weighed, by the change's MAC (its  *)
 (* identity, `id` here), and stands while that change is still their       *)
@@ -45,8 +45,8 @@
 (*                                                                         *)
 (* The protections (scripts/formal.sh turns each off):                     *)
 (*   WeighsChanges  a finding of 0.15's is weighed against the changes;    *)
-(*                  without, by 0.14's rule, under 0.16 a change after it  *)
-(*                  settles nothing (the frozen watermark);                *)
+(*                  without, by 0.14's rule, once contracted a change      *)
+(*                  after it settles nothing (the frozen watermark);       *)
 (*   EveryFinding   any finding naming the newest change counts, not the   *)
 (*                  newest finding alone: without, a check that read       *)
 (*                  before a change commits after a check that read past   *)
@@ -65,7 +65,7 @@ CONSTANTS
     MaxTampers,      \* times the writer changes the row
     MaxRenumbers,    \* times the writer renumbers a change
     MaxNumber,       \* the numbers a change may hold
-    Writes014,       \* each change also writes 0.14's access entry (0.15); FALSE: 0.16's, none
+    Writes014,       \* each change also writes 0.14's access entry (0.15); FALSE: the contraction's, none
     Legacy,          \* findings of 0.14's, which name no change, beside 0.15's
     WeighsChanges,   \* protection
     EveryFinding,    \* protection

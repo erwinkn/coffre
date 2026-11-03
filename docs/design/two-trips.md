@@ -286,8 +286,8 @@ rows**:
   stays a lock after PR 6.
 - **After the fence.** `hold_inputs` takes the issue lock shared and then
   the fence exclusive, as `app_change` does; `app_change_strict` takes them
-  again later in the transaction, which an advisory lock allows. Once 0.16
-  drops 0047's head from `revoke_credential`, a session's revoke takes the
+  again later in the transaction, which an advisory lock allows. Once the
+  contraction drops 0047's head from `revoke_credential`, a session's revoke takes the
   fence and not the head: a hold before the fence could pass, the revoke
   commit, and our write after it.
 - **In a statement after the locks.** `hold_inputs` takes them, then calls
@@ -386,7 +386,7 @@ hold fails; the retry is refused; her grant is given back and her session
 revoked; today's path then writes version 2, 200. Today's front door has
 the same window between its check and its wrap; after a served try it
 spans those tries too, a few round trips. `write-held.test.ts` pins this
-(it flips when 0.16 closes the window, PR 6), and formal/Writing.tla's
+(it flips when PR 6 closes the window), and formal/Writing.tla's
 `TodayCallerStandsAtDecision` is an expected gap (`WritingCaller`).
 
 What an abandoned try leaves behind, with nothing waiting on it:
@@ -394,7 +394,7 @@ What an abandoned try leaves behind, with nothing waiting on it:
 - **its number**, drawn from `log_number` by `write_request`: a gap in the
   log, which a checkpoint seals past as it does a rolled-back change's;
 - **its 0.14 `key.wrap` entries**, one per key, committed by the vault
-  before it answered (until 0.16 stops them): records of wraps that were
+  before it answered (until the contraction stops them): records of wraps that were
   made, each an allowed key operation with no intent left open, which no
   `secret.write` names. The committed try's `secret.write` names its own
   try's wrap (`relatedSeq`), and a request writes once whichever path
@@ -639,7 +639,7 @@ it, holding the app's key, which defeats the MAC. The vault's 0.14 entries
 `audit_log` entry. Their record is the request and the change in the log:
 actor, request, object, payload, MAC'd by the vault (`log-entry.ts`). SQL
 stores them, and the checkpointer checks them before sealing. This is the
-contract 0.16 already plans (0.15-plan.md, "11. The contract, in 0.16").
+contract the 0.15 plan already planned (0.15-plan.md, "11. The contract, in 0.16"), now PR 6's.
 
 **The audit pages have to read them first.** Today the sealed pages render
 sign-ins only (`sealedPage`), a place-filtered page never reaches the log,
@@ -700,7 +700,7 @@ no round trip: it is a statement of the same Sync.
   fence. That waits for nobody: every statement that locks a key's row
   holds 0.14's head first (`audited`, `app_change`, `change_input`), and
   the vault and the uses lock none. The head stays its first statement
-  after 0.16 stops the appends, a lock and nothing read: `app_change`
+  after the contraction stops the appends, a lock and nothing read: `app_change`
   takes the head again inside, so without it a two-trip write (rows, then
   head) and a route still head-first (`patchSecret`: head, then rows)
   would wait on each other until Postgres kills one. Neither Writing (its
@@ -720,7 +720,7 @@ Sync. No round trip is spent while it is held.
 **A session's revoke takes 0.14's head too, today.** 0047 put the head first
 in `revoke_credential`, to order it against 0.14's checks on isolates still
 serving them (Migration015's `EntryLessHead`). The model leaves it out, as
-0.16 will once 0.14's path is gone: a revoke that takes the fence alone is
+the contraction will once 0.14's path is gone: a revoke that takes the fence alone is
 the stronger adversary, and the hold after the fence is what holds then.
 Dropping it is a migration of its own (PR 6).
 
@@ -816,7 +816,7 @@ Each with what the key write and the first member add then cost:
    (a refusal takes today's path, as PR 3's): "As built: PR 5". First grants and a
    set-up by someone who runs no instance (the read holding the places, the protected
    set and the services setting, as the steps above have it) are PR 5b.
-6. **0.16, the contraction.** The two routes stop writing 0.14's entries;
+6. **The contraction.** The two routes stop writing 0.14's entries;
    `revoke_credential` drops the head (a migration); the app's statement
    keeps it as a lock (above). The services setting's changes move into
    `log_changes` with §11's other vault changes, and `admit_inputs` reads
@@ -825,6 +825,9 @@ Each with what the key write and the first member add then cost:
    `write_outcome` land here: a refusal is answered and logged by the
    vault's outcome record, no longer by today's path. The retry loop
    stays as PR 3 built it.
+   The contraction ships after a release that still writes 0.14's entries,
+   so that the releases before it, which read them, never serve after it;
+   which release is still open.
 7. **The other change routes**, each in the same shape; references join the
    key write once `write_request` seals their making and their end, and a
    remote key-encryption key once the request and outcome records stand
@@ -986,7 +989,7 @@ then: no route's cost moves.
 The rule (`findingStands`): a member's findings stand while one of them names their newest change, or while their
 newest finding of 0.14's (none named) is newer than their newest access entry. Any finding, not the newest alone: two
 checks commit in an order of their own (Findings.tla, EveryFinding). A change after the one it names is one the vault
-made only once its own check passed the row: what clears it, as 0.14's access entry did, and what 0.16 still writes.
+made only once its own check passed the row: what clears it, as 0.14's access entry did, and what the contraction still writes.
 
 By the change's MAC, not its number (review r1 of #476). A change's MAC covers every column but its number, which a
 database writer can change (`changeHolds`; rotations name theirs in their payload for that reason). Weighed by number,
@@ -1011,17 +1014,17 @@ Read by:
   is the same as `coffre migrate`'s so that the two never disagree.
 - **`missingMembers` of one member**: no row, and a change of theirs in 0.15's log or an access entry of 0.14's, as
   `#onLog` weighs both. Nothing asked it of one member: the member's report (`memberReport`) now does, when the list
-  of everyone has no such member, so that a member added under 0.16, their row gone, reads tampered there, not 404.
+  of everyone has no such member, so that a member added after the contraction, their row gone, reads tampered there, not 404.
   The list of everyone finds the rowless by 0.14's entries still: a change's object names its member by a hash alone,
   which a scan cannot turn back into a principal (PR 4b).
 
 The same row found again after a change is another finding: the vault's once-per-process key includes the change
-weighed, where it had left the second unlogged. A finding of 0.14's that stands when a deployment moves to 0.16 is
+weighed, where it had left the second unlogged. A finding of 0.14's that stands when a deployment takes the contraction is
 settled by no access entry after: PR 6 settles them by the change that follows, its own rule to write.
 
 The regressions: packages/vault/test/vault.test.ts (a finding names the change its check weighed and stands until a
-change after it, the same row then found again; settled by a change whose 0.14 entries are taken out, as 0.16 writes
-none; two findings committed out of the order they read in, and one forged naming the next change, which only the
+change after it, the same row then found again; settled by a change whose 0.14 entries are taken out, as the contraction
+writes none; two findings committed out of the order they read in, and one forged naming the next change, which only the
 vault passes over; forged names, a number and a JSON number, none of which stands past the next change; the change a
 finding names renumbered up for its check and back, and up after it, the finding standing until the next change, then
 settled), packages/vault/test/bindings.test.ts (a finding from `#notLogged`, named as it appends), and

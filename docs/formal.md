@@ -2302,8 +2302,8 @@ write has had since 0.14 (`TodayStandsAtCommit`, which TLC must find
 broken in `WritingFallBack`, on a session revoked: listed under EXPECTED
 in `scripts/formal.sh`). The
 two-trip path closes it for the writes it serves (`WritesStandAtCommit`
-holds of those alone); 0.16 closes it for every write
-([two-trips.md](design/two-trips.md), PR 6). Review r1 of #469 found the
+holds of those alone); PR 6 closes it for every write
+([two-trips.md](design/two-trips.md)). Review r1 of #469 found the
 model's first today's path, one atomic step, hid this window.
 `OneWritePerRequest`: a request writes once, whichever path commits it.
 `WritesNameTheirWrap`: its write names the wrap of the try that committed
@@ -2356,7 +2356,7 @@ made in a project or a project made under an old slug is not an object
 here: it is a move of `names`, as a rename is (a key's object holds no
 name). Names are app rows, unsealed, as today; each move of one is an app
 write under 0.14's head. A session's revoke takes the fence and not 0.14's
-head, as it will once 0.16 contracts 0047's head away; today's takes the
+head, as it will once the contraction takes 0047's head away; today's takes the
 head too, which only adds order. The app's statement is two steps: its
 hold (the head, the issue lock, the fence, the read again) and its COMMIT
 (the rows, the change). Between them `held` names who holds the head and
@@ -2435,7 +2435,7 @@ page, `coffre migrate` and the vault's conversion read it (T179 PR 4a;
 only once its own check passes their row, so a change made after a
 finding's check means the row checked out since. 0.14's rule compares the
 finding with the member's newest access entry, which every change wrote;
-0.16 writes none, and that watermark would freeze. Under 0.15's log a
+the contraction writes none, and that watermark would freeze. Under 0.15's log a
 finding names the member's newest change its check weighed, by the
 change's MAC (`{"change": "<its MAC, hex>"}` in its metadata, `changeName`),
 and stands while that change is still their newest. Not by its number: a
@@ -2458,13 +2458,13 @@ the invariants: an entry replayed or deleted whole, its MAC intact, is the
 checkpoints' to catch (docs/design/merkle-checkpoints.md). `StandsUnchanged`:
 a finding whose check read the vault's newest change, none made since,
 stands. `Settles`: a change after every finding's check settles them.
-`Findings.cfg` has no access entries (0.16), 82,200 states;
+`Findings.cfg` has no access entries (the contraction), 82,200 states;
 `Findings015.cfg` writes one beside each change, and 0.14's findings beside
 0.15's, 408,314.
 
 | protection | turned off, TLC finds |
 |---|---|
-| a finding of 0.15's is weighed against the changes (WeighsChanges) | `Settles`, under 0.16: no access entry follows the change that settles the finding, which then stands for good |
+| a finding of 0.15's is weighed against the changes (WeighsChanges) | `Settles`, under the contraction: no access entry follows the change that settles the finding, which then stands for good |
 | any finding naming the newest change counts, not the newest finding alone (EveryFinding) | `StandsUnchanged`: a check that read before a change commits after one that read past it, and hides the other's |
 | a finding names its change by MAC, not number (NamesChange) | `StandsUnchanged`: the writer renumbers the change a finding names up, and it settles with no change since; `Settles`: renumbered up before the check and back after, the finding names a number no later change reaches |
 

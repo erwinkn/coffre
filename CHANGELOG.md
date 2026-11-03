@@ -168,7 +168,7 @@
   their page, their report, `coffre migrate` and the vault's conversion
   read it as standing while that change is still their newest. Until now
   each compared the finding with the member's newest 0.14 access entry,
-  which 0.16 stops writing: a member found tampered after it would have
+  which the contraction stops writing (PR 6): a member found tampered after it would have
   read tampered for good. Findings that name no change, 0.14's, keep that
   rule. The same row found again after a change is logged again, where a
   process logged it once. A member's report finds them missing (tampered)
@@ -192,7 +192,7 @@
   someone who runs no instance, a re-admit or a role change, a member
   the config names, SQLite, and every refusal, which that path answers
   and logs as before, after the vault's read. 0.14's `member.add` entry
-  is still written; 0.16 drops it, and the add to two round trips.
+  is still written; the contraction drops it, and the add to two round trips.
 - **A key write makes five round trips, not sixteen (T179 PR 3).** On
   Postgres with 0.15's log, `PATCH /secrets/<project>/<env>` of values
   (given or generated), at an environment of its own, by a session, a CLI
@@ -215,7 +215,7 @@
   sensitive value asked for, a dry run, a fork or `dev@me`, a binding's or
   a workload's token, SQLite, a key service's vault, and every refusal,
   which that path answers and logs as before, after the vault's one call.
-  0.14's entries are still written; 0.16 drops them, and the write to two
+  0.14's entries are still written; the contraction drops them, and the write to two
   round trips (docs/design/two-trips.md, "As built: PR 3").
 
 - **A use and a change trust a newest change's seal only once its MAC
