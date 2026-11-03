@@ -49,7 +49,11 @@
   signature, check or URL ready after the use's deadline, or after kept
   values lapse, is 503 `late`. No presigned URL, code's or the UI's, may
   carry the session token of the workload that asks for it, in its path
-  or query, escaped or not (400), as none could carry a handle.
+  or query, escaped or not (400), as none could carry a handle; nor may
+  one still escaped after eight decodings, which no check could read
+  through (400). A workload's request to a UI item counts against the
+  item's limit whatever its kind, so a session's kept signer still counts
+  after the name is saved over as a verifier.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart

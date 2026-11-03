@@ -428,6 +428,9 @@ void (null as unknown as Vault);
 
 const NO_LIMIT = { perMinute: null, perDay: null };
 const HOOK = 'whsec-prod-0123456789abcdef';
+
+/** `text` with its underscores percent-encoded `layers` times over: `%5F`, `%255F`, `%25255F`… */
+const deeply = (text: string, layers: number) => text.replaceAll('_', `%${'25'.repeat(layers - 1)}5F`);
 const AWS_ID = 'AKIAREALPROD00000001';
 const AWS_SECRET = 'real/prod+secret/key0123456789ABCDEFGHI';
 
@@ -491,14 +494,43 @@ test("a workload signs, verifies and presigns with items saved in the UI: the si
     { path: `/bucket/${held.token}` },
     { path: `/bucket/${held.token.replaceAll('_', '%5F')}` },
     { path: `/bucket/${held.token.replaceAll('_', '%255F')}` },
+    // Seven times over in the query, which the URL encodes an eighth: the last reading checked shows it.
+    { path: '/bucket/report.csv', query: { trace: deeply(held.token, 7) } },
   ]) {
     const carried = await compute(held, { presign: { credential: 's3', expiresIn: 60, ...presign } });
     assert.deepEqual([carried.status, carried.body.message], [400, 'the session token goes in no presigned URL'], JSON.stringify(presign));
   }
+  // Eight times over, a ninth by the URL: past what is checked, refused as such, never signed (review r2 of #480).
+  const deep = await compute(held, { presign: { credential: 's3', expiresIn: 60, path: '/bucket/report.csv', query: { trace: deeply(held.token, 8) } } });
+  assert.deepEqual([deep.status, deep.body.message], [400, 'the URL is encoded too many times over to check'], JSON.stringify(deep.body));
+  assert.equal((await compute(held, { presign: { credential: 's3', expiresIn: 60, path: `/bucket/${deeply(held.token, 9)}` } })).status, 400);
   // Kinds: a verifier signs nothing; a name nothing defines is 404, after the proof.
   assert.equal((await compute(held, { sign: { credential: 'inbound', message } })).status, 404);
   assert.equal((await compute(held, { sign: { credential: 'nothing', message } })).status, 404);
   assert.equal(reached.length, 0, 'nothing went upstream');
+});
+
+test("an Owner saves another kind under a kept HMAC signer's name: the kept signs still count against the item's limit (review r2 of #480)", ON_015, async () => {
+  // A keeps an HMAC signer's values, 3 a minute. The name becomes a verifier with the same limit, and B's verify brings
+  // its copy to this isolate. A's kept values still sign, for cacheSeconds, by the signer they were decided on: each
+  // sign is counted against the limit the item at the name has now, never let through uncounted for the verifier's kind.
+  runtime = makeRuntime(60);
+  await clientFor(deps, ROOT).secrets.set('market/prod', { HOOK_SECRET: HOOK });
+  const limit = { perMinute: 3, perDay: null };
+  await save({ hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit } });
+  await bind();
+  const a = await session();
+  const b = await session();
+  const message = Buffer.from('transfer 10').toString('base64url');
+  const expected = createHmac('sha256', HOOK).update('transfer 10').digest('hex');
+  assert.deepEqual((await compute(a, { sign: { credential: 'hooks', message } })).body.signature, expected);
+  await save({ hooks: { kind: 'verifier', name: 'hooks', hmac: { key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit } });
+  const checked = await compute(b, { verify: { credential: 'hooks', message, signature: expected } });
+  assert.deepEqual([checked.status, checked.body.valid], [200, true], JSON.stringify(checked.body));
+  const kept = await compute(a, { sign: { credential: 'hooks', message } });
+  assert.deepEqual([kept.status, kept.body.signature], [200, expected], 'A signs by its kept signer');
+  const past = await compute(a, { sign: { credential: 'hooks', message } });
+  assert.deepEqual([past.status, past.body.reason], [429, 'limit'], JSON.stringify(past.body));
 });
 
 test("a Cloudflare call signs with a UI signer as its binding, at the one environment it reaches (C2b2)", ON_015, async () => {

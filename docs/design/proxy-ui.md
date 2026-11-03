@@ -2006,8 +2006,10 @@ open:
 - **No token in a URL.** A presigned URL is for sharing, so neither a
   handle nor the request's own session token may be in it: its path or
   its query, as it is or decoded as often as it changes (8 times at
-  most), is 400 before anything is signed (review r1 of #480). This holds
-  for code's presign too, which checked the handle alone.
+  most), is 400 before anything is signed (review r1 of #480). A URL that
+  still decodes after the eighth pass is 400 too, as a path segment that
+  does is: a ninth reading would go unchecked (review r2 of #480). This
+  holds for code's presign too, which checked the handle alone.
 - **The log.** `RouteAsked.logged` may be a function of the decided
   item: a presign's entry names the decided route's host, never the
   copy's; a private key's sign names the message's SHA-256. Both are the
@@ -2016,7 +2018,16 @@ open:
   and the item by the object's seal.
 - **Counts**: a signer's or verifier's limit is the item's (`itemCounts`,
   shared with C2b1's routes; a presign counts the route's), from this
-  isolate's copy or, cold, one `proxyItem` call before the gate.
+  isolate's copy or, cold, one `proxyItem` call before the gate. A
+  request counts against the copy's limit whatever the copy's kind: the
+  counts are taken before the gate, so before the session's kept values
+  are known, and those may still serve it. A signer saved over as a
+  verifier with the same limit, another session's verify bringing the
+  verifier's copy, leaves the first session's kept signer signing until
+  its values lapse; each of those signs is counted against the limit the
+  name has now, never let through uncounted for the verifier's kind
+  (review r2 of #480). A tunnel has no limit, so a name saved over as one
+  counts nothing until kept values lapse.
 - **Cost**: a handle, one vault call (`useRoute`); a workload, one warm
   and two cold; a kept HMAC, none.
 

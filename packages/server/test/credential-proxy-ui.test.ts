@@ -961,6 +961,34 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
   }
 });
 
+test("a message longer than the decided item takes is refused before its values open: cold, by the use's own check; under a copy that took it, 503 moved, then 413 (review r2 of #480)", ON_015, async () => {
+  await root.secrets.set('market/dev', { HOOK_SECRET: 'whsec-0123456789abcdef' });
+  const hmac = (maxBytes: number) => ({ key: 'HOOK_SECRET', encoding: 'hex' as const, prefix: '', maxBytes });
+  await save({
+    inbound: { kind: 'verifier', name: 'inbound', hmac: hmac(32), limit: NO_LIMIT },
+    hooks: { kind: 'signer', name: 'hooks', signer: { kind: 'hmac', ...hmac(8) }, limit: NO_LIMIT },
+  });
+  const token = await handle();
+  const verify = (text: string) => compute(token, { verify: { credential: 'inbound', message: b64(text), signature: 'x' } });
+  await countingUses(async (uses) => {
+    // Cold, no copy: the use decides the item, whose own check refuses the message before any value is read.
+    const signed = await compute(token, { sign: { credential: 'hooks', message: b64('nine byte') } });
+    assert.deepEqual([signed.status, signed.body.reason], [413, 'too_large'], JSON.stringify(signed.body));
+    const checked = await verify('x'.repeat(33));
+    assert.deepEqual([checked.status, checked.body.reason], [413, 'too_large'], JSON.stringify(checked.body));
+    assert.equal(uses(), 2);
+    // The copy those uses brought takes 20 bytes; the Owner cuts the verifier to 16. The copy admits, the decided item
+    // refuses: 503 moved, nothing made; then the copy is the decided item's, and refuses it with no use.
+    await save({ inbound: { kind: 'verifier', name: 'inbound', hmac: hmac(16), limit: NO_LIMIT } });
+    const moved = await verify('x'.repeat(20));
+    assert.deepEqual([moved.status, moved.body.reason, moved.retryAfter], [503, 'moved', '1'], JSON.stringify(moved.body));
+    assert.equal(uses(), 3);
+    const refused = await verify('x'.repeat(20));
+    assert.deepEqual([refused.status, refused.body.reason], [413, 'too_large'], JSON.stringify(refused.body));
+    assert.equal(uses(), 3);
+  });
+});
+
 test("a presign of a route saved in the UI: built and checked again on the decided item, signed with its pair, its entry logging the decided host; a copy that admitted what the decided item refuses is 503 moved (C2b2)", ON_015, async () => {
   // Plain keys, so that the app writes its credential.use entry, whose host this test reads: a secret's use is the
   // vault's slim row alone (R53), which names the route, and the item by the object's seal.
@@ -986,6 +1014,12 @@ test("a presign of a route saved in the UI: built and checked again on the decid
     assert.equal(uses(), 1);
     // Its allow list, the decided item's: 403, a fresh copy's refusal standing with no use.
     assert.equal((await presign('/other/report.csv')).status, 403);
+    assert.equal(uses(), 1);
+    // The handle in none of the URL, encoded seven times over in its query (an eighth by the URL), or eight, past what is
+    // checked: each 400, nothing signed (review r2 of #480).
+    const encoded = (layers: number) => compute(token, { presign: { credential: 's3', path: '/bucket/report.csv', expiresIn: 60, query: { trace: token.replaceAll('_', `%${'25'.repeat(layers - 1)}5F`) } } });
+    assert.deepEqual([(await encoded(7)).status, (await encoded(7)).body.message], [400, 'the handle goes in no presigned URL']);
+    assert.deepEqual([(await encoded(8)).status, (await encoded(8)).body.message], [400, 'the URL is encoded too many times over to check']);
     assert.equal(uses(), 1);
     // The upstream moves: the copy admits, the use decides on the new item, and the URL is built from its upstream.
     await save({ s3: s3('https://s3-new.example.test/files', '/bucket/**') });

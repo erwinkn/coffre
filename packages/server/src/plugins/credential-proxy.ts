@@ -1545,7 +1545,7 @@ type Computing = {
  *   handle           the use: 1 call; an HMAC kept: none
  */
 async function uiCompute(request: Request, coffre: PluginContext, proxy: Proxy, path: string | null, operation: Operation, name: string, given: Record<string, unknown>, raw: Uint8Array | undefined): Promise<Response> {
-  const item = itemCounts(proxy, (definition) => (takes(definition, operation) ? (definition as { limit: ProxyLimit }).limit : null));
+  const item = itemCounts(proxy);
   const caller = await workloadOf(request, coffre, { place: path, credential: name, body: await bodyDigest(raw ?? new Uint8Array(0)), counts: item.counts });
   if (caller instanceof Response) return limitRefused(caller, item);
   if (caller !== null) {
@@ -1875,20 +1875,26 @@ function presignTarget(credential: Resolved, asked: PresignAsked, token: string 
   // A URL is for sharing: neither the handle nor the session's token goes in it, its path or its query, as it is or
   // decoded however often a server behind may decode it (review r1 of #480: `query: { trace: <token> }`).
   const readings = decodings(target.href);
+  // A URL still decoding after `climbs`'s 8 passes may hold anything a ninth would show: refused, as `climbs` refuses
+  // such a segment (review r2 of #480: a token's `_` encoded 8 times over, which `searchParams` encodes a ninth).
+  if (readings === null) return failure(400, 'the URL is encoded too many times over to check');
   if (readings.some((text) => HANDLE.test(text))) return failure(400, 'the handle goes in no presigned URL');
   if (token !== null && readings.some((text) => text.includes(token))) return failure(400, 'the session token goes in no presigned URL');
   return { target, relative };
 }
 
-/** A URL as it is, then decoded as often as it changes, `climbs`'s 8 times at most: each reading a server behind may see. */
-function decodings(href: string): string[] {
+/**
+ * A URL as it is, then decoded as often as it changes: each reading a server behind may see; or null when it still
+ * changes after `climbs`'s 8 decodings, whose further readings go unchecked.
+ */
+function decodings(href: string): string[] | null {
   const readings = [href];
   for (let depth = 0; depth < 8; depth += 1) {
     const next = bytesOf(readings.at(-1)!);
-    if (next === readings.at(-1)) break;
+    if (next === readings.at(-1)) return readings;
     readings.push(next);
   }
-  return readings;
+  return bytesOf(readings.at(-1)!) === readings.at(-1) ? readings : null;
 }
 
 /**
@@ -2320,7 +2326,7 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
   }
   // The route's item, by this isolate's copy at the workload's place, or the vault's (`proxyItem`), as its counts need
   // it: a refusal of the item answered once the gate has counted the request.
-  const item = itemCounts(proxy, (definition) => (definition.kind === 'route' ? definition.limit : null));
+  const item = itemCounts(proxy);
   const caller = await workloadOf(request, coffre, { ...at, ...(body === undefined ? {} : { body }), counts: item.counts });
   if (caller instanceof Response) return limitRefused(caller, item);
   // Its body read, it is no other caller's request now.
@@ -2435,11 +2441,13 @@ type ItemCounted = { counts: PluginCounts; copy: () => ItemCopy | CoffreError | 
 /**
  * The counts of a workload's request to a UI item (C2b), and the copy they were made from: this isolate's at the
  * workload's place, or, on a cold isolate, the vault's (`proxyItem`, asked as the workload), whose refusal is answered
- * after the gate (`copy`). `limit` names the kinds the request counts against (a route's limit for a forward, a signer's
- * for a sign): another kind counts nothing, and the use's answer refuses it. `refresh`, when a kept copy made the
- * counts, asks the vault for the item again (`limitRefused`).
+ * after the gate (`copy`). The request counts against the copy's limit whatever the item's kind and whatever it asks:
+ * values kept for this session may still serve it after an Owner saved another kind under the name, which a limit taken
+ * only from a kind that takes the request would leave uncounted (review r2 of #480: a kept HMAC signer's signs, under a
+ * verifier with the same limit). `refresh`, when a kept copy made the counts, asks the vault for the item again
+ * (`limitRefused`).
  */
-function itemCounts(proxy: Proxy, limit: (definition: ProxyDefinition) => ProxyLimit | null): ItemCounted {
+function itemCounts(proxy: Proxy): ItemCounted {
   let copy: ItemCopy | CoffreError | null = null;
   // The vault's answer for the item, asked as the workload, kept as this isolate's copy (`CopyFromVault`).
   let asked: (() => Promise<void>) | null = null;
@@ -2471,7 +2479,7 @@ function itemCounts(proxy: Proxy, limit: (definition: ProxyDefinition) => ProxyL
       await ask();
     }
     const found = copy as ItemCopy | CoffreError | null;
-    const counted = found === null || found instanceof CoffreError ? null : limit(found.definition);
+    const counted = found === null || found instanceof CoffreError || !('limit' in found.definition) ? null : found.definition.limit;
     return counted === null ? [] : limitCounts(name, counted, service);
   };
   return { counts, copy: () => copy, refresh: () => asked };
