@@ -25,6 +25,10 @@ const ACCOUNT = 'acct_1Plain0123456';
 const ESCAPED = '%41%42%43%44%45%46%47%48';
 /** Escapes as written and punctuation a URL's parser encodes: `'` in a query, `"` in a path (review r5 of #483). */
 const PUNCTUATED = `${ESCAPED}'"`;
+/** Values a JSON string escapes, each its own way: Go `<` and `>`, Python what is past ASCII, PHP `/` (review r6 of #483). */
+const ANGLED = 'foo<bar>baz';
+const ACCENTED = 'foo\u00e9baz';
+const SLASHED = 'foo/bar/baz';
 
 let upstream: Server;
 let upstreamUrl: string;
@@ -64,6 +68,18 @@ before(async () => {
         const location = url.includes('/echoquery') ? `${base}/getMe?echo=${sent}&api_key=${sent}&keep=%7e&?api_key=cursor&api_key=again` : `${base}/x${sent}/getMe`;
         response.writeHead(302, { location }).end();
       }
+      // The value, the path rule's or the query rule's, quoted in a redirect's path as a JSON string writes it: Go's
+      // `\u003c`, Python's `\u00e9`, PHP's `\/`, each backslash a `/` to a URL's parser (review r6 of #483).
+      else if (url.includes('/jsonecho')) {
+        const at = new URL(url, upstreamUrl);
+        const sent = at.searchParams.get('k') ?? decodeURIComponent(at.pathname.split('/')[2]!.slice(3));
+        const js = JSON.stringify(sent).slice(1, -1);
+        const how = at.searchParams.get('how');
+        const quoted = how === 'go' ? js.replace(/[<>&]/g, (char) => `\\u00${char.charCodeAt(0).toString(16)}`) : how === 'python' ? js.replace(/[\u0080-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`) : js.replaceAll('/', '\\/');
+        response.writeHead(302, { location: `/${at.pathname.split('/')[1]}/echo-${quoted}` }).end();
+      }
+      // A query that ends in a space once its fragment goes.
+      else if (url.endsWith('/spaced')) response.writeHead(302, { location: `${url.replace(/spaced$/, 'getMe')}?cursor=abc #top` }).end();
       // An error page that quotes the request, as a framework's 404 may: as it came, and decoded.
       else if (url.endsWith('/echo')) response.writeHead(404, { 'content-type': 'text/plain', 'x-path': url }).end(`no route for ${url} (${decodeURIComponent(url)})`);
       else if (url.includes('/file/')) response.writeHead(200, { 'content-type': 'image/jpeg' }).end(Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
@@ -100,6 +116,10 @@ function options(): CredentialProxyOptions {
       // A query rule whose value is percent-escapes, as written: `%41` is three characters of the key, not `A`.
       keyed: { upstream: `${upstreamUrl}/keyed`, inject: query('api_key', '{ESCAPED_KEY}') },
       punctuated: { upstream: `${upstreamUrl}/punctuated`, inject: query('api_key', '{PUNCTUATED_KEY}') },
+      angled: { upstream: `${upstreamUrl}/angled`, inject: path('bot{ANGLED_KEY}') },
+      accented: { upstream: `${upstreamUrl}/accented`, inject: path('bot{ACCENTED_KEY}') },
+      angledq: { upstream: `${upstreamUrl}/angledq`, inject: query('k', '{ANGLED_KEY}') },
+      slashedq: { upstream: `${upstreamUrl}/slashedq`, inject: query('k', '{SLASHED_KEY}') },
       dots: { upstream: `${upstreamUrl}/dots`, inject: path('..{BOT_VALUE}'), allow: [{ methods: ['GET'], path: '/*/getMe' }] },
     },
     insecureUpstreams: true,
@@ -114,7 +134,7 @@ useMcp(async () => {
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, PUNCTUATED_KEY: { value: PUNCTUATED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
+  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, PUNCTUATED_KEY: { value: PUNCTUATED, sensitivity: 'sensitive' }, ANGLED_KEY: { value: ANGLED, sensitivity: 'sensitive' }, ACCENTED_KEY: { value: ACCENTED, sensitivity: 'sensitive' }, SLASHED_KEY: { value: SLASHED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -316,6 +336,32 @@ test("a key of escapes and punctuation, echoed in a redirect, is masked in its q
   assert.equal(pathed.headers.get('location'), null);
   const said = await pathed.text();
   for (const form of forms) assert.ok(!said.includes(form), said);
+});
+
+test("a value a JSON string escapes, echoed so in a redirect's path, is refused: each escape's backslash a `/` hides it from no check", async () => {
+  const { handle } = await run();
+  const cases = [
+    ['go', `/use/angled/bot${handle}/jsonecho?how=go`, ANGLED],
+    ['python', `/use/accented/bot${handle}/jsonecho?how=python`, ACCENTED],
+    ['go', `/use/angledq/jsonecho?k=${handle}&how=go`, ANGLED],
+    ['php', `/use/slashedq/jsonecho?k=${handle}&how=php`, SLASHED],
+  ] as const;
+  for (const [how, url, value] of cases) {
+    const moved = await route(url);
+    assert.equal(moved.status, 502, `${url}: ${moved.headers.get('location')}`);
+    assert.equal(moved.headers.get('location'), null, how);
+    const said = await moved.text();
+    for (const form of [value, JSON.stringify(value).slice(1, -1), 'foo/u00', 'foo/u003c', 'foo//bar']) assert.ok(!said.includes(form), said);
+  }
+});
+
+test("a redirect's query keeps a space it ends in once its fragment goes: a cursor is the upstream's to the byte", async () => {
+  const { handle } = await run();
+  const moved = await route(`/use/telegram/bot${handle}/spaced`);
+  assert.equal(moved.status, 302, await moved.clone().text());
+  const location = moved.headers.get('location')!;
+  assert.equal(location, `${ORIGIN}/use/market/dev/telegram/bot${handle}/getMe?cursor=abc%20`);
+  assert.equal(new URL(location).searchParams.get('cursor'), 'abc ');
 });
 
 test("the stable URL finds the handle in the segment under each credential's own upstream", async () => {

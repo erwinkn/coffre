@@ -1047,14 +1047,19 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   parser reads it: written again through `searchParams`, `echo=%41%42…`,
   a key that is those escapes, would be `echo=AB…`, and the parser's own
   copy encodes `'` as `%27`, so `%41%42'` would be `%41%42%27`; neither
-  is a form redaction names.
+  is a form redaction names. Its spaces go as `%20`, as the parser's
+  would: `?cursor=abc #top` without its fragment ends in one, which a
+  header's value loses.
   The value anywhere else in it, or in an answer's headers or text body,
   is redacted as any value is (section 4), its encoded form and the whole
   segment included. The path is the parser's, which encodes `"` or a
   space, so a check comes last: the `Location` read as the app's client
   reads it (decoded once, tabs and newlines dropped, `\` as `/`) must
-  hold no value read the same way, or it is a 502 with nothing of the
-  answer (`/x%41%42"` is `/x%41%42%22`, both `/xAB"`). As with `query()`, the URL that goes out holds the
+  hold no value, nor any echo of one (section 4's list), read the same
+  way, or it is a 502 with nothing of the answer (`/x%41%42"` is
+  `/x%41%42%22`, both `/xAB"`; Go's JSON `foo\u003cbar`, for the value
+  `foo<bar`, is `foo/u003cbar` in the parsed path, which the echo's own
+  reading matches). As with `query()`, the URL that goes out holds the
   value, and so does what a platform records of outgoing requests
   (Workers' tracing, which what `coffre init` writes leaves off). The
   other way, the handle rides in the URL the app sends, as a `query()`
