@@ -250,14 +250,23 @@ test("a ticket another vault read, written by one whose config names the member 
     { database: await openVaultDatabase(), hotDatabase: hotDatabaseUrl(), kek: { id: 'test-kek-1', key: w.kek.toString('base64') }, owners: ['new@acme.example'] },
     { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
   ));
+  // Asserted outside the callback: inside it, a failed assertion would be the route's 500, which nothing checks.
   let written: unknown;
+  let after: Awaited<ReturnType<typeof memberRow>> | 'unset' = 'unset';
   w.between(async () => {
     const ticket = (w.answers.at(-1) as Extract<AdmitReadOutcome, { served: true }>).ticket;
     written = await rolled.admitWrite!({ ticket });
-    assert.equal(await memberRow(NEW), undefined);
+    after = await memberRow(NEW);
   });
-  await w.add();
+  const added = await w.add();
   assert.deepEqual(written, { written: false, why: 'unserved' });
+  // Settling its config, the rolled-out vault declares new@ an Owner itself: that row is the vault's, never Bob's add.
+  assert.deepEqual(after, { role: 'owner', createdBy: 'system:vault' });
+  // Bob's own try then finds that change: its hold fails, the read again finds a member, and today's path refuses an admin's change to an Owner.
+  assert.deepEqual(served(w.answers), ['served', 'shape']);
+  assert.equal(added.status, 403, JSON.stringify(added.body));
+  assert.equal(reason(added.body), 'not_allowed');
+  assert.deepEqual(await memberRow(NEW), { role: 'owner', createdBy: 'system:vault' });
 });
 
 test("Bob's token hash copied onto the Owner's session: the vault reads the Owner, and the app's check of the row's MAC refuses it before anything is written (WritingAdd, sub; round 6)", { skip: ANY }, async () => {
