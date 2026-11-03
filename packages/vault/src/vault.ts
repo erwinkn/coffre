@@ -4429,9 +4429,16 @@ class VaultService implements Vault {
     // keeps no pending call), and every use behind them: a use waited 147 s in #467's bench at 1,000 a second. A read
     // that cannot say, unsealed, torn by a change between its two statements or short of a name, decides under the head.
     if ((await this.#settled()) === null && (await this.#cutOverNow())) {
-      const held = await heldByLog(keys.seals, this.#db, RESERVED_REF).catch(notLogged);
-      const names = held.log === 'live' && held.object.kind === 'proxy-reserved' ? held.object.names : [];
-      if (wanted.every((name) => names.includes(name))) return { ok: true, reserved: [...names], cleared: [] };
+      // A set its log does not bear out says nothing, not "none": it decides under the head, which reports it and
+      // refuses, an empty ask's (a deployment of UI routes alone) as much as any (review r12 of #467).
+      const held = await heldByLog(keys.seals, this.#db, RESERVED_REF).catch((error: unknown) => {
+        if (error instanceof NotLogged) return null;
+        throw error;
+      });
+      if (held !== null) {
+        const names = held.log === 'live' && held.object.kind === 'proxy-reserved' ? held.object.names : [];
+        if (wanted.every((name) => names.includes(name))) return { ok: true, reserved: [...names], cleared: [] };
+      }
     }
     return this.#decide([], async (d) => {
       const changes = d.changes!;

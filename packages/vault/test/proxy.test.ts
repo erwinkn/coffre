@@ -438,6 +438,12 @@ test('the reserved set forged around the vault refuses every save: fail closed (
   assert.equal((await w.view()).reservedState, 'tampered');
   const outcome = await w.save({ seal: null, items: { maps: route('maps', 'maps.example.com', 'MAPS_KEY') } });
   assert.equal(outcome.ok, false);
+  // Nor does code's reservation pass on it, an empty ask (a deployment of UI routes alone) as much as a full one: a set
+  // the log does not bear out is no set of none, so the gate serves nothing (review r12 of #467).
+  for (const names of [[], ['maps']]) {
+    const reserved = await w.vault.reserveProxy({ names });
+    assert.equal(reserved.ok, false, `reserveProxy(${JSON.stringify(names)}) on a forged set`);
+  }
 });
 
 test('items or names no change writes fail the seal like any forgery: the tab shows tampered, and code\'s reservation passes them by', ON_015, async () => {
