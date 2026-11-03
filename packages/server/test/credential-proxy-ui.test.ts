@@ -8,7 +8,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createHmac, type Hash, type Hmac } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { createServer as createTlsServer } from 'node:https';
 import type { AddressInfo, LookupFunction } from 'node:net';
@@ -25,7 +25,7 @@ import { sql, type SQL } from 'drizzle-orm';
 
 import { clientFor, LOG } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
-import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
+import { db, deps, DEV, entries, NO, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { bindingRoute, checkPlugins } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
@@ -221,6 +221,20 @@ test('a name no definition holds is 404; a signer saved in the UI reaches no ups
   } finally {
     vault.useRoute = real;
   }
+});
+
+test("a UI signer whose inherited key its caller may not use answers that refusal, the one \"no\", never what kind the item is (review r10 of #467)", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ signer: { kind: 'signer', name: 'signer', signer: { kind: 'private-key', key: 'OPENAI_API_KEY' }, limit: { perMinute: null, perDay: null } } });
+  await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
+  // LIN stands at the fork alone: its signer and its key are dev's, which LIN holds nothing of.
+  await root.access.set(`user:${LIN}`, { 'market/dev-eu': 'developer' });
+  const refused = await route('/use/market/dev-eu/signer/x', as(await handle('market/dev-eu', LIN)));
+  assert.deepEqual([refused.status, await refused.json()], [404, NO]);
+  // DEV may use it: the item's kind is the answer, the signer reaching no upstream.
+  const served = await route('/use/market/dev-eu/signer/x', as(await handle('market/dev-eu')));
+  assert.equal(served.status, 404, await served.clone().text());
+  assert.match((await served.json() as { message: string }).message, /signer is a signer, which reaches no upstream/);
 });
 
 test("the plan gives a UI route's key as the handle, never its value, and names its URL; one forged item answers 503 and no environment", ON_015, async () => {
@@ -677,7 +691,9 @@ test("a UI route through undici's public fetch, as a Node deployment sends one: 
   let port = 0;
   const tls = createTlsServer();
   try {
-    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=api.openai.example', '-addext', 'subjectAltName=DNS:api.openai.example', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
+    // The name in a config file of its own, not `-addext`, which macOS's LibreSSL lacks (review r10 of #467).
+    writeFileSync(join(dir, 'san.cnf'), '[req]\ndistinguished_name = dn\n[dn]\n[san]\nsubjectAltName = DNS:api.openai.example\n');
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=api.openai.example', '-config', join(dir, 'san.cnf'), '-extensions', 'san', '-keyout', join(dir, 'key.pem'), '-out', join(dir, 'cert.pem')], { stdio: 'ignore' });
     const cert = readFileSync(join(dir, 'cert.pem'), 'utf8');
     tls.setSecureContext({ key: readFileSync(join(dir, 'key.pem')), cert });
     tls.on('request', (request: IncomingMessage, response) => {

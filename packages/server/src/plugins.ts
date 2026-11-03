@@ -199,7 +199,8 @@ export type RouteAsked = {
   /**
    * Why the proxy would serve no request on the item the vault found, or null: `GET /use/signing/x`, a signer, reaches
    * no upstream. Asked before the read opens what the vault answered, so the app reads no value of it and keeps none
-   * (404; Fable's review of #467). The vault's call has logged its use already: C2b's uses of these kinds decide them.
+   * (404; Fable's review of #467), and only of a use the vault allowed: a key the caller may not use is the read's one
+   * "no" whatever the item's kind (review r10). The vault's call has logged its use already: C2b's uses of these kinds decide them.
    */
   refuses?: (item: DecidedItem) => string | null;
 };
@@ -768,7 +769,9 @@ function pluginContext(
       const refused = routeRefusal(answered, asked);
       if (refused !== null) throw refused;
       if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
-      const unserved = answered.found?.found === true ? asked.refuses?.(answered.found.item) ?? null : null;
+      // Only an allowed use's item is asked: a refusal of the caller's own (a key they may not use, busy, the bulk limit)
+      // is the read's to answer, as every read's is, whatever kind the item is (review r10 of #467).
+      const unserved = answered.found?.found === true && answered.outcome.ok ? asked.refuses?.(answered.found.item) ?? null : null;
       if (unserved !== null) throw new CoffreError(404, 'not_found', unserved);
       const read = await reveal(apiContext(runtime, identity), answered.place, {
         purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...asked.logged, credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
