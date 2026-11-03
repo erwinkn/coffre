@@ -23,6 +23,8 @@ const AIOGRAM = '987654321:AAFzzBP0av28dGcj4Xqp-5Yv_LxQz0654321';
 const TENANT = 'tenant-0123456789abcdef';
 const ACCOUNT = 'acct_1Plain0123456';
 const ESCAPED = '%41%42%43%44%45%46%47%48';
+/** Escapes as written and punctuation a URL's parser encodes: `'` in a query, `"` in a path (review r5 of #483). */
+const PUNCTUATED = `${ESCAPED}'"`;
 
 let upstream: Server;
 let upstreamUrl: string;
@@ -55,9 +57,12 @@ before(async () => {
       // An absolute redirect to the path as it came, where the value is the upstream's own host and port (review r3 of #483).
       else if (url.endsWith('/loop')) response.writeHead(302, { location: `${upstreamUrl}${url.replace(/loop$/, 'getMe')}` }).end();
       // A query rule's value quoted in a redirect's query as it is, `%41%42…`, which `searchParams` would write `AB…` (review r4 of #483).
-      else if (url.includes('/keyed/echoquery')) {
+      // A field named `?api_key`, which is not the rule's.
+      else if (url.includes('/echoquery') || url.includes('/echopath')) {
         const sent = new URL(url, upstreamUrl).searchParams.get('api_key')!;
-        response.writeHead(302, { location: `/keyed/getMe?echo=${sent}&api_key=${sent}&keep=%7e&api_key=again` }).end();
+        const base = url.slice(0, url.search(/\/echo(query|path)/));
+        const location = url.includes('/echoquery') ? `${base}/getMe?echo=${sent}&api_key=${sent}&keep=%7e&?api_key=cursor&api_key=again` : `${base}/x${sent}/getMe`;
+        response.writeHead(302, { location }).end();
       }
       // An error page that quotes the request, as a framework's 404 may: as it came, and decoded.
       else if (url.endsWith('/echo')) response.writeHead(404, { 'content-type': 'text/plain', 'x-path': url }).end(`no route for ${url} (${decodeURIComponent(url)})`);
@@ -94,6 +99,7 @@ function options(): CredentialProxyOptions {
       // A template whose text and a value make a segment that goes as none: `..` and `.` is `...`.
       // A query rule whose value is percent-escapes, as written: `%41` is three characters of the key, not `A`.
       keyed: { upstream: `${upstreamUrl}/keyed`, inject: query('api_key', '{ESCAPED_KEY}') },
+      punctuated: { upstream: `${upstreamUrl}/punctuated`, inject: query('api_key', '{PUNCTUATED_KEY}') },
       dots: { upstream: `${upstreamUrl}/dots`, inject: path('..{BOT_VALUE}'), allow: [{ methods: ['GET'], path: '/*/getMe' }] },
     },
     insecureUpstreams: true,
@@ -108,7 +114,7 @@ useMcp(async () => {
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
+  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, PUNCTUATED_KEY: { value: PUNCTUATED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -291,7 +297,25 @@ test("a redirect's query keeps the bytes the upstream wrote: a key echoed there 
   const location = moved.headers.get('location')!;
   for (const form of [ESCAPED, 'ABCDEFGH', encodeURIComponent(ESCAPED)]) assert.ok(!location.includes(form), location);
   // The rule's parameter the app's placeholder, once, where the upstream first put it; every other pair as it was written.
-  assert.match(location, new RegExp(`^${ORIGIN}/use/market/dev/keyed/getMe\\?echo=[^&]*&api_key=${handle}&keep=%7e$`));
+  // `?api_key`, another field, as it was too.
+  assert.match(location, new RegExp(`^${ORIGIN}/use/market/dev/keyed/getMe\\?echo=[^&]*&api_key=${handle}&keep=%7e&\\?api_key=cursor$`));
+});
+
+test("a key of escapes and punctuation, echoed in a redirect, is masked in its query and refused in its path, never re-encoded past both", async () => {
+  const { handle } = await run();
+  // Every form the app could read the key back from: as it is, as the parser writes it, and either decoded once.
+  const forms = [PUNCTUATED, `${ESCAPED}%27"`, `${ESCAPED}'%22`, `${ESCAPED}%27%22`, 'ABCDEFGH'];
+  const moved = await route(`/use/punctuated/echoquery?api_key=${handle}`);
+  assert.equal(moved.status, 302, await moved.clone().text());
+  const location = moved.headers.get('location')!;
+  for (const form of forms) assert.ok(!location.includes(form), location);
+  assert.match(location, new RegExp(`^${ORIGIN}/use/market/dev/punctuated/getMe\\?echo=[^&]*&api_key=${handle}&keep=%7e&\\?api_key=cursor$`));
+  // In a path, a parser encodes `"`, so it never stays as written: the redirect goes nowhere, its answer with it.
+  const pathed = await route(`/use/punctuated/echopath?api_key=${handle}`);
+  assert.equal(pathed.status, 502);
+  assert.equal(pathed.headers.get('location'), null);
+  const said = await pathed.text();
+  for (const form of forms) assert.ok(!said.includes(form), said);
 });
 
 test("the stable URL finds the handle in the segment under each credential's own upstream", async () => {

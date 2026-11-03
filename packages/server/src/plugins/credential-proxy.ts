@@ -2675,7 +2675,8 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
   // form an honest upstream may echo it in (`echoed`). A plain value is no secret, and an upstream quotes an account's id
   // back as a matter of course: it stays, and so does what a rule made of plain values alone.
   const secrets = Object.entries(values).filter(([key]) => !plain.includes(key)).map(([, value]) => value);
-  const redact = redactor([...secrets.flatMap((value) => [value, value.trim()]), ...made].flatMap(echoed));
+  const known = [...secrets.flatMap((value) => [value, value.trim()]), ...made];
+  const redact = redactor(known.flatMap(echoed));
 
   // A streamed body's refusal, once `scanned` stops it: the answer, whatever the upstream made of the broken request.
   // Values decided for a request sent within their window: one whose body, digest or signature came after it goes with none.
@@ -2712,16 +2713,22 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       // The proxy's URL for it, a path rule's segment and a query rule's parameter, kept or not, the app's placeholder, for
       // it to follow and be let in.
       const path = swap === null ? to.pathname.slice(under.length) : swappedBack(to.pathname.slice(under.length), swap);
-      // Redacted as the bytes the upstream wrote, which neither swap re-encodes: should a value be there, it is masked.
-      at = redact.whole(`${out.proxied}${path}${queryBack(to.search, out.back)}`);
+      // The query as the upstream wrote it, `?` to `#`, where a URL's parser finds it too, and redacted so, before
+      // anything reads it: the parser's own copy is encoded its way, `'` as `%27`, and `%41%42'`, a key, would be
+      // `%41%42%27`, a form no list names, nor its decoding, `AB'` (review r5 of #483). A Location with none keeps the
+      // app's own, which a relative `#top` or `` inherits from it.
+      const written = /^[^#]*?(\?[^#]*)/.exec(raw)?.[1];
+      const query = written === undefined ? to.search : redact.whole(written);
+      at = redact.whole(`${out.proxied}${path}${queryBack(query, out.back)}`);
     } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
       return failure(502, `the upstream redirected outside ${credential.name}'s, where its key does not go`);
     } else at = redact.whole(raw);
-    // Decoded once, as the app's HTTP client reads it, it holds no value either: a form no list above names (`%3a` for
-    // `%3A`, `%41` for `A`) goes nowhere.
-    if (at !== null && redact.whole(bytesOf(at)) !== bytesOf(at)) {
+    // Read as the app's HTTP client reads it, it holds no value either: a form no list above names (`%3a` for `%3A`,
+    // `%41` for `A`), or one the path's parsing made (`%41%42"` as `%41%42%22`), goes nowhere. Each value read the
+    // same way, as a parse only encodes: whatever it encoded of the value, the same decoding undoes.
+    if (at !== null && redactor(known.flatMap((value) => [value, readAsURL(value)]).flatMap(echoed)).whole(readAsURL(at)) !== readAsURL(at)) {
       await upstream.body?.cancel();
       return failure(502, `the upstream's Location quoted what ${credential.name} sent, in a form coffre does not mask`);
     }
@@ -2747,7 +2754,8 @@ function queryBack(search: string, back: readonly [string, string][]): string {
   const done = new Set<string>();
   const pairs = search.length > 1 ? search.slice(1).split('&') : [];
   const kept = pairs.flatMap((written) => {
-    const name = [...new URLSearchParams(written).keys()][0];
+    // Behind a `&`, so a `?` it begins with is its name's, which `URLSearchParams` would take for the query's own.
+    const name = [...new URLSearchParams(`&${written}`).keys()][0];
     if (name === undefined || !wanted.has(name)) return [written];
     if (done.has(name)) return [];
     done.add(name);
@@ -2755,6 +2763,14 @@ function queryBack(search: string, back: readonly [string, string][]): string {
   });
   for (const [name, value] of wanted) if (!done.has(name)) kept.push(pair(name, value));
   return `?${kept.join('&')}`;
+}
+
+/**
+ * A URL as an HTTP client reads what it holds: decoded once, without the tabs and newlines a parser drops, and each
+ * backslash a `/`, as a URL with a scheme like `https` reads it.
+ */
+function readAsURL(text: string): string {
+  return bytesOf(text).replace(/[\t\n\r]/g, '').replaceAll('\\', '/');
 }
 
 /**
