@@ -1654,17 +1654,19 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
     }
     admitted = copy.digest;
   }
-  const sha256 = operation === 'sign' ? hex(await crypto.subtle.digest('SHA-256', message!)) : null;
   // The entry records what was asked of the item the vault decided on: a private key's sign the message's SHA-256, a
-  // presign the decided upstream's host, never the copy's (section 3, "Presign").
-  const logged = (decided: DecidedItem | null): Record<string, unknown> => {
+  // presign the decided upstream's host, never the copy's (section 3, "Presign"). Asked once the vault has decided, so a
+  // message is hashed only for a caller it knows, and only when the decided item signs with a private key, whose own
+  // check (`refuses`) has held it to 64 KiB by then: never 1 MiB for any bearer (Fable's review of #480).
+  const logged = async (decided: DecidedItem | null): Promise<Record<string, unknown>> => {
     const definition = decided === null ? null : itemOf(proxy, decided);
     if (asked !== null) {
       const resolved = definition?.kind === 'route' ? uiCredential(proxy, decided!.digest, definition) : null;
       const host = resolved === null || typeof resolved === 'string' ? undefined : resolved.base.host;
       return { ui: true, ...(host === undefined ? {} : { host }), presign: { method: asked.method, path: `/${asked.segments.join('/')}`, expiresIn: asked.expiresIn } };
     }
-    return { ui: true, ...(definition?.kind === 'signer' && definition.signer.kind === 'private-key' ? { sign: { sha256 } } : {}) };
+    if (operation !== 'sign' || definition?.kind !== 'signer' || definition.signer.kind !== 'private-key') return { ui: true };
+    return { ui: true, sign: { sha256: hex(await crypto.subtle.digest('SHA-256', message!)) } };
   };
   const used = await coffre.useRoute!(who, { ...computing.asked, digests: copy === null ? [] : [copy.digest], logged, refuses: (decided) => {
     const definition = itemOf(proxy, decided);

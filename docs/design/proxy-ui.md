@@ -2022,10 +2022,15 @@ open:
   holds for code's presign too, which checked the handle alone.
 - **The log.** `RouteAsked.logged` may be a function of the decided
   item: a presign's entry names the decided route's host, never the
-  copy's; a private key's sign names the message's SHA-256. Both are the
+  copy's; a private key's sign names the message's SHA-256, hashed only
+  once the vault has decided on a private-key signer, which holds the
+  message to 64 KiB by then: an unknown bearer gets no 1 MiB hash out of
+  the isolate (Fable's review of #480). Both are the
   app's `credential.use` entry, which 0.15 writes only when no key is
   secret: a secret's use is the vault's slim row (R53), naming the route,
-  and the item by the object's seal.
+  and the item by the object's seal. A refusal thrown before the use,
+  from a kept entry or a fresh copy, is answered in the proxy's shape,
+  `coffre-proxy: refused`, as the decided item's is.
 - **Counts**: a signer's or verifier's limit is the item's (`itemCounts`,
   shared with C2b1's routes; a presign counts the route's), from this
   isolate's copy or, cold, one `proxyItem` call before the gate. A

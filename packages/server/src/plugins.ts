@@ -196,8 +196,12 @@ export type RouteAsked = {
   named: { path: string; route: string } | null;
   stable: string | null;
   digests: readonly string[];
-  /** What the app's `credential.use` entry records beside the route, or how the item the vault decided on says it (a presigned URL's host, C2b2). */
-  logged: Record<string, unknown> | ((item: DecidedItem | null) => Record<string, unknown>);
+  /**
+   * What the app's `credential.use` entry records beside the route, or how the item the vault decided on says it (a
+   * presigned URL's host, C2b2), asked once the vault has decided, before the read: so a private key's sign hashes its
+   * message only for a caller the vault knows, whose item signs with a private key (Fable's review of #480).
+   */
+  logged: Record<string, unknown> | ((item: DecidedItem | null) => Record<string, unknown> | Promise<Record<string, unknown>>);
   /**
    * Why the proxy would serve no request on the item the vault found, or null: `GET /use/signing/x`, a signer, reaches
    * no upstream. Asked before the read opens what the vault answered, so the app reads no value of it and keeps none
@@ -300,9 +304,9 @@ function foundRefusal(found: RouteFound, name: string): CoffreError | null {
 
 /** A route use's answer as the proxy takes it: the values the read opened, the item, and where. */
 /** What a route use's `credential.use` entry records beside the route: the proxy's, or what it says of the item the vault decided on. */
-function loggedOf(answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): Record<string, unknown> {
+async function loggedOf(answered: Extract<RouteUseOutcome, { route: 'name' }>, asked: RouteAsked): Promise<Record<string, unknown>> {
   if (typeof asked.logged !== 'function') return asked.logged;
-  return asked.logged(answered.found?.found === true ? answered.found.item : null);
+  return await asked.logged(answered.found?.found === true ? answered.found.item : null);
 }
 
 /** The proxy's refusal of the item a use decided on (`RouteAsked.refuses`): a reason alone is a 404. */
@@ -826,7 +830,7 @@ function pluginContext(
       const unserved = answered.found?.found === true && answered.outcome.ok ? asked.refuses?.(answered.found.item) ?? null : null;
       if (unserved !== null) throw unservedError(unserved);
       const read = await reveal(apiContext(runtime, identity), answered.place, {
-        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...loggedOf(answered, asked), credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
+        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...(await loggedOf(answered, asked)), credential: readName(answered, asked) }, only: true, decided: used.decided, ...(used.ahead == null ? {} : { ahead: used.ahead }),
       });
       return routeUsed(answered, read, identity.credentialExpiresAt!);
     } catch (error) {
@@ -866,7 +870,7 @@ function pluginContext(
       if (made === null || !made.identity.registered) throw new ApiError('unauthenticated', 'that workload is no caller coffre authenticated');
       const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal: false });
       const read = await reveal(apiContext(runtime, made.identity), parsePath(caller.path!, [2]), {
-        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...loggedOf(answered, asked), credential: asked.stable }, only: true, environmentId: caller.place!,
+        purpose: 'use', keys: answered.keys.map((key) => key.key), logged: { ...(await loggedOf(answered, asked)), credential: asked.stable }, only: true, environmentId: caller.place!,
         decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, ...(ahead == null ? {} : { ahead }),
       });
       return routeUsed(answered, read, made.expiresAt);

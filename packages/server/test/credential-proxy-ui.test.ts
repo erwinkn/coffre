@@ -885,9 +885,14 @@ async function countingUses(work: (uses: () => number) => Promise<void>): Promis
 const NO_LIMIT = { perMinute: null, perDay: null };
 
 /** `POST /use/market/dev` with `body` as JSON, the handle as its bearer token: a sign, verify or presign. */
-async function compute(token: string, body: unknown): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | null }> {
+async function compute(token: string, body: unknown): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | null; proxy: string | null }> {
   const answer = await route('/use/market/dev', as(token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
-  return { status: answer.status, body: await answer.json() as Record<string, unknown>, retryAfter: answer.headers.get('retry-after') };
+  return { status: answer.status, body: await answer.json() as Record<string, unknown>, retryAfter: answer.headers.get('retry-after'), proxy: answer.headers.get('coffre-proxy') };
+}
+
+/** A refusal in the proxy's own shape, which apps tell from the upstream's by its header (docs/design/credential-proxy.md). */
+function proxyRefused(answer: Awaited<ReturnType<typeof compute>>, status: number): void {
+  assert.deepEqual([answer.status, answer.body.error, answer.proxy], [status, 'credential_proxy', 'refused'], JSON.stringify(answer.body));
 }
 
 const b64 = (text: string) => Buffer.from(text).toString('base64url');
@@ -935,12 +940,13 @@ test("a signer and a verifier saved in the UI: a private key's signature and an 
   assert.equal((await compute(token, { sign: { credential: 'hooks', message: message.toString('base64url') } })).body.signature, `sha256=${createHmac('sha256', HOOK).update(message).digest('hex')}`);
   // A kept item's kind holds as a copy's does: the verifier's values, kept by the verify above, sign nothing; a route's,
   // kept by a request through it, sign nothing either, and it is sent nothing (review r1 of #480).
-  assert.equal((await compute(token, { sign: { credential: 'inbound', message: 'aGk' } })).status, 404);
+  // Thrown from the kept entry, answered in the proxy's shape as the decided item's refusal is (Fable's review of #480).
+  proxyRefused(await compute(token, { sign: { credential: 'inbound', message: 'aGk' } }), 404);
   await countingUses(async (uses) => {
     assert.equal((await route('/use/market/dev/openai/models', as(token))).status, 200);
     const sent = reached.length;
-    assert.equal((await compute(token, { sign: { credential: 'openai', message: 'aGk' } })).status, 404);
-    assert.equal((await compute(token, { verify: { credential: 'openai', message: 'aGk', signature: 'x' } })).status, 404);
+    proxyRefused(await compute(token, { sign: { credential: 'openai', message: 'aGk' } }), 404);
+    proxyRefused(await compute(token, { verify: { credential: 'openai', message: 'aGk', signature: 'x' } }), 404);
     assert.deepEqual([uses(), reached.length], [1, sent], 'the route kept: refused with no use, nothing sent');
   });
   // An isolate that keeps nothing: decided on the newest version.
@@ -985,8 +991,36 @@ test("a message longer than the decided item takes is refused before its values 
     assert.equal(uses(), 3);
     const refused = await verify('x'.repeat(20));
     assert.deepEqual([refused.status, refused.body.reason], [413, 'too_large'], JSON.stringify(refused.body));
+    // The fresh copy's refusal, thrown before any use, in the proxy's shape too.
+    proxyRefused(refused, 413);
     assert.equal(uses(), 3);
   });
+});
+
+test("a copy past cacheSeconds refuses nothing: the use decides, and a private key's sign logs its message's SHA-256, hashed once the vault decided (Fable's review of #480)", ON_015, async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  // Plain keys, so that the app writes the credential.use entry this test reads (a secret's use is the vault's slim row, R53).
+  await root.secrets.set('market/dev', {
+    STAMP_PEM: { value: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), sensitivity: 'plain' },
+    STAMP_SECRET: { value: 'whsec-0123456789abcdef', sensitivity: 'plain' },
+  });
+  // An isolate that keeps nothing: every copy it holds is past cacheSeconds the moment it is made.
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ stamp: { kind: 'verifier', name: 'stamp', hmac: { key: 'STAMP_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT } });
+  const token = await handle();
+  const message = Buffer.from('transfer 10');
+  await countingUses(async (uses) => {
+    // The verify brings this isolate a copy of the verifier, which would refuse a sign were it fresh.
+    assert.deepEqual((await compute(token, { verify: { credential: 'stamp', message: message.toString('base64url'), signature: '0'.repeat(64) } })).body, { valid: false });
+    await save({ stamp: { kind: 'signer', name: 'stamp', signer: { kind: 'private-key', key: 'STAMP_PEM' }, limit: NO_LIMIT } });
+    // Stale, the copy refuses nothing: the use decides on the signer, which signs.
+    const signed = await compute(token, { sign: { credential: 'stamp', message: message.toString('base64url') } });
+    assert.equal(signed.status, 200, JSON.stringify(signed.body));
+    assert.ok(verifyWith(null, message, publicKey, Buffer.from(signed.body.signature as string, 'base64url')));
+    assert.equal(uses(), 2);
+  });
+  const signs = (await entries('credential.use')).filter((entry) => entry.metadata.ui === true && entry.metadata.sign !== undefined).map((entry) => entry.metadata.sign);
+  assert.deepEqual(signs, [{ sha256: createHash('sha256').update(message).digest('hex') }]);
 });
 
 test("a presign of a route saved in the UI: built and checked again on the decided item, signed with its pair, its entry logging the decided host; a copy that admitted what the decided item refuses is 503 moved (C2b2)", ON_015, async () => {
