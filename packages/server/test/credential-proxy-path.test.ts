@@ -15,13 +15,14 @@ import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMc
 import { auditLog } from './db/tables.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
-import { credentialProxy, header, path, prefix, sigv4, type Credential, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
+import { credentialProxy, header, path, prefix, query, sigv4, type Credential, type CredentialProxyOptions } from '../src/plugins/credential-proxy.ts';
 
 /** A bot token as BotFather writes one: the bot's id, a colon, 35 characters. */
 const TOKEN = '123456789:AAEhBP0av28dGcj4Xqp-5Yv_LxQz0123456';
 const AIOGRAM = '987654321:AAFzzBP0av28dGcj4Xqp-5Yv_LxQz0654321';
 const TENANT = 'tenant-0123456789abcdef';
 const ACCOUNT = 'acct_1Plain0123456';
+const ESCAPED = '%41%42%43%44%45%46%47%48';
 
 let upstream: Server;
 let upstreamUrl: string;
@@ -53,6 +54,11 @@ before(async () => {
       }
       // An absolute redirect to the path as it came, where the value is the upstream's own host and port (review r3 of #483).
       else if (url.endsWith('/loop')) response.writeHead(302, { location: `${upstreamUrl}${url.replace(/loop$/, 'getMe')}` }).end();
+      // A query rule's value quoted in a redirect's query as it is, `%41%42…`, which `searchParams` would write `AB…` (review r4 of #483).
+      else if (url.includes('/keyed/echoquery')) {
+        const sent = new URL(url, upstreamUrl).searchParams.get('api_key')!;
+        response.writeHead(302, { location: `/keyed/getMe?echo=${sent}&api_key=${sent}&keep=%7e&api_key=again` }).end();
+      }
       // An error page that quotes the request, as a framework's 404 may: as it came, and decoded.
       else if (url.endsWith('/echo')) response.writeHead(404, { 'content-type': 'text/plain', 'x-path': url }).end(`no route for ${url} (${decodeURIComponent(url)})`);
       else if (url.includes('/file/')) response.writeHead(200, { 'content-type': 'image/jpeg' }).end(Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
@@ -86,6 +92,8 @@ function options(): CredentialProxyOptions {
       // A plain key that is the upstream's own authority, `127.0.0.1:<port>`, in a redirect's host as in its path.
       host: { upstream: `${upstreamUrl}/host`, inject: [header('x-api-key', '{TENANT_KEY}'), path('{AUTHORITY}')] },
       // A template whose text and a value make a segment that goes as none: `..` and `.` is `...`.
+      // A query rule whose value is percent-escapes, as written: `%41` is three characters of the key, not `A`.
+      keyed: { upstream: `${upstreamUrl}/keyed`, inject: query('api_key', '{ESCAPED_KEY}') },
       dots: { upstream: `${upstreamUrl}/dots`, inject: path('..{BOT_VALUE}'), allow: [{ methods: ['GET'], path: '/*/getMe' }] },
     },
     insecureUpstreams: true,
@@ -100,7 +108,7 @@ useMcp(async () => {
   await root.members.add(`user:${DEV}`);
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
+  await root.secrets.set('market/dev', { TELEGRAM_BOT_TOKEN: { value: TOKEN, sensitivity: 'sensitive' }, AIOGRAM_TOKEN: AIOGRAM, BOT_VALUE: 'a+b=c', TENANT_KEY: TENANT, ESCAPED_KEY: { value: ESCAPED, sensitivity: 'sensitive' }, ACCOUNT: { value: ACCOUNT, sensitivity: 'plain' }, AUTHORITY: { value: new URL(upstreamUrl).host, sensitivity: 'plain' } });
   await root.access.set(`user:${DEV}`, { market: 'developer' });
 });
 
@@ -273,6 +281,17 @@ test("a redirect's host is never swapped: only the path's segments get the app's
   assert.equal(reached.at(-1)!.url, `/host/${host}/loop`);
   assert.equal(moved.status, 302, await moved.clone().text());
   assert.equal(moved.headers.get('location'), `${ORIGIN}/use/market/dev/host/coffre/getMe`);
+});
+
+test("a redirect's query keeps the bytes the upstream wrote: a key echoed there as it is gets masked, never decoded first", async () => {
+  const { handle } = await run();
+  const moved = await route(`/use/keyed/echoquery?api_key=${handle}`);
+  assert.equal(moved.status, 302, await moved.clone().text());
+  assert.equal(reached.at(-1)!.url, `/keyed/echoquery?api_key=${encodeURIComponent(ESCAPED)}`);
+  const location = moved.headers.get('location')!;
+  for (const form of [ESCAPED, 'ABCDEFGH', encodeURIComponent(ESCAPED)]) assert.ok(!location.includes(form), location);
+  // The rule's parameter the app's placeholder, once, where the upstream first put it; every other pair as it was written.
+  assert.match(location, new RegExp(`^${ORIGIN}/use/market/dev/keyed/getMe\\?echo=[^&]*&api_key=${handle}&keep=%7e$`));
 });
 
 test("the stable URL finds the handle in the segment under each credential's own upstream", async () => {

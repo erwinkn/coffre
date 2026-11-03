@@ -2712,10 +2712,8 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
       // The proxy's URL for it, a path rule's segment and a query rule's parameter, kept or not, the app's placeholder, for
       // it to follow and be let in.
       const path = swap === null ? to.pathname.slice(under.length) : swappedBack(to.pathname.slice(under.length), swap);
-      const moved = new URL(`${out.proxied}${path}${to.search}`);
-      for (const [name, value] of out.back) moved.searchParams.set(name, value);
-      // Redacted again as the URL it now is, which no value reached through the steps above: should one have, it is masked.
-      at = redact.whole(moved.href);
+      // Redacted as the bytes the upstream wrote, which neither swap re-encodes: should a value be there, it is masked.
+      at = redact.whole(`${out.proxied}${path}${queryBack(to.search, out.back)}`);
     } else if (upstream.status >= 300 && upstream.status < 400) {
       await upstream.body?.cancel();
       // Where to is the upstream's to say, and may hold anything: the refusal names only the credential.
@@ -2734,6 +2732,29 @@ async function send(request: Request, credential: Resolved, out: Sending): Promi
     return failure(400, refused);
   }
   return redacted(upstream, redact, at);
+}
+
+/**
+ * A redirect's query with each query rule's parameter the app's placeholder, in place of the first it holds, the others
+ * dropped, or at its end, as `searchParams.set` would, and every other pair the bytes the upstream wrote. Never through
+ * `searchParams`, which writes every pair again, decoded and encoded its own way (review r4 of #483): `echo=%41%42…`,
+ * a key's value as it is, which the redactor masks, would be `echo=AB…`, which it does not know.
+ */
+function queryBack(search: string, back: readonly [string, string][]): string {
+  if (back.length === 0) return search;
+  const pair = (name: string, value: string) => new URLSearchParams([[name, value]]).toString();
+  const wanted = new Map(back);
+  const done = new Set<string>();
+  const pairs = search.length > 1 ? search.slice(1).split('&') : [];
+  const kept = pairs.flatMap((written) => {
+    const name = [...new URLSearchParams(written).keys()][0];
+    if (name === undefined || !wanted.has(name)) return [written];
+    if (done.has(name)) return [];
+    done.add(name);
+    return [pair(name, wanted.get(name)!)];
+  });
+  for (const [name, value] of wanted) if (!done.has(name)) kept.push(pair(name, value));
+  return `?${kept.join('&')}`;
 }
 
 /**

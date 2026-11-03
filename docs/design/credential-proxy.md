@@ -1041,7 +1041,10 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   Only the path's segments: swapped in the text before it is read,
   `bot123456789%3AAAE…/getMe` would become the scheme `bot123456789:`,
   and a value that is the upstream's own `host:port` would replace its
-  authority.
+  authority. A `query()` rule's parameter gets the app's placeholder the
+  same way, every other pair of the query left as the upstream wrote it:
+  written again through `searchParams`, `echo=%41%42…`, a key that is
+  those escapes, would be `echo=AB…`, which no redaction names.
   The value anywhere else in it, or in an answer's headers or text body,
   is redacted as any value is (section 4), its encoded form and the whole
   segment included; and a `Location` that still holds it once decoded,
