@@ -98,19 +98,34 @@ export async function weighInTurn(url: string, call: HotCall, calls = EARLY_CALL
   }
 }
 
+/** A key's name no world of the matrices makes. */
+export const NEVER_MADE = 'NEVER_MADE_BY_ANY_WORLD';
+
 /**
- * Where the keys' refusals, each weighed in turn in a session of its own (`weighInTurn`), fetched blocks of the key's
- * relations apart at the same call: one line a call, each key's blocks, and what they are made of between the fewest
- * and the most.
+ * A named call's twin: the same request, of a key its world never made (`p_key`, the 19th argument). It reads all the
+ * world's own rows the call does, and no key's.
  */
-export function turnsApart(read: readonly { key: string; turns: readonly Weighed[] }[]): string[] {
-  const calls = Math.max(0, ...read.map((r) => r.turns.length));
-  return Array.from({ length: calls }, (_, n) => n).flatMap((n) => {
-    const at = read.flatMap((r) => (r.turns[n] === undefined ? [] : [{ key: r.key, weighed: r.turns[n]! }]));
-    if (new Set(at.map((r) => r.weighed.keyBlocks)).size <= 1) return [];
-    const fewest = at.reduce((a, r) => (r.weighed.keyBlocks < a.weighed.keyBlocks ? r : a));
-    const most = at.reduce((a, r) => (r.weighed.keyBlocks > a.weighed.keyBlocks ? r : a));
-    return [`call ${n + 1} of a new session, blocks of the key's tables ${at.map((r) => `${r.key} ${r.weighed.keyBlocks}`).join(', ')}; blocks apart (${fewest.key}/${most.key}): ${blocksApart(fewest.weighed.blocks, most.weighed.blocks).join(', ')}`];
+export function twinOf<T extends HotCall>(call: T): T {
+  if (typeof call.args[18] !== 'string') throw new Error('a named call names its key, the 19th argument');
+  const args = [...call.args];
+  args[18] = NEVER_MADE;
+  return { ...call, args } as T;
+}
+
+/**
+ * Where a key's refusal, weighed in turn in a session of its own (`weighInTurn`), fetched blocks of the key's relations
+ * apart from its twin's (`twinOf`, weighed so too) at the same call: one line a call, both counts and what they are made
+ * of. Held to its own world's twin, not to another key's world: a session's first call plans and runs each form once
+ * for no key (0063's dry run, T131), whose probe of the caller's own row of the cap's (`log_bulk`, by principal) falls
+ * where that world's rows put it, a block more or less from one world to another (CI read 9 beside 8 for a key held
+ * once, in one row of 144), the same for every key the caller names.
+ */
+export function turnsApart(key: string, asked: readonly Weighed[], twin: readonly Weighed[]): string[] {
+  return Array.from({ length: Math.max(asked.length, twin.length) }, (_, n) => n).flatMap((n) => {
+    const [a, t] = [asked[n], twin[n]];
+    if (a === undefined || t === undefined) return [`call ${n + 1} of a new session, ${key} weighed ${a === undefined ? 'not' : 'but not its twin'}`];
+    if (a.keyBlocks === t.keyBlocks) return [];
+    return [`call ${n + 1} of a new session, ${key}: blocks of the key's tables ${a.keyBlocks} beside ${t.keyBlocks} for a key its world never made; blocks apart (twin/${key}): ${blocksApart(t.blocks, a.blocks).join(', ')}`];
   });
 }
 

@@ -189,8 +189,15 @@ its own database did, and holds it to every other check
   - At each of a new session's first seven calls (`weighInTurn`), at the
     server's own settings: the dry run, the four calls planned for their
     own values, the one that makes the plan for any values, and the first
-    on it. Each key is weighed in a session of its own, against every
-    other key at the same call.
+    on it. Each key's refusal is weighed in a session of its own, and so
+    is its twin, the same request for a key its world never made; the
+    two must fetch as many blocks of the key's tables at every call.
+    Each key of a matrix row lives in a world of its own, and the dry
+    run's probe of the caller's own `log_bulk` rows lands where that
+    world's rows put it: CI once read 9 blocks for a key held before
+    against 8 for every other world, at call 1 only. The same caller
+    naming any key reads the same, so the check holds each key to its
+    own world's twin, not to the other worlds.
 
   These are the weighing's own session settings, never a login's or a
   function's.

@@ -34,7 +34,7 @@ import { rowsOf } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { blocksApart, weigh, weighingSession, WORLD_TABLES, type Weighed } from '../../../scripts/matrix-weigh.ts';
+import { blocksApart, twinOf, weigh, weighingSession, WORLD_TABLES, type Weighed } from '../../../scripts/matrix-weigh.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { checkPlugins, pluginRoute } from '../src/plugins.ts';
@@ -193,20 +193,6 @@ async function relay(at: string): Promise<{
 
 /** A statement as a Bind sent it: the text it was prepared from, and its arguments, `$1` first (text, bytes or null). */
 type HotCall = { query: string; args: (string | Buffer | null)[] };
-
-/** A key's name no world of the matrix makes. */
-const NEVER_MADE = 'NEVER_MADE_BY_ANY_WORLD';
-
-/**
- * A named call's twin: the same request, of a key its world never made (`p_key`, the 19th argument). It reads all the
- * world's own rows the call does, and no key's.
- */
-function twinOf(call: HotCall): HotCall {
-  if (typeof call.args[18] !== 'string') throw new Error('a named call names its key, the 19th argument');
-  const args = [...call.args];
-  args[18] = NEVER_MADE;
-  return { query: call.query, args };
-}
 
 /** A Bind message's statement, by name, and its arguments: text as text, binary as its bytes, null as null. */
 function bindOf(body: Buffer): { statement: string; args: (string | Buffer | null)[] } {

@@ -227,13 +227,11 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
       const blocks = new Set(refused.flatMap((r) => (r.keyBlocks === null ? [] : [r.keyBlocks])));
       if (blocks.size > 1) differing.push(`${label}: blocks of the key's tables ${refused.map((r) => `${r.key} ${r.keyBlocks}`).join(', ')}`);
       // And at each of a new session's first calls, at the server's planner settings, before its plan cache settles:
-      // as many for every key, at the same call (T207, Sol's review r2).
-      const turns = [];
+      // as many as its world's twin, of a key never made, at the same call (T207, Sol's review r2; `turnsApart`).
       for (const r of refused) {
         const read = await weighedInTurn(r.sent);
-        if (read !== null) turns.push({ key: r.key, turns: read });
+        if (read !== null) for (const line of turnsApart(r.key, read.asked, read.twin)) differing.push(`${label}: ${line}`);
       }
-      for (const line of turnsApart(turns)) differing.push(`${label}: ${line}`);
     }
   }
   assert.deepEqual(differing, []);
