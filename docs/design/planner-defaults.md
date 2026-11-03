@@ -192,12 +192,16 @@ its own database did, and holds it to every other check
     on it. Each key's refusal is weighed in a session of its own, and so
     is its twin, the same request for a key its world never made; the
     two must fetch as many blocks of the key's tables at every call.
-    Each key of a matrix row lives in a world of its own, and the dry
-    run's probe of the caller's own `log_bulk` rows lands where that
-    world's rows put it: CI once read 9 blocks for a key held before
-    against 8 for every other world, at call 1 only. The same caller
-    naming any key reads the same, so the check holds each key to its
-    own world's twin, not to the other worlds. The twin changes only the
+    Each key of a matrix row lives in a world of its own, whose rows sit
+    where its writes put them, so the check holds each key to its own
+    world's twin, not to the other worlds. Before them, one call of the
+    control below, unweighed, in a session of its own: the first session
+    to plan after a batch's rolled-back writes read 1 or 2 more `log_bulk`
+    blocks at its first call than every session after it, the same request
+    asked again included (75 beside 74 for held, a batch's first key, in
+    three runs out of three; 74 again when it was asked after its
+    controls). That call carries nothing of the key, so it cannot hide a
+    read of the key's, which every weighing would show. The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so
     each refusal is also held to a second control (`absentOf`), the twin

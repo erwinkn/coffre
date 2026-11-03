@@ -313,10 +313,16 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
 /**
  * What `call` reads at each of a new session's first calls, at the server's planner settings (`weighInTurn`), and what
  * its controls read at each, each in a new session of its own: its twin, of a key its world never made (`twinOf`), and
- * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call.
+ * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call. After one call
+ * unweighed, of that last control, in a session of its own: the first session to plan after a batch's rolled-back
+ * writes (its standing cells', weighed) read 1 or 2 more blocks of `log_bulk` at its first call than any after it, the
+ * same request again included (T207 r5: held, a batch's first key, 75 beside 74, then 74 asked again after its
+ * controls). That call carries nothing of the key, so it settles the pages for every request alike and hides no read of
+ * a key's, which every weighing of the request would show.
  */
 export async function weighedInTurn(call: HotCall | null): Promise<{ asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null> {
   if (ENGINE !== 'postgres' || call === null) return null;
+  await weighInTurn(HOT_URL, absentOf(call), 1);
   return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, twinOf(call)), absent: await weighInTurn(HOT_URL, absentOf(call)) };
 }
 

@@ -130,10 +130,9 @@ export function absentOf<T extends HotCall>(call: T): T {
  * Where a key's refusal, weighed in turn in a session of its own (`weighInTurn`), fetched blocks of the key's relations
  * apart from a control's, weighed so too, at the same call: its twin, of a key never made (`twinOf`), and its twin with
  * nothing of the key the isolate kept (`absentOf`). One line a call and control, both counts and what they are made of.
- * Held to its own world's controls, not to another key's world: a session's first call plans and runs each form once for
- * no key (0063's dry run, T131), whose probe of the caller's own row of the cap's (`log_bulk`, by principal) falls where
- * that world's rows put it, a block more or less from one world to another (CI read 9 beside 8 for a key held once, in
- * one row of 144), the same for every key the caller names.
+ * Held to its own world's controls, not to another key's world: each cell is a world of its own, whose rows sit where
+ * its writes put them, a block more or less of the caller's own from one world to another, the same for every key the
+ * caller names. The pages a batch's rolled-back writes left are settled before (`weighedInTurn`, T207 r5).
  */
 export function turnsApart(key: string, asked: readonly Weighed[], controls: { twin: readonly Weighed[]; absent: readonly Weighed[] }): string[] {
   return (['twin', 'absent'] as const).flatMap((of) => {
