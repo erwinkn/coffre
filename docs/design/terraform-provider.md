@@ -70,7 +70,13 @@ configuration instead of storing the value.
 | `value_wo` | required, write-only, sensitive | The value. Never stored, never shown |
 | `value_wo_version` | required, string | Any string. When it changes, the next apply writes `value_wo` as a new version |
 | `on_destroy` | optional, default `keep` | `keep` or `archive`: what destroying the resource does in coffre (section 6) |
-| `version` | computed | The version number coffre gave the value Terraform last wrote |
+| `version` | computed | The key's current version number in coffre, as the last refresh or write saw it |
+| `version_id` | computed | That version's ID, which an update sends as `replaces` (section 5) |
+
+`value_wo` is sent to coffre on create and when `value_wo_version`
+changes, and at no other time: Terraform's convention for write-only
+arguments, and the one rule that keeps two destinations of one value in
+step (section 7).
 
 The resource's ID is `infra/prod/SCW_BACKUP_SECRET_KEY`, which `terraform
 import` takes as well.
@@ -123,12 +129,25 @@ the platform's variables, as the CLI does in `packages/cli/src/workload.ts`)
 and trades it at `POST /api/auth/oidc` for a five-minute `coffre_svc_`
 credential. A trust binding on the service account decides which workflow,
 branch and GitHub environment may do this ([ci.md](../ci.md#without-a-stored-token)).
-An apply can run longer than five minutes. The provider then fetches a
-fresh ID token and trades it again, at most once per credential, when coffre
-answers 401 on an expired one. With `id_token`, there is no second token
-to fetch, and an ID token is spent once: such an apply has five minutes,
-and a job that runs `terraform plan` and `terraform apply` as two commands
-declares two ID tokens, one for each (GitLab's `id_tokens:` takes several).
+Terraform starts and configures the provider once per phase, so a single
+`terraform apply` (or `destroy`) configures it twice, for its plan and for
+its apply, and the provider exchanges a fresh ID token each time. An apply
+can also run longer than five minutes: the provider then fetches another
+ID token and trades it again, at most once per credential, when coffre
+answers 401 on an expired one.
+
+**With `id_token`, one token serves one phase.** Coffre spends an ID token
+on its first exchange and refuses it after as `replayed`
+(`packages/server/src/api/workloads.ts`), and the provider has no way to
+fetch another. So this mode is for saved plans: `terraform plan -out=tfplan`
+and `terraform apply tfplan` as two commands, each given its own token
+(GitLab's `id_tokens:` declares several), each phase within five minutes.
+A combined `terraform apply` fails at its apply phase, and the provider
+says why: "this ID token was spent by the plan phase of this run; plan
+with -out and apply the saved plan with a fresh token". A job that wants a
+combined apply trades its ID token itself (`POST /api/auth/oidc`) and passes
+the five-minute `coffre_svc_` credential through `token`, from a variable,
+never a file: nothing outlives the job.
 
 **A bearer token** is `coffre_svc_…` (a service token, 1 to 366 days) or
 `coffre_pat_…` (a person's token, at most 7 days, scope required). A
@@ -162,8 +181,9 @@ token.
 | When | Call | Right needed |
 |---|---|---|
 | Sign in (OIDC) | `POST /api/auth/oidc` `{ service, token }` | a binding that matches |
-| Refresh, and before each create or update | `GET /api/secrets/:project/:environment` | `secret.use` or `secret.read` |
-| Create, update | `PATCH /api/secrets/:project/:environment` `{ KEY: { value, sensitivity, replaces? } }` | `secret.write` |
+| Refresh, and before each create | `GET /api/secrets/:project/:environment` | `secret.use` or `secret.read` |
+| Create, write a new version | `PATCH /api/secrets/:project/:environment` `{ KEY: { value, sensitivity, replaces? } }` | `secret.write` |
+| Make the key stricter, with no new value | `PATCH /api/secrets/:project/:environment` `{ KEY: { sensitivity } }` | `secret.write` |
 | Destroy with `on_destroy = "archive"` | `PATCH /api/secrets/:project/:environment/:key` `{ archived: true }` | `secret.archive` |
 
 No new server endpoint. None of these returns a secret value. The list
@@ -217,9 +237,10 @@ version reaches the app with no copy.
 **Writing `sensitive` takes writing alone.** Typing a value at any nature,
 and making a key stricter, need only `secret.write` ([roles.md](roles.md#8-rules-that-hold-the-policy)):
 what is written is what the writer has seen. Making a key looser, sensitive
-to secret, writes the value again, which `value_wo` provides at every
-apply. The provider never asks coffre to loosen a value in place: that is
-an Owner's act (R30), which no service credential can perform.
+to secret, needs the value written again, so the plan requires a changed
+`value_wo_version` with it (section 5). The provider never asks coffre to
+loosen a value in place: that is an Owner's act (R30), which no service
+credential can perform.
 
 **Rejected: key-prefix grants.** A credential scoped to some keys of an
 environment would let Terraform share `market/prod` with people. It is a new
@@ -258,9 +279,22 @@ The plan reads:
 
 **Every write is a new version.** Coffre keeps the old ones, so a bad
 rotation is one `coffre restore` away (by someone allowed to read what comes
-back). An apply that changes only `sensitivity` writes the value again too,
-a new version with the new nature, since `value_wo` is at hand: one path for
-every change.
+back).
+
+**What each change of the configuration plans:**
+
+| Change | The plan | The apply |
+|---|---|---|
+| `value_wo_version` (with or without `sensitivity`) | update, `version` known after apply | writes `value_wo` at the configured nature, `replaces` guarded |
+| `sensitivity` stricter only | update, `version` known after apply | marks the current value stricter (`{ sensitivity }`), a new version holding the same value; `value_wo` is not sent |
+| `sensitivity` looser only | an error: "making KEY looser writes its value again; change value_wo_version in the same apply" | |
+| `on_destroy` only | update, `version` and `version_id` kept | calls nothing |
+| none | nothing | |
+
+A plan modifier (`ModifyPlan`) makes `version` and `version_id` unknown in
+the first two rows and keeps them from state in the others
+(`UseStateForUnknown`). No other input schedules a write: not drift, not a
+refresh (below).
 
 **Rejected: a hash of the value in state.** The provider sees `value_wo` at
 plan time and could store its hash, so that a changed value is noticed
@@ -274,30 +308,38 @@ dry run refuses it without `secret.read` for that reason.
 
 ### Values written outside Terraform
 
-The provider remembers, in the resource's private state, the version it
-wrote. Each refresh compares it with coffre's current version for the key:
+The provider remembers, in the resource's private state, the version ID
+it last wrote. Each refresh (`Read`) lists the environment, stores coffre's
+current `version` and `version_id` in state, and compares:
 
-| Coffre has | The plan |
-|---|---|
-| the version Terraform wrote | nothing to do |
-| a later version, written by someone else | an update, with a warning naming who wrote it (`updatedBy`): this apply writes Terraform's value again |
-| no such key | create (the resource leaves state; Terraform makes it again) |
-| the key, archived | an error at plan: archived in coffre; unarchive it there, or remove the resource |
-| the key as a reference | an error at plan: a reference is not Terraform's to overwrite |
+| Coffre has | The refresh | The plan |
+|---|---|---|
+| the version Terraform wrote | nothing | nothing to do |
+| a later version, written by someone else | state takes the new `version`; a warning names who wrote it (`updatedBy`) | nothing to write; Terraform lists the change under "Objects have changed outside of Terraform" |
+| no such key | the resource leaves state | create |
+| the key, archived | an error: archived in coffre; unarchive it there, or remove the resource | |
+| the key as a reference | an error: a reference is not Terraform's to overwrite | |
 
-Terraform owns the keys it declares, so a newer value written by hand is
-drift, and the next apply puts Terraform's value back. That matches every
-other Terraform resource, and the warning names who wrote the newer version.
-If that value matters (a leaked key rotated by hand), rotate it in Terraform: a
-value rotated only in coffre leaves the old key live upstream anyway.
+**A version written by hand is reported, not overwritten.** The provider
+cannot tell whether that version holds the value its source has now (a
+person may have rotated a leaked key in coffre and upstream both), and
+writing `value_wo` again outside a version change would break section 7's
+rule. So the warning repeats on every plan until Terraform writes again,
+and says how: change `value_wo_version`. If the hand-written value matters,
+rotate in Terraform anyway: a value rotated only in coffre leaves the old
+key live upstream.
 
-**Writes never overwrite an unseen version.** An update sends `replaces`,
-the `versionId` the provider read just before writing, and stops on coffre's
-409 `stale` if anyone wrote in between. Telling coffre "create only if
-absent" is not possible today (`replaces` names an existing version), so a
-create checks that the key is absent first and a create racing another
-writer may still win. The other writer's version stays in the history, and
-the audit log shows both.
+**A write never overwrites a version its plan did not see.** An update
+sends `replaces` with the `version_id` of the prior state, which is what
+the plan's refresh read (and what a saved plan carries), not a fresh read
+at apply. If anyone wrote between the plan and the apply, coffre answers
+409 `stale` and the apply stops: "KEY was written after this plan; plan
+again". The new plan shows the drift warning, so whoever approves it sees
+the version it is about to replace. Telling coffre "create only if absent"
+is not possible today (`replaces` names an existing version), so a create
+checks that the key is absent at plan and again at apply, and a create
+racing another writer between that check and the write may still win. The
+other writer's version stays in the history, and the audit log shows both.
 
 **Adopting a key that exists.** A create refuses a key already live in
 coffre ("exists; import it"). `terraform import coffre_secret.backup_key
@@ -334,12 +376,17 @@ behind on purpose, to be archived once nothing uses it.
 2. Remove the resource and apply. The plan says `destroy`, and the apply
    archives the key.
 
-The principal also needs `secret.archive` on the place, which `contributor`
+The credential also needs `secret.archive` on the place, which `contributor`
 lacks: by default, step 2 fails with coffre's 403, before the provider
-removes the resource from state. So an archive takes a go in the
-configuration and a grant that someone gave on purpose (`maintainer` on
-`infra/prod`, for the apply that archives). Most teams will never grant it and will
-archive by hand, in coffre.
+removes the resource from state. No built-in role fits: `maintainer` holds
+`environment.manage`, which only a project takes, and coffre refuses it on
+`infra/prod` in a grant or a scope. So an archive takes a go in the
+configuration and a role someone made on purpose: an Owner makes
+`terraform-archiver` in the role editor (`secret.use`, `secret.write`,
+`secret.archive`), grants it on `infra/prod`, and issues a new credential
+scoped to it (a token, or a binding's `--scope`), since a credential made
+before never gains what the account gains after. Most teams will never do
+this and will archive by hand, in coffre.
 
 Coffre has no hard delete of one key: an archived key keeps its versions,
 out of every read, run and export, and comes back with `coffre unarchive`.
@@ -366,23 +413,34 @@ told otherwise. So each source needs a look:
 | Scaleway `scaleway_iam_api_key`, plain | yes, `secret_key` | avoid |
 | Scaleway `scaleway_iam_api_key` with `secret_id` | no: `secret_key` goes to a Scaleway Secret Manager secret as a new version | **recommended**, with ephemeral `scaleway_secret_version` feeding `value_wo` (section 1) |
 | Scaleway ephemeral `scaleway_iam_api_key` (experimental) | no, but each plan and apply makes a new key, deleted when the run ends unless `delete_on_close = false` (v2.90) | unusable for a key that must outlive the run |
-| A generated password, ephemeral `random_password` (hashicorp/random 3.7+) | no | feed the same value to the upstream's write-only argument (Scaleway's `scaleway_rdb_user.password_wo`) and to `value_wo`, with one shared version |
+| A generated password, ephemeral `random_password` (hashicorp/random 3.7+) | no | never fed to two destinations directly: it is a new value on every run. Store it once in Secret Manager (`scaleway_secret_version.data_wo`), and feed both destinations from there (below) |
 | Any resource with a plain `sensitive` output | yes | coffre_secret still removes the GitHub or Kubernetes copy, but state stays as sensitive as before |
 
 A database password, never in any state:
 
 ```hcl
+locals { app_db_rotation = 1 } # bump to rotate: one input for every version below
+
 ephemeral "random_password" "app_db" {
   length = 40
 }
 
-locals { app_db_rotation = "2026-11" } # bump to rotate both
+resource "scaleway_secret_version" "app_db" {
+  secret_id       = scaleway_secret.app_db.id
+  data_wo         = ephemeral.random_password.app_db.result
+  data_wo_version = local.app_db_rotation # written once per rotation; later runs' new randoms are ignored
+}
+
+ephemeral "scaleway_secret_version" "app_db" {
+  secret_id  = scaleway_secret.app_db.id # revision defaults to "latest"
+  depends_on = [scaleway_secret_version.app_db]
+}
 
 resource "scaleway_rdb_user" "app" {
   instance_id         = scaleway_rdb_instance.main.id
   name                = "app"
-  password_wo         = ephemeral.random_password.app_db.result
-  password_wo_version = 1 # Scaleway's is a number: bump it with local.app_db_rotation
+  password_wo         = base64decode(ephemeral.scaleway_secret_version.app_db.data)
+  password_wo_version = local.app_db_rotation
 }
 
 resource "coffre_secret" "app_db_password" {
@@ -390,31 +448,41 @@ resource "coffre_secret" "app_db_password" {
   environment      = "prod"
   key              = "APP_DB_PASSWORD"
   sensitivity      = "sensitive"
-  value_wo         = ephemeral.random_password.app_db.result
+  value_wo         = base64decode(ephemeral.scaleway_secret_version.app_db.data)
   value_wo_version = local.app_db_rotation
 }
 ```
 
-Both resources write in the same apply, from the same ephemeral value,
-so they cannot disagree. Bumping one version and not the other would: the
-example keeps them side by side for that reason.
+Why the detour through Secret Manager: each destination writes its value
+only when its own version changes, so feeding both from an ephemeral
+`random_password` directly would let them part. Say the apply that rotates
+writes the database user and then fails on coffre: the retry generates a
+new password, which coffre takes (its version still differs) and the
+database does not (its version already moved). With one stored value read
+by both, a retry writes the same value wherever it is still missing, and
+section 5's rules (no write on drift, a looser nature only with a new
+version) never send a value one destination lacks.
 
-With Scaleway's Secret Manager pattern, the key's secret lives in one more
-place, inside the same Scaleway account that made it. Delete that secret's
-versions once coffre has the value if that copy matters. On the first
-apply, the ephemeral `scaleway_secret_version` must open only after the
-key has written its version: section 1's `depends_on` orders it so, as
-Scaleway's own examples do. Whether the first plan also defers it, rather
-than failing on a secret with no version yet, is Terraform's behaviour and
-Infra's configuration, not this provider's; that first apply is where to
-check it (`-target=scaleway_iam_api_key.backup` first, if not). The
-secret's payload is base64, hence `base64decode`.
+**The source's copy stays.** Ephemeral `scaleway_secret_version` reads the
+latest version on every plan and apply, so it must stay readable while
+Terraform manages the destinations; deleting it fails the next run. That
+copy lives in the same Scaleway account that made the value, readable by
+whoever holds Secret Manager rights there, which is the same as for the
+API key in section 1. On the first apply, the ephemeral
+`scaleway_secret_version` must open only after the version is written:
+`depends_on` orders it so, as Scaleway's own examples do. Whether the
+first plan also defers it, rather than failing on a secret with no version
+yet, is Terraform's behaviour and Infra's configuration, not this
+provider's; that first apply is where to check it (`-target` on the
+version first, if not). The secret's payload is base64, hence
+`base64decode`.
 
 ## 8. The code, its release and its tests
 
 **A Go module in this repository, `terraform-provider/`**, on
-terraform-plugin-framework, the current SDK and the only one with write-only
-attributes. It lives beside the server it calls: a PR that changes a route
+terraform-plugin-framework, HashiCorp's current SDK (SDKv2 has write-only
+arguments too, but plan modification and private state are the
+framework's strengths, and section 5 leans on both). It lives beside the server it calls: a PR that changes a route
 it uses changes and tests the provider in the same PR, and its acceptance
 tests run against this checkout's coffre in CI. It talks to the HTTP API
 directly (four calls, a small client of its own). No `@coffre/*` package
@@ -441,33 +509,51 @@ mirror.
 
 **Tests, never against a live instance.**
 
-- Unit tests (`go test`): the plan logic of section 5's drift table, the
-  credential choice of section 3, `replaces` on update, the re-exchange on
-  401, and that no code path writes `value_wo` into state, a diagnostic or
+- Unit tests (`go test`): the plan logic of section 5's two tables, the
+  credential choice of section 3, `replaces` from the prior state, the
+  re-exchange on 401, the `replayed` error's message, and that no code path writes `value_wo` into state, a diagnostic or
   a log line.
 - Acceptance tests (`TF_ACC=1`, terraform-plugin-testing), against a local
   coffre that the test harness boots as `pnpm conformance:node` does: the
   Node example on SQLite in a temp directory, on ports of its own, with no
   shared Postgres. A seed made through the API: project `infra`,
   environments `prod` and `market`, a service account with `contributor`
-  on `infra/prod`, a scoped service token, and an OIDC binding with
-  uploaded keys whose ID tokens the test signs (the `id_token` path). The
-  GitHub path gets a fake `ACTIONS_ID_TOKEN_REQUEST_URL` from the same test.
-  Each runs on Terraform 1.11 and OpenTofu 1.11, and covers:
-  - create, update on a new `value_wo_version`, and a change of
-    `sensitivity`. After each step it reads the value back with an Owner's
-    session and checks it, and checks that neither the state file nor
-    `terraform show -json` of the saved plan contains the value;
-  - drift: a version written by hand is overwritten with a warning; a
-    deleted key is made again; an archived key fails the plan;
+  on `infra/prod` and `contributor` on `market/prod` too (more than any
+  credential the tests give it), service tokens and an OIDC binding all
+  scoped to `infra/prod=contributor`, with uploaded keys whose ID tokens
+  the test signs (the `id_token` path), and a `verifier` service account,
+  `viewer` on `infra/prod`, with a token an Owner of `infra` issued (R32),
+  which alone may read a sensitive value back. The GitHub path gets a
+  fake `ACTIONS_ID_TOKEN_REQUEST_URL` from the same test. Each runs on
+  Terraform 1.11 and OpenTofu 1.11, and covers:
+  - create, update on a new `value_wo_version`, a stricter `sensitivity`
+    (a mark, no value sent) and a looser one (refused at plan without a
+    version change). After each step the verifier reads the value back
+    and checks it; the Owner's session and Terraform's own credential are
+    refused the same read. Neither the state file nor `terraform show
+    -json` of the saved plan contains the value;
+  - the write rule: an `on_destroy`-only change and a refresh call no
+    `PATCH` (the fake records calls), and `version` stays;
+  - drift: a version written by hand gives a warning, no write, and the
+    following plan has no change; a version written between a saved plan
+    and its apply stops the apply with `stale`; a key gone from coffre is
+    made again; an archived key fails the plan;
+  - two destinations: section 7's configuration against a fake upstream
+    provider, with the apply failing after one destination; the retry
+    leaves both holding the same value;
   - destroy with `keep` (the key and its versions stay) and with
     `archive`, without `secret.archive` (403, the resource stays in state)
-    and with it (archived);
-  - scope: a write to `market/prod` is refused, and `terraform plan` makes
-    no write;
+    and with a credential scoped to a `terraform-archiver` role (archived);
+  - scope: a write to `market/prod`, which the account may write and the
+    credential may not, is refused for each credential, after the
+    account's grants widen, and after the GitHub path trades again;
+    `terraform plan` makes no write;
   - `terraform import`, then an apply that writes a new version;
-  - a credential expiring mid-apply: the GitHub path trades again; the
-    `id_token` path fails with an error that says why.
+  - phases: a combined `terraform apply` on the GitHub path trades twice
+    and succeeds; on the `id_token` path it fails at its apply phase with
+    the error of section 3, and a saved plan with a token per phase
+    succeeds;
+  - a credential expiring mid-apply: the GitHub path trades again.
 - CI: a job "Terraform provider" runs both on changes to
   `terraform-provider/`, to `packages/server/src/api/`, or to
   `packages/client/src/api.ts`, with Go and both Terraform binaries pinned by
@@ -479,19 +565,22 @@ mirror.
    `value_wo_version`. No data source, no ephemeral resource, nothing that
    reads a value.
 2. It signs in with coffre's existing credentials: GitHub OIDC
-   (`service`), another issuer's ID token (`id_token`), or a bearer token.
+   (`service`), another issuer's ID token (`id_token`, one per phase:
+   saved plans), or a bearer token.
    Scope is fixed when the credential is made. No new endpoint, no
    environment variable of its own.
 3. A Terraform principal is a service account with `contributor` on
    environments that hold only what Terraform writes. No key-prefix grants.
 4. `sensitivity` is required. Writing at any nature needs only
    `secret.write`. Loosening writes the value again, never in place.
-5. A changed `value_wo_version` writes a new version. Versions written by
-   others are drift, overwritten with a warning. Every update is guarded by
-   `replaces`.
+5. `value_wo` is sent only on create and on a changed `value_wo_version`.
+   A stricter nature is a mark; a looser one needs a new version. Versions
+   written by others are reported with a warning, never overwritten
+   unasked. Every update sends `replaces` with the version its plan saw.
+   A value with two destinations comes from one stored source.
 6. Destroy keeps the key (`on_destroy = "keep"`). Archiving takes
-   `on_destroy = "archive"` in a reviewed apply, and `secret.archive`,
-   which `contributor` lacks.
+   `on_destroy = "archive"` in a reviewed apply, and a credential made for
+   a custom role holding `secret.archive`, which `contributor` lacks.
 7. Code in `terraform-provider/`, its own versions, published from a
    mirror repository once Erwin says go. Acceptance tests boot a local
    coffre, on Terraform and OpenTofu.
