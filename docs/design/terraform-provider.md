@@ -183,10 +183,24 @@ token.
 | Sign in (OIDC) | `POST /api/auth/oidc` `{ service, token }` | a binding that matches |
 | Refresh, and before each create | `GET /api/secrets/:project/:environment` | `secret.use` or `secret.read` |
 | Create, write a new version | `PATCH /api/secrets/:project/:environment` `{ KEY: { value, sensitivity, replaces? } }` | `secret.write` |
-| Make the key stricter, with no new value | `PATCH /api/secrets/:project/:environment` `{ KEY: { sensitivity } }` | `secret.write` |
+| Make the key stricter, with no new value | `PATCH /api/secrets/:project/:environment` `{ KEY: { sensitivity, replaces } }` | `secret.write` |
 | Destroy with `on_destroy = "archive"` | `PATCH /api/secrets/:project/:environment/:key` `{ archived: true }` | `secret.archive` |
 
-No new server endpoint. None of these returns a secret value. The list
+No new server endpoint, and two small additions to the existing write:
+
+- **A mark takes `replaces`.** Today `{ sensitivity }` is a strict schema
+  (`marked` in `packages/server/src/api/routes.ts`) and marks whatever
+  version is current. It gains the same optional `replaces` a value write
+  has, so a sensitivity-only apply refuses with 409 `stale` when someone
+  wrote after its plan (section 5).
+- **The write says which version it made.** The response's outcome for a
+  key, `{ version, sensitivity }` (`SetOutcome` in
+  `packages/server/src/api/secrets.ts`), gains `versionId`. Without it the
+  provider would have to list the environment after writing, and a version
+  someone else committed in between would pass for its own (section 5).
+  It is metadata the list already shows; no value comes back.
+
+None of these calls returns a secret value. The list
 returns the values of `plain` keys, which anyone who can list the
 environment sees already: the provider drops them and never stores them.
 From the list it keeps, for its key, `version`, `versionId`, `updatedBy`,
@@ -286,7 +300,7 @@ back).
 | Change | The plan | The apply |
 |---|---|---|
 | `value_wo_version` (with or without `sensitivity`) | update, `version` known after apply | writes `value_wo` at the configured nature, `replaces` guarded |
-| `sensitivity` stricter only | update, `version` known after apply | marks the current value stricter (`{ sensitivity }`), a new version holding the same value; `value_wo` is not sent |
+| `sensitivity` stricter only | update, `version` known after apply | marks the current value stricter (`{ sensitivity, replaces }`), a new version holding the same value; `value_wo` is not sent |
 | `sensitivity` looser only | an error: "making KEY looser writes its value again; change value_wo_version in the same apply" | |
 | `on_destroy` only | update, `version` and `version_id` kept | calls nothing |
 | none | nothing | |
@@ -309,7 +323,10 @@ dry run refuses it without `secret.read` for that reason.
 ### Values written outside Terraform
 
 The provider remembers, in the resource's private state, the version ID
-it last wrote. Each refresh (`Read`) lists the environment, stores coffre's
+it last wrote, taken from the write's own response (`versionId`, section
+3), never from a list made after it: if Terraform writes A and someone
+writes B before that list, the list would record B as Terraform's and
+hide the drift. Each refresh (`Read`) lists the environment, stores coffre's
 current `version` and `version_id` in state, and compares:
 
 | Coffre has | The refresh | The plan |
@@ -329,8 +346,8 @@ and says how: change `value_wo_version`. If the hand-written value matters,
 rotate in Terraform anyway: a value rotated only in coffre leaves the old
 key live upstream.
 
-**A write never overwrites a version its plan did not see.** An update
-sends `replaces` with the `version_id` of the prior state, which is what
+**A write never overwrites a version its plan did not see.** An update,
+a value write or a mark alike, sends `replaces` with the `version_id` of the prior state, which is what
 the plan's refresh read (and what a saved plan carries), not a fresh read
 at apply. If anyone wrote between the plan and the apply, coffre answers
 409 `stale` and the apply stops: "KEY was written after this plan; plan
@@ -432,7 +449,8 @@ resource "scaleway_secret_version" "app_db" {
 }
 
 ephemeral "scaleway_secret_version" "app_db" {
-  secret_id  = scaleway_secret.app_db.id # revision defaults to "latest"
+  secret_id  = scaleway_secret.app_db.id
+  revision   = scaleway_secret_version.app_db.revision # the revision Terraform wrote, never "latest"
   depends_on = [scaleway_secret_version.app_db]
 }
 
@@ -463,8 +481,16 @@ by both, a retry writes the same value wherever it is still missing, and
 section 5's rules (no write on drift, a looser nature only with a new
 version) never send a value one destination lacks.
 
-**The source's copy stays.** Ephemeral `scaleway_secret_version` reads the
-latest version on every plan and apply, so it must stay readable while
+**Pin the revision.** Scaleway resolves `latest` afresh each time the
+ephemeral resource opens. Say the rotation writes the database, coffre
+fails, and someone adds a newer Secret Manager version before the retry:
+reading `latest`, the retry would hand coffre that newer password, which
+the database never got (its version already moved). Naming
+`scaleway_secret_version.app_db.revision` reads the value Terraform wrote,
+whatever came after it.
+
+**The source's copy stays.** Ephemeral `scaleway_secret_version` reads that
+revision on every plan and apply, so it must stay readable while
 Terraform manages the destinations; deleting it fails the next run. That
 copy lives in the same Scaleway account that made the value, readable by
 whoever holds Secret Manager rights there, which is the same as for the
@@ -516,10 +542,10 @@ mirror.
 - Acceptance tests (`TF_ACC=1`, terraform-plugin-testing), against a local
   coffre that the test harness boots as `pnpm conformance:node` does: the
   Node example on SQLite in a temp directory, on ports of its own, with no
-  shared Postgres. A seed made through the API: project `infra`,
-  environments `prod` and `market`, a service account with `contributor`
-  on `infra/prod` and `contributor` on `market/prod` too (more than any
-  credential the tests give it), service tokens and an OIDC binding all
+  shared Postgres. A seed made through the API: projects `infra` and
+  `market`, each with an environment `prod`, a service account with
+  `contributor` on `infra/prod` and `contributor` on `market/prod` too
+  (more than any credential the tests give it), service tokens and an OIDC binding all
   scoped to `infra/prod=contributor`, with uploaded keys whose ID tokens
   the test signs (the `id_token` path), and a `verifier` service account,
   `viewer` on `infra/prod`, with a token an Owner of `infra` issued (R32),
@@ -529,18 +555,23 @@ mirror.
   - create, update on a new `value_wo_version`, a stricter `sensitivity`
     (a mark, no value sent) and a looser one (refused at plan without a
     version change). After each step the verifier reads the value back
-    and checks it; the Owner's session and Terraform's own credential are
-    refused the same read. Neither the state file nor `terraform show
+    and checks it, and Terraform's own credential is refused the same
+    read. The Owner's session is refused it while the key is `sensitive`,
+    and reads it at `secret` and `plain`, as coffre's natures say. Neither the state file nor `terraform show
     -json` of the saved plan contains the value;
   - the write rule: an `on_destroy`-only change and a refresh call no
     `PATCH` (the fake records calls), and `version` stays;
   - drift: a version written by hand gives a warning, no write, and the
     following plan has no change; a version written between a saved plan
-    and its apply stops the apply with `stale`; a key gone from coffre is
-    made again; an archived key fails the plan;
+    and its apply stops the apply with `stale`, for a value write and for
+    a sensitivity-only mark alike; a version written right after
+    Terraform's own, before any list, still gives the warning on the next
+    plan (the receipt, not a list, names Terraform's version); a key gone
+    from coffre is made again; an archived key fails the plan;
   - two destinations: section 7's configuration against a fake upstream
     provider, with the apply failing after one destination; the retry
-    leaves both holding the same value;
+    leaves both holding the same value, also when a newer source version
+    was added between the failure and the retry (the pinned revision);
   - destroy with `keep` (the key and its versions stay) and with
     `archive`, without `secret.archive` (403, the resource stays in state)
     and with a credential scoped to a `terraform-archiver` role (archived);
@@ -568,7 +599,8 @@ mirror.
    (`service`), another issuer's ID token (`id_token`, one per phase:
    saved plans), or a bearer token.
    Scope is fixed when the credential is made. No new endpoint, no
-   environment variable of its own.
+   environment variable of its own; the existing write gains `replaces`
+   on a mark and returns each new version's `versionId`.
 3. A Terraform principal is a service account with `contributor` on
    environments that hold only what Terraform writes. No key-prefix grants.
 4. `sensitivity` is required. Writing at any nature needs only
@@ -577,7 +609,8 @@ mirror.
    A stricter nature is a mark; a looser one needs a new version. Versions
    written by others are reported with a warning, never overwritten
    unasked. Every update sends `replaces` with the version its plan saw.
-   A value with two destinations comes from one stored source.
+   A value with two destinations comes from one stored source, read at
+   the revision Terraform wrote.
 6. Destroy keeps the key (`on_destroy = "keep"`). Archiving takes
    `on_destroy = "archive"` in a reviewed apply, and a credential made for
    a custom role holding `secret.archive`, which `contributor` lacks.
