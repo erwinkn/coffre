@@ -321,6 +321,27 @@ test('a read through a place archived, then put back unarchived with the archive
   assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
 });
 
+// A key held in the forged place itself, read once so the vault keeps the answer: the kept answer does not outlive the
+// place's MAC, warm or fresh (T191, review r2).
+for (const how of ['put back after its archive, the archive\'s seal column made the old one', 'put back after its rename, the rename\'s seal column made the old one']) {
+  test(`a read of a key held in a place ${how} around the log is refused, warm and fresh, and reported as a MAC (T191)`, async () => {
+    const w = await world();
+    const id = randomUUID();
+    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.dev, key: 'DATABASE_URL' });
+    const secret = { projectId: w.project, environmentId: w.dev, secretId: id, version: 1, path: 'p/dev/DATABASE_URL' };
+    const wrapped = await w.vault.wrap({ principal: ROOT, caller: 'person', items: [{ secret, key: randomBytes(32).toString('base64') }] });
+    assert.ok(wrapped.ok);
+    const [item] = await storedVersions(db.owner, [{ secret, wrapped: wrapped.wrapped[0]! }]);
+    const read = (vault: LocalVault) => vault.unwrap({ principal: ADA, caller: 'person', purpose: 'reveal', items: [item!] });
+    assert.ok((await read(w.vault)).ok, 'a Developer of dev reads there');
+    await TAMPERS[how]!.tamper(w);
+    assert.equal((await read(w.vault)).ok, false);
+    const fresh = speaking(await openRawVault(db.vault, w.config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld }));
+    assert.equal((await read(fresh)).ok, false);
+    assert.ok((await placeReports()).includes('mac'), 'reported as the place\'s, a MAC');
+  });
+}
+
 test('unprotecting a place whose tombstone a writer set around the log is refused: the protection\'s end is its object\'s too (review r1)', async () => {
   const w = await world();
   const protect = (on: boolean) => w.vault.changePolicy({ actor: ROOT, caller: 'person', change: { kind: 'protect', projectId: w.project, environmentIds: [w.dev], protected: on } });
