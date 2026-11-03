@@ -17,6 +17,7 @@ import {
   insertIfAbsent,
   lock,
   heldWrites,
+  touchCredential,
   recipeRow,
   referenceRows,
   resolvePath,
@@ -703,6 +704,8 @@ export async function setSecrets(
   if (ctx.written !== undefined && stillSo === undefined) {
     const held = await heldWrite(ctx, place, patch, ctx.written, sticky);
     if (held !== null) return held;
+    // The credential's last use the front door left to the held write, which did not commit (Fable's review of #469).
+    if (ctx.written.touched !== null) await touchCredential(ctx.db, ctx.written.touched);
   }
   const environment = requireLive(place);
   const keysIn = Object.keys(patch);

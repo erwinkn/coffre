@@ -359,8 +359,8 @@ Request(p, r) == [p |-> p, n |-> next, live |-> Decide(p, r), replay |-> Decide(
 
 \* Who the request is by, as the app authenticated it: on the first try,
 \* from that try's read (the two-trip path's rows, AppChecks) or, the try
-\* not served, by the credential's own check just after (conservatively,
-\* here, at the read); on a later try, kept: each later try the vault
+\* not served, by the credential's own check just after (at WDecide, for a
+\* try the Worker refuses: Fable's review of #469); on a later try, kept: each later try the vault
 \* serves is checked to be the same credential (`Written.again`), and
 \* today's path, after one, goes on with the caller the first checked
 \* (review r2 of #469). Only the token's resolution is kept: the caller's
@@ -415,7 +415,13 @@ WRest(p) ==
 WDecide(p) ==
     /\ pc[p] = "w.decide"
     /\ IF ~Decide(p, l[p].read)
-         THEN /\ Goto(p, "w.today") /\ UNCHANGED l
+         \* A first try refused: `writeAhead` answers nothing, and the
+         \* credential's own check reads its row now (`authenticateRequest`):
+         \* ended, 401; else the caller it finds, which today's path takes.
+         THEN IF tries[p] = 1 /\ ~Value("cred")
+                THEN /\ Goto(p, "done") /\ UNCHANGED l
+                ELSE /\ Goto(p, "w.today")
+                     /\ l' = [l EXCEPT ![p].auth = Auth(p)]
        ELSE IF ~AppChecks(l[p].read)
          THEN /\ Goto(p, "done") /\ UNCHANGED l
          ELSE /\ l' = [l EXCEPT ![p].wrap = tries[p]] /\ Goto(p, "w.app")

@@ -155,7 +155,8 @@ takes today's.
    revocation, no tombstone). Today's `verify` also awaits an UPDATE of
    the credential's `last_used_at`, once every five minutes per
    credential: here it goes into the Sync below, left to `later`, so it
-   costs no round trip of its own. Only then it encrypts: the AAD binds `project|environment|key` by
+   costs no round trip of its own (a write that then goes down today's
+   path writes it on its own first, as `verify` would have). Only then it encrypts: the AAD binds `project|environment|key` by
    id (`envelope.ts`), which it learns from the answer. No round trip. Then
    it sends **one Sync**: BEGIN, 0.14's head `FOR UPDATE` (its first
    statement, and kept after PR 6 as a lock alone: see "Locks"), the
@@ -370,6 +371,9 @@ revoked or expired at the vault's clock (`ended`): 401, as today's path
 answers a credential it finds ended, there and then. Today's path reads
 the row again and holds it to its `auth_mac` alone, so a session revoked,
 then put back by a database writer between the two reads, would pass it.
+Both come before every other refusal, a missing environment's too: one
+the vault refused for its place first would go down today's path, which
+answers 404 for that session put back.
 
 Once a request has gone down today's path, nothing rechecks the caller's
 session: the path goes on with the caller the request authenticated (the

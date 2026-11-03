@@ -94,9 +94,9 @@ async function world({ fast = true }: { fast?: boolean } = {}) {
     return { token: signed.credential.token, id: signed.credential.id };
   };
   const ada = await session('ada', ADA);
-  /** Ada's PATCH of market/dev, as her browser sends it: its status and body. */
-  const write = async (patch: Record<string, unknown>, token = ada.token) => {
-    const response = await fetchApi(new Request(`${ORIGIN}/api/secrets/market/dev`, {
+  /** Ada's PATCH of market/dev (or `place`), as her browser sends it: its status and body. */
+  const write = async (patch: Record<string, unknown>, token = ada.token, place = 'market/dev') => {
+    const response = await fetchApi(new Request(`${ORIGIN}/api/secrets/${place}`, {
       method: 'PATCH',
       headers: { cookie: `${sessionCookieName(runtime.auth)}=${token}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
       body: JSON.stringify(patch),
@@ -164,6 +164,18 @@ test("Ada's grant taken between the vault's read and the hold: the hold fails, t
   // Served, held and failed; then refused, which today's path answers and logs.
   assert.deepEqual(served(w.answers), ['served', 'refused']);
   assert.deepEqual(await keyRow('API_KEY'), before);
+});
+
+test("a last use due, handed to a held write that then went down today's path: written there, not lost (Fable's review of #469)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const long = new Date(Date.now() - 60 * 60 * 1000);
+  await db.owner.update(credentials).set({ lastUsedAt: long }).where(eq(credentials.id, w.ada.id));
+  w.between(async () => void (await w.root.access.set(`user:${ADA}`, { 'market/dev': null })));
+  const wrote = await w.write({ API_KEY: 'fake-ada' });
+  assert.equal(wrote.status, 403, JSON.stringify(wrote.body));
+  assert.deepEqual(served(w.answers), ['served', 'refused']);
+  const [after] = await db.owner.select({ lastUsedAt: credentials.lastUsedAt }).from(credentials).where(eq(credentials.id, w.ada.id));
+  assert.ok(after!.lastUsedAt !== null && after!.lastUsedAt.getTime() > long.getTime(), String(after!.lastUsedAt));
 });
 
 test("Ada's session revoked between the read and the hold: nothing commits on it (WritingRevoke, end)", { skip: POSTGRES }, async () => {
@@ -322,6 +334,16 @@ test("Ada's session revoked and its row put back, live: the vault's read refuses
   // Refused on her credential's own log, and never asked down today's path, whose check of the row's MAC alone would take it.
   if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['forged']);
   assert.deepEqual(await keyRow('API_KEY'), before);
+});
+
+test("Ada's session revoked and its row put back, writing to an environment that is not there: 401 on her credential's own log, not today's 404 (Fable's review of #469)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, w.ada.id));
+  await w.signOut();
+  await db.owner.update(credentials).set(row!).where(eq(credentials.id, w.ada.id));
+  const wrote = await w.write({ API_KEY: 'fake-ada' }, w.ada.token, 'market/nope');
+  assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
+  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['forged']);
 });
 
 test("Ada's token hash copied onto the Owner's session: the vault reads the Owner, and the app's check of the row's MAC refuses it before anything commits (WritingTamper, sub; round 6)", { skip: ANY }, async () => {

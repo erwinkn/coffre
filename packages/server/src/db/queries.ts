@@ -102,6 +102,14 @@ export async function update<T extends Table>(
   return changedRows(await db.update(mine).set(set as never).where(matching(mine, match)));
 }
 
+/**
+ * A credential's last use, on its own and outside any transaction, as sign-in writes it when nothing carries it: a touch
+ * handed to a held write (`heldWrites`) whose write then went down today's path instead. Losing it never costs the request.
+ */
+export async function touchCredential(db: Queryable, touch: { credential: string; at: Date; ip: string | null }): Promise<void> {
+  await update(db, tablesOf(db).credentials, { id: touch.credential }, { lastUsedAt: touch.at, lastUsedIp: touch.ip }).catch(() => 0);
+}
+
 /** State changes authenticate the old row first and cannot overwrite a concurrent change. */
 export async function updateAuth<
   T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations'] | Tables['serviceBindings'] | Tables['oauthClients'] | Tables['mcpConnections'],

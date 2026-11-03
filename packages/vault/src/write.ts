@@ -178,15 +178,6 @@ export function decideWrite(
   if (!request.accepts.signin) return 'credential';
   if (credential.kind === 'browser' && (credential.identity === null || !request.accepts.issuers.includes(`${credential.identity.provider}:${credential.identity.issuerHash}`))) return 'credential';
   if (credential.identity?.revoked === true) return 'credential';
-  if (environment.row === null) return 'place';
-  const objects: { held: Held<Input>; ref: Ref }[] = [
-    { held: credential, ref: { kind: 'credential', id: credential.row.id } },
-    { held: principal, ref: { kind: 'principal', id: credential.row.principal } },
-    { held: roles, ref: { kind: 'roles', id: 'instance' } },
-    { held: policy, ref: { kind: 'policy', id: 'instance' } },
-    { held: environment, ref: { kind: 'environment', id: environment.row.id } },
-    ...read.keys.flatMap((key) => (key.id === null ? [] : [{ held: key.object as Held<Input>, ref: { kind: 'secret' as const, id: key.id } }])),
-  ];
   // Every newest change's MAC first: its seal is only what a writer could not have written once it holds (T190). Then
   // each row's seal: the vault's over the row, and the one its object's newest change left (StaleFirst).
   const holds = ({ held }: { held: Held<Input> }) => held.newest === null || changeHolds(keys.macs, held.newest);
@@ -198,11 +189,22 @@ export function decideWrite(
   };
   // The caller's own credential first, which no other path may then answer for: a session revoked and its row put back
   // live (WritingTamper's dbw), whose MAC the app's check would find whole, is refused here, never written on.
-  if (!holds(objects[0]!) || !stands(objects[0]!)) return 'forged';
+  const own: { held: Held<Input>; ref: Ref } = { held: credential, ref: { kind: 'credential', id: credential.row.id } };
+  if (!holds(own) || !stands(own)) return 'forged';
   // ... then revoked or expired, as the log has it: answered 401 here, as today's path answers it, and never sent down
   // that path, which reads the row again and would take one a database writer put back meanwhile (formal/Writing.tla,
-  // WToday). Before any other object's refusal, which goes down that path.
+  // WToday). Before any other object's refusal, which goes down that path: a missing place's too (Fable's review of
+  // #469: a session put back, writing to an environment that is not there, was answered 404 by today's path).
   if (credential.row.revoked || (credential.row.expiresAt !== null && request.at >= credential.row.expiresAt)) return 'ended';
+  if (environment.row === null) return 'place';
+  const objects: { held: Held<Input>; ref: Ref }[] = [
+    own,
+    { held: principal, ref: { kind: 'principal', id: credential.row.principal } },
+    { held: roles, ref: { kind: 'roles', id: 'instance' } },
+    { held: policy, ref: { kind: 'policy', id: 'instance' } },
+    { held: environment, ref: { kind: 'environment', id: environment.row.id } },
+    ...read.keys.flatMap((key) => (key.id === null ? [] : [{ held: key.object as Held<Input>, ref: { kind: 'secret' as const, id: key.id } }])),
+  ];
   // A key whose object this path does not rebuild (archived, a reference): today's path, before its seal is weighed.
   if (read.keys.some((key) => key.id !== null && key.object.row === null)) return 'shape';
   if (!objects.every(holds)) return 'tampered';
