@@ -4,6 +4,7 @@ import type { BindingColumns, ConnectionColumns, CredentialColumns, EndedBinding
 import type { Queryable, Transaction } from '@coffre/db';
 import { holdIssues, isMovedChange, isStaleChange, laterChanges, newestCommitted, type ChangeNumbers } from '@coffre/db/log';
 
+import { askedOnce, askOnce, type AskedOnce } from '../asked-once.ts';
 import { authMac } from '../auth-rows.ts';
 import type { BindingRow, CredentialRow, ObjectRead, SecretRead } from '../db/queries.ts';
 import type { Caller } from './caller.ts';
@@ -37,14 +38,22 @@ import { ApiError, vaultRefused } from './errors.ts';
 /** The actor of the app's own changes, made for no one's request: a key rotation's revokes, an unknown token signed out. */
 export const COFFRE_ACTOR = 'coffre';
 
-/** What the vault keeps of 0.15, as it says (`about()`): asked once per vault, then kept, settled. */
 type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean; admits: boolean };
 
-const keeping = new WeakMap<Vault, Kept>();
+/**
+ * What the vault keeps of 0.15, as it says (`about()`): asked once per vault (asked-once.ts), then kept, settled. An
+ * isolate's first call settles the vault's keys, its cutover and its bulk cap (vault.ts, `#settled`): its concurrent
+ * first requests wait for that one call's answer rather than each settling the vault again (T201).
+ */
+const keeping = new WeakMap<Vault, AskedOnce<Kept>>();
 
-async function about015(vault: Vault): Promise<Kept> {
-  const known = keeping.get(vault);
-  if (known !== undefined) return known;
+function about015(vault: Vault): Promise<Kept> {
+  let kept = keeping.get(vault);
+  if (kept === undefined) keeping.set(vault, (kept = askedOnce()));
+  return askOnce(kept, () => asked015(vault));
+}
+
+async function asked015(vault: Vault): Promise<Kept> {
   const about = await vault.about();
   const log = about.log === '0.15' && vault.prepare !== undefined && vault.waitSealed !== undefined;
   const kept = {
@@ -59,7 +68,6 @@ async function about015(vault: Vault): Promise<Kept> {
     writes: log && about.writes === true && vault.writeKeys !== undefined,
     admits: log && about.admits === true && vault.admitRead !== undefined && vault.admitWrite !== undefined,
   };
-  keeping.set(vault, kept);
   return kept;
 }
 

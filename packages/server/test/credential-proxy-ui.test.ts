@@ -348,6 +348,31 @@ test("the gate: a vault that cannot reserve code's names, or one on another rele
   assert.equal(reached.length, 1);
 });
 
+test("the gate: an isolate's concurrent first requests reserve code's names in one call, and each is served (T201)", ON_015, async () => {
+  await save({ openai: uiRoute('openai', '/openai') });
+  const token = await handle();
+  forgetProxyGates();
+  const vault = runtime.vault as unknown as { reserveProxy: Vault['reserveProxy'] };
+  const real = vault.reserveProxy;
+  let asked = 0;
+  try {
+    vault.reserveProxy = async (input) => {
+      asked += 1;
+      return real.call(vault, input);
+    };
+    const answers = await Promise.all(Array.from({ length: 20 }, () => route('/use/openai/models', as(token))));
+    // Each past the gate: served, or refused by the uses' in-flight cap, which 20 requests at once on the fixture's pool
+    // meet; none by the gate.
+    const reasons = await Promise.all(answers.map(async (answer) => answer.status === 200 ? 'served' : (await answer.json() as { reason?: string }).reason));
+    assert.deepEqual(reasons.filter((reason) => reason !== 'served' && reason !== 'busy'), []);
+    assert.ok(reasons.includes('served'));
+    assert.equal(asked, 1, 'one call for the isolate: the other first requests waited for its answer');
+    assert.equal(reached.length, reasons.filter((reason) => reason === 'served').length);
+  } finally {
+    vault.reserveProxy = real;
+  }
+});
+
 test("values go out within their window: a body that comes after the use's deadline is sent with none (review r1 of #467)", ON_015, async () => {
   deploy(proxyOf({ cacheSeconds: 0 }));
   await save({ openai: uiRoute('openai', '/openai') });

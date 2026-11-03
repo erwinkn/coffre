@@ -171,7 +171,11 @@ prepared state, config caches). Keep only settled values there, never a
 pending promise: a call that awaits another call's in-flight work is
 cancelled as hung on Cloudflare when that call goes, which local workerd
 does not reproduce. Concurrent first calls each do their own reads
-(`packages/vault/test/isolate.test.ts`).
+(`packages/vault/test/isolate.test.ts`). The app's own asks, once per
+isolate, of the vault's `about()` and the proxy's gate, are made by its
+first request alone: the others poll, on timers of their own, for that
+call's settled answer or failure, and take over a call not settled in 3 s
+(`packages/server/src/asked-once.ts`, T201).
 
 **One connection per call.** On Workers, each app request and each vault
 call has one Postgres client through Hyperdrive (`HyperdrivePool` in

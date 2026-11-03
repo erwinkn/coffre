@@ -1155,14 +1155,19 @@ they outlive the deployment that reserved them:
   The vault reads the reserved set (one row, section 2, checked against its
   newest change's seal, with no lock, as it reads `bulk.limit` at its
   start), and most isolates find their names there and go on. The isolate
-  keeps the settled answer, never the pending call (AGENTS.md, "What an
-  isolate keeps"), so its concurrent first requests each make the call: only
-  a name missing from the read, or a read that cannot say (unsealed, torn by a
+  keeps settled values only, never the pending call (AGENTS.md, "What an
+  isolate keeps"): its first request makes the call, and its other first
+  requests wait for that call's answer on timers of their own, polling, and
+  take over a call not settled in 3 s (`packages/server/src/asked-once.ts`,
+  T201). Each making its own call instead, a Node deployment's start at
+  1,000 requests a second queued 200 to 270 calls a thread on its vault's
+  pool of 8 for 2 s, and the uses held behind them burst into the in-flight
+  cap. Only a name missing from the read, or a read that cannot say (unsealed, torn by a
   change), decides under the head, which reports it and refuses: an empty ask,
   from a deployment of UI routes alone, as much as any. Under the head every time, as the first
   cut did, those calls queued one behind the other and every use behind them,
   up to 147 s for one use in #467's bench at 1,000 a second. The deploy that
-  adds a name sends them all there at once, each finding it missing: so only
+  adds a name sends every isolate's first call there at once, each finding it missing: so only
   one waits for the head, in a place in line of the code's own (the reads'
   places, `READ_HEAD_WAITERS`, are apart). The others, refused that place at
   once, pause (25 ms, doubled each time, up to 400 ms) and try again, and
