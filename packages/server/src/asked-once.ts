@@ -16,7 +16,8 @@ import { ApiError } from './api/errors.ts';
  *   an isolate's first request                      1 call
  *   the requests that come while it is under way    no call: each polls its attempt, from 1 ms to every 20 ms
  *   an attempt under way for TAKE_OVER_MS           the next poll makes the call again, and the others join that one
- *   a request that has waited WAIT_MS               503 `starting`, Retry-After 1, however many attempts it joined
+ *   a request that has waited WAIT_MS               503 `starting`, Retry-After 1, however many attempts it joined, the
+ *                                                   one it made by taking over included
  *   every request after                             no call
  *
  * Each concurrent first request making its own call instead, a Node deployment's start at 1,000 requests a second
@@ -48,8 +49,22 @@ export async function askOnce<T>(
   { takeOverMs = TAKE_OVER_MS, waitMs = WAIT_MS }: { takeOverMs?: number; waitMs?: number } = {},
 ): Promise<T> {
   if (kept.answer !== null) return kept.answer.value;
+  // The isolate's first request: its own call, as long as the call takes (the vault's calls have deadlines of their own).
+  if (kept.under === null) return begin(kept, ask).call;
+  // A request that joins one waits WAIT_MS in all. A call it takes over is an attempt of its own, which it waits on as
+  // it did on the one it joined: by polling, under the same deadline, so its own call hanging (Workers cancelled the
+  // request that made the attempt it took over, and then this call) holds it no longer, nor keeps from it an answer
+  // another attempt gives meanwhile (review r2 of T201).
   const deadline = Date.now() + waitMs;
-  for (let joined = kept.under, pause = POLL_MS; joined !== null; pause = Math.min(2 * pause, POLL_MAX_MS)) {
+  let mine: { attempt: Attempt<T>; settles: Promise<unknown> } | null = null;
+  for (let joined: Attempt<T> | null = kept.under, pause = POLL_MS; ; pause = Math.min(2 * pause, POLL_MAX_MS)) {
+    if (joined === null) {
+      // Nothing under way, no answer: this request makes the call, and waits on it as on any; past its deadline, none.
+      if (Date.now() >= deadline) throw starting();
+      const made = begin(kept, ask);
+      joined = made.attempt;
+      mine = { attempt: made.attempt, settles: made.call.catch(() => {}) };
+    }
     // The outcome of the attempt this request joined, once it has one, whatever another attempt answered since.
     const settled = joined.settled;
     if (settled !== null) {
@@ -65,21 +80,36 @@ export async function askOnce<T>(
       continue;
     }
     const now = Date.now();
-    if (now >= deadline) throw new ApiError('unavailable', 'coffre is still starting: ask again in a moment', 'starting', '1');
-    if (now - joined.since >= takeOverMs) break;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pause * (0.5 + Math.random()), deadline - now)));
+    if (now >= deadline) throw starting();
+    // Another's call not settled in time is taken over; its own, never: this request is alive, so its call is too.
+    if (joined !== mine?.attempt && now - joined.since >= takeOverMs) {
+      joined = null;
+      continue;
+    }
+    const polled = new Promise((resolve) => setTimeout(resolve, Math.min(pause * (0.5 + Math.random()), deadline - now)));
+    // Its own call, once it made one, wakes it as soon as it settles; another's only on its next poll.
+    await (mine === null ? polled : Promise.race([polled, mine.settles]));
   }
+}
+
+const starting = () => new ApiError('unavailable', 'coffre is still starting: ask again in a moment', 'starting', '1');
+
+/** A call made: its attempt, under way until the call settles, and the call. */
+function begin<T>(kept: AskedOnce<T>, ask: () => Promise<T>): { attempt: Attempt<T>; call: Promise<T> } {
   const attempt: Attempt<T> = { since: Date.now(), settled: null };
   kept.under = attempt;
-  try {
-    const value = await ask();
-    attempt.settled = { value };
-    kept.answer = { value };
-    return value;
-  } catch (error) {
-    attempt.settled = { error };
-    throw error;
-  } finally {
-    if (kept.under === attempt) kept.under = null;
-  }
+  const call = (async () => {
+    try {
+      const value = await ask();
+      attempt.settled = { value };
+      kept.answer = { value };
+      return value;
+    } catch (error) {
+      attempt.settled = { error };
+      throw error;
+    } finally {
+      if (kept.under === attempt) kept.under = null;
+    }
+  })();
+  return { attempt, call };
 }

@@ -1159,8 +1159,11 @@ they outlive the deployment that reserved them:
   isolate keeps"): its first request makes the call, and its other first
   requests join that call's attempt and wait for its outcome on timers of
   their own, polling, take over a call not settled in 3 s, and answer 503
-  `starting` to ask again once they have waited 6 s in all
-  (`packages/server/src/asked-once.ts`, T201). An outcome is its attempt's:
+  `starting` to ask again once they have waited 6 s in all, a call of
+  their own taken over included, which they poll as they did the one
+  they joined (`packages/server/src/asked-once.ts`, T201). The gate passes
+  that refusal on as it is: 503 `starting` when it waited on `about()`.
+  An outcome is its attempt's:
   a retry's followers never take the failure before it, nor a superseded
   call's late one. Each making its own call instead, a Node deployment's start at
   1,000 requests a second queued 200 to 270 calls a thread on its vault's

@@ -4,8 +4,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { Vault } from '@coffre/core/vault';
+
 import { ApiError } from '../src/api/errors.ts';
-import { askedOnce, askOnce } from '../src/asked-once.ts';
+import { keeps015 } from '../src/api/changes.ts';
+import { askedOnce, askOnce, WAIT_MS } from '../src/asked-once.ts';
+import type { ProxyCode } from '../src/proxy-code.ts';
+import { gateProxy } from '../src/proxy-gate.ts';
 
 const settles = <T>(ms: number, value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,9 +22,9 @@ function call<T>() {
   return { promise, resolve, reject };
 }
 const unasked = (): Promise<never> => assert.fail('a request that joined a call under way made one');
-/** Within `ms`, or the request waits still: on another call's pending work, or for ever. */
 /** How `answer` settles, without leaving its rejection unhandled while the test goes on. */
 const outcome = <T>(answer: Promise<T>) => answer.then((value) => ({ value }), (error: unknown) => ({ error }));
+/** Within `ms`, or the request waits still: on another call's pending work, or for ever. */
 const within = <T>(ms: number, answer: Promise<T>) =>
   Promise.race([answer, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`still waiting after ${ms} ms`)), ms).unref())]);
 
@@ -125,7 +130,31 @@ test("a retry that succeeds before the failed call's followers wake: they take t
   assert.equal(await askOnce(kept, unasked), 'up');
 });
 
-test('a request waits WAIT_MS in all, however many calls are taken over meanwhile: then 503, Retry-After 1, and it never makes the call', async () => {
+/** Mocked time (timers and the clock) moved on `ms` in steps of `step`, each step's settled work run before the next. */
+type Clock = { tick: (ms: number) => void };
+async function advance(clock: Clock, ms: number, step = 1) {
+  for (let moved = 0; moved < ms; moved += step) {
+    clock.tick(step);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+/** `answer`, and whether it has settled yet. */
+function watched<T>(answer: Promise<T>) {
+  const seen = { settled: null as { value: T } | { error: unknown } | null };
+  void answer.then((value) => (seen.settled = { value }), (error: unknown) => (seen.settled = { error }));
+  return seen;
+}
+/** Settled with asked-once's refusal: 503 `starting`, Retry-After 1. */
+function refusedStarting(seen: { settled: { value: unknown } | { error: unknown } | null }) {
+  const error = seen.settled !== null && 'error' in seen.settled ? seen.settled.error : null;
+  assert.ok(error instanceof ApiError, `refused: ${JSON.stringify(seen.settled)}`);
+  assert.deepEqual([error.status, error.reason, error.retryAfter], [503, 'starting', '1']);
+}
+
+test('a request waits WAIT_MS in all, however many calls are taken over meanwhile: then 503, Retry-After 1, and it never makes the call', async (t) => {
+  // Mocked time, moved a millisecond at a time: each take-over comes before the waiting request's poll would see its
+  // call 100 ms old, however slow the machine (review r2 of T201).
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 });
   const kept = askedOnce<string>();
   const never = () => new Promise<string>(() => {});
   void askOnce(kept, never);
@@ -133,16 +162,77 @@ test('a request waits WAIT_MS in all, however many calls are taken over meanwhil
   // joins and takes over within 5 ms of its call's start, so no call this request joins reaches its 100 ms.
   const takers = setInterval(() => void askOnce(kept, never, { takeOverMs: 5, waitMs: 2_000 }).catch(() => {}), 15);
   try {
-    const started = Date.now();
     let asked = false;
-    const waiting = askOnce(kept, () => ((asked = true), Promise.resolve('mine')), { takeOverMs: 100, waitMs: 300 });
-    const refused = await within(2_000, waiting.then(() => null, (error: unknown) => error));
-    const waited = Date.now() - started;
-    assert.ok(refused instanceof ApiError, `refused: ${String(refused)}`);
-    assert.deepEqual([refused.status, refused.reason, refused.retryAfter], [503, 'starting', '1']);
+    const waiting = watched(askOnce(kept, () => ((asked = true), Promise.resolve('mine')), { takeOverMs: 100, waitMs: 300 }));
+    await advance(t.mock.timers, 299);
+    assert.equal(waiting.settled, null, 'within its 300 ms it waits');
+    await advance(t.mock.timers, 2);
+    refusedStarting(waiting);
     assert.equal(asked, false, 'every call it joined was taken over before it would');
-    assert.ok(waited >= 290 && waited < 1_000, `waited ${waited} ms`);
   } finally {
     clearInterval(takers);
   }
+});
+
+test("a request that took a call over keeps its deadline: its own call hanging, it answers 503 at WAIT_MS all the same (review r2 of T201)", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const kept = askedOnce<string>();
+  const never = () => new Promise<string>(() => {});
+  void askOnce(kept, never);
+  let asked = 0;
+  const waiting = watched(askOnce(kept, () => ((asked += 1), new Promise<string>(() => {})), { takeOverMs: 100, waitMs: 300 }));
+  await advance(t.mock.timers, 150);
+  assert.equal(asked, 1, 'it took the call over at 100 ms');
+  await advance(t.mock.timers, 149);
+  assert.equal(waiting.settled, null);
+  await advance(t.mock.timers, 2);
+  refusedStarting(waiting);
+  assert.equal(asked, 1, 'it made one call: its own, never taken over by itself');
+});
+
+test("a request that took a call over takes another's answer meanwhile: its own call hanging, another request's take-over answers it", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const kept = askedOnce<string>();
+  void askOnce(kept, () => new Promise<string>(() => {}));
+  const waiting = watched(askOnce(kept, () => new Promise<string>(() => {}), { takeOverMs: 100, waitMs: 300 }));
+  await advance(t.mock.timers, 150);
+  // Its call (since 100 ms) hangs; another request, trusting a call only 20 ms, takes it over, its call answering 10 ms
+  // later.
+  const other = watched(askOnce(kept, () => settles(10, 'up'), { takeOverMs: 20, waitMs: 300 }));
+  await advance(t.mock.timers, 60);
+  assert.deepEqual(other.settled, { value: 'up' });
+  assert.deepEqual(waiting.settled, { value: 'up' }, 'it took the answer its take-over never gave');
+});
+
+test("a request that took a call over answers as soon as its own call does, not on its next poll", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const kept = askedOnce<string>();
+  void askOnce(kept, () => new Promise<string>(() => {}));
+  const mine = call<string>();
+  const waiting = watched(askOnce(kept, () => mine.promise, { takeOverMs: 100, waitMs: 300 }));
+  await advance(t.mock.timers, 120);
+  assert.equal(waiting.settled, null);
+  mine.resolve('mine');
+  // No time passes: its own call settled, it answers.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(waiting.settled, { value: 'mine' });
+});
+
+test("the gate's reservation, waiting its deadline on the vault's about() another request asks: 503 `starting`, as asked-once answers it, not the gate's own reason (review r2 of T201)", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  let asked = 0;
+  let reserved = 0;
+  // A vault whose about() never answers: its request cancelled, as Workers does, and each take-over's in turn.
+  const vault = {
+    about: () => ((asked += 1), new Promise(() => {})),
+    reserveProxy: async () => ((reserved += 1), { ok: true, cleared: [] }),
+  } as unknown as Vault;
+  // Another route's request asks about() first; the gate's then joins its call.
+  void keeps015(vault).catch(() => {});
+  const gate = watched(gateProxy(vault, { names: ['maps'] } as unknown as ProxyCode));
+  await advance(t.mock.timers, WAIT_MS - 10, 10);
+  assert.equal(gate.settled, null);
+  await advance(t.mock.timers, 20, 10);
+  refusedStarting(gate);
+  assert.deepEqual([asked, reserved], [2, 0], 'the first call, then its take-over; nothing reserved');
 });

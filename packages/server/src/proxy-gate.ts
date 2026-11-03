@@ -45,8 +45,10 @@ async function reserve(vault: Vault, code: ProxyCode): Promise<void> {
     // log is fixed when it is made, so the answer is kept with the vault.
     answer = (await keeps015(vault)) ? await vault.reserveProxy({ names: [...code.names] }) : null;
   } catch (error) {
-    // A vault on another release (decision 8): 503 `deploying`, as every call answers it.
-    if (isDeploying(error)) throw error;
+    // A vault on another release (decision 8): 503 `deploying`, as every call answers it. An answer already the app's
+    // own as well: 503 `starting`, from the vault's `about()` asked once (`keeps015`), when this request waited its
+    // deadline for another's (review r2 of T201).
+    if (isDeploying(error) || error instanceof ApiError) throw error;
     console.error("reserving the proxy code's names failed", { error: error instanceof Error ? error.message : String(error) });
     throw new ApiError('unavailable', "coffre cannot reserve its code's proxy names right now: ask again", 'proxy_gate', '1');
   }
