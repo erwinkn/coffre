@@ -150,6 +150,8 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
       return answer.gate.state === 'stood' ? { ...answer, gate: await gated(false) } : answer;
     };
     const place = handle ? gate.n_place! : call.place!;
+    // The place itself (C2b4): a place reading of no route (`''`) taken, its reading and gate the answer, no definition read.
+    if (reading === 1 && route === '') return whole({ ...none, gate, stood: true, place });
     const credential = handle ? gate.n_credential! : call.credential!;
     const at = await one<{ project_id: string; parent_id: string | null; owner: string | null }>(sql`SELECT project_id, parent_id, owner FROM environments WHERE id = ${place}`);
     if (at?.owner != null || (handle && reading === 1 && call.environment!.endsWith('@me'))) return whole({ ...none, gate, stood: true, place, personal: true });

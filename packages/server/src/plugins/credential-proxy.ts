@@ -900,9 +900,10 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
     const used = itself === null
       ? await coffre.useRoute!(handle, { named, stable, digests, logged: { ui: true }, refuses })
       : await coffre.useRouteOrPlace!(handle, { place: itself, stable: stable!, digests, logged: { ui: true }, refuses });
-    if (used === null) {
-      // The place's, kept as a made-for list would say it, for `cacheSeconds`: the next such URL serves the place's at once.
-      if (proxy.cacheMs > 0) remember(proxy.ui.places, `${handle}\n${itself}`, now + proxy.cacheMs);
+    if (used.reading === 'place') {
+      // The place's, kept as a made-for list keeps it, for `cacheSeconds` and never past the handle's end: the next such
+      // URL serves the place's at once, and a copy's refusal there stands for this handle only while it stands (Sol r1).
+      if (proxy.cacheMs > 0) remember(proxy.ui.places, `${handle}\n${itself}`, Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)));
       return null;
     }
     const definition = itemOf(proxy, used.item);
