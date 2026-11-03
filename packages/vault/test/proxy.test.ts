@@ -484,6 +484,27 @@ test("a reservation waits for the head within one bound, however late it took th
   }
 });
 
+test("names reserved already are found so while another transaction holds SQLite's one writer, which a read waits for not (review r15 of #467)", ON_015, async () => {
+  const w = await world({ codeWaitMs: 1_000 });
+  assert.ok((await w.vault.reserveProxy({ names: ['maps', 'stripe'] })).ok);
+  let end!: () => void;
+  const ended = new Promise<void>((resolve) => (end = resolve));
+  // A change under way, holding its transaction (on SQLite, the file's writer queue) for 3 s at most.
+  const holding = db.vault.transaction(async () => {
+    await Promise.race([ended, new Promise((resolve) => setTimeout(resolve, 3_000))]);
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    assert.deepEqual(await w.vault.reserveProxy({ names: ['stripe'] }), { ok: true, reserved: ['maps', 'stripe'], cleared: [] });
+    const ms = Date.now() - started;
+    assert.ok(ms < 1_000, `found after ${ms} ms, behind the transaction`);
+  } finally {
+    end();
+    await holding;
+  }
+});
+
 test('the reserved set forged around the vault refuses every save: fail closed (R64)', ON_015, async () => {
   const w = await world();
   assert.ok((await w.vault.reserveProxy({ names: ['maps'] })).ok);

@@ -1166,12 +1166,16 @@ they outlive the deployment that reserved them:
   one waits for the head, in a place in line of the code's own (the reads'
   places, `READ_HEAD_WAITERS`, are apart). The others, refused that place at
   once, pause (25 ms, doubled each time, up to 400 ms) and try again, and
-  read the name the one wrote; every wait of the call, for the place and for
-  the head, within one bound of 15 s. Each waiting its turn instead, 3,080
-  no-op decisions queued 200 s in the same bench. The read is the decision's
-  first statement, on its connection, before any lock: in a read of its own,
-  a Node deployment's pool of 8 queued the first call's decision behind every
-  other call's read, and the last answered after 15 s.
+  read the name the one wrote; their waits, for the place and for the head,
+  within one bound of 15 s for the call. The one that writes waits besides
+  for the issue lock and the fence, each within what was left when its
+  attempt began, as every change waits for each lock it takes. Each waiting
+  its turn instead, 3,080 no-op decisions queued 200 s in the same bench. On
+  Postgres the read is the decision's first statement, on its connection,
+  before any lock: in a read of its own, a Node deployment's pool of 8
+  queued the first call's decision behind every other call's read, and the
+  last answered after 15 s. On SQLite, whose every transaction queues for the
+  file's one writer and a plain read not, it is a read of its own.
 - **One release at a time.** The gate's call is a vault call like any
   other: from an app on another release it is 503 `deploying` before the
   vault reads the reserved set (section 3, "One version at a time"). What
