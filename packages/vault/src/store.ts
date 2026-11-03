@@ -469,7 +469,7 @@ export function newestSealsQuery(refs: readonly Ref[]): SQL {
  */
 export type MemberLog = {
   seal: Buffer | null;
-  newest: { number: bigint; seal: Buffer | null; old: bigint | null; row: Omit<ChangeRow, 'number'> } | null;
+  newest: { seal: Buffer | null; old: bigint | null; row: Omit<ChangeRow, 'number'> } | null;
   /** Read by `memberLogs` alone (a snapshot has its own, `newestAccess`): the vault's newest allowed access entry about the member, unchecked. */
   access?: bigint | null;
 };
@@ -495,7 +495,6 @@ export function memberLogOf(row: MemberLogColumns): MemberLog {
   return {
     seal: bytes(row.seal),
     newest: {
-      number: BigInt(String(row.number)),
       seal: bytes(row.newest),
       old,
       row: {

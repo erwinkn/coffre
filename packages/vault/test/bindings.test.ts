@@ -243,14 +243,14 @@ test("a sign-in through the binding of an account whose newest change was edited
   assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
   // The account's newest change, its actor edited: its MAC no longer holds.
   const object = objectKey({ kind: 'principal', id: CI });
-  const [newest] = await rows<{ n: string }>(db.owner, sql`SELECT CAST(max(number) AS text) AS n FROM log_changes WHERE object = ${object}`);
+  const [newest] = await rows<{ n: string; mac: Uint8Array }>(db.owner, sql`SELECT CAST(number AS text) AS n, mac FROM log_changes WHERE object = ${object} ORDER BY number DESC LIMIT 1`);
   await rows(db.owner, sql`UPDATE log_changes SET actor = 'user:mallory@acme.example' WHERE number = ${newest!.n}`);
   assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
   // Found where the sign-in holds the account to the log (`#notLogged`), which names no change: the finding is given
-  // the account's newest as it appends (`#weigh`).
+  // the account's newest as it appends (`#weigh`), by its MAC (`changeName`).
   const findings = await db.owner.select({ metadata: auditLog.metadata }).from(auditLog)
     .where(and(eq(auditLog.action, 'vault.tampered'), eq(auditLog.subjectPrincipal, CI), inArray(auditLog.code, ['mac', 'stale'])));
-  assert.deepEqual(findings.map((finding) => (JSON.parse(finding.metadata) as { change?: string }).change), [newest!.n]);
+  assert.deepEqual(findings.map((finding) => (JSON.parse(finding.metadata) as { change?: string }).change), [Buffer.from(newest!.mac).toString('hex')]);
 });
 
 test("an unbind ends the binding and every live credential it issued, each a change, in one statement; a sign-in after is none", async () => {

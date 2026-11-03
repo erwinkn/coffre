@@ -1,15 +1,16 @@
 // T179 PR 4a: the app's readers of the vault's findings about a member, under 0.15's log. A finding names the newest
-// change of theirs it weighed, and stands until a change above it; a member the log has a change of, with no row, is
+// change of theirs it weighed, by its MAC, and stands until a change after it; a member the log has a change of, with no row, is
 // missing. Neither leans on 0.14's access entries, which 0.16 stops writing (docs/design/two-trips.md, PR 4).
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ACCESS_ACTIONS } from '@coffre/core/vault';
-import { and, eq, gt, inArray, max } from 'drizzle-orm';
+import { logObject } from '@coffre/db/log';
+import { and, desc, eq, gt, inArray, max } from 'drizzle-orm';
 
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { withLogUnlocked } from './db/engine.ts';
-import { auditLog, vaultGrants, vaultMembers } from './db/tables.ts';
+import { auditLog, logChanges, vaultGrants, vaultMembers } from './db/tables.ts';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -62,7 +63,15 @@ async function dropAccessEntriesAfter(seq: bigint): Promise<void> {
   )));
 }
 
-test('a finding stands on every reader until a change above the one it weighed, with or without the access entry 0.14 wrote beside it', LOG_015_ONLY, async () => {
+/** Gives the member's newest change in 0.15's log the number `to`, as a database writer can (no MAC covers it); answers the one it had. */
+async function renumberNewest(to: bigint): Promise<bigint> {
+  const [newest] = await db.owner.select({ number: logChanges.number }).from(logChanges)
+    .where(eq(logChanges.object, logObject('principal', MEMBER))).orderBy(desc(logChanges.number)).limit(1);
+  await db.owner.update(logChanges).set({ number: to }).where(eq(logChanges.number, newest!.number));
+  return newest!.number;
+}
+
+test('a finding stands on every reader until a change after the one it weighed, however that one is renumbered, with or without the access entry 0.14 wrote beside it', LOG_015_ONLY, async () => {
   const old = await snapshot();
   await root.access.set(MEMBER, { market: 'viewer' });
   const newest = await snapshot();
@@ -70,9 +79,13 @@ test('a finding stands on every reader until a change above the one it weighed, 
   await old();
   assert.equal((await deps.vault.access(MEMBER)).status, 'tampered');
   assert.deepEqual(await tampered(), [true, true, true]);
-  // Their newest row back: no change since, so the finding stands.
+  // Their newest row back: no change since, so the finding stands, though the change it names is numbered up.
   await newest();
   assert.deepEqual(await tampered(), [true, true, true]);
+  const [top] = await db.owner.select({ number: max(logChanges.number) }).from(logChanges);
+  const genuine = await renumberNewest(top!.number! + 1_000_000n);
+  assert.deepEqual(await tampered(), [true, true, true]);
+  await renumberNewest(genuine);
   const [finding] = await db.owner.select({ seq: max(auditLog.seq) }).from(auditLog).where(eq(auditLog.action, 'vault.tampered'));
 
   // The change that settles it, its 0.14 entries then taken out: the change alone says so.

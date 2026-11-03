@@ -6,7 +6,7 @@ import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
 import { logObject, newestSeqQuery, newestVaultSeq, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
-import { findingsOf, findingStands, newestChangeOf, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
+import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
@@ -921,10 +921,9 @@ export type MemberRow = {
   grants: StoredGrant[];
   /**
    * Whether the vault has found their row or grants changed around it
-   * since it last changed what they hold (`tamperedMembers`): no change of
-   * theirs in 0.15's log is numbered above the one its finding weighed, or,
-   * for a finding of 0.14's, its newest is newer than its newest access
-   * entry. The vault refuses them while their row fails its check.
+   * since it last changed what they hold (`tamperedMembers`): a finding of
+   * 0.15's log names their newest change, or, for a finding of 0.14's, its
+   * newest is newer than its newest access entry. The vault refuses them while their row fails its check.
    */
   tampered: boolean;
   /** Live credentials: neither revoked nor expired. */
@@ -971,8 +970,8 @@ export type MemberAccessRows = {
 /**
  * One member's access in one query, whatever they hold: their row (and
  * whether the vault's findings about it stand, as `tamperedMembers` says:
- * the most a finding weighed against their newest change's number, the
- * newest of 0.14's against their newest access entry), each live grant with the slugs of
+ * whether a finding names their newest change, the newest of 0.14's
+ * against their newest access entry), each live grant with the slugs of
  * its place, and, when their scope names projects, every project's slug,
  * to name them by. A member page reads this once, not one list per project.
  *
@@ -988,10 +987,10 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
   const { vaultMembers: m, vaultGrants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
   const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
   const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
-  const found = findingsOf(db, sql`${m.principal}`);
+  const found = findingsOf(db, principal);
   const query = sql`
     SELECT ${m.status} AS status, ${m.owner} AS owner, ${m.role} AS member_role, ${m.scope} AS scope, ${m.statusChangedBy} AS status_changed_by,
-      ${found.legacy} AS found_seq, ${found.weighed} AS found_change, ${newestChangeOf(principal)} AS changed_number,
+      ${found.legacy} AS found_seq, ${found.named} AS found_named,
       (SELECT CAST(max(${log.seq}) AS text) FROM ${log} WHERE ${log.author} = 'vault' AND ${log.decision} = 'allow'
         AND ${log.action} IN (${actions}) AND ${log.subjectPrincipal} = ${m.principal}) AS changed_seq,
       x.kind, x.project_id, x.project_slug, x.environment_id, x.environment_slug, x.role, x.expires_at
@@ -1011,7 +1010,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
     WHERE ${m.principal} = ${principal}`;
   type Row = {
     status: string; owner: boolean | number; member_role: string | null; scope: string | null; status_changed_by: string;
-    found_seq: string | null; found_change: string | null; changed_seq: string | null; changed_number: string | null;
+    found_seq: string | null; found_named: number | string; changed_seq: string | null;
     kind: 'grant' | 'project' | null; project_id: string | null; project_slug: string | null;
     environment_id: string | null; environment_slug: string | null; role: string | null; expires_at: string | number | null;
   };
@@ -1023,7 +1022,7 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
     member: {
       status: first.status as 'active' | 'removed',
       ...storedRole({ owner: first.owner === true || first.owner === 1, role: first.member_role, scope: first.scope }),
-      tampered: findingStands({ legacy: big(first.found_seq), access: big(first.changed_seq), weighed: big(first.found_change), change: big(first.changed_number) }),
+      tampered: findingStands({ legacy: big(first.found_seq), access: big(first.changed_seq), named: Number(first.found_named) === 1 }),
       admittedBy: first.status_changed_by,
     },
     grants: rows.flatMap((row) =>

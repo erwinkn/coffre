@@ -976,40 +976,55 @@ by a million entries (R48).
 ## As built: PR 4a
 
 The members' watermark, without 0.14's entries (packages/db/src/grants.ts; formal/Findings.tla). Under 0.15's log a
-`vault.tampered` about a member's row (`mac`, `stale`) names, in its metadata, the number of the member's newest change
-its check weighed: `{"change": "52"}`, decimal text, "0" for none. A check that read the member's log (`#onLog`, and
-`#integrity`, whose 0.4 MAC's finding now reads the log first, the read `#onLog` makes anyway) passes its number; one
-that read none (a grant written in during a decision, `#seal`; a change refused, `#notLogged`) has the newest read as
-the finding appends (`#weigh`), one statement for all of them, and only then: no route's cost moves.
+`vault.tampered` about a member's row (`mac`, `stale`) names, in its metadata, the member's newest change its check
+weighed, by the change's MAC: `{"change": "<32 hex digits>"}`, "none" for none (`changeName`). A check that read the
+member's log (`#onLog`, and `#integrity`, whose 0.4 MAC's finding now reads the log first, the read `#onLog` makes
+anyway) passes the change it read; one that read none (a grant written in during a decision, `#seal`; a change
+refused, `#notLogged`) has the newest read as the finding appends (`#weigh`), one statement for all of them, and only
+then: no route's cost moves.
 
-The rule (`findingStands`): a member's findings stand while the most any of them weighed is at least their newest
-change's number, or while their newest finding of 0.14's (none named) is newer than their newest access entry. The
-most, not the newest finding's: two checks commit in an order of their own (Findings.tla, MostWeighed). A change above
-it is one the vault made only once its own check passed the row: what clears it, as 0.14's access entry did, and what
-0.16 still writes. Read by:
+The rule (`findingStands`): a member's findings stand while one of them names their newest change, or while their
+newest finding of 0.14's (none named) is newer than their newest access entry. Any finding, not the newest alone: two
+checks commit in an order of their own (Findings.tla, EveryFinding). A change after the one it names is one the vault
+made only once its own check passed the row: what clears it, as 0.14's access entry did, and what 0.16 still writes.
 
-- **`tamperedMembers`**, the list's and `coffre migrate`'s: the findings grouped by member, the newest of 0.14's and the
-  most weighed of 0.15's in one aggregate, then for those named the newest access entry and the newest change, one
-  probe each (`newestChanges`, `log_changes_object_idx`'s `max`, R48).
+By the change's MAC, not its number (review r1 of #476). A change's MAC covers every column but its number, which a
+database writer can change (`changeHolds`; rotations name theirs in their payload for that reason). Weighed by number,
+as this PR first did, a finding about Ada naming change 52 would settle once the writer renumbered that same change to
+1,000,000, with no change since; or, renumbered up before the check and back after, would name 1,000,000 and stand
+past every change she will ever have, removal included. Named by MAC, renumbering moves nothing: the finding stands
+until her newest change is another one. A name no change of hers bears (forged, or a JSON number) never names her
+newest, so it settles at once, or, not a JSON string, is 0.14's to the keyless readers. What a name cannot see is an
+older change of hers put back above the newest, whole, its MAC intact: the vault's check then finds her row stale and
+refuses, and a finding naming it settles once the log is put right; the checkpoints catch such an entry
+(docs/design/merkle-checkpoints.md, (a) and (f)).
+
+Read by:
+
+- **`tamperedMembers`**, the list's and `coffre migrate`'s: the findings grouped by member and the change they name,
+  the newest of 0.14's by seq, then for those named the newest access entry and the newest change's MAC, one probe each
+  (`newestChangeNames`, `log_changes_object_idx`, R48).
 - **`memberAccess`**, the member page's one statement: the same, as subqueries beside the row.
 - **`reportStands`**, the vault's conversion, each finding as the vault's MAC tells it from one forged in its name:
-  those of 0.15's naming the member's newest change or later, then those of 0.14's after the newest access entry. The
-  conversion runs on rows from before the cutover, which no finding numbers, so it decides as before; the rule is the
-  same as `coffre migrate`'s so that the two never disagree.
+  those of 0.15's naming the change the decision just checked the member's row against (`#standing`'s log: its MAC,
+  and the row's seal against it), not a newest read again, then those of 0.14's after the newest access entry. The rule
+  is the same as `coffre migrate`'s so that the two never disagree.
 - **`missingMembers` of one member**: no row, and a change of theirs in 0.15's log or an access entry of 0.14's, as
   `#onLog` weighs both. Nothing asked it of one member: the member's report (`memberReport`) now does, when the list
   of everyone has no such member, so that a member added under 0.16, their row gone, reads tampered there, not 404.
   The list of everyone finds the rowless by 0.14's entries still: a change's object names its member by a hash alone,
   which a scan cannot turn back into a principal (PR 4b).
 
-A finding that names no number, or one that is not digits (written around the vault), is 0.14's to the readers that
-hold no key; the vault's MAC tells it apart in `reportStands`. The same row found again after a change is another
-finding: the vault's once-per-process key includes the number weighed, where it had left the second unlogged.
+The same row found again after a change is another finding: the vault's once-per-process key includes the change
+weighed, where it had left the second unlogged. A finding of 0.14's that stands when a deployment moves to 0.16 is
+settled by no access entry after: PR 6 settles them by the change that follows, its own rule to write.
 
 The regressions: packages/vault/test/vault.test.ts (a finding names the change its check weighed and stands until a
-change above it, the same row then found again; settled by a change whose 0.14 entries are taken out, as 0.16 writes
-none; two findings committed out of the order they read in, and one forged above the next change, which only the
-vault passes over), packages/vault/test/bindings.test.ts (a finding from `#notLogged`, numbered as it appends), and
-packages/server/test/tamper-watermark.test.ts (the list, the member page and the report agree, a change settling
-them with its 0.14 entries gone; a member with a change and no row reads tampered in their report). Each fails with
-its protection taken out.
+change after it, the same row then found again; settled by a change whose 0.14 entries are taken out, as 0.16 writes
+none; two findings committed out of the order they read in, and one forged naming the next change, which only the
+vault passes over; forged names, a number and a JSON number, none of which stands past the next change; the change a
+finding names renumbered up for its check and back, and up after it, the finding standing until the next change, then
+settled), packages/vault/test/bindings.test.ts (a finding from `#notLogged`, named as it appends), and
+packages/server/test/tamper-watermark.test.ts (the list, the member page and the report agree, through a renumbering
+of the change named, a change settling them with its 0.14 entries gone; a member with a change and no row reads
+tampered in their report). Each fails with its protection taken out.

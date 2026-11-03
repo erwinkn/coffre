@@ -172,7 +172,7 @@ import {
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
-import { everyProjectConversion, findingMetadata, newestAccess, newestChanges, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
+import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, parseAdmitInputs, scopeSlugs, sealTicket, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
@@ -566,9 +566,9 @@ class Retry {}
 /** What each `vault.tampered` entry reports, to mark it logged once committed. */
 const REPORTED = new WeakMap<NewEntry, string>();
 
-/** The newest change of a member's a check of their row weighed (`#report`): its number, 0 for none. */
-function weighedOf(log: MemberLog): bigint {
-  return log.newest?.number ?? 0n;
+/** The newest change of a member's a check of their row weighed (`#report`), by its name (`changeName`): its MAC. */
+function weighedOf(log: MemberLog): string {
+  return changeName(log.newest?.row.mac ?? null);
 }
 
 /** Each environment row's check, once made (`#placeFault`): one HMAC a row, however many parts of a decision read it. */
@@ -701,7 +701,11 @@ type Fault = 'mac' | 'stale';
  * its check, and they hold nothing. `stored` is the grants as read, which
  * the check verified when `fault` is null.
  */
-type Standing = { principal: string; status: Access['status']; live: Holdings; all: Holdings; fault: Fault | null; stored: GrantRow[] };
+type Standing = {
+  principal: string; status: Access['status']; live: Holdings; all: Holdings; fault: Fault | null; stored: GrantRow[];
+  /** Under 0.15's log, what their row was checked against (`#onLog`): its newest change, its MAC checked when no fault. */
+  log?: MemberLog;
+};
 
 /**
  * How one key operation of a call came out: its value; or a bad claim, a
@@ -999,7 +1003,7 @@ class VaultService implements Vault {
     logs?: ReadonlyMap<string, MemberLog>,
   ): Promise<Fault | null> {
     // Read first under 0.15's log, which its 0.4 MAC's finding names too (`#report`): the read `#onLog` makes anyway.
-    const log = this.#checksSeals() ? logs?.get(principal) ?? reads?.memberLogs.get(principal) ?? (await store.memberLogs(db, [principal])).get(principal)! : null;
+    const log = this.#checksSeals() ? await this.#memberLog(db, principal, reads, logs) : null;
     if (row !== undefined && !this.#sealed(row, grants)) {
       this.#report(reports, principal, 'mac', row.mac.toString('hex'), null, log === null ? undefined : weighedOf(log));
       return 'mac';
@@ -1215,15 +1219,21 @@ class VaultService implements Vault {
     return (since === null ? rowKeys : rowKeys.slice(0, 1)).some((key) => sealed(key, row, grants));
   }
 
+  /** A member's `MemberLog`: the one a decision or snapshot read, or one statement now. */
+  async #memberLog(db: Queryable, principal: string, reads?: Snapshot, logs?: ReadonlyMap<string, MemberLog>): Promise<MemberLog> {
+    return logs?.get(principal) ?? reads?.memberLogs.get(principal) ?? (await store.memberLogs(db, [principal])).get(principal)!;
+  }
+
   /**
    * A `vault.tampered` entry, once per process for each thing found: `#reported` marks it once committed. A member's
-   * row (`mac`, `stale`) found under 0.15's log names the newest change of theirs the check weighed (`weighed`,
-   * `findingMetadata`; T179 PR 4a), what a later change is numbered above: the same thing found again after one is
-   * another finding. Passed where the check read it (`#onLog`); otherwise read as the entry appends (`#weigh`).
+   * row (`mac`, `stale`) found under 0.15's log names the newest change of theirs the check weighed (`weighed`, its
+   * MAC, `changeName`, `findingMetadata`; T179 PR 4a), which a later change replaces as their newest: the same thing
+   * found again after one is another finding. Passed where the check read it (`#onLog`); otherwise read as the entry
+   * appends (`#weigh`).
    */
   #report(
     reports: NewEntry[], principal: string | null, code: Fault | 'forged_entry', detail: string, relatedSeq: bigint | null = null,
-    weighed?: bigint,
+    weighed?: string,
   ): void {
     const key = `${principal}|${code}|${detail}|${weighed ?? ''}`;
     if (this.#prepared.reported.has(key) || reports.some((entry) => REPORTED.get(entry) === key)) return;
@@ -1265,8 +1275,8 @@ class VaultService implements Vault {
     if (!this.#checksSeals()) return;
     const unweighed = entries.filter((entry) => REPORTED.has(entry) && entry.subjectPrincipal != null && (entry.code === 'mac' || entry.code === 'stale') && entry.metadata === '{}');
     if (unweighed.length === 0) return;
-    const numbers = await newestChanges(tx, [...new Set(unweighed.map((entry) => entry.subjectPrincipal!))]);
-    for (const entry of unweighed) entry.metadata = findingMetadata(numbers.get(entry.subjectPrincipal!) ?? 0n);
+    const names = await newestChangeNames(tx, [...new Set(unweighed.map((entry) => entry.subjectPrincipal!))]);
+    for (const entry of unweighed) entry.metadata = findingMetadata(names.get(entry.subjectPrincipal!)!);
   }
 
   /** Mark these reports as logged, once their transaction has committed. */
@@ -1367,7 +1377,10 @@ class VaultService implements Vault {
     if (row === undefined || subject.status !== 'active') return;
     const everyProject = subject.stored.filter((grant) => grant.projectId === null && grant.environmentId === null);
     if (everyProject.length === 0) return;
-    if (await reportStands(d.tx, principal, this.#check(d.reports, principal))) return;
+    // Weighed against the change their row was just checked against, its MAC with it (`#onLog`), not the newest read
+    // again: that read's number is no MAC's (review r1 of #476). Before the cutover, the newest as it stands.
+    const weighed = subject.log === undefined ? (await newestChangeNames(d.tx, [principal])).get(principal)! : weighedOf(subject.log);
+    if (await reportStands(d.tx, principal, this.#check(d.reports, principal), weighed)) return;
     // The projects there are now, read under the log's head, which a deletion holds; each environment by its slug as 0.15's
     // log holds its row (T159, review r7): a grant on a slug in every project becomes one on each place that answers to
     // it, never on one a writer renamed into it.
@@ -2437,10 +2450,11 @@ class VaultService implements Vault {
   async #standing(db: Queryable, principal: string, row: Member | undefined, at: number, reports: NewEntry[], reads?: Snapshot): Promise<Standing> {
     const none = NOTHING;
     const grants = row === undefined ? [] : reads?.grants.get(principal) ?? (await store.grants(db, principal));
-    const fault = await this.#integrity(db, principal, row, grants, reports, reads);
-    if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants };
-    if (!PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants };
-    if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants };
+    const log = this.#checksSeals() ? await this.#memberLog(db, principal, reads) : undefined;
+    const fault = await this.#integrity(db, principal, row, grants, reports, reads, log === undefined ? undefined : new Map([[principal, log]]));
+    if (fault !== null) return { principal, status: 'tampered', live: none, all: none, fault, stored: grants, log };
+    if (!PRINCIPAL.test(principal)) return { principal, status: 'unknown', live: none, all: none, fault, stored: grants, log };
+    if (row?.status !== 'active') return { principal, status: row?.status ?? 'unknown', live: none, all: none, fault, stored: grants, log };
     // What they hold: their grants but those on a place whose row is not as 0.15's log holds it (T159). Kept as stored.
     const held = (await this.#heldGrants(db, grants, reports, reads?.environments)).map((grant) => ({ ...grant, role: grant.role as Role }));
     const { role, scope } = roleOf(principal, row);
@@ -2454,6 +2468,7 @@ class VaultService implements Vault {
       all: { role, scope, grants: held, policy, service },
       fault,
       stored: grants,
+      log,
     };
   }
 

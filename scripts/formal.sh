@@ -505,9 +505,14 @@ REMOVALS=(
   # A finding about a member weighed by 0.14's rule (Findings.tla, T179 PR 4a): under 0.16 no access entry follows a
   # change, and a change above the finding settles nothing.
   "Findings WeighsChanges Settles"
-  # The newest finding's weighed change, not the most any weighed: a check that read before a change commits after
-  # one that read past it, and hides it.
-  "Findings MostWeighed StandsUnchanged"
+  # The newest finding alone, not any naming the newest change: a check that read before a change commits after one
+  # that read past it, and hides it.
+  "Findings EveryFinding StandsUnchanged"
+  # A finding naming its change by number, which no MAC covers (review r1 of #476): the writer renumbers the newest
+  # change up, and the finding about it settles with no change since.
+  "Findings NamesChange StandsUnchanged"
+  # The same, renumbered before the check and back after: the finding names a number no later change reaches.
+  "Findings NamesChange Settles"
   # A request down today's path after a try that committed (its seal wait failing taken for `served: false`): it writes twice.
   "WritingFallBack FallBackUncommitted OneWritePerRequest"
   # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its

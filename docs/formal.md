@@ -2436,26 +2436,38 @@ only once its own check passes their row, so a change made after a
 finding's check means the row checked out since. 0.14's rule compares the
 finding with the member's newest access entry, which every change wrote;
 0.16 writes none, and that watermark would freeze. Under 0.15's log a
-finding names the number of the member's newest change its check weighed
-(`{"change": "<number>"}` in its metadata), and stands while no change is
-numbered above the most any finding weighed.
+finding names the member's newest change its check weighed, by the
+change's MAC (`{"change": "<its MAC, hex>"}` in its metadata, `changeName`),
+and stands while that change is still their newest. Not by its number: a
+change's MAC covers every column but its number, which a database writer
+can change (review r1 of #476).
 
 **The model.** The member's row, good or bad (`Tamper`, `Restore`); the
-vault's changes, numbered, made only of a good row; checks of a bad row,
-each naming the number it read (`#onLog`, `#integrity`), or, for one that
-read none, the newest as its finding appends (`#weigh`: `#seal`,
-`#notLogged`); and findings appended in any order. `StandsUnchanged`: a
-finding whose weighed change is still the member's newest stands.
-`Settles`: a change above every number the findings weighed settles them.
-`Findings.cfg` has no access entries (0.16), 2,344 states;
-`Findings015.cfg` writes one beside each change, 3,920.
+vault's changes, made in order and only of a row that checks out against
+the newest, each taking the log's next number; a writer who gives a change
+any number no other holds (`Renumber`); checks of a bad row, each naming the
+change it read (`#onLog`, `#integrity`), or, for one that read none, the
+newest as its finding appends (`#weigh`: `#seal`, `#notLogged`); 0.14's
+checks, which append at once and name none (`CheckOld`, `Findings015.cfg`
+only: the 0.15 reader is both rules at once); and findings appended in any
+order. The readers take the change numbered highest as the newest. When
+that is an older change put above the newest (`Honest` false), the vault's
+check finds the row stale and refuses; what a finding says then is outside
+the invariants: an entry replayed or deleted whole, its MAC intact, is the
+checkpoints' to catch (docs/design/merkle-checkpoints.md). `StandsUnchanged`:
+a finding whose check read the vault's newest change, none made since,
+stands. `Settles`: a change after every finding's check settles them.
+`Findings.cfg` has no access entries (0.16), 82,200 states;
+`Findings015.cfg` writes one beside each change, and 0.14's findings beside
+0.15's, 190,803.
 
 | protection | turned off, TLC finds |
 |---|---|
 | a finding of 0.15's is weighed against the changes (WeighsChanges) | `Settles`, under 0.16: no access entry follows the change that settles the finding, which then stands for good |
-| the most any finding weighed counts, not the newest finding's (MostWeighed) | `StandsUnchanged`: a check that read before a change commits after one that read past it, and its lower number hides the other's |
+| any finding naming the newest change counts, not the newest finding alone (EveryFinding) | `StandsUnchanged`: a check that read before a change commits after one that read past it, and hides the other's |
+| a finding names its change by MAC, not number (NamesChange) | `StandsUnchanged`: the writer renumbers the change a finding names up, and it settles with no change since; `Settles`: renumbered up before the check and back after, the finding names a number no later change reaches |
 
-A finding that reads its number as it appends, not as its check read the
+A finding that reads its change as it appends, not as its check read the
 row, weighs any change committed between the two: it then stands until the
 next change, as 0.14's rule held one past the access entry that change
 wrote. The model allows it (`Check(TRUE)`); it errs only toward standing.
