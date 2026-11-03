@@ -467,10 +467,12 @@ test(`through the app, a person is answered alike for every key they may not hav
         const cells: Awaited<ReturnType<typeof cell>>[] = [];
         for (const key of KEYS) cells.push(await cell(row, key));
         if (row.window === 'passed') for (const c of cells) await rowsOf(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${`user:${c.person}`}`);
-        if (row.admission === 'past the floor') await db.owner.update(logFence).set({ atFloor: Date.now() + 60_000 });
         const answers: { key: Key; api: unknown; proxy: unknown; work: unknown; sent: { api: HotCall | undefined; proxy: HotCall | undefined }; many: unknown }[] = [];
         try {
           for (const c of cells) {
+            // Past the floor: a minute past every request of this cell's, set again for each cell. Once for the row, its
+            // later cells were asked after the minute, each cell's several keys the vault's calls by name, slowed (T203).
+            if (row.admission === 'past the floor') await db.owner.update(logFence).set({ atFloor: Date.now() + 60_000 });
             let release!: () => void;
             const released = new Promise<void>((resolve) => { release = resolve; });
             const held = lockDb === null ? Promise.resolve() : lockDb.transaction(async (tx) => {

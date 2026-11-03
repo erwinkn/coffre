@@ -16,7 +16,7 @@ import { HIDDEN_COUNTED } from '../src/db/queries.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog, credentials, logChanges } from './db/tables.ts';
-import { clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -182,12 +182,7 @@ test('a token weighs its person as they are at each request: narrowed, it narrow
  */
 function beforeNextRelease(meanwhile: () => Promise<unknown>): void {
   if (LOG === '0.15') {
-    const use = deps.vault.use!;
-    deps.vault.use = async (...args) => {
-      deps.vault.use = use;
-      await meanwhile();
-      return use(...args);
-    };
+    aroundNextUseByIds(deps.vault, { before: meanwhile });
     return;
   }
   const unwrap = deps.vault.unwrap;
@@ -218,13 +213,7 @@ test('a token revoked while its read is under way gets nothing: 0.14\'s read che
 
 test("0.15: a token revoked once its use has decided ends after that read, which stands: the log orders the use before the revoke (Revoking015Folded)", { skip: LOG === '0.15' ? false : "0.14's read checks the token again after the vault's release" }, async () => {
   const issued = await ada.tokens.issue(ADA, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
-  const use = deps.vault.use!;
-  deps.vault.use = async (...args) => {
-    deps.vault.use = use;
-    const used = await use(...args);
-    await root.tokens.revoke(ADA, issued.id);
-    return used;
-  };
+  aroundNextUseByIds(deps.vault, { after: () => root.tokens.revoke(ADA, issued.id) });
   assert.equal(await reads(issued.token, 'dev'), 'dev-key');
   assert.equal(await reads(issued.token, 'dev'), 401);
 });

@@ -93,6 +93,36 @@ function said(input: unknown): unknown {
 
 const vaults = new Set<TestVault>();
 
+/** The vault's calls that use values by name, which it makes before the app authenticates, and by ids, after. */
+const BY_NAME = ['useNamed', 'useNamedMany'] as const;
+const BY_IDS = ['use', 'useMany'] as const;
+
+/**
+ * Run `before` and `after` once, around the vault's next use by ids (`use`, or `useMany` for several keys), which the
+ * app asks once it has authenticated the request. A request by name is one vault call, made before the app
+ * authenticates from the rows it returns; its next one is declined (`served: false`), as a vault that serves none,
+ * so the app authenticates the request as ever and asks by ids, as a workload's read does.
+ */
+export function aroundNextUseByIds(vault: Vault, hooks: { before?: () => Promise<unknown>; after?: () => Promise<unknown> }): void {
+  const methods = vault as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>;
+  const saved = [...BY_NAME, ...BY_IDS].map((name) => [name, methods[name]] as const);
+  const restore = () => {
+    for (const [name, original] of saved) methods[name] = original;
+  };
+  for (const name of BY_NAME) if (methods[name] !== undefined) methods[name] = async () => ({ served: false });
+  for (const name of BY_IDS) {
+    const method = methods[name];
+    if (method === undefined) continue;
+    methods[name] = async (...args) => {
+      restore();
+      await hooks.before?.();
+      const used = await method.apply(vault, args);
+      await hooks.after?.();
+      return used;
+    };
+  }
+}
+
 /** A test runtime's waitUntil: retain the task until the case is finished. */
 export function waitUntil(promise: Promise<unknown>): void {
   trackBackgroundTask(promise);
@@ -353,6 +383,12 @@ export function testVault(
     use: call('use'),
     // And its use by name (T145, PR B): a reveal's or a handle's one key, which the vault resolves and uses in one call.
     useNamed: call('useNamed'),
+    // And a request's several keys in one call, by ids (T167) and by name (T165), as the app asks a vault of this
+    // release. Without them, its keys were a call each, four at once: each new to its principal's cap set took the
+    // principal's lock in a transaction of its own, so a request's keys waited on each other, and one past the hot
+    // login's lock_timeout answered busy, `late`, where the vault's one batch takes the lock once (T203).
+    useMany: call('useMany'),
+    useNamedMany: call('useNamedMany'),
     // 0.16's proxy definitions (T186).
     proxy: call('proxy'),
     saveProxy: call('saveProxy'),
