@@ -21,6 +21,11 @@
     "coffre-conformance": "./bin/coffre-conformance.js"
   },
   "exports": {
+    "./authenticator": {
+      "coffre:source": "./src/authenticator.ts",
+      "types": "./dist/authenticator.d.ts",
+      "default": "./dist/authenticator.js"
+    },
     "./idp": {
       "coffre:source": "./src/idp/index.ts",
       "types": "./dist/idp.d.ts",

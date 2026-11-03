@@ -9,5 +9,21 @@ export * from './signin/index.ts';
 export * from './tokens.ts';
 export * from './types.ts';
 export * from './verifier.ts';
+// Passkeys' verifier; its CBOR reader stays the module's own.
+export {
+  PASSKEY_ALGORITHMS,
+  verifyAssertion,
+  verifyRegistration,
+  type AssertionExpectation,
+  type CeremonyExpectation,
+  type PasskeyAlgorithm,
+  type PasskeyFlags,
+  type PasskeyReason,
+  type PasskeyRefusal,
+  type RegistrationExpectation,
+  type StoredPasskey,
+  type VerifiedAssertion,
+  type VerifiedRegistration,
+} from './webauthn.ts';
 export * from './workloads.ts';
 export * from './workload-token.ts';
