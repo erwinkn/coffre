@@ -505,7 +505,12 @@ test("a reservation's wait for the head ends within its bound, however many chan
     const secondHolds = second.unsafe(LOCK).then(() => Date.now());
     await until('the second change never waited for the head', async () => (await waiting()) >= 1);
     const started = Date.now();
-    const reserving = w.vault.reserveProxy({ names: ['openai'] }).then(() => 'reserved' as const, (error: unknown) => error);
+    // When the reservation ends, read as it ends, not after the holders' own statements, which may run late under load.
+    let endedAt = Number.NaN;
+    const reserving = w.vault.reserveProxy({ names: ['openai'] }).then(
+      () => ((endedAt = Date.now()), 'reserved' as const),
+      (error: unknown) => ((endedAt = Date.now()), error),
+    );
     await until('the reservation never waited for the head', async () => (await waiting()) >= 2);
     // Each wait shorter than the bound, both together longer: the first change holds 600 ms of it, the second 800 more.
     await pause(Math.max(0, started + 600 - Date.now()));
@@ -513,7 +518,7 @@ test("a reservation's wait for the head ends within its bound, however many chan
     const held = await secondHolds;
     await second.unsafe(WRITE);
     const ended = await Promise.race([reserving, pause(Math.max(0, held + 800 - Date.now())).then(() => 'still waiting' as const)]);
-    const ms = Date.now() - started;
+    const ms = (Number.isNaN(endedAt) ? Date.now() : endedAt) - started;
     await second.unsafe('COMMIT');
     assert.ok(gaveUp(ended), `the reservation ended ${ended instanceof Error ? ended.message : String(ended)} after ${ms} ms`);
     assert.ok(ms < 1_400, `the reservation gave up after ${ms} ms, past its bound of 1,000`);
