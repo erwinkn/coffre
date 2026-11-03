@@ -226,5 +226,5 @@ plans never planned for a value, so never showed it.
 
 The dry run now binds the nil id, which no key has; the call binds a key
 where it reads it, a use by id or a named call of a caller who stands.
-Weighed at each of a session's first eight calls, a held key and a key
+Weighed at each of a session's first seven calls, a held key and a key
 never made then read the same blocks at every call.
