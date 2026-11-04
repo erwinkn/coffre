@@ -31,6 +31,7 @@ import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_U
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { logFence } from './db/tables.ts';
+import { inBulkPeriod } from './window-fixture.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the hot path's Postgres statements");
 const ORIGIN = 'https://secrets.acme.example';
@@ -150,6 +151,8 @@ async function statements(request: () => Promise<Response>): Promise<{ app: stri
     assert.ok(response.status === 200 || response.status === 204, `${response.status}: ${await response.clone().text()}`);
     await response.arrayBuffer();
   };
+  // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again (T202).
+  await inBulkPeriod(5000);
   await run();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
   await run();

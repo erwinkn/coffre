@@ -33,12 +33,16 @@ import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
 import { logFence } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
+import { inBulkPeriod } from './window-fixture.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the hot path's Postgres statements");
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
 const API_KEY = 'sk_live_0123456789abcdef';
+
+/** What a request and its warm-up need of one bulk-cap period, far more than they take (T202). */
+const PERIOD_ROOM_MS = 5000;
 
 type Statement = { text: string; values: unknown[]; rows: number };
 
@@ -145,6 +149,8 @@ async function statements(url: string, token = handle, { warm = true, at = runti
     assert.equal(response.status, 200, await response.clone().text());
     await response.arrayBuffer();
   };
+  // The warm-up and the measured request share one refresh period of the bulk cap: a use in the next one writes its key's row again (T202).
+  await inBulkPeriod(PERIOD_ROOM_MS);
   if (warm) await use();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
   await use();
@@ -277,6 +283,7 @@ async function revealed(token: string, body: { path: string; keys?: readonly str
     assert.equal(response.status, 200, await response.clone().text());
     await response.arrayBuffer();
   };
+  await inBulkPeriod(PERIOD_ROOM_MS);
   await reveal();
   for (const pool of [app, vaultPool, hot]) pool.recording = [];
   await reveal();
