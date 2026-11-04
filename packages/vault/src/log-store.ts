@@ -3,6 +3,7 @@ import type { Database } from '@coffre/db';
 import { engineOf, rowsOf } from '@coffre/db/dialect';
 import { sql, type SQL } from 'drizzle-orm';
 
+import { REFRESH_MAX_MS, REFRESH_WINDOW_SHARE, USE_AHEAD_MS, USE_DEADLINE_MS } from './bulk.ts';
 import { misplaced, Refused, type CheckpointStore, type Locating } from './checkpointer.ts';
 import { logObject } from './inputs.ts';
 import { changeEntry, KEY_OBJECT, RETENTION_ACTOR, RETENTION_OBJECT, useEntry } from './log-entry.ts';
@@ -43,11 +44,16 @@ import type { RetentionStore } from './retention.ts';
 export const TILE_RANGE = 2 ** 24;
 
 /**
- * How far past its window's barrier floor a use's `at` may lie: the deadline (`deadline_max()`, 3 s) and the minute
+ * How far past its window's barrier floor a use's `at` may lie: the deadline (`deadline_max()`) and the minute
  * a Worker's clock may run ahead of Postgres's, which `use_credential` holds a use to (it answers `ahead`, and writes
  * nothing, past it). `locate` reads a use's window through the uses' one index within it.
  */
-const AT_SLACK_MS = 63_000;
+const AT_SLACK_MS = USE_DEADLINE_MS + USE_AHEAD_MS;
+
+/** SQLite's copies of the deadline and the bulk refresh, written into its statements as the literals they always were. */
+const DEADLINE = sql.raw(String(USE_DEADLINE_MS));
+const REFRESH_MAX = sql.raw(String(REFRESH_MAX_MS));
+const REFRESH_SHARE = sql.raw(String(REFRESH_WINDOW_SHARE));
 
 type Options = {
   /** Leaves per range of the uses tree's leaf tiles (Postgres): `TILE_RANGE` unless set, smaller in tests. */
@@ -482,9 +488,9 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
       // One writer: every number committed is final. The barrier only moves the floor, as close_one does.
       const barrier = await db.transaction(async (tx) => {
         const [fence] = await rowsOf<{ at_floor: number }>(tx, sql`SELECT at_floor FROM log_fence WHERE only_row`);
-        await rowsOf(tx, sql`UPDATE log_fence SET at_floor = max(at_floor, ${NOW} - 3000) WHERE only_row`);
+        await rowsOf(tx, sql`UPDATE log_fence SET at_floor = max(at_floor, ${NOW} - ${DEADLINE}) WHERE only_row`);
         const [now] = await rowsOf<{ at_floor: number; ceiling: number; upto: number | null }>(tx, sql`
-          SELECT (SELECT at_floor FROM log_fence WHERE only_row) AS at_floor, ${NOW} - 3000 AS ceiling,
+          SELECT (SELECT at_floor FROM log_fence WHERE only_row) AS at_floor, ${NOW} - ${DEADLINE} AS ceiling,
                  max(coalesce((SELECT max(number) FROM log_changes), 0), coalesce((SELECT max(number) FROM log_uses), 0)) AS upto`);
         return { found: fence?.at_floor ?? null, set: Number(now!.at_floor), ceiling: Number(now!.ceiling), upto: BigInt(now!.upto ?? 0) };
       });
@@ -626,7 +632,7 @@ function sqliteStore(db: Database): CheckpointStore & Omit<RetentionStore, 'read
           SELECT b.rowid FROM log_bulk b, (
             SELECT CAST(json_extract(x.payload, '$.value.bulk.windowMs') AS INTEGER) AS w FROM log_changes x
              WHERE x.object = ${logObject('policy', 'instance')} ORDER BY x.number DESC LIMIT 1) p
-           WHERE p.w IS NOT NULL AND b.last < ${NOW} - p.w - min(60000, p.w / 10) - 3000 - 3600000 LIMIT ${limit})
+           WHERE p.w IS NOT NULL AND b.last < ${NOW} - p.w - min(${REFRESH_MAX}, p.w / ${REFRESH_SHARE}) - ${DEADLINE} - 3600000 LIMIT ${limit})
         RETURNING 1 AS n`);
       return pruned.length;
     },

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { TUNNEL_FLOW as FLOW } from '@coffre/client/workload';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 import { WebSocket } from 'ws';
 
@@ -21,7 +22,6 @@ import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_U
 import { TEST_ENGINE } from './db/engine.ts';
 import { db, deps, DEV, ROOT, route, sessionFor, useMcp } from './mcp-fixture.ts';
 import { appClient, tunnelListener } from './tunnel-listener.ts';
-import { FLOW } from '../src/cloudflare-sockets.ts';
 
 const skip = TEST_ENGINE !== 'postgres'
   ? 'the tunnel reaches a Postgres database, over Hyperdrive'

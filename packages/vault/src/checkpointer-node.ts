@@ -5,7 +5,7 @@ import type { PairNotes } from '@coffre/core/merkle';
 import type { Sealing } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
-import { Fence, heldIn, sealingOf, Stalled, TICK_BOUND_MS, Unsealed, within, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
+import { ALARMS_KEPT_MS, Fence, heldIn, OPEN_BOUND_MS, sealingOf, Stalled, Unsealed, UPKEEP_BOUND_MS, within, type Alarm, type Checkpointer, type Memory, type SealThrough, type Witness } from './checkpointer.ts';
 import { daysAround, openLogCheckpointer, reasonOf, TICK_MS, upkeep } from './log-checkpointer.ts';
 import { Projector } from './reads.ts';
 import { verifierKeys } from './verifier.ts';
@@ -60,10 +60,6 @@ export type RunningCheckpointer = {
   sealing(): Sealing;
   stop(): Promise<void>;
 };
-
-/** How long the runner waits on an open, the next days of uses, or the log's upkeep after a tick (T169). */
-const OPEN_BOUND_MS = TICK_BOUND_MS;
-const UPKEEP_BOUND_MS = 60_000;
 
 /** A connection of the checkpointer's own (T169), which its runner cuts once it stalls: `openDatabase(url, { max })`. */
 export type Session = { db: Database; cut(): Promise<void> };
@@ -122,12 +118,12 @@ export async function runCheckpointer(options: {
     await fence.close('its open failed');
     throw error;
   });
-  /** In order, one after the other; a file grown past a megabyte keeps its last 30 days. */
+  /** In order, one after the other; a file grown past a megabyte keeps its last `ALARMS_KEPT_MS`. */
   function record(alarm: Alarm): Promise<void> {
     appending = appending.then(async () => {
       await appendFile(alarmsPath, `${JSON.stringify(alarm)}\n`);
       if ((await stat(alarmsPath)).size > 1_000_000) {
-        const kept = (await readAlarms(alarmsPath)).filter((a) => a.at >= alarm.at - 30 * 86_400_000);
+        const kept = (await readAlarms(alarmsPath)).filter((a) => a.at >= alarm.at - ALARMS_KEPT_MS);
         await writeFile(`${alarmsPath}.part`, kept.map((a) => `${JSON.stringify(a)}\n`).join(''));
         await rename(`${alarmsPath}.part`, alarmsPath);
       }

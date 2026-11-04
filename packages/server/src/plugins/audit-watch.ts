@@ -15,6 +15,7 @@ import { verifyCheckpoint, type Checkpoint, type LogHead } from '@coffre/core/va
 
 import { walking, type AnchorFields, type AnchorFinding, type AnchorStore, type AuditAnchor } from '../anchor.ts';
 import type { CoffrePlugin } from '../plugins.ts';
+import { SCHEDULE_MINUTES } from '../schedule.ts';
 import { Refusal, Superseded, watcher, WATCH, type WatchContext } from '../watch.ts';
 
 export type AuditWatchOptions = {
@@ -286,11 +287,11 @@ async function repaired(ctx: WatchContext, seq: number, anchor: Fields): Promise
 }
 
 /**
- * How old the anchor may be before readiness fails. Cron beats every five
- * minutes, so this allows one late or skipped run, plus a minute of
+ * How old the anchor may be before readiness fails: two beats of the
+ * schedule (`SCHEDULE_MINUTES`), one late or skipped run, plus a minute of
  * scheduling slack, before a monitor sees a failure.
  */
-export const HEARTBEAT_STALE_AFTER_SECONDS = 11 * 60;
+export const HEARTBEAT_STALE_AFTER_SECONDS = (2 * SCHEDULE_MINUTES + 1) * 60;
 
 export type Readiness = {
   ok: boolean;

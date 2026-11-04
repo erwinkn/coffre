@@ -7,7 +7,7 @@
 import { openSync, closeSync, writeSync, rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 
-import { INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, PROJECT_ONLY_PERMISSIONS, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
+import { DEFAULT_SERVICE_TOKEN_DAYS, INSTANCE_ROLES, isInstanceRole, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, PROJECT_ONLY_PERMISSIONS, scopeInWords, unscoped, type Filter, type InstanceRole, type Scope } from '@coffre/core/access';
 import { apiMember, byFolder, serviceName, shownMember, type CoffreClient, type Deletion, type RoleView, type RouteInput } from '@coffre/client';
 
 import { describeRemoval, reaches, scopeFrom, serviceMember, withheldLine } from './trust.ts';
@@ -876,16 +876,18 @@ const PERSONAL_MINUTES = 60;
 /**
  * What `--expires-in` takes: `30m`, `4h`, `2d`, or a number alone, which
  * is days, as a service token's always was. A service token lasts whole
- * days, 1 to 366, 90 unless told; a personal token a minute to a week, an
+ * days, 1 to `MAX_SERVICE_TOKEN_DAYS`, `DEFAULT_SERVICE_TOKEN_DAYS` unless told; a personal token a minute to a week, an
  * hour unless told. In days for a service token, in minutes for a personal one.
  */
 export function lifetime(text: string | undefined, personal: boolean): number {
-  if (text === undefined) return personal ? PERSONAL_MINUTES : 90;
+  if (text === undefined) return personal ? PERSONAL_MINUTES : DEFAULT_SERVICE_TOKEN_DAYS;
   const match = /^(\d+)([mhd]?)$/.exec(text.trim());
   const count = match === null ? NaN : Number(match[1]);
   const unit = match?.[2] || 'd';
   if (!personal) {
-    if (unit !== 'd' || !Number.isInteger(count) || count < 1 || count > 366) throw new UsageError(`--expires-in takes days for a service token, 1 to 366, as 90 or 90d; not "${text}"`);
+    if (unit !== 'd' || !Number.isInteger(count) || count < 1 || count > MAX_SERVICE_TOKEN_DAYS) {
+      throw new UsageError(`--expires-in takes days for a service token, 1 to ${MAX_SERVICE_TOKEN_DAYS}, as ${DEFAULT_SERVICE_TOKEN_DAYS} or ${DEFAULT_SERVICE_TOKEN_DAYS}d; not "${text}"`);
+    }
     return count;
   }
   const minutes = count * { m: 1, h: 60, d: 1440 }[unit as 'm' | 'h' | 'd'];

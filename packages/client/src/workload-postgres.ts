@@ -24,7 +24,16 @@
 import { Buffer } from 'node:buffer';
 import { Duplex } from 'node:stream';
 
-import { upgradeHeaders, upgradeRefused, type Workload } from './workload.ts';
+import {
+  TUNNEL_COUNT_EVERY as COUNT_EVERY,
+  TUNNEL_FLOW as FLOW,
+  TUNNEL_HIGH_WATER as HIGH_WATER,
+  TUNNEL_KEEPALIVE_MS as KEEPALIVE_MS,
+  TUNNEL_WINDOW as WINDOW,
+  upgradeHeaders,
+  upgradeRefused,
+  type Workload,
+} from './workload.ts';
 
 /**
  * What the stream uses of a WebSocket: the WHATWG API's, which Node's,
@@ -48,17 +57,8 @@ export type TunnelSocket = {
 /** A WebSocket class that takes the upgrade's headers, as all of those do. */
 export type WebSocketClass = new (url: string, options: { headers: Record<string, string> }) => TunnelSocket;
 
-const FLOW = 'coffre-tunnel-flow';
-/** What either side may send that the other has not counted back. */
-const WINDOW = 1024 * 1024;
-/** How much the app takes before the stream counts it back: well under the window. */
-const COUNT_EVERY = 128 * 1024;
-/** How much the stream sends before it waits for the WebSocket to send it: a few COPY chunks. */
-const HIGH_WATER = 1024 * 1024;
 /** The most one message carries: a large query is sent in frames, each within the credit left. */
 const FRAME = 64 * 1024;
-/** How often an open connection says it is there, so that an idle one outlives Cloudflare's 100-second timeout. */
-const KEEPALIVE_MS = 30_000;
 
 /**
  * A stream to the database behind the tunnel `name`, which the app's driver

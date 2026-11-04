@@ -5,6 +5,7 @@ import {
   INSTANCE_ROLES,
   PERMISSIONS,
   PROJECT_ONLY_PERMISSIONS,
+  ROLE_ID_MAX,
   ROLES,
   type Permission,
   type RoleDefinition,
@@ -150,7 +151,7 @@ export function roleIdFrom(name: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^[^a-z]+/, '')
     .replace(/-+$/, '')
-    .slice(0, 32)
+    .slice(0, ROLE_ID_MAX)
     .replace(/-+$/, '');
 }
 
@@ -159,7 +160,7 @@ export function roleIdProblem(id: string, taken: readonly string[]): string | nu
   if (id === '') return 'A role needs an id.';
   if (!/^[a-z0-9-]+$/.test(id)) return 'An id is lowercase letters, digits and dashes.';
   if (!/^[a-z]/.test(id)) return 'An id starts with a letter.';
-  if (id.length < 2 || id.length > 32) return 'An id is 2 to 32 characters.';
+  if (id.length < 2 || id.length > ROLE_ID_MAX) return `An id is 2 to ${ROLE_ID_MAX} characters.`;
   if (taken.includes(id)) return `There is a role ${id} already.`;
   return null;
 }

@@ -28,12 +28,14 @@ import { HyperdrivePool } from '@coffre/db/hyperdrive';
 import type { Sealing } from '@coffre/core/vault';
 
 import {
+  ALARMS_KEPT_MS,
   Fence,
   heldIn,
+  OPEN_BOUND_MS,
   SEAL_WAIT_MS,
   sealingOf,
-  TICK_BOUND_MS,
   Unsealed,
+  UPKEEP_BOUND_MS,
   WITNESS_DEADLINE_MS,
   within,
   type Alarm,
@@ -102,15 +104,6 @@ export function durableMemory(storage: ObjectState['storage']): Memory {
   };
 }
 
-/** How long alarms are kept. */
-const ALARMS_KEPT_MS = 30 * 86_400_000;
-/**
- * How long the object waits on an open, which reads the newest pair and the trees' edges, and on the next days of
- * uses made without it (T169): as long as a tick.
- */
-const OPEN_BOUND_MS = TICK_BOUND_MS;
-/** How long it waits on the log's upkeep after a tick: retention drops a day's partition and its tiles, hourly. */
-const UPKEEP_BOUND_MS = 60_000;
 /** How long the vault waits on the object for anything but a seal: a start, its status, the pair it remembers. */
 const ASK_BOUND_MS = 2000;
 /** How long the vault waits on the object for a seal: its own bound, and the witnesses', and a second more. */

@@ -586,7 +586,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   const now = Date.now();
   const nothing = (state: string): UseRow => ({ state } as UseRow);
   if (call.deadline > call.at + USE_DEADLINE_MS) return nothing('late');
-  if (call.at > now + 60_000) return nothing('ahead');
+  if (call.at > now + USE_AHEAD_MS) return nothing('ahead');
   // A named call's credential first, held to what the app's config accepts (0045, reviews r6 and r7 of D153): one the
   // app would refuse is answered as a token no credential has, before the place, the key or anything else is read.
   const names = call.names;

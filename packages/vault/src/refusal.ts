@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { openUnder, sealUnder } from './admit.ts';
+import { openUnder, sealUnder, TICKET_MS } from './admit.ts';
 import { canonical, logObject } from './inputs.ts';
 import { entryMac, type LogMacKey } from './log-entry.ts';
 
@@ -45,9 +45,6 @@ export type AddRefusing = Refusing & { principal: string; role?: string; scope?:
 /** The record as the vault prepared it, which the app hands back to `recordRefusal` and can neither change nor make. */
 export type RefusalTicket = { v: 1; until: number; actor: string; requestId: string; payload: string };
 
-/** How long a refusal's ticket is taken: the record follows its decision by the app's check, in memory. */
-export const REFUSAL_MS = 30_000;
-
 const REFUSAL_DOMAIN = 'coffre.refusal.v1\0';
 
 /** A key write's refusal, its record prepared. */
@@ -71,7 +68,7 @@ function ticketOf(key: LogMacKey, at: number, actor: string, payload: (id: strin
   // The record's own request id, drawn here: the same each time the ticket is written (`log_refusal` finds it), never
   // a change's (each key write's is derived from its number and object, `writeRequestId`; an add's is drawn too).
   const requestId = randomUUID();
-  const ticket: RefusalTicket = { v: 1, until: at + REFUSAL_MS, actor, requestId, payload: canonical(payload(requestId)) };
+  const ticket: RefusalTicket = { v: 1, until: at + TICKET_MS, actor, requestId, payload: canonical(payload(requestId)) };
   return sealUnder(REFUSAL_DOMAIN, key, ticket);
 }
 

@@ -1,5 +1,6 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { deriveLogKey, type StoredEntry } from '@coffre/core/audit';
 import { verifyCheckpoint, type Vault } from '@coffre/core/vault';
@@ -10,6 +11,7 @@ import { asc, eq, gte } from 'drizzle-orm';
 import { memoryAnchor, sealAnchor, type AnchorStore, type AuditAnchor } from '../src/anchor.ts';
 import { appendAudit, appLogKey, CHAIN_WALK } from '../src/db/audit.ts';
 import { latestCheckpoint } from '../src/db/queries.ts';
+import { SCHEDULE_MINUTES } from '../src/schedule.ts';
 import { acceptLoss, auditReadiness, HEARTBEAT_STALE_AFTER_SECONDS, walkAuditBacklog, writeAuditHeartbeat, type HeartbeatLogger } from './watch-fixture.ts';
 import { LOG, openTestDatabase, resetDatabase, testAnchor, testVault } from './api-fixture.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
@@ -609,4 +611,11 @@ test('two beats at once: the one that anchors second loses the compare-and-set, 
   assert.deepEqual(said, ['another beat wrote the audit anchor first: the next goes on from it']);
   assert.deepEqual(await anchored(), b);
   assert.equal((await ready()).ok, true);
+});
+
+test("the heartbeat's bound counts beats of the schedule every Workers deployment's cron runs: coffre init's, and the dev stack's", () => {
+  for (const file of ['examples/workers/app/wrangler.jsonc', 'dev/deployment/app/wrangler.jsonc']) {
+    const config = readFileSync(new URL(`../../../${file}`, import.meta.url), 'utf8');
+    assert.deepEqual([...config.matchAll(/"crons":\s*\[([^\]]*)\]/g)].map((found) => found[1]!.trim()), [`"*/${SCHEDULE_MINUTES} * * * *"`], file);
+  }
 });

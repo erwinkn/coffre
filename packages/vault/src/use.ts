@@ -2,7 +2,7 @@ import { NOTHING } from '@coffre/core/access';
 import { ownerKey, type SecretContext } from '@coffre/core/envelope';
 import { KekBadClaimError, KekUnavailableError, type KekRegistry } from '@coffre/core/kek';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
-import { MAX_PARENTS } from '@coffre/core/vault';
+import { HOT_STATEMENT_TIMEOUT_MS, MAX_PARENTS } from '@coffre/core/vault';
 import {
   type Access, type CredentialAcceptance, type DecidedItem, type NamedKey, type NamedManyInput, type NamedManyOutcome, type NamedUseInput, type NamedUseOutcome, type NamedValue, newUseRequestId,
   type ProxyItemInput, type ProxyItemOutcome, type RouteFound, type RouteUseInput, type RouteUseOutcome, type UseBusy, type UseInput, type UseManyInput, type UseManyOutcome, type UseOutcome, type UsedValue,
@@ -107,14 +107,14 @@ export function useLimits(connections: number, set: Partial<UseLimits> = {}): Us
 
 /**
  * How long past its deadline a call keeps its place at most where places lapse (`UseCache`, Workers): the hot login's
- * `statement_timeout` (`coffre setup`'s HOT_SETTINGS, `migrate`). On Workers a call's connection is its own, closed
+ * `statement_timeout`, `HOT_STATEMENT_TIMEOUT_MS` (`@coffre/core/vault`). On Workers a call's connection is its own, closed
  * at its deadline at the latest (cloudflare.ts, `HyperdrivePool.end`), or with its request if that ends first: what
  * the call asked and Hyperdrive had not sent goes with it, and what reached Postgres by then Postgres ends within its
  * `statement_timeout`. So by this long past the deadline nothing of the call's holds a connection, whether its
  * promise ever settles or not, which on Workers it may never do: its I/O is gone with its request (AGENTS.md, "What
  * an isolate keeps"). Counted until it settled, each such call kept its place until the isolate was recycled (T170).
  */
-export const HELD_PAST_DEADLINE_MS = 2_000;
+export const HELD_PAST_DEADLINE_MS = HOT_STATEMENT_TIMEOUT_MS;
 
 /**
  * An isolate's admission, seal cache and covers. Bounded: past `max` entries, a map starts over.

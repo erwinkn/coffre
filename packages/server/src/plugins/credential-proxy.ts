@@ -49,7 +49,7 @@ import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
 import type { ProxyAllow, ProxyDefinition, ProxyHmac, ProxyInject, ProxyLimit, ProxyMethod, ProxyTunnel } from '@coffre/core/vault';
-import { withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
+import { DEFAULT_CACHE_SECONDS, withProxyCode, type ProxyCodeItem } from '../proxy-code.ts';
 import { UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { WorkloadRefused, type CoffrePlugin, type Connect, type PickKeys, type PluginContext, type PluginCounts, type RouteAsked, type RouteUsed, type SocketSession, type Used, type WorkloadAt, type WorkloadUse } from '../plugins.ts';
 import { definitionKeys, TEMPLATE_KEY as SHARED_TEMPLATE_KEY, USE_DEADLINE_MS, type DecidedItem, type ProxyRoute } from '@coffre/core/vault';
@@ -468,7 +468,7 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   const messageBytes = Math.max(...[...signers.values(), ...verifiers.values()].map(longest), MESSAGE_BYTES);
   const recheckMs = (options.recheckSeconds ?? 60) * 1000;
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
-  const cacheMs = (options.cacheSeconds ?? 60) * 1000;
+  const cacheMs = (options.cacheSeconds ?? DEFAULT_CACHE_SECONDS) * 1000;
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
   // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
   const cache = new Map<string, Kept>();

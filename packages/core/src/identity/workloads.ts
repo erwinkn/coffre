@@ -651,7 +651,7 @@ export type BindingReads = Readonly<Record<string, { readonly keys?: readonly st
  *   binding says so.
  * - `reads`: the escape hatch, by ID (section 6.1).
  * - `sources`: CIDRs a session's client address must be within.
- * - `sessionHours`: a session's hard end after its proof, at most 168.
+ * - `sessionHours`: a session's hard end after its proof, at most `MAX_SESSION_HOURS`.
  * - An `enrollment` binding's codes: `replicas` (required), `sessionDays`,
  *   `overlapMinutes`, `mintedBy` (the service, never the binding's own,
  *   that may mint them), `approve` and `onContention` (section 4.4).
@@ -685,6 +685,12 @@ export const WORKLOAD_SIGN_IN_PATH = '/api/auth/workload';
 export const EXCHANGE_SKEW_SECONDS = 60;
 
 /** What a field left out of a policy means. */
+/**
+ * The most `sessionHours` takes: a week, a session's latest hard end after its proof (workload-access.md, section 5,
+ * "at most 168"). The vault holds a sign-in to it too (`@coffre/vault`'s credentials).
+ */
+export const MAX_SESSION_HOURS = 168;
+
 export const POLICY_DEFAULTS = {
   keyAudience: false,
   sessionHours: 24,
@@ -838,7 +844,7 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
     const value = integer(given[name], name, min, max);
     if (name === 'replicas' || value !== POLICY_DEFAULTS[name]) policy[name] = value;
   };
-  number('sessionHours', 1, 168);
+  number('sessionHours', 1, MAX_SESSION_HOURS);
   number('sessionDays', 1, 90);
   number('overlapMinutes', 1, 60);
   number('replicas', 1, 64);

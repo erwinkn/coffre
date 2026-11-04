@@ -1801,7 +1801,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-1Ji1XVkE.js
+//#region ../core/dist/access-B5ul0GWb.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -1902,8 +1902,8 @@ const ROLES = {
 	}
 };
 Object.keys(ROLES);
-/** A custom role's id: lowercase, as a slug, and no built-in one's. */
-const ROLE_ID = /^[a-z][a-z0-9-]{1,31}$/;
+/** A custom role's id: lowercase, as a slug, 2 to `ROLE_ID_MAX` characters, and no built-in one's. */
+const ROLE_ID = new RegExp(`^[a-z][a-z0-9-]{1,31}$`);
 /** Whether `value` names a role of `policy`'s: a built-in one, as it ships, unless told. */
 function isRole(value, policy = DEFAULT_POLICY) {
 	return Object.hasOwn(policy.roles, value);
@@ -5927,7 +5927,6 @@ function gitlabProject(input) {
 		}
 	};
 }
-/** What a field left out of a policy means. */
 const POLICY_DEFAULTS = {
 	keyAudience: false,
 	sessionHours: 24,
@@ -6314,12 +6313,12 @@ A workload signs in for a key-bound session, by its platform's proof:
        coffre trust <service> --vercel <team> --owner-id team_… --project-id prj_…
                     [--vercel-environment production] [--issuer https://oidc.vercel.com] [--claim …]
        coffre trust <service> --enrollment --replicas <n> [--minted-by <service>] [--approve]
-                    [--session-days 30] [--overlap-minutes 15] [--on-contention freeze|alert]
+                    [--session-days ${POLICY_DEFAULTS.sessionDays}] [--overlap-minutes ${POLICY_DEFAULTS.overlapMinutes}] [--on-contention freeze|alert]
        coffre trust <service> --cloudflare
        coffre trust <service> (--github … | --gitlab … | --issuer …) --workload
          and, for any of them:
                     [--reads <project>/<env>=<KEY>,… | <project>/<env>=*] [--source <cidr> …]
-                    [--session-hours 24] [--unsigned-uploads]
+                    [--session-hours ${POLICY_DEFAULTS.sessionHours}] [--unsigned-uploads]
          --aws, --kubernetes and --gcp look up the IDs they bind with the aws, kubectl and gcloud you
          are signed in to; --role-id, --uid and a unique ID skip the lookup
          --reads lists the values its sessions may read, which its platform then holds: every other
@@ -6933,7 +6932,7 @@ function describeBinding(binding) {
 function policyLines(profile, policy) {
 	if (policy === null) return [];
 	const uploads = policy.unsignedUploads === true ? "; streamed uploads no digest binds go through" : "";
-	const sessions = profile === "enrollment" ? `  sessions key-bound, each renewed every 30 s and ended at its code's expiry, ${policy.sessionDays ?? 30} days after minting${uploads}` : profile === "cloudflare" ? null : `  sessions key-bound, at most ${policy.sessionHours ?? 24} h from each proof${uploads}`;
+	const sessions = profile === "enrollment" ? `  sessions key-bound, each renewed every 30 s and ended at its code's expiry, ${policy.sessionDays ?? POLICY_DEFAULTS.sessionDays} days after minting${uploads}` : profile === "cloudflare" ? null : `  sessions key-bound, at most ${policy.sessionHours ?? POLICY_DEFAULTS.sessionHours} h from each proof${uploads}`;
 	const lines = sessions === null ? [] : [sessions];
 	if (policy.audience !== void 0) lines.push(`  audience ${policy.audience}`);
 	else if (policy.keyAudience === true || KEY_NAMING_PROFILES.includes(profile)) lines.push("  audience names the session's key: <publicUrl>#jkt=<thumbprint>");
@@ -6943,8 +6942,8 @@ function policyLines(profile, policy) {
 	if (policy.sources !== void 0) lines.push(`  from     ${policy.sources.join(", ")}`);
 	if (profile === "enrollment") {
 		const minted = policy.mintedBy === void 0 ? "its managers" : `its managers and ${shownMember$1(policy.mintedBy)}`;
-		lines.push(`  codes    minted by ${minted}, ${policy.sessionDays ?? 30} days each; up to ${2 * (policy.replicas ?? 1)} sessions of ${policy.replicas} replica${policy.replicas === 1 ? "" : "s"}`);
-		lines.push(`           ${policy.onContention === "alert" ? "alerts" : "freezes"} when a copy contends past ${policy.overlapMinutes ?? 15} minutes of overlap${policy.approve === true ? "; each session waits for approval" : ""}`);
+		lines.push(`  codes    minted by ${minted}, ${policy.sessionDays ?? POLICY_DEFAULTS.sessionDays} days each; up to ${2 * (policy.replicas ?? 1)} sessions of ${policy.replicas} replica${policy.replicas === 1 ? "" : "s"}`);
+		lines.push(`           ${policy.onContention === "alert" ? "alerts" : "freezes"} when a copy contends past ${policy.overlapMinutes ?? POLICY_DEFAULTS.overlapMinutes} minutes of overlap${policy.approve === true ? "; each session waits for approval" : ""}`);
 	}
 	return lines;
 }
@@ -7372,7 +7371,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-B_gSRZo-.js
+//#region ../client/dist/workload-D9-CzlBB.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -8265,6 +8264,23 @@ function child(parent, key, token, expiresAt, places) {
 		})()
 	});
 }
+/**
+* A database tunnel's credit flow, which every end of one speaks: coffre's (on Workers, packages/server's
+* `cloudflare-sockets.ts`), the SDK's stream (`@coffre/client/workload/postgres`) and `coffre run`'s listener (the
+* CLI). The client asks for it in the `TUNNEL_FLOW` header; then each side sends at most `TUNNEL_WINDOW` bytes the
+* other has not counted back, and counts back what it took every `TUNNEL_COUNT_EVERY`. A Workers WebSocket has no
+* back-pressure, so the window is what bounds the bytes an object holds for a session: three windows of each of its
+* sessions within its 128 MB (`MOST_SESSIONS`, there). The count, an eighth of the window, is the design's: well
+* under it, so that neither side waits on the other.
+*/
+const TUNNEL_FLOW = "coffre-tunnel-flow";
+/**
+* How often a client's end of an open tunnel says it is there, idle or not: a count, which keeps an idle connection
+* and its Durable Object alive, and, from `coffre run`, a ping whose pong must come before the next, which finds a
+* peer gone without a word. Cloudflare closes an idle WebSocket after "a period of time" its WebSockets page
+* (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (limits.md, C3).
+*/
+const TUNNEL_KEEPALIVE_MS = 3e4;
 /**
 * The headers that sign a WebSocket's upgrade to `url` (a tunnel's), made
 * outside `coffre.fetch`: the session, and a proof of a GET at its `https`
@@ -9202,7 +9218,7 @@ const PERSONAL_MINUTES = 60;
 /**
 * What `--expires-in` takes: `30m`, `4h`, `2d`, or a number alone, which
 * is days, as a service token's always was. A service token lasts whole
-* days, 1 to 366, 90 unless told; a personal token a minute to a week, an
+* days, 1 to `MAX_SERVICE_TOKEN_DAYS`, `DEFAULT_SERVICE_TOKEN_DAYS` unless told; a personal token a minute to a week, an
 * hour unless told. In days for a service token, in minutes for a personal one.
 */
 function lifetime(text, personal) {
@@ -13092,31 +13108,6 @@ var import_websocket = /* @__PURE__ */ __toESM(require_websocket(), 1);
 require_websocket_server();
 //#endregion
 //#region src/tunnels.ts
-/** How much one side may hold for the other before it stops reading: a few COPY chunks. */
-const HIGH_WATER = 1048576;
-/**
-* Credit flow, asked for in a header (on Workers, whose WebSockets have no
-* back-pressure: packages/server/src/cloudflare-sockets.ts): each side
-* counts back what it took, in text messages, each the bytes taken from
-* binary messages since its last, and sends at most `WINDOW` bytes the
-* other has not counted. coffre's first message says whether it paces: a
-* count, `0`, before any byte, or a byte, from a coffre on Node, which
-* reads its socket only as fast as it writes and ignores the counts. Until
-* it says, the listener holds the app to the window; it counts back
-* whatever coffre it reaches.
-*/
-const FLOW = "coffre-tunnel-flow";
-const WINDOW = 1048576;
-/** How much the app takes before the listener counts it back: well under the window. */
-const COUNT_EVERY = 131072;
-/**
-* How often an open connection says it is there, idle or not: a count,
-* which reaches coffre's end, so that a psql left at its prompt outlives
-* Cloudflare's idle timeout (100 seconds), and keeps its Durable Object;
-* and a ping, whose pong must come before the next, or the connection is
-* gone, as when a laptop's network changes without a word.
-*/
-const KEEPALIVE_MS = 3e4;
 /**
 * How long coffre has to answer the upgrade: a coffre that does not is gone,
 * and both ends close, rather than wait forever on it. Longer than coffre's
@@ -13130,7 +13121,7 @@ const HANDSHAKE_MS = 7e4;
 * are a person's run's, by `handle`, or a workload's, signed by its session.
 * `keepaliveMs` and `handshakeMs` are for tests.
 */
-async function listen(tunnel, as, { keepaliveMs = KEEPALIVE_MS, handshakeMs = HANDSHAKE_MS, address = {
+async function listen(tunnel, as, { keepaliveMs = TUNNEL_KEEPALIVE_MS, handshakeMs = HANDSHAKE_MS, address = {
 	host: "127.0.0.1",
 	port: 0
 } } = {}) {
@@ -13143,7 +13134,7 @@ async function listen(tunnel, as, { keepaliveMs = KEEPALIVE_MS, handshakeMs = HA
 		const ws = new import_websocket.default(tunnel.url, {
 			headers: {
 				...typeof as === "string" ? { authorization: `Bearer ${as}` } : {},
-				[FLOW]: "credit"
+				[TUNNEL_FLOW]: "credit"
 			},
 			handshakeTimeout: handshakeMs,
 			finishRequest: signed(as, tunnel.url)
@@ -13198,7 +13189,7 @@ function carry(socket, ws, keepaliveMs) {
 	/** Bytes coffre sent that the listener has not counted back: a coffre that paces keeps them under a window. */
 	let owed = 0;
 	let answered = true;
-	const held = () => ws.bufferedAmount >= HIGH_WATER || pacing !== false && uncounted >= WINDOW;
+	const held = () => ws.bufferedAmount >= 1048576 || pacing !== false && uncounted >= 1048576;
 	const count = () => {
 		if (ws.readyState !== import_websocket.default.OPEN) return;
 		ws.send(String(taken), () => void 0);
@@ -13237,11 +13228,11 @@ function carry(socket, ws, keepaliveMs) {
 			if (!held()) socket.resume();
 		}
 		owed += data.length;
-		if (pacing === true && owed > 2 * WINDOW) return ws.terminate();
+		if (pacing === true && owed > 2097152) return ws.terminate();
 		if (socket.destroyed) return;
 		if (!socket.write(data, () => {
 			taken += data.length;
-			if (taken >= COUNT_EVERY) count();
+			if (taken >= 131072) count();
 		}) && pacing === false) ws.pause();
 	});
 	socket.on("drain", () => ws.resume());

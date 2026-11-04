@@ -1,14 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { ownsInstance, ownsProject } from '@coffre/core/access';
-import type { ProxyDefinition, ProxyView, Refusal as VaultRefusal } from '@coffre/core/vault';
+import { USE_DEADLINE_MS, type ProxyDefinition, type ProxyView, type Refusal as VaultRefusal } from '@coffre/core/vault';
 
 import type { ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
 import { denied, Refusal, through, vaultCredential, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
-import type { ProxyCodeItem } from '../proxy-code.ts';
+import { DEFAULT_CACHE_SECONDS, type ProxyCodeItem } from '../proxy-code.ts';
 import { gateProxy } from '../proxy-gate.ts';
 
 /**
@@ -84,9 +84,8 @@ function pageOf(ctx: ApiContext, place: ResolvedPath, view: ProxyView): ProxyPag
   };
 }
 
-/** The proxy's `cacheSeconds` unless set, and the deadline a use's values are sent by (R53), the window with no cache. */
-const DEFAULT_CACHE_SECONDS = 60;
-const USE_DEADLINE_SECONDS = 3;
+/** The deadline a use's values are sent by (R53), in seconds: the window with no cache. */
+const USE_DEADLINE_SECONDS = USE_DEADLINE_MS / 1000;
 
 /** Whether the caller releases a reserved name: an Owner of the whole instance, a person signed in as themselves. */
 function mayRelease(ctx: ApiContext): boolean {
