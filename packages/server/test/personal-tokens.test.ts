@@ -15,6 +15,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { HIDDEN_COUNTED } from '../src/db/queries.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
+import { TEST_ENGINE } from './db/engine.ts';
 import { auditLog, credentials, logChanges } from './db/tables.ts';
 import { aroundNextUseByIds, clientFor, contextFor, issuesLogged, LOG, openTestDatabase, resetDatabase, revokesLogged, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 
@@ -267,7 +268,16 @@ test('every entry made with a personal token names its person and the token, the
     .orderBy(asc(auditLog.seq));
   const made = written.filter((row) => JSON.parse(row.metadata).credentialId === issued.id).map((row) => `${row.author} ${row.action}`);
   // The read, under 0.15's log, is a use, its credential the token's: no entry here.
-  for (const action of ['app secret.write', 'vault key.wrap', ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
+  // On Postgres under 0.15's log the write goes down the two-trip path, which since 0.16.0 writes no 0.14 entry (T179):
+  // its record is the key's change in 0.15's log, which names her and the token it was decided for.
+  const fast = TEST_ENGINE === 'postgres' && LOG === '0.15';
+  for (const action of [...(fast ? [] : ['app secret.write', 'vault key.wrap']), ...(LOG === '0.14' ? ['vault secret.read'] : [])]) assert.ok(made.includes(action), action);
+  if (fast) {
+    assert.deepEqual(made.filter((action) => action === 'app secret.write' || action === 'vault key.wrap'), []);
+    const changes = await db.owner.select({ actor: logChanges.actor, payload: logChanges.payload }).from(logChanges)
+      .where(sql`${logChanges.payload} LIKE ${'{"digest":%"inputs":"%'} AND ${logChanges.payload} LIKE ${'%"op":"secret.write"%'}`);
+    assert.deepEqual(changes.map(({ actor, payload }) => [actor, (JSON.parse(payload) as { request: { credential: string } }).request.credential]), [[ADA, issued.id]]);
+  }
   if (LOG === '0.15') assert.deepEqual((await usesLogged(db.owner)).map((use) => use.credential), [issued.id]);
 
   // With 0.15's log, the vault issues it (T149), and its change records it (D147): the page lists it in 0.14's entry's

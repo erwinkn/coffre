@@ -17,6 +17,7 @@ import { eq, sql } from 'drizzle-orm';
 
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
+import { missingMembers } from '../src/db/queries.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { localVault, spoken } from '@coffre/vault/node';
@@ -133,24 +134,31 @@ async function since<T>(work: () => Promise<T>): Promise<{ result: T; entries: s
   return { result, entries: entries.map((entry) => `${entry.author} ${entry.action} ${entry.decision} ${entry.actor}`), changes: changes.map((change) => ({ actor: change.actor, payload: JSON.parse(change.payload) as Record<string, unknown> })) };
 }
 
-test("a first add the vault decided on its read commits in its write, no app statement, its change naming the caller and the read it was decided on, answered as today's path answers it", { skip: POSTGRES }, async () => {
+test("a first add the vault decided on its read commits in its write, no app statement, its change naming the caller and the read it was decided on, and no 0.14 entry (0.16.0), answered as today's path answers it", { skip: POSTGRES }, async () => {
   const fast = await world();
   const made = await since(() => fast.add());
   assert.equal(made.result.status, 200, JSON.stringify(made.result.body));
   assert.deepEqual(served(fast.answers), ['served']);
-  assert.deepEqual(made.entries, [`vault member.add allow user:${BOB}`]);
+  // The change is the add's record: no `member.add` entry of 0.14's.
+  assert.deepEqual(made.entries, []);
   assert.equal(made.changes.length, 1);
   const [change] = made.changes;
   assert.equal(change!.actor, `user:${BOB}`);
   assert.equal(change!.payload.op, 'member.add');
-  assert.deepEqual((change!.payload.request as { credential: string }).credential, fast.bob.id);
+  assert.equal(change!.payload.old, undefined);
+  const request = change!.payload.request as { credential: string; operationId: unknown; requestId: unknown };
+  assert.deepEqual(request.credential, fast.bob.id);
+  assert.match(String(request.operationId), /^[0-9a-f-]{36}$/);
+  assert.match(String(request.requestId), /^[0-9a-f-]{36}$/);
   assert.match(String(change!.payload.inputs), /^[0-9a-f]{64}$/);
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
   assert.ok((await fast.root.audit.verify()).ok);
-  // As a vault that serves no `admitRead` answers the same add: status, body, entries.
+  // As a vault that serves no `admitRead` answers the same add: status and body. Its record differs: today's path
+  // appends `member.add`, beside its change; the two-trip path's change stands alone.
   const today = await world({ fast: false });
   const was = await since(() => today.add());
-  assert.deepEqual({ status: made.result.status, body: made.result.body, entries: made.entries }, { status: was.result.status, body: was.result.body, entries: was.entries });
+  assert.deepEqual({ status: made.result.status, body: made.result.body }, { status: was.result.status, body: was.result.body });
+  assert.deepEqual(was.entries, [`vault member.add allow user:${BOB}`]);
   assert.deepEqual(await memberRow(NEW), { role: 'developer', createdBy: `user:${BOB}` });
 });
 
@@ -239,9 +247,11 @@ test('another add of the same member between the read and the write: the hold fa
   assert.equal(added.status, 200, JSON.stringify(added.body));
   assert.equal(added.body.created, false);
   assert.deepEqual(served(w.answers), ['served', 'shape']);
-  // Once: the root's, whose role Bob's then changes, as today's path does a member's.
+  // Once: the root's, down today's path, whose role Bob's then changes, as today's path does a member's. No add of
+  // Bob's recorded in 0.15's log alone (a two-trip add's change starts with its `inputs`).
   const [{ count }] = await run(db.owner, sql`SELECT count(*)::int AS count FROM audit_log WHERE action = 'member.add' AND subject_principal = ${NEW} AND decision = 'allow'`) as { count: number }[];
-  assert.equal(count, 1);
+  const [{ adds }] = await run(db.owner, sql`SELECT count(*)::int AS adds FROM log_changes WHERE object = ${logObject('principal', NEW)} AND payload LIKE ${'{"inputs":"%'}`) as { adds: number }[];
+  assert.deepEqual([Number(count), Number(adds)], [1, 0]);
 });
 
 test('a hold that keeps failing gives up after three tries: 409 `changed`, asked again in a second, nothing added (EveryRequestEnds)', { skip: POSTGRES }, async () => {
@@ -292,6 +302,27 @@ test("Bob's member row edited in a column only its 0.4 MAC covers (`created_by`)
   assert.equal(fast.status, 401, JSON.stringify(fast.body));
   assert.equal(fast.row, undefined);
   assert.deepEqual({ ...fast, served: [] }, { ...today, served: [] });
+});
+
+test("a member added down the two-trip path and changed no further, then the vault's key rotated: the rotation seals their row again under the new key, as it does everyone's, and they are served (review r1 of #490)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const added = await w.add();
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.deepEqual(served(w.answers), ['served']);
+  assert.equal(await accessSeq(NEW), 0n);
+  // A cold isolate of the deployment given a new KEK, the old one among its previous: its first call rotates.
+  const rotated = spoken(await localVault(
+    {
+      database: await openVaultDatabase(), hotDatabase: hotDatabaseUrl(), owners: [ROOT],
+      kek: { id: 'test-kek-2', key: randomBytes(32).toString('base64') }, previousKeks: [{ id: 'test-kek-1', key: w.kek.toString('base64') }],
+    },
+    { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld },
+  ));
+  const access = await rotated.access(NEW);
+  assert.deepEqual([access.status, access.role], ['active', 'developer'], JSON.stringify(access));
+  assert.deepEqual(await run(db.owner, sql`SELECT count(*)::int AS n FROM audit_log WHERE action = 'key.rotate'`), [{ n: 1 }]);
+  const verified = await rotated.verifyLog({});
+  assert.ok(verified.ok, JSON.stringify(verified));
 });
 
 test("a ticket another vault read, written by one whose config names the member an Owner: that vault leaves the add to today's path, nothing written (review r1 of #474)", { skip: POSTGRES }, async () => {
@@ -436,4 +467,70 @@ test("the read moves with every part an add's decision weighs, its numbers too: 
     assert.notEqual(now, digest, what);
     digest = now;
   }
+});
+
+test("a first add down the two-trip path, recorded in 0.15's log alone, is listed on the instance's page where 0.14's `member.add` stood; the log verifies through a later change down today's path, and not with the row forged; its row deleted, the member is missing (T179, 0.16.0)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const added = await w.add();
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.deepEqual(served(w.answers), ['served']);
+  const adds = async (query: Record<string, string | undefined>) => (await w.root.audit.list({ sealed: '1', limit: 50, ...query })).entries.filter((entry) => entry.action === 'member.add' && entry.log === '0.15');
+  for (const query of [{}, { actor: `user:${BOB}` }, { actor: BOB }]) {
+    const [entry, ...more] = await adds(query);
+    assert.deepEqual(more, [], JSON.stringify(query));
+    assert.deepEqual(
+      { actor: entry?.actorId, subject: entry?.subject, role: entry?.metadata.role, author: entry?.author, forged: entry?.forged },
+      { actor: BOB, subject: NEW, role: 'developer', author: 'vault', forged: undefined },
+      JSON.stringify(query),
+    );
+    assert.match(String(entry?.operationId), /^[0-9a-f-]{36}$/);
+  }
+  // An add is the instance's, of no place; and no other member's.
+  for (const query of [{ path: 'market' }, { actor: ROOT }, { decision: 'deny' }]) assert.deepEqual(await adds(query), [], JSON.stringify(query));
+  // 0.14's replay of the vault's access entries never saw the add: a role change down today's path after it is one it
+  // cannot follow, and 0.15's log holds the rows instead.
+  await w.root.members.add(NEW, { role: 'auditor' });
+  assert.ok((await w.root.audit.verify()).ok);
+  const [row] = await run(db.owner, sql`SELECT * FROM vault_members WHERE principal = ${NEW}`) as Record<string, unknown>[];
+  await run(db.owner, sql`UPDATE vault_members SET role = 'owner' WHERE principal = ${NEW}`);
+  const forged = await w.root.audit.verify();
+  assert.deepEqual([forged.ok, forged.ok ? null : forged.author], [false, 'vault']);
+  await run(db.owner, sql`UPDATE vault_members SET role = ${row!.role as string} WHERE principal = ${NEW}`);
+  assert.ok((await w.root.audit.verify()).ok);
+  // Its row deleted around the vault: the list of everyone finds the member missing.
+  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${NEW}`);
+  assert.deepEqual(await missingMembers(db.runtime), [NEW]);
+});
+
+test("a member added down the two-trip path, then removed down today's path: 0.14's replay stops at a removal of someone it never saw added, and the log still verifies, every row held to 0.15's log instead; a row deleted around the vault after it is found (T179, 0.16.0)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const added = await w.add();
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.deepEqual(served(w.answers), ['served']);
+  const CAROL = 'user:carol@acme.example';
+  assert.equal((await w.deps.vault.admit({ actor: `user:${ROOT}`, principal: CAROL, role: 'developer' })).ok, true);
+  assert.equal((await w.deps.vault.remove({ actor: `user:${ROOT}`, principal: NEW })).ok, true);
+  const [removal] = await run(db.owner, sql`SELECT action FROM audit_log WHERE author = 'vault' AND subject_principal = ${NEW}`) as { action: string }[];
+  assert.equal(removal?.action, 'member.remove');
+  const verified = await w.root.audit.verify();
+  assert.ok(verified.ok, JSON.stringify(verified));
+  // Carol, added down today's path before the removal, her row deleted: no replay says she is missing now, 0.15's log does.
+  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${CAROL}`);
+  const missing = await w.root.audit.verify();
+  assert.deepEqual([missing.ok, missing.ok ? null : missing.author, missing.ok ? null : missing.reason], [false, 'vault', "the store's carol@acme.example is older than the log's last change to them: it was put back"], JSON.stringify(missing));
+});
+
+test("a member added down the two-trip path alone, with no 0.14 entry of them, whose row is deleted around the vault is missing by their add's change in 0.15's log (T179, 0.16.0)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const added = await w.add();
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+  assert.deepEqual(served(w.answers), ['served']);
+  assert.deepEqual(await run(db.owner, sql`SELECT count(*)::int AS n FROM audit_log WHERE subject_principal = ${NEW}`), [{ n: 0 }]);
+  assert.deepEqual(await missingMembers(db.runtime), []);
+  assert.ok((await w.root.audit.verify()).ok);
+  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${NEW}`);
+  assert.deepEqual(await missingMembers(db.runtime), [NEW]);
+  // And the vault's verification, which no 0.14 entry of theirs tells either.
+  const verified = await w.root.audit.verify();
+  assert.deepEqual([verified.ok, verified.ok ? null : verified.reason], [false, "the store's new@acme.example is older than the log's last change to them: it was put back"], JSON.stringify(verified));
 });

@@ -173,7 +173,7 @@ import {
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
-import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
+import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
 import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, parseAdmitInputs, scopeSlugs, sealTicket, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
@@ -1507,6 +1507,11 @@ class VaultService implements Vault {
       const [newest] = await store.vaultPage(tx, undefined, 1);
       if (newest?.keyId !== from || (await store.allMembers(tx)).length !== rows.size) throw new Retry();
       const held = await store.grants(tx);
+      // A process's first call settles its key before it learns the cutover (`#settled`): learnt here, since a row
+      // must be held to the log that holds it. Since 0.16.0, a member added down the two-trip path and changed no
+      // further has no 0.14 access entry, which 0.14's rule reads as stale: left under the old key, refused after
+      // (review r1 of #490). The cutover is never undone, so a retry finds it the same.
+      if (this.#prepared.log015 !== null && !this.#checksSeals() && (await store.cutOver(tx))) this.#prepared.marked = true;
       // Once 0.15's log holds the rows, each one's seals, all in one read (`#onLog`).
       const logs = this.#checksSeals() ? await store.memberLogs(tx, [...rows.keys()]) : undefined;
       for (const row of rows.values()) {
@@ -3929,11 +3934,12 @@ class VaultService implements Vault {
   /**
    * A key write decided on one read (write.ts; T179 PR 3; docs/design/two-trips.md, "A key write"; formal/Writing.tla):
    * `write_request`, one statement, reads what the decision weighs and numbers the request; the decision takes that
-   * read alone (`decideWrite`); then each data key is wrapped, 0.14's `key.wrap` entries appended (a transaction of
-   * two round trips, its head read before its MAC, until 0.16 stops the appends), and each key's change prepared from
-   * its object as read, the request and the read's digest in its payload. The app's transaction holds the same read
-   * before it commits (`hold_inputs`). Anything this path does not serve, a refusal among them, answers `served: false`,
-   * nothing written but the request's number: the app writes as before, which decides, answers and logs it.
+   * read alone (`decideWrite`); then each data key is wrapped and each key's change prepared from its object as read,
+   * the request and the read's digest in its payload: what records the write, in 0.15's log alone (0.16.0 appends no
+   * 0.14 `key.wrap` entry, which needed a transaction of two round trips, its head read before its MAC). The app's
+   * transaction holds the same read before it commits (`hold_inputs`). Anything this path does not serve, a refusal
+   * among them, answers `served: false`, nothing written but the request's number: the app writes as before, which
+   * decides, answers and logs it.
    */
   async writeKeys(input: WriteKeysInput): Promise<WriteKeysOutcome> {
     const unserved = (why: string): WriteKeysOutcome => ({ served: false, why });
@@ -3966,15 +3972,6 @@ class VaultService implements Vault {
         dek.fill(0);
       }
     }));
-    // 0.14's record of the wraps, which its readers still take (two-trips.md, "The PRs", 3 and 4), and which a write's
-    // `secret.write` entries name.
-    // A personal token's entries name it, as the app's `asking` does for one (`vaultCredential`): here from the read.
-    const correlation = { operationId: input.operationId ?? null, requestId: input.requestId ?? null, ...(inputs.credential.kind === 'personal' ? { credentialId: credential.id } : {}) };
-    const entries = secrets.map((secret) => keyEntry('key.wrap', principal, secret, 'allow', null, correlation));
-    // Two round trips: BEGIN, the head locked and read in one statement (`snapshot`, as a decision takes it), then the
-    // append with the COMMIT. A write's: it waits for the head within the bound, as today's wrap does, not in the reads'
-    // line (Fable's review of #474, on the add's).
-    const appended = await this.#db.transaction(async (tx) => this.#append(tx, entries, [], await snapshot(tx, { principals: [], head: true }), { final: true }));
     // Each key's change, from its object as read (none for a key the write makes) to its new version.
     const changes = prepareChanges(log015, at, principal, decided.keys.map((key, i): ObjectChange => ({
       kind: 'secret', id: key.id,
@@ -3986,10 +3983,13 @@ class VaultService implements Vault {
           kekProvider: wrapped[i]!.kekProvider, kekId: wrapped[i]!.kekId, kekVersion: wrapped[i]!.kekVersion, wrappedDek: wrapped[i]!.bytes,
         },
       },
-    })), new Map(), { number: read.number, credential: credential.id, identity: inputs.credential.identityId, inputs: read.digest });
+    })), new Map(), {
+      number: read.number, credential: credential.id, identity: inputs.credential.identityId, inputs: read.digest,
+      operationId: input.operationId ?? null, requestId: input.requestId ?? null,
+    });
     return {
       served: true, at, number: read.number.toString(), app: read.app, standing: writeStanding(decided, at), digest: read.digest,
-      keys: decided.keys.map((key, i) => ({ name: key.name, id: key.id, created: key.created, version: key.before.version + 1, sensitive: key.sensitive, wrapped: wrapped[i]!, seq: Number(appended.seqStart) + i })),
+      keys: decided.keys.map((key, i) => ({ name: key.name, id: key.id, created: key.created, version: key.before.version + 1, sensitive: key.sensitive, wrapped: wrapped[i]! })),
       changes,
     };
   }
@@ -4027,13 +4027,14 @@ class VaultService implements Vault {
   }
 
   /**
-   * The add `admitRead` prepared, written in one transaction of two round trips (T179 PR 5): the bound on lock waits,
-   * the members' rows (`lockMembers`) and 0.14's head, read for its entry's MAC (`snapshot`, as a decision takes them:
-   * MembersFirst, formal/WriteLocks.tla's AddLocks); then, left to `later` and sent with the COMMIT, the hold
-   * (`admit_hold`: the issue lock, the fence, the read again, as decided or `coffre_moved`), 0.14's `member.add` entry,
-   * the member's row, sealed as `#seal` seals one, and its change (`change_input_strict`, the read's digest in its
-   * payload). Then the seal wait (R51). A hold that fails writes nothing: `moved`, and the app reads again. First, as
-   * `admitRead`, this isolate's keys settled and its config's Owners weighed: else `unserved`, today's path.
+   * The add `admitRead` prepared, written in one transaction of one round trip (T179; docs/design/two-trips.md, "A member
+   * add"), every statement left to `later` and sent with the COMMIT, in this order: the bound on lock waits, the members'
+   * rows (`laterLockMembers`) and 0.14's head, a lock alone (MembersFirst, formal/WriteLocks.tla's AddLocks); the hold
+   * (`admit_hold`: the issue lock, the fence, the read again, as decided or `coffre_moved`); the member's row, sealed as
+   * `#seal` seals one; and its change (`change_input_strict`, the read's digest and the request's ids in its payload),
+   * which records the add, in 0.15's log alone (0.16.0 appends no 0.14 `member.add` entry, whose MAC needed the head
+   * read first). Then the seal wait (R51). A hold that fails writes nothing: `moved`, and the app reads again. First,
+   * as `admitRead`, this isolate's keys settled and its config's Owners weighed: else `unserved`, today's path.
    */
   async admitWrite(input: AdmitWriteInput): Promise<AdmitWriteOutcome> {
     const log015 = this.#prepared.log015;
@@ -4048,29 +4049,25 @@ class VaultService implements Vault {
     // `admitRead` would have (`listed`). A rollout between the two calls changes neither digest nor ticket.
     if ((await this.#settled()) !== null || this.#listed(principal)) return { written: false, why: 'unserved' };
     const { role, scope } = asStored(ticket.role, ticket.scope);
-    const correlation = { operationId: ticket.operationId, requestId: ticket.requestId, ...(ticket.personal ? { credentialId: ticket.credential } : {}) };
-    const entry = accessEntry(actor, 'member.add', principal, 'allow', correlation, { role, scope });
     let numbers: ChangeNumbers;
     try {
       numbers = await this.#db.transaction(async (tx) => {
-        // One Sync: the bound, the members' rows, then the head and its read, in that order (as `#decideOnce` asks them).
-        // A write waits for the head within the bound, as today's add does, not in the reads' line, whose places a burst
-        // of reads may all take (Fable's review of #474).
-        const [, , reads] = await Promise.all([
-          store.boundLockWaits(tx, LOCK_TIMEOUT_MS),
-          store.lockMembers(tx, [actor, principal]),
-          snapshot(tx, { principals: [], head: true }),
-        ]);
-        // The rest, nothing awaited: the hold first, which every write after it rests on.
+        // One Sync, nothing awaited: the bound, the members' rows, then the head, in that order (as `#decideOnce` takes
+        // them), each a lock; then the hold, which every write after it rests on.
+        void store.boundLockWaits(tx, LOCK_TIMEOUT_MS, false, { final: true });
+        store.laterLockMembers(tx, [actor, principal]);
+        laterHead(tx);
         holdAdmit(tx, { tokenHash: Buffer.from(ticket.tokenHash, 'base64'), principal, scope: ticket.scopeSlugs, digest: Buffer.from(ticket.digest, 'hex') });
-        const appended = await this.#append(tx, [entry], [], reads, { final: true });
-        const at = appended.occurredAt;
-        const row = { principal, status: 'active' as const, role, scope, generation: 0, createdAt: at, createdBy: actor, statusChangedAt: at, statusChangedBy: actor, accessSeq: appended.seqStart };
+        const at = Date.now() + this.#prepared.options.clockOffset();
+        // No 0.14 access entry accounts for the row: its `accessSeq` names none (0, as a row before its first `#seal`),
+        // and its change says nothing of one (no `old`). Under 0.15's log nothing weighs the column against an entry
+        // (`#onLog` weighs the member's newest access entry against its newest change, and a first add has neither).
+        const row = { principal, status: 'active' as const, role, scope, generation: 0, createdAt: at, createdBy: actor, statusChangedAt: at, statusChangedBy: actor, accessSeq: 0n };
         await store.insertMember(tx, { ...row, mac: memberMac(this.#prepared.rowKey, row, []) }, { final: true });
         const after = principalObject({ principal, status: 'active', generation: 0, role, scope }, []);
         return store.laterInputs(tx, [admitChange(log015, {
-          at, actor, principal, after, op: { op: 'member.add', role, scope }, old: appended.seqStart,
-          credential: ticket.credential, identity: ticket.identity, inputs: ticket.digest,
+          at, actor, principal, after, op: { op: 'member.add', role, scope },
+          credential: ticket.credential, identity: ticket.identity, inputs: ticket.digest, operationId: ticket.operationId, requestId: ticket.requestId,
         })]);
       });
     } catch (error) {
@@ -5120,8 +5117,10 @@ class VaultService implements Vault {
       const at = await this.#now(tx);
       const accounting = walk.accounting.result(at);
       if (!accounting.ok) return accounting;
-      const [rows, held] = await Promise.all([store.allMembers(tx), store.grants(tx)]);
-      const fault = this.#unsealed(rows, held, walk.newestAccess) ?? walk.replayFault ?? replayFault(walk.replayed, rows, held, at);
+      const [rows, held, fast] = await Promise.all([store.allMembers(tx), store.grants(tx), this.#checksSeals() ? store.fastAdded(tx) : new Set<string>()]);
+      const fault = fast.size === 0
+        ? this.#unsealed(rows, held, walk.newestAccess) ?? walk.replayFault ?? replayFault(walk.replayed, rows, held, at)
+        : await this.#partlyReplayed(tx, walk, rows, held, fast, at);
       if (fault !== null) return { ok: false, failedAtSeq: null, reason: describeAccessFault(fault), fault };
       return accounting.pending === 0 ? verified : { ...verified, pending: accounting.pending };
     }, SNAPSHOT);
@@ -5163,6 +5162,51 @@ class VaultService implements Vault {
       }));
       const at = faults.findIndex((fault) => fault !== null);
       if (at !== -1) return { ok: false, failedAtSeq: Number(chunk[at]!.entry.seq), reason: faults[at]! };
+    }
+    return null;
+  }
+
+  /**
+   * The rows held to the log once a first add down the two-trip path wrote
+   * no 0.14 entry (T179, since 0.16.0): `fast`, whom such adds added, are
+   * people 0.14's replay never admitted. Every row still names the newest
+   * 0.14 access entry about them (`#unsealed`; none, 0, for one added so
+   * and changed no further). Everyone else is replayed as before, unless
+   * the replay stopped at a change of one of `fast` (an `unadmitted-change`:
+   * the walk applies nothing after its first fault, a tally keeps it, and a
+   * tally follows from 0.14's log alone): it can say nothing after. Whom it
+   * cannot replay, `fast`, and every row past a stopped replay, are held to
+   * 0.15's log, as `#sweep` holds them (`#integrity`, then `#onLog`: the
+   * 0.4 MAC, the row's seal against its object's newest change, that
+   * change's MAC, and no 0.14 access entry past the one it accounts for),
+   * with no row too (deleted, unless the log says so).
+   * Nothing reported: a verification only says.
+   */
+  async #partlyReplayed(
+    db: Queryable, walk: Walk, rows: readonly Member[], held: readonly GrantRow[], fast: ReadonlySet<string>, at: number,
+  ): Promise<AccessFault | null> {
+    const newest = new Map(walk.newestAccess);
+    for (const principal of fast) if (!newest.has(principal)) newest.set(principal, 0n);
+    const unsealed = this.#unsealed(rows, held, newest);
+    if (unsealed !== null) return unsealed;
+    const stopped = walk.replayFault !== null && walk.replayFault.kind === 'unadmitted-change' && fast.has(walk.replayFault.principal);
+    if (!stopped) {
+      if (walk.replayFault !== null) return walk.replayFault;
+      const replayed: Replayed = {
+        members: new Map([...walk.replayed.members].filter(([principal]) => !fast.has(principal))),
+        held: new Map([...walk.replayed.held].filter(([principal]) => !fast.has(principal))),
+      };
+      const others = replayFault(replayed, rows.filter((row) => !fast.has(row.principal)), held.filter((grant) => !fast.has(grant.principal)), at);
+      if (others !== null) return others;
+    }
+    const byPrincipal = new Map(rows.map((row) => [row.principal, row]));
+    // Past a stopped replay, everyone: each row, and each the walk saw an access entry about (it keeps their newest
+    // after a fault), whose row deleted the replay no longer says.
+    const principals = [...new Set([...(stopped ? [...byPrincipal.keys(), ...walk.newestAccess.keys()] : []), ...fast])].sort();
+    const logs = await store.memberLogs(db, principals);
+    for (const principal of principals) {
+      const why = await this.#integrity(db, principal, byPrincipal.get(principal), held.filter((grant) => grant.principal === principal), [], undefined, logs);
+      if (why !== null) return { kind: 'tampered-member', principal, why };
     }
     return null;
   }

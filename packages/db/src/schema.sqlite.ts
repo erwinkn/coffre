@@ -15,7 +15,7 @@ import {
 } from 'drizzle-orm/sqlite-core';
 
 import { ACTIVE_SUBJECT } from './active-subject.ts';
-import { recorded } from './change-records.ts';
+import { recordField, recorded } from './change-records.ts';
 
 /**
  * The schema in schema.ts, for SQLite (through libsql). Same tables,
@@ -1035,6 +1035,15 @@ export const logChanges = sqliteTable(
     // The vault's token issues, revokes and sign-outs (schema.ts).
     index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'issue', 'revoke', 'signOut')),
     index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'issue', 'revoke', 'signOut')),
+    // The key writes and the first adds down the two-trip path (schema.ts).
+    index('log_changes_written_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
+    index('log_changes_written_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
+    index('log_changes_written_environment_idx').on(recordField('sqlite', table.payload, 'environmentId'), table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
+    index('log_changes_written_object_idx').on(table.object, table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
+    index('log_changes_written_actor_environment_idx').on(table.actor, recordField('sqlite', table.payload, 'environmentId'), table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
+    index('log_changes_written_actor_object_idx').on(table.actor, table.object, table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
+    index('log_changes_admitted_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'admitted')),
+    index('log_changes_admitted_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'admitted')),
   ],
 );
 

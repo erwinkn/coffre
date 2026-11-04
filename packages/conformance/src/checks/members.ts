@@ -70,7 +70,11 @@ export async function memberTampering(deployment: Deployment, people: People, ki
   return `${kind === 'stale' ? 'a genuine older member row, put back,' : `a forged ${kind}`} refused at use as tampered, logged, then restored`;
 }
 
-/** Access changes have one author, the vault that commits the changed rows. */
+/**
+ * Access changes have one author, the vault that commits the changed rows. A first add down the two-trip path (0.16,
+ * on Postgres) writes no 0.14 entry: its record is its change in 0.15's log, `member.add` with the request it was
+ * decided on, which only the vault makes (the app's login writes no row of `log_changes`).
+ */
 export async function accessAuthorship(deployment: Deployment, people: People): Promise<string> {
   const person = await member(deployment, people, 'access-actions');
   const { admin } = people;
@@ -82,11 +86,19 @@ export async function accessAuthorship(deployment: Deployment, people: People): 
       WHERE decision = 'allow' AND (action LIKE 'access.%' OR action LIKE 'member.%' OR action LIKE 'directory.%' OR action LIKE 'grant.%' OR action LIKE 'principal.%')`);
     expect(access.length > 0 && access.every((entry) => entry.author === 'vault'), 'an access change was written by the app', access.filter((entry) => entry.author !== 'vault'));
     const actions = access.filter((entry) => entry.subject_principal === person.member).map((entry) => entry.action);
-    for (const action of ['member.add', 'member.remove', 'member.restore', 'access.grant', 'access.revoke']) {
+    if (!actions.includes('member.add')) {
+      const changes = await sql.query<{ payload: string }>(`SELECT payload FROM log_changes WHERE payload LIKE '%"op":"member.add"%'`);
+      const added = changes.some(({ payload }) => {
+        const parsed = JSON.parse(payload) as { ref?: { id?: unknown }; request?: unknown; inputs?: unknown };
+        return parsed.ref?.id === person.member && typeof parsed.request === 'object' && typeof parsed.inputs === 'string';
+      });
+      expect(added, 'member.add left no vault entry, nor a change in 0.15\'s log', actions);
+    }
+    for (const action of ['member.remove', 'member.restore', 'access.grant', 'access.revoke']) {
       expect(actions.includes(action), `${action} left no vault entry`, actions);
     }
   });
-  return 'admission, grant, revoke, removal and re-admission are only vault entries';
+  return 'admission, grant, revoke, removal and re-admission are only the vault\'s records';
 }
 
 /** A failure to append may not commit an access change. */
@@ -99,7 +111,8 @@ export async function noAuditNoAccess(deployment: Deployment, people: People): P
       grants: await sql.query('SELECT * FROM vault_grants ORDER BY principal, project_id, environment_id'),
     });
     const before = await snapshot();
-    await logRefuses(sql, async () => {
+    // Both logs: since 0.16 a first add down the two-trip path appends to 0.15's alone.
+    await logRefuses(sql, () => logRefuses(sql, async () => {
       for (const change of [
         () => admin.api.access.set(person.member, { [DEV]: 'developer' }),
         () => admin.api.members.remove(person.member),
@@ -109,7 +122,7 @@ export async function noAuditNoAccess(deployment: Deployment, people: People): P
         expect(!outcome, 'an access change succeeded while the log refused writes');
         expect(JSON.stringify(await snapshot()) === JSON.stringify(before), 'an access change committed without its entry');
       }
-    });
+    }, undefined, 'log_changes'));
   });
   expect((await person.api.secrets.reveal(DEV)).values.API_KEY !== undefined, 'legitimate reads did not recover');
   return 'grant, removal and admission commit nothing while the log refuses their entries';

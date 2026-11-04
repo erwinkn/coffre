@@ -20,6 +20,12 @@ export const RECORDS = {
   issue: { starts: '{"caller":"', holds: '"issue":{"by":"' },
   revoke: { starts: '{"op":"credential.revoke",', holds: '"reason":"revoke"' },
   signOut: { starts: '{"op":"credential.revoke",', holds: '"reason":"sign_out"' },
+  // A key write and a member's first add down the two-trip path (T179), which since 0.16.0 write no 0.14 entry: the
+  // change is their only record, and names the read it was decided on (`inputs`, the digest, which only those two
+  // paths write). A key's change starts with its `digest`, its first key; an add's with `inputs`, its own first, as
+  // no change of today's path does (which starts with `old` or `op`).
+  written: { starts: '{"digest":', holds: '"inputs":"' },
+  admitted: { starts: '{"inputs":"', holds: '"op":"member.add"' },
 } as const satisfies Record<string, { starts?: string; holds: string }>;
 
 export type ChangeRecord = keyof typeof RECORDS;
@@ -35,4 +41,12 @@ export function recorded(engine: 'postgres' | 'sqlite', payload: SQLWrapper, ...
     return starts === undefined ? sql`${at(holds)} > 0` : sql`(${at(starts)} = 1 AND ${at(holds)} > 0)`;
   });
   return each.length === 1 ? each[0]! : sql`(${sql.join(each, sql` OR `)})`;
+}
+
+/**
+ * A field of a change's payload, as the indexes of `log_changes` that hold one (`log_changes_written_environment_idx`)
+ * repeat it, word for word: the payload as JSON, the field's text.
+ */
+export function recordField(engine: 'postgres' | 'sqlite', payload: SQLWrapper, field: 'environmentId'): SQL {
+  return engine === 'postgres' ? sql`(${payload}::jsonb ->> ${sql.raw(`'${field}'`)})` : sql`json_extract(${payload}, ${sql.raw(`'$.${field}'`)})`;
 }

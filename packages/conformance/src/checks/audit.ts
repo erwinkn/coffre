@@ -197,8 +197,12 @@ export async function checkpoints(deployment: Deployment, { admin }: People): Pr
  * Every version the app says it stored names the vault's entry for the key
  * it was sealed with, `key.wrap` for a write and `key.rewrap` for a restore,
  * a mark and a loosening:
- * the same member, request and operation, the same secret and version. And
- * every value read is the vault's to log: the app keeps no reads of its own.
+ * the same member, request and operation, the same secret and version. A
+ * version written down the two-trip path (0.16, on Postgres) has no 0.14
+ * entry: its record is its key's change in 0.15's log, which only the vault
+ * makes, naming the version, the request it was decided on, its operation
+ * and its request id; never both. And every value read is the vault's to
+ * log: the app keeps no reads of its own.
  */
 export async function writesAgree(deployment: Deployment): Promise<string> {
   return using(deployment.database(), async (sql) => {
@@ -228,16 +232,26 @@ export async function writesAgree(deployment: Deployment): Promise<string> {
       expect((sealed.secretId ?? key.secret_id) === entry.secret_id && sealed.version === metadata.version
         && sealed.subject.split('/').at(-1) === metadata.key, 'the write names a seal of another secret or version', { entry, key });
     }
-    const versions = await query<{ secret_id: string; version: number }>(sql,
-      `SELECT v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
+    const versions = await query<{ id: string; secret_id: string; version: number }>(sql,
+      `SELECT v.id, v.secret_id, v.version FROM secret_versions v JOIN secrets s ON s.id = v.secret_id
        JOIN projects p ON p.id = s.project_id WHERE p.slug = $1`, [PROJECT]);
     expect(versions.length > 0, 'no stored versions were inspected');
+    type Logged = { op?: unknown; version?: unknown; inputs?: unknown; ref?: { id?: unknown }; request?: { operationId?: unknown; requestId?: unknown } };
+    const logged = (await query<{ payload: string }>(sql, `SELECT payload FROM log_changes WHERE payload LIKE '%"op":"secret.write"%' AND payload LIKE '%"inputs":"%'`))
+      .map(({ payload }) => JSON.parse(payload) as Logged);
+    let alone = 0;
     for (const version of versions) {
       const matching = writes.filter((entry) => entry.secret_id === version.secret_id
         && (JSON.parse(entry.metadata) as { version: number }).version === version.version);
-      expect(matching.length === 1, 'a stored version has no unique app write entry', { version, matching });
+      const changes = logged.filter((change) => change.version === version.id && change.ref?.id === version.secret_id);
+      expect(matching.length + changes.length === 1, 'a stored version has no unique write record, an app entry or a change of 0.15\'s', { version, matching, changes });
+      if (changes.length === 1) {
+        alone += 1;
+        const { request } = changes[0]!;
+        expect(typeof request?.operationId === 'string' && typeof request.requestId === 'string', 'a write recorded in 0.15\'s log alone names no operation or request', changes[0]);
+      }
     }
-    return `${versions.length} stored versions, each with one app write naming the vault's seal in the same operation`;
+    return `${versions.length} stored versions, each with one app write naming the vault's seal in the same operation, or (${alone} of them) one change of 0.15's log naming its request`;
   });
 }
 
@@ -333,8 +347,24 @@ export async function rewrittenEntry(deployment: Deployment, { admin }: People, 
   return `entry ${seq}, the ${author}'s, rewritten: caught there, then put back`;
 }
 
+/**
+ * Beats of the scheduled job until 0.14's log holds an entry after its first
+ * page of 1,000, each an `audit.heartbeat`: since 0.16.0 the key writes down
+ * the two-trip path (Postgres's, the bulk limit's 1,001 among them) write no
+ * 0.14 entry, which took a run past it before. How many it took.
+ */
+async function pastFirstPage(deployment: Deployment): Promise<number> {
+  for (let beats = 0; ; beats++) {
+    const [row] = await using(deployment.database(), (sql) => query<{ seq: string | number | null }>(sql, 'SELECT max(seq) AS seq FROM audit_log'));
+    if (row?.seq != null && Number(row.seq) > 1000) return beats;
+    expect(beats < 2_000, '2,000 beats of the scheduled job did not take the log past seq 1000', row);
+    await deployment.scheduled();
+  }
+}
+
 /** Remove an unreferenced entry, then put its exact bytes back. */
 export async function missingEntry(deployment: Deployment, { admin }: People, position: 'middle' | 'first' | 'batch'): Promise<string> {
+  const beats = position === 'batch' ? await pastFirstPage(deployment) : 0;
   expect((await admin.api.audit.verify()).ok, 'the log does not verify before deletion');
   let seq = 0;
   await using(deployment.database(), (sql) => appendOnlyLifted(sql, async () => {
@@ -356,7 +386,7 @@ export async function missingEntry(deployment: Deployment, { admin }: People, po
   }));
   expect((await admin.api.audit.verify()).ok, 'the restored log did not verify');
   const which = { first: 'the first', batch: 'the first past a page of 1,000', middle: 'a heartbeat' }[position];
-  return `entry ${seq}, ${which}, deleted: caught, then put back`;
+  return `entry ${seq}, ${which}${beats > 0 ? ` (${beats} heartbeats in to reach it)` : ''}, deleted: caught, then put back`;
 }
 
 /** Last: keep the head, delete its newest entries, and require verification to notice. */

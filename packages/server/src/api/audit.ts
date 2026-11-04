@@ -18,13 +18,17 @@ import {
   sealedHidden,
   sealedPage,
   sealedReach,
+  secretPlaces,
+  versionsOf,
   talliedAfter,
   talliedAt,
   type AuditFilter,
   type ChangePoint,
   type CredentialOrigin,
   type RecordedChange,
+  type SecretPlaceRow,
   type Signed,
+  type WrittenAt,
 } from '../db/queries.ts';
 import { readsPageStanding, type ListedRead, type ReadPlace, type ReadsStanding } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
@@ -332,6 +336,10 @@ export async function listAudit(
     && before.change !== 'done';
   const start = before.change === 'done' ? undefined : before.change;
   const detail = query.detail === true;
+  // The key writes 0.15's log records alone (T179, 0.16.0), where the page's place and its reader's scope meet; and,
+  // on a page of the instance's, its first adds (`sealedPage`). Allowed changes, never refused.
+  const loggedAsked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
+  const written = loggedAsked ? await writtenAt(ctx, filter) : null;
   // What it leaves out, counted: as before 0.15 without `sealed`; with it, when asked. No first-party page shows the
   // counts, and one that does not ask reads nothing for them, and always fills with what it shows.
   const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
@@ -362,7 +370,7 @@ export async function listAudit(
   // The page's reads and how far they are listed in one statement, so as of one moment (review r6).
   const [old, sealed, listedReads, reach] = await Promise.all([
     before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
-    recorded ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit }) : { rows: [], more: false },
+    recorded || written !== null ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit, instance: recorded, written }) : { rows: [], more: false },
     used ? readsPageStanding(ctx.db, readsFilter) : null,
     counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
@@ -371,14 +379,18 @@ export async function listAudit(
   // (`readsListed`), so the vault is asked nothing for it: an app deployed before its vault serves 0.14's pages.
   const standing = listedReads?.standing.sealed == null ? null : listedReads.standing;
   const oldRead = old.rows.map((row) => ({ at: Date.parse(row.occurredAt), entry: entryView(row), below: `${row.seq}`, above: `${row.seq + 1n}` }));
-  const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row), below: { at: row.at, number: row.number } }));
+  const keyWrites: KeyWrite[] = [];
+  const changesRead = sealed.rows.map((row) => ({ at: row.at, entry: sealedView(row, keyWrites), below: { at: row.at, number: row.number } }));
   const readsRead = reads.rows.map((row) => ({ at: row.at, entry: seen(row) ? readView(row) : null, below: { at: row.at, number: row.number } }));
   // Beside each other: whether the vault vouches for each entry of 0.15's log the page shows, and for how far the reads
-  // are listed; and how the entries' credentials came to be.
-  const [vouches, origins] = await Promise.all([
+  // are listed; how the entries' credentials came to be; and the keys and versions the key writes name by id.
+  const [vouches, origins, written015, versions] = await Promise.all([
     vouched(ctx, sealed.rows, reads.rows.filter(seen), standing),
     originsOf(ctx.db, credentialsNamed([...oldRead, ...changesRead, ...readsRead].map((read) => read.entry))),
+    secretPlaces(ctx.db, keyWrites.map(({ secretId }) => secretId)),
+    versionsOf(ctx.db, keyWrites.map(({ versionId }) => versionId)),
   ]);
+  for (const { entry, secretId, versionId } of keyWrites) withNames(entry, written015.get(secretId), versions.get(versionId));
   for (const read of [...changesRead, ...readsRead]) {
     if (read.entry !== null && vouches.forged.has(read.below.number)) read.entry.forged = true;
   }
@@ -419,6 +431,26 @@ export async function listAudit(
     ...listed,
     hidden: [...hidden].map(([action, count]) => ({ action, count })).sort((a, b) => b.count - a.count || (a.action < b.action ? -1 : a.action > b.action ? 1 : 0)),
   };
+}
+
+/**
+ * Where a page lists the key writes 0.15's log records alone (`WrittenAt`): at its place, a key, an environment, or
+ * a project's environments, deleted ones among them, as 0.14's entries stay readable by a tombstone's slug; within
+ * what its reader reads, as `within` holds 0.14's (a project's environments but those `except` names, and each
+ * environment named); every one where neither narrows it.
+ */
+async function writtenAt(ctx: ApiContext, filter: AuditFilter): Promise<WrittenAt> {
+  const { within } = filter;
+  const projects = [...new Set([...(filter.environmentId === undefined && filter.projectId !== undefined ? [filter.projectId] : []), ...(within?.projectIds ?? [])])];
+  const environmentsOf = new Map((projects.length === 0 ? [] : await places(ctx.db, { tombstones: true, within: projects })).map((project) => [project.id, project.environments.map(({ id }) => id)]));
+  const at = filter.environmentId !== undefined ? [filter.environmentId] : filter.projectId !== undefined ? environmentsOf.get(filter.projectId) ?? [] : null;
+  const readable = within === undefined ? null : new Set([
+    ...within.projectIds.flatMap((id) => environmentsOf.get(id) ?? []).filter((id) => !(within.except ?? []).includes(id)),
+    ...within.environmentIds,
+  ]);
+  const environmentIds = at === null ? (readable === null ? null : [...readable]) : readable === null ? at : at.filter((id) => readable.has(id));
+  if (filter.secretId !== undefined) return environmentIds === null || environmentIds.includes(filter.environmentId!) ? { secretId: filter.secretId } : { environmentIds: [] };
+  return environmentIds === null ? { all: true } : { environmentIds };
 }
 
 /** A page's `next`: `<seq>:<at>.<change>`, or `<seq>:<at>` below a time, each `-` for a log with nothing older. */
@@ -815,10 +847,11 @@ function entryView(row: Awaited<ReturnType<typeof auditPage>>['rows'][number]): 
  * writer could leave under the indexes' conditions. No request: the
  * change's id is the vault's own, which names none.
  */
-function sealedView(row: RecordedChange): AuditEntryView | null {
+function sealedView(row: RecordedChange, keyWrites: KeyWrite[]): AuditEntryView | null {
   type Fields = Record<string, unknown>;
   const payload = JSON.parse(row.payload) as Fields & { ref?: { kind?: unknown; id?: unknown }; signIn?: unknown; issue?: unknown; revoke?: unknown };
   const { ref } = payload;
+  if (ref?.kind === 'secret' || ref?.kind === 'principal') return twoTripView(row, payload, keyWrites);
   if (ref?.kind !== 'credential' || typeof ref.id !== 'string' || !isMember(row.actor)) return null;
   const record = (value: unknown): Fields | null => (typeof value === 'object' && value !== null ? (value as Fields) : null);
   const time = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? new Date(value).toISOString() : null);
@@ -892,6 +925,77 @@ function sealedView(row: RecordedChange): AuditEntryView | null {
   if (revoke?.reason === 'revoke') return view('token.revoke', { targetCredentialId: ref.id, kind: revoke.kind, ...account(revoke.principal), ...traced(revoke.trace) });
   if (revoke?.reason === 'sign_out') return view('sign_out', { targetCredentialId: ref.id, kind: revoke.kind, ...traced(revoke.trace) });
   return null;
+}
+
+/** A key write the page lists from 0.15's log, by the ids its change names, for its key's and version's names (`withNames`). */
+type KeyWrite = { entry: AuditEntryView; secretId: string; versionId: string };
+
+/**
+ * A change of 0.15's log that is the only record of a key write or a
+ * member's first add down the two-trip path (T179, 0.16.0), as 0.14's entry
+ * showed it: `secret.write` by the writer, its key and version, or
+ * `member.add` by the adder, of the member, their role and scope. Each with
+ * the request's operation and id and the credential it came in on, which
+ * the change's payload carries under the vault's MAC: an entry of either
+ * on a credential a trust binding issued shows its run, and one on a
+ * personal token the token (`withOrigins`). A key write's names (its key,
+ * its place, its version) are its rows', read after it (`withNames`); a key
+ * deleted since keeps its id alone. None for a payload of another shape,
+ * which only a database writer could leave under the indexes' conditions.
+ */
+function twoTripView(
+  row: RecordedChange,
+  payload: Record<string, unknown> & { ref?: { kind?: unknown; id?: unknown } },
+  keyWrites: KeyWrite[],
+): AuditEntryView | null {
+  const { ref, op } = payload;
+  const request = typeof payload.request === 'object' && payload.request !== null ? payload.request as Record<string, unknown> : null;
+  const text = (value: unknown) => (typeof value === 'string' ? value : null);
+  if (request === null || typeof ref?.id !== 'string' || !isMember(row.actor) || typeof payload.inputs !== 'string') return null;
+  const credentialId = text(request.credential);
+  const view = (action: string, fields: Partial<AuditEntryView>, metadata: Record<string, unknown>): AuditEntryView => ({
+    seq: Number(row.number),
+    log: '0.15',
+    author: 'vault',
+    occurredAt: new Date(row.at).toISOString(),
+    ...actorParts(row.actor),
+    action,
+    decision: 'allow',
+    reason: null,
+    detail: false,
+    subject: null,
+    project: null,
+    environment: null,
+    key: null,
+    version: null,
+    secrets: null,
+    operationId: text(request.operationId),
+    relatedSeq: null,
+    requestId: text(request.requestId),
+    run: null,
+    token: null,
+    ...fields,
+    metadata: { ...metadata, ...(credentialId === null ? {} : { credentialId }) },
+  });
+  if (ref.kind === 'secret' && op === 'secret.write' && typeof payload.version === 'string') {
+    const entry = view('secret.write', {}, payload.nature === 'sensitive' ? { sensitive: true } : {});
+    // Ids of a payload's own, unchecked till the vault vouches for it: looked up only as ids, else shown without names.
+    if (UUID.test(ref.id) && UUID.test(payload.version)) keyWrites.push({ entry, secretId: ref.id, versionId: payload.version });
+    return entry;
+  }
+  if (ref.kind === 'principal' && op === 'member.add') return view('member.add', { subject: ref.id }, { role: payload.role ?? null, scope: payload.scope ?? null });
+  return null;
+}
+
+/** A key write's names as its rows give them now: its key, its place's slugs, its version's number and recipe. */
+function withNames(entry: AuditEntryView, place: SecretPlaceRow | undefined, version: { version: number; recipe: string | null } | undefined): void {
+  if (place !== undefined) Object.assign(entry, { project: place.project, environment: place.environment, key: place.key });
+  if (version !== undefined) entry.version = version.version;
+  entry.metadata = {
+    ...(place === undefined ? {} : { key: place.key }),
+    ...(version === undefined ? {} : { version: version.version, ...(version.recipe === null ? {} : { recipe: version.recipe }) }),
+    ...entry.metadata,
+  };
 }
 
 /**

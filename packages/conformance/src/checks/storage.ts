@@ -96,7 +96,8 @@ export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
 /**
  * `work` with a log refusing appends, as a full disk or a lost connection
  * would, without changing the deployment's code: a trigger, dropped after.
- * 0.14's, `audit_log`, of one action or all; or 0.15's uses, `log_uses`.
+ * 0.14's, `audit_log`, of one action or all; or 0.15's uses, `log_uses`, or its changes, `log_changes`. Each table's
+ * trigger and function are named for it, so that two logs may refuse at once.
  *
  * On Postgres, each statement first locks the table itself, as every reader
  * does: `log_uses` is partitioned by day, and a trigger on it is one on each
@@ -106,22 +107,23 @@ export const LOG_REFUSAL = 'coffre-conformance: the log refuses writes';
  * drops against uses and the projector, none in 2,703 with the table locked
  * first).
  */
-export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: string, table: 'audit_log' | 'log_uses' = 'audit_log'): Promise<T> {
+export async function logRefuses<T>(sql: Sql, work: () => Promise<T>, action?: string, table: 'audit_log' | 'log_uses' | 'log_changes' = 'audit_log'): Promise<T> {
   const when = action === undefined ? '' : ` WHEN (NEW.action = '${action}')`;
+  const name = `conformance_refuse_${table}`;
   const create = sql.engine === 'postgres'
     ? `LOCK TABLE ${table} IN SHARE ROW EXCLUSIVE MODE;
-       CREATE FUNCTION conformance_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
+       CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS $$
        BEGIN RAISE EXCEPTION '${LOG_REFUSAL}'; END $$;
-       CREATE TRIGGER conformance_refuse BEFORE INSERT ON ${table} FOR EACH ROW${when} EXECUTE FUNCTION conformance_refuse();`
-    : `CREATE TRIGGER conformance_refuse BEFORE INSERT ON ${table}${when}
+       CREATE TRIGGER ${name} BEFORE INSERT ON ${table} FOR EACH ROW${when} EXECUTE FUNCTION ${name}();`
+    : `CREATE TRIGGER ${name} BEFORE INSERT ON ${table}${when}
        BEGIN SELECT RAISE(ABORT, '${LOG_REFUSAL}'); END;`;
   await sql.exec(create);
   try {
     return await work();
   } finally {
     await sql.exec(sql.engine === 'postgres'
-      ? `LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE; DROP TRIGGER conformance_refuse ON ${table}; DROP FUNCTION conformance_refuse();`
-      : 'DROP TRIGGER conformance_refuse;');
+      ? `LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE; DROP TRIGGER ${name} ON ${table}; DROP FUNCTION ${name}();`
+      : `DROP TRIGGER ${name};`);
   }
 }
 
