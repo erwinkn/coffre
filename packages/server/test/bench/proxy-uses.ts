@@ -22,7 +22,11 @@ import { answer, type Pages } from '../start-fixture.ts';
 import { farPostgres } from './far.ts';
 
 /** A phase as one thread saw it: each request's latency, the refusals, and the thread's CPU, µs. The main thread merges threads. */
-export type ProxyPhase = { phase: string; sent: number; latencies: number[]; refused: Record<string, number>; cpuUs: number };
+export type ProxyPhase = {
+  phase: string; sent: number; latencies: number[]; refused: Record<string, number>; cpuUs: number;
+  /** Refusals by when each was due, a quarter second a column; and the phase's first request's latency, ms. */
+  timeline: number[]; first: number | null;
+};
 
 export type ProxyLoad = {
   log: '0.14' | '0.15';
@@ -109,7 +113,7 @@ const runtime = createRuntime(config, createDatabase(appPool), vault, { json: as
 runtime.plugins = checkPlugins(config.plugins);
 const ui = {} as Pages;
 
-type Phase = { phase: string; latencies: number[]; refused: Map<string, number>; sent: number; cpuUs: number };
+type Phase = { phase: string; latencies: number[]; refused: Map<string, number>; sent: number; cpuUs: number; started: number; timeline: number[]; first: number | null };
 let cpuFrom: number | null = null;
 const threadCpu = () => { const { user, system } = process.threadCpuUsage(); return user + system; };
 const phases: Phase[] = [];
@@ -120,10 +124,16 @@ let next = 0;
 // Each request's own number, however its handle was picked: a UI route's path differs every time (review r2 of #467).
 let requests = 0;
 
-const use = async (phase: Phase, due: number) => {
+const use = async (phase: Phase, due: number, first: boolean) => {
   const nth = requests++;
   // At random under a map smaller than the handles: in turn, each would be the one just dropped.
   const handle = load.handles[load.names === undefined ? next++ % load.handles.length : Math.floor(Math.random() * load.handles.length)]!;
+  // A refusal, an HTTP one or a thrown one, counted once in its total and once in the bucket it was due in.
+  const refuse = (why: string) => {
+    phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
+    const bucket = Math.floor((due - phase.started) / 250);
+    phase.timeline[bucket] = (phase.timeline[bucket] ?? 0) + 1;
+  };
   try {
     // As an app's own config names them (R14): the stable URL with the API's path after it, `/use/<credential>/v1/…`.
     // Through a path rule, the handle in the path alone, as Telegram's SDKs put the token there: `/bot<handle>/thing`.
@@ -131,14 +141,13 @@ const use = async (phase: Phase, due: number) => {
     const url = load.stable ? `${load.origin}/use/api/${rest}` : `${load.origin}/use/${load.path}/api/${rest}`;
     const response = await answer(new Request(url, load.inPath === true ? {} : { headers: { 'x-api-key': handle } }), runtime, ui, '203.0.113.7');
     if (response.status !== 200) {
-      const why = `${response.status} ${(await response.text()).slice(0, 80)}`;
-      phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
+      refuse(`${response.status} ${(await response.text()).slice(0, 80)}`);
     } else await response.arrayBuffer();
   } catch (error) {
-    const why = String((error as Error).message).slice(0, 80);
-    phase.refused.set(why, (phase.refused.get(why) ?? 0) + 1);
+    refuse(String((error as Error).message).slice(0, 80));
   } finally {
     phase.latencies.push(performance.now() - due);
+    if (first) phase.first = performance.now() - due;
   }
 };
 
@@ -156,7 +165,7 @@ const sender = (async () => {
       const due = Math.floor(((performance.now() - start) / 1000) * load.rate);
       for (; sent < due; sent += 1) {
         of.sent += 1;
-        const p = use(of, start + (sent * 1000) / load.rate).finally(() => inflight.delete(p));
+        const p = use(of, start + (sent * 1000) / load.rate, sent === 0).finally(() => inflight.delete(p));
         inflight.add(p);
       }
     }
@@ -164,13 +173,13 @@ const sender = (async () => {
   }
 })();
 
-const summary = ({ phase, latencies, refused, sent, cpuUs }: Phase): ProxyPhase => ({ phase, sent, latencies, refused: Object.fromEntries(refused), cpuUs });
+const summary = ({ phase, latencies, refused, sent, cpuUs, timeline, first }: Phase): ProxyPhase => ({ phase, sent, latencies, refused: Object.fromEntries(refused), cpuUs, timeline: Array.from(timeline, (n) => n ?? 0), first });
 
 parentPort!.on('message', async (message: { phase?: string | null; report?: true }) => {
   if (message.phase !== undefined) {
     if (current !== null && cpuFrom !== null) current.cpuUs += threadCpu() - cpuFrom;
     current = message.phase === null ? null : phases.find(({ phase }) => phase === message.phase) ?? null;
-    if (message.phase !== null && current === null) phases.push((current = { phase: message.phase, latencies: [], refused: new Map(), sent: 0, cpuUs: 0 }));
+    if (message.phase !== null && current === null) phases.push((current = { phase: message.phase, latencies: [], refused: new Map(), sent: 0, cpuUs: 0, started: performance.now(), timeline: [], first: null }));
     cpuFrom = current === null ? null : threadCpu();
     parentPort!.postMessage({ ok: true });
   }

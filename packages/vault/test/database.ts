@@ -136,39 +136,56 @@ export async function cutOver(vault: Pick<Vault, 'cutover'>, db: Queryable): Pro
   assert.ok(outcome.ok && outcome.done, `the cutover is refused: ${outcome.ok ? '' : outcome.why}`);
 }
 
-export type TestDatabase = { owner: Database; vault: Database; connect(connections?: number): Promise<Database>; hot(connections?: number): Promise<Database>; close(): Promise<void> };
+export type TestDatabase = {
+  owner: Database;
+  vault: Database;
+  connect(connections?: number): Promise<Database>;
+  hot(connections?: number): Promise<Database>;
+  release(): Promise<void>;
+  close(): Promise<void>;
+};
 
 /**
  * The database as its owner and as the vault; `connect` opens one more as the vault, as a second instance would, with
  * up to `connections` at once (10 unless set). `connections`, each pool's own: a matrix that runs beside the others,
- * a process of its own each, keeps its share of Postgres's connections (forks.matrix.ts).
+ * a process of its own each, keeps its share of Postgres's connections (forks.matrix.ts). `release` closes the pools
+ * `connect` and `hot` opened so far, for a file whose tests each open their own (`afterEach`): a vault's start asks
+ * its reads together, a pooled connection each on Node (T206), so a file that kept every test's pools open until it
+ * ends would hold more than the 100 connections Postgres has for the four files that run at once.
  */
 export async function openTestDatabase({ connections: pools }: { connections?: number } = {}): Promise<TestDatabase> {
   const opened: (() => Promise<void>)[] = [];
-  const open = async (login: string, connections?: number): Promise<Database> => {
+  let extra: (() => Promise<void>)[] = [];
+  const open = async (login: string, connections?: number, into = extra): Promise<Database> => {
     if (ENGINE === 'postgres') {
       const client = postgresClient(login, { max: connections ?? pools ?? 10 });
-      opened.push(() => client.end());
+      into.push(() => client.end());
       return createDatabase(client);
     }
     const file = process.env.COFFRE_TEST_DATABASE_URL;
     if (!file) throw new Error('COFFRE_TEST_DATABASE_URL is required on sqlite; see scripts/test-suite.sh');
     const { db, close } = await openDatabase(file);
-    opened.push(close);
+    into.push(close);
     return db;
   };
-  const owner = await open(OWNER_URL);
+  const release = async () => {
+    const closing = extra;
+    extra = [];
+    await Promise.all(closing.map((close) => close()));
+  };
+  const owner = await open(OWNER_URL, undefined, opened);
   return {
     owner,
-    vault: await open(VAULT_URL),
+    vault: await open(VAULT_URL, undefined, opened),
     connect: (connections) => open(VAULT_URL, connections),
     hot: (connections) => open(HOT_URL, connections),
+    release,
     close: async () => {
       // A connection whose transaction a test left open is one no client's end lets go of (`endLeftOpen`).
       try {
         if (ENGINE === 'postgres') await endLeftOpen(owner);
       } finally {
-        await Promise.all(opened.map((close) => close()));
+        await Promise.all([release(), ...opened.map((close) => close())]);
       }
     },
   };

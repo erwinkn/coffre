@@ -48,16 +48,22 @@ beforeEach(async () => {
  * Sync, or simple Query); `flushes` the Flush messages, which a client sends
  * to have a statement described before it sends its values; and `trips` the
  * round trips past the login: each time a client speaks again once answered,
- * but to say goodbye (Terminate), which waits for no answer.
+ * but to say goodbye (Terminate), which waits for no answer. `tripsOf(n)`:
+ * the round trips of the n-th connection opened (from 0) alone.
  */
-async function slowPostgres(ms: number, to = VAULT_URL): Promise<{ url: string; readonly opened: number; readonly statements: number; readonly flushes: number; readonly trips: number; close(): Promise<void> }> {
+async function slowPostgres(ms: number, to = VAULT_URL): Promise<{
+  url: string; readonly opened: number; readonly statements: number; readonly flushes: number; readonly trips: number; tripsOf(connection: number): number; close(): Promise<void>;
+}> {
   const target = new URL(to);
   let opened = 0;
   let statements = 0;
   let flushes = 0;
   let trips = 0;
+  const each: number[] = [];
   const server: Server = createServer((client) => {
+    const index = opened;
     opened += 1;
+    each[index] = 0;
     const upstream = connect(Number(target.port), target.hostname);
     const relay = (from: NodeJS.ReadableStream, to: NodeJS.WritableStream) =>
       from.on('data', (chunk) => setTimeout(() => to.write(chunk), ms));
@@ -67,7 +73,10 @@ async function slowPostgres(ms: number, to = VAULT_URL): Promise<{ url: string; 
     let answered = true;
     client.on('data', (chunk: Buffer) => {
       // A round trip begins: the login's (its startup, its password messages) is not a statement's.
-      if (answered && started && chunk[0] !== 0x70 && chunk[0] !== 0x58) trips += 1;
+      if (answered && started && chunk[0] !== 0x70 && chunk[0] !== 0x58) {
+        trips += 1;
+        each[index]! += 1;
+      }
       answered = false;
       pending = Buffer.concat([pending, chunk]);
       for (;;) {
@@ -119,18 +128,18 @@ async function slowPostgres(ms: number, to = VAULT_URL): Promise<{ url: string; 
     get trips() {
       return trips;
     },
+    tripsOf: (connection) => each[connection] ?? 0,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
 
 /** A fresh isolate of the vault Worker, over the suite's database through the vault's login. */
-async function freshVault(database: string, hotDatabase = HOT_URL): Promise<{
+async function freshVault(database: string, hotDatabase = HOT_URL, key = randomBytes(32).toString('base64')): Promise<{
   call(method: string, ...args: unknown[]): Promise<{ ok: boolean; error?: string; code?: string; result?: unknown }>;
   /** The binding's one entry, as an app on `release` calls it: its answer, the envelope, whole. */
   raw(release: string, method: string, args: unknown[]): Promise<{ ok: boolean; error?: string; result?: unknown }>;
   stop(): Promise<void>;
 }> {
-  const key = randomBytes(32).toString('base64');
   // Cut over from 0.14 first, as the app's door has it, from another process: the isolate's calls below are its first.
   const cut = await openLocalVault(db.vault, resolveVaultConfig({ kek: { id: 'vault-workers-test', key }, owners: ['root@acme.example'] }), { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   await cut.close();
@@ -326,6 +335,36 @@ test('in workerd, a call\'s statements cost a round trip each at most: none wait
       // Fewer when statements of a transaction go together.
       assert.ok(trips <= statements, `${name}: ${statements} statements in ${trips} round trips`);
     }
+  } finally {
+    await vault.stop();
+    await database.close();
+  }
+});
+
+test('a fresh isolate\'s first call starts in a handful of round trips: the reads each step of its start begins with go together (T206)', { skip, timeout: 180_000 }, async (t) => {
+  const key = randomBytes(32).toString('base64');
+  // An instance that has served: root its Owner, the cap in the log, by an isolate before.
+  const before = await freshVault(VAULT_URL, HOT_URL, key);
+  try {
+    assert.ok((await before.call('access', ROOT)).ok);
+  } finally {
+    await before.stop();
+  }
+  const database = await slowPostgres(2);
+  const vault = await freshVault(database.url, HOT_URL, key);
+  try {
+    // The objects' connections first, the checkpointer's and the projector's, so that the call's is the next one.
+    for (const deadline = Date.now() + 10_000; database.opened < 2 && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(database.opened, 2, "the checkpointer's connection and the projector's");
+    const result = await vault.call('access', ROOT);
+    assert.ok(result.ok, result.error ?? 'refused');
+    assert.equal(database.opened, 3, 'the call opened one connection');
+    const trips = database.tripsOf(2);
+    t.diagnostic(`a fresh isolate's first access: ${trips} round trips`);
+    // Its start's first reads, one round trip; the cutover's seal proved, two (its checkpoint's place, then its tiles);
+    // the Owners the deployment names, one; the caller's own read, one. Asked one after another, each read of the
+    // start took one: 16 in all before (T206).
+    assert.ok(trips <= 5, `a fresh isolate's first access took ${trips} round trips`);
   } finally {
     await vault.stop();
     await database.close();

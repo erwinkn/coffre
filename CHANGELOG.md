@@ -242,6 +242,20 @@
   own `warm-up` line, so a cold start's busy refusals are counted apart
   from the measured window's.
 
+- **A cold isolate starts in a handful of round trips (T206).** Its
+  first `/use` made about 27 statements one after another before the
+  use itself: the app's migration check (2) and key state (3), the
+  vault's start (15: its key, the cutover and its seal, the 0.4
+  conversion, the Owners it names, the bulk cap), then the gate's
+  reservation. The migration check is now one statement; the key
+  state's three reads go together; and the vault asks the reads each
+  step of its start begins with together, which its Worker's pool now
+  sends under one Sync (`groupReads`), and reads the named Owners in
+  one snapshot. A fresh vault isolate's first `access` takes 5 round
+  trips in workerd, where it took 16. At 1,000 `/use` a second on four
+  isolates, 20 ms from Postgres, the first use answers in 370 to 590 ms
+  (600 to 900 before), and the first 3 s refuse about 450 busy where
+  they refused about 750 to 1,050; the warm path is unchanged.
 - **An isolate's first requests ask the vault once (T201).** Each
   concurrent first request reserved the proxy code's names on its own,
   and settled the vault through `about()` on its own: a Node
