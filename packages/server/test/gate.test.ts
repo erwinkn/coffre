@@ -312,7 +312,9 @@ test("on Workers, each workload's object: a replayed proof refused, and after an
   assert.ok(!answer.ok && answer.reason === 'use_dpop_nonce' && answer.nonce !== nonce);
 });
 
-test("on Workers, a day's counts are written within a flush and read back after an eviction; a minute's are not", async () => {
+test("on Workers, a day's counts are written within a flush and read back after an eviction; a minute's are not", async (t) => {
+  // On a stopped clock, 01:30 UTC: the day's window cannot turn over between the calls (T218).
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
   const held = objectState();
   const first = new CoffreGates(held.state, {});
   await held.started();

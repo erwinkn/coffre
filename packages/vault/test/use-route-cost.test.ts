@@ -17,6 +17,10 @@ import { openVault, prepareVault } from '../src/vault.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
 import { CONFIG, emptyLog, LOG_015, useDatabases } from './use-world.ts';
+import { inBulkPeriod } from './window-fixture.ts';
+
+/** What the statement-counting uses need of one bulk-cap period, far more than they take (T218). */
+const PERIOD_ROOM_MS = 5000;
 
 let db: TestDatabase;
 before(async () => {
@@ -75,6 +79,8 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
   const { pool, statements } = counting();
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
   try {
+    // The key enters the set in the cold use; a period turning over before the warm one would have it write its row again (T218).
+    await inBulkPeriod(PERIOD_ROOM_MS);
     // Cold: the map's miss reads the ids (one statement), then the use, its key entering the set, decided first and made
     // under the lock (two more). Warm, its key in the set: one.
     const cold = await vault.useRoute(w.askRoute('openai'));

@@ -15,6 +15,10 @@ import type { GateAdmission } from '@coffre/core/identity';
 import { unstable_dev, type Unstable_DevWorker } from 'wrangler';
 
 import { FLUSH_MS } from '../src/gate.ts';
+import { inUtcDay } from './window-fixture.ts';
+
+/** What the test needs of one UTC day, far more than it takes; the wait for a day with this much left is at most this long. */
+const DAY_ROOM_MS = 90_000;
 
 let dir: string;
 let worker: Unstable_DevWorker | undefined;
@@ -43,6 +47,9 @@ before(async () => {
   );
   await start();
 }, { timeout: 120_000 });
+
+// The test's day of counts must stay in one UTC day: its flush wait, restart and calls take well under this (T218).
+before(() => inUtcDay(DAY_ROOM_MS), { timeout: DAY_ROOM_MS + 10_000 });
 
 after(async () => {
   await worker?.stop();
