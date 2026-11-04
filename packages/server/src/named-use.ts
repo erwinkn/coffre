@@ -6,6 +6,7 @@ import { authenticateRequest, refusedByKind, type AuthenticatedIdentity } from '
 import { namesMany, uses015 } from './api/changes.ts';
 import { refusedUse, type Decided, type DecidedMany } from './api/keys.ts';
 import { namedAhead, namedManyAhead, type ReadAhead } from './db/read-ahead.ts';
+import { passkeyAhead } from './passkey-check.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /** What the deployment's config accepts of a credential, as the named call carries it (`NamedUseInput.accepts`). */
@@ -67,6 +68,11 @@ export async function useByName(
   // Refused on its kind alone (a service's bearer token on a strict instance): by the credential's own check, as ever,
   // with nothing asked of the vault, nor written in its log or its cap (review r3 of #412).
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
+  // The passkey check first, as the vault's call releases values and logs their use, and answers nothing of passkeys.
+  // Refused, the request goes the ordinary way, whose credential check refuses it, 401 `passkey_required`, before
+  // anything reads the key: the same answer, at the same cost, whatever it asked for (conformance check 19).
+  const passkey = await passkeyAhead(runtime, token, kind);
+  if (passkey === 'refused') return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamed({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, key: asked.key, accepts: acceptance(runtime), purpose: asked.purpose,
@@ -87,6 +93,7 @@ export async function useByName(
   // row's MAC is not decided above or by the vault (D154; the comment above).
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
+    ...(passkey === undefined ? {} : { passkey }),
   });
   return { identity, ahead, decided: { secretId: answered.secretId, outcome, at: answered.at }, place: answered.place };
 }
@@ -117,6 +124,9 @@ export async function useManyByName(
   if (kind === null || !asked.kinds.includes(kind) || runtime.vault.useNamedMany === undefined || !(await namesMany(runtime.vault))) return null;
   // Refused on its kind alone: by the credential's own check, as ever, nothing asked of the vault (`useByName`).
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
+  // The passkey check first, as for one key (`useByName`).
+  const passkey = await passkeyAhead(runtime, token, kind);
+  if (passkey === 'refused') return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamedMany({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, keys: asked.keys, accepts: acceptance(runtime), purpose: asked.purpose,
@@ -130,6 +140,7 @@ export async function useManyByName(
   const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal });
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
+    ...(passkey === undefined ? {} : { passkey }),
   });
   return { identity, ahead, decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, place: answered.place };
 }

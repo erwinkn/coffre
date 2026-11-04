@@ -47,8 +47,12 @@ import {
   revokePriorMembership,
   update,
   updateAuth,
+  passkeyBehind,
+  passkeyByToken,
   type CredentialRead,
+  type PasskeyRead,
 } from '../db/queries.ts';
+import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, COFFRE_ACTOR, connectionRevokes, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
@@ -90,7 +94,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance'>>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance'>>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -107,7 +111,12 @@ export type SigninRefusal =
   /** Linking: the account already belongs to someone else. */
   | 'already_linked'
   /** The matching person's record failed the vault's integrity check. */
-  | 'tampered';
+  | 'tampered'
+  /**
+   * The person holds a live passkey, and the provider alone signed them in (docs/design/passkeys.md, section 6.1): a
+   * session no passkey confirmed is never issued to them while the policy is not `off`.
+   */
+  | 'passkey_required';
 
 /**
  * A credential that could not be checked, rather than one checked and
@@ -154,6 +163,13 @@ export type IssuedCredential = { id: string; token: string; expiresAt: string };
 /** A credential's row, as its issuer writes it; `id` chosen before the transaction, so that 0.15's change of it is too (`#issueChange`). */
 type CredentialOptions = {
   id?: string; generation: number; identityId: string | null; label: string | null; createdBy: string; expiresAt: Date; scope?: CredentialScope; places?: readonly HandlePlace[];
+  /**
+   * The passkey that stands behind it (docs/design/passkeys.md, section 5.2), which its MAC covers, null for none: the one
+   * a session's touch confirmed, with `confirmedAt` when; or what the credential it is issued from names, copied with no
+   * `confirmedAt`, so that a token or handle never passes a fresh check. Said by every issuer.
+   */
+  passkeyId: string | null;
+  confirmedAt?: Date | null;
   /** Its scope as stored, verbatim, in place of `scope`: a binding's own, which the vault holds a sign-in's to (T149). */
   stored?: string | null;
 };
@@ -218,6 +234,8 @@ export type CredentialPrincipal = Principal & {
   handlePlaces: readonly HandlePlace[] | null;
   /** When the credential ends, ISO 8601. */
   expiresAt: string;
+  /** The passkey it names, which the check held live (`passkeyStands`); null for none. */
+  passkeyId: string | null;
 };
 
 export type ClientMeta = {
@@ -475,7 +493,14 @@ export class SigninService {
         return [this.#issueChange('browser', principal, plan), ...revokes(prior), ...connectionRevokes(apps)];
       });
       return audited(this.#deps, async (tx, log) => {
-        if (!(await this.#stillMember(tx, principal, standing))) throw refuse('deactivated', preparedId);
+        // Under the head, which every change to the person's passkeys holds too: the provider alone signs in nobody who
+        // holds a live passkey, while the policy is not `off` (passkeys.md, section 6.1). Asked together, one round trip.
+        const [member, backed] = await Promise.all([
+          this.#stillMember(tx, principal, standing),
+          this.#issuedBacked(tx, { principal: principalOf(principal), generation: standing.generation, passkeyId: null }),
+        ]);
+        if (!member) throw refuse('deactivated', preparedId);
+        if (!backed) throw refuse('passkey_required', preparedId);
         const now = new Date();
         const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
         let principalId: string;
@@ -530,6 +555,8 @@ export class SigninService {
           identityId,
           label: meta.label,
           createdBy: principalId,
+          // The provider alone: no passkey confirmed it.
+          passkeyId: null,
         });
         log.push({
           ...base,
@@ -627,14 +654,33 @@ export class SigninService {
     return row !== null && row.generation === standing.generation && row.status === 'active';
   }
 
-  /** Revalidate the initiating credential under the app audit head. */
+  /**
+   * Revalidate the initiating credential under the app audit head: live, and still backed by what it names (passkeys.md,
+   * section 6.1), as what it issues names the same. A change to the person's passkeys revokes under the same head.
+   */
   async #currentCaller(tx: Transaction, ctx: Asker, standing: Access): Promise<Access | null> {
     if (standing.generation !== ctx.caller.generation || !(await this.#stillMember(tx, ctx.caller.principal, standing))) return null;
     if (ctx.credentialId !== null) {
       const row = await findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId });
       if (!this.#liveCredential(row, standing, new Date()) || row?.principal !== principalOf(ctx.caller.principal)) return null;
+      if (passkeyChecked(row.kind) && !this.#backed(row, row.passkeyRead!)) return null;
     }
     return standing;
+  }
+
+  /** Whether a live passkey stands behind a credential of a person's, or none needs to (`passkeyStands`). */
+  #backed(row: { principal: string; generation: number; passkeyId: string | null }, read: PasskeyRead): boolean {
+    return passkeyStands(this.#deps.signin.passkeys.policy, row, read);
+  }
+
+  /**
+   * Whether what an issue would name stands behind it now (section 6.1): the live passkey it names, or none while the
+   * person holds none, as the request's own check decides (`passkeyStands`). Read under the log's head, which every
+   * change to their passkeys holds too (formal/Factor.tla, `AppIssueChecks`); nothing read under `off`.
+   */
+  async #issuedBacked(tx: Transaction, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<boolean> {
+    if (this.#deps.signin.passkeys.policy === 'off') return true;
+    return this.#backed(holder, await passkeyBehind(tx, this.#deps.chainKey, holder));
   }
 
   #liveCredential(row: Awaited<ReturnType<typeof findCredential>>, access: Access, now: Date): boolean {
@@ -694,8 +740,8 @@ export class SigninService {
       credential: {
         id: row.id!, kind, tokenHash: row.tokenHash.toString('base64'), tokenHint: row.tokenHint, label: row.label ?? null, scope: row.scope!, places: row.places ?? null,
         expiresAt: row.expiresAt.getTime(), createdBy: row.createdBy, authMac: row.authMac.toString('base64'),
-        // The passkey of the credential it comes in on, which the row's MAC covers: none until sign-in confirms
-        // sessions (T176 PR 4), and the vault issues only while `via` names this same one.
+        // The passkey of the credential it comes in on, which the row's MAC covers: the vault issues only while `via`
+        // names this same one, live (migration 0064).
         passkeyId: row.passkeyId ?? null,
       },
       policy: {
@@ -750,8 +796,8 @@ export class SigninService {
       scope: options.stored !== undefined ? options.stored : options.scope === undefined ? null : storedScope(options.scope),
       places: options.places === undefined ? null : JSON.stringify(options.places.map(({ environmentId, personal }) => ({ environmentId, personal }))),
       revokedAt: null,
-      passkeyId: null,
-      confirmedAt: null,
+      passkeyId: options.passkeyId,
+      confirmedAt: options.passkeyId === null ? null : options.confirmedAt ?? null,
     };
     return { row: { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) }, issued: { id, token, expiresAt: options.expiresAt.toISOString() } };
   }
@@ -781,6 +827,8 @@ export class SigninService {
       sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number;
       /** `touch`: the request writes the touch itself, with what it writes, at no round trip of its own (a key write's held statement, T179 PR 3). */
       touch?: (touched: Touch) => void;
+      /** `passkey`: what stands behind the credential, read on its own before the vault's call that read the row (`passkeyByToken`). */
+      passkey?: PasskeyRead | null;
     } = { sourceIp: null },
   ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
@@ -828,6 +876,19 @@ export class SigninService {
       throw new CredentialUncheckable(error);
     }
     if (row === null || access === null || !this.#liveCredential(row, access, asked)) throw new Error('unknown, expired or revoked credential');
+    // What stands behind a person's credential (passkeys.md, section 6.2): read with it, or by the request on its own
+    // before the vault's call that read it (`passkeyByToken`); a row read ahead without it (a handle's, never checked) is
+    // read here. Nothing read under `off`.
+    if (passkeyChecked(row.kind) && this.#deps.signin.passkeys.policy !== 'off') {
+      let read = row.passkeyRead ?? request.passkey ?? null;
+      try {
+        read ??= await passkeyByToken(db, chainKey, tokenHash);
+      } catch (error) {
+        if (error instanceof AuthRowTampered) throw error;
+        throw new CredentialUncheckable(error);
+      }
+      if (read === null || !this.#backed(row, read)) throw new PasskeyRequired(row.principal, row.id);
+    }
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
     if (now.getTime() - lastUsed > TOUCH_INTERVAL_MS) {
@@ -855,6 +916,7 @@ export class SigninService {
           personalToken: null,
           handlePlaces: null,
           expiresAt: row.expiresAt.toISOString(),
+          passkeyId: null,
         }
       : {
           type: 'user',
@@ -874,6 +936,7 @@ export class SigninService {
           personalToken: row.kind === 'personal' ? { id: row.id, label: row.label ?? '', expiresAt: row.expiresAt.toISOString() } : null,
           handlePlaces: row.kind === 'handle' ? readPlaces(row.places) : null,
           expiresAt: row.expiresAt.toISOString(),
+          passkeyId: row.passkeyId,
         };
   }
 
@@ -1123,7 +1186,8 @@ export class SigninService {
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInDays * 86_400_000), scope, generation: standing.generation };
       // With 0.15's log, the vault issues it, weighing the issuer itself (T149, PR 2): one call.
       if (await vaultIssuesTokens(this.#deps.vault)) {
-        const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id }, details, { accessSeq, refusal });
+        // It names the issuer's passkey, as the vault holds `via` to (section 6.3).
+        const credential = await this.#issuedByVault(ctx, caller, 'service', service, { ...plan, identityId: null, label: input.label, createdBy: ctx.caller.principal.id, passkeyId: ctx.passkeyId }, details, { accessSeq, refusal });
         if (credential !== null) return { ...credential, scope: byPath, withheld };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), [this.#issueChange('service', service, plan)]);
@@ -1131,12 +1195,17 @@ export class SigninService {
       return audited({ ...this.#deps, caller }, async (tx, log) => {
         await issuerStill(tx, caller, accessSeq);
         await credentialStill(ctx, tx, 'token.create');
+        // The session it comes from, still backed by what it names, which the token names too (section 6.1).
+        if (ctx.credentialId !== null && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
+          throw new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
+        }
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();
         const credential = await this.#issue(tx, 'service', service, {
           ...plan,
           identityId: null,
           label: input.label,
           createdBy: ctx.caller.principal.id,
+          passkeyId: ctx.passkeyId,
         });
         log.push(
           allowed(ctx, 'token.create', {
@@ -1200,7 +1269,7 @@ export class SigninService {
       const plan = { id: randomUUID(), expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
         // At the generation the request was made at: a person removed and admitted again since is refused (`#currentCaller`).
-        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id }, details, { accessSeq: null });
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'personal', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, passkeyId: ctx.passkeyId }, details, { accessSeq: null });
         if (credential !== null) return { ...credential, scope: byPath };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('personal', person, plan)]);
@@ -1215,6 +1284,8 @@ export class SigninService {
           identityId: null,
           label: input.label,
           createdBy: person.id,
+          // The session's passkey, copied: the token holds at most what the session does, and never passes a fresh check.
+          passkeyId: ctx.passkeyId,
         });
         log.push(
           allowed(ctx, 'token.create', {
@@ -1268,7 +1339,7 @@ export class SigninService {
       const ends = Math.min(Date.now() + input.expiresInMinutes * 60_000, ctx.personalToken === null ? Infinity : Date.parse(ctx.personalToken.expiresAt));
       const plan = { id: randomUUID(), expiresAt: new Date(ends), scope, generation: access.generation };
       if (await vaultIssuesTokens(this.#deps.vault)) {
-        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor }, details, { accessSeq: null });
+        const credential = await this.#issuedByVault(ctx, ctx.caller, 'handle', person, { ...plan, generation: ctx.caller.generation, identityId: null, label: input.label, createdBy: person.id, places: madeFor, passkeyId: ctx.passkeyId }, details, { accessSeq: null });
         if (credential !== null) return { ...credential, scope: byPath };
       }
       const changes = await AppChanges.prepare(this.#deps.vault, formatMember(person), [this.#issueChange('handle', person, plan)]);
@@ -1285,6 +1356,7 @@ export class SigninService {
           createdBy: person.id,
           // What the proxy's stable URL, `/use/<credential>`, resolves to: the environments as asked, `@me` included.
           places: madeFor,
+          passkeyId: ctx.passkeyId,
         });
         log.push(
           allowed(ctx, 'token.create', {
@@ -1366,6 +1438,8 @@ export class SigninService {
       label: options.label,
       createdBy: issuedBy(options.bindingId),
       expiresAt: options.expiresAt,
+      // A service's: no passkey.
+      passkeyId: null,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.stored === undefined ? {} : { stored: options.stored }),
     });
@@ -1466,7 +1540,9 @@ export class SigninService {
               deviceAuthorizations,
               { id: row.id, decidedAt: null },
               approve
-                ? { decidedAt: now, decision: 'approved', principal: principalOf(ctx.caller.principal), generation: standing.generation }
+                // The approving session's passkey, which the CLI session it redeems names in turn (passkeys.md, section 5.2):
+                // copied, with no touch of its own until the device ceremony (T176 PR 5) asks one per code.
+                ? { decidedAt: now, decision: 'approved', principal: principalOf(ctx.caller.principal), generation: standing.generation, passkeyId: ctx.passkeyId }
                 : { decidedAt: now, decision: 'denied' },
             );
       if (row === undefined || decided === 0) {
@@ -1514,11 +1590,17 @@ export class SigninService {
         // An approval given before the person was last added is void: someone
         // removed and re-added in between starts with nothing from before.
         if (standing.status !== 'active' || principalId !== principal.id || standing.generation !== row.generation) return { status: 'denied' };
-        if (!(await this.#stillMember(tx, principal, standing))) {
+        // Under the head, as every change to the person's passkeys: the approval's passkey still live, or, naming none, a
+        // person who holds none (section 6.1). Asked together, one round trip.
+        const [member, backed] = await Promise.all([
+          this.#stillMember(tx, principal, standing),
+          this.#issuedBacked(tx, { principal: row.principal!, generation: standing.generation, passkeyId: row.passkeyId }),
+        ]);
+        if (!member || !backed) {
           log.push({
             actorType: 'user', actorId: principal.id, action: 'sign_in', decision: 'deny',
             requestId: meta.requestId, sourceIp: meta.sourceIp,
-            metadata: { kind: 'cli', deviceAuthorizationId: row.id, reason: 'membership_changed' },
+            metadata: { kind: 'cli', deviceAuthorizationId: row.id, reason: member ? 'passkey_required' : 'membership_changed' },
           });
           return { status: 'denied' };
         }
@@ -1529,6 +1611,9 @@ export class SigninService {
           identityId: null,
           label: row.clientLabel,
           createdBy: principalId,
+          // The approval's passkey. Copied from the approving session, so not fresh: no `confirmedAt` until the device
+          // ceremony's touch stands behind the approval (T176 PR 5), whose `decided_at` it will be.
+          passkeyId: row.passkeyId,
         });
         const entry: AuditEntry = {
           actorType: 'user',

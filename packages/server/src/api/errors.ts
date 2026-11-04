@@ -13,6 +13,7 @@ import { Superseded } from '../watch.ts';
  *
  *   400 bad_request        the input does not parse, or names nothing usable
  *   401 unauthenticated    no credential, or one that did not verify
+ *   401 passkey_required   a credential no live passkey stands behind, while the person holds one or the policy is `required`
  *   403 forbidden          the caller lacks the permission
  *   403 registration_required  signed in, but not a member of this instance
  *   403 cross_origin       a change sent with a browser cookie, from another site
@@ -36,6 +37,7 @@ import { Superseded } from '../watch.ts';
 export const ERROR_STATUS = {
   bad_request: 400,
   unauthenticated: 401,
+  passkey_required: 401,
   forbidden: 403,
   registration_required: 403,
   cross_origin: 403,

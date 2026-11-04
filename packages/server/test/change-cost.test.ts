@@ -47,7 +47,7 @@ class PerRequest {
 
 type Relay = Awaited<ReturnType<typeof postgresProxy>>;
 /** A change's round trips: the app's, the vault's, the hot path's, and its vault calls; the statements, for a failure's message. */
-type Cost = { app: number; vault: number; hot: number; calls: number; ms: number; statements: string[] };
+type Cost = { app: number; vault: number; hot: number; calls: number; ms: number; statements: string[]; connections: number };
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -157,12 +157,12 @@ async function asRequest<T>(work: () => Promise<T>): Promise<T> {
 
 /** What `work` costs, as one request. */
 async function cost(work: () => Promise<unknown>): Promise<Cost> {
-  const from = { app: relays.app.syncs, vault: relays.vault.syncs, hot: relays.hot.syncs, calls };
+  const from = { app: relays.app.syncs, vault: relays.vault.syncs, hot: relays.hot.syncs, calls, opened: relays.app.opened };
   statements = [];
   const started = performance.now();
   await asRequest(work);
   const ms = Math.round(performance.now() - started);
-  return { app: relays.app.syncs - from.app, vault: relays.vault.syncs - from.vault, hot: relays.hot.syncs - from.hot, calls: calls - from.calls, ms, statements };
+  return { app: relays.app.syncs - from.app, vault: relays.vault.syncs - from.vault, hot: relays.hot.syncs - from.hot, calls: calls - from.calls, ms, statements, connections: relays.app.opened - from.opened };
 }
 
 type Case = { name: string; setup?: (i: number) => Promise<void>; run: (i: number) => Promise<unknown> };
@@ -301,13 +301,17 @@ const seals = new Map<number, string | null>();
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   // A key write decided on one read (T179; docs/design/two-trips.md): the vault's statement, then the app's one Sync, the
   // head (a lock alone) and everything with the COMMIT, however many keys. No 0.14 entry since 0.16.0's contraction:
-  // the changes record the write, in 0.15's log alone.
-  'key set, one': { app: 1, vault: 1 },
-  'key set, existing': { app: 1, vault: 1 },
-  'key set, five': { app: 1, vault: 1 },
+  // the changes record the write, in 0.15's log alone. One more of the app's, on purpose: what stands behind the
+  // person's credential (`passkeyAhead`, docs/design/passkeys.md, section 6.4), read beside the vault's statement on
+  // the request's own connection, so it costs a round trip but no wait. Not under `passkeys: 'off'`, nor for a
+  // service's token.
+  'key set, one': { app: 2, vault: 1 },
+  'key set, existing': { app: 2, vault: 1 },
+  'key set, five': { app: 2, vault: 1 },
   // Refused on the vault's read (PR 6): the read, then the vault's record of the refusal, which stands for 0.14's deny
-  // entry; the app answers it as today's path would, from what the read answered, reading nothing.
-  'key set, refused': { app: 0, vault: 2 },
+  // entry; the app answers it as today's path would, from what the read answered, reading nothing but the passkey
+  // beside the read.
+  'key set, refused': { app: 1, vault: 2 },
   'key archived': { app: 12, vault: 2 },
   'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },
@@ -323,12 +327,13 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'environment protected': { app: 5, vault: 9 },
   'environment archived': { app: 10, vault: 2 },
   // A first add decided on one read (T179; docs/design/two-trips.md, "A member add"): the vault's read; then its write,
-  // one Sync: the members' rows and 0.14's head (a lock alone), the hold, the row, the change and the COMMIT. No app
-  // statement, and no 0.14 `member.add` entry since 0.16.0's contraction: the change records the add.
-  'member added': { app: 0, vault: 2 },
-  'member added, a role': { app: 0, vault: 2 },
-  'service account added': { app: 0, vault: 2 },
-  'member added, refused': { app: 0, vault: 2 },
+  // one Sync: the members' rows and 0.14's head (a lock alone), the hold, the row, the change and the COMMIT. No 0.14
+  // `member.add` entry since 0.16.0's contraction: the change records the add. The app's one statement, on purpose:
+  // the passkey read beside the vault's read, as a key write's (`passkeyAhead`): a round trip, no wait.
+  'member added': { app: 1, vault: 2 },
+  'member added, a role': { app: 1, vault: 2 },
+  'service account added': { app: 1, vault: 2 },
+  'member added, refused': { app: 1, vault: 2 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },
@@ -349,7 +354,9 @@ test('each change route answers in exactly its budget of round trips (T179)', PO
       if (left < 5_000) await new Promise((resolve) => setTimeout(resolve, left + 100));
       for (const i of [2 * n, 2 * n + 1]) if (setup !== undefined) await asRequest(() => setup(i));
       await cost(() => run(2 * n));
-      const { statements: ran, ...counts } = await cost(() => run(2 * n + 1));
+      const { statements: ran, connections, ...counts } = await cost(() => run(2 * n + 1));
+      // One app connection a request, however its statements overlap the vault's calls (AGENTS.md, "One connection per call").
+      if (connections > 1) failures.push(`${name}: ${connections} app connections, not one`);
       table[name] = { ...counts, total: counts.app + counts.vault + counts.hot };
       const budget = BUDGETS[name];
       const spent = { app: counts.app, vault: counts.vault, hot: counts.hot };

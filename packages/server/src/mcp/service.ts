@@ -27,6 +27,7 @@ import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
   findConnection,
+  type PasskeyRead,
   insertConnection,
   insertOauthClient,
   liveConnections,
@@ -39,6 +40,7 @@ import {
   type ConnectionRow,
 } from '../db/queries.ts';
 import { logged } from '../logged.ts';
+import { passkeyStands, sourceStands } from '../passkey-check.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
 import { McpApprovals } from './approvals.ts';
 import { resolveClient, wouldFetch } from './clients.ts';
@@ -77,7 +79,7 @@ export type McpServiceDeps = {
 };
 
 /** Who is asking, for the consent page's calls. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId'>;
 
 /** An OAuth error, as the token, registration and revocation endpoints answer it (RFC 6749, section 5.2). */
 export class OAuthError extends Error {
@@ -148,6 +150,8 @@ export type McpConnection = {
   scopes: McpScope[];
   principal: { type: 'user'; id: string };
   caller: Caller;
+  /** The passkey that confirmed the session that connected it, held live by every call (passkeys.md, section 6.2); null for none. */
+  passkeyId: string | null;
 };
 
 export type TokenAnswer = {
@@ -253,8 +257,10 @@ export class McpService {
     ]);
     await audited(this.#deps, async (tx, log) => {
       const now = made;
-      const standing = await memberStanding(tx, member);
-      if (standing?.status !== 'active' || standing.generation !== asker.caller.generation) {
+      // Under the head, the session it comes from still live and what it names still backed (passkeys.md, section 6.1): a
+      // change to the person's passkeys ends it under the same head, before or after, never between.
+      const [standing, source] = await Promise.all([memberStanding(tx, member), sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, asker)]);
+      if (standing?.status !== 'active' || standing.generation !== asker.caller.generation || !source) {
         throw new Refusal(forbidden('that session has ended'), denied(asker, 'mcp.connect', 'session_ended', { metadata: shown }));
       }
       if ((await liveConnections(tx, this.#deps.chainKey, member, now)).filter((row) => holds(row, now)).length >= MAX_CONNECTIONS) {
@@ -277,7 +283,8 @@ export class McpService {
         codeChallenge: request.code_challenge!,
         codeExpiresAt: new Date(now.getTime() + CODE_SECONDS * 1000),
         expiresAt,
-        passkeyId: null,
+        // The passkey of the session that connected it, which every call through it holds live (section 5.2).
+        passkeyId: asker.passkeyId,
       });
       log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } }));
     }, changes);
@@ -582,6 +589,11 @@ export class McpService {
       throw error;
     }
     if (row === null || claims.expiresAt <= row.now || row.revokedAt !== null || row.expiresAt <= row.now || row.refreshHash === null) return null;
+    // No live passkey behind it (section 6.2): refused as any ended connection is, and its person connects it again.
+    if (!passkeyStands(this.#deps.signin.passkeys.policy, row, row.passkeyRead)) {
+      console.warn('an MCP connection no live passkey stands behind was refused', { principal: row.principal, connectionId: row.id });
+      return null;
+    }
     // Before the vault is asked: the policy it answers with is this one or newer (`policyStill`).
     const policySeq = await newestPolicySeq(this.#deps.db);
     const access = await this.#deps.vault.access(row.principal);
@@ -599,6 +611,7 @@ export class McpService {
       scopes: claims.scopes.filter((scope) => held.includes(scope)),
       principal,
       caller: callerFrom(principal, access, policySeq),
+      passkeyId: row.passkeyId,
     };
   }
 
@@ -679,7 +692,11 @@ export class McpService {
   }
 
   /** Whether the connection's person is still a member, at its generation: the vault's answer, before any transaction. */
-  async #stillMember(row: ConnectionRow): Promise<Access> {
+  async #stillMember(row: ConnectionRow & { passkeyRead: PasskeyRead }): Promise<Access> {
+    // A code or a refresh token of a connection no live passkey stands behind gives nothing (section 6.2 of passkeys.md).
+    if (!passkeyStands(this.#deps.signin.passkeys.policy, row, row.passkeyRead)) {
+      throw new OAuthError('invalid_grant', 'a passkey must confirm this connection: its person connects the app again');
+    }
     const access = await this.#deps.vault.access(row.principal);
     if (access.status !== 'active' || access.generation !== row.generation) {
       throw new OAuthError('invalid_grant', 'the person who connected this app is no longer a member as they were');

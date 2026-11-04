@@ -499,6 +499,7 @@ export async function contextFor(
     requestId: randomUUID(),
     sourceIp: null,
     credentialId: null,
+    passkeyId: null,
     provenance: null,
     via: null,
     personalToken: null,

@@ -23,6 +23,8 @@ const MESSAGES: Record<string, string> = {
   already_linked: 'That account is already linked to someone else.',
   tampered:
     'Your access record failed coffre’s integrity check: it was changed outside coffre. An owner must remove you and add you again.',
+  passkey_required:
+    'You have a passkey here, so signing in takes it too. Sign in again, and touch your passkey when coffre asks.',
   unknown_provider: 'That sign-in option is not configured here.',
   link_session: 'Your session changed while linking. Sign in again, then retry.',
 };

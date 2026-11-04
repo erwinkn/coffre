@@ -99,8 +99,10 @@ test("a credential read ahead is the credential's own read, of every kind and of
     const ahead = await readAhead(deps.db, { tokenHash });
     const own = await findCredential(deps.db, deps.chainKey, { tokenHash });
     const read = await findCredential(deps.db, deps.chainKey, { tokenHash }, ahead!.credential);
-    // The database's clock, read by each statement as it ran.
-    const at = ({ now: _now, ...rest }: NonNullable<typeof own>) => rest;
+    // The database's clock, read by each statement as it ran; and what stands behind a person's credential, which the
+    // credential's own statement reads (`credentialRow`) and `app_read` does not: only a handle's credential is read
+    // ahead by token, and a handle holds no passkey (`passkeyChecked`).
+    const at = ({ now: _now, passkeyRead: _passkey, ...rest }: NonNullable<typeof own>) => rest;
     assert.deepEqual(read === null ? null : at(read), own === null ? null : at(own), kind);
     assert.equal(own === null, kind === 'unknown', kind);
     if (kind === 'session') assert.notEqual(own!.subject, null, 'a session has its sign-in account');
