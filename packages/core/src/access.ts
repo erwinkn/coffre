@@ -123,6 +123,8 @@ export const ROLE_DESCRIPTION_MAX = 200;
 
 /** A custom role's id: lowercase, as a slug, 2 to `ROLE_ID_MAX` characters, and no built-in one's. */
 export const ROLE_ID = new RegExp(`^[a-z][a-z0-9-]{1,${ROLE_ID_MAX - 1}}$`);
+/** What `ROLE_ID` asks, in words, for the refusals that quote it. */
+export const ROLE_ID_RULE = `a role is named by lowercase letters, digits and dashes, 2 to ${ROLE_ID_MAX}, starting with a letter`;
 
 /** Whether `value` names a role of `policy`'s: a built-in one, as it ships, unless told. */
 export function isRole(value: string, policy: Policy = DEFAULT_POLICY): value is Role {

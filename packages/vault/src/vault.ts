@@ -27,6 +27,7 @@ import {
   ownsProject,
   PROJECT_ONLY_PERMISSIONS,
   ROLE_ID,
+  ROLE_ID_RULE,
   ROLES,
   runsInstance,
   setsUpServices,
@@ -3132,7 +3133,7 @@ class VaultService implements Vault {
         const fixed = instance ? FIXED_ROLES.instanceRoles.includes(change.role as InstanceRole) : FIXED_ROLES.roles.includes(change.role);
         if (typeof change.role !== 'string' || fixed) throw refused('invalid', `${change.role} is not edited: it holds ${change.role === 'member' ? 'nothing' : 'everything'}, always`);
         if (instance && !isInstanceRole(change.role)) throw refused('invalid', `no instance role ${change.role}: an Owner makes project roles`);
-        if (!instance && !isBuiltinRole(change.role) && !ROLE_ID.test(change.role)) throw refused('invalid', 'a role is named by lowercase letters, digits and dashes, 2 to 32, starting with a letter');
+        if (!instance && !isBuiltinRole(change.role) && !ROLE_ID.test(change.role)) throw refused('invalid', ROLE_ID_RULE);
         const table = instance ? next.instanceRoles as Record<string, RoleDefinition> : next.roles;
         if (change.definition === null) {
           // Put back as it ships, or, one an Owner made, gone: while no grant names it.

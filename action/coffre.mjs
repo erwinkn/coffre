@@ -1801,7 +1801,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-By-hV_hQ.js
+//#region ../core/dist/access-DDn9zAHY.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -1904,6 +1904,8 @@ const ROLES = {
 Object.keys(ROLES);
 /** A custom role's id: lowercase, as a slug, 2 to `ROLE_ID_MAX` characters, and no built-in one's. */
 const ROLE_ID = new RegExp(`^[a-z][a-z0-9-]{1,31}$`);
+/** What `ROLE_ID` asks, in words, for the refusals that quote it. */
+const ROLE_ID_RULE = `a role is named by lowercase letters, digits and dashes, 2 to 32, starting with a letter`;
 /** Whether `value` names a role of `policy`'s: a built-in one, as it ships, unless told. */
 function isRole(value, policy = DEFAULT_POLICY) {
 	return Object.hasOwn(policy.roles, value);
@@ -5741,7 +5743,7 @@ function shownMember(member) {
 _enum(["user", "service"]);
 string().trim().min(1).max(320);
 _enum(INSTANCE_ROLE_NAMES);
-string().regex(ROLE_ID, "a role is named by lowercase letters, digits and dashes, 2 to 32, starting with a letter");
+string().regex(ROLE_ID, ROLE_ID_RULE);
 /** Which projects or environments a scope takes in, by slug: `all`, `{ only: [...] }` or `{ except: [...] }`. */
 const scopeFilter = union([
 	literal("all"),
@@ -14605,7 +14607,7 @@ const SECTIONS = [
 				usage: ["tokens issue <service> [--expires-in <days>] [--label <label>]", "             [--scope <path>=<role>,…] [--output-file <path>]"],
 				about: [
 					"a bearer token, on stdout or in a new 0600 file, shown once",
-					"and kept nowhere; 90 days unless told. It reaches what --scope",
+					`and kept nowhere; 90 days unless told. It reaches what --scope`,
 					"says, at most what the account holds, all of it unless told,",
 					"and nothing the account is given later"
 				]

@@ -7,6 +7,7 @@
  * named.
  */
 import type { RouteKey } from '@coffre/client';
+import { DEFAULT_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
 
 /** A command: how it is written, and what it does, a line or more beside it. */
 export type Entry = {
@@ -381,7 +382,7 @@ export const SECTIONS = [
         usage: ['tokens issue <service> [--expires-in <days>] [--label <label>]', '             [--scope <path>=<role>,…] [--output-file <path>]'],
         about: [
           'a bearer token, on stdout or in a new 0600 file, shown once',
-          'and kept nowhere; 90 days unless told. It reaches what --scope',
+          `and kept nowhere; ${DEFAULT_SERVICE_TOKEN_DAYS} days unless told. It reaches what --scope`,
           'says, at most what the account holds, all of it unless told,',
           'and nothing the account is given later',
         ],
