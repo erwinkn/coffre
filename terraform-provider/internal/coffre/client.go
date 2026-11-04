@@ -56,6 +56,11 @@ func New(origin string, auth Auth, runner Runner, httpClient *http.Client, versi
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
+	// A redirect is answered, never followed: on a 307 or 308, Go would send
+	// the write's body, its value, again to a URL nobody configured.
+	own := *httpClient
+	own.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	httpClient = &own
 	if runner == nil {
 		runner = func(string) string { return "" }
 	}
@@ -223,6 +228,9 @@ func (c *Client) call(ctx context.Context, method, path string, body, into any) 
 		if err != nil {
 			return err
 		}
+		if status >= 300 && status < 400 {
+			return fmt.Errorf("%s %s%s answered %d, a redirect to %q, which the provider does not follow: set url to the origin coffre answers on", method, c.origin, path, status, header.Get("location"))
+		}
 		if status >= 200 && status < 300 {
 			if into == nil {
 				return nil
@@ -346,6 +354,12 @@ func (c *Client) bearer(ctx context.Context) (string, error) {
 		return "", err
 	}
 	credential, err := c.exchange(ctx, idToken)
+	var unsent *transportError
+	if c.auth.IDToken != "" && !errors.As(err, &unsent) {
+		// Coffre saw the token: it is spent, whatever coffre answered. One
+		// the network lost may be tried again, and coffre says if it arrived.
+		c.spent = true
+	}
 	if err != nil {
 		return "", err
 	}
@@ -368,7 +382,6 @@ func (c *Client) idToken(ctx context.Context) (string, error) {
 		if c.spent {
 			return "", errors.New("the credential this phase traded its ID token for expired, and an ID token is spent once: run each phase within five minutes, or give the provider a token")
 		}
-		c.spent = true
 		return c.auth.IDToken, nil
 	}
 	requestURL, bearer := strings.TrimSpace(c.runner("ACTIONS_ID_TOKEN_REQUEST_URL")), strings.TrimSpace(c.runner("ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
@@ -417,6 +430,12 @@ func ServiceMember(name string) string {
 	return "token:" + name
 }
 
+// transportError is an exchange coffre did not answer.
+type transportError struct{ err error }
+
+func (e *transportError) Error() string { return e.err.Error() }
+func (e *transportError) Unwrap() error { return e.err }
+
 func (c *Client) exchange(ctx context.Context, idToken string) (string, error) {
 	payload, err := json.Marshal(map[string]string{"service": ServiceMember(c.auth.Service), "token": idToken})
 	if err != nil {
@@ -431,7 +450,7 @@ func (c *Client) exchange(ctx context.Context, idToken string) (string, error) {
 	request.Header.Set("user-agent", c.agent)
 	response, err := c.http.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("POST %s/api/auth/oidc: %w", c.origin, unwrapURL(err))
+		return "", &transportError{fmt.Errorf("POST %s/api/auth/oidc: %w", c.origin, unwrapURL(err))}
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))

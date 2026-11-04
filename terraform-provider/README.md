@@ -58,13 +58,14 @@ The provider reads no environment variable of its own; only GitHub's
 | `sensitivity` | `plain`, `secret` or `sensitive`. Stricter marks the current value; looser needs `value_wo_version` changed in the same apply. |
 | `value_wo` | The value, write-only. Sent on create and when `value_wo_version` changes, never otherwise. |
 | `value_wo_version` | Any string. Change it to write `value_wo` again, as a new version. |
-| `on_destroy` | `keep` (default): destroy stops managing the key, which stays. `archive`: destroy archives it, with a credential holding `secret.archive`. |
+| `on_destroy` | `keep` (default): destroy stops managing the key, which stays. `archive`: destroy archives it, with a credential holding `secret.archive`; in a fork, archiving an override returns the key to the parent's value. |
 | `version`, `version_id` | Computed: coffre's current version, which the next write must replace. |
 
 A version written outside Terraform is reported with a warning and never
 overwritten unasked; one written between a saved plan and its apply stops
 the apply (`stale`). `terraform import coffre_secret.x infra/prod/KEY`
-adopts an existing key.
+adopts an existing key. `terraform apply -replace` and `taint` stop at the
+plan, since the key exists: a new value is a new `value_wo_version`.
 
 ## Using a local build
 

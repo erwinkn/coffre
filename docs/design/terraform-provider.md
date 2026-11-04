@@ -481,6 +481,16 @@ Coffre has no hard delete of one key: an archived key keeps its versions,
 out of every read, run and export, and comes back with `coffre unarchive`.
 So the option is named `archive`, not `delete`.
 
+In a fork, archiving an override is how coffre resets it: the key stays
+readable in the fork, with the parent's value. A `coffre_secret` in
+`prod-eu` with `on_destroy = "archive"` therefore returns the key to
+`prod`'s value; it does not take it out of service. To end a key in a
+fork, remove it there (`coffre remove`), by hand.
+
+A forced replacement (`terraform apply -replace`, `taint`) plans a create,
+which finds the key in coffre and stops at the plan; the state is left as
+it was. A new value is a new `value_wo_version`, never a recreated key.
+
 Terraform's own `removed` block (1.7) stops managing a resource whatever
 `on_destroy` says:
 

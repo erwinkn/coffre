@@ -50,9 +50,9 @@ func TestLifecycle(t *testing.T) {
 		}
 		v1 := value(t, "one")
 		config("secret", "1", "")
-		w.ok(tokenVars(coffre.Tokens.Terraform, v1), "plan", "-out=create.tfplan")
+		w.ok(traced(tokenVars(coffre.Tokens.Terraform, v1)), "plan", "-out=create.tfplan")
 		checkClean(t, w, "create.tfplan", v1)
-		w.ok(tokenVars(coffre.Tokens.Terraform, v1), "apply", "create.tfplan")
+		w.ok(traced(tokenVars(coffre.Tokens.Terraform, v1)), "apply", "create.tfplan")
 		checkClean(t, w, "", v1)
 		if got, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod", key); got != v1 {
 			t.Fatalf("the verifier read %q", got)
@@ -373,6 +373,21 @@ func TestDestroyArchive(t *testing.T) {
 		archiver.ok(tokenVars(coffre.Tokens.Archiver, value(t, "one")), "destroy", "-auto-approve")
 		if got := listed(t, "", "infra/prod", other); got == nil || got["archived"] != true {
 			t.Errorf("not archived: %v", got)
+		}
+
+		// In a fork, archiving an override resets it: the key reads the parent's value again.
+		forked := newWorkspace(t, w.cli)
+		inherited := unique(t, "ARCHIVEFORK")
+		write(t, "infra/prod", inherited, map[string]any{"value": value(t, "parent"), "sensitivity": "secret"})
+		forked.configure(variables + provider(r.url(), "token") + secret("s", "prod-eu", inherited, "secret", "1", "  on_destroy = \"archive\"\n"))
+		forked.ok(tokenVars(coffre.Tokens.Archiver, value(t, "one")), "apply", "-auto-approve")
+		forked.ok(tokenVars(coffre.Tokens.Archiver, value(t, "one")), "destroy", "-auto-approve")
+		got := listed(t, "", "infra/prod-eu", inherited)
+		if parent, _ := got["parent"].(map[string]any); parent == nil || parent["state"] != "inherited" {
+			t.Errorf("an archived override is not the parent's again: %v", got)
+		}
+		if read, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod-eu", inherited); read != value(t, "parent") {
+			t.Errorf("the fork reads %q after the archive", read)
 		}
 	})
 }

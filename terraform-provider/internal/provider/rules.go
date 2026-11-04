@@ -146,7 +146,7 @@ func creatable(id string, key *coffre.Key) (replaces *string, problem string) {
 		// An override over the parent's value: guarded by the inherited version, when the list shows it.
 		return key.VersionID, ""
 	}
-	return nil, fmt.Sprintf("%s exists in coffre; import it (terraform import <address> %s) to manage it", id, id)
+	return nil, fmt.Sprintf("%s exists in coffre; import it (terraform import <address> %s) to manage it. If Terraform manages it already (a -replace or a taint), change value_wo_version instead: the provider never recreates a key", id, id)
 }
 
 // stillHidden says whether an update the plan saw no version for may write

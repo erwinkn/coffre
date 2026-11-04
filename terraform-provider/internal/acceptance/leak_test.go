@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -72,6 +73,34 @@ func TestLeakCheckReadsEverything(t *testing.T) {
 	if found, err := leaks("late", record, short); err != nil || len(found) == 0 {
 		t.Errorf("a value after 5000 runs was not found: %v (%v)", found, err)
 	}
+	// A plan record's field holding the value's base64, which parses as a message by chance.
+	parses := func(data []byte) bool {
+		for len(data) > 0 {
+			number, kind, n := protowire.ConsumeTag(data)
+			if n < 0 || number <= 0 {
+				return false
+			}
+			m := protowire.ConsumeFieldValue(number, kind, data[n:])
+			if m < 0 {
+				return false
+			}
+			data = data[n+m:]
+		}
+		return true
+	}
+	var chance string
+	for i := 0; chance == "" && i < 1_000_000; i++ {
+		if candidate := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprint(i))))[:24]; parses([]byte(base64.StdEncoding.EncodeToString([]byte(candidate)))) {
+			chance = candidate
+		}
+	}
+	if chance == "" {
+		t.Fatal("no value's base64 parses as a message")
+	}
+	field := protowire.AppendBytes(protowire.AppendTag(nil, 6, protowire.BytesType), []byte(base64.StdEncoding.EncodeToString([]byte(chance))))
+	if found, err := leaks("by chance", field, chance); err != nil || len(found) == 0 {
+		t.Errorf("base64 that parses as a message was not decoded: %v (%v)", found, err)
+	}
 	// Too deep to read: an error, never clean.
 	deep := []byte("fake-other")
 	for i := 0; i < maxDepth+2; i++ {
@@ -104,6 +133,10 @@ func checkClean(t *testing.T, w *workspace, plan string, value string) {
 	for _, name := range []string{"terraform.tfstate", "terraform.tfstate.backup"} {
 		data, err := os.ReadFile(filepath.Join(w.dir, name))
 		if err != nil {
+			// The state is written by the first apply, the backup only by a later one.
+			if name == "terraform.tfstate" && plan == "" {
+				t.Fatalf("after an apply, %s does not read: %v", name, err)
+			}
 			continue
 		}
 		if found, err := leaks(name, data, value); err != nil || len(found) > 0 {

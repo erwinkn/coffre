@@ -88,7 +88,7 @@ func (r *secretResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			},
 			"on_destroy": schema.StringAttribute{
 				Optional: true, Computed: true, Default: stringdefault.StaticString("keep"),
-				Description: "keep (the default: Terraform stops managing the key, which stays) or archive (the credential needs secret.archive).",
+				Description: "keep (the default: Terraform stops managing the key, which stays) or archive (the credential needs secret.archive). In a fork, archiving an override returns the key to the parent's value.",
 				Validators:  []validator.String{stringvalidator.OneOf("keep", "archive")},
 			},
 			"version":    schema.Int64Attribute{Computed: true, Description: "The key's current version number in coffre, as the last refresh or write saw it."},

@@ -216,3 +216,57 @@ func TestServiceMember(t *testing.T) {
 		}
 	}
 }
+
+// A write coffre redirects is refused, its value sent once, to the URL configured.
+func TestRedirectIsNotFollowed(t *testing.T) {
+	var elsewhere []string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		elsewhere = append(elsewhere, string(body))
+	}))
+	t.Cleanup(other.Close)
+	sent := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sent++
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusPermanentRedirect)
+	}))
+	t.Cleanup(server.Close)
+	client := New(server.URL, Auth{Token: "t"}, nil, nil, "test")
+	v := value
+	_, err := client.Set(context.Background(), "infra", "prod", "KEY", Write{Value: &v, Sensitivity: "secret"})
+	if err == nil || !strings.Contains(err.Error(), "a redirect to") || !strings.Contains(err.Error(), other.URL) {
+		t.Errorf("a redirected write: %v", err)
+	}
+	if sent != 1 || len(elsewhere) != 0 {
+		t.Errorf("the write went %d times to coffre and %d elsewhere", sent, len(elsewhere))
+	}
+}
+
+// failOnce fails its first request before it leaves, as a network would.
+type failOnce struct{ failed bool }
+
+func (f *failOnce) RoundTrip(r *http.Request) (*http.Response, error) {
+	if !f.failed {
+		f.failed = true
+		return nil, io.ErrUnexpectedEOF
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// An exchange the network lost leaves the ID token unspent: the next call
+// trades it, and the error before names the network, not a spent token.
+func TestIDTokenIsSpentOnceCoffreSawIt(t *testing.T) {
+	f := newFake()
+	server := f.server(t)
+	client := New(server.URL, Auth{Service: "terraform-infra", IDToken: "one-token"}, nil, &http.Client{Transport: &failOnce{}}, "test")
+	_, err := client.List(context.Background(), "infra", "prod")
+	if err == nil || strings.Contains(err.Error(), "spent once") || !strings.Contains(err.Error(), "/api/auth/oidc") {
+		t.Errorf("the lost exchange: %v", err)
+	}
+	if _, err := client.List(context.Background(), "infra", "prod"); err != nil {
+		t.Errorf("after the network came back: %v", err)
+	}
+	if len(f.exchanges) != 1 {
+		t.Errorf("coffre saw %d exchanges", len(f.exchanges))
+	}
+}

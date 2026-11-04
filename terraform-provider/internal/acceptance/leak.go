@@ -118,8 +118,9 @@ func (s *scan) search(where string, data []byte, depth int, proto bool) {
 		})
 		return
 	}
-	if proto && s.message(where, data, depth) {
-		return
+	// Text can parse as a message by chance: it is read as both.
+	if proto {
+		s.message(where, data, depth)
 	}
 	if utf8.Valid(data) {
 		for _, run := range base64Run.FindAll(data, -1) {
@@ -146,19 +147,19 @@ func (s *scan) decode(where, text string, depth int) {
 }
 
 // message searches each length-delimited field of data as a protobuf
-// message, and reports whether data parsed as one to its end.
-func (s *scan) message(where string, data []byte, depth int) bool {
+// message, when data parses as one to its end.
+func (s *scan) message(where string, data []byte, depth int) {
 	var fields [][]byte
 	for rest := data; len(rest) > 0; {
 		number, kind, n := protowire.ConsumeTag(rest)
 		if n < 0 || number <= 0 {
-			return false
+			return
 		}
 		rest = rest[n:]
 		if kind == protowire.BytesType {
 			field, m := protowire.ConsumeBytes(rest)
 			if m < 0 {
-				return false
+				return
 			}
 			fields = append(fields, field)
 			rest = rest[m:]
@@ -166,14 +167,13 @@ func (s *scan) message(where string, data []byte, depth int) bool {
 		}
 		m := protowire.ConsumeFieldValue(number, kind, rest)
 		if m < 0 {
-			return false
+			return
 		}
 		rest = rest[m:]
 	}
 	for _, field := range fields {
 		s.search(where+"(proto)", field, depth+1, true)
 	}
-	return true
 }
 
 // readAll reads r to its end, or fails past maxSize.

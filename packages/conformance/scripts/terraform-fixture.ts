@@ -106,7 +106,7 @@ async function seed(api: CoffreClient, issuer: string) {
   const preview = await api.roles.preview('terraform-archiver', { ...archiver, permissions: [...archiver.permissions] });
   await api.roles.set('terraform-archiver', { ...archiver, permissions: [...archiver.permissions] }, { revision: preview.revision });
   await api.members.add('token:terraform-archive');
-  await api.access.set('token:terraform-archive', { 'infra/prod': 'terraform-archiver' });
+  await api.access.set('token:terraform-archive', { 'infra/prod': 'terraform-archiver', 'infra/prod-eu': 'terraform-archiver' });
 
   return {
     tokens: {
@@ -114,7 +114,7 @@ async function seed(api: CoffreClient, issuer: string) {
       fork: await issue(TERRAFORM, { 'infra/prod-eu': 'contributor' }),
       hand: await issue('token:rotator', SCOPE),
       verifier: await issue('token:verifier', { 'infra/prod': 'viewer', 'infra/prod-eu': 'viewer' }),
-      archiver: await issue('token:terraform-archive', { 'infra/prod': 'terraform-archiver' }),
+      archiver: await issue('token:terraform-archive', { 'infra/prod': 'terraform-archiver', 'infra/prod-eu': 'terraform-archiver' }),
     },
   };
 }

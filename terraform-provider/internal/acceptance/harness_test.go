@@ -215,7 +215,9 @@ type result struct {
 	code int
 }
 
-// run runs the binary with args, and the variables given (TF_VAR_*, the runner's).
+// run runs the binary with args, and the variables given (TF_VAR_*, the
+// runner's), and fails the test when its output holds the value or the
+// token given.
 func (w *workspace) run(vars map[string]string, args ...string) result {
 	w.t.Helper()
 	cmd := exec.Command(w.cli.path, append(args, "-no-color")...)
@@ -233,7 +235,22 @@ func (w *workspace) run(vars map[string]string, args ...string) result {
 	} else if err != nil {
 		w.t.Fatalf("%s %v: %v", w.cli.name, args, err)
 	}
+	for _, name := range []string{"TF_VAR_value", "TF_VAR_coffre_token"} {
+		if secret := vars[name]; secret != "" && contains(out.Bytes(), secret) {
+			w.t.Fatalf("%s %v printed %s's value", w.cli.name, args, name)
+		}
+	}
 	return result{out.String(), code}
+}
+
+// traced is vars with Terraform's most detailed log on, which run's
+// output check then reads too.
+func traced(vars map[string]string) map[string]string {
+	all := map[string]string{"TF_LOG": "TRACE"}
+	for name, value := range vars {
+		all[name] = value
+	}
+	return all
 }
 
 // ok runs a command that must succeed.
