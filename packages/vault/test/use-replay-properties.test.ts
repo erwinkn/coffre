@@ -7,7 +7,9 @@ import { EVERYWHERE, type CallerKind, type InstanceRole } from '@coffre/core/acc
 import type { Purpose } from '@coffre/core/vault';
 
 import { refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS, type BulkRows } from '../src/bulk.ts';
-import { checkSeals, decideUse, standingRefusal, useEnvironments, type UseCode, type UseRequest, type UseView } from '../src/decide.ts';
+import {
+  checkSeals, credentialEnded, decideUse, standingRefusal, useEnvironments, type CheckedView, type UseCode, type UseRequest, type UseView,
+} from '../src/decide.ts';
 import { limitOp, objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
 import { emptyReplay, readUse, replay } from '../src/log-replay.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
@@ -241,9 +243,12 @@ test(`rows that are not the replay's change a decision only to stale or tampered
   if (live !== truth) assert.ok(live === 'stale' || live === 'tampered' || capOnly, `live ${live}, the replay ${truth}`);
   // The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught. The key's own
   // only once the caller's standing, which comes first, lets it on (T158, review d5 of #416): a caller it refuses is
-  // refused alike whatever the key's rows, which the log refuses too.
-  const stands = standingRefusal(checkSeals(SEAL_KEYS, replayView, request), request) === null;
-  const weighed = stands ? inputsOf(replayView, request) : standingInputsOf(replayView, request);
+  // refused alike whatever the key's rows, which the log refuses too. And the standing's own past the credential only
+  // once it reaches (review r1 of D153, formal/Probing.tla's AcceptedFirst): one missing, revoked, ended or of another
+  // generation is the app's 401 whatever anything else reads, roles, policy and the key's row included (T213).
+  const checked = checkSeals(SEAL_KEYS, replayView, request);
+  const weighed = !reaches(checked, request) ? callerInputsOf(replayView, request)
+    : standingRefusal(checked, request) === null ? inputsOf(replayView, request) : standingInputsOf(replayView, request);
   if (weighed.some((key) => perturbed.has(key))) assert.ok(live === 'stale' || live === 'tampered', `a weighed input was not the log's, and live answered ${live}`);
 }, settings));
 
@@ -263,7 +268,21 @@ function edited(row: Input): Input {
   }
 }
 
-/** The object keys a decision on `view` weighs, in its order. */
+/** Whether the use's credential reaches at all, as the replay's rows have it: there, and not ended at the request's time. */
+function reaches(view: CheckedView, request: UseRequest): boolean {
+  const credential = view.credential.row;
+  return credential !== null && !credentialEnded(credential, view.principal?.row ?? null, request.at);
+}
+
+/** The inputs that decide whether the credential reaches: its row, and its account's, whose generation it must be. */
+function callerInputsOf(view: UseView, request: UseRequest): string[] {
+  const credential = view.credential.row;
+  return [
+    objectKey({ kind: 'credential', id: request.credential }),
+    ...(credential === null ? [] : [objectKey({ kind: 'principal', id: credential.principal })]),
+  ];
+}
+
 /** The inputs the caller's standing weighs: theirs, the roles, the policy, the key's row, the place where it is held or sought. */
 function standingInputsOf(view: UseView, request: UseRequest): string[] {
   const credential = view.credential.row;
@@ -278,6 +297,7 @@ function standingInputsOf(view: UseView, request: UseRequest): string[] {
   ];
 }
 
+/** The object keys a decision on `view` weighs, in its order. */
 function inputsOf(view: UseView, request: UseRequest): string[] {
   const credential = view.credential.row;
   const secret = view.secret.row;

@@ -403,9 +403,12 @@ async function scenario(operations: readonly Operation[]) {
         const permitted = model.active[op.member] && key !== null && (!asAda || adaManages());
         const noOp = permitted && (granting ? previousRole === op.role : previousRole === undefined);
         const previous = noOp ? await state() : undefined;
-        // On every project is no place a grant can be: refused before anyone's rights are asked.
+        // On every project is no place a grant can be: refused before anyone's rights are asked. But only of a caller
+        // signed in: ada with no live credential (removed, every one of hers ended) is the app's 401 before it reads the
+        // request (T213).
         const everyProject = op.scope === 'every' || op.scope === 'every-env';
-        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true, everyProject ? 400 : undefined);
+        const status = asAda && !signedIn('ada') ? 401 : everyProject ? 400 : undefined;
+        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true, status);
         if (result) {
           assert.equal(result.changes[where], noOp ? 'unchanged' : !granting ? 'revoked' : previousRole === undefined ? 'created' : 'updated');
           if (granting) model.grants[op.member].set(key!, op.role);
@@ -626,6 +629,9 @@ test('API operation sequence covers invitation, grants, values, removal, re-admi
     { ...base, kind: 'revoke-token' },
     { ...base, kind: 'remove' },
     { ...base, kind: 'remove' },
+    // Removed, her credentials ended: 401 for whatever she asks, a grant on every project too (T213).
+    { ...base, kind: 'grant-as-ada', scope: 'every' },
+    { ...base, kind: 'grant-as-ada' },
     { ...base, kind: 'invite' },
     { ...base, kind: 'remove', member: 'ci' },
     { ...base, kind: 'invite', member: 'ci' },

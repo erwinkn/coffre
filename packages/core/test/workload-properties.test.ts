@@ -222,7 +222,9 @@ function meaning(profile: WorkloadProfile, policy: Record<string, unknown>) {
   const reads = policy.reads === undefined ? {} : Object.fromEntries(Object.entries(policy.reads as Record<string, { keys?: string[] | '*'; mints?: string[] }>).map(([id, read]) => [id.toLowerCase(), {
     keys: read.keys === '*' ? '*' : [...new Set((read.keys ?? []).map((key) => key.toLowerCase()))].sort(),
     mints: [...new Set(read.mints ?? [])].sort(),
-  }]).filter(([, read]) => (read as { keys: unknown }).keys === '*' || ((read as { keys: string[] }).keys.length > 0) || (read as { mints: string[] }).mints.length > 0));
+  }]).filter(([, read]) => (read as { keys: unknown }).keys === '*' || ((read as { keys: string[] }).keys.length > 0) || (read as { mints: string[] }).mints.length > 0)
+    // By environment, whatever order the policy names them in: a map's meaning has no order (T213).
+    .sort(([x], [y]) => ((x as string) < (y as string) ? -1 : (x as string) > (y as string) ? 1 : 0)));
   return {
     profile,
     audience: policy.audience ?? null,
