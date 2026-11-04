@@ -23,7 +23,7 @@ export async function routeWorld(db: TestDatabase) {
   const w = await namedWorld(db, { role: 'developer', caller: 'person' });
   /** A member who saves definitions: their row, grants and object, sealed; and what a save of theirs freezes. */
   const member = async (grants: { environmentId: string | null; role: string }[]) => {
-    const principal = `user:${randomUUID().slice(0, 8)}@acme.example`;
+    const principal = `user:${randomUUID()}@acme.example`;
     const now = Date.now();
     const t = tablesOf(db.owner);
     await db.owner.insert(t.vaultMembers).values({

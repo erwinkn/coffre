@@ -28,7 +28,7 @@ import { logStore } from '../src/log-store.ts';
 import { HELD_PAST_DEADLINE_MS, newRequestId, use, UseCache, useLimits, type UsePath } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { variableMemory } from './audit-tree.ts';
-import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
+import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, postgresOnly, projectSlug, rows, run, withLogUnlocked, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, DAY, emptyLog, FENCE, genesis, isolate, LOG_015, MAC, onePeriod, replayed, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
 
 let db: TestDatabase;
@@ -1012,7 +1012,7 @@ test('a place renamed, brought back from its deletion, or moved into the key\'s 
   // A fork of another project's, moved into the key's to read it through: a live place of its project, by its row.
   const elsewhere = randomUUID();
   const fork = randomUUID();
-  await db.owner.insert(tablesOf(db.owner).projects).values({ id: elsewhere, slug: `p-${elsewhere.slice(0, 8)}`, name: 'Elsewhere' });
+  await db.owner.insert(tablesOf(db.owner).projects).values({ id: elsewhere, slug: projectSlug(elsewhere), name: 'Elsewhere' });
   await db.owner.insert(tablesOf(db.owner).environments).values({ id: fork, projectId: elsewhere, slug: 'fork', name: 'fork', protected: false });
   await genesis({ kind: 'environment', id: fork }, { ...environment, id: fork, projectId: elsewhere, slug: 'fork' });
   assert.deepEqual(await both({ place: fork }), ['bad_claim', 'bad_claim'], 'read through another project\'s place');
