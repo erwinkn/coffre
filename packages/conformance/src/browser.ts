@@ -32,6 +32,7 @@ export class Browser {
       request.headers.set('cookie', [...this.#jar].map(([name, value]) => `${name}=${value}`).join('; '));
     }
     const response = await fetch(request, { redirect: 'manual' });
+    await note(request, response);
     if (ours) {
       for (const cookie of response.headers.getSetCookie()) {
         const [pair = ''] = cookie.split(';');
@@ -68,5 +69,26 @@ export class Browser {
 
 /** The API as the CLI or a service calls it, with a bearer token. */
 export function bearer(origin: string, token: string): CoffreClient {
-  return createClient({ url: origin, headers: () => ({ authorization: `Bearer ${token}` }) });
+  return createClient({
+    url: origin,
+    headers: () => ({ authorization: `Bearer ${token}` }),
+    transport: async (request) => {
+      const response = await fetch(request);
+      await note(request, response);
+      return response;
+    },
+  });
+}
+
+/**
+ * The 5xx answers the checks met, each with its body, which a client error
+ * drops when it is not coffre's own JSON (one of workerd's, say): a check
+ * that fails prints those it met (`Report`).
+ */
+export const serverErrors: string[] = [];
+
+async function note(request: Request, response: Response): Promise<void> {
+  if (response.status < 500) return;
+  const body = await response.clone().text().catch((error: unknown) => `(its body unread: ${String(error)})`);
+  serverErrors.push(`${request.method} ${new URL(request.url).pathname} ${response.status}: ${body.slice(0, 2000)}`);
 }

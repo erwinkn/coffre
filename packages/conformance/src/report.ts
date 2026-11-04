@@ -5,6 +5,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { CoffreError } from '@coffre/client';
 
+import { serverErrors } from './browser.ts';
+
 /** A check that failed: what went wrong, and what was seen instead. */
 export class Failure extends Error {
   readonly detail: unknown;
@@ -48,12 +50,18 @@ export async function until(what: string, probe: () => Promise<boolean>, seconds
 
 type Passed<T> = string | { detail: string; value: T };
 
+/** A request the server answered below 500, as wrangler logs it, colours or none: what a failure's output leaves out. */
+const ANSWERED = /^(?:\x1b\[[\d;]*m)*\[wrangler:info\](?:\x1b\[[\d;]*m)* [A-Z]+ \S+ [1-4]\d\d /;
+
 export class Report {
   readonly #results: { name: string; status: 'ok' | 'FAIL' | 'skip' }[] = [];
   readonly #width: number;
+  readonly #mark: (() => () => string) | undefined;
 
-  constructor(width = 19) {
-    this.#width = width;
+  /** `mark` marks the processes' output, so that a check that fails prints what they wrote while it ran. */
+  constructor(options: { width?: number; mark?: () => () => string } = {}) {
+    this.#width = options.width ?? 19;
+    this.#mark = options.mark;
   }
 
   get failed(): string[] {
@@ -75,6 +83,8 @@ export class Report {
       this.#print(name, 'skip', `no ${missing.join(' or ')}: an earlier check failed`);
       return undefined;
     }
+    const since = this.#mark?.();
+    const errors = serverErrors.length;
     try {
       const passed = await run(needs as { [K in keyof N]: NonNullable<N[K]> });
       this.#print(name, 'ok', typeof passed === 'string' ? passed : passed.detail);
@@ -86,8 +96,23 @@ export class Report {
       }
       const detail = error instanceof Failure ? error.detail : error instanceof Error ? error.stack : error;
       this.#print(name, 'FAIL', error instanceof Error ? error.message : String(error), detail);
+      this.#seen(serverErrors.slice(errors), since?.());
       return undefined;
     }
+  }
+
+  /**
+   * What a check that failed met: the 5xx answers, bodies and all, and the
+   * processes' output while it ran, whole, but for the requests answered
+   * below 500, so that a server's error is never cut from the report.
+   */
+  #seen(answers: string[], output: string | undefined): void {
+    const indent = (text: string) => text.replace(/^/gm, ' '.repeat(this.#width + 9));
+    if (answers.length > 0) console.error(indent(`The answers of 500 and over during this check:\n${answers.join('\n')}`));
+    if (output === undefined) return;
+    const lines = output.split('\n');
+    const kept = lines.filter((line) => !ANSWERED.test(line));
+    console.error(indent(`The processes' output during this check, but for ${lines.length - kept.length} requests answered below 500:\n${kept.join('\n')}`));
   }
 
   #print(name: string, status: 'ok' | 'FAIL' | 'skip', line: string, detail?: unknown): void {

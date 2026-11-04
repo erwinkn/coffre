@@ -22,7 +22,7 @@ import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, ru
 
 /** The names of the checks that failed. */
 export async function conform(deployment: Deployment, options: { bulkLimit: number; browser: string | null }): Promise<string[]> {
-  const report = new Report();
+  const report = new Report({ mark: deployment.mark });
   await report.check('health', {}, () => health(deployment));
   await report.check('browser bundle', {}, () => browserBundle(deployment));
   const admin = await report.check('sign-in', {}, () => signInAdmin(deployment));
