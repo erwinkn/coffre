@@ -1121,15 +1121,15 @@ test('T169, review r1: a fence closed refuses every call after it and every answ
 test('T169, review by Fable: a tick is bounded by the work its window asks, so a long drain goes on where a short window that took as long stalls', async (t) => {
   const { k, store, memory, alerts } = await setup();
   const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 250, windowMax: 2000 });
-  const cp = await open();
-  await traffic(store, cp, 1);
-  // The bound reads `performance.now`, which this test drives: it moves only by the read's simulated time, never by the
-  // machine's own (sorting and signing a part of the window, a runner starved of CPU), so that what is proved does not
-  // depend on how fast the machine is. The tick's own timer still runs on the real one, and finds the bound reached
-  // when the simulated time says so.
+  // The bound reads `performance.now`, which this test drives from the start, the first tick's included: it moves only
+  // by the read's simulated time, never by the machine's own (sorting and signing a part of the window, a runner
+  // starved of CPU), so that what is proved does not depend on how fast the machine is. The tick's own timer still runs
+  // on the real one, and finds the bound reached when the simulated time says so.
   const start = performance.now();
   let simulated = 0;
   t.mock.method(performance, 'now', () => start + simulated);
+  const cp = await open();
+  await traffic(store, cp, 1);
   // A window read that sorts what is left, 6 µs a number: 300 ms for a backlog of 50,000, past the bound alone, and
   // inside it with the window's own allowance (WINDOW_ENTRY_MS), the rest of the bound left for the part's own work.
   let fixed: number | null = null;
