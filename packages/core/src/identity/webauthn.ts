@@ -18,10 +18,10 @@
  *      `.get`), its challenge the one sent, its origin exactly the
  *      deployment's, `crossOrigin` false or absent, `topOrigin` absent
  *                                            `type` `challenge` `origin`
- *   d. `authenticatorData`: the RP ID's hash, then the flags: UP and UV
- *      set, BS only with BE, AT set for a registration and clear for an
- *      assertion, ED followed by one CBOR map, whose extensions are ignored
- *                     `rp_id` `user_presence` `user_verification` `backup_state`
+ *   d. `authenticatorData`: the RP ID's hash, then the flags: UP set, BS
+ *      only with BE, AT set for a registration and clear for an assertion,
+ *      ED followed by one CBOR map, whose extensions are ignored
+ *                                     `rp_id` `user_presence` `backup_state`
  *   e. a registration's credential: its ID 16 to 1023 bytes and the
  *      response's `id`, its key a COSE key of an algorithm asked for
  *      (Ed25519, ES256, RS256 of 2048 to 4096 bits), its `alg` the one its
@@ -29,9 +29,14 @@
  *   f. an assertion's signature, over `authenticatorData ‖
  *      SHA-256(clientDataJSON)` with the stored key; ES256's DER turned into
  *      the raw form WebCrypto verifies                        `signature`
+ *   g. UV set: the touch was a fingerprint, a face or a PIN, not presence
+ *      alone (`USER_VERIFICATION`)                    `user_verification`
  *
- * A registration runs a, c, d and e; an assertion a, b, c, d and f, in
- * section 7.2's order.
+ * A registration runs a, c, d, e and g; an assertion a, b, c, d, f and g, in
+ * section 7.2's order but for g, which comes last: a response refused for
+ * `user_verification` passed every other check. That costs nothing (UV is
+ * one bit the signature covers, and a refusal returns nothing), and it
+ * keeps the W3C vectors whose UV bit is clear verifying every other step.
  *
  * What it leaves to its caller: the sealed state the challenge came in,
  * which passkey row the ID names and whether it is live, and the counter and
@@ -44,6 +49,13 @@ import { base64url, fromBase64url } from '@coffre/client/dpop';
 /** The COSE algorithms a passkey may use, in the order `create()` asks for them: Ed25519, ES256, RS256. */
 export const PASSKEY_ALGORITHMS = [-8, -7, -257] as const;
 export type PasskeyAlgorithm = (typeof PASSKEY_ALGORITHMS)[number];
+
+/**
+ * What `create()` and `get()` ask for and the verifier holds every response
+ * to (section 7.4): a PIN or a biometric, never presence alone. One value,
+ * not a setting.
+ */
+export const USER_VERIFICATION = 'required';
 
 /** Why a response was refused; `passkey.check`'s denials name it. */
 export type PasskeyReason =
@@ -70,8 +82,6 @@ export type CeremonyExpectation = {
   origin: string;
   /** `publicUrl`'s host, or the parent of it the deployment names. */
   rpId: string;
-  /** UV must be set: a fingerprint, a face or a PIN, not presence alone (section 7.4). Default true. */
-  requireUserVerification?: boolean;
 };
 
 export type RegistrationExpectation = CeremonyExpectation & {
@@ -90,8 +100,8 @@ export type StoredPasskey = {
 
 export type AssertionExpectation = CeremonyExpectation & { passkey: StoredPasskey };
 
-/** The flags a response's authenticator data carried. */
-export type PasskeyFlags = { userVerified: boolean; backupEligible: boolean; backedUp: boolean };
+/** The flags a response's authenticator data carried; UV is always set on one that verified. */
+export type PasskeyFlags = { backupEligible: boolean; backedUp: boolean };
 
 export type VerifiedRegistration = PasskeyFlags & {
   ok: true;
@@ -293,7 +303,7 @@ const BS = 0x10;
 const AT = 0x40;
 const ED = 0x80;
 
-type AuthenticatorData = PasskeyFlags & { signCount: number; attested: { aaguid: Uint8Array; credentialId: Uint8Array; publicKey: Uint8Array } | null };
+type AuthenticatorData = PasskeyFlags & { userVerified: boolean; signCount: number; attested: { aaguid: Uint8Array; credentialId: Uint8Array; publicKey: Uint8Array } | null };
 
 /** Step 3: the RP ID's hash, the flags, and for a registration the attested credential. */
 async function readAuthenticatorData(bytes: Uint8Array, attested: boolean, expected: CeremonyExpectation): Promise<AuthenticatorData> {
@@ -301,7 +311,6 @@ async function readAuthenticatorData(bytes: Uint8Array, attested: boolean, expec
   if (!equal(bytes.subarray(0, 32), await sha256(ENCODER.encode(expected.rpId)))) return fail('rp_id', `the RP ID is not ${expected.rpId}`);
   const flags = bytes[32];
   if (!(flags & UP)) return fail('user_presence', 'the user was not present');
-  if (expected.requireUserVerification !== false && !(flags & UV)) return fail('user_verification', 'the user was not verified');
   if (flags & BS && !(flags & BE)) return fail('backup_state', 'backed up but not backup eligible');
   if (Boolean(flags & AT) !== attested) return fail('malformed', attested ? 'no attested credential data' : 'attested credential data in an assertion');
   const signCount = new DataView(bytes.buffer, bytes.byteOffset + 33, 4).getUint32(0);
@@ -474,6 +483,7 @@ export function verifyRegistration(input: unknown, expected: RegistrationExpecta
     const credential = data.attested!;
     if (!equal(credential.credentialId, id)) return fail('credential', "the attested credential is not the response's id");
     const { algorithm } = await importCoseKey(credential.publicKey, expected.algorithms ?? PASSKEY_ALGORITHMS);
+    checkVerified(data);
     return {
       ok: true as const,
       credentialId: credential.credentialId,
@@ -482,11 +492,15 @@ export function verifyRegistration(input: unknown, expected: RegistrationExpecta
       signCount: data.signCount,
       aaguid: credential.aaguid.some((byte) => byte !== 0) ? credential.aaguid : null,
       transports,
-      userVerified: data.userVerified,
       backupEligible: data.backupEligible,
       backedUp: data.backedUp,
     };
   });
+}
+
+/** Check g, the last: `USER_VERIFICATION` is `required`, so UV is set. */
+function checkVerified(data: AuthenticatorData): void {
+  if (!data.userVerified) fail('user_verification', 'the user was not verified, only present');
 }
 
 /** A returned user handle: canonical base64url of 1 to 64 bytes, or, empty, one that matches no passkey. */
@@ -515,6 +529,7 @@ export function verifyAssertion(input: unknown, expected: AssertionExpectation):
     signed.set(authData);
     signed.set(await sha256(clientData), authData.length);
     if (!(await verifySignature(passkey.algorithm, key, signature, signed))) return fail('signature', 'the signature does not verify');
-    return { ok: true as const, signCount: data.signCount, userVerified: data.userVerified, backupEligible: data.backupEligible, backedUp: data.backedUp };
+    checkVerified(data);
+    return { ok: true as const, signCount: data.signCount, backupEligible: data.backupEligible, backedUp: data.backedUp };
   });
 }
