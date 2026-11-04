@@ -59,6 +59,13 @@
 (* step (AToday), its caller's session not weighed again                   *)
 (* (TodayCallerStandsAtDecision, as a key write's).                        *)
 (*                                                                         *)
+(* A refusal's record (PR 6). A try the decision refuses on its read is    *)
+(* answered there: once the app has checked the caller's rows, the vault   *)
+(* writes its record, a row of the log's changes of the request's own      *)
+(* object, under the fence shared, which moves no object's newest change   *)
+(* (Refuse); then the seal wait, then the answer. Before PR 6               *)
+(* (RefusalLogged off) a refusal went down today's path.                    *)
+(*                                                                         *)
 (* Today's path (PR 3: `served: false`). A key write the vault does not    *)
 (* serve goes as every write went before: the vault decides on the rows as *)
 (* they are, each object's row held to its newest change, and that change  *)
@@ -130,6 +137,12 @@
 (*            row and the log agree again, and only that change's MAC,     *)
 (*            which the writer cannot make, says it is not the vault's;    *)
 (*            in an add, Bob's row put back after his demotion likewise;   *)
+(*   shp      a maintainer makes the key Ada writes a reference: a write    *)
+(*            the two-trip path does not serve, down today's path on any   *)
+(*            try (its `shape`, a name: no seal moves);                    *)
+(*   rfl      a database writer copies a refusal's record, MAC and all, as *)
+(*            the newest change of a revoked or demoted object, the row    *)
+(*            put back to match (PR 6);                                    *)
 (*   sub      a database writer copies a token hash they hold onto a live  *)
 (*            Owner's credential row: the token now resolves to the Owner, *)
 (*            no seal moves, the row's `auth_mac` no longer matches        *)
@@ -216,7 +229,19 @@ CONSTANTS
     \* the membership it was issued under (`credentialEnded`): a session of
     \* a membership removed and restored since is ended, 401, before its row
     \* is revoked. Without, the restored member's old session adds.
-    GenerationChecked
+    GenerationChecked,
+    \* A try the decision refuses is answered by the vault's record of the
+    \* refusal (PR 6), its second statement, and goes nowhere else. Without,
+    \* it goes down today's path, as before PR 6, which refuses and logs it
+    \* there, or, the request asked again since, may write.
+    RefusalLogged,
+    \* The refusal's record ends the request. Without, the request still goes
+    \* down today's path after it.
+    RefusalEnds,
+    \* The vault writes a refusal's record only once the app has checked the
+    \* caller's rows its read answered (AuthChecked, as before a change
+    \* commits). Without, it writes it at its decision, in its first call.
+    RefusalAfterAuth
 
 Writers == {"w1", "w2"}
 Adders == {"bob", "cy"}
@@ -226,15 +251,18 @@ Moves == [rev |-> "member", end |-> "cred", rol |-> "roles", pol |-> "policy",
           dem |-> "bob", cls |-> "settings", plc |-> "place", prt |-> "prot"]
 \* What each rename moves: a name's resolution, no seal.
 Renames == [ren |-> "keyName", phn |-> "chain", del |-> "me",
-            slg |-> "slug", nev |-> "envs", scp |-> "scope"]
+            slg |-> "slug", nev |-> "envs", scp |-> "scope", shp |-> "shape"]
 \* What a token resolves to, by its hash.
 Token == "tok"
 
 \* What a key write reads: Ada's session, her member object, the roles, the
 \* policy, the environment, its fork parent, the parent's keys weighed, the
-\* key itself; and what the key's name, the fork chain and `env@me` resolve to.
+\* key itself; and what the key's name, the fork chain and `env@me` resolve
+\* to, and whether the key is still a value of its own (`shape`: made a
+\* reference, it is one the two-trip path does not write, and the request
+\* goes down today's path, on any try).
 WriteObjects == {"cred", "member", "roles", "policy", "env", "parent", "parentKey", "key"}
-WriteNames == {"keyName", "chain", "me", Token}
+WriteNames == {"keyName", "chain", "me", "shape", Token}
 \* What an add reads: the adder's session and object, the roles, the policy,
 \* the services setting, the grant's place, the project's other
 \* environments, svc's row; and what the grant's slugs, the project's set of
@@ -272,10 +300,11 @@ VARIABLES
     requests,   \* ghost: each write's request, as decided live and by the replay
     writes,     \* ghost: each committed key change
     admits,     \* ghost: each committed member add
-    answered    \* ghost: each change answered, with its number
+    answered,   \* ghost: each change answered, with its number
+    refusals    \* ghost: each refusal's record, as the vault wrote it
 
 vars == <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held,
-          pc, l, tries, trips, requests, writes, admits, answered>>
+          pc, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* An object's row as stored: put back to its first state by a database
 \* writer, or as its newest change left it.
@@ -357,6 +386,7 @@ Init ==
                                 [] p = "dbw" -> "tamper"
                                 [] p = "fsg" -> "forge"
                                 [] p = "sub" -> "substitute"
+                                [] p = "rfl" -> "refile"
                                 [] p = "bk" -> "giveback"
                                 [] p = "rmb" -> "remove"
                                 [] p \in DOMAIN Renames -> "rename"
@@ -364,7 +394,7 @@ Init ==
     /\ l = [p \in Procs |-> [n |-> 0]]
     /\ tries = [p \in Procs |-> 1]
     /\ trips = [p \in Procs |-> 0]
-    /\ requests = {} /\ writes = {} /\ admits = {} /\ answered = {}
+    /\ requests = {} /\ writes = {} /\ admits = {} /\ answered = {} /\ refusals = {}
 
 Goto(p, to) == pc' = [pc EXCEPT ![p] = to]
 \* A change commits, numbered, its object's newest change moved.
@@ -424,14 +454,15 @@ WVault(p) ==
          THEN /\ Goto(p, "w.today")
               /\ l' = [l EXCEPT ![p] = [n |-> 0, auth |-> Auth(p)]]
               /\ UNCHANGED <<next, requests>>
-         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("write"), seals |-> seal, wrap |-> 0, auth |-> Auth(p)]]
+         ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("write"), seals |-> seal, wrap |-> 0, auth |-> Auth(p),
+                                          asked |-> Request(p, Read("write"))]]
               /\ IF RequestUnderFence
                    THEN /\ next' = next + 1
                         /\ requests' = requests \cup {Request(p, Read("write"))}
                         /\ Goto(p, "w.decide")
                    ELSE /\ UNCHANGED <<next, requests>>
                         /\ Goto(p, "w.rest")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, writes, admits, answered, refusals>>
 
 \* Without one statement under the fence: the rest of the read, and the
 \* request numbered, in a later step. A change between the two tears what
@@ -440,31 +471,49 @@ WRest(p) ==
     /\ pc[p] = "w.rest"
     /\ LET r == [o \in Parts("write") |-> IF o \in FirstRead THEN l[p].read[o] ELSE Read("write")[o]]
            seals == [o \in Objects |-> IF o \in FirstRead THEN l[p].seals[o] ELSE seal[o]]
-       IN /\ l' = [l EXCEPT ![p].read = r, ![p].seals = seals]
+       IN /\ l' = [l EXCEPT ![p].read = r, ![p].seals = seals, ![p].asked = Request(p, r)]
           /\ requests' = requests \cup {Request(p, r)}
     /\ next' = next + 1
     /\ Goto(p, "w.decide")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, trips, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, trips, writes, admits, answered, refusals>>
+
+\* A refusal decided on the read, recorded (PR 6): once the app has checked
+\* the caller's rows the read answered (RefusalAfterAuth), the vault writes
+\* its record (Refuse); rows not the caller's, 401 and no record. Without,
+\* the vault writes it at its decision, before the app has seen the rows.
+RefuseOrAnswer(p) ==
+    /\ IF RefusalAfterAuth /\ ~AppChecks(l[p].read) THEN Goto(p, "done") ELSE Goto(p, "r.refuse")
+    /\ UNCHANGED l
+
+\* Today's path, from a try's decision. A first try: `writeAhead` answers
+\* nothing, and the credential's own check reads its row now
+\* (`authenticateRequest`): ended, 401; else the caller it finds, which
+\* today's path takes. A later one: the caller the first checked (Auth).
+Today(p, to) ==
+    IF tries[p] = 1 /\ ~Value("cred")
+      THEN Goto(p, "done") /\ UNCHANGED l
+      ELSE /\ Goto(p, to)
+           /\ l' = [l EXCEPT ![p].auth = Auth(p)]
 
 \* The Worker decides on the read; allowed, it wraps the key (the try's,
 \* `wrap`, which its change names by the request's number; no 0.14
 \* `key.wrap` entry since 0.16.0) and seals the change, and the app checks
-\* the caller's rows. No round trip. Refused: today's path, which refuses
-\* and logs it as ever. The rows not the caller's: 401.
+\* the caller's rows. No round trip. Refused: the refusal's record (PR 6),
+\* or, before it, today's path, which refuses and logs it as ever. A key
+\* the read found a reference (`shape`), whatever the decision: today's
+\* path, on any try (the vault serves no such write). The rows not the
+\* caller's: 401.
 WDecide(p) ==
     /\ pc[p] = "w.decide"
-    /\ IF ~Decide(p, l[p].read)
-         \* A first try refused: `writeAhead` answers nothing, and the
-         \* credential's own check reads its row now (`authenticateRequest`):
-         \* ended, 401; else the caller it finds, which today's path takes.
-         THEN IF tries[p] = 1 /\ ~Value("cred")
-                THEN /\ Goto(p, "done") /\ UNCHANGED l
-                ELSE /\ Goto(p, "w.today")
-                     /\ l' = [l EXCEPT ![p].auth = Auth(p)]
-       ELSE IF ~AppChecks(l[p].read)
-         THEN /\ Goto(p, "done") /\ UNCHANGED l
-         ELSE /\ l' = [l EXCEPT ![p].wrap = tries[p]] /\ Goto(p, "w.app")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+    /\ LET unserved == l[p].read["shape"].name # 0
+           allowed == Decide(p, l[p].read)
+       IN \/ /\ ~unserved /\ allowed
+             /\ IF ~AppChecks(l[p].read)
+                  THEN Goto(p, "done") /\ UNCHANGED l
+                  ELSE /\ l' = [l EXCEPT ![p].wrap = tries[p]] /\ Goto(p, "w.app")
+          \/ ~unserved /\ ~allowed /\ RefusalLogged /\ RefuseOrAnswer(p)
+          \/ (unserved \/ (~allowed /\ ~RefusalLogged)) /\ Today(p, "w.today")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* The write itself: the key's next version, its change numbered.
 Commit(p) ==
@@ -491,7 +540,7 @@ WApp(p) ==
                      /\ UNCHANGED <<held, tries>>
          ELSE /\ Again(p, "w.vault")
               /\ UNCHANGED <<head, held>>
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, l, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, l, requests, writes, admits, answered, refusals>>
 
 \* The same statement, after its wait for the fence (a removal: the hold
 \* ran before it).
@@ -500,7 +549,7 @@ WFence(p) ==
     /\ held = None
     /\ head' = None /\ held' = p
     /\ Goto(p, "w.commit")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* The rows, the key's update, the change, COMMIT; the locks let go.
 WCommit(p) ==
@@ -511,7 +560,7 @@ WCommit(p) ==
     \* vault's `served: false`.)
     /\ \/ Goto(p, "w.seal")
        \/ ~FallBackUncommitted /\ Goto(p, "w.today")
-    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, head, tries, trips, requests, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, head, tries, trips, requests, admits, answered, refusals>>
 
 \* Today's path, as it goes: the vault decides on the rows as they are and
 \* wraps the key (0.14's `key.wrap`), then the app's transaction, under
@@ -550,7 +599,7 @@ WToday(p) ==
                                           decided |-> \A o \in WrapObjects : ok[o],
                                           caller |-> ok["cred"]]]
                  /\ Goto(p, "w.tcommit")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* ... and the app's transaction: under 0.14's head and the fence, it finds
 \* the policy the caller was loaded with still the newest (`policyStill`,
@@ -581,7 +630,7 @@ WTodayCommit(p) ==
                                            t |-> 0, wrap |-> 0]}
               /\ Goto(p, "t.seal")
               /\ UNCHANGED tries
-    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, head, held, trips, requests, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, putBack, forged, gen, sealedTo, head, held, trips, requests, admits, answered, refusals>>
 
 -----------------------------------------------------------------------------
 (* A member add *)
@@ -599,26 +648,26 @@ ARead(p) ==
               /\ l' = [l EXCEPT ![p] = [n |-> 0, auth |-> Auth(p)]]
          ELSE /\ l' = [l EXCEPT ![p] = [n |-> 0, read |-> Read("add"), seals |-> seal, auth |-> Auth(p)]]
               /\ Goto(p, "a.decide")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, requests, writes, admits, answered, refusals>>
 
 \* The Worker decides on the read: the adder's standing, svc no member yet;
 \* then the app checks the adder's rows, between the vault's two calls.
 \* (The check reads only what the vault answered, so it is one step with
 \* the decision.) No round trip.
-\* Refused, or allowed but a case the vault leaves to today's path (PR 5
-\* serves an admin's first add, nothing else): today's path, as a key
-\* write's (WDecide), the caller the first try authenticated, or on a first
-\* try the credential's own check now.
+\* Refused: the refusal's record (PR 6), as a key write's (WDecide); or,
+\* before it, today's path. Allowed but a case the vault leaves to today's
+\* path (PR 5 serves an admin's first add: a set-up by someone who runs no
+\* instance is PR 5b's), there, as a key write's, the caller the first try
+\* authenticated, or on a first try the credential's own check now.
 ADecide(p) ==
     /\ pc[p] = "a.decide"
-    /\ \/ /\ Decide(p, l[p].read)
-          /\ IF AppChecks(l[p].read) THEN Goto(p, "a.write") ELSE Goto(p, "done")
-          /\ UNCHANGED l
-       \/ IF tries[p] = 1 /\ ~Value("cred")
-            THEN Goto(p, "done") /\ UNCHANGED l
-            ELSE /\ Goto(p, "a.today")
-                 /\ l' = [l EXCEPT ![p].auth = Auth(p)]
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+    /\ LET allowed == Decide(p, l[p].read)
+       IN \/ /\ allowed
+             /\ IF AppChecks(l[p].read) THEN Goto(p, "a.write") ELSE Goto(p, "done")
+             /\ UNCHANGED l
+          \/ ~allowed /\ RefusalLogged /\ RefuseOrAnswer(p)
+          \/ (allowed \/ ~RefusalLogged) /\ Today(p, "a.today")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* The write: rows, head, fence, the hold. One round trip. As a key
 \* write's, the row and its COMMIT are a step of their own (ACommit), with
@@ -632,7 +681,7 @@ AWrite(p) ==
               /\ UNCHANGED tries
          ELSE /\ Again(p, "a.read")
               /\ UNCHANGED held
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, l, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, l, requests, writes, admits, answered, refusals>>
 
 \* svc's row, its change, COMMIT; the locks let go.
 ACommit(p) ==
@@ -643,7 +692,7 @@ ACommit(p) ==
     /\ l' = [l EXCEPT ![p].n = next]
     /\ admits' = admits \cup {Committed(p, "svc", AddStands(p))}
     /\ Goto(p, "a.seal")
-    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, head, tries, trips, requests, writes, answered>>
+    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, head, tries, trips, requests, writes, answered, refusals>>
 
 \* Today's add (`admit`, `setAccess(…, admit)`): one transaction, under the
 \* members' rows and 0.14's head, which every change of what it weighs takes
@@ -676,18 +725,45 @@ AToday(p) ==
                                              authentic |-> IF ActorFromRead THEN l[p].auth.tok = 0 ELSE names[Token] = 0,
                                              t |-> 0, wrap |-> 0]}
                  /\ Goto(p, "t.seal")
-    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, answered>>
+    /\ UNCHANGED <<ok, names, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, answered, refusals>>
+
+-----------------------------------------------------------------------------
+(* A refusal's record (PR 6) *)
+
+\* The vault's second statement (`log_refusal`): the refusal, MAC'd by the
+\* Worker, a row of the log's changes numbered under the fence shared, as a
+\* use is (it waits for a change's hold to its COMMIT, `held`, and holds up
+\* no use), of the request's own object, so no object's newest change moves
+\* and no reader that decides takes it (docs/design/two-trips.md, "A
+\* refusal's record"). One round trip. It names the request's number (a
+\* key write's: an add's read numbers nothing) and the credential the read
+\* resolved the token to, which the app's check vouched for first
+\* (RefusalAfterAuth). Then the seal wait (R51, D165 kept for refusals),
+\* then the answer: today's status and body, and no 0.14 entry.
+Refuse(p) ==
+    /\ pc[p] = "r.refuse"
+    /\ held = None
+    /\ trips' = [trips EXCEPT ![p] = @ + 1]
+    /\ refusals' = refusals \cup {[p |-> p, kind |-> Kind(p), n |-> next, t |-> tries[p],
+                                   replay |-> IF Kind(p) = "write" THEN l[p].asked.replay ELSE FALSE,
+                                   authentic |-> l[p].read[Token].name = 0]}
+    /\ next' = next + 1
+    /\ l' = [l EXCEPT ![p].n = next]
+    \* (A removal: the request goes on down today's path after its record.)
+    /\ IF RefusalEnds THEN Goto(p, "r.seal")
+       ELSE Goto(p, IF Kind(p) = "write" THEN "w.today" ELSE "a.today")
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, requests, writes, admits, answered>>
 
 -----------------------------------------------------------------------------
 (* The seal wait, the answer, and everything else *)
 
 \* A change answers once its number is sealed (R51).
 Answer(p) ==
-    /\ pc[p] \in {"w.seal", "a.seal", "x.seal", "t.seal"}
+    /\ pc[p] \in {"w.seal", "a.seal", "x.seal", "t.seal", "r.seal"}
     /\ ~WaitForSeal \/ l[p].n < sealedTo
     /\ answered' = answered \cup {[p |-> p, n |-> l[p].n]}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, refusals>>
 
 \* Every other change, one atomic step: 0.14's head and the fence (a
 \* session's revoke the fence alone, which the head's holder does not stop).
@@ -699,7 +775,7 @@ Change(p) ==
     /\ Numbered(Moves[p])
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* Ada's grant given back once taken: the same row, a newer change.
 GiveBack(p) ==
@@ -710,7 +786,7 @@ GiveBack(p) ==
     /\ Numbered("member")
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* Bob removed, his generation advanced, which ends his session though its
 \* row still says live (its revoke follows, by the app's sweep); then
@@ -723,7 +799,7 @@ Remove(p) ==
     /\ gen' = 1
     /\ Numbered("bob")
     /\ Goto(p, "restore")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 Restore(p) ==
     /\ pc[p] = "restore"
     /\ head = None /\ held = None
@@ -731,7 +807,7 @@ Restore(p) ==
     /\ Numbered("bob")
     /\ l' = [l EXCEPT ![p].n = next]
     /\ Goto(p, "x.seal")
-    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<names, svc, kver, putBack, forged, gen, sealedTo, head, held, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer puts cA's row back as it was, live, once it is revoked.
 \* Nothing logged: the log's newest change of cA is still the revoke.
@@ -740,7 +816,7 @@ Tamper(p) ==
     /\ seal["cred"] > 0
     /\ putBack' = putBack \cup {"cred"}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer puts a revoked or demoted row back, live, and writes its
 \* seal into the log's newest change of it, the revoke or the demotion: row
@@ -753,7 +829,7 @@ Forge(p) ==
           /\ putBack' = putBack \cup {o}
           /\ forged' = forged \cup {o}
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, names, svc, kver, seal, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A database writer copies a token hash onto another credential: around
 \* coffre, no lock, nothing logged.
@@ -761,7 +837,29 @@ Substitute(p) ==
     /\ pc[p] = "substitute"
     /\ names' = [names EXCEPT ![Token] = 1]
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
+
+\* A database writer copies a refusal's record (PR 6), its MAC with it, to a
+\* number of its own as the newest change of a revoked or demoted object,
+\* the row put back and the record's seal column made the row's: row and
+\* log agree. The record's MAC is over its own object, the request's, so
+\* under another it fails, as a forged seal's does (ChangeMacChecked).
+\* (Copied whole, its object its own, it is the same refusal listed twice,
+\* which moves nothing anything decides on: not modelled.)
+\* With no refusal to copy once everyone else is done, it has nothing to do.
+Refile(p) ==
+    /\ pc[p] = "refile"
+    /\ Goto(p, "done")
+    /\ \/ /\ refusals # {}
+          /\ \E o \in {"cred", "member", "bob"} :
+                /\ seal[o] > 0
+                /\ seal' = [seal EXCEPT ![o] = @ + 1]
+                /\ putBack' = putBack \cup {o}
+                /\ forged' = forged \cup {o}
+          /\ next' = next + 1
+       \/ /\ refusals = {} /\ \A q \in Procs \ {p, "ck"} : pc[q] = "done"
+          /\ UNCHANGED <<seal, putBack, forged, next>>
+    /\ UNCHANGED <<ok, names, svc, kver, gen, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A rename, a key appearing, a config deleted, a project made under an old
 \* slug: an app write under 0.14's head, which moves what a name resolves
@@ -771,18 +869,19 @@ Rename(p) ==
     /\ head = None /\ held = None
     /\ names' = [names EXCEPT ![Renames[p]] = @ + 1]
     /\ Goto(p, "done")
-    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, svc, kver, seal, putBack, forged, gen, next, sealedTo, head, held, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 \* A tick seals every number committed so far.
 Tick ==
     /\ "ck" \in Procs
     /\ sealedTo < next
     /\ sealedTo' = next
-    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, head, held, pc, l, tries, trips, requests, writes, admits, answered>>
+    /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, next, head, held, pc, l, tries, trips, requests, writes, admits, answered, refusals>>
 
 Step(p) == WVault(p) \/ WRest(p) \/ WDecide(p) \/ WApp(p) \/ WFence(p) \/ WCommit(p) \/ WToday(p) \/ WTodayCommit(p)
         \/ ARead(p) \/ ADecide(p) \/ AWrite(p) \/ ACommit(p) \/ AToday(p) \/ Answer(p) \/ Change(p)
         \/ GiveBack(p) \/ Remove(p) \/ Restore(p) \/ Tamper(p) \/ Forge(p) \/ Substitute(p) \/ Rename(p)
+        \/ Refuse(p) \/ Refile(p)
 
 Terminating ==
     /\ \A p \in Procs \ {"ck"} : pc[p] = "done"
@@ -889,13 +988,33 @@ OneWritePerRequest == \A v, w \in writes : v.p = w.p => v = w
 \* in 0.14's log as a wrap no change names).
 WritesNameTheirWrap == \A w \in writes : w.wrap = w.t
 
-\* Every change answers only once sealed (R51).
+\* Every change answers only once sealed (R51), and every refusal the vault
+\* records (PR 6).
 AnsweredSealed == \A a \in answered : a.n < sealedTo
 
+\* A key write's refusal is recorded only where the log, replayed at the
+\* request's number, refuses it too: the read and the number are one
+\* statement under the fence (RequestUnderFence). An add's read numbers
+\* nothing: its record binds the read by its digest alone.
+RefusalsReplay == \A f \in refusals : f.kind = "write" => ~f.replay
+
+\* A refusal is recorded only as the caller its token is: the app checks the
+\* caller's rows before the vault records it (RefusalAfterAuth), so a token
+\* hash copied onto an Owner's credential never puts a refusal in the
+\* Owner's name (round 6, for the record a refusal now writes).
+RefusalsAuthentic == \A f \in refusals : f.authentic
+
+\* A request ends with its refusal's record or with a change, never both:
+\* refused, nothing more is tried (RefusalEnds); and one refusal at most.
+RefusedOrWritten == /\ \A f \in refusals : \A c \in writes \cup admits : c.p # f.p
+                    /\ \A f, g \in refusals : f.p = g.p => f = g
+
 \* A write or an add that committed at its first try made two round trips:
-\* the vault's statement and the app's, or the vault's two. It follows from
-\* the steps' shape; it says what the steps are, it proves nothing else.
-TwoTrips == \A p \in Procs : (pc[p] \in {"w.seal", "a.seal"} /\ tries[p] = 1) => trips[p] = 2
+\* the vault's statement and the app's, or the vault's two; and one refused
+\* at its first try, the vault's read and the refusal's record (PR 6). It
+\* follows from the steps' shape; it says what the steps are, it proves
+\* nothing else.
+TwoTrips == \A p \in Procs : (pc[p] \in {"w.seal", "a.seal", "r.seal"} /\ tries[p] = 1) => trips[p] = 2
 
 \* Every write and add ends, committed or refused, within its tries: a hold
 \* that keeps failing gives up (409), it never loops.

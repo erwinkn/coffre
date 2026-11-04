@@ -153,6 +153,12 @@ export const UNAVAILABLE_RETRY_AFTER = '5';
 export const UNSEALED_MESSAGE = 'coffre made this change, but could not seal it in its audit log in time; it will once it can. Check before you make it again';
 
 /**
+ * What a refused key write or first add is told when the record of its refusal (T179 PR 6, refused.ts) committed but
+ * its seal did not come in time: as `UNSEALED_MESSAGE`'s 503, but nothing was changed, so it says so (review r2).
+ */
+export const REFUSAL_UNSEALED_MESSAGE = 'coffre did not make this change, but could not seal its refusal in its audit log in time; it will once it can. Try again in a moment';
+
+/**
  * What a request is told while the app and the vault run two releases, for
  * the seconds of a deploy (`Deploying`, docs/design/proxy-ui.md, section 3):
  * the vault ran nothing, and the same request a second later is served.

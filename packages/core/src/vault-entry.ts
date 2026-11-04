@@ -50,6 +50,7 @@ export const VAULT_METHODS = [
   'writeKeys',
   'admitRead',
   'admitWrite',
+  'recordRefusal',
   'waitSealed',
   'signIn',
   'revokeCredential',

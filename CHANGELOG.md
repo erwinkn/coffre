@@ -15,6 +15,29 @@
   ([terraform-provider/README.md](terraform-provider/README.md)). `pnpm
   test:terraform` runs its tests against a local coffre, in CI too.
 
+- **A refused key write or first add answers in two round trips, and
+  its record is the vault's, in 0.15's log (T179 PR 6).** On Postgres with
+  0.15's log, a key write (`PATCH /secrets/<project>/<env>` of values) or a
+  member's first add (`PUT /members/<member>`) that the vault's decision
+  refuses on its read (no `secret.write` there; a person or a role asked
+  by someone who runs no instance; an Owner asked by an admin) no longer
+  goes on down the old path, which read everything again and appended a
+  0.14 deny entry: the app answers it from the vault's read, with the same
+  status and body, and the vault records it, once the app has checked the
+  caller's credential, as a row of 0.15's log of the request's own
+  (`log_refusal`, migration 0067), sealed in a checkpoint before the
+  answer. Two round trips, the read and the record, where it took a dozen.
+  The audit pages list the record where the deny entry stood (the whole
+  log, the place's page, the member's, `decision=deny`), its reason the
+  vault's code (`no_grant`, `not_allowed`). A refusal no longer goes down
+  the old path after a try the vault served, so a session revoked
+  meanwhile no longer writes there; what the two-trip path does not serve
+  (a key made a reference meanwhile, a fork) still goes there. No
+  credential's last use is written on a refusal. Example: Ada, a Viewer of
+  market/dev, `PATCH /secrets/market/dev { "API_KEY": "…" }`: 403 "you
+  need secret.write on market/dev", as before; `GET /audit?decision=deny`
+  lists `secret.write` denied to Ada at market/dev, `no_grant`.
+
 - **Breaking: a key write and a member's first add write no 0.14 entry,
   and a rollback refuses the members 0.16.0 added (T179, the
   contraction).** On Postgres with 0.15's log, the two-trip key write

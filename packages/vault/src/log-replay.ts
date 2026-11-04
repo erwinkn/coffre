@@ -8,6 +8,7 @@ import { decideUse, useEnvironments, type Read, type UseCode, type UseRequest, t
 import { applyOp, noEdits, objectKey, POLICY_REF, ROLES_REF, sealed, sealKey, type Input, type Kind, type Op, type Ref, type SealKeys } from './inputs.ts';
 import { proxyLookup, routeEditorRefusal, type ProxyLevel } from './proxy.ts';
 import { CUTOVER_OBJECT, KEY_OBJECT, RETENTION_OBJECT } from './log-entry.ts';
+import { REFUSALS } from './refusal.ts';
 import { loggedRows } from './store.ts';
 
 /**
@@ -167,8 +168,11 @@ function routeDecision(keys: SealKeys, replayed: Replayed, view: UseView, reques
   return why === null ? null : 'route_not_cleared';
 }
 
-/** The ops of the log's own changes, which change no input: a retention's (PR 7), the cutover's (PR 9), a rotation's (T168). */
-const LOGS_OWN = new Set(['retention', 'cutover', 'rotate']);
+/**
+ * The ops of the log's own changes, which change no input: a retention's (PR 7), the cutover's (PR 9), a rotation's
+ * (T168); and a refusal's record (T179 PR 6), of its request's own object.
+ */
+const LOGS_OWN = new Set(['retention', 'cutover', 'rotate', ...REFUSALS]);
 
 function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   const key = objectKey(entry.ref);

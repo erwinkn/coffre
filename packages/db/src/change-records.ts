@@ -27,6 +27,11 @@ export const RECORDS = {
   // An add's change starts with `inputs`, its own first, as no change of today's path does.
   written: { starts: '{"digest":', holds: '"inputs":"' },
   admitted: { starts: '{"inputs":"', holds: '"op":"member.add"' },
+  // Their refusals, which the vault's decision made on the read and records itself since PR 6 (T179; refusal.ts), in
+  // place of 0.14's deny entries: a change of the request's own object, its payload's first key its `code`, as no other
+  // change's is (an op's, a ref's, a caller's or a digest's come first in theirs).
+  refusedWrite: { starts: '{"code":"', holds: '"op":"write.refused"' },
+  refusedAdd: { starts: '{"code":"', holds: '"op":"add.refused"' },
 } as const satisfies Record<string, { starts?: string; holds: string }>;
 
 export type ChangeRecord = keyof typeof RECORDS;

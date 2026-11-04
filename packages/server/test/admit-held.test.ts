@@ -22,7 +22,8 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { localVault, spoken } from '@coffre/vault/node';
 
-import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
+import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
+import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -45,10 +46,10 @@ const { vaultMembers, credentials } = tablesOf(db.owner);
  * A fresh instance: projects market and billing, Bob an admin of the whole instance, and his browser session. `fast:
  * false`: a vault that serves no `admitRead`, every add down today's path, to answer as the two-trip path's refusals must.
  */
-async function world({ fast = true, past = 0n }: { fast?: boolean; past?: bigint } = {}) {
+async function world({ fast = true, past = 0n, sealThrough = sealedNow }: { fast?: boolean; past?: bigint; sealThrough?: typeof sealedNow } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough, heldOutside: nothingHeld });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
@@ -364,6 +365,39 @@ test("Bob's token hash copied onto the Owner's session: the vault reads the Owne
   assert.equal(await memberRow(NEW), undefined);
 });
 
+test("Bob's token hash copied onto a Developer's session: the vault reads the Developer and refuses, and the app's check of the row's MAC answers 401 before the refusal is recorded: no record names the Developer (WritingRefuse, RefusalAfterAuth; review r1 of PR 6)", { skip: ANY }, async () => {
+  const w = await world();
+  const carol = 'carol@acme.example';
+  await w.root.members.add(`user:${carol}`, { role: 'developer' });
+  const developer = await w.session('carol', carol);
+  const [bob] = await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.bob.id));
+  await db.owner.update(credentials).set({ tokenHash: randomBytes(32) }).where(eq(credentials.id, w.bob.id));
+  await db.owner.update(credentials).set({ tokenHash: bob!.tokenHash }).where(eq(credentials.id, developer.id));
+  const added = await w.add();
+  assert.equal(added.status, 401, JSON.stringify(added.body));
+  // On Postgres the vault refused it, on the Developer's rows, with a ticket: what kept it from the log is the app's check.
+  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['refused']);
+  assert.deepEqual(await run(db.owner, sql`SELECT number FROM log_changes WHERE payload LIKE '%"op":"add.refused"%'`), []);
+  assert.equal(await memberRow(NEW), undefined);
+});
+
+test("a refused first add whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the member not added, and no 0.14 entry (review r2 of PR 6)", { skip: POSTGRES }, async () => {
+  const sealing = stallingSeal();
+  const w = await world({ sealThrough: sealing.sealThrough });
+  sealing.stalled = true;
+  const made = await since(() => w.add({ role: 'owner' }));
+  assert.equal(made.result.status, 503, JSON.stringify(made.result.body));
+  assert.deepEqual(made.result.body, { error: 'unavailable', message: REFUSAL_UNSEALED_MESSAGE });
+  assert.deepEqual(served(w.answers), ['refused']);
+  assert.equal(await memberRow(NEW), undefined);
+  // The record written, which the next checkpointer seals; no deny entry beside it.
+  assert.deepEqual(made.entries, []);
+  assert.deepEqual(made.changes.map((change) => change.payload.op), ['add.refused']);
+  // Sealing again, the same add is refused as before, 403.
+  sealing.stalled = false;
+  assert.equal((await w.add({ role: 'owner' })).status, 403);
+});
+
 test("Bob's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, 401, never down today's path (dbw)", { skip: POSTGRES }, async () => {
   const w = await world();
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, w.bob.id));
@@ -387,23 +421,44 @@ test("Bob demoted, then his row put back and its seal written into the demotion'
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test('a refusal is answered as today\'s path answers it, status and body: one who runs no instance, a project no slug names, a role no instance has', { skip: POSTGRES }, async () => {
-  const cases: [string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>, Record<string, unknown>][] = [
-    ['Bob no admin', async (w) => void (await w.root.members.add(`user:${BOB}`, { role: 'developer' })), { role: 'developer' }],
-    ['a project no slug names', async () => {}, { role: 'developer', scope: { projects: { only: ['nowhere'] } } }],
-    ['an Owner, by an admin', async () => {}, { role: 'owner' }],
+test("a refusal is answered as today's path answers it, status and body: one who runs no instance, an Owner asked by an admin, refused on the vault's read and recorded by it in place of 0.14's deny entry (PR 6); a project no slug names, today's path's still", { skip: POSTGRES }, async () => {
+  // What the fast attempt answers by: the vault's refusal and its record, or today's path.
+  const cases: [string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>, Record<string, unknown>, string | null][] = [
+    ['Bob no admin', async (w) => void (await w.root.members.add(`user:${BOB}`, { role: 'developer' })), { role: 'developer' }, 'app member.add deny'],
+    ['an Owner, by an admin', async () => {}, { role: 'owner' }, 'vault member.add deny'],
+    ['a project no slug names', async () => {}, { role: 'developer', scope: { projects: { only: ['nowhere'] } } }, null],
   ];
-  for (const [what, arrange, body] of cases) {
+  for (const [what, arrange, body, entry] of cases) {
     const attempt = async (fast: boolean) => {
       const w = await world({ fast });
       await arrange(w);
+      const everyone = await w.root.members.list();
       const made = await since(() => w.add(body));
-      return { status: made.result.status, body: made.result.body, entries: made.entries, row: await memberRow(NEW) };
+      // The list of everyone as it was: the record names the member asked for, whom no scan of the missing takes for one.
+      assert.deepEqual(await w.root.members.list(), everyone, what);
+      await assert.rejects(w.root.members.get(NEW), (error: { status?: number }) => error.status === 404, what);
+      return { answer: { status: made.result.status, body: made.result.body, row: await memberRow(NEW) }, entries: made.entries, changes: made.changes, answers: served(w.answers) };
     };
     const fast = await attempt(true);
     const today = await attempt(false);
-    assert.notEqual(fast.status, 200, what);
-    assert.deepEqual(fast, today, what);
+    assert.notEqual(fast.answer.status, 200, what);
+    assert.deepEqual(fast.answer, today.answer, what);
+    if (entry === null) {
+      assert.deepEqual(fast.answers, ['shape'], what);
+      assert.deepEqual({ entries: fast.entries, changes: fast.changes }, { entries: today.entries, changes: today.changes }, what);
+      continue;
+    }
+    // Today's deny entry, Bob's; the vault's record in its place, and nothing else of either log's.
+    assert.deepEqual(fast.answers, ['refused'], what);
+    assert.deepEqual(today.entries, [`${entry} user:${BOB}`], what);
+    assert.deepEqual(fast.entries, [], what);
+    assert.equal(fast.changes.length, 1, what);
+    const [record] = fast.changes;
+    assert.equal(record!.actor, `user:${BOB}`, what);
+    assert.equal(record!.payload.op, 'add.refused', what);
+    assert.equal(record!.payload.code, 'not_allowed', what);
+    assert.equal(record!.payload.principal, NEW, what);
+    assert.deepEqual((record!.payload.ref as { kind: string }).kind, 'request', what);
   }
 });
 
