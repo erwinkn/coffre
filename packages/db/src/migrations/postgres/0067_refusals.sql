@@ -1,6 +1,6 @@
 -- 0.16.0, T179 PR 6: a refusal's record (docs/design/two-trips.md, "A refusal's record"; formal/Writing.tla, Refuse). A key write or a member's first add the vault's decision refused on its read is answered as today's path answers it, and recorded by the vault in 0.15's log, in place of the 0.14 deny entry that path writes: two round trips, the read and this record. The record is a row of `log_changes`, so that the checkpoints seal it and retention keeps it as every change, of an object of its own, its request's (`log_object('request', id)`), which no other row's is: no reader that asks an object's newest change takes it (a use, a hold, a member's watermark), and the replay passes over it as the log's own. Its payload starts `{"code":"`, as no other change's does (change-records.ts, `refusedWrite`, `refusedAdd`).
 --> statement-breakpoint
--- The record, written once the app has checked the caller's rows (RefusalAfterAuth): its MAC is the Worker's, over every column but its number, its object the request's own. Under the fence shared, as a use: it waits for a change's hold to its COMMIT, the checkpointer's barrier waits for it, and it holds up no use. A retry of the same record (its request id, its payload) answers the number it took; another under its request id is refused. Its own: the vault's login reads `log_changes` and writes none of it.
+-- The record, written once the app has checked the caller's rows (RefusalAfterAuth): its MAC is the Worker's, over every column but its number, its object the request's own. Under the fence shared, as a use: it waits for a change's hold to its COMMIT, the checkpointer's barrier waits for it, and it holds up no use. A retry of the same record (its request id, its payload) answers the number it took, a retry at the same time as it too; another under its request id is refused. Its own: the vault's login reads `log_changes` and writes none of it.
 CREATE FUNCTION log_refusal(p_at bigint, p_request text, p_actor text, p_payload text, p_mac bytea) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -14,15 +14,20 @@ BEGIN
     END IF;
     PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     SELECT c.number INTO n FROM public.log_changes c WHERE c.request_id = p_request;
-    IF FOUND THEN
-        IF NOT EXISTS (SELECT 1 FROM public.log_changes c WHERE c.request_id = p_request AND c.object = target AND c.payload = p_payload) THEN
-            RAISE EXCEPTION 'request % names another change', p_request USING ERRCODE = 'unique_violation';
+    IF NOT FOUND THEN
+        -- Two retries at once both find none: the second's insert waits for the first's, and takes its row once it commits.
+        INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
+            VALUES (nextval('public.log_number'), p_at, p_request, target, p_actor, p_payload, NULL, p_mac)
+            ON CONFLICT (request_id) DO NOTHING
+            RETURNING number INTO n;
+        IF FOUND THEN
+            RETURN n;
         END IF;
-        RETURN n;
+        SELECT c.number INTO n FROM public.log_changes c WHERE c.request_id = p_request;
     END IF;
-    INSERT INTO public.log_changes (number, at, request_id, object, actor, payload, seal, mac)
-        VALUES (nextval('public.log_number'), p_at, p_request, target, p_actor, p_payload, NULL, p_mac)
-        RETURNING number INTO n;
+    IF n IS NULL OR NOT EXISTS (SELECT 1 FROM public.log_changes c WHERE c.request_id = p_request AND c.object = target AND c.payload = p_payload) THEN
+        RAISE EXCEPTION 'request % names another change', p_request USING ERRCODE = 'unique_violation';
+    END IF;
     RETURN n;
 END
 $$;

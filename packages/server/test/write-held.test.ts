@@ -14,7 +14,7 @@ import { join } from 'node:path';
 
 import { createClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
-import type { Vault, WriteKeysInput, WriteKeysOutcome } from '@coffre/core/vault';
+import type { Vault, VaultRefused, WriteKeysInput, WriteKeysOutcome } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { derivedSigningKey } from '@coffre/vault';
@@ -437,6 +437,24 @@ test("Ada's token hash copied onto the Owner's session: the vault reads the Owne
   assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
   // On Postgres the vault served it, on the Owner's rows: what refused it is the app's check (AuthChecked).
   if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['served']);
+  assert.deepEqual(await keyRow('API_KEY'), before);
+});
+
+test("Ada's token hash copied onto a Viewer's session: the vault reads the Viewer and refuses, and the app's check of the row's MAC answers 401 before the refusal is recorded: no record names the Viewer (WritingRefuse, RefusalAfterAuth; review r1 of PR 6)", { skip: ANY }, async () => {
+  const w = await world();
+  const before = (await keyRow('API_KEY'))!;
+  const carol = 'carol@acme.example';
+  await w.root.members.add(`user:${carol}`);
+  await w.root.access.set(`user:${carol}`, { 'market/dev': 'viewer' });
+  const viewer = await w.session('carol', carol);
+  const [ada] = await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.ada.id));
+  await db.owner.update(credentials).set({ tokenHash: randomBytes(32) }).where(eq(credentials.id, w.ada.id));
+  await db.owner.update(credentials).set({ tokenHash: ada!.tokenHash }).where(eq(credentials.id, viewer.id));
+  const wrote = await w.write({ API_KEY: 'fake-ada' });
+  assert.equal(wrote.status, 401, JSON.stringify(wrote.body));
+  // On Postgres the vault refused it, on the Viewer's rows, with a ticket: what kept it from the log is the app's check.
+  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['refused']);
+  assert.deepEqual(await run(db.owner, sql`SELECT number FROM log_changes WHERE payload LIKE '%"op":"write.refused"%'`), []);
   assert.deepEqual(await keyRow('API_KEY'), before);
 });
 
@@ -983,7 +1001,45 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   // Its credential's id, as a two-trip change's, not shown for a session (Fable's review of #490).
   const [shown] = (await w.root.audit.list({ sealed: 'true', decision: 'deny' })).entries;
   assert.equal(shown!.metadata.credentialId, undefined);
-  // (Sealed into the trees by a checkpointer, replayed, kept by retention: packages/vault/test/refusals.test.ts.)
+  // (Sealed into the trees by a checkpointer and replayed: the test of that, below.)
+});
+
+test("two retries of one refusal's ticket at once, both finding no record: the second's insert waits for the first's, and both answer its number, one record written, never a duplicate key (review r1 of PR 6)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });
+  assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
+  const answer = w.answers.at(-1)!;
+  assert.ok(!answer.served && answer.why === 'refused' && 'ticket' in answer, JSON.stringify(answer));
+  const { ticket } = answer as VaultRefused;
+  const [record] = await refusalRecords();
+  // The record taken out, then put back by a transaction left open: both retries look, find none, and meet it at their
+  // insert, which waits for that transaction. Committed, it is the record both find (the first, as their race leaves it).
+  const [row] = await run(db.owner, sql`DELETE FROM log_changes WHERE number = ${record!.number}::bigint RETURNING number, at, request_id, object, actor, payload, seal, mac`) as Record<string, unknown>[];
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let inserted!: () => void;
+  const putBack = new Promise<void>((resolve) => { inserted = resolve; });
+  const holding = db.owner.transaction(async (tx) => {
+    await run(tx, sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
+      VALUES (${row!.number}, ${row!.at}, ${row!.request_id}, ${row!.object}, ${row!.actor}, ${row!.payload}, ${row!.seal}, ${row!.mac})`);
+    inserted();
+    await released;
+  });
+  await putBack;
+  const recordRefusal = w.deps.vault.recordRefusal!.bind(w.deps.vault);
+  const retries = Promise.all([recordRefusal({ ticket }), recordRefusal({ ticket })]);
+  const waiting = async () => Number((await run(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+    WHERE NOT l.granted AND l.locktype = 'transactionid' AND a.datname = current_database()`) as { n: number }[])[0]!.n);
+  for (let tries = 0; (await waiting()) < 2; tries += 1) {
+    assert.ok(tries < 500, 'both retries wait at their insert');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  release();
+  await holding;
+  assert.deepEqual(await retries, [{ recorded: true, number: record!.number }, { recorded: true, number: record!.number }]);
+  // And once committed, a retry after them finds it first.
+  assert.deepEqual(await recordRefusal({ ticket }), { recorded: true, number: record!.number });
+  assert.deepEqual((await refusalRecords()).map((each) => each.number), [record!.number]);
 });
 
 test("a refusal's record copied to another object, by a database writer, Ada's row put back to match: its MAC is over its own object, so the vault refuses the member it now stands for, and nothing is written; copied whole under another request id, it is forged in the audit list (PR 6, WritingRefuse)", { skip: POSTGRES }, async () => {

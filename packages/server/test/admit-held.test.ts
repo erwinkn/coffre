@@ -364,6 +364,22 @@ test("Bob's token hash copied onto the Owner's session: the vault reads the Owne
   assert.equal(await memberRow(NEW), undefined);
 });
 
+test("Bob's token hash copied onto a Developer's session: the vault reads the Developer and refuses, and the app's check of the row's MAC answers 401 before the refusal is recorded: no record names the Developer (WritingRefuse, RefusalAfterAuth; review r1 of PR 6)", { skip: ANY }, async () => {
+  const w = await world();
+  const carol = 'carol@acme.example';
+  await w.root.members.add(`user:${carol}`, { role: 'developer' });
+  const developer = await w.session('carol', carol);
+  const [bob] = await db.owner.select({ tokenHash: credentials.tokenHash }).from(credentials).where(eq(credentials.id, w.bob.id));
+  await db.owner.update(credentials).set({ tokenHash: randomBytes(32) }).where(eq(credentials.id, w.bob.id));
+  await db.owner.update(credentials).set({ tokenHash: bob!.tokenHash }).where(eq(credentials.id, developer.id));
+  const added = await w.add();
+  assert.equal(added.status, 401, JSON.stringify(added.body));
+  // On Postgres the vault refused it, on the Developer's rows, with a ticket: what kept it from the log is the app's check.
+  if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['refused']);
+  assert.deepEqual(await run(db.owner, sql`SELECT number FROM log_changes WHERE payload LIKE '%"op":"add.refused"%'`), []);
+  assert.equal(await memberRow(NEW), undefined);
+});
+
 test("Bob's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, 401, never down today's path (dbw)", { skip: POSTGRES }, async () => {
   const w = await world();
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, w.bob.id));
