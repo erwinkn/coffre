@@ -18,7 +18,7 @@ import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId } from '../src/use.ts';
-import { emptyReads, ENGINE, rows, run, type TestDatabase } from './database.ts';
+import { emptyReads, ENGINE, projectSlug, rows, run, type TestDatabase } from './database.ts';
 
 export const SIGNING_KEY = randomBytes(32);
 /** The vault's key encryption key, as a configuration names it: a vault elsewhere (a Worker's) opens what this one wrapped. */
@@ -125,10 +125,10 @@ export async function world(options: {
   const t = tablesOf(db.owner);
   const project = randomUUID();
   const dev = randomUUID();
-  const principal = options.caller === 'person' ? `user:${randomUUID().slice(0, 8)}@acme.example` : `token:${randomUUID().slice(0, 8)}`;
+  const principal = options.caller === 'person' ? `user:${randomUUID()}@acme.example` : `token:${randomUUID()}`;
   const credentialId = randomUUID();
   const now = Date.now();
-  await db.owner.insert(t.projects).values({ id: project, slug: `p-${project.slice(0, 8)}`, name: 'Project' });
+  await db.owner.insert(t.projects).values({ id: project, slug: projectSlug(project), name: 'Project' });
   await db.owner.insert(t.environments).values({ id: dev, projectId: project, slug: 'dev', name: 'Development', protected: false });
   await db.owner.insert(t.vaultMembers).values({
     principal, status: 'active', role: null, scope: null, generation: 0, createdAt: now, createdBy: ROOT, statusChangedAt: now, statusChangedBy: ROOT,

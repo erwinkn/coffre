@@ -420,16 +420,23 @@ export async function places(owner: Database, { sealed: seal = true }: { sealed?
   const secret = async (environmentId: string, key = 'DATABASE_URL'): Promise<SecretRef> => {
     const id = randomUUID();
     await owner.insert(secrets).values({ id, projectId: project, environmentId, key: `${key}_${++n}` });
-    return { projectId: project, environmentId, secretId: id, version: 1, path: `p-${project.slice(0, 8)}/${environmentId === dev ? 'dev' : 'prod'}/${key}_${n}` };
+    return { projectId: project, environmentId, secretId: id, version: 1, path: `${projectSlug(project)}/${environmentId === dev ? 'dev' : 'prod'}/${key}_${n}` };
   };
   return { project, dev, prod, secret };
 }
+
+/**
+ * A project's slug from its id: `p-` and 30 hex digits (about 116 random bits), so no two collide across the thousands
+ * of worlds one database holds (the first 8 digits did, now and then: T223), and 32 characters, the longest a route's
+ * name may be, for a test that names a route for its project.
+ */
+export const projectSlug = (id: string) => `p-${id.replaceAll('-', '').slice(0, 30)}`;
 
 /** A project of its own, with one environment, for a grant somewhere else. */
 export async function newProject(owner: Database): Promise<string> {
   const { projects } = tablesOf(owner);
   const id = randomUUID();
-  await owner.insert(projects).values({ id, slug: `p-${id.slice(0, 8)}`, name: 'Project' });
+  await owner.insert(projects).values({ id, slug: projectSlug(id), name: 'Project' });
   return id;
 }
 
