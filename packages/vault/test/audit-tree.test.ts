@@ -1118,9 +1118,16 @@ test('T169, review r1: a fence closed refuses every call after it and every answ
   assert.throws(() => memory.remember('another'), /closed \(stalled\)/);
 });
 
-test('T169, review by Fable: a tick is bounded by the work its window asks, so a long drain goes on where a short window that took as long stalls', async () => {
+test('T169, review by Fable: a tick is bounded by the work its window asks, so a long drain goes on where a short window that took as long stalls', async (t) => {
   const { k, store, memory, alerts } = await setup();
   const open = () => Checkpointer.open(store, k.signers, { memory, authentic: authentic(k.macKey), alert: (m) => alerts.push(m), tickBoundMs: 250, windowMax: 2000 });
+  // The bound reads `performance.now`, which this test drives from the start, the first tick's included: it moves only
+  // by the read's simulated time, never by the machine's own (sorting and signing a part of the window, a runner
+  // starved of CPU), so that what is proved does not depend on how fast the machine is. The tick's own timer still runs
+  // on the real one, and finds the bound reached when the simulated time says so.
+  const start = performance.now();
+  let simulated = 0;
+  t.mock.method(performance, 'now', () => start + simulated);
   const cp = await open();
   await traffic(store, cp, 1);
   // A window read that sorts what is left, 6 µs a number: 300 ms for a backlog of 50,000, past the bound alone, and
@@ -1129,13 +1136,16 @@ test('T169, review by Fable: a tick is bounded by the work its window asks, so a
   const close = store.close.bind(store);
   store.close = async (after, from, limit, barrier) => {
     const read = await close(after, from, limit, barrier);
-    await new Promise((resolve) => setTimeout(resolve, fixed ?? Number(read.upto - after) * 0.006));
+    const ms = fixed ?? Number(read.upto - after) * 0.006;
+    // The time passes on the clock at once, and in fact too: a stalled tick is found by its timer, due before the read ends.
+    simulated += ms;
+    await new Promise((resolve) => setTimeout(resolve, ms));
     return read;
   };
   for (let i = 0; i < 50_000; i += 1) store.append('uses', `drain-${i}`);
   assert.ok(50_000 * 0.006 > 250 && 0.006 < WINDOW_ENTRY_MS);
-  const t = await cp.tick();
-  assert.ok(t.signed && t.more, t.failures.join('; '));
+  const first = await cp.tick();
+  assert.ok(first.signed && first.more, first.failures.join('; '));
   while ((await cp.tick()).more);
   assert.equal(cp.pair.pair.uses.size, 50_000 + 20);
   // One entry whose read takes twice as long: no window asks for that, and the tick stalls.
