@@ -53,16 +53,16 @@ principal.
 
 Counts in the [inventory](#4-the-inventory): 238 rows, each one item or
 a small group of like items (about 420 values in all). A row with two
-classes (30 rows, e.g. "a on Workers, e on Node") is counted under its
+classes (31 rows, e.g. "a on Workers, e on Node") is counted under its
 first.
 
 | Class | Rows | Rows that can bite R44 load (⚠) |
 |---|---|---|
-| a, real external | 23 | 3: AWS's STS quota under AWS sign-in (S78), and two for their **e** half: the workload gate on Node (S1), setup's 20 connections on Paid (C2) |
+| a, real external | 24 | 3: AWS's STS quota under AWS sign-in (S78), and two for their **e** half: the workload gate on Node (S1), setup's 20 connections on Paid (C2) |
 | b, policy | 55 | 4: the sign-in count per binding, in the app and the vault (S8, V30), and its row lock (Q16), all CI sign-in; the 3 s use deadline (C12), which turns any queue into `late`: right, but it makes every other limit here bite sooner |
 | c, derived | 37 | 0 |
 | d, defensive | 40 | 1: `ABOVE_NEWEST` (V11), sized from a rate: `capped` past 2,000 unsealed entries, e.g. at 4,000 new entries a second |
-| e, unjustified | 79 | 11 |
+| e, unjustified | 78 | 11 |
 | none (a missing bound, or a knob no deployment can reach) | 4 | 0 |
 
 Format constants (IV and tag sizes, hash and MAC widths, key sizes, UUID
@@ -626,7 +626,7 @@ or move, pointing to section 3's #).
 | V16 | `KEY_BUDGET_MS` | 5 s | `vault.ts:389` | e | "a removal waits at most this long for a read at KMS" (87ed75ae) | | keep, cite KMS's latency or derive from `TIMEOUT_MS × ATTEMPTS` |
 | V17 | `LOCK_TIMEOUT_MS` | 15 s | `vault.ts:392` | c | "above the key budget" | | keep, computed `3 × KEY_BUDGET_MS` |
 | V18 | `READ_LOCK_TIMEOUT_MS` | 3 s | `vault.ts:401` | b | "longer is a queue holding a connection" (ecfaaec4, #347) | | keep |
-| V19 | `READ_DEADLINE_MS`, plus `KEY_BUDGET_MS` with a key service | 5 s from a read's first decision, after the vault has settled and cut over (`vault.ts:873-884`); `unwrap`, `wrap` and `rewrap` with a key service add V16's 5 s, so 10 s in all (`vault.ts:1973`) | `vault.ts:410` | b | "a caller hears within it" (#356) | | keep; state the stages each covers |
+| V19 | `READ_DEADLINE_MS`, plus `KEY_BUDGET_MS` with a key service | two clock origins. A read that sets no deadline of its own gets 5 s from its first decision, after the vault has settled and cut over (`vault.ts:873-884`). `unwrap`, `wrap` and `rewrap` set theirs earlier, before the KEK check (`vault.ts:1973-1974`): 5 s, plus V16's 5 s with a key service, so 10 s in all. That check can itself start the vault, read the database and call the key service (`vault.ts:3333-3374`), and it spends from the same 10 s: a 2 s check leaves 8 s for the rest | `vault.ts:410` | b | "a caller hears within it" (#356) | | keep; state the stages each covers |
 | V20 | `CODE_QUEUE.waiters` | 1 | `vault.ts:427` | b | one call of a deploy's herd waits (#467) | | keep |
 | V21 | `CODE_PAUSE_MS`, `CODE_PAUSE_MAX_MS` | 25 → 400 ms, doubling | `vault.ts:430-431` | e | none | | derive from the measured hold (as V6) |
 | V22 | `RELEASES_PRUNED` | 10,000 | `vault.ts:434` | d | one short statement (#359) | | keep |
@@ -676,7 +676,7 @@ or move, pointing to section 3's #).
 | V66 | `AT_SLACK_MS` | 63,000 | `log-store.ts:50` | c | deadline + the minute ahead, as a literal | | #16 |
 | V67 | `PROOF_WINDOW` | 2^20 | `log-store.ts:218` | d | ~17 min at 1,000/s | | keep |
 | V68 | `dropTiles` steps | 10,000 | `log-store.ts:442` | d | | | keep |
-| V69 | `OBJECTS_AT_ONCE` | 200 | `log-store.ts:644` | e | none | | cite the parameter count |
+| V69 | `OBJECTS_AT_ONCE` | 200 | `log-store.ts:644` | a / e | SQLite's 500 terms in a compound SELECT ([`SQLITE_MAX_COMPOUND_SELECT`](https://www.sqlite.org/limits.html#max_compound_select)); each object is one `UNION ALL` term (`log-store.ts:663-669`), two bound parameters each (object and `below`), far under the 32,766 parameters. Why 200 and not 500 is not written | | keep the 500-term ceiling as its source; derive the batch from it (500 on SQLite, or one cap for both engines) or write why it sits lower |
 | V70 | `SQLITE_ROWS` | 500 | `log-store.ts:647` | a | 14 params, under SQLite's 32,766 | | keep |
 | V71 | `VERIFY_BATCH` | 5,000 | `log.ts:37` | c | a fifth of the trips of 1,000 | | keep; one copy with server `BATCH` |
 | V72 | `HASHES_AT_ONCE` | 5,000 | `store.ts:696` | d | | | keep |
@@ -1037,8 +1037,10 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
 - **Q5. A statement bound for the app's and vault's logins.** Only the
   hot login has a `statement_timeout`. An app statement has no bound in
   Postgres. Should the app's and vault's logins get one, derived from
-  what is left of each call's own deadline (V19: 5 s, 10 s with a key
-  service, counted from the first decision)?
+  what is left of each call's own deadline, without starting it again?
+  V19 has two origins: 5 s from the first decision for a plain read, and
+  5 s (10 s with a key service) from before the KEK check for
+  `unwrap`, `wrap` and `rewrap`, whose check spends from it first.
 - **Q6. Retention can't be turned on in the standard setup.** `retainDays`
   exists, but only a Node deployment that runs its own checkpointer
   (`runCheckpointer`, `keepCheckpointer`) can reach it. The uses log
