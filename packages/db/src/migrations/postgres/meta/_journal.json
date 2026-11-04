@@ -477,6 +477,13 @@
       "when": 1793796943777,
       "tag": "0070_route_place",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1793796944777,
+      "tag": "0071_route_named",
+      "breakpoints": true
     }
   ]
 }

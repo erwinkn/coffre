@@ -33,6 +33,23 @@
   still read a page for each key it counts, when the archived keys'
   order makes Postgres pick an index scan (T226).
 
+- **A Proxy-tab `/use` of one key is the vault's one function call
+  (T205).** A warm use of a UI route was `use_route`: the URL's reading
+  picked again, the gate's named call of no key, the route's reads, then
+  the key's use by ids, `use_credential` again, three PL/pgSQL calls.
+  Now, when the vault's map holds the reading, the place and a route of
+  one key, it asks `use_credential` itself, a handle's named call that
+  names the route instead of a key: after the caller's standing, under
+  the same fence, it reads the route's levels, its editor and the one
+  key the item names, resolves that key by name as a code route's call
+  does, and makes its use when the map's ids are that key's now. A
+  reading the map picked wrong answers `reread`, nothing read, and a
+  route of several keys, a cold map, the place itself, `dev@me` and a
+  workload's use stay `use_route`'s. Migration 0071 makes
+  `use_credential` and `use_route` again (the latter only for its
+  warm-up mark); every other call's answer is 0069's and 0070's.
+  `formal/Routing.tla` models the caller's standing and the key the
+  route names (`RoutingKeys`: `StandingFirst`, `KeyByItem`).
 - **A key's newest reference is read by its own index, never through
   other keys' references (T220).** Every read of a key's newest
   reference row, `use_credential` (`/use`), the vault's object reads and

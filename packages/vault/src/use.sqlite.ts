@@ -10,7 +10,7 @@ import { namedStanding } from './decide.ts';
 import { noEdits, objectKey, type Kind, type RolesInput } from './inputs.ts';
 import { purposeOf, WAYS } from './log-replay.ts';
 import { configObject, credentialObject, environmentObject, memberStanding, principalObject } from './objects.ts';
-import type { ChangeColumns, Cover, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
+import type { ChangeColumns, Cover, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteNamedRows, RouteRead, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
  * `use_credential` (0024's, as 0046 has it) on SQLite, for tests and local development
@@ -22,6 +22,19 @@ import type { ChangeColumns, Cover, EditorRow, NamedAhead, NamedBatchCall, Named
  */
 export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
   return (db as Database).transaction((tx) => useOnce(tx, call, direct(tx)));
+}
+
+/**
+ * A route's named call (0071, T205) on SQLite: `callUse`'s, for a handle's call that names its route and no key, which
+ * reads the route for one who stands and resolves the one key its item names; the route's reads answered beside.
+ */
+export async function callRouteNamed(db: Queryable, call: UseCall): Promise<RouteNamedRows> {
+  if (call.names === undefined || call.names.key !== null || call.route == null) throw new Error("a route's named call is a handle's, naming its route and no key");
+  return (db as Database).transaction(async (tx) => {
+    const routed: { read: RouteRead | null } = { read: null };
+    const row = await useOnce(tx, call, direct(tx), routed);
+    return { row, route: routed.read };
+  });
 }
 
 /**
@@ -157,66 +170,8 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     if (at?.owner != null || (handle && reading === 1 && call.environment!.endsWith('@me'))) return whole({ ...none, gate, stood: true, place, personal: true });
     const { layers, cut } = at === undefined ? { layers: [], cut: true } : await chainOf(tx, place, at.parent_id);
     if (cut) return whole({ ...none, gate, stood: true, place, cut: true });
-    const levels: RouteLevelRow[] = [];
-    let serving: Record<string, unknown> | null = null;
-    let inputs = 0n;
-    // Each level's definitions through the first that serves the route (every level's, for every item), and every
-    // level's environment, which the keys resolve through whatever level serves (review r2).
-    for (const layer of layers) {
-      const looking = serving === null;
-      const row = looking ? await one<{ items: string; digests: Buffer; seal: Buffer }>(sql`SELECT items, digests, seal FROM proxy_definitions WHERE environment_id = ${layer}`) : undefined;
-      // By the column, not the text it is read as, which the alias would sort by.
-      const newest = looking ? await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
-        WHERE c.object = ${objectKey({ kind: 'proxy', id: layer })} ORDER BY c.number DESC LIMIT 1`) : undefined;
-      if (newest !== undefined && BigInt(newest.number) > inputs) inputs = BigInt(newest.number);
-      let items: unknown;
-      try {
-        items = row === undefined ? null : JSON.parse(row.items);
-      } catch {
-        items = null;
-      }
-      const record = items !== null && typeof items === 'object' && !Array.isArray(items) ? items as Record<string, unknown> : null;
-      const item = route === null ? items : record !== null && Object.hasOwn(record, route) ? record[route] ?? null : null;
-      // The level's environment, row, seal and newest change, which the vault checks the chain by, link by link.
-      const env = await one<EnvironmentRow & { parent_id: string | null }>(sql`SELECT ${ENVIRONMENT} FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${layer}`);
-      const envNewest = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
-        WHERE c.object = ${objectKey({ kind: 'environment', id: layer })} ORDER BY c.number DESC LIMIT 1`);
-      if (envNewest !== undefined && BigInt(envNewest.number) > inputs) inputs = BigInt(envNewest.number);
-      levels.push({
-        environment: layer, row: row !== undefined, item, digests: row === undefined ? null : Buffer.from(row.digests), seal: row === undefined ? null : Buffer.from(row.seal),
-        newest: newest?.seal == null ? null : Buffer.from(newest.seal), number: newest?.number ?? null, change: columnsOf(newest) ?? null,
-        env: env === undefined ? null : {
-          project: env.project_id, slug: env.slug, owner: env.owner, parent: env.parent_id, protected: env.protected === null ? null : Boolean(env.protected),
-          archived: Boolean(env.archived), project_archived: Boolean(env.project_archived), seal: env.seal == null ? null : Buffer.from(env.seal),
-          last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal), change: columnsOf(envNewest) ?? null,
-        },
-      });
-      if (looking && route !== null && item !== null) serving = typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
-    }
+    const { levels, serving, editor, inputs } = await readRoute(tx, layers, route);
     if (serving === null) return whole({ ...none, gate, stood: true, place, project: at!.project_id, levels });
-    let editor: EditorRow | null = null;
-    if (typeof serving.savedBy === 'string') {
-      const principal = serving.savedBy;
-      const member = await one<{ status: string; owner: number; role: string | null; scope: string | null; generation: number; seal: Buffer | null }>(sql`SELECT status, owner, role, scope, generation, seal
-        FROM vault_members WHERE principal = ${principal}`);
-      const grants = member === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx, sql`SELECT
-        coalesce(g.project_id, e.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
-        FROM vault_grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
-      const last = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
-        WHERE c.object = ${objectKey({ kind: 'principal', id: principal })} ORDER BY c.number DESC LIMIT 1`);
-      const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${principal}
-        AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
-      if (last !== undefined && BigInt(last.number) > inputs) inputs = BigInt(last.number);
-      const listOf = <T>(of: (grant: (typeof grants)[number]) => T) => (member === undefined || grants.length === 0 ? null : grants.map(of));
-      editor = {
-        principal, status: member?.status ?? null, owner: member === undefined ? null : Boolean(member.owner), role: member?.role ?? null, scope: member?.scope ?? null,
-        generation: member?.generation ?? null, seal: member?.seal == null ? null : Buffer.from(member.seal),
-        g_project: listOf((grant) => grant.project_id), g_environment: listOf((grant) => grant.environment_id), g_slug: listOf((grant) => grant.environment_slug),
-        g_role: listOf((grant) => grant.role), g_expires: listOf((grant) => (grant.expires_at === null ? null : String(grant.expires_at))),
-        last: last?.seal == null ? null : Buffer.from(last.seal), number: last?.number ?? null, old: last === undefined ? null : oldOf(last.payload), access: access?.seq ?? null,
-        change: columnsOf(last) ?? null,
-      };
-    }
     const keys = Array.isArray(serving.keys) ? serving.keys.map(String) : [];
     const found: (Awaited<ReturnType<typeof resolved>>)[] = [];
     for (const key of keys) found.push(await resolved(tx, at!.project_id, layers, key));
@@ -247,6 +202,77 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     }
     return whole({ gate, reading, route, madeFor, stood: true, place, project: at!.project_id, personal: false, cut: false, levels, editor, keys, resolved: resolvedRows, made: right, rows: out });
   });
+}
+
+/**
+ * A route's reads (0058's, 0071's): each level of the place's chain, nearest first, its definitions through the first
+ * whose row holds the route's item (every level's, for every item, `route` null), and every level's environment, its
+ * row, seal and newest change, which the vault checks the chain by, link by link; the item's editor's principal; and the
+ * newest change of those inputs, which a cover must be past.
+ */
+async function readRoute(tx: Queryable, layers: readonly string[], route: string | null): Promise<{ levels: RouteLevelRow[]; serving: Record<string, unknown> | null; editor: EditorRow | null; inputs: bigint }> {
+  const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
+  const levels: RouteLevelRow[] = [];
+  let serving: Record<string, unknown> | null = null;
+  let inputs = 0n;
+  // Each level's definitions through the first that serves the route (every level's, for every item), and every
+  // level's environment, which the keys resolve through whatever level serves (review r2).
+  for (const layer of layers) {
+    const looking = serving === null;
+    const row = looking ? await one<{ items: string; digests: Buffer; seal: Buffer }>(sql`SELECT items, digests, seal FROM proxy_definitions WHERE environment_id = ${layer}`) : undefined;
+    // By the column, not the text it is read as, which the alias would sort by.
+    const newest = looking ? await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
+      WHERE c.object = ${objectKey({ kind: 'proxy', id: layer })} ORDER BY c.number DESC LIMIT 1`) : undefined;
+    if (newest !== undefined && BigInt(newest.number) > inputs) inputs = BigInt(newest.number);
+    let items: unknown;
+    try {
+      items = row === undefined ? null : JSON.parse(row.items);
+    } catch {
+      items = null;
+    }
+    const record = items !== null && typeof items === 'object' && !Array.isArray(items) ? items as Record<string, unknown> : null;
+    const item = route === null ? items : record !== null && Object.hasOwn(record, route) ? record[route] ?? null : null;
+    // The level's environment, row, seal and newest change, which the vault checks the chain by, link by link.
+    const env = await one<EnvironmentRow & { parent_id: string | null }>(sql`SELECT ${ENVIRONMENT} FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${layer}`);
+    const envNewest = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
+      WHERE c.object = ${objectKey({ kind: 'environment', id: layer })} ORDER BY c.number DESC LIMIT 1`);
+    if (envNewest !== undefined && BigInt(envNewest.number) > inputs) inputs = BigInt(envNewest.number);
+    levels.push({
+      environment: layer, row: row !== undefined, item, digests: row === undefined ? null : Buffer.from(row.digests), seal: row === undefined ? null : Buffer.from(row.seal),
+      newest: newest?.seal == null ? null : Buffer.from(newest.seal), number: newest?.number ?? null, change: columnsOf(newest) ?? null,
+      env: env === undefined ? null : {
+        project: env.project_id, slug: env.slug, owner: env.owner, parent: env.parent_id, protected: env.protected === null ? null : Boolean(env.protected),
+        archived: Boolean(env.archived), project_archived: Boolean(env.project_archived), seal: env.seal == null ? null : Buffer.from(env.seal),
+        last: envNewest?.seal == null ? null : Buffer.from(envNewest.seal), change: columnsOf(envNewest) ?? null,
+      },
+    });
+    if (looking && route !== null && item !== null) serving = typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+  }
+  if (serving === null) return { levels, serving, editor: null, inputs };
+  let editor: EditorRow | null = null;
+  if (typeof serving.savedBy === 'string') {
+    const principal = serving.savedBy;
+    const member = await one<{ status: string; owner: number; role: string | null; scope: string | null; generation: number; seal: Buffer | null }>(sql`SELECT status, owner, role, scope, generation, seal
+      FROM vault_members WHERE principal = ${principal}`);
+    const grants = member === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx, sql`SELECT
+      coalesce(g.project_id, e.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
+      FROM vault_grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
+    const last = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
+      WHERE c.object = ${objectKey({ kind: 'principal', id: principal })} ORDER BY c.number DESC LIMIT 1`);
+    const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${principal}
+      AND a.decision = 'allow' AND a.action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)}) ORDER BY a.seq DESC LIMIT 1`);
+    if (last !== undefined && BigInt(last.number) > inputs) inputs = BigInt(last.number);
+    const listOf = <T>(of: (grant: (typeof grants)[number]) => T) => (member === undefined || grants.length === 0 ? null : grants.map(of));
+    editor = {
+      principal, status: member?.status ?? null, owner: member === undefined ? null : Boolean(member.owner), role: member?.role ?? null, scope: member?.scope ?? null,
+      generation: member?.generation ?? null, seal: member?.seal == null ? null : Buffer.from(member.seal),
+      g_project: listOf((grant) => grant.project_id), g_environment: listOf((grant) => grant.environment_id), g_slug: listOf((grant) => grant.environment_slug),
+      g_role: listOf((grant) => grant.role), g_expires: listOf((grant) => (grant.expires_at === null ? null : String(grant.expires_at))),
+      last: last?.seal == null ? null : Buffer.from(last.seal), number: last?.number ?? null, old: last === undefined ? null : oldOf(last.payload), access: access?.seq ?? null,
+      change: columnsOf(last) ?? null,
+    };
+  }
+  return { levels, serving, editor, inputs };
 }
 
 /** A credential's `places`, read without throwing: each place's environment and whether it is a personal config. */
@@ -582,7 +608,7 @@ class Batched implements Rows {
   }
 }
 
-async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow> {
+async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read: RouteRead | null }): Promise<UseRow> {
   const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
   const once = <T>(key: string, query: SQL) => rows.read(key, () => one<T>(query));
   const now = Date.now();
@@ -615,8 +641,12 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   // slugs or a handle's one place, as `use_resolve` reads it, and the key of its name there. Every row it reads is one
   // of those; the ids the vault passed only let it write, when they are those (`right`).
   let read: { credential: string | null; secretId: string | null; place: string | null } = { credential: call.credential, secretId: call.secretId, place: call.place };
-  let resolved: { state: 'nowhere' | null; right: boolean; place: string | null; project: string | null; environment: string | null; cut: boolean } | null = null;
+  let resolved: { state: 'nowhere' | 'reread' | null; right: boolean; place: string | null; project: string | null; environment: string | null; cut: boolean } | null = null;
   let stands: boolean | null = null;
+  // A route's named call (0071, T205): a handle's that names its route and no key.
+  const routing = names !== undefined && call.route != null;
+  // The newest change of the route's own inputs, which a cover must be past (none: no route read).
+  let routeInputs: bigint | null = null;
   if (names !== undefined && credential !== undefined) {
     type Place = { id: string; project_id: string; project_slug: string; slug: string; parent_id: string | null; live: number };
     // A fork's place too, with forks served (0051, T165); never a personal config's by its own slug.
@@ -637,7 +667,13 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
       }
     }
     // A handle's place the stable URL does not mean, by the slugs read here: the app's, as a place that is none.
-    const state = place === undefined || !place.live || (names.handle && names.unless.includes(`${place.project_slug}/${place.slug}`)) ? 'nowhere' : null;
+    const none = place === undefined || !place.live || (names.handle && names.unless.includes(`${place.project_slug}/${place.slug}`)) ? 'nowhere' : null;
+    // A route's named call at the reading the map picked, `unless` naming the URL's other one (0071): the place reading,
+    // where the URL has a stable one too, only for a handle made for the place the slugs name now; the stable one only
+    // where the handle's one place serves and is no place the URL names. Else `reread`, nothing read.
+    const madeFor = routing && !names.handle && place !== undefined && mine === null
+      && placesOf(credential.places).some((one) => one.environmentId === place!.id && !one.personal);
+    const state = routing && ((names.handle && none !== null) || (!names.handle && names.unless.length > 0 && !madeFor)) ? 'reread' : none;
     // The caller's standing there first, from rows no key decides (0045's `use_stands`, W268): the key only for one who
     // stands. At a personal config, weighed with dev (0051's `use_stands_personal`).
     stands = state === null && place !== undefined && await standsAt(tx, credential.id, place.id, call);
@@ -645,14 +681,28 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
     // chain that loops or runs past 3 cuts it, and the place reads nothing.
     const { layers, cut } = place === undefined ? { layers: [], cut: false }
       : stands && names.forks && place.parent_id !== null ? await chainOf(tx, place.id, place.parent_id) : { layers: [place.id], cut: false };
+    // A route's, for one who stands at the place, its chain whole (0071): its levels and editor, read as `use_route`
+    // reads them, and the one key its item names, resolved by that name below; an item of another number of keys, or
+    // none, resolves none, and the call reads on as one of no key at the place.
+    let named = names.key;
+    let whole = false;
+    let route: RouteRead | null = null;
+    if (routing && state === null && stands && !cut) {
+      const read = await readRoute(tx, layers, call.route!);
+      const keys = read.serving !== null && Array.isArray(read.serving.keys) ? read.serving.keys.map(String) : [];
+      named = keys.length === 1 ? keys[0]! : null;
+      whole = named !== null;
+      routeInputs = read.inputs;
+      route = { place: place!.id, project: place!.project_id, levels: read.levels, editor: read.editor, keys, made: false, keyed: named !== null };
+    }
     // The key, in the nearest layer that settles it: holds it live, or (but the last) removed it.
     let key: { id: string; environment_id: string } | undefined;
-    if (stands && !cut && names.key !== null) {
+    if (stands && !cut && named !== null) {
       for (const [depth, layer] of layers.entries()) {
         key = await one<{ id: string; environment_id: string }>(sql`SELECT id, environment_id FROM secrets
-          WHERE project_id = ${place!.project_id} AND environment_id = ${layer} AND key = ${names.key} AND archived_at IS NULL LIMIT 1`);
+          WHERE project_id = ${place!.project_id} AND environment_id = ${layer} AND key = ${named} AND archived_at IS NULL LIMIT 1`);
         if (key !== undefined) break;
-        if (depth < layers.length - 1 && await one(sql`SELECT 1 AS removed FROM dismissed_keys WHERE environment_id = ${layer} AND key = ${names.key} AND restored_at IS NULL`) !== undefined) break;
+        if (depth < layers.length - 1 && await one(sql`SELECT 1 AS removed FROM dismissed_keys WHERE environment_id = ${layer} AND key = ${named} AND restored_at IS NULL`) !== undefined) break;
       }
     }
     // Held at the place, by its id; inherited, by its id through the place; none, through the place.
@@ -661,9 +711,11 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
     if (!stands || cut) cached = false;
     resolved = {
       state,
-      right: read.credential === call.credential && read.secretId === call.secretId && read.place === call.place,
+      // A route's: and its route read whole, one key named and resolved by that name.
+      right: read.credential === call.credential && read.secretId === call.secretId && read.place === call.place && (!routing || whole),
       place: place?.id ?? null, project: place?.project_slug ?? null, environment: mine !== null ? names.environment : place?.slug ?? null, cut,
     };
+    if (route !== null) routed!.read = { ...route, made: resolved.right };
     // A route use's light gate (0060's `p_gate`, T200): one who stands at a live place whose chain is whole is answered by
     // their names, nothing more read; the route's keys' uses read their rows. Else it reads on as any named call.
     if (call.gate === true && state === null && stands && !cut) {
@@ -726,10 +778,11 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   e.push(await environmentOf(ids[3]!));
   // What the names name, if not a live place; ids the vault passed that are not the names' (`moved`), nothing written;
   // a place it reads archived, the key's or a reference's source's, which the vault refuses by name (0045's `archived`).
-  let namedState: 'unknown' | 'nowhere' | 'moved' | 'archived' | null = null;
+  let namedState: 'unknown' | 'nowhere' | 'reread' | 'moved' | 'archived' | null = null;
   if (resolved !== null) {
+    // A route's named call refuses nothing as `archived` by name: its key's use is decided as `use_route`'s by ids are.
     namedState = resolved.state ?? (!resolved.right ? 'moved'
-      : resolved.cut || e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived))) ? 'archived' : null);
+      : !routing && (resolved.cut || e.slice(0, 3).some((row) => row !== undefined && (Boolean(row.archived) || Boolean(row.project_archived)))) ? 'archived' : null);
     if (namedState !== null) cached = false;
   }
   // Named, or a route use's (T186, 0058's `v_quiet`): a key the place does not hold, and a plain value, decided, never
@@ -755,8 +808,10 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows): Promise<UseRow
   const inSet = b !== undefined && b.last > call.at - limit.windowMs - refresh;
   const stale = b === undefined || b.last < period;
   const others = c === undefined || inSet ? 0 : await rows.others(c.principal, read.secretId, since, limit.count);
-  const cover = call.cover;
+  // A route's named call's cover rides only past every change of the route's own inputs too (0071).
+  const cover = routeInputs !== null && call.cover !== undefined && BigInt(call.cover.number) <= routeInputs ? undefined : call.cover;
   const covered = cover !== undefined && b !== undefined && b.last >= period && (cached || BigInt(cover.number) > (inputs ?? 0n))
+    // The call itself, whose cover this is: a batch's rows find a cover by the call they were read for.
     && await rows.cover(call as UseCall & { cover: Cover });
   // A use whose key would take its principal's lock, to enter the cap's set or move on in it, named or by ids, takes it
   // only in the call the vault makes once it has decided the use (0045, T158, D153): else `decide`, nothing written, its
