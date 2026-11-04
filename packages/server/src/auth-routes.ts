@@ -455,7 +455,8 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
   const auth = runtime.auth;
   const url = new URL(request.url);
   const nothing = () => jsonResponse({ error: 'state_mismatch', message: 'this sign-in expired or was finished elsewhere: sign in again' }, 404);
-  if (request.method === 'GET') {
+  // GET, or HEAD, which `coffreRoute` lets in as GET and hands on as itself (review r8 of #500): only a POST answers.
+  if (request.method !== 'POST') {
     if (url.searchParams.get('step-up') === '1') {
       const token = readCookie(request, sessionCookieName(auth));
       const step = token === null ? null : await signin.stepUpStep(token, safeNext(url.searchParams.get('next'), signin.config.publicUrl));

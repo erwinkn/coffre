@@ -279,7 +279,26 @@ though its answer was lost, and the server would refuse the new one as
 `passkey_exists`, leaving the person a key coffre does not hold (Chrome's
 virtual authenticator does). Sent again, the first passkey completes the
 step, or, its enrollment having committed, ends it with `passkey_exists`,
-and they sign in again with the key their device holds.
+and they sign in again with the key their device holds. The page's memory
+covers one page; two tabs of one sign-in, or the page reloaded, share its
+cookie, so its challenge and its user handle, and a `create()` in the second
+replaces the first's passkey all the same (review r8). An enrollment's step
+therefore lives in `localStorage`, under its challenge (`storedKeeper`):
+`asking` while a `create()` is open, `unsent` once it answered, `done` once
+coffre answered it. A press that finds `asking` makes nothing ("another tab
+is adding your passkey"), finds `unsent` sends that answer, and finds `done`
+ends the page as a sign-in finished in another tab. An entry lasts the
+step's `timeout`, the ceremony's five minutes, which is also how long a
+`create()` stays open, so a tab closed mid-`create()` blocks nothing longer;
+lapsed entries are removed as new ones are made. The answer it holds is a
+public key and an attestation of `none`, no secret, and only the browser
+holding the sign-in's cookie can send it. Where the browser keeps no
+storage, or refuses it, the page's memory stands in. Two tabs pressed
+within the same instant can still both read nothing (storage has no
+compare-and-set across tabs); a person cannot press two tabs' buttons at
+once. A touch keeps its step in the page alone: a second `get()` replaces
+nothing. A HEAD of the route answers as its GET, never as its POST
+(review r8).
 The cookie's value names its purpose, whose key
 opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
 callback's reads (`SigninService.afterProvider`) are step 2's, in one round

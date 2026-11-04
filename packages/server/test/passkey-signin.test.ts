@@ -506,6 +506,18 @@ test('nothing to ask: no pending sign-in, or a step-up for a session whose perso
   assert.equal(cross!.status, 403, 'an answer comes from coffre\'s own page');
 });
 
+test("a HEAD asks what a GET asks, and answers nothing: it never reads a body, nor ends the sign-in (review r8 of #500)", async () => {
+  const runtime = deployment('required');
+  const browser = new Browser(runtime);
+  assert.equal((await browser.fetch('/api/auth/passkey', { method: 'HEAD' })).status, 404, 'nothing waits: as a GET');
+  assert.equal(await browser.provider(ADA), '/auth/passkey');
+  assert.equal((await browser.fetch('/api/auth/passkey', { method: 'HEAD' })).status, 200);
+  // The sign-in still waits, and completes.
+  const step = await browser.step();
+  assert.equal(step.body.purpose, 'enroll');
+  assert.deepEqual(await browser.answer({ response: await register(await SoftAuthenticator.create('ES256'), step.body.options) }), { status: 200, body: { next: '/projects/market' } });
+});
+
 test("a person promoted to an Owner of the whole instance between the callback's answer and its sign-in is asked for a first passkey, not signed in by the provider alone (section 2; review r1 of #500)", async () => {
   const root = clientFor(deps, ROOT);
   // The vault answers about Ada, a Developer, then she is promoted, before the sign-in's transaction.

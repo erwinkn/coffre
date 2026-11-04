@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { passkeyAnswer, sendPasskey } from '../lib/passkey-answer';
+import { memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -45,14 +45,19 @@ export function PasskeyPage() {
   const [error, setError] = useState<string | null>(null);
   // Why the step ended without a session, when it did: said above the way back in.
   const [ended, setEnded] = useState<string | null>(null);
-  // The authenticator's answer that coffre did not answer: the next press sends it again, never asks for another (`sendPasskey`).
-  const [unsent, setUnsent] = useState<string | null>(null);
+  // An answer coffre did not answer: the next press sends it again, never asks for another (`sendPasskey`).
+  const [unanswered, setUnanswered] = useState(false);
+  // What the step holds between presses: an enrollment's in `localStorage`, shared by its tabs and reloads; a touch's here.
+  const keeper = useMemo(
+    () => (step === null || typeof step === 'string' ? null : step.purpose === 'enroll' ? storedKeeper(browserStorage(), step.options.challenge, step.options.timeout) : memoryKeeper()),
+    [step],
+  );
 
   useEffect(() => {
     const query = stepUp ? `?step-up=1${search.next === undefined ? '' : `&next=${encodeURIComponent(search.next)}`}` : '';
     let current = true;
     setStep(null);
-    setUnsent(null);
+    setUnanswered(false);
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
       if (current) setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
     });
@@ -112,11 +117,12 @@ export function PasskeyPage() {
   const enroll = step.purpose === 'enroll';
 
   async function answer(current: Step) {
+    if (keeper === null) return;
     setBusy(true);
     setError(null);
     try {
-      const sent = await sendPasskey<{ next?: unknown }>(
-        unsent,
+      const answer = await sendPasskey<{ next?: unknown }>(
+        keeper,
         async () => {
           const credential = current.purpose === 'enroll'
             ? await navigator.credentials.create({ publicKey: creationOptions(current.options) })
@@ -126,14 +132,16 @@ export function PasskeyPage() {
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );
-      const answer = sent.answer;
-      setUnsent(sent.unsent);
+      setUnanswered(answer.kind === 'unavailable');
       if (answer.kind === 'ok' && typeof answer.value.next === 'string') {
         // A full navigation: the new session cookie is the next page's.
         window.location.assign(answer.value.next);
         return;
       }
-      if (answer.kind !== 'refused') {
+      if (answer.kind === 'elsewhere') {
+        // Another tab of this sign-in is making its passkey: a second `create()` could replace that one (review r8 of #500).
+        setError('Another tab of this sign-in is adding your passkey. Finish there, or try again here in a moment.');
+      } else if (answer.kind !== 'refused') {
         // No answer to go by: the sign-in still waits, and the next press sends the same answer again.
         setError(
           enroll
@@ -180,7 +188,7 @@ export function PasskeyPage() {
       </div>
       <button className="btn btn-primary" type="button" disabled={busy} aria-busy={busy} onClick={() => void answer(step)}>
         {busy ? <Spinner /> : <Key size={14} />}
-        {unsent !== null ? 'Try again' : enroll ? 'Add passkey' : 'Use passkey'}
+        {unanswered ? 'Try again' : enroll ? 'Add passkey' : 'Use passkey'}
       </button>
       {error !== null && (
         <div className="signin-error">
@@ -190,6 +198,15 @@ export function PasskeyPage() {
       {!enroll && <p className="signin-lede">Lost your passkeys? An Owner can reset them.</p>}
     </section>
   );
+}
+
+/** `localStorage`, or null where the browser keeps none for this page or refuses to say. */
+function browserStorage(): KeptStorage | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
 }
 
 const bytes = (value: string): ArrayBuffer => {
