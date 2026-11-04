@@ -83,8 +83,8 @@ export type CeremonyExpectation = {
   /** `publicUrl`'s host, or the parent of it the deployment names. */
   rpId: string;
   /**
-   * The most CBOR values the response's attestation object, authenticator
-   * data and COSE key may decode to, all together: the bound the caller
+   * The most values the response's client data JSON, attestation object,
+   * authenticator data and COSE key may decode to, all together: the bound the caller
    * holds a request's values to (coffre's server: its body's, `MAX_BODY_NODES`),
    * not one of the verifier's own. Neither WebAuthn nor CBOR bounds them, and
    * each costs memory and work as it is built: a megabyte of maps nested a
@@ -339,14 +339,35 @@ function checkExpectation(expected: CeremonyExpectation): void {
   if (!(expected.values >= 1)) throw new Error('a ceremony reads at least one CBOR value');
 }
 
+/**
+ * Counts decoded client data's values against the same budget as the CBOR
+ * (`CeremonyExpectation.values`): WebAuthn lets a browser add members that
+ * are ignored (5.8.1), and their JSON, a parse of the decoded bytes, is
+ * otherwise held only by the body's bytes. As `parseJsonBody` walks a body:
+ * a list, never the call stack, and each array's or object's children pushed
+ * only once they are counted.
+ */
+function countJson(value: unknown, budget: Budget): void {
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const next = stack.pop();
+    if (--budget.left < 0) fail('malformed', 'the response decodes to more values than a request may hold');
+    if (next === null || typeof next !== 'object') continue;
+    const children = Array.isArray(next) ? next : Object.values(next);
+    if (budget.left - children.length < 0) fail('malformed', 'the response decodes to more values than a request may hold');
+    for (const child of children) stack.push(child);
+  }
+}
+
 /** Step 2: what the browser says it signed for. */
-function checkClientData(bytes: Uint8Array, type: 'webauthn.create' | 'webauthn.get', expected: CeremonyExpectation): void {
+function checkClientData(bytes: Uint8Array, type: 'webauthn.create' | 'webauthn.get', expected: CeremonyExpectation, budget: Budget): void {
   let data: unknown;
   try {
     data = JSON.parse(UTF8.decode(bytes));
   } catch {
     return fail('malformed', 'clientDataJSON is not UTF-8 JSON');
   }
+  countJson(data, budget);
   if (!isObject(data)) return fail('malformed', 'clientDataJSON is not an object');
   if (data.type !== type) return fail('type', `clientDataJSON's type is not ${type}`);
   if (data.challenge !== base64url(expected.challenge)) return fail('challenge', 'the challenge is not the one sent');
@@ -540,7 +561,7 @@ export function verifyRegistration(input: unknown, expected: RegistrationExpecta
     if (typeof attestation.get('fmt') !== 'string' || !(attestation.get('attStmt') instanceof Map) || !(authData instanceof Uint8Array)) {
       return fail('malformed', 'the attestation object is not fmt, attStmt and authData');
     }
-    checkClientData(clientData, 'webauthn.create', expected);
+    checkClientData(clientData, 'webauthn.create', expected, budget);
     const data = await readAuthenticatorData(authData, true, expected, budget);
     const credential = data.attested!;
     if (!equal(credential.credentialId, id)) return fail('credential', "the attested credential is not the response's id");
@@ -584,8 +605,8 @@ export function verifyAssertion(input: unknown, expected: AssertionExpectation):
     const { passkey } = expected;
     if (!equal(id, passkey.credentialId)) return fail('credential', 'the assertion is by another credential');
     if (handle !== null && !equal(handle, passkey.userHandle)) return fail('user_handle', "the user handle is not the passkey's");
-    checkClientData(clientData, 'webauthn.get', expected);
     const budget: Budget = { left: expected.values };
+    checkClientData(clientData, 'webauthn.get', expected, budget);
     const data = await readAuthenticatorData(authData, false, expected, budget);
     // The key is the row's, which the app signed: its values count all the same, as it decodes.
     const { key } = await importCoseKey(passkey.publicKey, [passkey.algorithm], budget);

@@ -469,6 +469,28 @@ test('a session no passkey stands behind steps up with a touch: a new session, c
   assert.deepEqual(checks.map(({ decision }) => decision), ['allow']);
 });
 
+test('a step-up a newer challenge overtook ends at its touch, keeping the session it came in on: no touch on it could ever count (section 6.5; review r12 of #500)', async () => {
+  const key = await SoftAuthenticator.create('ES256');
+  await enroll(deployment('required'), ADA, key);
+  const browser = new Browser(deployment('off'));
+  await browser.provider(ADA);
+  const old = await sessionRow(browser);
+  browser.runtime = deployment('optional');
+  const step = await browser.step('?step-up=1');
+  assert.equal(step.body.purpose, 'step-up');
+  // Another browser signs in with the same passkey after: its newer challenge moves the replay mark past this one's.
+  const elsewhere = new Browser(browser.runtime);
+  await elsewhere.provider(ADA);
+  assert.deepEqual(await elsewhere.answer({ response: await assertion(key, (await elsewhere.step()).body.options) }), { status: 200, body: { next: '/projects/market' } });
+  assert.deepEqual(await browser.answer({ state: step.body.state, response: await assertion(key, step.body.options) }), { status: 400, body: { error: 'state_mismatch' } });
+  assert.equal((await sessionRow(browser)).id, old.id, 'the session it came in on stands');
+  assert.equal(await me(browser), 'passkey_required');
+  // A fresh step-up, a newer challenge, does.
+  const again = await browser.step('?step-up=1');
+  assert.deepEqual(await browser.answer({ state: again.body.state, response: await assertion(key, again.body.options) }), { status: 200, body: { next: '/projects' } });
+  assert.equal(await me(browser), 'ok');
+});
+
 test("a touch at sign-in ends the session the browser came in on in its own transaction: a copy of the old cookie is dead even when the sign-out after it fails (section 6.5; review r3 of #500)", async () => {
   const key = await SoftAuthenticator.create('ES256');
   const runtime = deployment('required');

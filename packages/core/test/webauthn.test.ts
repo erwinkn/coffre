@@ -402,6 +402,18 @@ test("a response decodes to no more CBOR values than its request may hold, all i
   });
   const refused = await register({ response: deep });
   assert.ok(!refused.ok && refused.reason === 'malformed' && /more CBOR values/.test(refused.message), JSON.stringify(refused));
+  // Decoded client data counts too, toward the same budget (review r12 of #500): an ignored member of three
+  // elements is four more values, and one of 20,001, 54 KB a body may hold, is refused at 20,000 by either ceremony.
+  for (const [name, run] of [['registration', register], ['assertion', assertion]] as const) {
+    const fewest = async (tweak: Tweak) => {
+      let values = 1;
+      while (reason(await run(tweak, { values })) === 'malformed') values++;
+      return values;
+    };
+    assert.equal(await fewest({ clientData: { ignored: [0, 0, 0] } }), (await fewest({})) + 4, name);
+    const wide = await run({ clientData: { ignored: new Array(20_001).fill(0) } }, { values: 20_000 });
+    assert.ok(!wide.ok && wide.reason === 'malformed' && /more values/.test(wide.message), `${name}: ${JSON.stringify(wide)}`);
+  }
   // The reader's own count, called directly: a value per item and per map key.
   assert.deepEqual(readCbor(Uint8Array.of(0xa1, 0x01, 0x82, 0x02, 0x03), 0, { left: 5 }), [new Map([[1, [2, 3]]]), 5]);
   assert.throws(() => readCbor(Uint8Array.of(0xa1, 0x01, 0x82, 0x02, 0x03), 0, { left: 4 }), /more CBOR values/);

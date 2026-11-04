@@ -374,12 +374,16 @@ once the cookie it must carry has opened. Their CBOR is read with a list of
 what is open, not the call stack, so however deep it nests it costs no
 stack (RFC 8949, section 10), and needs no depth limit. What it decodes to
 is counted, though: every item and map key of the attestation object, the
-authenticator data's CBOR and the COSE key, together, is held to the count
+authenticator data's CBOR and the COSE key, and every value of the decoded
+client data's JSON, whose unknown members are ignored (5.8.1), together, is
+held to the count
 the API holds a body's JSON values to (`MAX_BODY_NODES`, 20,000, R27's CPU
 budget), one count of what a body builds. Without it, a megabyte of maps
 nested one byte apiece, in an attestation statement the verifier ignores,
 built about 150 MiB of them before anything refused it, past the 128 MB a
-Worker's isolate has (review r2 of #500).
+Worker's isolate has (review r2 of #500). Client data counted only by its
+bytes let 54 KB of an ignored array of 20,001 elements past the count
+(review r12).
 
 ### 3.2 The first sign-in under `required`
 
@@ -1260,7 +1264,12 @@ which, under `required`, adds one. `POST /api/auth/passkey { state,
 response }` checks the touch (`SigninService.stepUp`), then in one
 transaction ends the session it came in on, conditionally, moves the
 replay mark and issues the new session, confirmed, with the old one's
-account and end; `passkey.check` entries, allowed or denied. PR 5's fresh
+account and end; `passkey.check` entries, allowed or denied. A touch whose
+challenge cannot move the replay mark, since a newer one signed in with
+the same passkey meanwhile, ends the step-up (`state_mismatch`), its
+transaction rolled back so the old session stands: a step-up, like a
+sign-in, never offers another touch on a challenge no touch can answer
+(review r12 of #500); the page's next step-up asks a fresh one. PR 5's fresh
 check is the same transaction from another door.
 
 A touch at sign-in does the same with the session cookie the browser

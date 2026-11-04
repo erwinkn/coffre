@@ -934,8 +934,10 @@ export class SigninService {
             const ended = await revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.id(session.id), { revokedAt: now, revokedBy: principal.id });
             if (ended.length !== 1) throw new Refusal(new SigninRefused('session_ended'), check('deny', { reason: 'session_ended', passkeyId: passkey.id }));
             changes?.expectRevoked(ended);
+            // A replay mark this challenge cannot move (a newer one signed in elsewhere since, or this one answered):
+            // no touch on it will ever count, so the step ends, its rollback keeping the session (review r12 of #500).
             if ((await touchPasskey(tx, { id: passkey.id, principal: state.principal, generation: standing.generation, issuedAt: new Date(state.issuedAt), signCount: verified.signCount })) === 0) {
-              throw deny('replay', passkey.id);
+              throw new Refusal(new SigninRefused('state_mismatch'), check('deny', { reason: 'replay', passkeyId: passkey.id }));
             }
             const credential = await this.#issue(tx, 'browser', principal, {
               ...plan, identityId: session.identityId, label: session.label, createdBy: principal.id, passkeyId: passkey.id, confirmedAt: now,
