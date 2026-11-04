@@ -164,7 +164,7 @@ test("a workload's session is a MAC kind of its own, over what binds it; a bindi
     identityId: null, scope: null, places: null, label: null, createdAt: new Date(), createdBy: `binding:${bindingId}`, expiresAt: new Date(Date.now() + 3_600_000),
     lastUsedAt: null, lastUsedIp: null, revokedAt: null, revokedBy: null,
     jkt: 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs', notAfter: new Date(Date.now() + 86_400_000), ancestors: null, constraints: null,
-    enrollmentId: enrollment.id, approvedAt: null, approvedBy: null,
+    enrollmentId: enrollment.id, approvedAt: null, approvedBy: null, passkeyId: null, confirmedAt: null,
   };
   await db.owner.insert(credentials).values({ ...session, authMac: authMac(deps.chainKey, 'credentials', session) });
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, session.id));

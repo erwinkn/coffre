@@ -46,4 +46,5 @@ export const {
   logReadsCursor,
   proxyDefinitions,
   proxyReserved,
+  passkeys,
 } = schema;

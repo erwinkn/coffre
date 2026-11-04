@@ -115,7 +115,7 @@ before(async () => {
   await audited({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault }, async (tx) => {
     await insertConnection(tx, deps.chainKey, {
       id: connectionId, principal: member, generation: 0, clientId: 'https://client.example/meta', clientName: 'Client', clientHost: 'client.example', registration: 'cimd',
-      scopes: 'read reveal', redirectUri: 'https://client.example/back', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt,
+      scopes: 'read reveal', redirectUri: 'https://client.example/back', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt, passkeyId: null,
     });
   }, changes);
   await changes?.sealed(deps.db);

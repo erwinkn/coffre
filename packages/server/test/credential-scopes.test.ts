@@ -334,6 +334,8 @@ async function legacyToken(principal: string): Promise<{ token: string; id: stri
     createdBy: 'ada@acme.example',
     expiresAt: new Date(Date.now() + 86_400_000),
     revokedAt: null,
+    passkeyId: null,
+    confirmedAt: null,
   };
   await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
   return { token, id: row.id };
@@ -459,6 +461,8 @@ test("0.4's tokens and bindings keep exactly what they reached: sealed with the 
     createdBy: 'ada@acme.example',
     expiresAt: new Date(Date.now() + 86_400_000),
     revokedAt: null,
+    passkeyId: null,
+    confirmedAt: null,
   };
   await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
   // A binding 0.4 made, and one it removed, which stays as it is.

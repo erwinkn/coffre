@@ -35,6 +35,8 @@ import { movedFrom, newestAppEntry, newestMove, reseal, signedRowsAfter, wroteUn
 /** Every table whose rows carry the app's MAC, in the order a rotation signs them again. */
 export const SIGNED_TABLES: readonly AuthTable[] = [
   'identities', 'credentials', 'device_authorizations', 'service_bindings', 'oauth_clients', 'mcp_connections', 'enrollments',
+  // Last, so that a cursor the previous release wrote names the table it meant.
+  'passkeys',
 ];
 
 /** The credentials a rotation signs out: people's sessions, the browser's and the CLI's, which a sign-in gives back. */

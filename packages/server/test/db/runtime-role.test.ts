@@ -34,6 +34,8 @@ const EXPECTED_UPDATE_COLUMNS = [
   'device_authorizations.decided_at',
   'device_authorizations.decision',
   'device_authorizations.generation',
+  // The passkey that approved a CLI login, named when it is decided (0063_passkeys).
+  'device_authorizations.passkey_id',
   'device_authorizations.principal',
   'dismissed_keys.dismissed_at',
   'dismissed_keys.dismissed_by',
@@ -64,6 +66,14 @@ const EXPECTED_UPDATE_COLUMNS = [
   'mcp_connections.revoked_by',
   'oauth_clients.auth_mac',
   'oauth_clients.revoked_at',
+  // A passkey's bookkeeping, its removal and its MAC; never whose it is, or its key (0063_passkeys).
+  'passkeys.auth_mac',
+  'passkeys.last_challenge_at',
+  'passkeys.last_used_at',
+  'passkeys.name',
+  'passkeys.removed_at',
+  'passkeys.removed_by',
+  'passkeys.sign_count',
   'projects.archived_at',
   'projects.folder',
   'projects.name',

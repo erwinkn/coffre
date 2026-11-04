@@ -599,6 +599,70 @@ export const identities = pgTable(
 );
 
 /**
+ * A person's passkeys (docs/design/passkeys.md, section 5.1): WebAuthn
+ * credentials, a second factor after the provider's sign-in, never a
+ * sign-in of their own. Never deleted: a removed one keeps its row, so a
+ * credential still names the passkey that confirmed it, and the log's
+ * entries a name. The MAC covers what decides, who, which credential and
+ * key, and whether it is removed (auth-rows.ts in the server); the counter,
+ * the replay mark, the name, the transports and last use are bookkeeping.
+ * The app's alone: the vault's logins cannot read it.
+ */
+export const passkeys = pgTable(
+  'passkeys',
+  {
+    id: uuid().primaryKey(),
+    authMac: bytea('auth_mac').notNull(),
+    // Whose: the member and the generation it was added in, as identities are bound.
+    principal: text().notNull(),
+    generation: integer().notNull(),
+    // The WebAuthn user handle: 16 random bytes, the same on every passkey of the person's (section 3.2).
+    userHandle: bytea('user_handle').notNull(),
+    // The authenticator's credential ID, raw (WebAuthn caps it at 1023 bytes), unique across the instance.
+    credentialId: bytea('credential_id').notNull(),
+    // The COSE_Key as registered, and its COSE algorithm: -8 Ed25519, -7 ES256, -257 RS256.
+    publicKey: bytea('public_key').notNull(),
+    algorithm: integer().notNull(),
+    // The authenticator's signature counter, a uint32; 0 for synced passkeys, which never move it.
+    signCount: bigint('sign_count', { mode: 'number' }).notNull().default(0),
+    // The newest challenge an assertion of it answered, by when it was issued: the replay guard (section 7.3).
+    lastChallengeAt: timestamp('last_challenge_at', { withTimezone: true }),
+    // Display only: what the browser said it can reach it by (a JSON array), its model, whether it syncs, and its name.
+    transports: text().notNull().default('[]'),
+    aaguid: bytea(),
+    synced: boolean().notNull(),
+    name: text().notNull(),
+    createdAt: createdAt(),
+    // Who added it: the person, or `system:signin` at a first sign-in.
+    createdBy: text('created_by').notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    removedAt: timestamp('removed_at', { withTimezone: true }),
+    // Who removed it: the person, or the Owner who reset it.
+    removedBy: text('removed_by'),
+  },
+  (table) => [
+    unique('passkeys_credential_id_key').on(table.credentialId),
+    check('passkeys_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('passkeys_principal_check', sql`${table.principal} LIKE 'user:%'`),
+    check('passkeys_user_handle_check', sql`octet_length(${table.userHandle}) = 16`),
+    check('passkeys_credential_id_check', sql`octet_length(${table.credentialId}) BETWEEN 16 AND 1023`),
+    check('passkeys_algorithm_check', sql`${table.algorithm} IN (-8, -7, -257)`),
+    check('passkeys_sign_count_check', sql`${table.signCount} BETWEEN 0 AND 4294967295`),
+    check('passkeys_transports_check', sql`jsonb_typeof(${table.transports}::jsonb) = 'array'`),
+    check('passkeys_aaguid_check', sql`${table.aaguid} IS NULL OR octet_length(${table.aaguid}) = 16`),
+    check('passkeys_name_check', sql`char_length(${table.name}) BETWEEN 1 AND 64`),
+    check('passkeys_removed_check', sql`(${table.removedAt} IS NULL) = (${table.removedBy} IS NULL)`),
+    foreignKey({
+      name: 'passkeys_principal_fkey',
+      columns: [table.principal],
+      foreignColumns: [vaultMembers.principal],
+    }).onDelete('restrict'),
+    // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
+    index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+  ],
+);
+
+/**
  * A trust binding: which CI runs may sign in as a service, by the ID token
  * their platform signs (`@coffre/core/identity`'s workloads.ts). Immutable
  * but for its label, last use and revocation: a change is a new binding, and
@@ -755,8 +819,15 @@ export const mcpConnections = pgTable(
     // 0.15's seal (T147): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16 bytes, the same
     // seal its newest change in `log_changes` records. Null until the row is sealed.
     seal: bytea(),
+    // The passkey that confirmed the session that connected it (passkeys.md, section 5.2); null where none did.
+    passkeyId: uuid('passkey_id'),
   },
   (table) => [
+    foreignKey({
+      name: 'mcp_connections_passkey_id_fkey',
+      columns: [table.passkeyId],
+      foreignColumns: [passkeys.id],
+    }).onDelete('restrict'),
     check('mcp_connections_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     check('mcp_connections_principal_check', sql`${table.principal} LIKE 'user:%'`),
     check('mcp_connections_registration_check', sql`${table.registration} IN ('cimd', 'dcr')`),
@@ -904,8 +975,19 @@ export const credentials = pgTable(
     // 0.15's seal (0022_log_015): the vault's MAC over the object this row is part of, HMAC-SHA256 cut to 16
     // bytes, the same seal its newest change in `log_changes` records. Null until the row is sealed.
     seal: bytea(),
+    // The passkey that confirmed it, and when it was touched (passkeys.md, section 5.2): set on the browser and
+    // CLI sessions a touch issued, the passkey alone copied onto what they make (personal tokens, handles, service
+    // tokens). Fresh is derived: `confirmed_at` within five minutes. Written once, with the row.
+    passkeyId: uuid('passkey_id'),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
   },
   (table) => [
+    foreignKey({
+      name: 'credentials_passkey_id_fkey',
+      columns: [table.passkeyId],
+      foreignColumns: [passkeys.id],
+    }).onDelete('restrict'),
+    check('credentials_confirmed_check', sql`${table.confirmedAt} IS NULL OR (${table.passkeyId} IS NOT NULL AND ${table.kind} IN ('browser', 'cli'))`),
     check('credentials_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
     unique('credentials_token_hash_key').on(table.tokenHash),
     check('credentials_kind_check', sql`${table.kind} IN ('browser', 'cli', 'service', 'personal', 'handle', 'workload')`),
@@ -967,8 +1049,16 @@ export const deviceAuthorizations = pgTable(
     // Who approved it, `user:<email>`, once approved.
     principal: text(),
     consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    // The passkey that approved this terminal, at `decided_at` (passkeys.md, section 5.2); null where none did.
+    passkeyId: uuid('passkey_id'),
   },
   (table) => [
+    foreignKey({
+      name: 'device_authorizations_passkey_id_fkey',
+      columns: [table.passkeyId],
+      foreignColumns: [passkeys.id],
+    }).onDelete('restrict'),
+    check('device_authorizations_passkey_check', sql`${table.passkeyId} IS NULL OR (${table.decision} IS NOT NULL AND ${table.decision} = 'approved')`),
     unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
     unique('device_authorizations_user_code_key').on(table.userCode),
     check('device_authorizations_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),

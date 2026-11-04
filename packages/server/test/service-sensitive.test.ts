@@ -410,7 +410,7 @@ test('tokens and bindings issued before 0.11 are sealed once by who issued them:
     const token = generateToken('service');
     const row = {
       id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
-      principal: CI, identityId: null, label: '0.10', createdBy, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope: stored,
+      principal: CI, identityId: null, label: '0.10', createdBy, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope: stored, passkeyId: null, confirmedAt: null,
     };
     await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
     return { id: row.id, token };
@@ -449,7 +449,7 @@ test('an Owner demoted while their older token is sealed seals it reading nothin
   const token = generateToken('service');
   const row = {
     id: randomUUID(), kind: 'service', tokenHash: hashToken(token), generation: member!.generation, tokenHint: tokenHint(token),
-    principal: CI, identityId: null, label: '0.10', createdBy: OWEN, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope,
+    principal: CI, identityId: null, label: '0.10', createdBy: OWEN, expiresAt: new Date(Date.now() + 86_400_000), revokedAt: null, scope, passkeyId: null, confirmedAt: null,
   };
   await db.owner.insert(credentials).values({ ...row, authMac: authMac(deps.chainKey, 'credentials', row) });
   // The seal asks the vault about Owen, an Owner of backend; he is demoted before it commits.

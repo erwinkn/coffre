@@ -246,6 +246,8 @@ BEGIN
         'SELECT * FROM oauth_clients',
         'SELECT * FROM mcp_connections',
         'SELECT * FROM mcp_approvals',
+        'SELECT * FROM passkeys',
+        'DELETE FROM passkeys',
             'DELETE FROM identities',
         'DELETE FROM device_authorizations',
         'TRUNCATE vault_members',
