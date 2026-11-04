@@ -20,8 +20,11 @@ import { pagesInBrowser, pastedValues, signinErrorOnce } from './checks/pages.ts
 import { browserBundle, headers, health } from './checks/surface.ts';
 import { cliSignsIn, exchangesLimited, keysUploaded, runSignsIn, runsRefused, runUnbound, spentOnce, tokensUnlogged, trustRun } from './checks/workloads.ts';
 
-/** The names of the checks that failed. */
-export async function conform(deployment: Deployment, options: { bulkLimit: number; browser: string | null }): Promise<string[]> {
+/** The names of the checks that failed, and `afterwards`, what the run ends with when one did (`Report`). */
+export async function conform(
+  deployment: Deployment,
+  options: { bulkLimit: number; browser: string | null },
+): Promise<{ failed: string[]; afterwards: (output: string) => Promise<string | undefined> }> {
   const report = new Report({ mark: deployment.mark });
   await report.check('health', {}, () => health(deployment));
   await report.check('browser bundle', {}, () => browserBundle(deployment));
@@ -120,5 +123,5 @@ export async function conform(deployment: Deployment, options: { bulkLimit: numb
   await report.check('batch gap', { people }, ({ people }) => missingEntry(deployment, people, 'batch'));
   await report.check('earlier checkpoint', { people }, ({ people }) => earlierCheckpoint(deployment, people));
   await report.check('tail deleted', { people }, ({ people }) => deletedTail(deployment, people));
-  return report.failed;
+  return { failed: report.failed, afterwards: (output) => report.afterwards(output) };
 }

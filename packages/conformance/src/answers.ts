@@ -8,14 +8,13 @@ import { unreachable } from '@coffre/client';
 
 /**
  * A request a check sent, and what a failure shows of how it ended, once
- * it has: its status and the start of its body for an answer of 500 or
- * over, why it failed for none, and nothing for any other answer.
+ * it has: its status and its whole body for an answer of 500 or over, why
+ * it failed for none, and nothing for any other answer. Every request a
+ * check sends goes to the processes conformance runs, so each has ended
+ * once they have stopped: a failure waits for that, on no timer of its own
+ * (`Report.afterwards`).
  */
 export type Sent = { request: string; shown: Promise<string | null> };
-
-/** How much of a 5xx body a failure shows, and how long its read may take. */
-const SHOWN = 2000;
-export const WAITED = 1000;
 
 const checks = new AsyncLocalStorage<Sent[]>();
 let native: typeof fetch | undefined;
@@ -50,7 +49,7 @@ async function recorded(input: string | URL | Request, init?: RequestInit): Prom
   });
   try {
     const response = await native!(input, init);
-    shown(response.status < 500 ? null : opening(response.clone()).then((body) => `${response.status}: ${body}`));
+    shown(response.status < 500 ? null : whole(response.clone()).then((body) => `${response.status}: ${body}`));
     return response;
   } catch (error) {
     shown(`no answer: ${unreachable(at?.origin ?? url, error)}`);
@@ -58,28 +57,26 @@ async function recorded(input: string | URL | Request, init?: RequestInit): Prom
   }
 }
 
-/** The first `SHOWN` characters of a body, read for at most `WAITED` ms: a body that streams on, or is huge, holds up nothing. */
-async function opening(response: Response): Promise<string> {
+/**
+ * A body, whole, or as much of it as came before it broke off (its server
+ * stopped, say). It reads a clone, a tee of the body: a check that cancels
+ * its own copy waits, as a tee's cancel does, until this one has read to the
+ * end, which for a body that ends is once it has come (the headers check
+ * drops each so). A 5xx body that never ends, which coffre sends none of,
+ * would hold such a check until the processes stop.
+ */
+async function whole(response: Response): Promise<string> {
   const reader = response.body?.getReader();
   if (reader === undefined) return '';
   const decoder = new TextDecoder();
   let text = '';
-  let timer: NodeJS.Timeout | undefined;
-  const late = new Promise<'late'>((resolve) => {
-    timer = setTimeout(resolve, WAITED, 'late');
-  });
   try {
-    while (text.length <= SHOWN) {
-      const read = await Promise.race([reader.read(), late]);
-      if (read === 'late') return `${text}… (the rest unread: the body was still coming after ${WAITED} ms)`;
+    for (;;) {
+      const read = await reader.read();
       if (read.done) return text + decoder.decode();
       text += decoder.decode(read.value, { stream: true });
     }
-    return `${text.slice(0, SHOWN)}… (cut at ${SHOWN} characters)`;
   } catch (error) {
     return `${text}… (the rest unread: ${String(error)})`;
-  } finally {
-    clearTimeout(timer);
-    reader.cancel().catch(() => {});
   }
 }

@@ -184,14 +184,18 @@ The suites cover races during sign-in and late callbacks as well. Those
 checks use controlled pauses inside requests; conformance cites their
 evidence rather than booting a second app and vault pair.
 
-A check that fails prints what it saw: its error; every answer of 500 or
-over to the requests it sent, however it sent them, with the first 2,000
-characters of its body (read for a second at most), which a client error
-drops when it is not coffre's own JSON; the requests that got no answer,
-and why, those still running given two seconds to end; and what the
-processes wrote while it ran, whole, but for wrangler's lines for requests
-answered below 500. The ones that need its result are skipped, and the run
-ends with the last lines of the processes' output.
+A check that fails prints what it saw: its error, and what the processes
+wrote while it ran, whole, but for the server's lines (wrangler's or
+srvx's) for requests answered below 500. The ones that need its result are
+skipped. Once the processes have stopped, the run ends with all they wrote,
+filtered alike, so that a line written late is there however much came
+after it (wrangler logs a dropped connection a moment after the request it
+failed); then, for each failed check, every answer of 500 or over to the
+requests it sent, however it sent them, with its whole body, which a client
+error drops when it is not coffre's own JSON, and the requests that got no
+answer, and why. Every request a check sends goes to those processes, so
+each has ended by then, one the check left running included: the report
+waits on no timer of its own.
 
 One such failure is wrangler's, not coffre's. Under `wrangler dev`, a
 request that is neither a GET nor a HEAD, sent on a connection that has

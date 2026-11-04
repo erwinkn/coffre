@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { CoffreError } from '@coffre/client';
 
-import { recording, WAITED, type Sent } from './answers.ts';
+import { recording, type Sent } from './answers.ts';
 
 /** A check that failed: what went wrong, and what was seen instead. */
 export class Failure extends Error {
@@ -50,16 +50,26 @@ export async function until(what: string, probe: () => Promise<boolean>, seconds
 
 type Passed<T> = string | { detail: string; value: T };
 
-/** A request the server answered below 500, as wrangler logs it, its colours taken off: what a failure's output leaves out. */
-const ANSWERED = /^\[wrangler:info\] [A-Z]+ \S+ [1-4]\d\d /;
+/**
+ * A request the server answered below 500, its colours taken off: what a
+ * failure's output leaves out. As wrangler logs it
+ * (`[wrangler:info] GET /projects 200 OK (12ms)`), or srvx, which runs the
+ * Node example (`[9:31:22 AM] GET http://127.0.0.1:3082/livez [200] (0.68ms)`).
+ */
+const ANSWERED = /^(?:\[wrangler:info\] [A-Z]+ \S+ [1-4]\d\d |\[[^\]]+\] [A-Z]+ \S+ \[[1-4]\d\d\])/;
 
-/** How long a failure waits for its check's requests still running: an answer, then its body's read. */
-const SETTLING = 2 * WAITED;
+/** `output` under `heading`, but for the requests the server logs answered below 500. */
+function unanswered(heading: string, output: string): string {
+  const lines = output.split('\n');
+  const kept = lines.filter((line) => !ANSWERED.test(stripVTControlCharacters(line)));
+  return `${heading}, but for ${lines.length - kept.length} requests answered below 500:\n${kept.join('\n')}`;
+}
 
 export class Report {
   readonly #results: { name: string; status: 'ok' | 'FAIL' | 'skip' }[] = [];
   readonly #width: number;
   readonly #mark: (() => () => string) | undefined;
+  readonly #failures: { name: string; sent: Sent[] }[] = [];
 
   /** `mark` marks the processes' output, so that a check that fails prints what they wrote while it ran. */
   constructor(options: { width?: number; mark?: () => () => string } = {}) {
@@ -99,30 +109,37 @@ export class Report {
       }
       const detail = error instanceof Failure ? error.detail : error instanceof Error ? error.stack : error;
       this.#print(name, 'FAIL', error instanceof Error ? error.message : String(error), detail);
-      await this.#seen(sent, since);
+      this.#failures.push({ name, sent });
+      const output = since?.();
+      if (output) console.error(unanswered("The processes' output during this check", output).replace(/^/gm, ' '.repeat(this.#width + 9)));
       return undefined;
     }
   }
 
   /**
-   * What a check that failed met: the answers of 500 and over to its
-   * requests, bodies and all, the requests that got none, and the
-   * processes' output while it ran, whole, but for the requests answered
-   * below 500, so that a server's error is never cut from the report. A
-   * request still running, the check having failed without it (a page's
-   * other call failed first), is given `SETTLING` ms to end.
+   * What the run ends with when a check failed, or nothing: the processes'
+   * `output`, whole, but for the requests answered below 500, then the
+   * answers of 500 and over to each failed check's requests, bodies and
+   * all, and the requests that got none. Asked once the processes have
+   * stopped, so that it holds what they wrote late (wrangler logs a dropped
+   * connection after the request it failed) and every request has ended:
+   * one a check left running (a page's other call, its first having failed
+   * it) has its answer or its error by then.
    */
-  async #seen(sent: Sent[], since: (() => string) | undefined): Promise<void> {
-    const indent = (text: string) => text.replace(/^/gm, ' '.repeat(this.#width + 9));
-    const settled = sleep(SETTLING, `still unanswered ${SETTLING} ms after the check failed`, { ref: false });
-    const ended = await Promise.all(sent.map(async ({ request, shown }) => ({ request, shown: await Promise.race([shown, settled]) })));
-    const met = ended.filter(({ shown }) => shown !== null).map(({ request, shown }) => `${request} ${shown}`);
-    if (met.length > 0) console.error(indent(`The answers of 500 and over to this check's requests, and those it got none to:\n${met.join('\n')}`));
-    const output = since?.();
-    if (output === undefined) return;
-    const lines = output.split('\n');
-    const kept = lines.filter((line) => !ANSWERED.test(stripVTControlCharacters(line)));
-    console.error(indent(`The processes' output during this check, but for ${lines.length - kept.length} requests answered below 500:\n${kept.join('\n')}`));
+  async afterwards(output: string): Promise<string | undefined> {
+    if (this.#failures.length === 0) return undefined;
+    const met = await Promise.all(
+      this.#failures.map(async ({ name, sent }) => {
+        const ended = await Promise.all(sent.map(async ({ request, shown }) => ({ request, shown: await shown })));
+        const lines = ended.filter(({ shown }) => shown !== null).map(({ request, shown }) => `  ${request} ${shown}`);
+        return lines.length === 0 ? [] : [`${name}:`, ...lines];
+      }),
+    );
+    const answers = met.flat();
+    return [
+      unanswered("The processes' output", output),
+      ...(answers.length === 0 ? [] : [`The answers of 500 and over to the failed checks' requests, and those they got none to:\n${answers.join('\n')}`]),
+    ].join('\n\n');
   }
 
   #print(name: string, status: 'ok' | 'FAIL' | 'skip', line: string, detail?: unknown): void {

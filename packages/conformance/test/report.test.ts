@@ -9,13 +9,20 @@ import { bearer, Browser } from '../src/browser.ts';
 import { Report } from '../src/report.ts';
 
 async function serving(t: test.TestContext, listener: RequestListener): Promise<string> {
+  return (await stoppable(t, listener)).origin;
+}
+
+/** A server, and its stopping, as the harness stops the processes: every connection closed. */
+async function stoppable(t: test.TestContext, listener: RequestListener): Promise<{ origin: string; stop: () => Promise<void> }> {
   const server = createServer(listener);
   await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening));
-  t.after(() => {
+  let stopped: Promise<void> | undefined;
+  const stop = () => {
     server.closeAllConnections();
-    return new Promise((closed) => server.close(closed));
-  });
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    return (stopped ??= new Promise((closed) => server.close(() => closed())));
+  };
+  t.after(stop);
+  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, stop };
 }
 
 /** A server that answers as wrangler dev's proxy does when its connection to the Worker drops: a 500 in plain text. */
@@ -54,6 +61,9 @@ test('a failed check prints the bodies of the 5xx answers it met, and what the p
       '[wrangler:info] GET /projects 200 OK (12ms)',
       styled('GET', '/projects', 307, 'Temporary Redirect'),
       styled('GET', '/activity', 200, 'OK'),
+      // srvx's, as the Node example's server logs a request.
+      '\x1b[90m[9:31:22 AM]\x1b[39m \x1b[1mGET\x1b[22m \x1b[34mhttp://127.0.0.1:3290/livez\x1b[39m [\x1b[32m200\x1b[39m] \x1b[90m(0.68ms)\x1b[39m',
+      '\x1b[90m[9:31:23 AM]\x1b[39m \x1b[1mPOST\x1b[22m \x1b[34mhttp://127.0.0.1:3290/api/reveals\x1b[39m [\x1b[31m500\x1b[39m] \x1b[90m(3.10ms)\x1b[39m',
       '[wrangler:info] PATCH /api/access/service%3Aci 403 Forbidden (5ms)',
       '✘ [ERROR] Error inside ProxyWorker (the affected request failed; the dev server continues): PATCH /api/access/service%3Aci (failed after 1 attempt): Network connection lost.',
       '[wrangler:info] PATCH /api/access/service%3Aci 500 Internal Server Error (7ms)',
@@ -62,15 +72,16 @@ test('a failed check prints the bodies of the 5xx answers it met, and what the p
     return 'granted';
   });
   assert.deepEqual(report.failed, ['grant']);
-  const shown = printed.join('\n');
+  const shown = `${printed.join('\n')}\n${await report.afterwards('')}`;
   assert.match(shown, /request failed with status 500/);
   // The body the client error dropped.
   assert.match(shown, /PATCH \/api\/access\/service%3Aci 500: Error: Network connection lost\./);
   // What wrangler said meanwhile, but for the requests answered below 500.
   assert.match(shown, /Error inside ProxyWorker .* Network connection lost\./);
   assert.match(shown, /PATCH \/api\/access\/service%3Aci 500 Internal Server Error/);
-  assert.match(shown, /but for 4 requests answered below 500/);
-  assert.doesNotMatch(shown, /\/projects|\/activity|403 Forbidden|before the check/);
+  assert.match(shown, /\/api\/reveals.*500/);
+  assert.match(shown, /during this check, but for 5 requests answered below 500/);
+  assert.doesNotMatch(shown, /\/projects|\/activity|\/livez|403 Forbidden|before the check/);
 });
 
 test('a check that passes prints none of it, and the next failure only its own', async (t) => {
@@ -82,15 +93,16 @@ test('a check that passes prints none of it, and the next failure only its own',
     return 'a 500 met, and passed';
   });
   assert.deepEqual(printed, []);
+  assert.equal(await report.afterwards('output'), undefined, 'a run with no failure ends with nothing more');
   await report.check('second', {}, async () => {
     await new Browser(origin).fetch('/second');
     throw new Error('failed');
   });
-  const shown = printed.join('\n');
-  assert.match(shown, /GET \/second 500/);
+  // No mark, no output during the check.
+  assert.doesNotMatch(printed.join('\n'), /The processes' output/);
+  const shown = (await report.afterwards(''))!;
+  assert.match(shown, /second:\n  GET \/second 500/);
   assert.doesNotMatch(shown, /\/first/);
-  // No mark, no output.
-  assert.doesNotMatch(shown, /The processes' output/);
 });
 
 test("a request a check left running is that check's, even when it ends in the next", async (t) => {
@@ -123,33 +135,35 @@ test("a request a check left running is that check's, even when it ends in the n
     await new Browser(origin).fetch('/second');
     throw new Error('failed');
   });
-  const shown = printed.join('\n');
+  const shown = (await report.afterwards(''))!;
   assert.match(shown, /GET \/second 500: failed \/second/);
   assert.doesNotMatch(shown, /\/slow/);
 });
 
-test("a 5xx body that streams on, or is huge, holds up nothing: a failure shows its start, and why it stops", async (t) => {
-  const origin = await serving(t, (request, response) => {
+test('a 5xx body is shown whole, however large, cancelled or not, and one that streams on until its server stops shows what came, and why it stops', async (t) => {
+  const { origin, stop } = await stoppable(t, (request, response) => {
     response.writeHead(500, { 'content-type': 'text/plain' });
     if (request.url === '/endless') response.write('Error: still going');
+    else if (request.url === '/cancelled') response.end('Error: unread');
     else response.end('x'.repeat(4 * 1024 * 1024));
   });
-  const printed = printing(t);
+  printing(t);
   const report = new Report();
   await report.check('streams', {}, async () => {
     const browser = new Browser(origin);
-    const started = Date.now();
     const endless = await browser.fetch('/endless');
-    assert.equal(endless.status, 500);
-    assert.ok(Date.now() - started < 5000, 'the request returned without waiting on its body');
-    await endless.body?.cancel();
+    assert.equal(endless.status, 500, 'the request returned without waiting on its body');
+    // As the headers check drops each body: the cancel returns once the body has come.
+    await (await browser.fetch('/cancelled')).body?.cancel();
     const huge = await browser.fetch('/huge');
     assert.equal((await huge.text()).length, 4 * 1024 * 1024, 'the caller still reads the whole body');
     throw new Error('failed');
   });
-  const shown = printed.join('\n');
-  assert.match(shown, /GET \/endless 500: Error: still going… \(the rest unread: the body was still coming after 1000 ms\)/);
-  assert.match(shown, /GET \/huge 500: x{2000}… \(cut at 2000 characters\)/);
+  await stop();
+  const shown = (await report.afterwards(''))!;
+  assert.match(shown, /GET \/endless 500: Error: still going… \(the rest unread: TypeError: terminated\)/);
+  assert.match(shown, /GET \/cancelled 500: Error: unread/);
+  assert.ok(shown.includes(`GET /huge 500: ${'x'.repeat(4 * 1024 * 1024)}`), 'the huge body whole');
 });
 
 test('a request made with `fetch` itself, as the health and readiness checks make theirs, is kept too', async (t) => {
@@ -160,11 +174,12 @@ test('a request made with `fetch` itself, as the health and readiness checks mak
     const live = await fetch(`${origin}/livez`);
     throw new Error(`/livez answered ${live.status}`);
   });
-  assert.match(printed.join('\n'), /GET \/livez 500: Error: Network connection lost\./);
+  assert.match(printed.join('\n'), /\/livez answered 500/);
+  assert.match((await report.afterwards(''))!, /GET \/livez 500: Error: Network connection lost\./);
 });
 
-test('a failure waits, a while, for the requests its check left running: their answers, and those with none', async (t) => {
-  const origin = await serving(t, (request, response) => {
+test('the run ends with every request a failed check left running, once it has ended: its answer, its error, or its server stopping', async (t) => {
+  const { origin, stop } = await stoppable(t, (request, response) => {
     if (request.url === '/dropped') return request.socket.destroy();
     if (request.url === '/hung') return;
     // A page's other call, whose 500 comes after the first has failed it.
@@ -174,19 +189,21 @@ test('a failure waits, a while, for the requests its check left running: their a
       setTimeout(() => response.end(' and slow'), 200);
     }, 200);
   });
-  const printed = printing(t);
+  printing(t);
   const report = new Report();
-  const started = Date.now();
   await report.check('page load', {}, async () => {
     const browser = new Browser(origin);
     await Promise.all([browser.fetch('/late'), browser.fetch('/dropped'), browser.fetch('/hung')]);
     return 'loaded';
   });
-  const shown = printed.join('\n');
+  const ending = report.afterwards('');
+  const settled = await Promise.race([ending.then(() => true), new Promise((resolve) => setTimeout(resolve, 1000, false))]);
+  assert.equal(settled, false, 'the end waits on /hung, which nothing has ended');
+  await stop();
+  const shown = (await ending)!;
   assert.match(shown, /GET \/late 500: Error: late and slow/);
   assert.match(shown, /GET \/dropped no answer: could not reach http:\/\/127\.0\.0\.1:\d+: /);
-  assert.match(shown, /GET \/hung still unanswered 2000 ms after the check failed/);
-  assert.ok(Date.now() - started < 4000, 'a request that never ends holds the report up for 2 s at most');
+  assert.match(shown, /GET \/hung no answer: could not reach http:\/\/127\.0\.0\.1:\d+: /);
 });
 
 test("a bearer client still says why it could not reach the instance", async (t) => {
@@ -203,4 +220,32 @@ test("a bearer client still says why it could not reach the instance", async (t)
   });
   assert.ok(thrown instanceof Unreachable, String(thrown));
   assert.match(thrown.message, /could not reach http:\/\/127\.0\.0\.1:\d+: .*ECONNREFUSED/);
+});
+
+test("the run ends with the processes' whole output, filtered: a line written after a failed check's output was printed is there, however much came after", async (t) => {
+  const printed = printing(t);
+  let written = 'before the check\n';
+  const report = new Report({
+    mark: () => {
+      const at = written.length;
+      return () => written.slice(at);
+    },
+  });
+  await report.check('grant', {}, async () => {
+    throw new Error('request failed with status 500');
+  });
+  const late = '✘ [ERROR] Error inside ProxyWorker (the affected request failed; the dev server continues): PATCH /api/access/service%3Aci (failed after 1 attempt): Network connection lost.';
+  // Wrangler's line, after the check's own output; then more checks, passing, and their requests.
+  written += `${late}\n${'[wrangler:info] GET /projects 200 OK (3ms)\n'.repeat(1000)}`;
+  await report.check('later', {}, async () => {
+    written += 'a later check\n';
+    return 'passed';
+  });
+  assert.doesNotMatch(printed.join('\n'), /Error inside ProxyWorker/);
+  const afterwards = (await report.afterwards(written))!;
+  assert.ok(afterwards.includes(late));
+  assert.match(afterwards, /The processes' output, but for 1000 requests answered below 500/);
+  assert.match(afterwards, /before the check/);
+  assert.match(afterwards, /a later check/);
+  assert.doesNotMatch(afterwards, /GET \/projects|The answers of 500/);
 });

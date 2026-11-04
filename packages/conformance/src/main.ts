@@ -68,13 +68,16 @@ try {
   exit(1, `the deployment did not start: ${error instanceof Error ? error.message : String(error)}${detail}`);
 }
 console.log(`  up on ${deployment.origin}`);
-let failed: string[];
+let ran: Awaited<ReturnType<typeof conform>>;
 try {
-  failed = await conform(deployment, { bulkLimit, browser: values.browser || null });
-  if (failed.length > 0) console.error(`\nThe processes' output, last lines:\n${deployment.output(4000)}`);
+  ran = await conform(deployment, { bulkLimit, browser: values.browser || null });
 } finally {
   await deployment.stop();
 }
+// Once the processes have stopped: what they wrote late is in, and every request has ended.
+const { failed } = ran;
+const afterwards = await ran.afterwards(deployment.output());
+if (afterwards !== undefined) console.error(`\n${afterwards}`);
 exit(failed.length === 0 ? 0 : 1, summary(failed));
 
 function summary(failed: string[]): string {
