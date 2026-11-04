@@ -86,9 +86,13 @@ export async function revokeOnSqlite(tx: Queryable, c: RevokeCall): Promise<Answ
   return { number: number.toString() };
 }
 
-/** `issue_token` on SQLite, step for step, in one transaction: its one writer holds every row as read. */
+/**
+ * `issue_token` on SQLite, step for step, in one transaction: its one writer
+ * holds every row as read, and is the person's factor lock too (a change to
+ * their passkeys is another write transaction, before or after this one).
+ */
 export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer> {
-  const { auditLog, credentials, environments, logChanges, projects, vaultMembers } = tablesOf(tx);
+  const { auditLog, credentials, environments, logChanges, passkeys, projects, vaultMembers } = tablesOf(tx);
   const { change, input, read } = c;
   const k = input.credential;
   const standing = async (principal: string, generation: number, accessSeq: bigint) => {
@@ -98,15 +102,20 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
   if (!(await standing(input.actor, read.actor.generation, read.actor.accessSeq)) || !(await standing(input.principal, input.generation, read.principal.accessSeq))) return { state: 'moved' };
   const now = Date.now();
   if (input.via !== null) {
-    const [via] = await tx.select({ principal: credentials.principal, revokedAt: credentials.revokedAt, seal: credentials.seal, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter })
-      .from(credentials).where(eq(credentials.id, input.via));
+    const [via] = await tx.select({
+      principal: credentials.principal, revokedAt: credentials.revokedAt, seal: credentials.seal, expiresAt: credentials.expiresAt, notAfter: credentials.notAfter,
+      passkeyId: credentials.passkeyId,
+    }).from(credentials).where(eq(credentials.id, input.via));
     const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: input.via }))).orderBy(desc(logChanges.number)).limit(1);
-    // Its end as the vault authenticated it, still the columns' and still ahead (as `issue_token`).
+    // Its end as the vault authenticated it, still the columns' and still ahead (as `issue_token`); and the passkey it
+    // names, the one this issue carries, still the actor's and not removed.
     const sealedAs = read.via?.seal ?? null;
     const end = read.via?.columns.expiresAt ?? null;
     const ends = via === undefined ? null : Math.min(via.expiresAt.getTime(), via.notAfter?.getTime() ?? Infinity);
+    const [passkey] = k.passkeyId === null ? [] : await tx.select({ principal: passkeys.principal, removedAt: passkeys.removedAt }).from(passkeys).where(eq(passkeys.id, k.passkeyId));
     if (via === undefined || via.principal !== input.actor || via.revokedAt !== null || sealedAs === null || end === null || ends !== end || end <= now
-      || !same(via.seal ?? null, sealedAs) || !same(newest?.seal ?? null, sealedAs)) {
+      || !same(via.seal ?? null, sealedAs) || !same(newest?.seal ?? null, sealedAs) || (via.passkeyId ?? null) !== k.passkeyId
+      || (k.passkeyId !== null && (passkey === undefined || passkey.principal !== input.actor || passkey.removedAt !== null))) {
       return { state: 'ended' };
     }
   }
@@ -124,6 +133,7 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
   await tx.insert(credentials).values({
     id: k.id, kind: k.kind, authMac: c.authMac, tokenHash: c.tokenHash, tokenHint: k.tokenHint, generation: input.generation, principal: input.principal,
     identityId: null, scope: k.scope, places: k.places, label: k.label, createdBy: k.createdBy, expiresAt: new Date(k.expiresAt), revokedAt: null, seal: change.seal,
+    passkeyId: k.passkeyId,
   });
   const number = await nextNumber(tx);
   await tx.insert(logChanges).values({ number, at: change.at, requestId: change.requestId, object: change.object, actor: change.actor, payload: change.payload, seal: change.seal, mac: change.mac });

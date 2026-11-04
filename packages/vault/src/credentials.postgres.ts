@@ -33,7 +33,7 @@ export async function revokeOnPostgres(db: Queryable, c: RevokeCall): Promise<An
   return JSON.parse(row!.answer) as Answer;
 }
 
-/** `issue_token` (migration 0036): one statement, its own transaction, its answer one JSON value. */
+/** `issue_token` (migrations 0036, 0064: under the issuer's factor lock, carrying `via`'s passkey): one statement, its own transaction, its answer one JSON value. */
 export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answer> {
   const { change, input, read } = c;
   const k = input.credential;
@@ -44,7 +44,7 @@ export async function issueOnPostgres(db: Queryable, c: IssueCall): Promise<Answ
     ${input.via}::uuid, ${read.via?.seal ?? null}::bytea, ${read.via?.columns.expiresAt == null ? null : String(read.via.columns.expiresAt)}::bigint,
     ${input.policy.seq}::bigint, ${sql.param(guarded.map(({ environmentId }) => environmentId))}::uuid[], ${sql.param(guarded.map(({ slug }) => slug))}::text[], ${input.appKey}::text,
     ${k.id}::uuid, ${k.kind}::text, ${c.authMac}::bytea, ${c.tokenHash}::bytea, ${k.tokenHint}::text, ${k.label}::text, ${k.createdBy}::text,
-    ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint
+    ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint, ${k.passkeyId}::uuid
   )::text AS answer`);
   return JSON.parse(row!.answer) as Answer;
 }

@@ -5,7 +5,8 @@ Written on 2026-10-31, phase 1 of T176: the design and a mock of its screens
 building it for 0.16 on 2026-11-03; section 14's PRs land in order, and
 he answered section 15's questions on 2026-11-03 (D170), which this
 document now follows. Built so far: the verifier (PR 1, section 9), the
-storage (PR 2, section 5).
+storage (PR 2, section 5), and the vault's issue under the factor lock
+(PR 3, section 6.3).
 
 Erwin's decisions, from a team request on 2026-10-31:
 
@@ -901,40 +902,39 @@ generation, under the member row's lock; signing out does not end the
 handles a session made. What it lacks is the person's factor lock: a
 removal's sweep can read the person's credentials, then wait while a
 handle commits from a source it is about to revoke, and miss the handle
-(review r12). So the vault's issue contract grows: it takes the person's
-factor lock before it checks `via`, and copies `via`'s `passkey_id` onto
-what it issues, handles, personal tokens and service tokens alike. Its
-statement and its model change with it (R45), the model holding that
-interleaving.
+(review r12). So the vault's issue takes the person's factor lock first,
+before the members' rows, and carries `via`'s passkey onto what it issues,
+handles, personal tokens and service tokens alike. Built in PR 3
+(migration 0064, `formal/Factor.tla`, `docs/formal.md`):
 
-The previous release's vault issues too (`issueToken`), without the lock
-or `passkey_id`, and a rollout runs both releases at once: Workers Builds
-may deploy the app first, and a gradual deployment sends each call to
-either version of the vault, so an app that asked `about()` a moment ago
-and heard "new" may reach the old one with its next call. So the new
-contract is a method of its own, `issueTokenUnderFactor`, and the answer
-comes from the call itself, never from a capability read earlier:
+- **One statement, two signatures.** `issue_token` gains an overload whose
+  last argument is the passkey the issue carries, `p_passkey`. It takes
+  `pg_advisory_xact_lock(1717658484, hashtext(<issuer>))` first, then
+  checks `via` as before, and also that `via` names exactly that passkey,
+  still its issuer's and not removed; otherwise `ended`, with nothing
+  written. The row it inserts names the passkey, which the app's MAC on
+  the row covers (section 5.2). The vault never copies the passkey from
+  `via` on its own: the MAC is the app's, made before the call, and a row
+  naming a passkey its MAC did not cover would fail every read after.
+- **The previous release's vault takes the lock too.** The old signature,
+  same arguments, same grant, is now that overload with no passkey
+  (`CREATE OR REPLACE`). A rollout runs both releases, and the previous
+  one's issues must not race a removal by the new one's app. Carrying no
+  passkey, it issues only from a credential no passkey confirmed, which is
+  every credential the previous release can read (its MAC check refuses a
+  confirmed one).
+- **No fallback, and no capability check.** An earlier draft had a method
+  of its own, `issueTokenUnderFactor`, with a fallback to the app's own
+  path when an old vault refused it. Since T186 PR A (#462), every
+  app→vault call goes through the release gate: an app and a vault of
+  different releases answer `503 deploying` before anything runs, so a new
+  app never meets an old vault, and the fallback could never run. The
+  contract is `issueToken` as before, its token row gaining `passkeyId`.
+- **SQLite** checks the same in `issueOnSqlite`; its one writer is the
+  lock.
 
-- While passkeys are not `off`, the app calls `issueTokenUnderFactor`, on
-  every issue, with nothing cached about the vault's version.
-- A vault of the previous release has no such method, and refuses the call
-  before it runs anything: on Workers, the RPC stub rejects it ("does not
-  implement the method"); on Node, `serveVault` answers `404 not a vault
-  call`. Nothing was issued, so the app takes its own audited path, the
-  fallback that already exists, under the factor lock, writing
-  `passkey_id` itself. Only that refusal falls back: any other failure is
-  an error, as today, since the vault may have committed.
-- The new vault answers the old name, `issueToken`, with the same statement,
-  lock and `passkey_id` included, so the previous app's issues during the
-  rollout are swept like any other.
-
-A rollout costs one refused call per issue until the old vault is gone, on
-a path R58 lets take hundreds of milliseconds; after it, nothing.
-Conformance runs the new app against the previous release's vault, cold
-and after the same isolate has issued through a new one, and issues a
-handle, a personal token and a service token each time. A handle is then
-either ended by a change or made after it, from a credential the change
-left alive.
+The app sends `passkeyId: null` until PR 4 confirms sessions; until then
+no credential names a passkey, so null is always `via`'s.
 
 What escapes: a handle made while the policy was `off` lives out its
 lifetime, 12 hours unless asked and a week at most, unless a removal or a
@@ -1395,9 +1395,10 @@ running `passkeys: 'required'`:
     `off`, does not start.
 34. An MCP-approved service token issues, with its approval's touch, and
     the browser session the touch replaced is `401` after.
-35. With the previous release's vault, cold and after the same isolate
-    issued through a new vault, a handle, a personal token and a service
-    token issue through the app's path and carry their `passkey_id`.
+35. A handle issued while a removal of its person's passkey runs is
+    revoked with everything else, or refused, never live after; on the
+    previous release's vault during a rollout too, whose issue takes the
+    same lock (section 6.3).
 
 ## 14. Build plan (phase 2, after 0.15)
 
@@ -1406,13 +1407,13 @@ running `passkeys: 'required'`:
    property tests. No wiring.
 2. **Storage**: the migrations, the schema, the MAC kinds, `pnpm
    test:schema` and the backup grant.
-3. **The vault's issue contract**: `issueTokenUnderFactor`, and
-   `issueToken` answered by the same statement: personal tokens, handles
-   and service tokens issued under the person's factor lock (section 6.1),
-   their `passkey_id` copied from `via`, its statement and model (R45), with the
-   sweep-against-issue interleaving of review r12 in the model. Lands
-   against 0.15's issue path while it is fresh, independent of the sign-in
-   work.
+3. **The vault's issue contract** (built): `issue_token` under the
+   person's factor lock (section 6.1), for personal tokens, handles and
+   service tokens, carrying `via`'s passkey; the previous release's
+   signature the same statement carrying none (section 6.3); its model,
+   `formal/Factor.tla`, with review r12's sweep-against-issue interleaving
+   (R45). Also D170's user verification, hard-coded (section 7.4). The
+   app's own issues take the same lock in PR 4.
 4. **Sign-in**: `signin({ passkeys })`, the startup RP ID check, the
    callback's split, `/auth/passkey` and its page, enrolling under
    `required` and for Owners under `optional`, the configured Owner's

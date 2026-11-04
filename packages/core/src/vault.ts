@@ -1095,6 +1095,13 @@ export type IssuedTokenRow = {
   expiresAt: number;
   /** Who issued it, as its row names them: the actor's id. */
   createdBy: string;
+  /**
+   * The passkey that confirmed the credential it came in on (`via`'s
+   * `passkey_id`), carried onto the token, which `authMac` covers; null for
+   * none, and with no `via` (docs/design/passkeys.md, section 6.3). The vault
+   * issues only while `via` names this same passkey, still live.
+   */
+  passkeyId: string | null;
   authMac: string;
 };
 

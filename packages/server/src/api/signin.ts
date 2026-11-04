@@ -694,6 +694,9 @@ export class SigninService {
       credential: {
         id: row.id!, kind, tokenHash: row.tokenHash.toString('base64'), tokenHint: row.tokenHint, label: row.label ?? null, scope: row.scope!, places: row.places ?? null,
         expiresAt: row.expiresAt.getTime(), createdBy: row.createdBy, authMac: row.authMac.toString('base64'),
+        // The passkey of the credential it comes in on, which the row's MAC covers: none until sign-in confirms
+        // sessions (T176 PR 4), and the vault issues only while `via` names this same one.
+        passkeyId: row.passkeyId ?? null,
       },
       policy: {
         seq: weighed.policySeq?.toString() ?? null,

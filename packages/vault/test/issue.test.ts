@@ -21,6 +21,11 @@ const ROOT = 'user:root@acme.example';
 const ADMIN = 'user:admin@acme.example';
 const CI = 'token:ci';
 const APP_KEY = 'app:0123456789abcdef';
+/** `issue_token` as 0.16's vault calls it, with the passkey it carries (0064); the previous release's signature lacks the last `uuid`. */
+const OLD_ISSUE_TOKEN = 'issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint)';
+const ISSUE_TOKEN = `${OLD_ISSUE_TOKEN.slice(0, -1)}, uuid)`;
+/** The person's factor lock, as `issue_token` takes it and a change to their passkeys will (docs/design/passkeys.md, section 6.1). */
+const factorLock = (principal: string) => `SELECT pg_advisory_xact_lock(1717658484, hashtext('${principal}'))`;
 
 let db: TestDatabase;
 before(async () => {
@@ -63,7 +68,7 @@ function asked(w: World, change: (input: IssueTokenInput) => IssueTokenInput = (
     credential: {
       id: randomUUID(), kind: 'service', tokenHash: randomBytes(32).toString('base64'), tokenHint: 'coffre_svc_x', label: 'deploys',
       scope: storedScope([{ ...issuedGrant({ projectId: w.project, environmentId: null, role: 'viewer' }), sensitive }]),
-      places: null, expiresAt: Date.now() + 86_400_000, createdBy: 'root@acme.example', authMac: randomBytes(32).toString('base64'),
+      places: null, expiresAt: Date.now() + 86_400_000, createdBy: 'root@acme.example', passkeyId: null, authMac: randomBytes(32).toString('base64'),
     },
     policy: { seq: null, protected: [] },
     appKey: APP_KEY,
@@ -385,7 +390,7 @@ test("an environment the scope names, renamed while the issue's write waits, ref
 });
 
 test("`issue_token` compares the policy only once it holds the issue lock shared (IssuePolicyHeld)", postgresOnly('a function of 0036'), async () => {
-  const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef('issue_token'::regproc) AS body`);
+  const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef(${ISSUE_TOKEN}::regprocedure) AS body`);
   const lock = body.indexOf('pg_advisory_xact_lock_shared(1668244070, 1)');
   assert.ok(lock > 0 && lock < body.indexOf("'policy.change'") && body.indexOf("'policy.change'") < body.indexOf('INSERT INTO public.log_changes'));
 });
@@ -400,5 +405,143 @@ test('an issue takes the issue lock, never the fence: it commits while a change 
     await holder.unsafe('COMMIT');
   } finally {
     await holder.end();
+  }
+});
+
+// --- the person's factor lock and the passkey an issue carries (T176 PR 3; docs/design/passkeys.md, sections 6.1 and 6.3;
+// migration 0064; formal/Factor.tla) -------------------------------------------------------------------------------------
+
+/** A passkey of `principal`'s, as the app writes one at enrollment (PR 4); its MAC is the app's, which the vault never reads. */
+async function passkeyOf(principal: string): Promise<string> {
+  const { passkeys, vaultMembers } = tablesOf(db.owner);
+  const [member] = await db.owner.select({ generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const id = randomUUID();
+  await db.owner.insert(passkeys).values({
+    id, authMac: randomBytes(32), principal, generation: member!.generation, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
+    algorithm: -7, transports: '[]', synced: true, name: 'iCloud Keychain', createdBy: principal.slice('user:'.length),
+  });
+  return id;
+}
+
+/** A personal token of the Owner's, issued by the vault, that `passkey` confirmed: the source a handle comes in on. */
+async function confirmedToken(w: World, passkey: string | null): Promise<IssueTokenInput> {
+  const token = personal(w, ROOT, null, Date.now() + 3_600_000);
+  assert.ok((await w.vault.issueToken!(token)).ok);
+  // Written as the app's sign-in will (PR 4); the vault reads the column, which its seal does not cover.
+  const { credentials } = tablesOf(db.owner);
+  await db.owner.update(credentials).set({ passkeyId: passkey }).where(eq(credentials.id, token.credential.id));
+  return token;
+}
+
+const carrying = (input: IssueTokenInput, passkeyId: string | null): IssueTokenInput => ({ ...input, credential: { ...input.credential, passkeyId } });
+
+test("a token carries the passkey of the credential it came in on, and only that one, while it is its issuer's and live (section 6.3)", async () => {
+  const w = await world();
+  const passkey = await passkeyOf(ROOT);
+  const other = await passkeyOf(ROOT);
+  const token = await confirmedToken(w, passkey);
+  const handle = (passkeyId: string | null) => carrying(handleOf(w, token.credential.id, undefined, onViewerToken), passkeyId);
+  // None, or another of the same person's: the row's MAC would name a passkey that is not `via`'s.
+  for (const named of [null, other]) {
+    const outcome = await w.vault.issueToken!(handle(named));
+    assert.equal(!outcome.ok && outcome.refused, 'ended', String(named));
+  }
+  assert.equal(await credentialRows(), 1, 'nothing written');
+  // `via`'s own: issued, and the row names it.
+  const made = handle(passkey);
+  assert.ok((await w.vault.issueToken!(made)).ok);
+  const { credentials, passkeys } = tablesOf(db.owner);
+  const [row] = await db.owner.select({ passkeyId: credentials.passkeyId }).from(credentials).where(eq(credentials.id, made.credential.id));
+  assert.equal(row!.passkeyId, passkey);
+  // Removed (its session not revoked, which a removal does too): nothing more comes of it.
+  await db.owner.update(passkeys).set({ removedAt: new Date(), removedBy: 'root@acme.example' }).where(eq(passkeys.id, passkey));
+  const outcome = await w.vault.issueToken!(handle(passkey));
+  assert.equal(!outcome.ok && outcome.refused, 'ended');
+  assert.equal(await credentialRows(), 2);
+});
+
+test('a token on no credential carries no passkey, and one on a credential no passkey confirmed issues as before', async () => {
+  const w = await world();
+  const passkey = await passkeyOf(ROOT);
+  await assert.rejects(w.vault.issueToken!(carrying(asked(w), passkey)), /carries the passkey of the credential it came in on/);
+  const token = await confirmedToken(w, null);
+  assert.ok((await w.vault.issueToken!(handleOf(w, token.credential.id, undefined, onViewerToken))).ok);
+});
+
+test("a change to a person's passkeys that holds their factor lock: an issue on their session waits for it, then finds the session it revoked ended (review r12, IssueTakesFactor)", postgresOnly('the factor lock is an advisory lock'), async () => {
+  const w = await world();
+  const passkey = await passkeyOf(ROOT);
+  const token = await confirmedToken(w, passkey);
+  const change = postgresSession(OWNER_URL);
+  try {
+    // A removal (PR 4): the factor lock, then the person's credentials read, then each revoked; the commit.
+    await change.unsafe('BEGIN');
+    await change.unsafe(factorLock(ROOT));
+    const issuing = w.vault.issueToken!(carrying(handleOf(w, token.credential.id, undefined, onViewerToken), passkey));
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory' AND query LIKE '%issue_token(%'`))[0]!.n;
+    for (let tries = 0; (await waits()) === 0; tries += 1) {
+      assert.ok(tries < 200, 'the issue waits on the factor lock');
+      await sleep(10);
+    }
+    const live = await change.unsafe(`SELECT id FROM credentials WHERE principal = '${ROOT}' AND revoked_at IS NULL`);
+    assert.deepEqual(live.map(({ id }) => id), [token.credential.id], 'the handle is not there to miss');
+    await change.unsafe(`UPDATE credentials SET revoked_at = now(), revoked_by = 'root@acme.example' WHERE principal = '${ROOT}' AND revoked_at IS NULL`);
+    await change.unsafe(`UPDATE passkeys SET removed_at = now(), removed_by = 'root@acme.example' WHERE id = '${passkey}'`);
+    await change.unsafe('COMMIT');
+    const outcome = await issuing;
+    assert.equal(!outcome.ok && outcome.refused, 'ended', JSON.stringify(outcome));
+    assert.equal(await credentialRows(), 1, 'no handle');
+  } finally {
+    await change.end();
+  }
+});
+
+test("an issue takes the factor lock first, and holds it while it waits on a member's row: a change that comes after waits for it, and then reads the token it made (FactorFirst)", postgresOnly('the factor lock is an advisory lock'), async () => {
+  const w = await world();
+  const token = await confirmedToken(w, null);
+  const holder = postgresSession(OWNER_URL);
+  const change = postgresSession(OWNER_URL);
+  try {
+    // The Owner's member row held: the issue has the factor lock and waits there.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${ROOT}' FOR NO KEY UPDATE`);
+    const made = handleOf(w, token.credential.id, undefined, onViewerToken);
+    const issuing = w.vault.issueToken!(made);
+    const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event <> 'advisory' AND query LIKE '%issue_token(%'`))[0]!.n;
+    for (let tries = 0; (await waits()) === 0; tries += 1) {
+      assert.ok(tries < 200, 'the issue waits on the member row');
+      await sleep(10);
+    }
+    // A change to the Owner's passkeys starts now: its factor lock waits for the issue.
+    await change.unsafe('BEGIN');
+    let locked = false;
+    const locking = change.unsafe(factorLock(ROOT)).then(() => (locked = true));
+    await sleep(200);
+    assert.equal(locked, false, 'the change waits for the issue');
+    await holder.unsafe('COMMIT');
+    assert.ok((await issuing).ok);
+    await locking;
+    // Its read comes after the issue's commit: the handle is there to revoke.
+    const live = await change.unsafe(`SELECT id FROM credentials WHERE principal = '${ROOT}' AND revoked_at IS NULL ORDER BY id`);
+    assert.deepEqual(live.map(({ id }) => id).sort(), [token.credential.id, made.credential.id].sort());
+    await change.unsafe('COMMIT');
+  } finally {
+    await holder.end();
+    await change.end();
+  }
+});
+
+test('`issue_token` takes the factor lock before any row, and the previous release\'s signature is the same statement carrying no passkey (0064)', postgresOnly('functions of 0064'), async () => {
+  const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef(${ISSUE_TOKEN}::regprocedure) AS body`);
+  const lock = body.indexOf('pg_advisory_xact_lock(1717658484, hashtext(p_actor))');
+  assert.ok(lock > 0 && lock < body.indexOf('FROM public.vault_members') && lock < body.indexOf('FROM public.credentials'));
+  assert.doesNotMatch(body, /jit/i, 'no planner setting (R69)');
+  const [{ old }] = await db.owner.execute<{ old: string }>(sql`SELECT pg_get_functiondef(${OLD_ISSUE_TOKEN}::regprocedure) AS old`);
+  assert.match(old, /SELECT public\.issue_token\([^;]*p_expires, NULL::uuid\)/);
+  assert.doesNotMatch(old, /jit/i);
+  // Both the vault's to call, and no one else's.
+  for (const signature of [ISSUE_TOKEN, OLD_ISSUE_TOKEN]) {
+    const [grant] = await db.owner.execute<{ vault: boolean; app: boolean }>(sql`SELECT has_function_privilege('coffre_vault', ${signature}, 'EXECUTE') AS vault, has_function_privilege('coffre_app', ${signature}, 'EXECUTE') AS app`);
+    assert.deepEqual({ ...grant }, { vault: true, app: false }, signature);
   }
 });

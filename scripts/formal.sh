@@ -146,6 +146,12 @@ REMOVALS=(
   "Issuing ServiceRecheckInIssue TokensAtCurrentGeneration"
   "Issuing SealCompareAndSet SealedOnce"
   "Issuing IssuerGenerationKept+IssuerStandsUnderHead IssuedAsAuthenticated"
+  # A person's factor lock (Factor.tla, T176 PR 3): every issue of theirs and every change to their passkeys takes it, the issue first.
+  "Factor IssueTakesFactor ChangeEndsAll"
+  "Factor IssueTakesFactor LiveFromLive"
+  "Factor ChangeTakesFactor ChangeEndsAll"
+  "Factor FactorFirst NoWaitCycle"
+  "Factor IssueChecksPasskey NamesItsSource"
   "Bulk BulkRecountUnderHead CapHolds"
   "Bulk CountsTheRequest CapHolds"
   "Bulk PerPrincipal CapHolds"
