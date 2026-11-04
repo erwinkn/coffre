@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { passkeyAnswer } from '../lib/passkey-answer';
+import { passkeyAnswer, sendPasskey } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -45,11 +45,14 @@ export function PasskeyPage() {
   const [error, setError] = useState<string | null>(null);
   // Why the step ended without a session, when it did: said above the way back in.
   const [ended, setEnded] = useState<string | null>(null);
+  // The authenticator's answer that coffre did not answer: the next press sends it again, never asks for another (`sendPasskey`).
+  const [unsent, setUnsent] = useState<string | null>(null);
 
   useEffect(() => {
     const query = stepUp ? `?step-up=1${search.next === undefined ? '' : `&next=${encodeURIComponent(search.next)}`}` : '';
     let current = true;
     setStep(null);
+    setUnsent(null);
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
       if (current) setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
     });
@@ -112,26 +115,31 @@ export function PasskeyPage() {
     setBusy(true);
     setError(null);
     try {
-      const credential = current.purpose === 'enroll'
-        ? await navigator.credentials.create({ publicKey: creationOptions(current.options) })
-        : await navigator.credentials.get({ publicKey: requestOptions(current.options) });
-      if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-      const answer = await passkeyAnswer<{ next?: unknown }>(
-        fetch('/api/auth/passkey', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...('state' in current ? { state: current.state } : {}) }),
-        }),
+      const sent = await sendPasskey<{ next?: unknown }>(
+        unsent,
+        async () => {
+          const credential = current.purpose === 'enroll'
+            ? await navigator.credentials.create({ publicKey: creationOptions(current.options) })
+            : await navigator.credentials.get({ publicKey: requestOptions(current.options) });
+          if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
+          return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...('state' in current ? { state: current.state } : {}) });
+        },
+        (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );
+      const answer = sent.answer;
+      setUnsent(sent.unsent);
       if (answer.kind === 'ok' && typeof answer.value.next === 'string') {
         // A full navigation: the new session cookie is the next page's.
         window.location.assign(answer.value.next);
         return;
       }
       if (answer.kind !== 'refused') {
-        // No answer to go by: the sign-in still waits, and a touch is asked again.
-        setError('coffre did not answer just now. Try your passkey again in a moment.');
+        // No answer to go by: the sign-in still waits, and the next press sends the same answer again.
+        setError(
+          enroll
+            ? 'coffre did not answer just now. Try again in a moment: it sends the passkey you just made, without asking for another.'
+            : 'coffre did not answer just now. Try again in a moment.',
+        );
       } else if (answer.code === 'passkey_failed') {
         setError(enroll ? 'That passkey could not be added. Try again, or another one.' : 'That passkey did not confirm it’s you. Try again, or another one.');
       } else {
@@ -172,7 +180,7 @@ export function PasskeyPage() {
       </div>
       <button className="btn btn-primary" type="button" disabled={busy} aria-busy={busy} onClick={() => void answer(step)}>
         {busy ? <Spinner /> : <Key size={14} />}
-        {enroll ? 'Add passkey' : 'Use passkey'}
+        {unsent !== null ? 'Try again' : enroll ? 'Add passkey' : 'Use passkey'}
       </button>
       {error !== null && (
         <div className="signin-error">

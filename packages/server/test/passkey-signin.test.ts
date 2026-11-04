@@ -345,6 +345,30 @@ test("a touch whose sign-in committed but whose answer was lost ends that sign-i
   assert.equal(await me(browser), 'ok');
 });
 
+test("a first passkey whose enrollment committed but whose answer was lost, sent again as the page sends it, ends that sign-in, and is the one the person signs in with (section 3.2; review r7 of #500)", async () => {
+  const runtime = deployment('required');
+  const key = await SoftAuthenticator.create('ES256');
+  const browser = new Browser(runtime);
+  assert.equal(await browser.provider(ADA), '/auth/passkey');
+  const { body } = await browser.step();
+  const response = await register(key, body.options);
+  // Committed, its answer and cookies lost on the way: the browser is as it was before it.
+  const before = new Map(browser.jar);
+  assert.equal((await browser.answer({ response })).status, 200);
+  browser.jar.clear();
+  for (const [name, value] of before) browser.jar.set(name, value);
+
+  // The page sends the same passkey again, not a new one: the step ends, nothing more is added or issued.
+  const { keys, sessions } = await counts();
+  assert.deepEqual(await browser.answer({ response }), { status: 400, body: { error: 'passkey_exists' } });
+  assert.equal(browser.jar.get('__Host-coffre_passkey'), undefined, 'the pending sign-in is cleared');
+  assert.equal(browser.session, undefined);
+  assert.deepEqual(await counts().then(({ keys, sessions }) => ({ keys, sessions })), { keys, sessions });
+
+  // The key on the device is the one coffre holds.
+  assert.equal(await me(await touch(runtime, ADA, key)), 'ok');
+});
+
 test('a first passkey ends everything of the person\'s no passkey stood behind, approved device codes included; the sign-in that adds it does not (sections 6.1, 13.23)', async () => {
   const off = deployment('off');
   const earlier = new Browser(off);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { passkeyAnswer } from '../src/lib/passkey-answer.ts';
+import { passkeyAnswer, sendPasskey } from '../src/lib/passkey-answer.ts';
 
 const json = (body: unknown, status: number) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 
@@ -35,4 +35,47 @@ test("a change that came between every try asks again, the sign-in kept (Sol r6,
   assert.deepEqual(await passkeyAnswer(json({ error: 'conflict', message: 'try again', reason: 'changed' }, 409)), { kind: 'unavailable' });
   // Any other conflict is the server's refusal.
   assert.deepEqual(await passkeyAnswer(json({ error: 'conflict', message: 'taken' }, 409)), { kind: 'refused', code: 'conflict' });
+});
+
+test("a 409 or 401 whose body did not arrive whole is no refusal read: the step is kept (review r7 of #500)", async () => {
+  const cut = (status: number) => Promise.resolve(new Response('{"error":"conflict","reason":', { status }));
+  assert.deepEqual(await passkeyAnswer(cut(409)), { kind: 'unavailable' });
+  assert.deepEqual(await passkeyAnswer(cut(401)), { kind: 'unavailable' });
+  // A status none of whose refusals keeps the step ends it, read or not.
+  assert.deepEqual(await passkeyAnswer(cut(400)), { kind: 'refused', code: undefined });
+});
+
+test("an answer coffre did not answer is sent again, the same, never asked of the authenticator again: a second create() could replace the passkey the first one added (review r7 of #500)", async () => {
+  let asked = 0;
+  const ask = async () => `{"response":"passkey ${++asked}"}`;
+  const sent: string[] = [];
+  const answers = [
+    () => Promise.reject(new TypeError('Failed to fetch')),
+    () => json({ error: 'unavailable' }, 503),
+    () => json({ error: 'passkey_exists' }, 400),
+    () => json({ error: 'passkey_failed' }, 401),
+    () => json({ next: '/projects' }, 200),
+  ];
+  const send = (body: string) => {
+    sent.push(body);
+    return answers[sent.length - 1]!();
+  };
+
+  // Lost on the way, then a 503: the same passkey both times, the authenticator asked once.
+  let press = await sendPasskey(null, ask, send);
+  assert.deepEqual(press, { answer: { kind: 'unavailable' }, unsent: '{"response":"passkey 1"}' });
+  press = await sendPasskey(press.unsent, ask, send);
+  assert.deepEqual(press.answer, { kind: 'unavailable' });
+  // The first had committed: the server ends the step, and the key on the device is the one it holds.
+  press = await sendPasskey(press.unsent, ask, send);
+  assert.deepEqual(press, { answer: { kind: 'refused', code: 'passkey_exists' }, unsent: null });
+  assert.equal(asked, 1);
+  assert.deepEqual(sent, Array(3).fill('{"response":"passkey 1"}'));
+
+  // A refusal that keeps the step drops the answer it refused: the next press asks for another.
+  press = await sendPasskey(null, ask, send);
+  assert.deepEqual(press, { answer: { kind: 'refused', code: 'passkey_failed' }, unsent: null });
+  press = await sendPasskey(press.unsent, ask, send);
+  assert.deepEqual(press, { answer: { kind: 'ok', value: { next: '/projects' } }, unsent: null });
+  assert.equal(asked, 3);
 });

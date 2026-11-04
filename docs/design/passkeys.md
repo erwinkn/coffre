@@ -267,9 +267,19 @@ leaves the sign-in to try again, with another passkey too, and any other
 refusal clears the cookie. An answer that is no refusal (no response, a
 5xx such as `503 unavailable` or `migrating`, a 408 or 429, a body that
 does not parse, or a `409 changed`, another change having come between
-each of the transaction's tries, review r6) clears nothing, so the page says coffre did not answer and
-asks again, the question or the touch, rather than send the person back to
-their provider (`passkeyAnswer`, `packages/ui/src/lib/passkey-answer.ts`).
+each of the transaction's tries, review r6; a 401 or 409 whose body did not
+arrive whole, as those are the statuses whose refusals may keep the step,
+review r7) clears nothing, so the page says coffre did not answer and
+asks again rather than send the person back to their provider
+(`passkeyAnswer`, `packages/ui/src/lib/passkey-answer.ts`). Asking again
+sends the same answer, never a second `create()` or `get()` for the step
+(`sendPasskey`, review r7): a second `create()` for the same user handle can
+replace, on a discoverable authenticator, the passkey the first POST added
+though its answer was lost, and the server would refuse the new one as
+`passkey_exists`, leaving the person a key coffre does not hold (Chrome's
+virtual authenticator does). Sent again, the first passkey completes the
+step, or, its enrollment having committed, ends it with `passkey_exists`,
+and they sign in again with the key their device holds.
 The cookie's value names its purpose, whose key
 opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
 callback's reads (`SigninService.afterProvider`) are step 2's, in one round
