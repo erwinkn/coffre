@@ -15,7 +15,10 @@ import { sql } from 'drizzle-orm';
 import { ROLES } from '@coffre/core/access';
 
 import { applyOp, itemDigest, objectKey, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
-import { replayStored } from '../src/log-replay.ts';
+import { purposeCode, replayStored } from '../src/log-replay.ts';
+import { callRoute as postgresRoute } from '../src/use.postgres.ts';
+import { callRoute as sqliteRoute } from '../src/use.sqlite.ts';
+import type { RouteCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
@@ -23,9 +26,10 @@ import { weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scr
 import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
+let hot: Database;
 before(async () => {
   db = await openTestDatabase();
-  await useDatabases(db);
+  hot = await useDatabases(db);
 });
 after(() => db.close());
 beforeEach(emptyLog);
@@ -349,6 +353,31 @@ test('the place itself (C2b4): `/use/<project>/dev` read both ways, the place fo
   assert.ok(stable.found?.found, JSON.stringify(stable.found));
   // A place reading of no route and no stable one decides nothing: the app's bug.
   await assert.rejects(vault.useRoute(w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: null })), /names its route/);
+});
+
+test("the place itself reads no definition, in either engine's statement: the reading and the gate are its answer, no level of the chain read, nothing used (C2b4; Sol's review r1 of #486)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ [w.slug]: { definition: route(w.slug, [await w.nameOf(key)]), editor: ada } });
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const at = Date.now();
+  // As the vault asks it on a miss: the handle's names, the place reading's route, the stable one, no ids.
+  const ask = (named: string): RouteCall => ({
+    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [] }, project: w.slug, environment: 'dev', named, stable: w.slug, reading: null,
+    credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
+    mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: true, light: false,
+  });
+  const statement = ENGINE === 'postgres' ? postgresRoute : sqliteRoute;
+  const itself = await statement(hot, ask(''));
+  assert.deepEqual([itself.reading, itself.stood, itself.place], [1, true, w.dev]);
+  assert.deepEqual([itself.levels, itself.editor, itself.keys, itself.made, itself.rows], [[], null, [], false, []], 'no definition read: the route block left at once');
+  assert.deepEqual(itself.madeFor, [`${w.slug}/dev`], "the handle's places, for the map's next pick");
+  // A route at the same place reads its levels: what the place itself skips.
+  const routed = await statement(hot, ask(w.slug));
+  assert.equal(routed.reading, 1);
+  assert.equal(routed.levels.length, 1);
+  assert.equal(await count('log_uses'), 0);
 });
 
 test('a workload by its way in at its place: the same route use, its caller decided by ids', async () => {

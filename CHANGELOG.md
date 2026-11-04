@@ -275,8 +275,10 @@
   uses nothing, after which the plan, compute or code's credential make
   their own calls as before. With `cacheSeconds`, the place's answer is
   kept, by handle, as the made-for list was, and route `<a>`'s values
-  serve its two-segment URLs with no call. No migration: 0060's
-  `use_route` takes the place itself as a place reading of no route.
+  serve its two-segment URLs with no call, and a kept place lasts no
+  longer than its handle. Migration 0070 replaces `use_route`'s body
+  (signature, settings and answer unchanged): the place itself is a
+  place reading of no route, answered with no definition read.
 - **The `/use` bench reports its warm-up.** `ci.ts` measured its first
   `--warm` seconds and then left them out; it now prints them as their
   own `warm-up` line, so a cold start's busy refusals are counted apart

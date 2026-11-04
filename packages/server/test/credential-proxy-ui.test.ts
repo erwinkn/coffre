@@ -557,6 +557,49 @@ test("with cacheSeconds, a URL found the place's is kept as a made-for list is, 
   });
 });
 
+test("a URL found the place's is kept no longer than its handle stands: past the handle's end, a copy's refusal answers nothing, and the vault is asked again (C2b4; Sol's review r1 of #486)", ON_015, async () => {
+  await root.secrets.set('market/dev', { HOOK_SECRET: 'whsec-0123456789abcdef' });
+  await save({ inbound: { kind: 'verifier', name: 'inbound', hmac: { key: 'HOOK_SECRET', encoding: 'hex', prefix: '', maxBytes: null }, limit: NO_LIMIT } });
+  const token = await handle();
+  // The place's answer as for a handle that ends 200 ms on: what the kept place may last, at most.
+  let ending = false;
+  const plugins = runtime.plugins.map((plugin) => (plugin.routes === undefined ? plugin : {
+    ...plugin,
+    routes: {
+      ...plugin.routes,
+      fetch: (request: Request, context: Parameters<NonNullable<typeof plugin.routes>['fetch']>[1]) => plugin.routes!.fetch(request, context.useRouteOrPlace === undefined ? context : {
+        ...context,
+        useRouteOrPlace: async (caller, asked) => {
+          const used = await context.useRouteOrPlace!(caller, asked);
+          return used.reading === 'place' && ending ? { ...used, expiresAt: new Date(Date.now() + 200).toISOString() } : used;
+        },
+      }),
+    },
+  }));
+  const saved = runtime.plugins;
+  runtime.plugins = plugins;
+  try {
+    await countingUses(async (uses, places) => {
+      // The verifier's copy, brought by a verify; the place kept, by this handle, until it ends.
+      ending = true;
+      const checked = await compute(token, { verify: { credential: 'inbound', message: b64('x'), signature: 'x' } });
+      assert.equal(checked.status, 200, JSON.stringify(checked.body));
+      assert.deepEqual([places(), uses()], [1, 1]);
+      // Within it, a sign of the verifier: the fresh copy refuses, no call, as the made-for list let it.
+      assert.equal((await compute(token, { sign: { credential: 'inbound', message: b64('x') } })).status, 404);
+      assert.deepEqual([places(), uses()], [1, 1]);
+      // Past it: no copy answers for a handle the vault has not seen stand since. The place is asked again, the call that
+      // checks the handle (an ended one is 401 there), and only then does the fresh copy refuse.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      ending = false;
+      assert.equal((await compute(token, { sign: { credential: 'inbound', message: b64('x') } })).status, 404);
+      assert.deepEqual([places(), uses()], [2, 1], 'the place asked of the vault again');
+    });
+  } finally {
+    runtime.plugins = saved;
+  }
+});
+
 test('a two-segment stable URL whose handle rides only in the body: the UI route, not compute (review r1 of #467)', ON_015, async () => {
   deploy(proxyOf({ cacheSeconds: 0 }));
   await save({

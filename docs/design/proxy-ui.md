@@ -2154,9 +2154,12 @@ settles section 6's "URLs of one or two segments" for handles:
   takes the place for a handle made for `<a>/<b>`, and answers it with
   nothing of a route read or used (`found` null, no keys); otherwise
   route `<a>` at the handle's one environment, its values in that call.
-  0060's `use_route` takes a place reading only with a route named
-  (`p_named`), so the place itself is `''` to it, a name no item may
-  have; no migration.
+  `use_route` takes a place reading only with a route named (`p_named`),
+  so the place itself is `''` to it, a name no item may have; taken, the
+  statement leaves the route block before the place's chain and levels
+  are read (0070, on 0069's body, T207's; SQLite's `callRoute` the same):
+  the reading, the gate and the handle's places are its answer (Sol's
+  review r1 of #486).
 - **What is kept.** A made-for list this isolate keeps (`madeFor`, which
   code's stable URLs still ask) decides first, no call. Without one, with
   `cacheSeconds`, a place answer is kept by handle and path for
@@ -2166,16 +2169,20 @@ settles section 6's "URLs of one or two segments" for handles:
   kept for its stable reading, serve `/use/<a>/<b>` for any `<b>` but
   when `<a>/<b>` is the environment they were decided at, which is the
   place's (`keptFor`): a route named as the handle's project is never
-  sent the plan's request.
+  sent the plan's request. A kept place lasts no longer than its handle:
+  the answer carries when the handle ends, as the list's entry did, so a
+  copy's refusal never answers an ended handle, which the vault's call
+  answers 401 (Sol's review r1 of #486).
 - **A runtime without a public fetch** asks the made-for list, as before:
   the vault would otherwise log a use of route `<a>` for a request never
   sent (section 5).
 - **Cost** (`proxy-use-cost.test.ts`, `cacheSeconds: 0`, a warm vault
   map): `GET /use/<a>/<b>` of a UI route is one `use_route` statement and
   nothing of the app's. A plan, a sign or code's credential under the
-  place is the place's answer, a `use_route` reading the place's
-  definitions' rows where the list's `use_credential` read none, then
-  their own calls: as many calls as before.
+  place is the place's answer, a `use_route` of the gate and the
+  handle's places, no definition read (`use-route.test.ts` holds both
+  engines' statements to no level read), then their own calls: as many
+  calls as before.
 
 
 **PR B: matching and injection, for code definitions first.** Server only,
