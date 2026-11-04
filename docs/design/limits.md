@@ -146,10 +146,13 @@ what happened on Equisafe's instance. Each is class **e** unless marked.
    that count gone they would still pass the row lock one by one.
    An AWS sign-in also meets AWS's own limit, which no change in coffre
    lifts: each proof is one `GetCallerIdentity` (`workloads/aws.ts:284-294`,
-   not cached), counted against the signing account's STS quota of 600
-   requests a second per Region, shared with its `AssumeRole` and the like
-   (S78). It is adjustable, by a ticket to AWS support. So 1,000 AWS
-   sign-ins a second from one account and Region needs that raised first.
+   not cached), counted against the signing account's STS quota at the
+   endpoint the proof names: 600 requests a second per Region at a
+   regional host, shared with its `AssumeRole` and the like, and a quota
+   of its own at the global host, which coffre's server reaches in
+   us-east-1 (S78). Both are adjustable, by a ticket to AWS support. So
+   1,000 AWS sign-ins a second from one account needs the quota of the
+   endpoint they sign for raised first.
 5. **AWS KMS: 8 calls at once per `awsKms` provider object, one per
    isolate in practice** (`packages/core/src/kek/aws-kms.ts:36`). Every
    AWS-backed key a use opens makes one Decrypt: no data key is kept
@@ -306,9 +309,14 @@ postgres.js pool has `max` connections (`packages/db/src/connect.ts:26`,
 `max ?? 10`, again copied from node-postgres). A query asked while every
 connection is busy is sent on a busy one, behind what that connection
 already runs, up to 100 queries each (`max_pipeline`,
-`packages/db/src/postgres-js/index.ts:548-561, 661`). Only past 10 × 100
-does a query wait in the driver's queue, which has no size limit and no
-timeout. So the queue has three parts: queries sent and running,
+`packages/db/src/postgres-js/index.ts:548-561, 661`). 100 is a ceiling,
+not what a busy pool reaches: a connection takes no more pipelined work
+while it is still opening (a cold pool's first queries), while it waits
+for a statement's parameter description, while its socket is under
+backpressure, or behind a statement carrying a transaction's BEGIN until
+Postgres has answered it (`postgres-js/connection.ts:184, 225, 250-258`). Then a query waits in the
+driver's queue well before 10 × 100 are outstanding, and that queue has no
+size limit and no timeout. So the queue has three parts: queries sent and running,
 queries sent behind them on the same connection, and queries not sent.
 Postgres runs one connection's queries one after another, so pipelining
 saves the round trips between them, not their execution: a pool serves
@@ -618,7 +626,7 @@ or move, pointing to section 3's #).
 | V16 | `KEY_BUDGET_MS` | 5 s | `vault.ts:389` | e | "a removal waits at most this long for a read at KMS" (87ed75ae) | | keep, cite KMS's latency or derive from `TIMEOUT_MS × ATTEMPTS` |
 | V17 | `LOCK_TIMEOUT_MS` | 15 s | `vault.ts:392` | c | "above the key budget" | | keep, computed `3 × KEY_BUDGET_MS` |
 | V18 | `READ_LOCK_TIMEOUT_MS` | 3 s | `vault.ts:401` | b | "longer is a queue holding a connection" (ecfaaec4, #347) | | keep |
-| V19 | `READ_DEADLINE_MS` | 5 s | `vault.ts:410` | b | "a caller hears within it" (#356) | | keep |
+| V19 | `READ_DEADLINE_MS`, plus `KEY_BUDGET_MS` with a key service | 5 s from a read's first decision, after the vault has settled and cut over (`vault.ts:873-884`); `unwrap`, `wrap` and `rewrap` with a key service add V16's 5 s, so 10 s in all (`vault.ts:1973`) | `vault.ts:410` | b | "a caller hears within it" (#356) | | keep; state the stages each covers |
 | V20 | `CODE_QUEUE.waiters` | 1 | `vault.ts:427` | b | one call of a deploy's herd waits (#467) | | keep |
 | V21 | `CODE_PAUSE_MS`, `CODE_PAUSE_MAX_MS` | 25 → 400 ms, doubling | `vault.ts:430-431` | e | none | | derive from the measured hold (as V6) |
 | V22 | `RELEASES_PRUNED` | 10,000 | `vault.ts:434` | d | one short statement (#359) | | keep |
@@ -775,7 +783,7 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S75 | Credential `limit` (`perMinute`, `perDay`) | none by default; ≥ 1 | `credential-proxy.ts:3976-3990` | b | the operator's own (#308) | by design | keep |
 | S76 | `rotateAfterDays` | 365 unless the deployment says; `null` turns it off | `config.ts:43, 62` | b | a deployment's policy: a value unchanged this long is flagged, never refused | | keep |
 | S77 | `WRITES_LOST`, `REFUSAL_LOG_MS` | 3 writes again a beat; a refusal logged once a minute by reason and service | `plugins/audit-watch.ts:149`; `api/workloads.ts:418` | e | | | keep, cite |
-| S78 | AWS STS request quota | 600 requests a second per AWS account and Region, shared by `GetCallerIdentity`, `AssumeRole`, `GetSessionToken` and three more; adjustable by a support ticket | `workloads/aws.ts:284-294` | a | AWS's [STS request quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html#reference_iam-quotas-sts-requests). Every AWS proof a binding could take is one `GetCallerIdentity`, forwarded as the workload signed it and not cached, so it counts against the workload's own account in the Region it signed for | ⚠ CI | keep; Q4: 1,000 AWS sign-ins a second from one account and Region needs that quota raised first |
+| S78 | AWS STS request quota | 600 requests a second per AWS account and Region, shared by `GetCallerIdentity`, `AssumeRole`, `GetSessionToken` and three more; adjustable by a support ticket | `workloads/aws.ts:284-294` | a | AWS's [STS request quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html#reference_iam-quotas-sts-requests). Every AWS proof a binding could take is one `GetCallerIdentity`, forwarded as the workload signed it and not cached, so it counts against the workload's own account, at the endpoint it names. A regional host (`sts.<region>.amazonaws.com`) spends that Region's quota. The global host (`sts.amazonaws.com`, which coffre accepts and checks as signed for us-east-1, `workloads/aws.ts:44, 82-102`) has a quota of its own, apart from every regional one, and is served in us-east-1 unless the DNS lookup goes through Amazon's resolver in a default Region ([global endpoint changes](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_region-endpoints.html#reference_sts_global_endpoint_changes)). Coffre's server makes the request, so from Cloudflare or a host outside AWS it is us-east-1 | ⚠ CI | keep; Q4: 1,000 AWS sign-ins a second from one account needs the quota of the endpoint they use raised first |
 
 Format, fine: the CSP nonce (16 B), HSTS max-age, the Postgres protocol
 magic numbers, the SCRAM sizes, `HANDLE` (43 chars), the hmac MAC (32 B),
@@ -969,7 +977,11 @@ and adjustable.
 "600 requests per second, per account, per Region" for requests made with
 AWS credentials, shared by `AssumeRole`, `DecodeAuthorizationMessage`,
 `GetAccessKeyInfo`, `GetCallerIdentity`, `GetFederationToken` and
-`GetSessionToken`; an increase is "a ticket with AWS support".
+`GetSessionToken`; an increase is "a ticket with AWS support". The global
+endpoint ([endpoint changes](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_temp_region-endpoints.html#reference_sts_global_endpoint_changes)): "Requests handled by the AWS STS
+global endpoint do not share a requests per second quota with Regional
+AWS STS endpoints", and they "will continue to be served in US East (N.
+Virginia)" when resolved by "any other DNS provider" than Amazon's.
 
 **Drivers:** node-postgres's `max` "By default this is set to 10"
 ([pool](https://node-postgres.com/apis/pool)). postgres.js: `max: 10`,
@@ -1019,12 +1031,14 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
   redesigned (#36, TLA+ first), and the 32 in flight stays until a
   sign-in has a deadline (#35): what deadline do you want for a sign-in
   under load (R58 allows 1-2 s)? An AWS fleet at that rate also needs its
-  own account's STS quota raised (600 a second per Region, S78): a
-  prerequisite for the deployment, not a coffre setting.
+  own account's STS quota raised at the endpoint it signs for (600 a
+  second per Region at a regional host; the global host's is apart, S78):
+  a prerequisite for the deployment, not a coffre setting.
 - **Q5. A statement bound for the app's and vault's logins.** Only the
   hot login has a `statement_timeout`. An app statement has no bound in
   Postgres. Should the app's and vault's logins get one, derived from
-  their call's deadline (`READ_DEADLINE_MS`, 5 s)?
+  what is left of each call's own deadline (V19: 5 s, 10 s with a key
+  service, counted from the first decision)?
 - **Q6. Retention can't be turned on in the standard setup.** `retainDays`
   exists, but only a Node deployment that runs its own checkpointer
   (`runCheckpointer`, `keepCheckpointer`) can reach it. The uses log
