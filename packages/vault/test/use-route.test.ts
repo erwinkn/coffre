@@ -15,7 +15,10 @@ import { sql } from 'drizzle-orm';
 import { ROLES } from '@coffre/core/access';
 
 import { applyOp, itemDigest, objectKey, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
-import { replayStored } from '../src/log-replay.ts';
+import { purposeCode, replayStored } from '../src/log-replay.ts';
+import { callRoute as postgresRoute } from '../src/use.postgres.ts';
+import { callRoute as sqliteRoute } from '../src/use.sqlite.ts';
+import type { RouteCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
@@ -23,9 +26,10 @@ import { weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scr
 import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
+let hot: Database;
 before(async () => {
   db = await openTestDatabase();
-  await useDatabases(db);
+  hot = await useDatabases(db);
 });
 after(() => db.close());
 beforeEach(emptyLog);
@@ -319,6 +323,90 @@ test('the stable reading: a handle made for dev reads `/use/openai/…` at dev; 
   const moved = answered(await vault.useRoute(both()));
   assert.equal(moved.reading, 'stable', 'route `<project>` at the handle\'s one place now');
   assert.deepEqual(moved.found, { found: false, fault: null, seals: [''] });
+});
+
+test('the place itself (C2b4): `/use/<project>/dev` read both ways, the place for a handle made for dev, answered with nothing of a route read or used; the stable reading otherwise, in the same call', async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const name = await w.nameOf(key);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // A route named as the project is: what the stable reading of `/use/<project>/dev` would send.
+  await w.save({ [w.slug]: { definition: route(w.slug, [name]), editor: ada } });
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const { vault } = await isolate();
+  const itself = () => w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: w.slug });
+  // Cold, then warm (the map holding the handle's made-for list): the place each time, one statement, nothing written.
+  for (const round of ['cold', 'warm']) {
+    const place = answered(await vault.useRoute(itself()));
+    assert.equal(place.reading, 'named', round);
+    assert.deepEqual([place.stands, place.found, place.keys, place.outcome], [true, null, [], { ok: true, values: [] }], round);
+    assert.deepEqual(place.place, { project: w.slug, environment: 'dev' }, round);
+  }
+  assert.equal(await count('log_uses'), 0, 'nothing used');
+  // Made for another environment since: the same URL is route `<project>` at that one, its values in the same call.
+  const other = await w.environment('other');
+  await w.grantAt(other, 'developer');
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: other }])} WHERE id = ${w.credentialId}`);
+  await w.save({ [w.slug]: { definition: route(w.slug, [name]), editor: ada } }, other);
+  const stable = answered(await vault.useRoute(itself()));
+  assert.equal(stable.reading, 'stable');
+  assert.ok(stable.found?.found, JSON.stringify(stable.found));
+  // A place reading of no route and no stable one decides nothing: the app's bug.
+  await assert.rejects(vault.useRoute(w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: null })), /names its route/);
+});
+
+test("the place itself after a warm stable reading: the map's guess (stable, its keys' ids, the gate light) meets rows that pick the place, and the whole gate answers it, nothing used (C2b4; Fable's review of #486)", async () => {
+  const w = await routeWorld(db);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // Made for `other`, where route `<project>` and its key are saved: `/use/<project>/dev` is that route at `/dev`.
+  const other = await w.environment('other');
+  await w.grantAt(other, 'developer');
+  const key = await w.key('sk', false, other);
+  const name = await w.nameOf(key);
+  await w.save({ [w.slug]: { definition: route(w.slug, [name]), editor: ada } }, other);
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: other }])} WHERE id = ${w.credentialId}`);
+  const { vault } = await isolate();
+  const itself = () => w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: w.slug });
+  // Cold, then warm: the stable reading's values, the second asked with the map's ids, light.
+  for (const round of ['cold', 'warm']) {
+    const stable = answered(await vault.useRoute(itself()));
+    assert.equal(stable.reading, 'stable', round);
+    assert.deepEqual(values(stable), { [name]: 'sk' }, round);
+  }
+  const used = await count('log_uses');
+  // Made for dev since: the map still guesses the stable reading, light; the statement picks the place, whose answer
+  // is the reading and the whole gate, no key's use made.
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const place = answered(await vault.useRoute(itself()));
+  assert.equal(place.reading, 'named');
+  assert.deepEqual([place.stands, place.found, place.keys, place.outcome], [true, null, [], { ok: true, values: [] }]);
+  assert.deepEqual(place.place, { project: w.slug, environment: 'dev' });
+  assert.equal(await count('log_uses'), used, 'nothing used');
+});
+
+test("the place itself reads no definition, in either engine's statement: the reading and the gate are its answer, no level of the chain read, nothing used (C2b4; Sol's review r1 of #486)", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ [w.slug]: { definition: route(w.slug, [await w.nameOf(key)]), editor: ada } });
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const at = Date.now();
+  // As the vault asks it on a miss: the handle's names, the place reading's route, the stable one, no ids.
+  const ask = (named: string): RouteCall => ({
+    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [] }, project: w.slug, environment: 'dev', named, stable: w.slug, reading: null,
+    credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
+    mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: true, light: false,
+  });
+  const statement = ENGINE === 'postgres' ? postgresRoute : sqliteRoute;
+  const itself = await statement(hot, ask(''));
+  assert.deepEqual([itself.reading, itself.stood, itself.place], [1, true, w.dev]);
+  assert.deepEqual([itself.levels, itself.editor, itself.keys, itself.made, itself.rows], [[], null, [], false, []], 'no definition read: the route block left at once');
+  assert.deepEqual(itself.madeFor, [`${w.slug}/dev`], "the handle's places, for the map's next pick");
+  // A route at the same place reads its levels: what the place itself skips.
+  const routed = await statement(hot, ask(w.slug));
+  assert.equal(routed.reading, 1);
+  assert.equal(routed.levels.length, 1);
+  assert.equal(await count('log_uses'), 0);
 });
 
 test('a workload by its way in at its place: the same route use, its caller decided by ids', async () => {

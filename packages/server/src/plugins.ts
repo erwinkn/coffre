@@ -191,6 +191,15 @@ export type PluginContext = {
    */
   useRoute?(caller: string | WorkloadUse, asked: RouteAsked): Promise<RouteUsed>;
   /**
+   * A handle's `useRoute` of a URL that may name the place itself (T186 PR C2b4; section 6, "URLs of one or two
+   * segments"): `/use/<a>/<b>`, the plan or compute where the handle was made for `<a>/<b>`, else route `<a>` at `/<b>`;
+   * and `/use/<a>/<b>/<code's name>/…` the same, code's credential at `<a>/<b>`. Both readings go in the one call,
+   * which picks one from the caller's rows: the stable one is `useRoute`'s answer, `stable` at the handle's one
+   * environment; the place's is `{ reading: 'place' }`, nothing used or opened, with when the handle ends, and the
+   * proxy serves the URL as the place's, in calls of its own, as it did after the handle's made-for list.
+   */
+  useRouteOrPlace?(handle: string, asked: Omit<RouteAsked, 'named' | 'stable'> & { place: string; stable: string }): Promise<RouteUsed | PlaceRead>;
+  /**
    * A place's UI items as a use would find them, using nothing (section 3, `proxyItem`): the caller checked first, then
    * `name`'s item, or, with none, every item the place serves. `place`, a handle's by path, null for its own; a
    * workload's is always its own, the one its statement checked. Refused: a `CoffreError`.
@@ -226,6 +235,9 @@ export type RouteUsed = {
   item: DecidedItem; seals: string[]; reading: 'named' | 'stable';
   environment: { path: string }; expiresAt: string;
 };
+
+/** A handle's URL found the place's (`useRouteOrPlace`): nothing used; when the handle ends, which bounds keeping that. */
+export type PlaceRead = { reading: 'place'; expiresAt: string };
 
 /** A place's UI items as `proxyItem` found them: one, or every one, each with its digest; or a level a writer changed. */
 export type ItemsFound = {
@@ -815,12 +827,16 @@ function pluginContext(
     }
     return null;
   };
-  /** A handle's UI route use: the vault's call, the read on what it decided, and the item the values go by. */
-  const handleRouteUse = async (handle: string, asked: RouteAsked): Promise<RouteUsed> => {
+  /**
+   * A handle's UI route use: the vault's call, the read on what it decided, and the item the values go by; the place's
+   * where the vault took the place reading of no route (`route` null: the place itself, C2b4), nothing used.
+   */
+  const handleRouteUse = async (handle: string, asked: RouteAsked, place: { path: string; route: null } | null = null): Promise<RouteUsed | PlaceRead> => {
+    const reading = place ?? asked.named;
     const name = asked.named?.route ?? asked.stable ?? '';
-    const named = asked.named === null ? null : (() => {
-      const [project, environment] = asked.named.path.split('/');
-      return { place: { project: project!, environment: environment! }, route: asked.named.route };
+    const named = reading === null ? null : (() => {
+      const [project, environment] = reading.path.split('/');
+      return { place: { project: project!, environment: environment! }, route: reading.route };
     })();
     try {
       if (binding !== null) throw noCredential();
@@ -830,6 +846,8 @@ function pluginContext(
       const identity = used.identity as AuthenticatedIdentity;
       if (used.credential) throw new CoffreError(401, 'unauthenticated', 'that handle is unknown, expired or revoked');
       const { answered } = used;
+      // The place itself: the URL is the place's (the plan, compute, code's credential), which serves it as it says.
+      if (answered.reading === 'named' && place !== null) return { reading: 'place', expiresAt: identity.credentialExpiresAt! };
       const refused = routeRefusal(answered, asked);
       if (refused !== null) throw refused;
       if (answered.place === null) throw new CoffreError(404, 'not_found', `${name}: no such place`);
@@ -886,7 +904,13 @@ function pluginContext(
       return rethrown(error);
     }
   };
-  const routeUse: PluginContext['useRoute'] & {} = (caller, asked) => (typeof caller === 'string' ? handleRouteUse(caller, asked) : workloadRouteUse(caller, asked));
+  const routeUse: PluginContext['useRoute'] & {} = async (caller, asked) => {
+    if (typeof caller !== 'string') return workloadRouteUse(caller, asked);
+    const used = await handleRouteUse(caller, asked);
+    if (used.reading === 'place') throw new Error('a route use of a route answered the place');
+    return used;
+  };
+  const routeOrPlace: PluginContext['useRouteOrPlace'] & {} = (handle, asked) => handleRouteUse(handle, { ...asked, named: null }, { path: asked.place, route: null });
   /** `proxyItem`'s call as `caller`, refused as a use is. */
   const itemsAs = async (caller: RouteCaller, place: { project: string; environment: string } | null, name: string | null): Promise<ItemsFound> => {
     const at = Date.now();
@@ -938,7 +962,7 @@ function pluginContext(
   };
   return {
     // A vault that decides no UI item (`servesUi`): neither, and the proxy serves code's items alone.
-    ...(ui ? { useRoute: routeUse, proxyItem } : {}),
+    ...(ui ? { useRoute: routeUse, useRouteOrPlace: routeOrPlace, proxyItem } : {}),
     publicUrl: runtime.publicUrl,
     binding: binding !== null,
     ...(runtime.publicFetch === undefined ? {} : { publicFetch: runtime.publicFetch }),

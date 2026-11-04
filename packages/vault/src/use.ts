@@ -1587,6 +1587,7 @@ async function open(path: UsePath, view: UseView, row: UseRow, deadline: number)
 type RouteAsk = {
   handle: { tokenHash: Buffer; token: string; accepts: CredentialAcceptance } | null;
   workload: { credential: string; way: Way; principal: string | null; place: string } | null;
+  /** The place reading's place, null for none, and its route: null for the place itself (C2b4), or, for `proxyItem`, every item. */
   project: string | null; environment: string | null; named: string | null; stable: string | null;
   at: number; deadline: number; use: boolean;
 };
@@ -1625,8 +1626,8 @@ function guessOf(cache: UseCache, ask: RouteAsk): RouteGuess {
     return { reading: 2, credential: ask.workload.credential, place: ask.workload.place, route, keyed: route === null ? undefined : recall(cache.routeKeys, `${ask.workload.place}\n${route}`) };
   }
   const { token } = ask.handle!;
-  const madeFor = ask.named === null ? undefined : recall(cache.madeFor, token);
-  const reading = ask.named === null ? 2 : madeFor === undefined ? null : madeFor.has(`${ask.project}/${ask.environment}`) || ask.stable === null ? 1 : 2;
+  const madeFor = ask.project === null ? undefined : recall(cache.madeFor, token);
+  const reading = ask.project === null ? 2 : madeFor === undefined ? null : madeFor.has(`${ask.project}/${ask.environment}`) || ask.stable === null ? 1 : 2;
   if (reading === null) return { reading: null, credential: null, place: null, route: null, keyed: undefined };
   const found = cache.named(reading === 1 ? `${token}\n${ask.project}\n${ask.environment}` : `${token}\n\n`);
   const route = reading === 1 ? ask.named : ask.stable;
@@ -1665,7 +1666,9 @@ async function routeStatement(
   const workload = ask.workload;
   const call: RouteCall = {
     tokenHash: ask.handle?.tokenHash ?? null, accepts: ask.handle?.accepts ?? null,
-    project: ask.project, environment: ask.environment, named: ask.named, stable: ask.stable, reading: guess.reading,
+    // The place itself, a use's place reading of no route, is `''` to the statement, which no item is named (CREDENTIAL_NAME):
+    // 0060 offers the place reading only with a route named (`p_named`), and reads every item for `proxyItem`'s none.
+    project: ask.project, environment: ask.environment, named: ask.use && ask.project !== null && ask.named === null ? '' : ask.named, stable: ask.stable, reading: guess.reading,
     credential: keys.asked === null ? (workload?.credential ?? null) : guess.credential, way: WAYS.indexOf(workload?.way ?? 'credential'), principal: workload?.principal ?? null, place: workload?.place ?? null,
     at: ask.at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: workload?.way ?? 'credential' }), deadline: ask.deadline,
     // No use is made under it: the key's tag, so that the statement's MAC names the key the isolate holds (D162).
@@ -1865,7 +1868,7 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
   if (input.purpose !== 'use') throw new Error('a route use uses its keys');
   if (input.named !== null && (typeof input.named?.place?.project !== 'string' || typeof input.named.place.environment !== 'string')) throw new Error("a route use's place reading names its place by slugs");
   const workload = checkRoute(input, [input.named?.route ?? null, input.stable]);
-  if (input.stable === null && input.named === null) throw new Error('a route use names its route');
+  if (input.stable === null && (input.named === null || input.named.route === null)) throw new Error('a route use names its route');
   if (workload !== null && input.named !== null) throw new Error("a workload's route use names its route at its place");
   if (!Array.isArray(input.digests) || input.digests.some((digest) => typeof digest !== 'string')) throw new Error("a route use names its copies' digests");
   const { cache } = path;
@@ -1913,6 +1916,9 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
     if (!gate.stands || !rows.stood) {
       return { ...answer, stands: false, personal: false, found: null, keys: [], outcome: { ok: false, index: null, code: gate.code === 'missing' || gate.code === null ? 'stale' : gate.code, number: null } };
     }
+    // The place itself (`/use/market/dev`, the plan or compute; C2b4): the reading is the answer. Nothing of a route was
+    // read or used, and the app goes on as the place's URL says, in calls of its own.
+    if (rows.reading === 1 && ask.named === null) return { ...answer, stands: true, personal: rows.personal, found: null, keys: [], outcome: { ok: true, values: [] } };
     if (rows.personal) return { ...answer, stands: true, personal: true, found: null, keys: [], outcome: { ok: false, index: null, code: 'personal', number: null } };
     if (rows.cut) return { ...answer, stands: false, personal: false, found: null, keys: [], outcome: { ok: false, index: null, code: 'archived', number: null } };
     const looked = routeLookup(path.sealKeys, levelsOf(rows), rows.route!);
