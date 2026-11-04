@@ -14,10 +14,12 @@ import { defineSignin, github, type PasskeyPolicy } from '@coffre/core/identity'
 import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
+import { AuthRowTampered } from '../src/auth-rows.ts';
 import { fetchApi } from '../src/fetch-api.ts';
+import { passkeyStands } from '../src/passkey-check.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { credentials, deviceAuthorizations, passkeys } from './db/tables.ts';
+import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { auditLog, credentials, deviceAuthorizations, passkeys } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -126,12 +128,45 @@ test('a passkey that is not the credential\'s person\'s, or whose row was change
   assert.equal(await answer(deployment('optional').bearer(token).me()), 'unauthenticated');
 });
 
+// Review r1 of #497: the passkey's MAC is the check's to verify, where its answer reads the row, never the read's.
+test('a credential the check exempts never fails on a passkey it does not need: a service\'s token, any under off', async () => {
+  const key = await rows.addPasskey(db.owner, deps.chainKey, ROOT);
+  const { bearer } = deployment('optional');
+  const session = await rows.confirmedSession(db.owner, deps.chainKey, ROOT, key);
+  await clientFor(deps, ROOT).members.add('token:ci');
+  await clientFor(deps, ROOT).access.set('token:ci', { 'market/dev': 'viewer' });
+  const issued = await bearer(session).tokens.issue('token:ci', { label: 'ci', expiresInDays: 30 });
+  const [row] = await db.owner.select().from(credentials).where(eq(credentials.id, issued.id));
+  assert.equal(row!.passkeyId, key, 'named, as everything the session issues');
+
+  await db.owner.update(passkeys).set({ authMac: randomBytes(32) }).where(eq(passkeys.id, key));
+  assert.equal(await answer(bearer(issued.token).me()), 'ok', 'a service holds no passkey: its token is never checked against one');
+  assert.equal(await answer(deployment('off').bearer(session).me()), 'ok', 'under off, nothing is asked');
+  assert.equal(await answer(bearer(session).me()), 'unauthenticated', 'a session it backs fails as its own row would');
+});
+
+test('the check reads the passkey\'s MAC only where its answer depends on the row, as an MCP connection\'s check uses it', () => {
+  const holder = { principal: `user:${ADA}`, generation: 1, passkeyId: randomUUID() };
+  const forged = {
+    id: holder.passkeyId, principal: holder.principal, generation: 1, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
+    algorithm: -7, removedAt: null, removedBy: null, synced: true, name: 'YubiKey 5C', createdBy: holder.principal, authMac: randomBytes(32),
+  } as unknown as NonNullable<Parameters<typeof passkeyStands>[3]['passkey']>;
+  const read = { passkey: forged, held: true };
+  assert.equal(passkeyStands(deps.chainKey, 'off', holder, read), true);
+  assert.equal(passkeyStands(deps.chainKey, 'optional', { ...holder, passkeyId: null }, { passkey: null, held: true }), false);
+  for (const policy of ['optional', 'required'] as const) assert.throws(() => passkeyStands(deps.chainKey, policy, holder, read), AuthRowTampered, policy);
+});
+
 test('the provider alone signs in nobody who holds a live passkey, unless the policy is off', async () => {
   await addPasskey(ADA);
   const account = { provider: 'github', subject: 'ada', emails: [ADA], name: null };
+  const entries = async () => (await db.owner.select({ seq: auditLog.seq }).from(auditLog)).length;
+  const logged = await entries();
   const refused = await deployment('optional').signin.completeSignin(account, meta());
   assert.deepEqual(refused, { ok: false, reason: 'passkey_required' });
   assert.equal((await db.owner.select().from(credentials).where(eq(credentials.principal, `user:${ADA}`))).length, 0, 'no session written');
+  // Whoever answered passed the provider, not the factor: no entry (passkeys.md, section 11; review r1 of #497).
+  assert.equal(await entries(), logged, 'no entry written');
   assert.ok((await deployment('off').signin.completeSignin(account, meta())).ok);
 });
 
@@ -206,6 +241,23 @@ test('a reveal by a credential the check refuses gets the same 401 whatever it n
   assert.equal((await usesLogged(db.owner)).length, used, 'no use logged');
 });
 
+test('a reveal by a credential whose passkey fails its MAC gets the 401 any request does, by one key or several, and uses nothing', async () => {
+  const { bearer } = deployment('optional');
+  const key = await addPasskey(ADA);
+  // A personal token the confirmed session issues, which names its passkey, as the vault knows it (the session's row is
+  // the test's own, written around the vault's log).
+  const issued = await bearer(await confirmedSession(key)).tokens.issue(`user:${ADA}`, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
+  const ada = bearer(issued.token);
+  assert.equal(await answer(ada.secrets.reveal('market/dev', ['API_KEY'])), 'ok');
+  const used = (await usesLogged(db.owner)).length;
+
+  // Review r1 of #497: the check ahead of the vault's call threw outside the boundary that answers it, a 500.
+  await db.owner.update(passkeys).set({ authMac: randomBytes(32) }).where(eq(passkeys.id, key));
+  assert.equal(await answer(ada.me()), 'unauthenticated');
+  assert.deepEqual(await Promise.all([answer(ada.secrets.reveal('market/dev', ['API_KEY'])), answer(ada.secrets.reveal('market/dev'))]), ['unauthenticated', 'unauthenticated']);
+  assert.equal((await usesLogged(db.owner)).length, used, 'no use logged');
+});
+
 test('a key write or a member\'s add by a credential the check refuses is refused before it writes, by the fast path and today\'s alike', async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${BOB}`, { role: 'admin' });
@@ -230,8 +282,9 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
   // Taken while they hold no passkey.
   assert.equal(await answer(ada!.secrets.set('market/dev', { API_KEY: 'ada-1' })), 'ok');
   assert.equal(await answer(bob!.members.add('user:carol@acme.example', { role: 'developer' })), 'ok');
-  const fast = process.env.COFFRE_TEST_ENGINE === 'sqlite' ? { writes: 0, adds: 0 } : { writes: 1, adds: 1 };
-  assert.deepEqual(served, fast, 'the fast path served each on Postgres');
+  // The fast paths are Postgres's, under 0.15's log (`admit-held.test.ts`); elsewhere both go today's way.
+  const fast = process.env.COFFRE_TEST_ENGINE !== 'sqlite' && LOG === '0.15' ? { writes: 1, adds: 1 } : { writes: 0, adds: 0 };
+  assert.deepEqual(served, fast, "the fast path served each on Postgres, under 0.15's log");
   const keyNow = async () => {
     const { values, version } = await root.secrets.reveal('market/dev', ['API_KEY']);
     return { values, version };
@@ -251,7 +304,7 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
     answer(bob!.members.add('user:dan@acme.example', { role: 'developer' })),
   ]);
   assert.deepEqual(answers, ['passkey_required', 'passkey_required', 'passkey_required']);
-  assert.deepEqual(served, process.env.COFFRE_TEST_ENGINE === 'sqlite' ? fast : { writes: 2, adds: 2 }, 'the vault served the refused write and add too');
+  assert.deepEqual(served, { writes: 2 * fast.writes, adds: 2 * fast.adds }, 'where it serves them, the vault served the refused write and add too');
   assert.deepEqual(await keyNow(), before, 'the key is as it was');
   assert.deepEqual(await membersNow(), members, 'nobody was added');
 });

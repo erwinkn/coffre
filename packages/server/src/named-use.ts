@@ -69,10 +69,11 @@ export async function useByName(
   // with nothing asked of the vault, nor written in its log or its cap (review r3 of #412).
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
   // The passkey check first, as the vault's call releases values and logs their use, and answers nothing of passkeys.
-  // Refused, the request goes the ordinary way, whose credential check refuses it, 401 `passkey_required`, before
-  // anything reads the key: the same answer, at the same cost, whatever it asked for (conformance check 19).
+  // Refused, or unanswered, the request goes the ordinary way, whose credential check refuses it, 401 `passkey_required`
+  // (or 401, 503, as it answers any), before anything reads the key: the same answer, at the same cost, whatever it asked
+  // for (conformance check 19).
   const passkey = await passkeyAhead(runtime, token, kind);
-  if (passkey === 'refused') return null;
+  if (passkey === 'ordinary') return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamed({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, key: asked.key, accepts: acceptance(runtime), purpose: asked.purpose,
@@ -126,7 +127,7 @@ export async function useManyByName(
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
   // The passkey check first, as for one key (`useByName`).
   const passkey = await passkeyAhead(runtime, token, kind);
-  if (passkey === 'refused') return null;
+  if (passkey === 'ordinary') return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamedMany({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, keys: asked.keys, accepts: acceptance(runtime), purpose: asked.purpose,

@@ -500,7 +500,12 @@ export class SigninService {
           this.#issuedBacked(tx, { principal: principalOf(principal), generation: standing.generation, passkeyId: null }),
         ]);
         if (!member) throw refuse('deactivated', preparedId);
-        if (!backed) throw refuse('passkey_required', preparedId);
+        // Whoever answered passed the provider but not the factor: no entry, as section 3.1 promises such a visitor
+        // writes nothing, and the reason in the process log (section 11; review r1 of #497).
+        if (!backed) {
+          console.warn('a sign-in the provider alone answered was refused: its person holds a passkey', { principal: preparedId, reason: 'passkey_required', requestId: meta.requestId });
+          throw new SigninRefused('passkey_required');
+        }
         const now = new Date();
         const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
         let principalId: string;
@@ -670,7 +675,7 @@ export class SigninService {
 
   /** Whether a live passkey stands behind a credential of a person's, or none needs to (`passkeyStands`). */
   #backed(row: { principal: string; generation: number; passkeyId: string | null }, read: PasskeyRead): boolean {
-    return passkeyStands(this.#deps.signin.passkeys.policy, row, read);
+    return passkeyStands(this.#deps.chainKey, this.#deps.signin.passkeys.policy, row, read);
   }
 
   /**
@@ -680,7 +685,7 @@ export class SigninService {
    */
   async #issuedBacked(tx: Transaction, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<boolean> {
     if (this.#deps.signin.passkeys.policy === 'off') return true;
-    return this.#backed(holder, await passkeyBehind(tx, this.#deps.chainKey, holder));
+    return this.#backed(holder, await passkeyBehind(tx, holder));
   }
 
   #liveCredential(row: Awaited<ReturnType<typeof findCredential>>, access: Access, now: Date): boolean {
@@ -882,7 +887,7 @@ export class SigninService {
     if (passkeyChecked(row.kind) && this.#deps.signin.passkeys.policy !== 'off') {
       let read = row.passkeyRead ?? request.passkey ?? null;
       try {
-        read ??= await passkeyByToken(db, chainKey, tokenHash);
+        read ??= await passkeyByToken(db, tokenHash);
       } catch (error) {
         if (error instanceof AuthRowTampered) throw error;
         throw new CredentialUncheckable(error);

@@ -233,8 +233,7 @@ export async function writeAhead(
     }
   };
   // What stands behind a person's credential, read beside the vault's call, which only reads and prepares (`passkeyAhead`).
-  // A read that fails is the credential's check's to make again, which answers an outage as one.
-  const [first, passkey] = await Promise.all([ask(), passkeyAhead(runtime, token, kind).catch(() => undefined)]);
+  const [first, passkey] = await Promise.all([ask(), passkeyAhead(runtime, token, kind)]);
   // The caller's credential not as its log has it (put back, or its change forged): refused, as an unknown one is, and
   // never down today's path, whose check of its MAC alone would take it.
   if (first === 'forged') return { identity: unauthenticated(runtime.auth), written: null };
@@ -242,9 +241,10 @@ export async function writeAhead(
   // today's path, whose second read of the row would take one put back meanwhile (formal/Writing.tla, Today).
   if (first === 'ended') return { identity: endedCredential(), written: null };
   if (typeof first === 'string') return null;
-  // No live passkey behind it: today's path, whose credential check refuses it, 401 `passkey_required`, before its
-  // transaction (docs/design/passkeys.md, section 6.4). Nothing was written; what the vault prepared is dropped.
-  if (passkey === 'refused') {
+  // No live passkey behind it, or no answer: today's path, whose credential check decides again and refuses it, 401
+  // `passkey_required` (or 401, 503, as it answers any), before its transaction (docs/design/passkeys.md, section 6.4).
+  // Nothing was written; what the vault prepared is dropped.
+  if (passkey === 'ordinary') {
     wipeTry(first);
     return null;
   }

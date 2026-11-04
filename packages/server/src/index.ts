@@ -13,6 +13,7 @@ export {
   type Auth,
   type GitHubApp,
   type GitHubAppOptions,
+  type PasskeyPolicy,
   type PendingSignin,
   type RateLimiter,
   type WorkloadLimits,

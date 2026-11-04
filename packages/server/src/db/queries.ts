@@ -1392,7 +1392,7 @@ export async function findCredential(
   return {
     ...row.credential,
     /** What stands behind it, read with it (`passkeyOf`): undefined when the row came from a read that did not (`app_read`, the vault's). */
-    passkeyRead: passkeyOf(chainKey, row),
+    passkeyRead: passkeyOf(row),
     /** For a credential a trust binding issued: whether that binding still stands. Null for any other. */
     bindingStands: binding === null ? null : stands !== null,
     /** Its scope, as stored: its own, or for one a binding issued, the binding's. */
@@ -1440,32 +1440,32 @@ function heldSql(principal: SQL, generation: SQL): SQL<boolean> {
 
 /**
  * What would stand behind a credential an issue makes (passkeys.md, section 6.1), read under the log's head as the
- * request's check reads its own (`credentialRow`): the passkey it would name, by id, its MAC checked, and whether
+ * request's check reads its own (`credentialRow`): the passkey it would name, by id (its MAC the check's), and whether
  * `principal` holds a live passkey at `generation`. One statement.
  */
-export async function passkeyBehind(db: Queryable, chainKey: Buffer, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<PasskeyRead> {
+export async function passkeyBehind(db: Queryable, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<PasskeyRead> {
   const { passkeys } = tablesOf(db);
   const [row] = await db
     .select({ passkey: passkeys, passkeyHeld: heldSql(sql`${holder.principal}`, sql`${holder.generation}`), now: clock(db) })
     .from(sql`(SELECT 1) one`)
     .leftJoin(passkeys, holder.passkeyId === null ? sql`1 = 0` : eq(passkeys.id, holder.passkeyId));
-  return passkeyOf(chainKey, row!)!;
+  return passkeyOf(row!)!;
 }
 
 export type PasskeyRow = Tables['passkeys']['$inferSelect'];
 
 /**
  * What a credential or MCP connection needs behind it (docs/design/passkeys.md, section 6.2), read in the statement that
- * reads it: the passkey it names, its MAC checked, null for none; and whether its person holds a live passkey.
+ * reads it: the passkey it names, null for none; and whether its person holds a live passkey. The passkey's MAC is not
+ * checked here but by the check, where its answer depends on the row (`passkeyStands`): a credential the check passes
+ * over (a service's, a handle, any under `off`) never fails on a passkey it does not need (review r1 of #497).
  */
 export type PasskeyRead = { passkey: PasskeyRow | null; held: boolean };
 
-/** The passkey read with a row (`credentialRow`, `findConnection`), its MAC checked; undefined for a row read without it. */
-function passkeyOf(chainKey: Buffer, row: { passkey?: PasskeyRow | null; passkeyHeld?: boolean }): PasskeyRead | undefined {
+/** The passkey read with a row (`credentialRow`, `findConnection`), unchecked (`PasskeyRead`); undefined for a row read without it. */
+function passkeyOf(row: { passkey?: PasskeyRow | null; passkeyHeld?: boolean }): PasskeyRead | undefined {
   if (row.passkeyHeld === undefined) return undefined;
-  const passkey = row.passkey ?? null;
-  if (passkey !== null) verifyAuthRow(chainKey, 'passkeys', passkey);
-  return { passkey, held: row.passkeyHeld };
+  return { passkey: row.passkey ?? null, held: row.passkeyHeld };
 }
 
 /**
@@ -1474,9 +1474,9 @@ function passkeyOf(chainKey: Buffer, row: { passkey?: PasskeyRow | null; passkey
  * passkey and the person's, nothing about what the request asks for, so that what it answers says nothing of that. Null
  * for no such credential.
  */
-export async function passkeyByToken(db: Queryable, chainKey: Buffer, tokenHash: Buffer): Promise<(PasskeyRead & { holder: PasskeyHolder }) | null> {
+export async function passkeyByToken(db: Queryable, tokenHash: Buffer): Promise<(PasskeyRead & { holder: PasskeyHolder }) | null> {
   const [row] = await passkeyStatement(db, { tokenHash });
-  return row === undefined ? null : { ...passkeyOf(chainKey, row)!, holder: row.holder };
+  return row === undefined ? null : { ...passkeyOf(row)!, holder: row.holder };
 }
 
 /** Whose credential `passkeyByToken` read: what the check decides on (`passkeyStands`). Its MAC is the vault's call's to answer, and the app's to check after. */
@@ -2345,7 +2345,7 @@ export async function findConnection(
   if (row === undefined) return null;
   verifyAuthRow(chainKey, 'mcp_connections', row.connection);
   const previous = 'refreshHash' in by && row.connection.refreshHash?.equals(by.refreshHash) !== true;
-  return { ...row.connection, previous, now: new Date(row.now), passkeyRead: passkeyOf(chainKey, row)! };
+  return { ...row.connection, previous, now: new Date(row.now), passkeyRead: passkeyOf(row)! };
 }
 
 /**

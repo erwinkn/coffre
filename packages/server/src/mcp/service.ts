@@ -582,15 +582,17 @@ export class McpService {
     const claims = readAccessToken(this.#deps.chainKey, token);
     if (claims === null) return null;
     let row: Awaited<ReturnType<typeof findConnection>>;
+    let backed: boolean;
     try {
       row = await findConnection(this.#deps.db, this.#deps.chainKey, { id: claims.connectionId });
+      if (row === null || claims.expiresAt <= row.now || row.revokedAt !== null || row.expiresAt <= row.now || row.refreshHash === null) return null;
+      backed = passkeyStands(this.#deps.chainKey, this.#deps.signin.passkeys.policy, row, row.passkeyRead);
     } catch (error) {
       if (error instanceof AuthRowTampered) return null;
       throw error;
     }
-    if (row === null || claims.expiresAt <= row.now || row.revokedAt !== null || row.expiresAt <= row.now || row.refreshHash === null) return null;
     // No live passkey behind it (section 6.2): refused as any ended connection is, and its person connects it again.
-    if (!passkeyStands(this.#deps.signin.passkeys.policy, row, row.passkeyRead)) {
+    if (!backed) {
       console.warn('an MCP connection no live passkey stands behind was refused', { principal: row.principal, connectionId: row.id });
       return null;
     }
@@ -694,7 +696,14 @@ export class McpService {
   /** Whether the connection's person is still a member, at its generation: the vault's answer, before any transaction. */
   async #stillMember(row: ConnectionRow & { passkeyRead: PasskeyRead }): Promise<Access> {
     // A code or a refresh token of a connection no live passkey stands behind gives nothing (section 6.2 of passkeys.md).
-    if (!passkeyStands(this.#deps.signin.passkeys.policy, row, row.passkeyRead)) {
+    let backed: boolean;
+    try {
+      backed = passkeyStands(this.#deps.chainKey, this.#deps.signin.passkeys.policy, row, row.passkeyRead);
+    } catch (error) {
+      if (error instanceof AuthRowTampered) throw new OAuthError('invalid_grant', 'that connection failed its integrity check');
+      throw error;
+    }
+    if (!backed) {
       throw new OAuthError('invalid_grant', 'a passkey must confirm this connection: its person connects the app again');
     }
     const access = await this.#deps.vault.access(row.principal);

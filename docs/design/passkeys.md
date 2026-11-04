@@ -925,9 +925,12 @@ is the table above, for browser and CLI sessions and personal tokens
 are not checked. The statement that reads the credential
 (`credentialRow`, every variant: a request's, `GET /api/me`'s with the
 vault's rows, a page's) joins the passkey it names by its primary key and
-asks `EXISTS` of `passkeys_live_idx`; the passkey's MAC is checked as it is
-read, so a row changed around the app refuses the credential as any
-tampered row does (`401 unauthenticated`). An MCP connection's read
+asks `EXISTS` of `passkeys_live_idx`. The passkey's MAC is checked by
+`passkeyStands`, on the one branch whose answer reads the row, so a row
+changed around the app refuses the credential it backs as any tampered row
+does (`401 unauthenticated`), and refuses nothing the check exempts: a
+service's token issued from that session, or any credential under `off`
+(review r1 of #497). An MCP connection's read
 (`findConnection`) does the same, for every call through it, its code and
 its refreshes. `formal/Factor.tla`'s `RequestChecks` is this check:
 without it, the previous release's sign-in during a rollout serves a
@@ -943,8 +946,10 @@ the passkey it names and the person's, nothing of what the request asks).
 A use by name runs it before the vault's call (section 6.4); a key write
 and an add, whose first call releases nothing and writes nothing that
 commits without the app's transaction, run it beside that call, on the
-request's own client, so it costs a statement and no time. Refused, the
-request goes today's path, as one the vault does not serve does: its
+request's own client, so it costs a statement and no time. Refused, or
+unanswered (a passkey row that fails its MAC, a read that fails), the
+request goes today's path, as one the vault does not serve does, and is
+answered as any request is (`401`, `503`), never from the check itself: its
 credential check, the app's statement, refuses it `401 passkey_required`
 before the route's transaction, so nothing is written in either log, and
 what the vault prepared is dropped (`passkey-check.test.ts` holds both

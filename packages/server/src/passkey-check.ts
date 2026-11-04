@@ -4,7 +4,7 @@ import type { Queryable } from '@coffre/db';
 import type { Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { formatMember } from './api/paths.ts';
-import { AuthRowTampered } from './auth-rows.ts';
+import { AuthRowTampered, verifyAuthRow } from './auth-rows.ts';
 import { findCredential, passkeyByToken, type PasskeyRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
@@ -18,13 +18,16 @@ import type { CoffreRuntime } from './runtime.ts';
  *   optional   taken if that passkey is live  taken if the person holds no live passkey
  *   required   taken if that passkey is live  refused
  *
- * Live: its row not removed, and still its holder's, at the generation the credential is of; its MAC checked as it was
- * read (`PasskeyRead`). The revocations of section 6.1 end what a change to the person's passkeys leaves no passkey
+ * Live: its row not removed, and still its holder's, at the generation the credential is of. Its MAC is checked here, on
+ * the one branch whose answer reads the row, so that what the check exempts (`off`, a credential of a kind it does not
+ * hold) never fails on it; a row that fails throws `AuthRowTampered`, which each caller answers as it answers its own
+ * row's (review r1 of #497). The revocations of section 6.1 end what a change to the person's passkeys leaves no passkey
  * behind; this is there for what no change marks: a session made while the policy was `off`, or by the previous
  * release during a rollout, for a person who holds a passkey; one made before the deployment turned `required` on
  * (formal/Factor.tla, `ServedBacked`).
  */
 export function passkeyStands(
+  chainKey: Buffer,
   policy: PasskeyPolicy,
   holder: { principal: string; generation: number; passkeyId: string | null },
   read: PasskeyRead,
@@ -32,6 +35,7 @@ export function passkeyStands(
   if (policy === 'off') return true;
   if (holder.passkeyId === null) return policy === 'optional' && !read.held;
   const { passkey } = read;
+  if (passkey !== null) verifyAuthRow(chainKey, 'passkeys', passkey);
   return passkey !== null && passkey.id === holder.passkeyId && passkey.removedAt === null
     && passkey.principal === holder.principal && passkey.generation === holder.generation;
 }
@@ -80,16 +84,15 @@ export async function sourceStands(
   ctx: { caller: Pick<Caller, 'principal' | 'generation'>; credentialId: string | null },
 ): Promise<boolean> {
   if (ctx.credentialId === null) return false;
-  let row: Awaited<ReturnType<typeof findCredential>>;
   try {
-    row = await findCredential(tx, chainKey, { id: ctx.credentialId });
+    const row = await findCredential(tx, chainKey, { id: ctx.credentialId });
+    return row !== null && row.revokedAt === null && row.expiresAt > new Date() && row.identityRevokedAt === null
+      && row.principal === formatMember(ctx.caller.principal) && row.generation === ctx.caller.generation
+      && row.passkeyRead !== undefined && passkeyStands(chainKey, policy, row, row.passkeyRead);
   } catch (error) {
     if (error instanceof AuthRowTampered) return false;
     throw error;
   }
-  return row !== null && row.revokedAt === null && row.expiresAt > new Date() && row.identityRevokedAt === null
-    && row.principal === formatMember(ctx.caller.principal) && row.generation === ctx.caller.generation
-    && row.passkeyRead !== undefined && passkeyStands(policy, row, row.passkeyRead);
 }
 
 /**
@@ -102,10 +105,19 @@ export async function sourceStands(
  * 401 `passkey_required`, before anything is written. Undefined where nothing is checked: a handle, a service's token,
  * policy `off`, or no such credential (the vault's call refuses that). A passkey removed between this read and the
  * vault's revoked the credential (section 6.1), which the vault refuses itself.
+ *
+ * `'ordinary'`: the request goes the ordinary way, asking the vault nothing ahead, whose credential check reads and
+ * decides again and answers as it answers any request: refused, 401 `passkey_required`; a passkey row that fails its
+ * MAC, 401 (`AuthRowTampered`); a read that failed, 503 (`CredentialUncheckable`). Never thrown from here, where no
+ * boundary translates it (review r1 of #497).
  */
-export async function passkeyAhead(runtime: CoffreRuntime, token: string, kind: TokenKind): Promise<PasskeyRead | 'refused' | undefined> {
+export async function passkeyAhead(runtime: CoffreRuntime, token: string, kind: TokenKind): Promise<PasskeyRead | 'ordinary' | undefined> {
   if (!passkeyChecked(kind) || runtime.auth.mode !== 'signin' || runtime.auth.signin.passkeys.policy === 'off') return undefined;
-  const read = await passkeyByToken(runtime.db, runtime.chainKey, hashToken(token));
-  if (read === null) return undefined;
-  return passkeyStands(runtime.auth.signin.passkeys.policy, read.holder, read) ? read : 'refused';
+  try {
+    const read = await passkeyByToken(runtime.db, hashToken(token));
+    if (read === null) return undefined;
+    return passkeyStands(runtime.chainKey, runtime.auth.signin.passkeys.policy, read.holder, read) ? read : 'ordinary';
+  } catch {
+    return 'ordinary';
+  }
 }

@@ -1,4 +1,4 @@
-import { defineSignin, type McpOptions, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
+import { defineSignin, type McpOptions, type PasskeyPolicy, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
 import type { SigninProvider } from './signin/types.ts';
 import type { AccessVerifierConfig } from './types.ts';
 
@@ -103,6 +103,8 @@ export type SigninOptions = {
   workloads?: WorkloadsOptions;
   /** Lets MCP clients, Claude among them, act as the people who connect them (docs/mcp.md). */
   mcp?: McpOptions;
+  /** Whether people need a passkey after the provider: `'off'`, `'optional'` (unless set) or `'required'` (docs/design/passkeys.md, section 2). */
+  passkeys?: PasskeyPolicy;
 };
 
 /**
@@ -128,5 +130,6 @@ function toSignin(options: SigninOptions) {
     cliSessionDays: options.cliSessionDays,
     workloads: options.workloads,
     mcp: options.mcp,
+    passkeys: options.passkeys,
   };
 }
