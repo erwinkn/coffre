@@ -660,8 +660,8 @@ export class SigninService {
   }
 
   /**
-   * Revalidate the initiating credential under the app audit head: live, and still backed by what it names (passkeys.md,
-   * section 6.1), as what it issues names the same. A change to the person's passkeys revokes under the same head.
+   * Revalidate the initiating credential, or MCP connection, under the app audit head: live, and still backed by what it
+   * names (passkeys.md, section 6.1), as what it issues names the same. A change to the person's passkeys revokes under the same head.
    */
   async #currentCaller(tx: Transaction, ctx: Asker, standing: Access): Promise<Access | null> {
     if (standing.generation !== ctx.caller.generation || !(await this.#stillMember(tx, ctx.caller.principal, standing))) return null;
@@ -669,6 +669,9 @@ export class SigninService {
       const row = await findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId });
       if (!this.#liveCredential(row, standing, new Date()) || row?.principal !== principalOf(ctx.caller.principal)) return null;
       if (passkeyChecked(row.kind) && !this.#backed(row, row.passkeyRead!)) return null;
+    } else if (ctx.via !== null && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
+      // An MCP connection, held as the request held it: live, and its passkey too (review of #497 by Fable 5.1).
+      return null;
     }
     return standing;
   }
@@ -734,6 +737,9 @@ export class SigninService {
     details: Record<string, unknown>,
     held: { accessSeq: bigint | null; refusal?: () => Refusal },
   ): Promise<IssuedCredential | null> {
+    // The vault holds `via` to a credential it reads, and an MCP connection is none: what one issues, the app issues,
+    // holding the connection and its passkey under its head (`sourceStands`; review of #497 by Fable 5.1).
+    if (ctx.credentialId === null && ctx.via !== null) return null;
     const { row, issued } = this.#credential(kind, principal, options);
     const outcome = await this.#deps.vault.issueToken!({
       actor: formatMember(ctx.caller.principal),
@@ -1201,7 +1207,7 @@ export class SigninService {
         await issuerStill(tx, caller, accessSeq);
         await credentialStill(ctx, tx, 'token.create');
         // The session it comes from, still backed by what it names, which the token names too (section 6.1).
-        if (ctx.credentialId !== null && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
+        if ((ctx.credentialId !== null || ctx.via !== null) && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
           throw new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'token.create', 'credential_ended', { metadata: details }));
         }
         if (!(await this.#stillMember(tx, service, standing))) throw refusal();

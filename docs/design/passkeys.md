@@ -963,7 +963,15 @@ check; that is a task of its own.
 What a request issues names its credential's passkey, copied, never its
 touch (`confirmed_at` null): personal tokens, handles and service tokens,
 on the vault's path (which holds `via` to it, section 6.3) and the app's;
-an MCP connection, the consenting session's (5.2). Until PR 5's device
+an MCP connection, the consenting session's (5.2). What a connection
+issues (a service token through `issue_service_token`, or its person's
+personal token) names the connection's passkey, and goes the app's way:
+the vault holds `via` to a credential, which a connection is not, and
+refused a passkey with no `via` as a programming error. Under the head,
+`sourceStands` reads the connection as it reads a session, live and its
+passkey with it, and the issue's recheck (`#currentCaller`, or the
+service token's own) refuses one whose passkey has gone
+(`mcp-oauth.test.ts`; review of #497 by Fable 5.1). Until PR 5's device
 ceremony asks a touch per code, a device approval copies the approving
 session's passkey too, and the CLI session its poll redeems names it with
 no `confirmed_at`: a terminal approved by a confirmed browser keeps working
@@ -1033,7 +1041,7 @@ resolves the key before it decides on the caller.
 So the named path stays, for people too, and the passkey check goes before
 it: for a person's credential, while passkeys are not `off`, the app runs
 the check of 6.2 in one statement before the vault call, for one key and
-for several (`passkeyFirst` in `named-use.ts`). Refused, the request goes
+for several (`passkeyAhead`, which `named-use.ts` calls). Refused, the request goes
 the ordinary way, whose credential check refuses it `401 passkey_required`
 with the same statement, before anything reads the key. The statement
 reads the credential and the person's passkeys, nothing about the key, so

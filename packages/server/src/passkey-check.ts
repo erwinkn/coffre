@@ -5,7 +5,7 @@ import type { Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { formatMember } from './api/paths.ts';
 import { AuthRowTampered, verifyAuthRow } from './auth-rows.ts';
-import { findCredential, passkeyByToken, type PasskeyRead } from './db/queries.ts';
+import { findConnection, findCredential, passkeyByToken, type PasskeyRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -72,23 +72,32 @@ export function passkeyRequired(refused: { principal: string; credentialId: stri
 }
 
 /**
- * Whether the credential a request came in on still stands as its source, for an issue under the log's head (passkeys.md,
- * section 6.1): live, its person's at the generation the request was checked at, and still backed (`passkeyStands`). A
- * change to the person's passkeys revokes under the same head, so what this reads holds until the issue commits
- * (formal/Factor.tla, `AppIssueChecks`). A row that fails its MAC stands for nothing.
+ * Whether what a request came in on still stands as its source, for an issue under the log's head (passkeys.md, section
+ * 6.1): a credential, or an MCP connection (`via`), live, its person's at the generation the request was checked at, and
+ * still backed (`passkeyStands`). A change to the person's passkeys revokes both under the same head, so what this reads
+ * holds until the issue commits (formal/Factor.tla, `AppIssueChecks`). A row that fails its MAC stands for nothing, and
+ * so does a request that came in on neither.
  */
 export async function sourceStands(
   tx: Queryable,
   chainKey: Buffer,
   policy: PasskeyPolicy,
-  ctx: { caller: Pick<Caller, 'principal' | 'generation'>; credentialId: string | null },
+  ctx: { caller: Pick<Caller, 'principal' | 'generation'>; credentialId: string | null; via?: { connectionId: string } | null },
 ): Promise<boolean> {
-  if (ctx.credentialId === null) return false;
+  const principal = formatMember(ctx.caller.principal);
+  const now = new Date();
   try {
-    const row = await findCredential(tx, chainKey, { id: ctx.credentialId });
-    return row !== null && row.revokedAt === null && row.expiresAt > new Date() && row.identityRevokedAt === null
-      && row.principal === formatMember(ctx.caller.principal) && row.generation === ctx.caller.generation
-      && row.passkeyRead !== undefined && passkeyStands(chainKey, policy, row, row.passkeyRead);
+    if (ctx.credentialId !== null) {
+      const row = await findCredential(tx, chainKey, { id: ctx.credentialId });
+      return row !== null && row.revokedAt === null && row.expiresAt > now && row.identityRevokedAt === null
+        && row.principal === principal && row.generation === ctx.caller.generation
+        && row.passkeyRead !== undefined && passkeyStands(chainKey, policy, row, row.passkeyRead);
+    }
+    if (ctx.via == null) return false;
+    const row = await findConnection(tx, chainKey, { id: ctx.via.connectionId });
+    return row !== null && row.revokedAt === null && row.expiresAt > now && row.refreshHash !== null
+      && row.principal === principal && row.generation === ctx.caller.generation
+      && passkeyStands(chainKey, policy, row, row.passkeyRead);
   } catch (error) {
     if (error instanceof AuthRowTampered) return false;
     throw error;

@@ -18,7 +18,7 @@ import { McpService } from '../src/mcp/service.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, logChanges, mcpConnections, oauthClients } from './db/tables.ts';
+import { auditLog, credentials, logChanges, mcpConnections, oauthClients } from './db/tables.ts';
 import { addPasskey, confirmedSession, removePasskey } from './passkey-rows.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -699,4 +699,40 @@ test('a connection no passkey stands behind is refused once its person holds one
   });
   assert.equal(response.status, 401);
   assert.equal(((await response.json()) as { error: string }).error, 'passkey_required');
+});
+
+// What a connection issues, through `POST /api/members/<member>/tokens` (`issue_service_token`), names its passkey, as a
+// session's issue names the session's. The vault holds `via` to a credential, and a connection is none, so the app issues
+// it, holding the connection and its passkey under its head (review of #497 by Fable 5.1: the vault refused a passkey with
+// no `via` as a programming error, 500).
+test("a token issued through a connection names the connection's passkey, and none is issued once that passkey is gone", async () => {
+  const key = await addPasskey(db.owner, deps.chainKey, ROOT);
+  const { verifier, challenge } = pkce();
+  const redirect = 'http://localhost:51234/callback';
+  const back = await decide(await confirmedSession(db.owner, deps.chainKey, ROOT, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read manage-access' }), { approve: true, scopes: ['read', 'manage-access'] });
+  const redeemed = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE, resource: RESOURCE }));
+  assert.equal(redeemed.status, 200, await redeemed.clone().text());
+  const [connection] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${ROOT}`));
+  assert.equal(connection!.passkeyId, key);
+  const root = clientFor(deps, ROOT);
+  await root.members.add('token:ci');
+  await root.access.set('token:ci', { market: 'viewer' });
+  // The identity the MCP endpoint hands the API: no credential, the connection as `via`, and its passkey.
+  const through = {
+    ...(await contextFor(deps, ROOT)),
+    credentialId: null,
+    passkeyId: key,
+    provenance: connection!.id,
+    via: { connectionId: connection!.id, clientId: CLAUDE_CODE, clientName: 'Claude Code', scopes: ['read', 'manage-access'] as const },
+  };
+  const service = runtime.signin!;
+  const issued = await service.issueServiceToken(through, 'ci', { label: 'deploy', expiresInDays: 1 });
+  const personal = await service.issuePersonalToken(through, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } });
+  const named = await db.owner.select({ id: credentials.id, passkeyId: credentials.passkeyId }).from(credentials).where(inArray(credentials.id, [issued.id, personal.id]));
+  assert.deepEqual(named.map((row) => row.passkeyId), [key, key], 'each names the passkey behind the connection');
+
+  await removePasskey(db.owner, deps.chainKey, key);
+  await assert.rejects(service.issueServiceToken(through, 'ci', { label: 'again', expiresInDays: 1 }), { status: 401 });
+  await assert.rejects(service.issuePersonalToken(through, { label: 'again', expiresInMinutes: 60, scope: { market: 'viewer' } }), { status: 403 });
+  assert.equal((await db.owner.select().from(credentials).where(eq(credentials.label, 'again'))).length, 0, 'nothing issued on a connection no passkey stands behind');
 });

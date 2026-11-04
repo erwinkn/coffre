@@ -299,7 +299,7 @@ test("a reveal of one key is the vault's one call, as a /use is; a reveal of sev
   // What the app reads itself of a place's keys with no value of their own: whether a reference holds one (`valuesIn`).
   const references = ['select "secret_references"."id",', 'select "secrets"."id", "secrets"'];
   // A person's credential, with passkeys not off: the passkey check, one statement before the vault's call, which reads
-  // the credential and its person's passkeys and nothing of the key (passkeys.md, section 6.4; `passkeyFirst`). A
+  // the credential and its person's passkeys and nothing of the key (passkeys.md, section 6.4; `passkeyAhead`). A
   // service's credential holds no passkey, and runs none.
   const passkey = ['select "credentials"."kind", "cr'];
   const cases = [

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Passkeys, the server's side (T176, PR 4a; in progress).**
+  `signin({ passkeys })` takes the policy, `'off'`, `'optional'` (the
+  default) or `'required'`, and every request on a person's session, CLI
+  session, personal token or MCP connection is held to it: under
+  `optional`, once a person holds a live passkey, a credential that names
+  none answers `401 passkey_required`; under `required`, every one that
+  names none does. What a credential issues names its passkey, so removing
+  that passkey ends it too. Until the sign-in ceremony lands (PR 4b),
+  nothing confirms a session with a passkey: leave the policy at
+  `optional`, where a person with no passkey signs in as before, since
+  `required` lets no one sign in.
+
 - **A Terraform provider that writes and never reads (T108).**
   `terraform-provider/` is a Go provider for Terraform and OpenTofu 1.11
   with one resource, `coffre_secret`: its value is a write-only argument,
