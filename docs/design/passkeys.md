@@ -266,7 +266,8 @@ cookie and says where to go (`{ next }`); a passkey that did not answer
 leaves the sign-in to try again, with another passkey too, and any other
 refusal clears the cookie. An answer that is no refusal (no response, a
 5xx such as `503 unavailable` or `migrating`, a 408 or 429, a body that
-does not parse) clears nothing, so the page says coffre did not answer and
+does not parse, or a `409 changed`, another change having come between
+each of the transaction's tries, review r6) clears nothing, so the page says coffre did not answer and
 asks again, the question or the touch, rather than send the person back to
 their provider (`passkeyAnswer`, `packages/ui/src/lib/passkey-answer.ts`).
 The cookie's value names its purpose, whose key
@@ -1018,7 +1019,16 @@ live, for a credential that names none, reads them all, one statement
 more, and holds each to its MAC: a removal or a generation written in the
 database alone would otherwise pass a session made while the passkey was
 live, under `off` or by the previous release, and fails as a tampered row
-does (R64; reviews r3 and r5 of #500, PR 4b). A person readmitted after
+does (R64; reviews r3 and r5 of #500, PR 4b). What no MAC answers is a
+row that is gone from the person: deleted, or moved to another principal
+(review r6 of #500). Both are writes `coffre_app` cannot make (no `DELETE`,
+no `UPDATE` of `principal` or `generation`, `schema-guarantees.sql`, check
+22), only a login above it, and a person with no row reads as one who never
+had a passkey, whatever the other rows' MACs say. R64 leaves that writer's
+state undesigned for; telling "never had one" apart from "had one" would
+take a mark of the person's own, signed and outside the rows that writer
+can delete, a later change if one is wanted. A removal, which `coffre_app`
+can write (`removed_at`), is what the MACs above cover. A person readmitted after
 holding passkeys, and holding none since, pays that statement on each
 request of a session no passkey stands behind. The passkey's MAC is checked by
 `passkeyStands`, on the one branch whose answer reads the row, so a row

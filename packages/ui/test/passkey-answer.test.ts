@@ -29,3 +29,10 @@ test('no answer to go by keeps the step: the sign-in still waits (Sol r4, #500)'
   assert.deepEqual(await passkeyAnswer(Promise.reject(new TypeError('Failed to fetch'))), unavailable);
   assert.deepEqual(await passkeyAnswer(Promise.resolve(new Response('not json', { status: 200 }))), unavailable);
 });
+
+test("a change that came between every try asks again, the sign-in kept (Sol r6, #500)", async () => {
+  // `ObjectMoved` once `retrying`'s tries are spent: the pending sign-in's cookie stands, and the same answer may pass.
+  assert.deepEqual(await passkeyAnswer(json({ error: 'conflict', message: 'try again', reason: 'changed' }, 409)), { kind: 'unavailable' });
+  // Any other conflict is the server's refusal.
+  assert.deepEqual(await passkeyAnswer(json({ error: 'conflict', message: 'taken' }, 409)), { kind: 'refused', code: 'conflict' });
+});
