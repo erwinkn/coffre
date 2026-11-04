@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **A migration no longer holds up requests for minutes while it waits for
+  a table (W331, limits D2).** `coffre migrate` set `lock_timeout = 5min`
+  for its whole session, so a migration statement waiting for a table that
+  a long transaction held queued every request on that table behind it,
+  for up to 5 minutes. The 5 minutes now cover only what queues no request:
+  the wait for another run's migration lock, and, when reasserting the
+  privileges, for another database's run changing the same roles. A
+  migration's statements wait at most 500 ms for a lock, half the hot
+  login's 1 s, and the migrations are tried again, 5 times, a second apart,
+  then fail with nothing changed, naming the statement and what held
+  coffre's tables, prepared transactions included.
+
 - **A key's newest reference is read by its own index, never through
   other keys' references (T220).** Every read of a key's newest
   reference row, `use_credential` (`/use`), the vault's object reads and

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { postgresClient } from '@coffre/db/connect';
 
-import { AfterMigrations, managedObjects, migrateDatabase, migrationsFolder, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, LockWaitsExhausted, managedObjects, migrateDatabase, MIGRATION_LOCK_ATTEMPTS, MIGRATION_LOCK_WAIT_MS, migrationsFolder, NotOwner } from '@coffre/db/migrate';
 
 import { describeEveryProject, describeFirstRun, describeIssuers, describeUnsealed, migrationFailure, pinProblem } from '../src/migrate.ts';
 import { cliVersion } from '../src/version.ts';
@@ -201,6 +201,32 @@ test('a failure after the migrations committed never says nothing was changed', 
     migrationFailure(new AfterMigrations(refusal)),
     `the database is at the migrated schema, but reasserting its privileges failed: permission denied to grant role "coffre_backup"`,
   );
+});
+
+test("a migration that gave up waiting for a table says how many times and what held it, not Postgres's one wait", () => {
+  const wait = Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+  const failed = Object.assign(new Error('Failed query: ALTER TABLE "credentials" ADD COLUMN "passkey_id" uuid;\nparams: ', { cause: wait }), { query: 'ALTER TABLE "credentials" ADD COLUMN "passkey_id" uuid;' });
+  const said = migrationFailure(new LockWaitsExhausted(MIGRATION_LOCK_ATTEMPTS, [
+    { pid: 42, prepared: null, login: 'coffre_backup_login', application: 'pg_dump', tables: ['public.credentials'] },
+    { pid: null, prepared: 'deploy-7', login: 'coffre_owner', application: null, tables: ['public.credentials', 'public.secrets'] },
+    { pid: 43, prepared: null, login: null, application: null, tables: ['public.secrets'] },
+  ], failed));
+  assert.ok(said.startsWith(`the migrations waited for a lock ${MIGRATION_LOCK_ATTEMPTS} times, ${MIGRATION_LOCK_WAIT_MS} ms each, and gave up,`), said);
+  assert.ok(said.includes('at ALTER TABLE "credentials" ADD COLUMN "passkey_id" uuid. '), said);
+  assert.ok(said.includes("Sessions holding coffre's tables: pid 42 (coffre_backup_login, pg_dump) on public.credentials; prepared transaction 'deploy-7' (coffre_owner) on public.credentials, public.secrets; pid 43 on public.secrets. "), said);
+  assert.ok(said.endsWith('Nothing was changed: the migrations run in one transaction.'), said);
+  assert.ok(!said.includes('canceling statement'), said);
+
+  // A migration's statement as Drizzle sends it, its comments first (0029_use_objects).
+  const commented = Object.assign(new Error('Failed query: …', { cause: wait }), {
+    query: "-- Its newest reference row's end, which a use reads.\n\n-- Kept in step by the vault.\nALTER TABLE \"secret_references\" ADD COLUMN \"ended_at\" bigint;",
+  });
+  const fromComment = migrationFailure(new LockWaitsExhausted(MIGRATION_LOCK_ATTEMPTS, [], commented));
+  assert.ok(fromComment.includes('gave up, at ALTER TABLE "secret_references" ADD COLUMN "ended_at" bigint. '), fromComment);
+
+  const unread = migrationFailure(new LockWaitsExhausted(MIGRATION_LOCK_ATTEMPTS, { unread: new Error('connection lost') }, failed));
+  assert.ok(unread.includes("Which sessions held coffre's tables could not be read: connection lost. "), unread);
+  assert.ok(!unread.includes('No session held'), unread);
 });
 
 const scratch: string[] = [];

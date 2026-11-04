@@ -18,7 +18,7 @@ import { INSTANCE_ROLES, roleGrants, scopeInWords, unscoped } from '@coffre/core
 import { shownMember } from '@coffre/core/schemas';
 import { openDatabase } from '@coffre/db/connect';
 import { everyProjectPreview, readGrants, unsealedCredentials, type EveryProjectPreview, type Unsealed } from '@coffre/db/grants';
-import { AfterMigrations, backupLoginProblem, DatabaseAhead, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
+import { AfterMigrations, backupLoginProblem, DatabaseAhead, LockWaitsExhausted, migrateDatabase, migrationStatus, NotOwner } from '@coffre/db/migrate';
 
 import { readDatabaseUrl } from './database-url.ts';
 import { coffrePins, deploymentKind } from './deployment.ts';
@@ -63,6 +63,8 @@ export function migrationFailure(error: unknown): string {
   if (error instanceof NotOwner) return `${error.message}. Nothing was changed`;
   // After the migrations' transaction: what it applied stays.
   if (error instanceof AfterMigrations) return error.message;
+  // Its cause, Postgres's 55P03, is one try's: this says all of them, and who held the tables.
+  if (error instanceof LockWaitsExhausted) return `${error.message}. Nothing was changed: the migrations run in one transaction.`;
   for (let cause: unknown = error; cause instanceof Error; cause = cause.cause) {
     const code = (cause as { code?: unknown }).code;
     if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) {

@@ -21,6 +21,128 @@ import { postgresSession, quoteIdentifier, type PostgresClient } from './postgre
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
 
+/**
+ * How long each of a migration's statements waits for a lock, once the
+ * migration lock is held: half a use's (`HOT_LOCK_TIMEOUT_MS`, the hot
+ * login's `lock_timeout`, `@coffre/core/vault`). Postgres
+ * grants a table's locks in the order they were asked, so a DDL statement
+ * waiting for a table that a long transaction holds queues every later
+ * statement on that table behind it, a use's included. Leaving the queue
+ * within half a use's own wait lets a use that queued behind it take its lock
+ * with half its wait to spare, rather than be refused busy for the migration.
+ * A statement that waits longer fails its transaction with 55P03, and the run
+ * is tried again (`MIGRATION_LOCK_ATTEMPTS`). A migration's own changes to the
+ * roles, which other databases' migrators may be changing too, wait as
+ * briefly: they share the transaction that holds its tables.
+ */
+export const MIGRATION_LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
+
+/**
+ * Retry policy, not a constraint: how many times the migrations (all of them,
+ * one transaction, as Drizzle runs them) are tried when a statement gave up
+ * waiting for a lock, and the pause between tries, which holds no lock, so
+ * uses run freely through it. Five tries a second apart outlast a holder of a
+ * few seconds (a request's transaction, a vacuum of a small table) and give
+ * up within about 7 s on one that will not end soon (a backup's `pg_dump`, a
+ * session idle in a transaction), which whoever deploys must end or wait out.
+ */
+export const MIGRATION_LOCK_ATTEMPTS = 5;
+export const MIGRATION_LOCK_PAUSE_MS = 1_000;
+
+/**
+ * How long a migrator waits for another migrator's run: this database's, for
+ * the migration lock, or another database's of the same server, for the
+ * roles' rows that reasserting the privileges changes, which the roles of
+ * every database share. Neither wait holds a table, so no use queues behind
+ * it. 5 minutes is history (277928a5, docs/design/limits.md D2), kept for the
+ * waits that hold up no use.
+ */
+const OTHER_RUN_LOCK_TIMEOUT = '5min';
+
+/**
+ * The migrations gave up waiting for a lock `attempts` times: a session held
+ * a table they change past `MIGRATION_LOCK_WAIT_MS` each time. The message
+ * names the statement that waited, when the driver said which, and the
+ * sessions holding coffre's tables when they gave up, as Postgres showed them
+ * to this login (`holders`, null when they could not be read).
+ */
+export class LockWaitsExhausted extends Error {
+  readonly attempts: number;
+  readonly holders: LockHolder[] | null;
+
+  constructor(attempts: number, holders: LockHolder[] | { unread: unknown }, cause: unknown) {
+    const statement = failedStatement(cause);
+    const held = Array.isArray(holders)
+      ? holders.length > 0
+        ? `Sessions holding coffre's tables: ${holders.map(holderInWords).join('; ')}. `
+        : "No session held coffre's tables when they gave up. "
+      : `Which sessions held coffre's tables could not be read: ${holders.unread instanceof Error ? holders.unread.message : String(holders.unread)}. `;
+    super(
+      `the migrations waited for a lock ${attempts} times, ${MIGRATION_LOCK_WAIT_MS} ms each, and gave up` +
+        (statement === null ? '' : `, at ${statement}`) + '. ' + held +
+        'Find the one holding the table (pg_locks, pg_stat_activity), wait for it to end or end it ' +
+        "(SELECT pg_terminate_backend(<pid>), or ROLLBACK PREPARED '<name>' for a prepared transaction), then migrate again",
+      { cause },
+    );
+    this.name = 'LockWaitsExhausted';
+    this.attempts = attempts;
+    this.holders = Array.isArray(holders) ? holders : null;
+  }
+}
+
+/**
+ * A session holding locks on coffre's tables, or a prepared transaction
+ * (`pid` null, `prepared` its name), which holds its locks with no session.
+ * `login` and `application` are null where Postgres hides them from this login.
+ */
+export type LockHolder = { pid: number | null; prepared: string | null; login: string | null; application: string | null; tables: string[] };
+
+function holderInWords({ pid, prepared, login, application, tables }: LockHolder): string {
+  const who = [login, application].filter((part) => part !== null && part !== '').join(', ');
+  return `${pid === null ? `prepared transaction '${prepared}'` : `pid ${pid}`}${who === '' ? '' : ` (${who})`} on ${tables.join(', ')}`;
+}
+
+/** Whether a statement gave up waiting for a lock: `lock_timeout` (55P03), anywhere in its causes. */
+function lockNotAvailable(error: unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if ((cause as { code?: unknown }).code === '55P03') return true;
+  }
+  return false;
+}
+
+/**
+ * The statement that failed, its first line of SQL, past the comments a
+ * migration's statement may start with, when the driver or Drizzle said which.
+ */
+function failedStatement(error: unknown): string | null {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    const { query } = cause as { query?: unknown };
+    const first = typeof query === 'string' ? query.split('\n').map((line) => line.trim()).find((line) => line !== '' && !line.startsWith('--')) : undefined;
+    if (first !== undefined) return first.replace(/;$/, '');
+  }
+  return null;
+}
+
+/**
+ * What holds locks on the tables of coffre's schemas in this database, but
+ * this session, as pg_locks shows it: sessions, and prepared transactions,
+ * whose locks have no pid, named by the transaction ID their virtual
+ * transaction holds (PREPARE always assigns one).
+ */
+const LOCK_HOLDERS = `
+  SELECT l.pid, p.gid AS prepared, coalesce(a.usename, p.owner)::text AS login, a.application_name AS application,
+         array_agg(DISTINCT format('%I.%I', n.nspname, c.relname)) AS tables
+    FROM pg_locks l
+    JOIN pg_class c ON c.oid = l.relation
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+    LEFT JOIN pg_prepared_xacts p ON l.pid IS NULL AND EXISTS (
+      SELECT 1 FROM pg_locks x WHERE x.locktype = 'transactionid' AND x.pid IS NULL AND x.virtualtransaction = l.virtualtransaction AND x.transactionid = p.transaction)
+   WHERE l.locktype = 'relation' AND l.granted AND l.pid IS DISTINCT FROM pg_backend_pid()
+     AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+     AND n.nspname IN ('public', 'drizzle') AND c.relkind IN ('r', 'p')
+   GROUP BY l.pid, p.gid, a.usename, p.owner, a.application_name, coalesce(a.xact_start, p.prepared)
+   ORDER BY coalesce(a.xact_start, p.prepared) NULLS LAST, l.pid`;
 
 /**
  * Reassert database privileges that pg_dump and CREATE DATABASE TEMPLATE do not carry and the hot path's login's
@@ -418,15 +540,22 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       )];
     },
     async lock() {
-      await client.unsafe("SET lock_timeout = '5min'");
+      await client.unsafe(`SET lock_timeout = '${OTHER_RUN_LOCK_TIMEOUT}'`);
       await client.unsafe('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_LOCK_KEY]);
+      // The statements after it, the migrations', wait for a lock no longer than a use could stand to wait behind them.
+      await client.unsafe(`SET lock_timeout = '${MIGRATION_LOCK_WAIT_MS}ms'`);
     },
     async unlock() {
       await client.unsafe('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
-    // The migrator uses the database's dialect and session alone, never its relational config.
-    migrate: (migrationsFolder) => migrate(createDatabase(client) as unknown as Parameters<typeof migrate>[0], { migrationsFolder }),
+    // The migrator uses the database's dialect and session alone, never its relational config. Drizzle applies every
+    // pending migration in one transaction, which a statement that gave up waiting aborts: the whole run is tried again.
+    migrate: (migrationsFolder) =>
+      waitingBriefly(client, () => migrate(createDatabase(client) as unknown as Parameters<typeof migrate>[0], { migrationsFolder })),
     async restrict(backupLogin) {
+      // It changes no table, only rows of the roles and of the database, which no use locks: it may wait for another
+      // database's migrator changing the same roles, as for the migration lock. The last of the run's statements.
+      await client.unsafe(`SET lock_timeout = '${OTHER_RUN_LOCK_TIMEOUT}'`);
       await restrictDatabase(client);
       if (backupLogin !== undefined) {
         // Compared as text: as a name, Postgres would cut it to 63 bytes, and grant whichever role bears the cut.
@@ -445,6 +574,27 @@ async function postgresMigrator(url: string): Promise<Migrator> {
       await client.end();
     },
   };
+}
+
+/**
+ * `run`, tried again after a pause when one of its statements gave up waiting
+ * for a lock (55P03), up to `MIGRATION_LOCK_ATTEMPTS` times; any other failure
+ * fails at once. Then `LockWaitsExhausted`, naming what held coffre's tables.
+ */
+async function waitingBriefly<T>(client: Pick<PostgresClient, 'unsafe'>, run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!lockNotAvailable(error)) throw error;
+      if (attempt === MIGRATION_LOCK_ATTEMPTS) {
+        // The failure is the wait's, whether or not Postgres still says who held the tables.
+        const holders = await client.unsafe<LockHolder[]>(LOCK_HOLDERS).then((rows) => [...rows], (unread: unknown) => ({ unread }));
+        throw new LockWaitsExhausted(attempt, holders, error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, MIGRATION_LOCK_PAUSE_MS));
+    }
+  }
 }
 
 async function sqliteMigrator(url: string): Promise<Migrator> {
