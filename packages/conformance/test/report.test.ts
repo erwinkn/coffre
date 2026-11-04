@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { createServer, type RequestListener } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { Browser } from '../src/browser.ts';
+import { Unreachable } from '@coffre/client';
+
+import { bearer, Browser } from '../src/browser.ts';
 import { Report } from '../src/report.ts';
 
 async function serving(t: test.TestContext, listener: RequestListener): Promise<string> {
@@ -148,4 +150,57 @@ test("a 5xx body that streams on, or is huge, holds up nothing: a failure shows 
   const shown = printed.join('\n');
   assert.match(shown, /GET \/endless 500: Error: still going… \(the rest unread: the body was still coming after 1000 ms\)/);
   assert.match(shown, /GET \/huge 500: x{2000}… \(cut at 2000 characters\)/);
+});
+
+test('a request made with `fetch` itself, as the health and readiness checks make theirs, is kept too', async (t) => {
+  const origin = await dropping(t);
+  const printed = printing(t);
+  const report = new Report();
+  await report.check('health', {}, async () => {
+    const live = await fetch(`${origin}/livez`);
+    throw new Error(`/livez answered ${live.status}`);
+  });
+  assert.match(printed.join('\n'), /GET \/livez 500: Error: Network connection lost\./);
+});
+
+test('a failure waits, a while, for the requests its check left running: their answers, and those with none', async (t) => {
+  const origin = await serving(t, (request, response) => {
+    if (request.url === '/dropped') return request.socket.destroy();
+    if (request.url === '/hung') return;
+    // A page's other call, whose 500 comes after the first has failed it.
+    setTimeout(() => {
+      response.writeHead(500, { 'content-type': 'text/plain' });
+      response.write('Error: late');
+      setTimeout(() => response.end(' and slow'), 200);
+    }, 200);
+  });
+  const printed = printing(t);
+  const report = new Report();
+  const started = Date.now();
+  await report.check('page load', {}, async () => {
+    const browser = new Browser(origin);
+    await Promise.all([browser.fetch('/late'), browser.fetch('/dropped'), browser.fetch('/hung')]);
+    return 'loaded';
+  });
+  const shown = printed.join('\n');
+  assert.match(shown, /GET \/late 500: Error: late and slow/);
+  assert.match(shown, /GET \/dropped no answer: could not reach http:\/\/127\.0\.0\.1:\d+: /);
+  assert.match(shown, /GET \/hung still unanswered 2000 ms after the check failed/);
+  assert.ok(Date.now() - started < 4000, 'a request that never ends holds the report up for 2 s at most');
+});
+
+test("a bearer client still says why it could not reach the instance", async (t) => {
+  const server = createServer();
+  await new Promise<void>((listening) => server.listen(0, '127.0.0.1', listening));
+  const closed = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  await new Promise((done) => server.close(done));
+  printing(t);
+  const report = new Report();
+  let thrown: unknown;
+  await report.check('reach', {}, async () => {
+    thrown = await bearer(closed, 'token').me().catch((error: unknown) => error);
+    throw thrown;
+  });
+  assert.ok(thrown instanceof Unreachable, String(thrown));
+  assert.match(thrown.message, /could not reach http:\/\/127\.0\.0\.1:\d+: .*ECONNREFUSED/);
 });

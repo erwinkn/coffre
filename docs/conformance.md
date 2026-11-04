@@ -184,13 +184,28 @@ The suites cover races during sign-in and late callbacks as well. Those
 checks use controlled pauses inside requests; conformance cites their
 evidence rather than booting a second app and vault pair.
 
-A check that fails prints what it saw: its error, every answer of 500 or
-over to the requests it sent, with the first 2,000 characters of its body
-(read for a second at most), which a client error drops when it is not
-coffre's own JSON, and what the processes wrote while it ran, whole, but
-for wrangler's lines for requests answered below 500. The ones that need its
-result are skipped, and the run ends with the last lines of the processes'
-output.
+A check that fails prints what it saw: its error; every answer of 500 or
+over to the requests it sent, however it sent them, with the first 2,000
+characters of its body (read for a second at most), which a client error
+drops when it is not coffre's own JSON; the requests that got no answer,
+and why, those still running given two seconds to end; and what the
+processes wrote while it ran, whole, but for wrangler's lines for requests
+answered below 500. The ones that need its result are skipped, and the run
+ends with the last lines of the processes' output.
+
+One such failure is wrangler's, not coffre's. Under `wrangler dev`, a
+request that is neither a GET nor a HEAD, sent on a connection that has
+been idle about five seconds, can meet wrangler's own proxy dropping that
+connection to the Worker: the request gets a 500 whose body is
+`Error: Network connection lost.`, and wrangler prints
+`✘ [ERROR] Error inside ProxyWorker (the affected request failed; the dev
+server continues): <method> <path> (failed after 1 attempt): Network
+connection lost.` A GET or a HEAD is sent again, unseen. A deployed Worker
+has no such proxy. It is upstream's to fix
+([cloudflare/workers-sdk#16348](https://github.com/cloudflare/workers-sdk/issues/16348),
+[#14641](https://github.com/cloudflare/workers-sdk/issues/14641)); a run
+that fails with both is rerun once, its job alone, and the checks are left
+as they are.
 
 ## What it does not show
 
