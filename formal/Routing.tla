@@ -56,6 +56,19 @@
 (* decision 5(b)): the use's statement reads the editor's principal in the *)
 (* same snapshot as the row.                                               *)
 (*                                                                         *)
+(* The caller and the key (T205): Bo's handle at the place, whose standing *)
+(* there an Owner may revoke or give back (Revoke), and the key the route  *)
+(* names, which an edit may change (`defs[v].key`, among Keys: K, or M, a  *)
+(* key that stays secret). The vault's call, in its one snapshot, decides  *)
+(* Bo's standing first and reads the route only for one who stands        *)
+(* (StandingFirst); it resolves the key by the name the row it read gives *)
+(* (by name, as a code route's named call does); the isolate's map keeps  *)
+(* the id an earlier answer resolved (`mapKey[i]`), which only lets the    *)
+(* call make the use when it is the name's now (KeyByItem; else `moved`,   *)
+(* nothing used, and the vault asks again by the new id). A cold map (none)*)
+(* is a miss: two calls, the second by the ids the first read, the same    *)
+(* check in its own snapshot, so the model takes them as one step.         *)
+(*                                                                         *)
 (* Code names: the log keeps the names code has reserved (`reserved`, for  *)
 (* `r`). An isolate, before its first proxy request, adds its code's names *)
 (* to them (LogCode, a `proxy.code` change when it adds one), deleting the *)
@@ -87,6 +100,8 @@ CONSTANTS
     MaxTampers,     \* rows a database writer puts back or forges
     MaxMarks,       \* K made sensitive (once)
     MaxRestands,    \* changes of an editor's standing (promoted, demoted, removed)
+    MaxRevokes,     \* changes of the caller's standing at the place (revoked, given back)
+    Keys,           \* the keys a save may name: {"K"}, or {"K", "M"}
     MaxDeploys,     \* isolates restarted on code that flips whether it defines `r`
     MaxReleases,    \* an instance Owner's releases of a reserved name
     MaxMoves,       \* Workers moved to another release (a deploy or a rollback), one at a time
@@ -132,7 +147,15 @@ CONSTANTS
     VersionGate,
     \* The use weighs the key's nature now against its editor's standing now,
     \* read in the same snapshot (else only the standing the save froze).
-    EditorStillHolds
+    EditorStillHolds,
+    \* The call decides the caller's standing at the place first, from rows
+    \* no key decides, and reads the route and its key only for one who
+    \* stands (else it reads them for a caller it then refuses).
+    StandingFirst,
+    \* The call makes the use by the map's id only when it is the key the row
+    \* it read names now, resolved by that name in the same snapshot (else
+    \* `moved`); else the map's id, an earlier answer's, makes it.
+    KeyByItem
 
 None == "none"
 Editors == {"ada", "lin"}
@@ -142,15 +165,18 @@ Rank(x) == CASE x = "sensitive" -> 2 [] x = "secret" -> 1 [] OTHER -> 0
 Reads(st, n) == Rank(st) >= Rank(n)
 NoCopy == [ver |-> 0, host |-> None]
 NoKept == [ver |-> 0, host |-> None, at |-> 0, newest |-> FALSE, nat |-> None, revived |-> FALSE,
-           ver2 |-> 0, newest2 |-> FALSE, held |-> FALSE, held2 |-> FALSE]
-NoSnap == [ver |-> 0, host |-> None, newest |-> 0, standing |-> [e \in Editors |-> None]]
+           ver2 |-> 0, newest2 |-> FALSE, held |-> FALSE, held2 |-> FALSE, key |-> None, stood |-> FALSE]
+NoSnap == [ver |-> 0, host |-> None, key |-> None, newest |-> 0, standing |-> [e \in Editors |-> None], stands |-> FALSE]
 
 VARIABLES
     now,
     defs,       \* the log: defs[v], what change v left: [host, clearance, editor]
     standing,   \* standing[e]: editor e's standing now: "sensitive", "secret" or "none"
-    row,        \* the row: [ver (its seal), host (its body)]
-    nature,     \* K's nature: "secret" or "sensitive"
+    row,        \* the row: [ver (its seal), host and key (its body)]
+    nature,     \* K's nature: "secret" or "sensitive" (M's is "secret")
+    stands,     \* the caller's standing at the place: whether Bo may use its keys
+    mapKey,     \* mapKey[i]: the key id isolate i's map holds for the route, None when cold
+    readUnstood, \* ghost: a call read the route or its key for a caller who did not stand
     reserved,   \* the log's code names include `r`
     code,       \* code[i]: isolate i's code defines `r`
     logged,     \* logged[i]: isolate i's names are reserved (or it found them so)
@@ -159,27 +185,34 @@ VARIABLES
     snap,       \* snap[i]: without FencedRead, what its use read before the fence
     kept,       \* kept[i]: its value cache: the version decided, the host it sends to, when, ghosts
     sent,       \* ghost: every request that went out with K
-    edits, tampers, marks, restands, deploys, releases, left,
+    edits, tampers, marks, restands, revokes, deploys, releases, left,
     appv,       \* appv[i]: the release isolate i runs (1 or 2)
     vaultv,     \* the release the vault runs
     moves,
     mismatched  \* ghost: a vault call read or changed state across two releases
 
 gv == <<appv, vaultv, moves, mismatched>>
+rv == <<stands, mapKey, readUnstood, revokes>>
 vars == <<now, defs, standing, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent,
-          edits, tampers, marks, restands, deploys, releases, left, appv, vaultv, moves, mismatched>>
+          edits, tampers, marks, restands, deploys, releases, left, appv, vaultv, moves, mismatched, rv>>
 
 Newest == Len(defs)
 Body(v) == defs[v].host
-\* Whether version v's editor, by the standing st gives them, reads K now.
-EditorReads(v, st) == Body(v) # None /\ Reads(st[defs[v].editor], nature)
+KeyOf(v) == defs[v].key
+\* A key's nature now: K's may be marked sensitive; M stays secret.
+NatureOf(k) == IF k = "K" THEN nature ELSE "secret"
+\* Whether version v's editor, by the standing st gives them, reads key k now;
+\* the key the version names, by default.
+EditorReadsKey(v, st, k) == Body(v) # None /\ Reads(st[defs[v].editor], NatureOf(k))
+EditorReads(v, st) == EditorReadsKey(v, st, KeyOf(v))
 
 Init ==
     /\ now = 1
-    /\ defs = <<[host |-> "good", clearance |-> "sensitive", editor |-> "ada"]>>
+    /\ defs = <<[host |-> "good", clearance |-> "sensitive", editor |-> "ada", key |-> "K"]>>
     /\ standing = [e \in Editors |-> IF e = "ada" THEN "sensitive" ELSE "secret"]
-    /\ row = [ver |-> 1, host |-> "good"]
+    /\ row = [ver |-> 1, host |-> "good", key |-> "K"]
     /\ nature = "secret"
+    /\ stands = TRUE /\ mapKey = [i \in Iso |-> None] /\ readUnstood = FALSE /\ revokes = 0
     /\ reserved = FALSE
     /\ code = [i \in Iso |-> FALSE]
     /\ logged = [i \in Iso |-> TRUE]
@@ -200,25 +233,28 @@ Called(i) ==
     /\ UNCHANGED <<appv, vaultv, moves>>
 
 \* A change writes the newest version, its body with it.
-Write(d) == /\ defs' = Append(defs, d) /\ row' = [ver |-> Newest + 1, host |-> d.host]
+Write(d) == /\ defs' = Append(defs, d) /\ row' = [ver |-> Newest + 1, host |-> d.host, key |-> d.key]
 
 \* A save of `r` by editor e through isolate i's page, freezing e's standing
 \* now as the version's clearance: an Owner's ("sensitive"), or another
 \* editor's ("secret"), who may name only a key that is secret now. A
 \* removed editor saves nothing. The page refuses a name its code defines;
-\* the vault, with SaveChecksReserved, a name the log reserves.
-Edit(i, h, e) ==
+\* the vault, with SaveChecksReserved, a name the log reserves. The save
+\* names the route's key, k: K, or M (T205), as the editor may read it now.
+Edit(i, h, e, k) ==
     /\ Called(i)
+    /\ UNCHANGED rv
     /\ edits < MaxEdits /\ ~code[i]
     /\ SaveChecksReserved => ~reserved
     /\ standing[e] # "none"
-    /\ Reads(standing[e], nature)
-    /\ Write([host |-> h, clearance |-> standing[e], editor |-> e])
+    /\ Reads(standing[e], NatureOf(k))
+    /\ Write([host |-> h, clearance |-> standing[e], editor |-> e, key |-> k])
     /\ edits' = edits + 1
     /\ UNCHANGED <<now, standing, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, tampers, marks, restands, deploys, releases, left>>
 
 \* An Owner releases the reserved name, from an isolate whose code lacks it.
 Release(i) ==
+    /\ UNCHANGED rv
     /\ Called(i)
     /\ releases < MaxReleases /\ reserved /\ ~code[i]
     /\ reserved' = FALSE /\ releases' = releases + 1
@@ -226,6 +262,7 @@ Release(i) ==
 
 \* K made sensitive (`coffre mark`), a change of its own.
 Mark ==
+    /\ UNCHANGED rv
     /\ UNCHANGED gv
     /\ marks < MaxMarks /\ nature = "secret"
     /\ nature' = "sensitive" /\ marks' = marks + 1
@@ -234,6 +271,7 @@ Mark ==
 \* An editor's standing changes (a role edit, a demotion, a removal from the
 \* instance): a change of their principal object, under the fence like any.
 Restand(e, st) ==
+    /\ UNCHANGED rv
     /\ UNCHANGED gv
     /\ restands < MaxRestands /\ st # standing[e]
     /\ standing' = [standing EXCEPT ![e] = st] /\ restands' = restands + 1
@@ -241,17 +279,18 @@ Restand(e, st) ==
 
 \* A database writer puts back a row the vault once sealed, body and seal.
 Tamper(v) ==
-    /\ UNCHANGED gv
+    /\ UNCHANGED gv /\ UNCHANGED rv
     /\ tampers < MaxTampers /\ v \in 1..Newest
-    /\ row # [ver |-> v, host |-> Body(v)]
-    /\ row' = [ver |-> v, host |-> Body(v)] /\ tampers' = tampers + 1
+    /\ row # [ver |-> v, host |-> Body(v), key |-> KeyOf(v)]
+    /\ row' = [ver |-> v, host |-> Body(v), key |-> KeyOf(v)] /\ tampers' = tampers + 1
     /\ UNCHANGED <<now, defs, standing, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, marks, restands, deploys, releases, left>>
 
-\* ... or changes the body under the seal it finds: the MAC no longer holds.
-Forge(h) ==
-    /\ UNCHANGED gv
-    /\ tampers < MaxTampers /\ h # row.host
-    /\ row' = [row EXCEPT !.host = h] /\ tampers' = tampers + 1
+\* ... or changes the body under the seal it finds, its host or the key it
+\* names: the MAC no longer holds.
+Forge(h, k) ==
+    /\ UNCHANGED gv /\ UNCHANGED rv
+    /\ tampers < MaxTampers /\ <<h, k>> # <<row.host, row.key>>
+    /\ row' = [row EXCEPT !.host = h, !.key = k] /\ tampers' = tampers + 1
     /\ UNCHANGED <<now, defs, standing, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, marks, restands, deploys, releases, left>>
 
 \* Isolate i restarts on code that defines `r`, or no longer does: no copy,
@@ -264,6 +303,8 @@ Deploy(i) ==
     /\ copy' = [copy EXCEPT ![i] = NoCopy]
     /\ snap' = [snap EXCEPT ![i] = NoSnap]
     /\ kept' = [kept EXCEPT ![i] = NoKept]
+    /\ mapKey' = [mapKey EXCEPT ![i] = None]
+    /\ UNCHANGED <<stands, readUnstood, revokes>>
     /\ deploys' = deploys + 1
     /\ UNCHANGED <<now, defs, standing, row, nature, reserved, shadowed, sent, edits, tampers, marks, restands, releases, left>>
 
@@ -271,6 +312,7 @@ Deploy(i) ==
 \* `proxy.code` change when it adds one, which deletes the UI definition of
 \* the name it reserves (a change: the newest version, "none").
 LogCode(i) ==
+    /\ UNCHANGED rv
     /\ Called(i)
     /\ ~logged[i]
     /\ logged' = [logged EXCEPT ![i] = TRUE]
@@ -279,7 +321,7 @@ LogCode(i) ==
               \* The UI version its code hides from now on, deleted or not.
               /\ shadowed' = IF Body(Newest) # None THEN shadowed \cup {Newest} ELSE shadowed
               /\ IF ClearSuperseded /\ Body(Newest) # None
-                   THEN Write([host |-> None, clearance |-> None, editor |-> None])
+                   THEN Write([host |-> None, clearance |-> None, editor |-> None, key |-> None])
                    ELSE UNCHANGED <<defs, row>>
          ELSE UNCHANGED <<reserved, defs, row, shadowed>>
     /\ UNCHANGED <<now, standing, nature, code, copy, snap, kept, sent, edits, tampers, marks, restands, deploys, releases, left>>
@@ -290,6 +332,7 @@ Serving(i) == CodeGate => logged[i]
 \* which restarts on the other release (no copy, no kept values, its names
 \* not yet reserved).
 MoveVault ==
+    /\ UNCHANGED rv
     /\ moves < MaxMoves
     /\ vaultv' = 3 - vaultv /\ moves' = moves + 1
     /\ UNCHANGED <<appv, mismatched>>
@@ -303,12 +346,15 @@ MoveApp(i) ==
     /\ copy' = [copy EXCEPT ![i] = NoCopy]
     /\ snap' = [snap EXCEPT ![i] = NoSnap]
     /\ kept' = [kept EXCEPT ![i] = NoKept]
+    /\ mapKey' = [mapKey EXCEPT ![i] = None]
+    /\ UNCHANGED <<stands, readUnstood, revokes>>
     /\ UNCHANGED <<vaultv, mismatched>>
     /\ UNCHANGED <<now, defs, standing, row, nature, reserved, code, shadowed, sent, edits, tampers, marks, restands, deploys, releases, left>>
 
 \* A proxy request whose call the vault refuses, its release not the vault's:
 \* 503 `deploying`, nothing read, locked, written or logged.
 Refused(i) ==
+    /\ UNCHANGED rv
     /\ left > 0 /\ appv[i] # vaultv
     /\ left' = left - 1
     /\ UNCHANGED gv
@@ -319,6 +365,7 @@ Refused(i) ==
 \* definition, if any, is hidden (shadowed). Else, without CopyFromVault,
 \* the isolate may fill its copy from a read of its own, no MAC checked.
 Resolve(i) ==
+    /\ UNCHANGED rv
     /\ UNCHANGED gv
     /\ left > 0 /\ Serving(i)
     /\ left' = left - 1
@@ -332,8 +379,9 @@ Resolve(i) ==
 \* Without FencedRead: the use's reads take their snapshot before the fence.
 Read(i) ==
     /\ Called(i)
+    /\ UNCHANGED rv
     /\ ~FencedRead /\ ~code[i] /\ Serving(i) /\ snap[i] = NoSnap
-    /\ snap' = [snap EXCEPT ![i] = [ver |-> row.ver, host |-> row.host, newest |-> Newest, standing |-> standing]]
+    /\ snap' = [snap EXCEPT ![i] = [ver |-> row.ver, host |-> row.host, key |-> row.key, newest |-> Newest, standing |-> standing, stands |-> stands]]
     /\ UNCHANGED <<now, defs, standing, row, nature, reserved, code, logged, shadowed, copy, kept, sent, edits, tampers, marks, restands, deploys, releases, left>>
 
 \* The vault's call decides on the row it read (in its own snapshot, or the
@@ -351,30 +399,47 @@ Read(i) ==
 \* values decided before code hid it serve out their W, as after an edit.
 Decide(i, mine) ==
     /\ Called(i)
+    /\ UNCHANGED <<stands, revokes>>
     /\ left > 0 /\ ~code[i] /\ Serving(i)
     /\ FencedRead \/ snap[i] # NoSnap
-    /\ LET r       == IF FencedRead THEN [ver |-> row.ver, host |-> row.host, newest |-> Newest, standing |-> standing]
+    /\ LET r       == IF FencedRead THEN [ver |-> row.ver, host |-> row.host, key |-> row.key, newest |-> Newest, standing |-> standing, stands |-> stands]
                       ELSE snap[i]
            v       == r.ver
-           macOK   == r.host = Body(v)
+           \* The route and its key read (T205): for a caller who stands at the
+           \* place, or, without StandingFirst, for anyone.
+           routed  == r.stands \/ ~StandingFirst
+           \* The key the use is made of: the one the row read names, resolved
+           \* by that name; the map's id makes it only when it is that one
+           \* (KeyByItem: else `moved`, nothing used). Without KeyByItem, the
+           \* map's id makes it whatever the row names. A cold map, a miss: by
+           \* the name, in the call that reads it again.
+           named   == r.key
+           usedKey == IF KeyByItem \/ mapKey[i] = None THEN named ELSE mapKey[i]
+           moved   == KeyByItem /\ mapKey[i] \notin {None, named}
+           macOK   == r.host = Body(v) /\ r.key = KeyOf(v)
            sealOK  == ~SealChecked \/ v = r.newest
-           clearOK == ~ClearanceAtUse \/ nature = "secret" \/ defs[v].clearance = "sensitive"
-           heldOK  == ~EditorStillHolds \/ EditorReads(v, r.standing)
-           allowed == macOK /\ sealOK /\ Body(v) # None /\ clearOK /\ heldOK
-           \* The ghost: the editor reads K by their standing when the use is decided.
-           held    == EditorReads(v, standing)
+           clearOK == ~ClearanceAtUse \/ NatureOf(usedKey) = "secret" \/ defs[v].clearance = "sensitive"
+           heldOK  == ~EditorStillHolds \/ EditorReadsKey(v, r.standing, usedKey)
+           allowed == r.stands /\ routed /\ ~moved /\ usedKey # None /\ macOK /\ sealOK /\ Body(v) # None /\ clearOK /\ heldOK
+           \* The ghosts: the editor reads the key by their standing when the use
+           \* is decided; the caller stands there then.
+           held    == EditorReadsKey(v, standing, usedKey)
            answer  == IF copy[i].ver = v THEN copy[i].host ELSE Body(v)
            sendTo  == IF SentAsDecided \/ copy[i] = NoCopy THEN answer ELSE copy[i].host
        IN /\ kept' = IF allowed /\ mine
-                       THEN [kept EXCEPT ![i] = [ver |-> v, host |-> sendTo, at |-> now, newest |-> v = Newest, nat |-> nature,
+                       THEN [kept EXCEPT ![i] = [ver |-> v, host |-> sendTo, at |-> now, newest |-> v = Newest, nat |-> NatureOf(usedKey),
                                                  revived |-> v \in shadowed,
                                                  ver2 |-> IF OneVersion THEN v ELSE 0,
                                                  newest2 |-> OneVersion /\ v = Newest,
-                                                 held |-> held, held2 |-> OneVersion /\ held]]
+                                                 held |-> held, held2 |-> OneVersion /\ held,
+                                                 key |-> usedKey, stood |-> stands]]
                        ELSE kept
           /\ copy' = IF allowed /\ (SentAsDecided \/ copy[i] = NoCopy)
                        THEN [copy EXCEPT ![i] = [ver |-> v, host |-> answer]]
                        ELSE copy
+          \* The map keeps the id the call resolved, whenever it read the route.
+          /\ mapKey' = IF routed /\ named # None THEN [mapKey EXCEPT ![i] = named] ELSE mapKey
+          /\ readUnstood' = (readUnstood \/ (routed /\ ~r.stands))
     /\ snap' = [snap EXCEPT ![i] = NoSnap]
     /\ left' = left - 1
     /\ UNCHANGED <<now, defs, standing, row, nature, reserved, code, logged, shadowed, sent, edits, tampers, marks, restands, deploys, releases>>
@@ -382,6 +447,7 @@ Decide(i, mine) ==
 \* Without OneVersion: a later round of the same use decides K2, on the row
 \* it reads then (fenced, checked as Decide checks). Refused, nothing is sent.
 DecideSecond(i) ==
+    /\ UNCHANGED rv
     /\ Called(i)
     /\ ~OneVersion /\ ~code[i] /\ Serving(i)
     /\ kept[i].ver # 0 /\ kept[i].ver2 = 0
@@ -399,7 +465,7 @@ DecideSecond(i) ==
 \* A request goes out with the kept values: to the kept definition's
 \* upstream, or, not bound to it, wherever the isolate's copy says now.
 Send(i) ==
-    /\ UNCHANGED gv
+    /\ UNCHANGED gv /\ UNCHANGED rv
     /\ kept[i].ver # 0 /\ kept[i].ver2 # 0 /\ ~code[i]
     /\ KeptExpires => now < kept[i].at + W
     /\ LET h == IF BoundToDefinition \/ copy[i] = NoCopy THEN kept[i].host ELSE copy[i].host
@@ -408,10 +474,21 @@ Send(i) ==
                                  newest |-> kept[i].newest, nat |-> kept[i].nat,
                                  stillNewest |-> kept[i].ver = Newest, revived |-> kept[i].revived,
                                  ver2 |-> kept[i].ver2, newest2 |-> kept[i].newest2,
-                                 held |-> kept[i].held, held2 |-> kept[i].held2]}
+                                 held |-> kept[i].held, held2 |-> kept[i].held2,
+                                 key |-> kept[i].key, stood |-> kept[i].stood]}
     /\ UNCHANGED <<now, defs, standing, row, nature, reserved, code, logged, shadowed, copy, snap, kept, edits, tampers, marks, restands, deploys, releases, left>>
 
+\* The caller's standing at the place changes (T205): an Owner revokes Bo's
+\* grant, or gives it back, a change under the fence like any.
+Revoke ==
+    /\ UNCHANGED gv
+    /\ revokes < MaxRevokes
+    /\ stands' = ~stands /\ revokes' = revokes + 1
+    /\ UNCHANGED <<mapKey, readUnstood>>
+    /\ UNCHANGED <<now, defs, standing, row, nature, reserved, code, logged, shadowed, copy, snap, kept, sent, edits, tampers, marks, restands, deploys, releases, left>>
+
 Tick ==
+    /\ UNCHANGED rv
     /\ UNCHANGED gv
     /\ now < MaxTime
     /\ now' = now + 1
@@ -420,15 +497,15 @@ Tick ==
 Done == now = MaxTime /\ left = 0 /\ UNCHANGED vars
 
 Next ==
-    \/ \E i \in Iso, h \in Hosts, e \in Editors : Edit(i, h, e)
+    \/ \E i \in Iso, h \in Hosts, e \in Editors, k \in Keys : Edit(i, h, e, k)
     \/ \E e \in Editors, st \in {"sensitive", "secret", "none"} : Restand(e, st)
     \/ \E i \in Iso : Release(i) \/ Deploy(i) \/ LogCode(i) \/ Resolve(i) \/ Read(i) \/ DecideSecond(i) \/ Send(i)
     \/ \E i \in Iso : MoveApp(i) \/ Refused(i)
     \/ MoveVault
     \/ \E i \in Iso, mine \in BOOLEAN : Decide(i, mine)
-    \/ Mark
+    \/ Mark \/ Revoke
     \/ \E v \in 1..Newest : Tamper(v)
-    \/ \E h \in Hosts : Forge(h)
+    \/ \E h \in Hosts, k \in Keys : Forge(h, k)
     \/ Tick \/ Done
 
 Spec == Init /\ [][Next]_vars
@@ -439,6 +516,7 @@ TypeOK ==
     /\ nature \in {"secret", "sensitive"}
     /\ \A i \in Iso : copy[i].ver \in 0..Newest /\ kept[i].ver \in 0..Newest /\ kept[i].ver2 \in 0..Newest
     /\ \A e \in Editors : standing[e] \in {"sensitive", "secret", "none"}
+    /\ \A i \in Iso : mapKey[i] \in Keys \cup {None}
 
 (***************************************************************************)
 (* Every request that carried K went where a definition the vault decided  *)
@@ -447,7 +525,9 @@ TypeOK ==
 (* for K's nature then: a sensitive key only by an Owner's definition, and *)
 (* only while its editor still read K by their standing at that decision   *)
 (* (a demoted or removed editor's route stops). And K2, in the same        *)
-(* request, likewise, by the version it was decided on.                    *)
+(* request, likewise, by the version it was decided on. The key it carried *)
+(* is the one that version names (T205), and its caller stood at the place *)
+(* when the use was decided.                                               *)
 (***************************************************************************)
 EverySendAllowed ==
     \A s \in sent :
@@ -455,6 +535,13 @@ EverySendAllowed ==
         /\ s.host = Body(s.ver) /\ s.host = Body(s.ver2)
         /\ s.nat = "sensitive" => defs[s.ver].clearance = "sensitive" /\ defs[s.ver2].clearance = "sensitive"
         /\ s.held /\ s.held2
+        /\ s.key = KeyOf(s.ver) /\ s.stood
+
+\* No call reads the route, or a key it names, for a caller who does not
+\* stand at the place (T205): what it would read there hangs on the route
+\* and the key, which the caller has no standing to learn of (Probing.tla's
+\* NoKeyBeforeStanding, for a route).
+NoRouteBeforeStanding == ~readUnstood
 
 \* And within W of that decision: an edit stops the old upstream's requests
 \* W after it at the latest (a minute by default, a revocation's bound).

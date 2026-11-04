@@ -2589,6 +2589,16 @@ call on another release before it reads anything (503 `deploying`). Before
 it serves, an isolate reserves its code's names in the log (a
 `proxy.code` change, deleting the UI row of a name it adds); no deploy
 drops a reservation, only an instance Owner's audited release.
+The caller and the key are in it too (T205): Bo's handle, whose standing
+at the place an Owner may revoke or give back, and the key the route
+names, which an edit may change (K, or M, a key that stays secret). The
+call decides Bo's standing first and reads the route only for one who
+stands; it resolves the key by the name the row it read gives, and the
+isolate's map of the key's id, kept from an earlier answer, only lets it
+make the use when that id is the name's now (`moved` otherwise, and the
+vault asks again by the new one). A cold map is a miss, two calls, the
+second checked the same way in its own snapshot, which the model takes
+as one step.
 
 | Protection, in the design | Turned off, TLC finds |
 |---|---|
@@ -2605,13 +2615,21 @@ drops a reservation, only an instance Owner's audited release.
 | the vault refuses a save of a reserved name (SaveChecksReserved) | `NoRevival`: during a deploy, an Owner saves the name through the old isolate after the new one reserved it; the new code hides it, and it serves again once code drops the name |
 | no proxy request before the isolate's code names are reserved (CodeGate) | `NoRevival`: the same, through a deployment that served the name from code without reserving it |
 | the vault refuses a call on another release before any read (VersionGate) | `MismatchInert`: the vault's isolate restarted on the next release, an app isolate still on the last one saves the route |
+| the call makes the use by the map's id only when it is the key the row it read names now (KeyByItem; `use_credential`'s and `use_route`'s `v_right`) | `EverySendAllowed`, in `RoutingKeys`: an Owner points the route at M; the isolate's map still holds K's id, and the next use sends K under the version that names M |
+| the call decides the caller's standing at the place first and reads the route only for one who stands (StandingFirst; `use_stands`) | `NoRouteBeforeStanding`, in `RoutingKeys`: Bo's grant revoked, his call reads the route and its key before the vault refuses him |
 
 - `EverySendAllowed`: every request carrying the key went to the host of a
   version the vault decided on, the newest when it decided, cleared for
   the key's nature then, and whose editor still read the key by their
   standing then. In `RoutingEditor`, `FencedRead` off breaks it too: the
   use reads the editor's principal before the fence, Ada is removed, and
-  the use is decided on her standing as it was.
+  the use is decided on her standing as it was; in `RoutingKeys`, the
+  caller's: Bo's grant revoked after the early read, and the key sent all
+  the same. The key a request carries is the one the version decided on
+  names, and its caller stood at the place then.
+- `NoRouteBeforeStanding`: no call reads the route, or a key it names, for
+  a caller who does not stand at the place (Probing's `NoKeyBeforeStanding`,
+  for a route).
 - `WithinWindow`: within W of that decision.
 - `MismatchInert`: no vault call reads or changes the route while the
   caller's release and the vault's differ (proxy-ui.md, decision 8). The
@@ -2639,8 +2657,9 @@ drops a reservation, only an instance Owner's audited release.
 
 | Scenario | What | Distinct states |
 |---|---|---|
-| `Routing` | one isolate; two edits (any host, either editor), a key marked sensitive, two rows put back or forged, while uses (this caller's or another's) resolve, decide and send | 9,266,068 |
-| `RoutingEditor` | one isolate; one edit (any host, either editor), two changes of an editor's standing (promoted, demoted or removed), a key marked sensitive, while uses resolve, decide and send | 1,061,512 |
+| `Routing` | one isolate; two edits (any host, either editor), a key marked sensitive, two rows put back or forged, while uses (this caller's or another's) resolve, decide and send | 9,270,796 |
+| `RoutingEditor` | one isolate; one edit (any host, either editor), two changes of an editor's standing (promoted, demoted or removed), a key marked sensitive, while uses resolve, decide and send | 1,062,964 |
+| `RoutingKeys` | one isolate; one edit (any host, either editor, either key), a row forged or put back, the caller's standing revoked and given back, while uses by a warm or cold map resolve, decide and send (T205) | 175,269 |
 | `RoutingCode` | two isolates, one edit, and two restarts: code defines the name, then drops it, while the other isolate serves and saves | 1,678,179 |
 | `RoutingRelease` | as `RoutingCode`, with an instance Owner's release of the reserved name (`NoRevival` left out: the `EXPECTED` gap) | 2,949,085 |
 | `RoutingVersion` | two isolates, one edit, and three moves of a Worker to the other release (a deploy and a rollback, either Worker first), while uses resolve, decide and send | 2,059,664 |

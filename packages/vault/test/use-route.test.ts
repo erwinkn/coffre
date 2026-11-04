@@ -16,9 +16,9 @@ import { ROLES } from '@coffre/core/access';
 
 import { applyOp, itemDigest, objectKey, ROLES_REF, type Input, type Op, type ProxyItem, type Ref } from '../src/inputs.ts';
 import { purposeCode, replayStored } from '../src/log-replay.ts';
-import { callRoute as postgresRoute } from '../src/use.postgres.ts';
-import { callRoute as sqliteRoute } from '../src/use.sqlite.ts';
-import type { RouteCall } from '../src/use.ts';
+import { callRoute as postgresRoute, callRouteNamed as postgresNamed } from '../src/use.postgres.ts';
+import { callRoute as sqliteRoute, callRouteNamed as sqliteNamed } from '../src/use.sqlite.ts';
+import type { Names, RouteCall, UseCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
@@ -409,6 +409,56 @@ test("the place itself reads no definition, in either engine's statement: the re
   assert.equal(await count('log_uses'), 0);
 });
 
+test("T205, KeyByItem: an Owner points a route of one key at another key after the map kept the first's id: the use is of the key the item names now, never the map's (formal/Routing.tla, RoutingKeys)", async () => {
+  const w = await routeWorld(db);
+  const first = await w.key('sk-first');
+  const second = await w.key('sk-second');
+  const [a, b] = [await w.nameOf(first), await w.nameOf(second)];
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ openai: { definition: route('openai', [a]), editor: ada } });
+  const { vault, cache } = await isolate();
+  for (let i = 0; i < 2; i += 1) assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [a]: 'sk-first' });
+  assert.deepEqual(cache.routeKeys.get(`${w.dev}\nopenai`)?.ids, [{ id: first, through: false }], "the map holds the first key's id");
+  const usesOf = async (id: string) => (await rows(db.owner, sql`SELECT 1 FROM log_uses WHERE secret = ${id}`)).length;
+  const firstUses = await usesOf(first);
+  await w.save({ openai: { definition: route('openai', [b]), editor: ada } });
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [b]: 'sk-second' });
+  assert.equal(await usesOf(first), firstUses, 'no use of the key the route no longer names');
+  assert.ok(await usesOf(second) >= 1);
+  assert.deepEqual(cache.routeKeys.get(`${w.dev}\nopenai`)?.ids, [{ id: second, through: false }], "the map holds the second's now");
+});
+
+test("T205: the route's named call at a reading of the URL the map picked wrong reads nothing of the route and writes nothing (`reread`): the place reading only for a handle made for the place, where the URL has a stable reading too; the stable one only where the handle's place is not the one the URL names", async () => {
+  const w = await routeWorld(db);
+  const key = await w.key('sk');
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ openai: { definition: route('openai', [await w.nameOf(key)]), editor: ada } });
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  await w.environment('other');
+  const at = Date.now();
+  // As the vault asks it, but by ids that are not the key's (none), so that a call that reads the route makes no use.
+  const call = (names: Partial<Names>): UseCall => ({
+    credential: w.credentialId, secretId: null, requestId: '1', at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), place: null,
+    mac: Buffer.alloc(16), deadline: at + 3000, way: 0, principal: null, route: 'openai',
+    names: { tokenHash: w.tokenHash, project: null, environment: null, key: null, handle: false, unless: [], accepts: { signin: true, issuers: [] }, forks: true, ...names },
+  });
+  const named = ENGINE === 'postgres' ? postgresNamed : sqliteNamed;
+  const state = async (names: Partial<Names>) => {
+    const { row, route: read } = await named(hot, call(names));
+    return { state: row.state, read: read === null ? null : { keyed: read.keyed, made: read.made, place: read.place } };
+  };
+  // `/use/<project>/other/openai/…`, the URL's stable reading `<project>` too: the handle was not made for other.
+  assert.deepEqual(await state({ project: w.slug, environment: 'other', unless: [w.slug] }), { state: 'reread', read: null });
+  // `/use/<project>/dev/openai/…`: made for dev, the route read, its key resolved; the ids not the key's, nothing made.
+  assert.deepEqual(await state({ project: w.slug, environment: 'dev', unless: [w.slug] }), { state: 'moved', read: { keyed: true, made: false, place: w.dev } });
+  // No stable reading: the place reading is the URL's only one, made for or not (Bo stands nowhere at other: no route read).
+  assert.deepEqual(await state({ project: w.slug, environment: 'other', unless: [] }), { state: 'moved', read: null });
+  // The stable reading, `/use/openai/…`, at the handle's one place: read, unless that is the place the URL names.
+  assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/dev`] }), { state: 'reread', read: null });
+  assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/other`] }), { state: 'moved', read: { keyed: true, made: false, place: w.dev } });
+  assert.equal(await count('log_uses'), 0);
+});
+
 test('a workload by its way in at its place: the same route use, its caller decided by ids', async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
@@ -526,6 +576,32 @@ test("a route lengthened past a statement's keys while the map holds the shorter
   assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), Object.fromEntries(named.slice(0, 2).map((one) => [one.name, one.value])));
   await w.save({ many: { definition: route('many', named.map((one) => one.name)), editor: ada } });
   assert.deepEqual(values(await vault.useRoute(w.askRoute('many'))), Object.fromEntries(named.map((one) => [one.name, one.value])));
+});
+
+test("T205: a route of one key given a second while the map holds the one: the route's named call makes no use of the first alone, and the whole route is made, one entry a key", async () => {
+  const w = await routeWorld(db);
+  const [one, two] = [await w.key('one'), await w.key('two')];
+  const [first, second] = [await w.nameOf(one), await w.nameOf(two)];
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ pair: { definition: route('pair', [first]), editor: ada } });
+  const { vault } = await isolate();
+  for (let i = 0; i < 2; i += 1) assert.deepEqual(values(await vault.useRoute(w.askRoute('pair'))), { [first]: 'one' });
+  await w.save({ pair: { definition: route('pair', [first, second]), editor: ada } });
+  const before = await count('log_uses');
+  assert.deepEqual(values(await vault.useRoute(w.askRoute('pair'))), { [first]: 'one', [second]: 'two' });
+  assert.equal(await count('log_uses') - before, 2, 'an entry for each key of the route, none of the first alone');
+  // The call itself, decided (its lock taken, as a second round's), by the first key's ids, which are right: an item of
+  // two keys resolves none, so it uses nothing, and its row is the caller's at the place.
+  const at = Date.now();
+  const call: UseCall = {
+    credential: w.credentialId, secretId: one, requestId: '1', at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), place: null,
+    mac: Buffer.alloc(16), deadline: at + 3000, way: 0, principal: null, route: 'pair', decided: true,
+    names: { tokenHash: w.tokenHash, project: w.slug, environment: 'dev', key: null, handle: false, unless: [], accepts: { signin: true, issuers: [] }, forks: true },
+  };
+  const after = await count('log_uses');
+  const { row, route: read } = await (ENGINE === 'postgres' ? postgresNamed : sqliteNamed)(hot, call);
+  assert.deepEqual([row.state, row.n_secret, read?.keyed, read?.made, read?.keys], ['moved', null, false, false, [first, second]]);
+  assert.equal(await count('log_uses'), after, 'nothing used');
 });
 
 test("a later statement's fresh ids reach the map: an edit between a use's statements costs it one attempt, not two (Fable's review of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {
@@ -704,7 +780,8 @@ test("OneVersion holds the roles too: a role edit landing between a use's rounds
       return (...args: unknown[]) => {
         const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         statements += 1;
-        if (String(args[0]).includes('use_route') && edits === 0 && statements > 1) {
+        // After the use's first round, the route's named call (T205, a key entering the cap's set: `decide`), before its second.
+        if ((String(args[0]).includes('use_route') || String(args[0]).includes('use_credential')) && edits === 0 && statements > 1) {
           edits += 1;
           return Promise.resolve(sent).then(async (result) => {
             const ref: Ref = ROLES_REF;
@@ -820,10 +897,18 @@ async function watched(): Promise<{ vault: ReturnType<typeof openVault>; gates: 
       if (key !== 'unsafe') return value;
       return (...args: unknown[]) => {
         const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
-        if (!String(args[0]).includes('use_route')) return sent;
+        const query = String(args[0]);
+        if (!query.includes('use_route') && !query.includes('use_credential')) return sent;
         return Promise.resolve(sent).then((result) => {
-          const [row] = result as { route: string }[];
-          gates.push((JSON.parse(row!.route) as { gate: { state: string | null } }).gate.state ?? 'null');
+          if (query.includes('use_route')) {
+            const [row] = result as { route: string }[];
+            gates.push((JSON.parse(row!.route) as { gate: { state: string | null } }).gate.state ?? 'null');
+          } else {
+            // A route's named call (T205, 0071), its key's row's state; any other use by ids or name is no route's.
+            const [row] = result as { use: string }[];
+            const read = JSON.parse(row!.use) as { row?: { state: string | null } };
+            if (read.row !== undefined) gates.push(`one:${read.row.state ?? 'null'}`);
+          }
           return result;
         });
       };
@@ -833,7 +918,7 @@ async function watched(): Promise<{ vault: ReturnType<typeof openVault>; gates: 
   return { vault, gates, end: () => client.end() };
 }
 
-test("T200: a warm route use's gate is light, the use made by the map's ids; a statement that makes none (its item deleted since) asks the whole gate and answers as one without it", { skip: ENGINE !== 'postgres' ? "the hot pool's answers" : false }, async () => {
+test("T205: a warm route use of one key is the vault's one named call, the use made by the map's ids; one that resolves no key (its item deleted since) answers the caller's use of no key at the place, as the whole gate", { skip: ENGINE !== 'postgres' ? "the hot pool's answers" : false }, async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);
@@ -841,18 +926,18 @@ test("T200: a warm route use's gate is light, the use made by the map's ids; a s
   await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
   const { vault, gates, end } = await watched();
   try {
-    // Cold: the miss reads the ids under the whole gate; the use by them, and its round under the lock, light.
+    // Cold: the miss reads the ids under the whole gate (`use_route`); then the named call by them, its key entering
+    // the cap's set (`decide`), and that round under the lock, `use_route`'s, its gate light.
     assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
-    assert.equal(gates[0], 'moved', 'a miss: the whole gate');
-    assert.ok(gates.length > 1 && gates.slice(1).every((state) => state === 'stood'), gates.join());
+    assert.deepEqual(gates, ['moved', 'one:decide', 'stood']);
     const cold = gates.length;
     assert.deepEqual(values(await vault.useRoute(w.askRoute('openai'))), { [name]: 'sk' });
-    assert.deepEqual(gates.slice(cold), ['stood'], 'warm: one statement, its gate light');
-    // The item deleted since: the map's ids name no item now, no use is made, and the whole gate answers.
+    assert.deepEqual(gates.slice(cold), ['one:null'], 'warm: one call, the route\'s named call, its use made');
+    // The item deleted since: the call resolves no key, makes no use, and its row is the caller's at the place.
     await w.save({ openai: null });
     const warm = gates.length;
     const gone = answered(await vault.useRoute(w.askRoute('openai')));
-    assert.equal(gates[warm], 'moved', 'no use made: the whole gate');
+    assert.deepEqual(gates.slice(warm), ['one:moved'], 'no use made: one call, the place\'s row');
     assert.equal(gone.stands, true);
     assert.deepEqual(refused(gone), { code: 'missing', key: null });
     // As an isolate whose map is cold answers it, by the whole gate alone.
@@ -864,7 +949,7 @@ test("T200: a warm route use's gate is light, the use made by the map's ids; a s
   }
 });
 
-test("T200: under a light gate the caller is decided on their key's row: their grant revoked, their rows put back and the revoke's entry made to record the old seal, the credential's route, `stale`, never served, warm or cold (ChangeMacChecked, R64)", async () => {
+test("T200, T205: under a light gate, or the route's named call, the caller is decided on their key's row: their grant revoked, their rows put back and the revoke's entry made to record the old seal, the credential's route, `stale`, never served, warm or cold (ChangeMacChecked, R64)", async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);
@@ -892,7 +977,7 @@ test("T200: under a light gate the caller is decided on their key's row: their g
     const stale = { served: true, route: 'credential', outcome: { ok: false, code: 'stale', number: null } };
     const seen = watch?.gates.length ?? 0;
     assert.deepEqual(await vault.useRoute(w.askRoute('openai')), stale);
-    if (watch !== null) assert.equal(watch.gates[seen], 'stood', 'the warm use went by the light gate');
+    if (watch !== null) assert.equal(watch.gates[seen], 'one:null', 'the warm use went by the route\'s named call (T205), its use made');
     assert.deepEqual(await (await isolate()).vault.useRoute(w.askRoute('openai')), stale);
   } finally {
     await watch?.end();
@@ -911,7 +996,7 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     never: { definition: route('never', [names.never]), editor: ada },
   });
   await w.markSensitive(sensitive);
-  // Each use_route call as the vault sends it.
+  // Each use_route call as the vault sends it, and each route's named call (T205, `use_credential` naming its route).
   const calls: HotCall[] = [];
   const client = postgresClient(HOT_URL, { max: 2 });
   const pool = new Proxy(client, {
@@ -919,7 +1004,7 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
       const value: unknown = Reflect.get(target, key, target);
       if (key !== 'unsafe') return value;
       return (...args: unknown[]) => {
-        if (String(args[0]).includes('use_route')) calls.push({ query: String(args[0]), args: [...(args[1] as unknown[])] });
+        if (String(args[0]).includes('use_route') || String(args[0]).includes('use_credential')) calls.push({ query: String(args[0]), args: [...(args[1] as unknown[])] });
         return (value as (...a: unknown[]) => unknown).apply(target, args);
       };
     },
@@ -942,13 +1027,15 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
         asked.push({ label: `${label} ${name}`, call: calls.at(-1)! });
       }
     }
-    // Light where the map was warm: the vault asked the light gate there, and the statement answered the whole one.
-    assert.ok(asked.slice(0, 3).every(({ call }) => call.args.at(-1) === true), 'the warm map asked the light gate');
-    assert.ok(asked.slice(3).every(({ call }) => call.args.at(-1) === false), 'the cold map did not');
+    // Where the map was warm, the route's named call (T205): `use_credential`, its route its last argument, which read
+    // no route for one who stands nowhere; where cold, `use_route`, its gate asked whole.
+    assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && typeof call.args.at(-1) === 'string'), 'the warm map asked the route\'s named call');
+    assert.ok(asked.slice(3).every(({ call }) => call.query.includes('use_route') && call.args.at(-1) === false), 'the cold map asked use_route, its gate whole');
     await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
+    // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
       const args = [...call.args];
-      args[3] = 'nothing-saved';
+      args[call.query.includes('use_route') ? 3 : args.length - 1] = 'nothing-saved';
       return { query: call.query, args };
     };
     const read: { label: string; buffers: number; keyBlocks: number; beyond: number }[] = [];

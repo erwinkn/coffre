@@ -4,7 +4,7 @@ import { sql } from 'drizzle-orm';
 
 import { GATE_ROLES } from './decide.ts';
 import { exactly, unsafe } from './exact.ts';
-import type { ChangeColumns, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteRows, UseCall, UseRow } from './use.ts';
+import type { ChangeColumns, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRows, ResolvedRow, RouteCall, RouteLevelRow, RouteNamedRows, RouteRows, UseCall, UseRow } from './use.ts';
 
 /**
  * A use on Postgres: one call of `use_credential` (0024's, as 0053 has it), one
@@ -12,6 +12,32 @@ import type { ChangeColumns, EditorRow, NamedAhead, NamedBatchCall, NamedBatchRo
  * one JSON value (0024 says why), read back here as `UseRow`.
  */
 export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
+  return rowOf(await useText(db, call));
+}
+
+/**
+ * A route's named call on Postgres (T205; 0071): one call of `use_credential`, a handle's that names its route and no
+ * key, one statement and one round trip. It answers the key's row and what it read of the route beside it, none where
+ * it read none (`RouteNamedRows`).
+ */
+export async function callRouteNamed(db: Queryable, call: UseCall): Promise<RouteNamedRows> {
+  if (call.names === undefined || call.names.key !== null || call.route == null) throw new Error("a route's named call is a handle's, naming its route and no key");
+  const text = await useText(db, call);
+  type Read = { row: Record<string, unknown>; route: (Omit<RouteNamedRows['route'] & object, 'levels' | 'editor'> & { levels: Record<string, unknown>[] | null; editor: Record<string, unknown> | null }) | null };
+  let read = JSON.parse(text) as Read;
+  if (inexact(read.row)) read = exactly(text) as Read;
+  const route = read.route;
+  return {
+    row: rowFrom(read.row),
+    route: route === null ? null : {
+      place: String(route.place), project: String(route.project), levels: (route.levels ?? []).map(levelFrom), editor: editorFrom(route.editor),
+      keys: route.keys ?? [], made: route.made === true, keyed: route.keyed === true,
+    },
+  };
+}
+
+/** `use_credential`'s answer to a call, as its text. */
+async function useText(db: Queryable, call: UseCall): Promise<string> {
   const known = call.known;
   const [row] = await rowsOf<{ use: string }>(db, sql`SELECT use_credential(
     ${call.credential}::uuid, ${call.secretId}::uuid, ${call.requestId}::bigint, ${String(call.at)}::bigint, ${call.purpose}::smallint, ${call.place}::uuid,
@@ -30,7 +56,7 @@ export async function callUse(db: Queryable, call: UseCall): Promise<UseRow> {
     ${call.names?.forks === true}::boolean,
     ${call.route ?? null}::text
   )::text AS use`);
-  return rowOf(row!.use);
+  return row!.use;
 }
 
 /**
@@ -170,27 +196,39 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
   };
   let read = JSON.parse(row!.route) as Read;
   if (inexact(read.gate) || (read.rows ?? []).some((one) => one !== null && inexact(one))) read = exactly(row!.route) as Read;
-  const bytes = (value: unknown) => (typeof value === 'string' ? Buffer.from(value.slice(2), 'hex') : null);
   return {
     gate: rowFrom(read.gate), reading: read.reading, route: read.route ?? null, madeFor: read.made_for ?? null, stood: read.stood === true, place: read.place ?? null,
     project: read.project ?? null, personal: read.personal === true, cut: read.cut === true,
-    levels: (read.levels ?? []).map((level): RouteLevelRow => ({
-      environment: String(level.environment), row: level.row === true, item: level.item ?? null, digests: bytes(level.digests), seal: bytes(level.seal),
-      newest: bytes(level.newest), number: level.number == null ? null : String(level.number), change: changeFrom(level.change),
-      env: level.env == null ? null : (() => {
-        const env = level.env as Record<string, unknown>;
-        return {
-          project: String(env.project), slug: String(env.slug), owner: env.owner == null ? null : String(env.owner), parent: env.parent == null ? null : String(env.parent),
-          protected: env.protected == null ? null : env.protected === true, archived: env.archived === true, project_archived: env.project_archived === true,
-          seal: bytes(env.seal), last: bytes(env.last), change: changeFrom(env.change),
-        };
-      })(),
-    })),
-    editor: read.editor === null || read.editor === undefined ? null : {
-      ...(read.editor as Omit<EditorRow, 'seal' | 'last' | 'change'>), seal: bytes(read.editor.seal), last: bytes(read.editor.last), change: changeFrom(read.editor.change),
-      generation: read.editor.generation == null ? null : Number(read.editor.generation),
-    },
+    levels: (read.levels ?? []).map(levelFrom),
+    editor: editorFrom(read.editor ?? null),
     keys: read.keys ?? [], resolved: (read.resolved ?? []) as ResolvedRow[], made: read.made === true,
     rows: (read.rows ?? []).map((one) => (one === null ? null : rowFrom(one))),
+  };
+}
+
+/** A JSON value's bytes, which JSON carries as `\x` and hex; null for none. */
+const bytesOf = (value: unknown) => (typeof value === 'string' ? Buffer.from(value.slice(2), 'hex') : null);
+
+/** One level of a route's place as `use_route` and a route's named call answer it. */
+function levelFrom(level: Record<string, unknown>): RouteLevelRow {
+  return {
+    environment: String(level.environment), row: level.row === true, item: level.item ?? null, digests: bytesOf(level.digests), seal: bytesOf(level.seal),
+    newest: bytesOf(level.newest), number: level.number == null ? null : String(level.number), change: changeFrom(level.change),
+    env: level.env == null ? null : (() => {
+      const env = level.env as Record<string, unknown>;
+      return {
+        project: String(env.project), slug: String(env.slug), owner: env.owner == null ? null : String(env.owner), parent: env.parent == null ? null : String(env.parent),
+        protected: env.protected == null ? null : env.protected === true, archived: env.archived === true, project_archived: env.project_archived === true,
+        seal: bytesOf(env.seal), last: bytesOf(env.last), change: changeFrom(env.change),
+      };
+    })(),
+  };
+}
+
+/** A route's editor's principal as `use_route` and a route's named call answer it. */
+function editorFrom(editor: Record<string, unknown> | null): EditorRow | null {
+  return editor === null ? null : {
+    ...(editor as Omit<EditorRow, 'seal' | 'last' | 'change'>), seal: bytesOf(editor.seal), last: bytesOf(editor.last), change: changeFrom(editor.change),
+    generation: editor.generation == null ? null : Number(editor.generation),
   };
 }

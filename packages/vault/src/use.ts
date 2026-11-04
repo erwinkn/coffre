@@ -18,8 +18,8 @@ import { changeHolds, entryMac, MAC_BYTES, TAG_BYTES, type LogMacKey } from './l
 import { bindingObject, configObject, connectionObject, credentialObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
 import { PURPOSES, purposeCode, WAYS } from './log-replay.ts';
 import { proxyServing, routeEditorRefusal, routeLookup, type RouteLevel } from './proxy.ts';
-import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callRoute as routePostgres, callUse as callPostgres } from './use.postgres.ts';
-import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as routeSqlite, callUse as callSqlite } from './use.sqlite.ts';
+import { callBatch as batchPostgres, callNamedBatch as namedPostgres, callRoute as routePostgres, callRouteNamed as routeNamedPostgres, callUse as callPostgres } from './use.postgres.ts';
+import { callBatch as batchSqlite, callNamedBatch as namedSqlite, callRoute as routeSqlite, callRouteNamed as routeNamedSqlite, callUse as callSqlite } from './use.sqlite.ts';
 
 /**
  * 0.15's use (docs/design/0.15-plan.md, PR 5; hot-path-one.md, "A use";
@@ -304,6 +304,17 @@ export type RouteRows = {
   personal: boolean; cut: boolean; levels: RouteLevelRow[]; editor: EditorRow | null; keys: string[]; resolved: ResolvedRow[];
   made: boolean; rows: (UseRow | null)[];
 };
+
+/**
+ * What a route's named call (T205, 0071) read of its route, beside its key's row: its place and project, the levels and
+ * editor `use_route` reads, the keys its item names, whether the call made the use by the isolate's ids (`made`: they are
+ * the one key's the item names now), and whether it resolved a key at all (`keyed`: the item names one, so the row is
+ * that key's; else the row is the caller's use of no key at the place, as a gate's). None: the call read no route.
+ */
+export type RouteRead = { place: string; project: string; levels: RouteLevelRow[]; editor: EditorRow | null; keys: string[]; made: boolean; keyed: boolean };
+
+/** What a route's named call answers (`callRouteNamed`). */
+export type RouteNamedRows = { row: UseRow; route: RouteRead | null };
 
 /**
  * What a request named, which a named call reads by (0045, D153), and answers the app's rows for (0044). `handle`: it
@@ -1683,14 +1694,93 @@ async function routeStatement(
     const gateForged = await forgedOf(rows.gate, undefined);
     const keysForged: boolean[] = [];
     for (const row of rows.rows) keysForged.push(row === null ? false : await forgedOf(row, undefined));
-    const editor = rows.editor;
-    let editorForged = false;
-    if (editor !== null && path.oldWrite !== undefined && editor.access !== null && !(editor.old !== null && BigInt(editor.access) <= BigInt(editor.old))) {
-      starts();
-      editorForged = !(await path.oldWrite(editor.principal, editor.old === null ? null : BigInt(editor.old), BigInt(editor.access), starts));
-    }
-    return { rows, gateForged, keysForged, editorForged };
+    return { rows, gateForged, keysForged, editorForged: await editorForgedOf(path, rows.editor, starts) };
   });
+}
+
+/** Whether the route's editor has an access entry forged past what their newest change accounts for, as a caller's (`forgedPast`). */
+async function editorForgedOf(path: UsePath, editor: EditorRow | null, starts: () => void): Promise<boolean> {
+  if (editor === null || path.oldWrite === undefined || editor.access === null || (editor.old !== null && BigInt(editor.access) <= BigInt(editor.old))) return false;
+  starts();
+  return !(await path.oldWrite(editor.principal, editor.old === null ? null : BigInt(editor.old), BigInt(editor.access), starts));
+}
+
+/** The engine's route's named call (`use_credential`, 0071). */
+function routeNamedOf(db: Queryable): (db: Queryable, call: UseCall) => Promise<RouteNamedRows> {
+  return engineOf(db) === 'postgres' ? routeNamedPostgres : routeNamedSqlite;
+}
+
+/** A guess of nothing: the next statement reads by the names alone, `use_route` picking the reading. */
+const NO_GUESS: RouteGuess = { reading: null, credential: null, place: null, route: null, keyed: undefined };
+
+/**
+ * Whether a route use's first statement is the vault's one named call (T205; 0071) rather than `use_route`: a handle's
+ * use, at a reading of its URL the isolate's map picked, of a route the map holds the ids of, one key's. A route of
+ * several keys, a miss, the place itself, `dev@me` and a workload's use are `use_route`'s.
+ */
+function oneCall(ask: RouteAsk, guess: RouteGuess, prepared: readonly Ready[] | null): boolean {
+  return ask.handle !== null && ask.use && prepared?.length === 1 && guess.reading !== null && guess.route !== null && guess.route !== ''
+    && guess.credential !== null && guess.place !== null && !(guess.reading === 1 && (ask.named === null || ask.environment?.endsWith('@me') !== false));
+}
+
+/**
+ * A route use's first statement as the vault's one named call (T205; 0071; formal/Routing.tla, RoutingKeys): the
+ * handle's `use_credential` call that names the route and no key. Under the fence, it decides the caller's standing at
+ * the place first (StandingFirst), then reads the route's levels, its editor and the one key its item names, by that
+ * name (KeyByItem), and makes that key's use by the map's ids when they are its now. Its answer is a round as
+ * `use_route`'s reads: the use made, the caller's rows its key's row, as the light gate's (T200); or, the call having
+ * resolved no key (no standing there, a chain cut, no item, an item of several keys), the caller's use of no key at
+ * the place, as the whole gate's. Otherwise it answers the guess `use_route` is asked by instead: a reading the map
+ * picked wrong (`reread`: none, `use_route` picks it), or the key's ids out of date (the ids the call read).
+ *
+ *   Bo's handle, `/use/openai/v1/chat/completions`, the map warm      1 call: `use_credential`, its gate, the item, Ada, the key's use
+ *   the same, an Owner pointed `openai` at another key since        2 calls: the new key's ids read, then `use_route` makes the use
+ *   the same, Bo's grant revoked                                    1 call: his use of no key at the place, refused, no route read
+ */
+async function routeNamed(path: UsePath, ask: RouteAsk, guess: RouteGuess, made: Ready): Promise<RouteRound | Extract<UseOutcome, { busy: UseBusy }> | { reask: RouteGuess }> {
+  const handle = ask.handle!;
+  const reading = guess.reading!;
+  const names: Names = {
+    tokenHash: handle.tokenHash, project: reading === 1 ? ask.project : null, environment: reading === 1 ? ask.environment : null, key: null,
+    // The URL's other reading (0071): the stable one's place reading, which it is not; the place reading's stable route,
+    // which it takes over only for a handle made for the place.
+    handle: reading === 2, unless: reading === 2 ? (ask.project !== null ? [`${ask.project}/${ask.environment}`] : []) : (ask.stable !== null ? [ask.stable] : []),
+    accepts: handle.accepts, forks: true,
+  };
+  type Read = { row: UseRow; route: RouteRead | null; forged: boolean; editorForged: boolean };
+  const answered = await raced(path, ask.deadline, () => routeNamedOf(path.db)(path.db, { ...made.call, names }), async ({ row, route }, starts): Promise<Read | { reask: RouteGuess }> => {
+    if (row.state === 'reread') return { reask: NO_GUESS };
+    return { row, route, forged: await forgedOnce(path, starts)(row, undefined), editorForged: route === null ? false : await editorForgedOf(path, route.editor, starts) };
+  });
+  if ('busy' in answered || 'reask' in answered) return answered;
+  const { row, route, forged, editorForged } = answered;
+  const base = { reading, route: guess.route, madeFor: null, personal: false, cut: false };
+  if (route === null) {
+    return { rows: { ...base, gate: row, stood: false, place: null, project: null, levels: [], editor: null, keys: [], resolved: [], made: false, rows: [] }, gateForged: forged, keysForged: [], editorForged: false };
+  }
+  const read = { place: route.place, project: route.project, levels: route.levels, editor: route.editor, keys: route.keys };
+  if (route.made) {
+    // The light gate's answer (T200): the caller's names, and the app's rows of the place, the key's taken out.
+    const app = row.app == null ? null : { ...(row.app as Record<string, unknown>), held: null, secrets: [] };
+    const gate = {
+      state: 'stood', n_credential: row.n_credential, n_secret: null, n_place: row.n_place, n_project: row.n_project, n_environment: row.n_environment,
+      n_standing: true, n_cut: false, app,
+    } as UseRow;
+    const secret = (row.app as { secrets?: { secret: unknown; version: unknown }[] } | null)?.secrets?.[0];
+    const resolved: ResolvedRow = {
+      id: row.n_secret, sensitive: row.s_version === null ? null : row.v_sensitive, secret: secret?.secret ?? null, version: secret?.version ?? null,
+      held: inherited(row) ? { environmentId: row.s_environment!, slug: row.e2_slug! } : null,
+    };
+    return { rows: { ...base, ...read, gate, stood: true, resolved: [resolved], made: true, rows: [row] }, gateForged: false, keysForged: [forged], editorForged };
+  }
+  if (!route.keyed) return { rows: { ...base, ...read, gate: row, stood: true, resolved: [], made: false, rows: [] }, gateForged: forged, keysForged: [], editorForged };
+  // The key the item names now, read, its ids not the map's: `use_route` makes the use by the ones read.
+  return {
+    reask: {
+      reading, credential: row.n_credential, place: route.place, route: guess.route,
+      keyed: { keys: route.keys, ids: [row.n_secret === null ? null : { id: row.n_secret, through: inherited(row) }] },
+    },
+  };
 }
 
 /** What the isolate's map keeps of a statement's read: the handle's made-for places, its place's ids, the route's keys' ids. */
@@ -1885,12 +1975,18 @@ export async function useRoute(path: UsePath, input: RouteUseInput): Promise<Rou
   let guess = guessOf(cache, ask);
   for (let attempt = 0; attempt < ROUTE_ATTEMPTS; attempt++) {
     // Each key's use, by the ids the map holds, made ready for the first statement's keys; none on a miss.
-    const keyed = guess.keyed;
     const chunk = cache.limits.batch;
-    const asks = keyed === undefined || guess.credential === null || guess.place === null ? null
-      : keyed.ids.map((id) => routeAsked(ask, guess, id, newUseRequestId()));
-    const prepared = asks?.map((one) => ready(path, one, requestOf(one, undefined), undefined, false, seals)) ?? null;
-    const first = await routeStatement(path, ask, guess, { offset: 0, asked: prepared === null ? null : prepared.slice(0, chunk), lock: null });
+    const readied = (at: RouteGuess) => (at.keyed === undefined || at.credential === null || at.place === null ? null
+      : at.keyed.ids.map((id) => routeAsked(ask, at, id, newUseRequestId())).map((one) => ready(path, one, requestOf(one, undefined), undefined, false, seals)));
+    let prepared = readied(guess);
+    // A route of one key the map holds, the vault's one named call (T205); else, or as that call answers, `use_route`.
+    let first = oneCall(ask, guess, prepared) ? await routeNamed(path, ask, guess, prepared![0]!) : null;
+    if (first !== null && 'reask' in first) {
+      guess = first.reask;
+      prepared = readied(guess);
+      first = null;
+    }
+    first ??= await routeStatement(path, ask, guess, { offset: 0, asked: prepared === null ? null : prepared.slice(0, chunk), lock: null });
     if ('busy' in first) return busyFor(first);
     keepRoute(cache, ask, first.rows);
     // Light (T200): decided on the first key's row, its use made under the gate's fence, whose settling stands.

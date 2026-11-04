@@ -257,12 +257,13 @@ test("a handle's /use of a UI route is the vault's one call too, at either URL a
     return out;
   };
   const one = await measure();
-  const route1 = 'SELECT use_route( $1::bytea, $2:';
+  // The route's named call (T205, 0071): `use_credential`, naming the route, once the vault's map is warm.
+  const route1 = 'SELECT use_credential( $1::uuid,';
   for (const [url, ran] of Object.entries(one)) {
     assert.deepEqual(ran.app, [], `${url}: no statement of the app`);
     assert.deepEqual(ran.vault, [], `${url}: nothing of the vault's but the use's statement`);
   }
-  // The place's URL and a stable one, whatever its segments: the route use alone, which picks the reading itself. Two
+  // The place's URL and a stable one, whatever its segments: the route use alone, one function call. Two
   // segments, `/use/<a>/<b>`, may be the plan: the use offers the place itself as its place reading, and takes the
   // stable one here, the handle made for market/dev, no made-for list asked first (C2b4; docs/design/proxy-ui.md,
   // section 6, "URLs of one or two segments").

@@ -877,6 +877,35 @@ Naming.tla's `HeldToNames`, applied to the route's names. An edit between
 the two calls of a miss therefore cannot have a key used that the route no
 longer names.
 
+**A warm use of one key is one function call (T205).** Until 0071, a map
+hit was `use_route`: it picked the URL's reading again from the handle's
+places, asked the gate (a named call of no key, `use_credential`, its
+answer's JSON parsed back), read the route, then made the key's use by
+ids, `use_credential` again. Three PL/pgSQL calls, about 2.2 ms of
+Postgres CPU a use where a code route's named call costs 1.5. Now, when
+the isolate's map holds the reading, the place's ids and a route of one
+key, the vault asks `use_credential` itself, as a code route's named call
+(D153), naming the route instead of a key: after the caller's standing
+(`use_stands`), under the same fence, it reads the route's levels, its
+editor and the one key the item names, resolves that key by its name
+through the chain as it would a request's, and makes the use when the
+map's ids are that key's now (Routing.tla, `StandingFirst` and
+`KeyByItem`). The route's reads answer beside the key's row, and the
+vault decides on them as on `use_route`'s. With Bo's handle at
+`/use/openai/v1/chat/completions` and Ada's `openai` naming
+`OPENAI_API_KEY`:
+
+| What the call finds | What happens |
+|---|---|
+| Bo stands at dev, the map's ids are the key's | the use, one call |
+| Bo's grant revoked | his use of no key at dev, refused there, nothing of the route read: one call |
+| an Owner pointed `openai` at another key since | the new key's ids read; `use_route` makes the use by them: two calls, as a miss |
+| `openai` now names two keys, or is gone | the caller's use of no key at dev; `use_route` reads on (a route of several keys, a miss), or the route's refusal |
+| the map's reading wrong (the handle made for another place since a rename) | `reread`, nothing read; `use_route` picks the reading: as a cold map |
+
+A route of several keys, a cold map, the place itself, `dev@me` and a
+workload's use stay `use_route`'s.
+
 **The isolate's copy comes only from the vault's answers.** The copy saves
 bytes: a call that carries its digest gets the item omitted when the row's
 item still has that digest. So a digest the isolate sends must stand for an

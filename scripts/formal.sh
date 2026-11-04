@@ -237,6 +237,12 @@ REMOVALS=(
   "RoutingCode CodeGate NoRevival"
   # A call from an app on another release than the vault's, unrefused, reads and changes the route (Routing.tla).
   "RoutingVersion VersionGate MismatchInert"
+  # A route's key by the name the row it reads gives, and the caller's standing first (T205, RoutingKeys): the map's
+  # id, an earlier answer's, used whatever the route names now; the route read for a caller then refused; and both
+  # read before the fence, the caller decided on a standing revoked since.
+  "RoutingKeys KeyByItem EverySendAllowed"
+  "RoutingKeys StandingFirst NoRouteBeforeStanding"
+  "RoutingKeys FencedRead EverySendAllowed"
   # 0.15's hot path (HotPathOne.tla; W208, W211; the plan's PRs 3 to 5): one call per use, every input sealed.
   "HotPathOne UseLocks TotalOrder"
   "HotPathOne UseLocks NothingAllowedAfterAnswer"
