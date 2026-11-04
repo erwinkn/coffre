@@ -29,6 +29,7 @@
     "test:consumer": "./scripts/consumer-test.sh",
     "test:compat": "./scripts/compat-check.sh",
     "test:image": "./scripts/test-image.sh",
+    "test:terraform": "./scripts/terraform-provider.sh",
     "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
     "build:action": "pnpm --dir packages/cli run build:action",

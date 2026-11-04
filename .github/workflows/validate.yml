@@ -382,6 +382,21 @@ jobs:
         run: |
           pnpm conformance:node --browser /usr/bin/google-chrome
 
+  # The Terraform provider (terraform-provider/, docs/design/terraform-provider.md, section 8): Go and both CLIs
+  # pinned by version and SHA-256 in the script, its acceptance tests against a local coffre, the Node example on SQLite.
+  terraform:
+    needs: changes
+    if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
+    name: Terraform provider
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/prepare
+      - name: gofmt, vet, unit tests, and acceptance tests on Terraform and OpenTofu
+        run: pnpm test:terraform
+
   consumer:
     needs: changes
     if: ${{ always() && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.version_only != 'true') }}
@@ -464,7 +479,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, action, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, consumer, compat, image]
+    needs: [changes, action, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump

@@ -313,6 +313,16 @@ unsupported diff select full validation.
   It uses elan's Lean if it is the pinned release, or downloads that release
   once, checked against its SHA-256. A change to any of those rules changes
   `formal/lean` in the same pull request, or the cases disagree.
+- `pnpm test:terraform` (after `pnpm build`) checks the Terraform provider,
+  a Go module in `terraform-provider/` that no `@coffre/*` package imports:
+  gofmt, `go vet`, its unit tests, then its acceptance tests on Terraform
+  and OpenTofu 1.11 against a coffre that
+  `packages/conformance/scripts/terraform-fixture.ts` boots, the Node example
+  on SQLite on ports 3482 and 3483 (`scripts/terraform-provider.sh`; `--unit`
+  for the first three alone). Go and both CLIs are pinned by version and
+  SHA-256 and downloaded once. A change to a route the provider calls (the
+  secrets list and write, `POST /api/auth/oidc`) runs it in the same pull
+  request.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
   (every path, script and link the docs name exists) do not need Postgres.
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers

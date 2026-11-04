@@ -405,7 +405,27 @@ other writer's version stays in the history, and the audit log shows both.
 A write over an inherited key sends the inherited version's ID as
 `replaces`, which coffre checks against the parent's current version; when
 the list hid it (the credential is not told the parent's versions), the
-write has no `replaces` and is checked at plan and at apply, as a create.
+write has no `replaces` and is checked at plan and at apply, as a create:
+an update whose state holds no version lists the key again at apply and
+writes only while it is still inherited, its version still hidden, so an
+override written by hand since the plan stops the apply ("was written
+after this plan").
+
+An update's guard is the version in its prior state, which a saved plan
+carries. A create has no prior state, and Terraform plans every resource
+again at apply, so planned private data holds what that second plan
+listed, not what the approved plan saw: nothing carries the approved
+plan's inherited version to the create. A create over an inherited key
+therefore guards what it would overwrite, the fork: the check at apply
+refuses a key no longer inherited (an override written since the plan is
+"exists; import it"), and the write sends the inherited version that
+check listed, so a parent's write in between is refused too. A parent's
+write between the plan and that check is not one the override replaces:
+the parent keeps its version, and the fork, which read the parent's value
+until now, reads Terraform's, as the plan said. Holding the parent's
+version from the approved plan would take a computed attribute the plan
+fixes, and Terraform would report a change of it at apply as a provider
+bug ("produced an inconsistent final plan").
 
 **Adopting a key that exists.** A create refuses a key already live in
 coffre ("exists; import it"). In a fork, a key it inherits is not its own:
@@ -460,6 +480,16 @@ this and will archive by hand, in coffre.
 Coffre has no hard delete of one key: an archived key keeps its versions,
 out of every read, run and export, and comes back with `coffre unarchive`.
 So the option is named `archive`, not `delete`.
+
+In a fork, archiving an override is how coffre resets it: the key stays
+readable in the fork, with the parent's value. A `coffre_secret` in
+`prod-eu` with `on_destroy = "archive"` therefore returns the key to
+`prod`'s value; it does not take it out of service. To end a key in a
+fork, remove it there (`coffre remove`), by hand.
+
+A forced replacement (`terraform apply -replace`, `taint`) plans a create,
+which finds the key in coffre and stops at the plan; the state is left as
+it was. A new value is a new `value_wo_version`, never a recreated key.
 
 Terraform's own `removed` block (1.7) stops managing a resource whatever
 `on_destroy` says:
@@ -675,7 +705,11 @@ mirror.
     sensitivity-only change then fails at plan; a changed
     `value_wo_version` writes the override back, with `replaces` the
     inherited version, and with none from a credential scoped to the fork
-    alone; a key removed in the fork fails the plan, and its import;
+    alone, whose saved plan to write it back stops at apply when an
+    override is written by hand before it; a key removed in the fork fails
+    the plan, and its import;
+  - replacement: a new key name with a looser sensitivity and the same
+    `value_wo_version` creates the new key and keeps the old;
   - destroy with `keep` (the key and its versions stay) and with
     `archive`, without `secret.archive` (403, the resource stays in state)
     and with a credential scoped to a `terraform-archiver` role (archived);
@@ -689,10 +723,12 @@ mirror.
     the error of section 3, and a saved plan with a token per phase
     succeeds;
   - a credential expiring mid-apply: the GitHub path trades again.
-- CI: a job "Terraform provider" runs both on changes to
-  `terraform-provider/`, to `packages/server/src/api/`, or to
-  `packages/client/src/api.ts`, with Go and both Terraform binaries pinned by
-  version and checksum, as `pnpm formal` pins TLC.
+- CI: a job "Terraform provider" (`pnpm test:terraform`,
+  `scripts/terraform-provider.sh`) runs both on every full validation, with
+  Go and both Terraform binaries pinned by version and checksum, as `pnpm
+  formal` pins TLC. (Planned for changes to `terraform-provider/`, the API
+  routes and the client alone; on every run it needs no path filter beside
+  the Validate gate, and takes about two minutes after the build.)
 
 ## 9. Decisions
 

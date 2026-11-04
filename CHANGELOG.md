@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **A Terraform provider that writes and never reads (T108).**
+  `terraform-provider/` is a Go provider for Terraform and OpenTofu 1.11
+  with one resource, `coffre_secret`: its value is a write-only argument,
+  in neither state nor plans, written on create and whenever
+  `value_wo_version` changes, as a new version guarded by the version the
+  plan saw. A version written outside Terraform is reported, never
+  overwritten unasked; destroy keeps the key unless `on_destroy =
+  "archive"`. It signs in with GitHub Actions' OIDC, another issuer's ID
+  token, or a token, and needs `contributor`, never a read. Not published
+  yet: build it and use it through `dev_overrides`
+  ([terraform-provider/README.md](terraform-provider/README.md)). `pnpm
+  test:terraform` runs its tests against a local coffre, in CI too.
 - **A write names the version it made, and a mark the one it marks (T108).**
   `PATCH /api/secrets/:project/:environment` answers each key it wrote
   with the new version's id beside its number,
