@@ -588,9 +588,12 @@ export class SigninService {
           throw new SigninRefused('passkey_required');
         }
         const now = new Date();
-        // The touch taken: its replay mark and counter move, or nothing is issued (section 7.3).
+        // The touch taken: its replay mark and counter move, or nothing is issued (section 7.3). Not taken, this sign-in's
+        // challenge is spent for that passkey (a commit whose answer was lost, or a newer sign-in's), or its counter
+        // stood still: no touch of it answers this challenge again, so the sign-in ends, its cookie cleared, rather than
+        // ask for another touch that cannot pass (review r5 of #500).
         if (factor?.kind === 'touch' && (await touchPasskey(tx, { id: factor.passkey.id, principal: principalOf(principal), generation: standing.generation, issuedAt: new Date(factor.state.issuedAt), signCount: factor.signCount })) === 0) {
-          return passkeyRefused(meta, preparedId, 'passkey_failed', 'replayed, overtaken by a newer challenge, or a counter that did not move');
+          return passkeyRefused(meta, preparedId, 'state_mismatch', 'replayed, overtaken by a newer challenge, or a counter that did not move');
         }
         const bound = await findIdentity(tx, this.#deps.chainKey, { ...profile, issuerHash });
         let principalId: string;

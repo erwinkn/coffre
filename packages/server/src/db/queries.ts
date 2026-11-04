@@ -1502,20 +1502,21 @@ function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) =
     .where(by(credentials));
 }
 
-/** What `heldSql` answers: a live passkey at the generation, or only removed ones; null for none ever. */
+/** What `heldSql` answers: a live passkey at the generation, or only rows that are not (removed, or of another generation); null for none ever. */
 const HELD = { live: 2, removed: 1 } as const;
 
 /**
- * Whether a person holds a live passkey at a generation (`HELD.live`), has only removed ones (`HELD.removed`), or never
- * had one (null): one probe of `passkeys_live_idx`, which most often finds none, and, finding none, one of
- * `passkeys_principal_idx`. Removed ones apart, because what reads them as removed holds them to their MACs first
- * (`passkeyOf`). Written out, not through drizzle's table, so that a statement that also joins `passkeys`
- * (`credentialRow`) keeps the two apart.
+ * Whether a person holds a live passkey at a generation (`HELD.live`), has rows but none live at it (`HELD.removed`:
+ * removed, or of another generation), or never had one (null): one probe of `passkeys_live_idx`, which most often finds
+ * none, and, finding none, one of `passkeys_principal_idx`, at any generation. Those rows apart, because what reads them
+ * as not live holds them to their MACs first (`passkeyOf`): a row whose `removed_at` or `generation` was changed in the
+ * database, the MAC left as it was, fails there (review r5 of #500). Written out, not through drizzle's table, so that a
+ * statement that also joins `passkeys` (`credentialRow`) keeps the two apart.
  */
 function heldSql(principal: SQL, generation: SQL): SQL<number | null> {
   return sql<number | null>`(CASE
     WHEN EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal} AND held.generation = ${generation} AND held.removed_at IS NULL) THEN ${sql.raw(String(HELD.live))}
-    WHEN EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal} AND held.generation = ${generation}) THEN ${sql.raw(String(HELD.removed))}
+    WHEN EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal}) THEN ${sql.raw(String(HELD.removed))}
   END)`.mapWith(Number);
 }
 
@@ -1546,10 +1547,11 @@ export type PasskeyRead = { passkey: PasskeyRow | null; held: boolean | 'tampere
 
 /**
  * The passkey read with a row (`credentialRow`, `findConnection`), unchecked (`PasskeyRead`); undefined for a row read
- * without it. For what names no passkey, of a person whose passkeys at its generation all read as removed: those rows,
- * each held to its MAC, one statement more (`passkeyHistory`), since a removal forged in the database (`removed_at` set,
- * the MAC left as it was) would otherwise read as a person holding none, and pass a session made while one was live,
- * under `off` or by the previous release (R64; review r3 of #500). Only then: anyone else's read is the one statement.
+ * without it. For what names no passkey, of a person who has passkey rows but none live at its generation: those rows,
+ * each held to its MAC, one statement more (`passkeyHistory`), since a removal or a generation forged in the database
+ * (`removed_at` set or `generation` moved, the MAC left as it was) would otherwise read as a person holding none, and pass
+ * a session made while one was live, under `off` or by the previous release (R64; reviews r3 and r5 of #500). Only then:
+ * anyone else's read is the one statement.
  */
 async function passkeyOf(
   db: Queryable,

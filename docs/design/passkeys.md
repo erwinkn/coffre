@@ -1012,12 +1012,15 @@ are not checked. The statement that reads the credential
 (`credentialRow`, every variant: a request's, `GET /api/me`'s with the
 vault's rows, a page's) joins the passkey it names by its primary key and
 asks of `passkeys_live_idx`, then of `passkeys_principal_idx`, whether its
-person holds a live passkey at the credential's generation, only removed
-ones, or none ever. Only removed ones, for a credential that names none,
-reads those rows, one statement more, and holds each to its MAC: a removal
-written in the database alone would otherwise pass a session made while
-the passkey was live, under `off` or by the previous release, and fails
-as a tampered row does (R64; review r3 of #500, PR 4b). The passkey's MAC is checked by
+person holds a live passkey at the credential's generation, rows but none
+live at it (removed, or of another generation), or none ever. Rows but none
+live, for a credential that names none, reads them all, one statement
+more, and holds each to its MAC: a removal or a generation written in the
+database alone would otherwise pass a session made while the passkey was
+live, under `off` or by the previous release, and fails as a tampered row
+does (R64; reviews r3 and r5 of #500, PR 4b). A person readmitted after
+holding passkeys, and holding none since, pays that statement on each
+request of a session no passkey stands behind. The passkey's MAC is checked by
 `passkeyStands`, on the one branch whose answer reads the row, so a row
 changed around the app refuses the credential it backs as any tampered row
 does (`401 unauthenticated`), and refuses nothing the check exempts: a
@@ -1299,6 +1302,12 @@ For an assertion:
    with the stored key and algorithm. ES256 signatures arrive DER-encoded
    and are turned into the raw form WebCrypto takes.
 8. The counter and the replay mark move, in one statement (7.3).
+   Under the head, a mark that does not move means this challenge is spent
+   for that passkey (a sign-in that committed though its answer was lost,
+   or a newer one's), or its counter stood still: no touch of it can
+   answer the challenge again, so the sign-in ends (`state_mismatch`, its
+   cookie cleared) and the page sends the person to sign in again, rather
+   than ask for touches that cannot pass (review r5 of #500).
 
 For a registration, steps 1, 2 and 5 (with `webauthn.create`), then:
 `authenticatorData` with AT set, UP and UV set, BS only with BE; the

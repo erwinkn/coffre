@@ -317,7 +317,32 @@ test("the same assertion, sent twice with its sealed state, signs in once (secti
   const twice = [new Browser(runtime), new Browser(runtime)];
   for (const copy of twice) copy.jar.set('__Host-coffre_passkey', cookie);
   const answers = await Promise.all(twice.map((copy) => copy.answer({ response })));
-  assert.deepEqual(answers.map(({ status }) => status).sort(), [200, 401]);
+  assert.deepEqual(answers.map(({ status, body }) => `${status} ${body.error ?? ''}`).sort(), ['200 ', '400 state_mismatch']);
+});
+
+test("a touch whose sign-in committed but whose answer was lost ends that sign-in at the next touch, which cannot pass, and a new one signs in (section 7.3; review r5 of #500)", async () => {
+  const runtime = deployment('required');
+  const key = await SoftAuthenticator.create('ES256');
+  await enroll(runtime, NAMED, key);
+  const browser = new Browser(runtime);
+  await browser.provider(NAMED);
+  const { body } = await browser.step();
+  // Committed, its answer and cookies lost on the way (a gateway's 502, say): the browser is as it was before it.
+  const before = new Map(browser.jar);
+  assert.equal((await browser.answer({ response: await assertion(key, body.options) })).status, 200);
+  browser.jar.clear();
+  for (const [name, value] of before) browser.jar.set(name, value);
+
+  // The page asks for another touch: it signs the spent challenge, and ends the sign-in rather than ask again.
+  assert.deepEqual(await browser.answer({ response: await assertion(key, body.options) }), { status: 400, body: { error: 'state_mismatch' } });
+  assert.equal(browser.jar.get('__Host-coffre_passkey'), undefined, 'the pending sign-in is cleared');
+  assert.equal(browser.session, undefined);
+  assert.equal((await browser.step()).status, 404, 'nothing to ask: the page sends the person to sign in again');
+
+  assert.equal(await browser.provider(NAMED), '/auth/passkey');
+  const again = await browser.step();
+  assert.equal((await browser.answer({ response: await assertion(key, again.body.options) })).status, 200);
+  assert.equal(await me(browser), 'ok');
 });
 
 test('a first passkey ends everything of the person\'s no passkey stood behind, approved device codes included; the sign-in that adds it does not (sections 6.1, 13.23)', async () => {
@@ -525,7 +550,7 @@ test("a passkey's removal forged in the database, its MAC left as it was, refuse
 });
 
 
-test("a session no passkey stands behind is taken under optional only while its person holds none: a removal forged in the database, its MAC left as it was, does not pass it; the same removal made by the app does (sections 6.2, R64; review r3 of #500)", async () => {
+test("a session no passkey stands behind is taken under optional only while its person holds none: a removal or a generation forged in the database, its MAC left as it was, does not pass it; the same removal made by the app does (sections 6.2, R64; reviews r3 and r5 of #500)", async () => {
   await enroll(deployment('required'), ADA, await SoftAuthenticator.create());
   // Made while passkeys were off: no passkey stands behind it, and its person holds one.
   const browser = new Browser(deployment('off'));
@@ -534,6 +559,12 @@ test("a session no passkey stands behind is taken under optional only while its 
   assert.equal(await me(browser), 'passkey_required');
 
   const [held] = await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${ADA}`));
+  // Moved to another generation in the database alone: no longer live at hers, and no longer removed-at-hers either.
+  await db.owner.update(passkeys).set({ generation: held!.generation + 1 }).where(eq(passkeys.id, held!.id));
+  assert.equal(await me(browser), 'unauthenticated', 'a forged generation refuses, as a tampered row does');
+  await db.owner.update(passkeys).set({ generation: held!.generation }).where(eq(passkeys.id, held!.id));
+  assert.equal(await me(browser), 'passkey_required', 'put back, the row is hers again');
+
   await db.owner.update(passkeys).set({ removedAt: new Date(), removedBy: `user:${ROOT}` }).where(eq(passkeys.id, held!.id));
   assert.equal(await me(browser), 'unauthenticated', 'a forged removal refuses, as a tampered row does');
 
