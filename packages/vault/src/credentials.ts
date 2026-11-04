@@ -304,9 +304,11 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   if (typeof c?.id !== 'string' || !UUID.test(c.id) || (c.kind !== 'service' && c.kind !== 'personal' && c.kind !== 'handle') || !isBase64(c.tokenHash, 32)
     || !isBase64(c.authMac, 32) || typeof c.tokenHint !== 'string' || c.tokenHint.length === 0 || c.tokenHint.length > 64
     || (c.label !== null && (typeof c.label !== 'string' || c.label.length > 120)) || typeof c.scope !== 'string' || (c.places !== null && typeof c.places !== 'string')
-    || typeof c.expiresAt !== 'number' || !Number.isSafeInteger(c.expiresAt) || typeof c.createdBy !== 'string') {
-    throw new Error('an issue\'s token is its row: an id, its kind, its token\'s hash and hint, its scope as stored, its end, its maker, and the app\'s MAC');
+    || typeof c.expiresAt !== 'number' || !Number.isSafeInteger(c.expiresAt) || typeof c.createdBy !== 'string'
+    || (c.passkeyId !== null && (typeof c.passkeyId !== 'string' || !UUID.test(c.passkeyId)))) {
+    throw new Error('an issue\'s token is its row: an id, its kind, its token\'s hash and hint, its scope as stored, its end, its maker, its passkey, and the app\'s MAC');
   }
+  if (c.passkeyId !== null && via === null) throw new Error('an issued token carries the passkey of the credential it came in on, and only then');
   if ((c.kind === 'handle') !== (c.places !== null)) throw new Error('a handle, and only a handle, names the places it stands in for');
   const scope = readScope(c.scope);
   if (scope === null || scope.length === 0) throw new Error('an issued token reaches what its stored scope names, at least one place');

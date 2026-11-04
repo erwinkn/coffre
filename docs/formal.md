@@ -58,6 +58,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - One holds 0.16's proxy definitions edited in the UI, before they are
   built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
   when its route is a row an Owner edits ([below](#routingtla)).
+- One holds 0.16's passkeys: [`formal/Factor.tla`](../formal/Factor.tla),
+  a person's factor lock, which every issue of theirs and every change to
+  their passkeys takes ([below](#factortla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -2629,6 +2632,65 @@ again before the isolate serves, but no scenario composes the two.
 a writer who puts back the item a `proxy.code` change deleted makes a
 rollback like any other, since the deletion is a change, and `Routing`
 shows `SealChecked` refuses those.
+
+## 0.16: passkeys
+
+### Factor.tla
+
+A person's factor lock (T176; [passkeys.md](design/passkeys.md), sections
+6.1 and 6.3), written before `issue_token` took it (migration 0064, R45).
+A change to a person's passkeys ends credentials by revoking them: a first
+passkey ends every credential that names none, a removal or an Owner's
+reset every one but the session the touch issued. Review r12 of the design
+found the race this closes: a removal reads Ada's live credentials, a
+handle commits from her session meanwhile, and the removal revokes what it
+read, leaving the handle live.
+
+**The model.** Ada, signed in on session `cA`, which passkey `pa`
+confirmed or none did. Three processes, one step per statement or per lock
+wait, READ COMMITTED:
+
+- `iss`, the vault's `issue_token`: the factor lock, the members' rows
+  shared, `cA`'s row shared and checked live and naming the passkey the
+  issue carries (`cA`'s own, as the app read it), then the insert of
+  handle `h1` naming it;
+- `old`, the previous release's vault during a rollout, calling the same
+  statement through its old signature, which carries no passkey: `h2`;
+- `chg`, a change to Ada's passkeys, the app's transaction (PR 4): the
+  factor lock, the read of her live credentials, then for each one it ends
+  the member's row exclusive and the credential's, and the new session it
+  issues to the browser that touched, `n`. Her first passkey when she had
+  none, a removal of `pa` keeping `pb`, or an Owner's reset.
+
+| Protection | Turned off, TLC finds |
+|---|---|
+| `issue_token` takes the issuer's factor lock (`IssueTakesFactor`) | `ChangeEndsAll`: the removal reads `cA` alone, `h1` commits, the removal revokes `cA` and commits with `h1` live; and `LiveFromLive` |
+| A change takes it before it reads what to end (`ChangeTakesFactor`) | `ChangeEndsAll`, the same interleaving from the other side |
+| `issue_token` takes it first, before the members' rows (`FactorFirst`) | `NoWaitCycle`: the issue holds Ada's member row shared and waits for the factor lock, which the change holds while it waits for her member row exclusive |
+| `issue_token` goes ahead only while `cA` names the passkey the issue carries (`IssueChecksPasskey`) | `NamesItsSource`: the previous release's vault issues `h2` naming no passkey from a session `pa` confirmed |
+
+**The invariants.** `ChangeEndsAll`: once a change commits, every
+credential of Ada's its rule names is revoked but the session it issued.
+`LiveFromLive`: no credential stays live once the one it was issued on is
+ended. `NamesItsSource`: what either vault issues names `cA`'s passkey.
+`NoWaitCycle`: no two or three processes wait on each other in a circle,
+which Postgres would end with a deadlock.
+
+| Scenario | What | Distinct states |
+|---|---|---|
+| `Factor` | the vault issues Ada a handle, and the previous release's vault another, while her first passkey is added, one removed or all reset | 368 |
+
+**What it does not cover.** The checks `issue_token` made before (the
+issuer and account's standing, the policy, `via`'s seal and end), which
+Lifecycle.tla and Issuing.tla hold. The passkey's own liveness, which the
+statement checks too but which a removal makes moot by revoking `cA` under
+the lock. The app's own issues (a browser session at sign-in, a CLI session
+at its poll, an MCP connection, a device decision), which take the same
+lock in PR 4 and are held there by tests on both engines. SQLite, whose one
+writer serializes the change and the issue whole, so the interleaving
+cannot happen. The per-request check (section 6.2), which refuses a
+credential no passkey confirmed once its person has one, whatever this
+lock did.
 
 ## TLC
 

@@ -24,6 +24,7 @@ export {
   type StoredPasskey,
   type VerifiedAssertion,
   type VerifiedRegistration,
+  USER_VERIFICATION,
 } from './webauthn.ts';
 export * from './workloads.ts';
 export * from './workload-token.ts';

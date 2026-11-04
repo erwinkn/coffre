@@ -192,6 +192,17 @@ use_grants member 8
 migrate_through member migration_member local-member-only
 [[ "$(owners)" == "$expected" ]] || { echo "after 0059, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
+# 0064 makes `issue_token`'s overload, the member's, and replaces 0036's signature with a wrapper calling it, which keeps
+# its owner and runs as it (T176 PR 3). The previous release's vault, which calls that signature during a rollout, must
+# still be answered: for a person who is no member, `moved`, never a permission error.
+issuers="$(psql_owner -d member -Atc "SELECT string_agg(pronargs || '=' || pg_get_userbyid(proowner), ' ' ORDER BY pronargs) FROM pg_proc
+    WHERE pronamespace = 'public'::regnamespace AND proname = 'issue_token'")"
+[[ "$issuers" == "28=migration_owner 29=migration_member" ]] || { echo "after 0064, issue_token's owners: $issuers" >&2; exit 1; }
+answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
+    psql -X -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d member -c "SELECT issue_token(
+        'r', 0, 'nobody', '{}', '\x00', '\x00', 'nobody', 1, 0, 1, 0, NULL, NULL, NULL, 0, '{}', '{}', 'k',
+        gen_random_uuid(), 'personal', '\x00', '\x00', 'h', 'l', 'nobody', 'all', NULL, 0) ->> 'state'")"
+[[ "$answer" == moved ]] || { echo "the previous release's issue_token answered: $answer" >&2; exit 1; }
 
 # Unsafe groups must fail clearly, rather than trying a forbidden ALTER ROLE.
 for attribute in SUPERUSER REPLICATION BYPASSRLS; do

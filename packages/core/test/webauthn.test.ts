@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { USER_VERIFICATION } from '@coffre/core/identity';
 import { encodeCbor, FLAGS, SoftAuthenticator, toBase64url, type CborValue, type SoftAlgorithm, type Tweak } from '@coffre/conformance/authenticator';
 
 import {
@@ -48,6 +49,19 @@ const asAssertion = (v: W3cVector) => ({
 
 const W3C_SITE = { origin: 'https://example.org', rpId: 'example.org' };
 
+/** The passkey a vector's registration attested, read from its bytes: a vector whose UV bit is clear registers nothing. */
+const attestedBy = (v: W3cVector): StoredPasskey => {
+  const [attestation] = readCbor(hex(v.registration.attestationObject));
+  assert.ok(attestation instanceof Map);
+  const data = attestation.get('authData') as Uint8Array;
+  const length = (data[53] << 8) | data[54];
+  const [key, end] = readCbor(data, 55 + length);
+  assert.ok(key instanceof Map);
+  return { credentialId: data.slice(55, 55 + length), publicKey: data.slice(55 + length, end), algorithm: key.get(3) as PasskeyAlgorithm, userHandle: new Uint8Array(16) };
+};
+/** Coffre asks for UV, and checks it last: a response without it that answers `user_verification` passed every other check. */
+const verifiedOr = (flags: number) => (flags & FLAGS.UV ? 'ok' : 'user_verification');
+
 // What each vector must answer, read from its title, not from the verifier:
 // ES384, ES512 and Ed448 are no algorithm a passkey may use here, and a
 // cross-origin frame or a top origin is no ceremony on the deployment's page.
@@ -61,36 +75,46 @@ const W3C_REFUSED: Record<string, string> = {
 
 test('the W3C vectors register and assert, with their credential ID, AAGUID and counter, but those coffre does not take', async () => {
   assert.equal(vectors.w3c.length, 15);
+  let unverified = 0;
   for (const v of vectors.w3c as W3cVector[]) {
-    const registered = await verifyRegistration(asRegistration(v), { ...W3C_SITE, challenge: hex(v.registration.challenge), requireUserVerification: false });
-    assert.equal(reason(registered), W3C_REFUSED[v.id] ?? 'ok', v.id);
-    if (!registered.ok) continue;
-    assert.deepEqual(registered.credentialId, hex(v.registration.credential_id), v.id);
-    assert.deepEqual(registered.aaguid, hex(v.registration.aaguid), v.id);
-    const passkey: StoredPasskey = { credentialId: registered.credentialId, publicKey: registered.publicKey, algorithm: registered.algorithm, userHandle: new Uint8Array(16) };
-    const asserted = await verifyAssertion(asAssertion(v), { ...W3C_SITE, challenge: hex(v.authentication.challenge), passkey, requireUserVerification: false });
-    assert.equal(reason(asserted), 'ok', v.id);
+    if (W3C_REFUSED[v.id]) {
+      assert.equal(reason(await verifyRegistration(asRegistration(v), { ...W3C_SITE, challenge: hex(v.registration.challenge) })), W3C_REFUSED[v.id], v.id);
+      continue;
+    }
+    const [attestation] = readCbor(hex(v.registration.attestationObject));
+    const registered = await verifyRegistration(asRegistration(v), { ...W3C_SITE, challenge: hex(v.registration.challenge) });
+    assert.equal(reason(registered), verifiedOr(((attestation as Map<string, Uint8Array>).get('authData') as Uint8Array)[32]), v.id);
+    const passkey = attestedBy(v);
+    if (registered.ok) {
+      assert.deepEqual(registered.credentialId, hex(v.registration.credential_id), v.id);
+      assert.deepEqual(registered.aaguid, hex(v.registration.aaguid), v.id);
+      assert.deepEqual({ ...passkey, userHandle: undefined }, { credentialId: registered.credentialId, publicKey: registered.publicKey, algorithm: registered.algorithm, userHandle: undefined }, v.id);
+    } else assert.deepEqual(passkey.credentialId, hex(v.registration.credential_id), v.id);
     const authData = hex(v.authentication.authenticatorData);
-    assert.ok(asserted.ok);
-    assert.equal(asserted.signCount, new DataView(authData.buffer).getUint32(33), v.id);
-    assert.equal(asserted.userVerified, Boolean(authData[32] & 0x04), v.id);
-    // Where the vector's UV bit is clear, coffre's default, which asks for it, refuses.
-    const strict = await verifyAssertion(asAssertion(v), { ...W3C_SITE, challenge: hex(v.authentication.challenge), passkey });
-    assert.equal(reason(strict), authData[32] & 0x04 ? 'ok' : 'user_verification', v.id);
+    const expected = { ...W3C_SITE, challenge: hex(v.authentication.challenge), passkey };
+    const asserted = await verifyAssertion(asAssertion(v), expected);
+    assert.equal(reason(asserted), verifiedOr(authData[32]), v.id);
+    if (asserted.ok) assert.equal(asserted.signCount, new DataView(authData.buffer).getUint32(33), v.id);
+    else {
+      // UV clear: everything else verified, the signature included, which one bit flipped breaks.
+      unverified += 1;
+      const flipped = asAssertion(v);
+      flipped.response.signature = toBase64url(flip(8)(hex(v.authentication.signature)));
+      assert.equal(reason(await verifyAssertion(flipped, expected)), 'signature', v.id);
+    }
     // And the registration's challenge answers no assertion.
-    assert.equal(reason(await verifyAssertion(asAssertion(v), { ...W3C_SITE, challenge: hex(v.registration.challenge), passkey, requireUserVerification: false })), 'challenge', v.id);
+    assert.equal(reason(await verifyAssertion(asAssertion(v), { ...expected, challenge: hex(v.registration.challenge) })), 'challenge', v.id);
   }
+  assert.equal(unverified, 7); // RS256, EdDSA and five ES256: each algorithm still verifies a signature
 });
 
 test("a W3C vector's assertion is no registration, and its registration no assertion", async () => {
   const v = (vectors.w3c as W3cVector[]).find((vector) => vector.id === 'none-es256')!;
-  const registered = await verifyRegistration(asRegistration(v), { ...W3C_SITE, challenge: hex(v.registration.challenge), requireUserVerification: false });
-  assert.ok(registered.ok);
-  const passkey = { credentialId: registered.credentialId, publicKey: registered.publicKey, algorithm: registered.algorithm, userHandle: new Uint8Array(16) };
+  const passkey = attestedBy(v);
   // The registration's clientDataJSON, sent as an assertion's: `webauthn.create` is not `.get`.
   const crossed = asAssertion(v);
   crossed.response.clientDataJSON = toBase64url(hex(v.registration.clientDataJSON));
-  assert.equal(reason(await verifyAssertion(crossed, { ...W3C_SITE, challenge: hex(v.registration.challenge), passkey, requireUserVerification: false })), 'type');
+  assert.equal(reason(await verifyAssertion(crossed, { ...W3C_SITE, challenge: hex(v.registration.challenge), passkey })), 'type');
 });
 
 // --- SimpleWebAuthn's fixtures: real authenticators ---------------------------
@@ -100,6 +124,7 @@ type Fixture = {
   expectedChallenge: string;
   expectedOrigin: string;
   expectedRPID: string;
+  /** SimpleWebAuthn's own setting; where false, the authenticator asked for presence alone, which coffre refuses. */
   requireUserVerification: boolean;
   credential?: { id: string; publicKey: string; counter: number };
 };
@@ -108,10 +133,9 @@ test("SimpleWebAuthn's registrations, from U2F and packed security keys, TPM, An
   const registrations = Object.entries(vectors.simplewebauthn.registration as Record<string, Fixture>);
   assert.equal(registrations.length, 8);
   for (const [name, f] of registrations) {
-    const result = await verifyRegistration(f.response, { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID, requireUserVerification: f.requireUserVerification });
-    assert.equal(reason(result), 'ok', name);
-    assert.ok(result.ok);
-    assert.deepEqual(result.credentialId, b64(f.response.id as string), name);
+    const result = await verifyRegistration(f.response, { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID });
+    assert.equal(reason(result), f.requireUserVerification ? 'ok' : 'user_verification', name);
+    if (result.ok) assert.deepEqual(result.credentialId, b64(f.response.id as string), name);
   }
 });
 
@@ -136,11 +160,11 @@ test("SimpleWebAuthn's assertions verify against their credentials, and their co
       algorithm: -7,
       userHandle: response.response.userHandle ? b64(response.response.userHandle) : new Uint8Array(16),
     };
-    const expected: AssertionExpectation = { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID, requireUserVerification: f.requireUserVerification, passkey };
+    const expected: AssertionExpectation = { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID, passkey };
     const result = await verifyAssertion(f.response, expected);
-    assert.equal(reason(result), refused[name] ?? 'ok', name);
-    if (!result.ok) continue;
-    assert.equal(result.signCount, counters[name], name);
+    assert.equal(reason(result), refused[name] ?? (f.requireUserVerification ? 'ok' : 'user_verification'), name);
+    if (refused[name]) continue;
+    if (result.ok) assert.equal(result.signCount, counters[name], name);
     // The row's own ID, when the fixture's differs, is another credential.
     if (f.credential!.id !== response.id) {
       assert.equal(reason(await verifyAssertion(f.response, { ...expected, passkey: { ...passkey, credentialId: b64(f.credential!.id) } })), 'credential', name);
@@ -228,7 +252,6 @@ const SHARED: Case[] = [
   ['the parent RP ID the deployment did not name', { rpId: 'acme.example' }, { rpId: 'secrets.acme.example' }, 'rp_id'],
   ['UP clear', { flags: FLAGS.UV }, {}, 'user_presence'],
   ['UV clear', { flags: FLAGS.UP }, {}, 'user_verification'],
-  ['UV clear, where presence is enough', { flags: FLAGS.UP }, { requireUserVerification: false }, 'ok'],
   ['BS set, BE clear', { flags: FLAGS.UP | FLAGS.UV | FLAGS.BS }, {}, 'backup_state'],
   ['BE and BS set: a synced passkey', { flags: FLAGS.UP | FLAGS.UV | FLAGS.BE | FLAGS.BS }, {}, 'ok'],
   ['the reserved flag bits set, which are ignored', { flags: FLAGS.UP | FLAGS.UV | 0x02 | 0x20 }, {}, 'ok'],
@@ -253,6 +276,7 @@ test("an assertion is refused for each of section 7.2's checks, alone, with that
     // 7. the signature
     ['signed by another key', {}, { passkey: { ...(await stored(other)), credentialId: (await authenticator()).credentialId } }, 'signature'],
     ['a bit of the signature flipped', { signature: flip(40) }, {}, 'signature'],
+    ['UV clear and the signature bad: UV is the last check', { flags: FLAGS.UP, signature: flip(40) }, {}, 'signature'],
     ['the signature raw, not DER', { signature: (der) => der.subarray(der.length - 64) }, {}, 'signature'],
     ['bytes after the DER', { signature: append(0) }, {}, 'signature'],
     ['the authenticator data changed after signing', { response: inner((r) => void (r.authenticatorData = toBase64url(flip(34)(b64(String(r.authenticatorData)))))) }, {}, 'signature'],
@@ -273,11 +297,9 @@ test('a DER integer with a needless leading zero is refused, though it is the sa
   assert.ok(der[4] < 0x80);
   const body = [0x02, 33, 0, ...der.subarray(4)];
   const padded = Uint8Array.from([0x30, body.length, ...body]);
-  const registered = await verifyRegistration(asRegistration(v), { ...W3C_SITE, challenge: hex(v.registration.challenge), requireUserVerification: false });
-  assert.ok(registered.ok);
-  const passkey = { credentialId: registered.credentialId, publicKey: registered.publicKey, algorithm: registered.algorithm, userHandle: new Uint8Array(16) };
-  const expected = { ...W3C_SITE, challenge: hex(v.authentication.challenge), passkey, requireUserVerification: false };
-  assert.equal(reason(await verifyAssertion(asAssertion(v), expected)), 'ok');
+  const expected = { ...W3C_SITE, challenge: hex(v.authentication.challenge), passkey: attestedBy(v) };
+  // The vector's UV bit is clear, and UV is checked last: the signature as sent verifies.
+  assert.equal(reason(await verifyAssertion(asAssertion(v), expected)), 'user_verification');
   const sent = asAssertion(v);
   sent.response.signature = toBase64url(padded);
   assert.equal(reason(await verifyAssertion(sent, expected)), 'signature');
@@ -297,6 +319,7 @@ test("a registration is refused for each of section 7.2's checks, alone, with th
   const y = point.get(-3) as Uint8Array;
   const own: Case[] = [
     ['an assertion answering a registration', { clientData: { type: 'webauthn.get' } }, {}, 'type'],
+    ['UV clear and an algorithm not asked for: UV is the last check', { flags: FLAGS.UP }, { algorithms: [-8] }, 'algorithm'],
     ['transports that are no list', { response: inner((r) => void (r.transports = 'usb')) }, {}, 'malformed'],
     ['a transport that is no name', { response: inner((r) => void (r.transports = ['USB 3'])) }, {}, 'malformed'],
     // The attestation object
@@ -375,7 +398,6 @@ test('a registration answers what the row stores: the ID, the COSE key as attest
       assert.deepEqual(result.aaguid, synced ? null : aaguid);
       assert.equal(result.backupEligible, synced);
       assert.equal(result.backedUp, synced);
-      assert.equal(result.userVerified, true);
       assert.deepEqual(result.transports, synced ? ['hybrid', 'internal'] : ['usb']);
       // And the passkey it makes signs in, with its counter: a synced one's stays 0.
       key.userHandle = HANDLE;
@@ -384,6 +406,24 @@ test('a registration answers what the row stores: the ID, the COSE key as attest
       const second = await verifyAssertion(await key.assert({ ...SITE, challenge: CHALLENGE }), { ...SITE, challenge: CHALLENGE, passkey });
       assert.ok(first.ok && second.ok, algorithm);
       assert.deepEqual([first.signCount, second.signCount], synced ? [0, 0] : [2, 3]);
+    }
+  }
+});
+
+test('a touch without user verification registers no passkey and signs in nothing, whatever else it gets right', async () => {
+  // One value, not a setting: what create() and get() ask for, and what the verifier holds responses to.
+  assert.equal(USER_VERIFICATION, 'required');
+  for (const algorithm of ['Ed25519', 'ES256', 'RS256'] as const) {
+    for (const synced of [false, true]) {
+      const key = await SoftAuthenticator.create(algorithm, { synced });
+      const flags = FLAGS.UP | (synced ? FLAGS.BE | FLAGS.BS : 0);
+      // The same authenticator registers and signs in with UV set...
+      assert.equal(reason(await register({ flags: flags | FLAGS.UV }, {}, key)), 'ok', algorithm);
+      assert.equal(reason(await assertion({ flags: flags | FLAGS.UV }, {}, key)), 'ok', algorithm);
+      // ...and without it gets a refusal and nothing else: no credential ID or key to store, no counter to move.
+      for (const refused of [await register({ flags }, {}, key), await assertion({ flags }, {}, key)]) {
+        assert.deepEqual(refused, { ok: false, reason: 'user_verification', message: 'the user was not verified, only present' }, algorithm);
+      }
     }
   }
 });
