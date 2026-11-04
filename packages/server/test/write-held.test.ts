@@ -13,7 +13,7 @@ import type { Vault, WriteKeysInput, WriteKeysOutcome } from '@coffre/core/vault
 import { tablesOf, type Queryable } from '@coffre/db';
 import { rowsOf } from '@coffre/db/dialect';
 import { laterChanges, lockLogHead, logObject } from '@coffre/db/log';
-import { eq, sql } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -788,6 +788,33 @@ test("a project's audit page whose 0.14 read fails asks no more of its key write
   } finally {
     await run(db.owner, sql`GRANT SELECT ON audit_log TO coffre_app`);
   }
+  // And the page fails with its first error, not one met while it waits: a key-write statement fails at once, the
+  // page's other reads after it, each with another, while the key writes' statements asked with it, slower, are
+  // waited for (review r8 of #490: `newest` kept its error while it waited for them, and a read beside it that failed
+  // meanwhile stood for it).
+  const first = new Error("the key writes' third statement, refused at once");
+  const later = new Error('a statement refused after it');
+  let writesAsked = 0;
+  running = 0;
+  const failing = new Proxy(db.runtime, { get: (target, key, receiver) => {
+    const value = Reflect.get(target, key, receiver) as unknown;
+    if (key !== 'execute' || typeof value !== 'function') return value;
+    return async (statement: SQL) => {
+      const text = (target as unknown as { dialect: { sqlToQuery(statement: SQL): { sql: string } } }).dialect.sqlToQuery(statement).sql;
+      running += 1;
+      try {
+        const writes = text.includes(' UNION ALL ');
+        if (writes && ++writesAsked === 3) throw first;
+        await new Promise((resolve) => setTimeout(resolve, writes ? 200 : 50));
+        throw later;
+      } finally {
+        running -= 1;
+      }
+    };
+  } });
+  await assert.rejects(listAudit({ ...ctx, db: failing } as ApiContext, query), (error) => error === first);
+  assert.equal(writesAsked, STATEMENTS_AT_ONCE, `${writesAsked} key-write statements asked`);
+  assert.equal(running, 0, 'a statement was left running after the page failed');
 });
 
 test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", { skip: POSTGRES }, async () => {

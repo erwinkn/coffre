@@ -1801,7 +1801,7 @@ export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | 
 export async function sealedPage(
   db: Queryable,
   filter: { actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number; instance: boolean; written: WrittenAt | null },
-  signal?: AbortSignal,
+  stop?: AbortController,
 ): Promise<{ rows: RecordedChange[]; more: boolean }> {
   const { logChanges } = tablesOf(db);
   const engine = dialect.engineOf(db);
@@ -1832,7 +1832,7 @@ export async function sealedPage(
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
     ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
   const rows = await newest<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
-    db, reads(), columns, filter.before, filter.limit + 1, 0, signal,
+    db, reads(), columns, filter.before, filter.limit + 1, 0, stop,
   );
   return {
     rows: rows.slice(0, filter.limit).map((row) => ({
@@ -1872,10 +1872,13 @@ export const STATEMENTS_AT_ONCE = 4;
  * reads, one statement, one round trip. With more, a statement of each
  * `READS_PER_STATEMENT`, `STATEMENTS_AT_ONCE` asked together, each made
  * from `reads` as it is asked; their rows merge by `at`, then number, as
- * one statement's would, keeping the newest `skip + take`.
+ * one statement's would, keeping the newest `skip + take`. The first of
+ * them to fail aborts `stop` with its error, at once, and so does a read
+ * beside them that shares it: no statement is asked after that, and once
+ * those asked have answered, `newest` fails with the first error.
  */
 async function newest<Row extends { number: string | number | bigint; at: string | number }>(
-  db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0, signal?: AbortSignal,
+  db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0, stop = new AbortController(),
 ): Promise<Row[]> {
   const { logChanges } = tablesOf(db);
   const statement = (part: readonly SQL[], take: number, skip: number) => {
@@ -1895,7 +1898,7 @@ async function newest<Row extends { number: string | number | bigint; at: string
     }
     return part;
   };
-  signal?.throwIfAborted();
+  stop.signal.throwIfAborted();
   const first = nextPart();
   if (first.length === 0) return [];
   const second = nextPart();
@@ -1907,24 +1910,23 @@ async function newest<Row extends { number: string | number | bigint; at: string
   let kept: Row[] = [];
   const made = [first, second];
   // The first statement to fail fails the page: no other is asked after it, and those already asked are
-  // waited for, so that a failed page leaves none running behind it (review r6 of #490). So does `signal`'s
-  // abort, a read beside it that failed (review r7).
-  let failed: { error: unknown } | undefined;
+  // waited for, so that a failed page leaves none running behind it (review r6 of #490). It says so at once, as a
+  // read beside it that fails does (review r7), so that the page fails with the first error, not one met while
+  // waiting (review r8): `stop`'s reason, which a later abort leaves as it is.
   const asking = async () => {
-    while (failed === undefined && signal?.aborted !== true) {
+    while (!stop.signal.aborted) {
       try {
         const part = made.pop() ?? nextPart();
         if (part.length === 0) return;
         const rows = await dialect.rowsOf<Row>(db, statement(part, keep, 0));
         kept = kept.concat(rows).sort(byNewest).slice(0, keep);
       } catch (error) {
-        failed ??= { error };
+        stop.abort(error);
       }
     }
   };
   await Promise.all(Array.from({ length: STATEMENTS_AT_ONCE }, asking));
-  if (failed !== undefined) throw failed.error;
-  signal?.throwIfAborted();
+  stop.signal.throwIfAborted();
   return kept.slice(skip, skip + take);
 }
 
