@@ -265,11 +265,14 @@ export type SessionFields = Omit<Tables['credentials']['$inferInsert'], 'authMac
   id: string; kind: 'workload'; tokenHash: Buffer; tokenHint: string; generation: number; principal: string; identityId: null; createdBy: string; expiresAt: Date;
   revokedAt: null; scope: string | null; places: string | null; jkt: string; notAfter: Date; ancestors: string | null; constraints: string | null;
   enrollmentId: string | null; approvedAt: Date | null; approvedBy: string | null;
+  /** A workload's session stands on its token, never on a person's passkey. */
+  passkeyId?: null; confirmedAt?: null;
 };
 
 /** A workload's session's row with its MAC: what `insertSession` writes, and what the vault writes for 0.15's sign-in (T149). */
 export function signedSession(chainKey: Buffer, row: SessionFields): SessionFields & { authMac: Buffer } {
-  return { ...row, authMac: authMac(chainKey, 'credentials', row) };
+  const fields = { ...row, passkeyId: null, confirmedAt: null };
+  return { ...fields, authMac: authMac(chainKey, 'credentials', fields) };
 }
 
 /** The database's clock, in milliseconds, as this statement runs: renewal's first step. */

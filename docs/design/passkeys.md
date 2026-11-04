@@ -832,7 +832,21 @@ above, with these choices:
 - Checks beyond 5.1's: a 16-byte user handle and AAGUID, the counter a
   uint32, transports a JSON array, a name of 1 to 64 characters, `removed_by`
   exactly when `removed_at`; a credential's `confirmed_at` only with a
-  passkey, and a device login's passkey only on an approval.
+  passkey and only on a browser or CLI session (a personal token or handle
+  copies the passkey alone, so it never passes a fresh check); and a device
+  login's passkey only on an approval, never on a pending or denied one
+  (the check spells out `decision IS NOT NULL`, since a pending row's NULL
+  would otherwise pass it). So a device login that names a passkey ends by
+  `consumed_at`, as the rotation ends one, never by turning `denied`.
+- Every place that writes a credential, device login or MCP connection
+  says which passkey stands behind it, `null` included: the MAC's row type
+  requires `passkeyId` (and `confirmedAt` on credentials), so an issue site
+  that forgets one does not compile. A workload's session never names one.
+- During the rollout, an isolate of the previous release cannot compute
+  the `confirmed_` kinds, so a confirmed session that lands on it is
+  refused (401, `auth_row_tampered` logged) until the deploy finishes, as
+  sessions of the `scoped_` and `placed_` kinds were when those shipped.
+  The 0.16 upgrade note says so.
 - On Postgres the constraints on the three existing tables are `NOT VALID`,
   as 0022's seals were: their columns are null everywhere, so nothing is
   scanned, and each table is locked for a moment only. On SQLite each check

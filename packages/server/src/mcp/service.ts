@@ -277,6 +277,7 @@ export class McpService {
         codeChallenge: request.code_challenge!,
         codeExpiresAt: new Date(now.getTime() + CODE_SECONDS * 1000),
         expiresAt,
+        passkeyId: null,
       });
       log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } }));
     }, changes);

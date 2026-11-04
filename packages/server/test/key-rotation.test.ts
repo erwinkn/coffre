@@ -113,6 +113,7 @@ beforeEach(async () => {
   await insertConnection(deps.db, A, {
     id: randomUUID(), principal: `user:${ROOT}`, generation: 1, clientId, clientName: 'Claude', clientHost: null, registration: 'dcr',
     scopes: '["read"]', redirectUri: 'http://127.0.0.1/callback', codeHash: randomBytes(32), codeChallenge: 'challenge', codeExpiresAt: new Date(Date.now() + 60_000), expiresAt: new Date(Date.now() + 86_400_000),
+    passkeyId: null,
   });
   // A passkey of the Owner's, and a connection it confirmed: its MAC covers the passkey it names.
   const passkey = {

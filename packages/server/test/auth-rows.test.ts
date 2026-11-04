@@ -66,7 +66,7 @@ test('a row that names a passkey is a kind of its own: naming one, clearing it o
     assert.equal(signedBy(KEY, 'credentials', { ...signed, ...change }), false, JSON.stringify(change));
   }
   // A session made with none, named afterwards, fails too: a writer cannot vouch a passkey for it.
-  const plain = { ...credential, authMac: authMac(KEY, 'credentials', credential) };
+  const plain = { ...credential, authMac: authMac(KEY, 'credentials', { ...credential, passkeyId: null, confirmedAt: null }) };
   assert.equal(signedBy(KEY, 'credentials', { ...plain, passkeyId: passkey.id, confirmedAt: at }), false);
   assert.equal(signedBy(KEY, 'credentials', { ...plain, passkeyId: passkey.id, confirmedAt: null }), false);
 
@@ -74,7 +74,7 @@ test('a row that names a passkey is a kind of its own: naming one, clearing it o
   for (const row of [{ ...credential, kind: 'personal', scope: '{}' }, { ...credential, kind: 'handle', places: '[]' }, { ...credential, kind: 'workload', principal: 'token:ci', identityId: null, jkt: 'k', notAfter: at, ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null }]) {
     const named = { ...row, passkeyId: passkey.id, confirmedAt: null };
     const mac = authMac(KEY, 'credentials', named);
-    assert.notDeepEqual(mac, authMac(KEY, 'credentials', row), row.kind);
+    assert.notDeepEqual(mac, authMac(KEY, 'credentials', { ...row, passkeyId: null, confirmedAt: null }), row.kind);
     assert.equal(signedBy(KEY, 'credentials', { ...named, passkeyId: OTHER, authMac: mac }), false, row.kind);
   }
 

@@ -2047,7 +2047,7 @@ export async function sweepOauthClients(db: Queryable, chainKey: Buffer, before:
 
 export async function insertConnection(db: Queryable, chainKey: Buffer, row: Omit<NewRow<Tables['mcpConnections']>, 'authMac'> & {
   id: string; principal: string; generation: number; clientId: string; clientName: string; clientHost: string | null; registration: string;
-  scopes: string; redirectUri: string; codeHash: Buffer; codeChallenge: string; codeExpiresAt: Date; expiresAt: Date;
+  scopes: string; redirectUri: string; codeHash: Buffer; codeChallenge: string; codeExpiresAt: Date; expiresAt: Date; passkeyId: string | null;
 }): Promise<void> {
   const signed = { ...row, refreshHash: null, refreshPreviousHash: null, revokedAt: null };
   await insert(db, tablesOf(db).mcpConnections, { ...signed, authMac: authMac(chainKey, 'mcp_connections', signed) });

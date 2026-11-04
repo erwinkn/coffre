@@ -1069,7 +1069,7 @@
       "checkConstraints": {
         "credentials_confirmed_check": {
           "name": "credentials_confirmed_check",
-          "value": "\"credentials\".\"confirmed_at\" IS NULL OR \"credentials\".\"passkey_id\" IS NOT NULL"
+          "value": "\"credentials\".\"confirmed_at\" IS NULL OR (\"credentials\".\"passkey_id\" IS NOT NULL AND \"credentials\".\"kind\" IN ('browser', 'cli'))"
         },
         "credentials_seal_check": {
           "name": "credentials_seal_check",
@@ -1244,7 +1244,7 @@
       "checkConstraints": {
         "device_authorizations_passkey_check": {
           "name": "device_authorizations_passkey_check",
-          "value": "\"device_authorizations\".\"passkey_id\" IS NULL OR \"device_authorizations\".\"decision\" = 'approved'"
+          "value": "\"device_authorizations\".\"passkey_id\" IS NULL OR (\"device_authorizations\".\"decision\" IS NOT NULL AND \"device_authorizations\".\"decision\" = 'approved')"
         },
         "device_authorizations_auth_mac_check": {
           "name": "device_authorizations_auth_mac_check",

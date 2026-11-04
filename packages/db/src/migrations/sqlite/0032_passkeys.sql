@@ -35,6 +35,6 @@ CREATE TABLE `passkeys` (
 CREATE INDEX `passkeys_live_idx` ON `passkeys` (`principal`,`generation`) WHERE "passkeys"."removed_at" IS NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX `passkeys_credential_id_key` ON `passkeys` (`credential_id`);--> statement-breakpoint
 ALTER TABLE `credentials` ADD COLUMN `passkey_id` text REFERENCES passkeys(id) ON DELETE restrict;--> statement-breakpoint
-ALTER TABLE `credentials` ADD COLUMN `confirmed_at` integer CONSTRAINT "credentials_confirmed_check" CHECK("confirmed_at" IS NULL OR "passkey_id" IS NOT NULL);--> statement-breakpoint
-ALTER TABLE `device_authorizations` ADD COLUMN `passkey_id` text REFERENCES passkeys(id) ON DELETE restrict CONSTRAINT "device_authorizations_passkey_check" CHECK("passkey_id" IS NULL OR "decision" = 'approved');--> statement-breakpoint
+ALTER TABLE `credentials` ADD COLUMN `confirmed_at` integer CONSTRAINT "credentials_confirmed_check" CHECK("confirmed_at" IS NULL OR ("passkey_id" IS NOT NULL AND "kind" IN ('browser', 'cli')));--> statement-breakpoint
+ALTER TABLE `device_authorizations` ADD COLUMN `passkey_id` text REFERENCES passkeys(id) ON DELETE restrict CONSTRAINT "device_authorizations_passkey_check" CHECK("passkey_id" IS NULL OR ("decision" IS NOT NULL AND "decision" = 'approved'));--> statement-breakpoint
 ALTER TABLE `mcp_connections` ADD COLUMN `passkey_id` text REFERENCES passkeys(id) ON DELETE restrict;

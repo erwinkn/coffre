@@ -44,7 +44,7 @@ const FIELDS = {
 
 /** What names a passkey on a sign-in row, when one stands behind it (passkeys.md, section 5.2). */
 const CONFIRMED = { credentials: ['passkeyId', 'confirmedAt'], device_authorizations: ['passkeyId'], mcp_connections: ['passkeyId'] } as const;
-type Confirmed<K extends AuthTable> = K extends keyof typeof CONFIRMED ? Partial<Pick<Rows[K], Extract<typeof CONFIRMED[K][number], keyof Rows[K]>>> : unknown;
+type Confirmed<K extends AuthTable> = K extends keyof typeof CONFIRMED ? Pick<Rows[K], Extract<typeof CONFIRMED[K][number], keyof Rows[K]>> : unknown;
 
 type Fields = { [K in AuthTable]: Pick<Rows[K], Extract<typeof FIELDS[K][number], keyof Rows[K]>> & Confirmed<K> };
 

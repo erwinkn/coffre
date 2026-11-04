@@ -747,6 +747,8 @@ export class SigninService {
       scope: options.stored !== undefined ? options.stored : options.scope === undefined ? null : storedScope(options.scope),
       places: options.places === undefined ? null : JSON.stringify(options.places.map(({ environmentId, personal }) => ({ environmentId, personal }))),
       revokedAt: null,
+      passkeyId: null,
+      confirmedAt: null,
     };
     return { row: { ...row, authMac: authMac(this.#deps.chainKey, 'credentials', row) }, issued: { id, token, expiresAt: options.expiresAt.toISOString() } };
   }
@@ -1403,6 +1405,7 @@ export class SigninService {
           principal: null,
           generation: 0,
           consumedAt: null,
+          passkeyId: null,
         };
         await insert(db, deviceAuthorizations, { ...row, authMac: authMac(this.#deps.chainKey, 'device_authorizations', row) });
       } catch (error) {
