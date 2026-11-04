@@ -1,11 +1,11 @@
 // Checks, and what became of each: one line apiece, and the run goes on
 // past a failure, so one report shows everything that is wrong.
-import { inspect } from 'node:util';
+import { inspect, stripVTControlCharacters } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { CoffreError } from '@coffre/client';
 
-import { serverErrors } from './browser.ts';
+import { answers } from './browser.ts';
 
 /** A check that failed: what went wrong, and what was seen instead. */
 export class Failure extends Error {
@@ -50,8 +50,8 @@ export async function until(what: string, probe: () => Promise<boolean>, seconds
 
 type Passed<T> = string | { detail: string; value: T };
 
-/** A request the server answered below 500, as wrangler logs it, colours or none: what a failure's output leaves out. */
-const ANSWERED = /^(?:\x1b\[[\d;]*m)*\[wrangler:info\](?:\x1b\[[\d;]*m)* [A-Z]+ \S+ [1-4]\d\d /;
+/** A request the server answered below 500, as wrangler logs it, its colours taken off: what a failure's output leaves out. */
+const ANSWERED = /^\[wrangler:info\] [A-Z]+ \S+ [1-4]\d\d /;
 
 export class Report {
   readonly #results: { name: string; status: 'ok' | 'FAIL' | 'skip' }[] = [];
@@ -84,9 +84,9 @@ export class Report {
       return undefined;
     }
     const since = this.#mark?.();
-    const errors = serverErrors.length;
+    const met: string[] = [];
     try {
-      const passed = await run(needs as { [K in keyof N]: NonNullable<N[K]> });
+      const passed = await answers.run(met, () => run(needs as { [K in keyof N]: NonNullable<N[K]> }));
       this.#print(name, 'ok', typeof passed === 'string' ? passed : passed.detail);
       return typeof passed === 'string' ? undefined : passed.value;
     } catch (error) {
@@ -96,7 +96,7 @@ export class Report {
       }
       const detail = error instanceof Failure ? error.detail : error instanceof Error ? error.stack : error;
       this.#print(name, 'FAIL', error instanceof Error ? error.message : String(error), detail);
-      this.#seen(serverErrors.slice(errors), since?.());
+      this.#seen([...met], since?.());
       return undefined;
     }
   }
@@ -106,12 +106,12 @@ export class Report {
    * processes' output while it ran, whole, but for the requests answered
    * below 500, so that a server's error is never cut from the report.
    */
-  #seen(answers: string[], output: string | undefined): void {
+  #seen(met: string[], output: string | undefined): void {
     const indent = (text: string) => text.replace(/^/gm, ' '.repeat(this.#width + 9));
-    if (answers.length > 0) console.error(indent(`The answers of 500 and over during this check:\n${answers.join('\n')}`));
+    if (met.length > 0) console.error(indent(`The answers of 500 and over to this check's requests:\n${met.join('\n')}`));
     if (output === undefined) return;
     const lines = output.split('\n');
-    const kept = lines.filter((line) => !ANSWERED.test(line));
+    const kept = lines.filter((line) => !ANSWERED.test(stripVTControlCharacters(line)));
     console.error(indent(`The processes' output during this check, but for ${lines.length - kept.length} requests answered below 500:\n${kept.join('\n')}`));
   }
 

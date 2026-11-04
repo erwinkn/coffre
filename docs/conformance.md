@@ -185,7 +185,8 @@ checks use controlled pauses inside requests; conformance cites their
 evidence rather than booting a second app and vault pair.
 
 A check that fails prints what it saw: its error, every answer of 500 or
-over it met with its body, which a client error drops when it is not
+over to the requests it sent, with the first 2,000 characters of its body
+(read for a second at most), which a client error drops when it is not
 coffre's own JSON, and what the processes wrote while it ran, whole, but
 for wrangler's lines for requests answered below 500. The ones that need its
 result are skipped, and the run ends with the last lines of the processes'
