@@ -130,7 +130,11 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
     return { buffers: least, rows: read };
   };
   /** Each form's work: the light gate's, the vault's on a warm map; the whole gate's; and a miss's. */
-  const measured = async () => ({ ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers });
+  const measured = async () => {
+    // The light and the whole gate are held to each other, so both read the key's row in one period: a period turning over between them has the first write the row and the other not (T218).
+    await inBulkPeriod(PERIOD_ROOM_MS);
+    return { ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers };
+  };
   await grow(10_000);
   const small = await measured();
   await grow(990_000);
