@@ -1,8 +1,10 @@
-// Fixed 60 s windows in tests (T217, T202). Two things count by the wall clock's minute: a workload gate's
+// Fixed windows in tests (T217, T202, T218). Two things count by the wall clock's minute: a workload gate's
 // limits (`gate.ts`: a count's window starts at `floor(now / windowMs) * windowMs`), and the vault's bulk cap, whose
 // refresh period a use writes its key's row in (`bulk.ts`). A minute turning over between a test's calls resets the
 // first and makes the second's next use write its row again, a statement and a round it did not take before.
 // A test whose assertion depends on all its calls sharing one window uses what is here, rather than hope it does.
+// A gate's day count is the same, by the UTC day: a test in this process stops the clock (`t.mock.timers`), one in
+// another (workerd) waits for a day with room (`inUtcDay`).
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { GateState, type Gates } from '../src/gate.ts';
@@ -35,5 +37,16 @@ export function pinnedGates(now: number = Date.now()): Gates {
  */
 export async function inBulkPeriod(ms: number, now: () => number = Date.now): Promise<void> {
   const left = MINUTE_MS - (now() % MINUTE_MS);
+  if (left < ms) await sleep(left + 50);
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Waits for the next UTC day if fewer than `ms` of this one are left, so that a test of a Durable Object in workerd,
+ * whose clock a test cannot stop, keeps its day's counts in one window (T218). Waits at most `ms`.
+ */
+export async function inUtcDay(ms: number, now: () => number = Date.now): Promise<void> {
+  const left = DAY_MS - (now() % DAY_MS);
   if (left < ms) await sleep(left + 50);
 }

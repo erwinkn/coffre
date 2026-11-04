@@ -17,6 +17,10 @@ import { newRequestId } from '../src/use.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
 import { ask, CONFIG, emptyLog, LOG_015, useDatabases, world } from './use-world.ts';
+import { inBulkPeriod } from './window-fixture.ts';
+
+/** What the statement-counting uses need of one bulk-cap period: each call before the last measured one may take its 3 s deadline, so room for two of them and a margin (T218). */
+const PERIOD_ROOM_MS = 10_000;
 
 let db: TestDatabase;
 before(async () => {
@@ -74,6 +78,8 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   const id = await w.key();
   const { pool, statements } = counting();
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
+  // The key enters the set in the first use; a period turning over before the next would have it write its row again (T218).
+  await inBulkPeriod(PERIOD_ROOM_MS);
   // One statement per use, whichever form: the first probes, the next is from the cache. The first, its key not yet in
   // the principal's set, would take their lock: decided first, then made, a second (DecideBeforeLock; review r2 of D153).
   try {

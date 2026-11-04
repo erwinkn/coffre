@@ -17,6 +17,10 @@ import { openVault, prepareVault } from '../src/vault.ts';
 import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
 import { CONFIG, emptyLog, LOG_015, useDatabases } from './use-world.ts';
+import { inBulkPeriod } from './window-fixture.ts';
+
+/** What the statement-counting uses need of one bulk-cap period: each call before the last measured one may take its 3 s deadline, so room for two of them and a margin (T218). */
+const PERIOD_ROOM_MS = 10_000;
 
 let db: TestDatabase;
 before(async () => {
@@ -75,6 +79,8 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
   const { pool, statements } = counting();
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
   try {
+    // The key enters the set in the cold use; a period turning over before the warm one would have it write its row again (T218).
+    await inBulkPeriod(PERIOD_ROOM_MS);
     // Cold: the map's miss reads the ids (one statement), then the use, its key entering the set, decided first and made
     // under the lock (two more). Warm, its key in the set: one.
     const cold = await vault.useRoute(w.askRoute('openai'));
@@ -124,7 +130,11 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
     return { buffers: least, rows: read };
   };
   /** Each form's work: the light gate's, the vault's on a warm map; the whole gate's; and a miss's. */
-  const measured = async () => ({ ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers });
+  const measured = async () => {
+    // The light and the whole gate are held to each other, so both read the key's row in one period: a period turning over between them has the first write the row and the other not (T218).
+    await inBulkPeriod(PERIOD_ROOM_MS);
+    return { ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers };
+  };
   await grow(10_000);
   const small = await measured();
   await grow(990_000);
