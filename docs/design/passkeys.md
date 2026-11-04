@@ -291,19 +291,28 @@ ends the page as a sign-in finished in another tab. The step ends five
 minutes after its challenge (`issuedAt`, from which the sealed state's
 expiry is dated), and its options' `timeout` is what is left of those when
 the GET is answered (`remainingMs`), so the page knows when the step ends
-on its own clock (`Lifetime`): at the earliest, the GET's send plus
-`timeout` (`ends`); at the latest, its arrival plus `timeout` (`endedBy`).
-From `ends` on, a press asks the authenticator for nothing and ends the
-page, a page restored from the back-forward cache included: an entry that
-had lapsed, and a page that then made a `create()` of an expired step,
-could replace the passkey another tab added (review r9). An entry lasts
-until its writer's `endedBy`, which comes after every tab's `ends`, so no
-tab finds it gone while it may still ask; a tab closed mid-`create()`
-blocks nothing past the step, and lapsed entries are removed as new ones
-are made. The answer it holds is a public key and an attestation of
+(`Lifetime`): the GET's send plus `timeout`, on both of the browser's
+clocks, the wall clock (`Date.now()`, shared by every tab, moved when the
+system corrects it) and the tab's elapsed clock (`performance.now()`,
+which never jumps but stops in a sleep on some systems). Once either says
+the step is over, a press asks the authenticator for nothing and ends the
+page, a page restored from the back-forward cache included: a page that
+made a `create()` of an expired step could replace the passkey another
+tab added (review r9), and neither clock alone holds through both a
+correction and a sleep (review r10). Each tab that opens the step pushes
+its entry's expiry to the GET's arrival plus `timeout` on the wall clock
+(`endedBy`), which is after that tab's own end, so the entry outlives
+every tab that read it. Timed by its writer alone, it could not: tab A's
+GET at 0 with 300 s left, the clock moved 60 s ahead at 10 s, tab B's GET
+then with 290 s left; A's entry, until 300 by A's reading, lapsed at
+240 s real time while B's step ran to 300 s, and B made a second passkey
+(review r10). A tab reads its own step's entry whatever its expiry, and
+only a tab of another step removes a lapsed one, as it opens; a tab closed
+mid-`create()` blocks nothing past the step. The answer it holds is a public key and an attestation of
 `none`, no secret, and only the browser holding the sign-in's cookie can
 send it. Where the browser keeps no storage, or refuses a read or a
-write, the page's memory holds the step from then on: a write that failed
+write of the step, the page's memory holds the step from then on (a tab
+that cannot push the expiry as it opens still reads the entry): a write that failed
 leaves nothing for a later read to find, and the memory has it (review
 r9). What the storage held stays, so another tab finds the step `asking`
 at worst, and asks for nothing. Two tabs pressed

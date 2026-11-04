@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { lifetime, memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage, type Lifetime } from '../lib/passkey-answer';
+import { browserClock, lifetime, memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage, type Lifetime } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -62,10 +62,10 @@ export function PasskeyPage() {
     let current = true;
     setStep(null);
     setUnanswered(false);
-    const sent = Date.now();
+    const sent = browserClock();
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
       if (!current) return;
-      setStep(answer.kind === 'ok' ? { ...answer.value, life: lifetime(sent, Date.now(), answer.value.options.timeout) } : answer.kind === 'refused' ? 'none' : 'unavailable');
+      setStep(answer.kind === 'ok' ? { ...answer.value, life: lifetime(sent, browserClock(), answer.value.options.timeout) } : answer.kind === 'refused' ? 'none' : 'unavailable');
     });
     return () => {
       current = false;
