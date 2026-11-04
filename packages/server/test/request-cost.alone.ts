@@ -1171,6 +1171,14 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const [market] = (await places(counted)).filter((project) => project.slug === 'market');
   const ids = Object.fromEntries(market!.environments.map((environment) => [environment.slug, environment.id]));
   const everything = [ids.dev!, ids.prod!, ids.busy!];
+  // A sensitive value of market/prod's own, and one market/busy reads through a reference into shop. With none, a plan
+  // of `sensitiveFrom` that scans a table can stop at an empty join after a handful of pages, and the count said which
+  // plan Postgres picked, not what the statement reads; with them, a scan shows (T214).
+  await root.secrets.set('market/prod', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
+  await root.secrets.set('shop/dev', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
+  await root.secrets.set('market/busy', { COST_REFERS: { ref: 'shop/dev/COST_SENSITIVE' } });
+  const shop = (await places(counted)).find((project) => project.slug === 'shop')!;
+  assert.deepEqual(await sensitiveFrom(counted, everything), new Map([[ids.prod!, new Set([market!.id])], [ids.busy!, new Set([shop.id])]]));
   /** Each statement of these reads, run under EXPLAIN: its pages. */
   const reads: Record<string, () => Promise<unknown>> = {
     'the places tree of everything': () => places(counted),
@@ -1209,7 +1217,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
     return read;
   };
   /** As autovacuum leaves it: the table's statistics and visibility map, which the plans read. */
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, secret_versions`);
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, secret_versions, secret_references`);
   await settle();
   const small = await pages();
   // 10,000 archived keys in market/prod, beside the live ones the places tree counts.

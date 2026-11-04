@@ -2960,29 +2960,49 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
 /**
  * The sensitive values these environments hold now, as the projects they
  * are from, by environment: a live key's own current version, its
- * project's; or a reference's source's, which it reads as (R23), the
- * source's project's. A hint for whoever issues a service's credential that
- * will not read them, so a reference ended since may still count.
+ * project's; or, a live key with no version of its own, the source its
+ * newest reference names, whose current version it reads as (R23), the
+ * source's project's: so not the source of a reference repointed, given a
+ * value of its own or archived since. A hint for whoever issues a service's
+ * credential that will not read them, so a reference broken since still
+ * counts: 0.14's log keeps its end in the vault's entry alone
+ * (`referenceRows`), 0.15's in `ended_at` too, and the hint reads alike on
+ * both.
+ *
+ * Each goes from the environments' live keys (`secrets_live_idx`) and looks
+ * up the rest of a key by id, one subquery a step, which Postgres runs per
+ * key and never turns into a join: so as many pages however many keys,
+ * versions or references the instance holds elsewhere or archives. As joins
+ * (T214), the planner weighed a scan of `secret_references` (no index by
+ * the holder's environment), of `secrets` or of `secret_versions` against
+ * the lookups, and picked by the statistics of the day.
  */
 export async function sensitiveFrom(db: Queryable, environmentIds: readonly string[]): Promise<Map<string, Set<string>>> {
   if (environmentIds.length === 0) return new Map();
   const { secrets, secretVersions, secretReferences } = tablesOf(db);
   const ids = [...new Set(environmentIds)];
+  const live = and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt));
+  const sensitive = (versionId: SQL | AnyColumn) => sql`(SELECT ${secretVersions.sensitive} FROM ${secretVersions} WHERE ${secretVersions.id} = ${versionId})`;
+  const newest = sql`(SELECT ${secretReferences.sourceSecretId} FROM ${secretReferences}
+    WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  // The source's project, if its current version is sensitive. `source` names the source's row, so `secrets` in
+  // `newest` is still the holder's.
+  const sourceProject = sql<string | null>`(SELECT source.project_id FROM ${secrets} source
+    WHERE source.id = ${newest} AND ${sensitive(sql`source.current_version_id`)})`;
   const [own, referred] = await Promise.all([
     db
       .selectDistinct({ environmentId: secrets.environmentId, projectId: secrets.projectId })
       .from(secrets)
-      .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-      .where(and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt), eq(secretVersions.sensitive, true))),
+      .where(and(live, sensitive(secrets.currentVersionId))),
     db
-      .selectDistinct({ environmentId: secretReferences.environmentId, projectId: secretReferences.sourceProjectId })
-      .from(secretReferences)
-      .innerJoin(secrets, eq(secrets.id, secretReferences.sourceSecretId))
-      .innerJoin(secretVersions, eq(secretVersions.id, secrets.currentVersionId))
-      .where(and(inArray(secretReferences.environmentId, ids), eq(secretVersions.sensitive, true))),
+      .selectDistinct({ environmentId: secrets.environmentId, projectId: sourceProject })
+      .from(secrets)
+      .where(and(live, isNull(secrets.currentVersionId))),
   ]);
   const from = new Map<string, Set<string>>();
-  for (const { environmentId, projectId } of [...own, ...referred]) from.set(environmentId, (from.get(environmentId) ?? new Set()).add(projectId));
+  for (const { environmentId, projectId } of [...own, ...referred]) {
+    if (projectId !== null) from.set(environmentId, (from.get(environmentId) ?? new Set()).add(projectId));
+  }
   return from;
 }
 
