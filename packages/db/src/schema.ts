@@ -1,3 +1,4 @@
+import { ROLE_ID } from '@coffre/core/access';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -315,8 +316,9 @@ export const vaultGrants = pgTable(
     ),
     check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR ${table.environmentSlug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
     // A role's id, one that ships or one an Owner made (`ROLE_ID`): which the instance's policy defines, and which of them an
-    // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md).
-    check('vault_grants_role_check', sql`${table.role} ~ '^[a-z][a-z0-9-]{1,31}$'`),
+    // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md). The pattern is
+    // `ROLE_ID`'s; a database migrated holds its own copy, which `vault/test/sql-copies.test.ts` holds to it.
+    check('vault_grants_role_check', sql`${table.role} ~ ${sql.raw(`'${ROLE_ID.source}'`)}`),
     unique('vault_grants_on_project').on(table.principal, table.projectId),
     unique('vault_grants_on_environment').on(table.principal, table.environmentId),
     unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),

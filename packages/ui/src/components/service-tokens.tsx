@@ -14,7 +14,8 @@ import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { Key, Plus, X } from './icons';
 
-const LIFETIMES = [30, 90, 180, 365] as const;
+/** The lifetimes the form offers, in days: a month, a quarter, half a year and a year, and always the default. */
+const LIFETIMES = [...new Set([30, 90, 180, 365, DEFAULT_SERVICE_TOKEN_DAYS])].sort((a, b) => a - b);
 
 /**
  * The bearer tokens a service account presents to the API, for CI without

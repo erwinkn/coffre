@@ -112,9 +112,10 @@ export type Role = string;
 export const ROLE_NAMES = Object.keys(ROLES) as BuiltinRole[];
 
 /**
- * How long a role's id, name and description may be: what the role editor lays out (docs/design/roles.md), the
- * design's choice. The vault checks a definition by them (`definitionProblem`), the API's schema and the UI's fields
- * take them from here.
+ * How long a role's id, name and description may be, in characters. Input bounds chosen with custom roles (W128,
+ * 0.10) so a definition stays a small row, never measured: no platform or design document sets them (the limits
+ * audit, #501, S68 and C4). The vault checks a definition by them (`definitionProblem`), the database's role check
+ * holds the id's (`vault_grants_role_check`), and the API's schema and the UI's fields take them from here.
  */
 export const ROLE_ID_MAX = 32;
 export const ROLE_NAME_MAX = 40;
@@ -595,7 +596,11 @@ export const MAX_SERVICE_TOKEN_DAYS = 366;
 /** How long a service account's token lives unless its maker says, in days: the CLI's and the UI's default, the API has none. */
 export const DEFAULT_SERVICE_TOKEN_DAYS = 90;
 
-/** The longest a credential's label may be, a token's or a binding's, in characters: the vault holds an issue to it. */
+/**
+ * The longest a credential's label may be, a token's, a binding's or a device login's, in characters. An input bound
+ * chosen with the first sign-ins, never measured: no platform or design document sets it (the limits audit, #501, S60,
+ * S68 and V81). The vault holds an issue to it, the API's schemas refuse a longer one, and what stores one cuts it there.
+ */
 export const CREDENTIAL_LABEL_MAX = 120;
 
 /**

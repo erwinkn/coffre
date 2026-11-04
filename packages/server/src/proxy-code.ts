@@ -4,7 +4,7 @@ import type { CoffrePlugin } from './plugins.ts';
 
 /**
  * `credentialProxy`'s `cacheSeconds` unless set: a revocation bound, how long an isolate may serve values a use
- * decided before it asks again (#249, #252); the design's choice, kept as policy (limits.md, S22).
+ * decided before it asks again (#249, #252); the design's choice, kept as policy (the limits audit, #501, S22).
  */
 export const DEFAULT_CACHE_SECONDS = 60;
 

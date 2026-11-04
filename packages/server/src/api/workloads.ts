@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
 import {
   EXCHANGED_CREDENTIAL_MS,
   SESSION_MS,
@@ -673,7 +673,7 @@ export class WorkloadService {
           const row = {
             id: randomUUID(), principal: member, generation: standing.generation, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
             jwks: uploaded?.jwks ?? null, claims: canonicalClaims(planned.claims), scope: storedScope(scope), policy: rules === null ? null : policyText(rules),
-            label: input.label?.slice(0, 120) ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
+            label: input.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
           };
           const ending = live.filter((candidate) => planned.replaces.some(({ id }) => id === candidate.id));
           const entries = [
@@ -729,7 +729,7 @@ export class WorkloadService {
           scope: storedScope(scope),
           // None on a bearer binding, which `/api/auth/oidc` takes; canonical JSON on a workload's, under the MAC (`policed_`).
           policy: rules === null ? null : policyText(rules),
-          label: input.label?.slice(0, 120) ?? null,
+          label: input.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null,
           createdAt: now,
           createdBy: ctx.caller.principal.id,
         };

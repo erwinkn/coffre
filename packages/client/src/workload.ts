@@ -611,7 +611,7 @@ export const TUNNEL_HIGH_WATER = 1024 * 1024;
  * How often a client's end of an open tunnel says it is there, idle or not: a count, which keeps an idle connection
  * and its Durable Object alive, and, from `coffre run`, a ping whose pong must come before the next, which finds a
  * peer gone without a word. Cloudflare closes an idle WebSocket after "a period of time" its WebSockets page
- * (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (limits.md, C3).
+ * (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (the limits audit, #501, C3).
  */
 export const TUNNEL_KEEPALIVE_MS = 30_000;
 

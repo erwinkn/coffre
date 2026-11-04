@@ -205,11 +205,14 @@ export const OPEN_BOUND_MS = TICK_BOUND_MS;
 
 /**
  * How long it waits on the log's upkeep after a tick: retention drops a day's partition and its tiles, hourly. A bound
- * chosen in T169 (205e8255, #437), not measured (limits.md, V14).
+ * chosen in T169 (205e8255, #437), not measured (the limits audit, #501, V14).
  */
 export const UPKEEP_BOUND_MS = 60_000;
 
-/** How long a checkpointer keeps its alarms, in a Durable Object's storage or in the Node runner's file (limits.md, V57). */
+/**
+ * How long a checkpointer keeps its alarms, in a Durable Object's storage or in the Node runner's file (the limits
+ * audit, #501, V57).
+ */
 export const ALARMS_KEPT_MS = 30 * 86_400_000;
 
 /**

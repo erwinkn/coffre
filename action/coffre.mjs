@@ -1801,7 +1801,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-B5ul0GWb.js
+//#region ../core/dist/access-By-hV_hQ.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -7371,7 +7371,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-D9-CzlBB.js
+//#region ../client/dist/workload-TiJKe4F1.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -8278,7 +8278,7 @@ const TUNNEL_FLOW = "coffre-tunnel-flow";
 * How often a client's end of an open tunnel says it is there, idle or not: a count, which keeps an idle connection
 * and its Durable Object alive, and, from `coffre run`, a ping whose pong must come before the next, which finds a
 * peer gone without a word. Cloudflare closes an idle WebSocket after "a period of time" its WebSockets page
-* (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (limits.md, C3).
+* (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (the limits audit, #501, C3).
 */
 const TUNNEL_KEEPALIVE_MS = 3e4;
 /**
