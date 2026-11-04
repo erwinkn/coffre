@@ -22,7 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import type { WorkloadTransport } from '../src/workloads/transport.ts';
-import { auditLog, credentials, environments, logChanges, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
+import { auditLog, credentials, environments, logChanges, secretReferences, secrets, secretVersions, serviceBindings, vaultMembers } from './db/tables.ts';
 import { clientFor, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -274,6 +274,26 @@ test("a reference takes its source's nature: a Developer's token reads no refere
   assert.equal(await read(theirs.token, 'backend/staging/STRIPE_SECRET_KEY'), '404 not_owner_issued');
   const owners = await owen.tokens.issue(CI, { expiresInDays: 30, scope: { 'backend/staging': 'viewer' } });
   assert.equal(await read(owners.token, 'backend/staging/STRIPE_SECRET_KEY'), STRIPE, "backend's Owner issued it: backend/dev itself need not be in its scope");
+});
+
+test("a reference counts toward what a credential will not read while it is its key's newest: not once repointed, given a value or archived", async () => {
+  const withheld = async () => (await ada.tokens.preview(CI, { expiresInDays: 30, scope: { 'backend/staging': 'viewer' } })).withheld;
+  await root.secrets.set('backend/staging', { REPLACED: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  assert.deepEqual(await withheld(), ['backend/staging'], 'a reference to a sensitive value counts where it is held');
+  await root.secrets.set('backend/staging', { REPLACED: { value: 'a value of its own', sensitivity: 'secret' } });
+  assert.deepEqual(await withheld(), [], 'given a value of its own, not sensitive, it reads that');
+  await root.secrets.set('backend/staging', { REPOINTED: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  await root.secrets.set('backend/staging', { REPOINTED: { ref: 'backend/dev/API_URL' } });
+  assert.deepEqual(await withheld(), [], 'repointed, it reads its newest source, which is not sensitive');
+  await root.secrets.set('backend/staging', { ARCHIVED: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  await root.secrets.set('backend/staging', { ARCHIVED: null });
+  assert.deepEqual(await withheld(), [], 'archived, it reads nothing');
+  // Their reference rows stay: a read of those rows by the holder's environment counted all three (T214).
+  assert.equal((await db.owner.select().from(secretReferences)).length, 4);
+  // Broken, it still counts, on either log: a hint, which reads no reference's end.
+  await root.secrets.set('backend/staging', { BROKEN: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
+  await root.references.break('backend/staging/BROKEN');
+  assert.deepEqual(await withheld(), ['backend/staging']);
 });
 
 test("a reference into another project lends its sensitive value only on a credential an Owner of that project issued: an Owner of the holder's project is not enough", async () => {

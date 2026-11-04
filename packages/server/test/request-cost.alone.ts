@@ -1171,6 +1171,18 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const [market] = (await places(counted)).filter((project) => project.slug === 'market');
   const ids = Object.fromEntries(market!.environments.map((environment) => [environment.slug, environment.id]));
   const everything = [ids.dev!, ids.prod!, ids.busy!];
+  // A sensitive value of market/prod's own, and one market/busy reads through a reference into shop. With none, a plan
+  // of `sensitiveFrom` that scans a table can stop at an empty join after a handful of pages, and the count said which
+  // plan Postgres picked, not what the statement reads; with them, a scan shows (T214). The growth above keeps what it
+  // made, a sensitive value of market/busy's own among what it may, so these add to what the environments held before.
+  const before = await sensitiveFrom(counted, everything);
+  await root.secrets.set('market/prod', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
+  await root.secrets.set('shop/dev', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
+  await root.secrets.set('market/busy', { COST_REFERS: { ref: 'shop/dev/COST_SENSITIVE' } });
+  const shop = (await places(counted)).find((project) => project.slug === 'shop')!;
+  const added = new Map(before);
+  for (const [environment, project] of [[ids.prod!, market!.id], [ids.busy!, shop.id]] as const) added.set(environment, new Set([...(before.get(environment) ?? []), project]));
+  assert.deepEqual(await sensitiveFrom(counted, everything), added);
   /** Each statement of these reads, run under EXPLAIN: its pages. */
   const reads: Record<string, () => Promise<unknown>> = {
     'the places tree of everything': () => places(counted),
@@ -1209,7 +1221,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
     return read;
   };
   /** As autovacuum leaves it: the table's statistics and visibility map, which the plans read. */
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, secret_versions`);
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, secret_versions, secret_references`);
   await settle();
   const small = await pages();
   // 10,000 archived keys in market/prod, beside the live ones the places tree counts.
@@ -1231,10 +1243,31 @@ test("a read of an environment's keys reads as many pages however many keys the 
     FROM environments e JOIN projects p ON p.id = e.project_id CROSS JOIN generate_series(1, 120) g WHERE p.slug LIKE 'other-%'`);
   await settle();
   const elsewhere = await pages();
+  // market/busy's reference made long ago, and a key of shop's repointed 5,000 times since: newer rows of another
+  // holder's, which a lookup of market/busy's newest that walks the references by `created_seq` reads one by one (review
+  // r1 of #502). Their entries in the log, at seqs before any other, copy its oldest, as the log's growth above does.
+  await db.owner.execute(sql`
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
+    SELECT e.seq - g, e.author, e.key_id, e.occurred_at, e.actor, e.action, e.decision, e.prev_hash, e.mac, e.hash, e.metadata
+    FROM (SELECT * FROM audit_log ORDER BY seq LIMIT 1) e CROSS JOIN generate_series(1, 5001) g`);
+  await db.owner.execute(sql`
+    UPDATE secret_references SET created_seq = (SELECT min(seq) FROM audit_log)
+    WHERE secret_id = (SELECT id FROM secrets WHERE environment_id = ${ids.busy!} AND key = 'COST_REFERS')`);
+  await db.owner.execute(sql`
+    INSERT INTO secrets (project_id, environment_id, key, archived_at) VALUES (${shop.id}, (SELECT environment_id FROM secrets
+      WHERE project_id = ${shop.id} AND key = 'COST_SENSITIVE'), 'COST_REPOINTED', now())`);
+  await db.owner.execute(sql`
+    INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
+    SELECT gen_random_uuid(), s.project_id, s.environment_id, s.id, s.project_id, s.environment_id, s.id,
+      (SELECT min(seq) FROM audit_log) + g, 'system:load'
+    FROM secrets s CROSS JOIN generate_series(1, 5000) g WHERE s.key = 'COST_REPOINTED'`);
+  await settle();
+  const history = await pages();
   for (const [name, statements] of Object.entries(small)) {
-    for (const [grown, label] of [[archived, 'archived keys of its own'], [elsewhere, 'keys of other projects']] as const) {
-      // The places tree of everything counts every live key of every project, which the second growth adds: only the first bears on it.
-      if (name === 'the places tree of everything' && grown === elsewhere) continue;
+    for (const [grown, label] of [[archived, 'archived keys of its own'], [elsewhere, 'keys of other projects'], [history, 'references made since']] as const) {
+      // The places tree of everything counts every live key of every project, which the second growth adds and the third keeps:
+      // only the first bears on it.
+      if (name === 'the places tree of everything' && grown !== archived) continue;
       assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
       for (const [i, { text, pages: before }] of statements.entries()) {
         const { pages: after, plan } = grown[name]![i]!;
