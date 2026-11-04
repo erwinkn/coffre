@@ -3,8 +3,9 @@
 Written on 2026-10-31, phase 1 of T176: the design and a mock of its screens
 ([passkeys-mock/index.html](passkeys-mock/index.html)). Erwin approved
 building it for 0.16 on 2026-11-03; section 14's PRs land in order, and
-section 15's questions are his to answer before the sign-in work (PR 4)
-starts. Built so far: the verifier (PR 1, section 9).
+he answered section 15's questions on 2026-11-03 (D170), which this
+document now follows. Built so far: the verifier (PR 1, section 9), the
+storage (PR 2, section 5).
 
 Erwin's decisions, from a team request on 2026-10-31:
 
@@ -17,8 +18,8 @@ Erwin's decisions, from a team request on 2026-10-31:
   and coffre's default is `optional`.
 - A fresh check, a passkey touch within the last five minutes, guards risky
   acts: role changes, Owner promotion and demotion, issuing service
-  credentials. Reading a value is not one. Reads in a protected environment
-  may be, but only with one check covering many reads.
+  credentials. Reading a value is not one, in a protected environment or
+  any other (D170 dropped `protectedReveals`, section 4.3).
 - `coffre login` is approved in a browser, so the terminal inherits that
   browser's factor.
 
@@ -32,7 +33,6 @@ Erwin's decisions, from a team request on 2026-10-31:
 | Connecting an MCP client, linking an account, managing passkeys | as today | a touch in the last 5 minutes, if you have a passkey | a touch in the last 5 minutes |
 | Approving a terminal | as today | a touch for that terminal, if you have a passkey | a touch for that terminal |
 | Reading values | as today | as today | as today |
-| Reading a protected environment's values, with `protectedReveals` (phase 3) | as today | a touch in the last 5 minutes | a touch in the last 5 minutes |
 | `/use`, CI and workload sign-in, services | untouched | untouched | untouched |
 
 Three rules carry it:
@@ -124,8 +124,8 @@ stolen one ends (rule 1): the thief cannot ride Ada's touch.
 - **Malware that stays.** Software on Ada's machine that reads every new
   cookie gets every new session. A passkey proves a touch, not a clean
   device.
-- **Reads.** Revealing a value needs no passkey (Erwin's call), unless the
-  deployment turns on `protectedReveals` for protected environments.
+- **Reads.** Revealing a value needs no passkey (Erwin's call), in a
+  protected environment too (section 4.3).
 - **Cloudflare Access.** Behind Access, coffre has no session of its own;
   passkeys are a `signin()` option (section 12).
 
@@ -147,8 +147,6 @@ passkeys: {
   policy: 'required',
   // The WebAuthn relying party: publicUrl's host unless set, or a parent of it (section 7.1).
   rpId: 'acme.example',
-  // Phase 3 (section 4.3): reading a protected environment's values takes a fresh check too.
-  protectedReveals: true,
 },
 ```
 
@@ -474,12 +472,15 @@ Who may reset whose, mirroring R1:
   passkeys and what ended with them, and a banner at the target's next
   sign-in.
 
-**The last Owner, every passkey lost.** No one can reset Ada's. Whoever
-deploys coffre sets `passkeys: 'off'` and redeploys. Ada signs in with
-GitHub alone, removes the lost passkeys (no check under `off`), and the
-deployer puts the policy back; under `required` Ada adds a passkey at the
-next sign-in. While it is `off`, a provider account is enough for everyone,
-so the window should be minutes. A narrower lever is open question 3.
+**The last Owner, every passkey lost.** Keep two unscoped Owners, and
+this never happens: the other one resets Ada's. With no other, no one can.
+Whoever deploys coffre sets `passkeys: 'off'` and redeploys. Ada signs in
+with GitHub alone, removes the lost passkeys (no check under `off`), and
+the deployer puts the policy back; under `required` Ada adds a passkey at
+the next sign-in. While it is `off`, a provider account is enough for
+everyone, so the window should be minutes. There is no narrower lever, no
+reset command and no config exemption: Erwin's answer to open question 3
+(D170) is that recovery adds no concept of its own.
 
 What `off` leaves behind when it ends: sessions, terminals, personal
 tokens and MCP clients made while it lasted name no passkey, so for anyone
@@ -555,70 +556,21 @@ access today, needs a fresh session like any other.
 | `POST /api/members/user:<self>/passkeys`, a second one onward | holder | a new factor |
 | `DELETE /api/members/user:<self>/passkeys/:id` | ceremony | removing a factor: a touch of a passkey kept, or of the last one (section 3.6) |
 
-### 4.3 Reads, and `protectedReveals`
+### 4.3 Reads
 
-`POST /api/reveals` and every other read stay **never**, by default. With
-`protectedReveals: true`, a reveal that opens a value of a protected
-environment needs a fresh session, for a person's browser or CLI session:
-one touch covers five minutes of reads, never a prompt per secret. The
-vault checks it, not the router (below).
+`POST /api/reveals` and every other read are **never**: a reveal takes no
+touch, in a protected environment or any other. Protected environments
+keep what they do today: a role that may use or write a key but not read
+it cannot reveal its value, whether it acts through a browser, a CLI
+session, a personal token or an MCP connection. Passkeys add nothing on
+top.
 
-A personal token or an MCP connection cannot touch a passkey, so under
-`protectedReveals` they read no protected environment's values; their
-`/use` is untouched. Open question 4.
-
-**The vault decides it, on every reveal path.** Whether an environment is
-protected is the vault's to say: it reads the place under its own lock, and
-the policy can change while a read runs (another Owner protects `prod` while
-a stale session's `coffre export` is opening it). A check in the router, or
-in the app before the vault's call, decides on a protection the vault may
-no longer hold by the time it releases the values. So the router does not
-check reveals at all. **Every vault call that releases a value carries
-whether the caller's session is fresh**, `fresh: boolean`, beside what the
-call carries today, whichever route or path reaches it. Today those calls
-are `useNamed` (one key, by name; `fresh` goes in its `accepts`), `use` and
-`useMany` (0.15's reads, which `openValues` sends through `useValues`), and
-`unwrap` (0.14's); a new one joins the list in the `Vault` interface's own
-type, which makes `fresh` a required field of every call that returns a
-value. `fresh` is true for anything but a person's credential (browser,
-CLI, personal token, MCP connection): a service's read and a handle's `/use`
-never wait on a touch.
-The vault refuses a protected environment to a caller who is not fresh
-where it refuses a caller without standing, under the same fence that
-holds the policy for that decision, and so with the same answer as any
-refusal there: the named path's one `404 not_available`, the unwrap's
-`vault_refused`. A protection that lands while the read runs is the
-vault's own read, fenced like any other change of the policy.
-`Probing.tla`'s `AcceptedFirst` and `NoKeyBeforeStanding` take the new
-input, the use matrices gain its cases, and the unwrap's policy fence holds
-on all-encrypted reads too, on each of those calls.
-
-**An older vault cannot enforce it, so the app asks for proof.** The type
-binds the app, not the vault running beside it: Workers Builds may deploy
-either Worker first (`docs/deploy.md`), and a vault of the previous release
-ignores a field it does not know. So every answer that releases values says
-it decided `fresh` (`freshDecided: true`), and with `protectedReveals` on,
-the app releases nothing from an answer that does not say so: a person's
-read on such a vault is refused `503 vault_upgrade_needed`, on every path,
-until the vault is upgraded too. Services and handles, whose `fresh` is
-always true, read as before. Conformance runs it against the previous
-release's vault.
-
-**Asking before reading.** A refusal that looks like any other cannot ask
-for a touch, so the clients ask first, from what is no secret: `GET
-/api/me` lists the environments the caller reaches, each with whether it is
-protected, and says `confirmedUntil`. Before a read of a protected
-environment from a session that is not fresh, the page opens the confirm
-dialog, and the CLI starts its step-up (section 3.5), then reads. A
-protection that lands in between gets the plain refusal; the client reads
-`/api/me` again, sees it, confirms and retries once.
-
-**Phase 3, reviewed on its own.** Four review rounds of this design found a
-hole here each time, every one in how the check meets the vault's read
-paths, none in the passkeys themselves. So `protectedReveals` is out of
-phase 2: the policy and the rule above stay as decided, and its build
-starts with a design review of its own against the vault's read paths as
-they are then (open question 4).
+An earlier draft had an option, `protectedReveals`, under which a person's
+reveal in a protected environment took a fresh session, the vault deciding
+it on every read path. Four review rounds found a hole in it each time, all
+where the check meets the vault's several read paths, and no one had asked
+for it. Erwin dropped it (D170, open question 4): no option, no later
+phase.
 
 ### 4.4 Who is never asked, and who cannot be
 
@@ -670,7 +622,7 @@ export const FRESH_ROUTES: { [K in RouteKey]: Fresh | ((asked: Asked<K>, ctx: Ap
   'POST /device-logins/:code': ({ input }) => (input.approve ? 'ceremony' : 'never'),
   'POST /approvals/:id': ({ input }) => (input.approve ? 'ceremony' : 'never'),
   'PATCH /secrets/:project/:environment': 'handler',       // loosening a nature, decided where the current one is read
-  'POST /reveals': 'never',                         // protectedReveals is the vault's to decide (section 4.3)
+  'POST /reveals': 'never',                         // reads take no touch (section 4.3)
   'GET /me': 'never',
   // … every route
 };
@@ -1167,7 +1119,12 @@ matches no row, or the use comes first and the removal ends what it made.
 device's PIN, never presence alone. Every platform passkey does it; a
 security key without a PIN is asked to set one. Presence alone would let
 anyone at an unlocked laptop with a plugged-in key confirm an Owner change.
-Open question 5.
+Erwin's answer to open question 5 (D170): `required`, and not a setting.
+`USER_VERIFICATION` in `@coffre/core/identity` is the one place it is
+spelled: what `create()` and `get()` ask for, and what the verifier holds
+every response to, with no way for a caller to ask for less. The verifier
+checks it last (section 9), so a `user_verification` refusal means the
+response passed every other check.
 
 ## 8. The app authenticates, the vault authorizes: where the check lives
 
@@ -1415,13 +1372,10 @@ running `passkeys: 'required'`:
     nothing.
 25. An MCP consent whose session a removal ended meanwhile connects
     nothing.
-26. Phase 3, with `protectedReveals`: a stale session's one-key reveal in a
-    protected environment answers as for a key it cannot see, whether the
-    key exists or not, and the log holds no use of it; the same for a
-    several-key reveal (`POST /api/reveals` with `keys`) and an
-    environment's, by a stale session, a personal token or an MCP client;
-    a reveal that starts before the environment is protected and releases
-    after releases nothing, on each path.
+26. A role that may use a protected environment's key but not read it
+    reveals no value of it, from a browser session confirmed a moment ago
+    as from a personal token or an MCP client: a passkey widens no
+    read (section 4.3).
 27. The configured Owner of check 22 signs in again with the passkey added
     there.
 28. A pending sign-in or enrollment whose provider's issuer the deployment
@@ -1473,74 +1427,49 @@ running `passkeys: 'required'`:
    checks.
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
-7. **Conformance** checks of section 13 but check 26, which is phase 3's,
-   and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
+7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
    case) and `docs/offboarding.md`.
 
-8. **Phase 3, `protectedReveals`**, after a design review of its own:
-   `fresh`, required on every value-releasing call of the `Vault` interface
-   (`useNamed`, `use`, `useMany`, `unwrap`), decided under the policy fence
-   and acknowledged in every answer, `Probing.tla` and the use matrices,
-   the clients asking first from `GET /api/me`.
 
 Each PR leaves `main` shippable: until PR 4, nothing is reachable.
 
-## 15. Open questions for Erwin
+## 15. Open questions for Erwin, answered
 
-Asked on 2026-11-03 (D170), recommending the proposals below; PR 4 waits
-for the answers, and this section records them once given.
+Asked on 2026-11-03 (D170); Erwin answered the same day. Each question as
+asked, shortened, and his answer.
 
-1. **A per-act touch or a five-minute window?** Proposed: the window, as you
-   asked, with three exceptions that take a touch of their own: approving a
-   terminal (section 3.5), approving an MCP client's change and connecting
-   an MCP client (section 4.4). Option: a touch per act for Owner promotion and role
-   edits only, which is what option C in section 8 would need anyway.
+1. **A per-act touch or a five-minute window?** Proposed: the window, with
+   three exceptions that take a touch of their own: approving a terminal
+   (section 3.5), approving an MCP client's change and connecting an MCP
+   client (section 4.4). **Answer: as proposed.**
 2. **Owners under `optional`.** Proposed (section 2): no fourth mode, but
    unscoped and configured Owners sign in as under `required`, so the
    accounts that matter most never wait for their first risky act to get
-   a passkey. Option: Owners like everyone else, adding one at their first
-   risky act, which leaves an Owner's stolen GitHub account enough until
-   then.
+   a passkey. **Answer: as proposed.**
 3. **Recovering the last Owner: `off`, a config exemption, or a deployer
-   command?** `off` is what you described; it opens every account to its
-   provider alone until the next deploy, and the log review after it. A
-   config exemption (`recover: ['admin@acme.example']`) narrows that to the
-   people named, but still takes two deploys. A deployer command,
-   `coffre-server passkeys reset admin@acme.example`, run as `migrate` and
-   the `APP_KEY` rotation are (the database and the deployment's keys),
-   writes the reset, its revocations and its entry like an Owner's, with no
-   redeploy and no window. Proposed: the command, if PR 6 can run the
-   vault's change path from it as `coffre setup` and the restore do; `off`,
-   documented, until then and as the fallback.
-4. **`protectedReveals`: phase 3, and what tokens may do under it.** It is
-   the one part review kept finding holes in (section 4.3), all where a
-   check meets the vault's several read paths, so I moved it out of phase 2
-   behind a review of its own. Under it, personal tokens and MCP
-   connections read no protected environment's values (they cannot touch
-   a passkey); their `/use` is untouched. Option: let a personal token
-   made inside a fresh window read them until it expires. Proposed: phase
-   3; refuse tokens; off by default.
+   command?** Proposed: a deployer command, `coffre-server passkeys reset
+   <email>`, with `off` as the fallback. **Answer: neither the command nor
+   an exemption**: no new concept and no new CLI for recovery. Another
+   unscoped Owner resets (instances keep two), else `passkeys: 'off'` and a
+   redeploy, documented (section 3.7).
+4. **`protectedReveals`: phase 3, and what tokens may do under it.**
+   Proposed: phase 3, off by default, tokens refused under it. **Answer:
+   drop it entirely**, no option and no later phase: an option nobody
+   asked for. Protected environments keep today's rule, and passkeys add
+   nothing to reads (section 4.3).
 5. **User verification: `required` or `preferred`?** Proposed `required`:
    a touch then means the person, not someone at their unlocked laptop.
-   `preferred` would let PIN-less security keys work without setup.
+   **Answer: `required`**, hard-coded in one place, not a setting (section
+   7.4).
 6. **Fresh checks behind Cloudflare Access?** Proposed: not in phase 2;
-   Access deployments use Access's own MFA policies. Option: a sealed
-   cookie bound to the Access identity for the browser, and browser-only
-   for risky acts.
+   Access deployments use Access's own MFA policies. **Answer: as
+   proposed.**
 7. **How much do passkey changes sign out?** Proposed (section 6.1):
    adding a first passkey ends everything no passkey confirmed, and
-   removing one signs the person out everywhere else. Bob's terminals log
-   in again and Bob's tokens are made again; in exchange nothing a stolen
-   GitHub account made earlier survives, and no rule has to work out what a
-   removed passkey once confirmed. Option: end only what the removed
-   passkey confirmed, which needs that lineage tracked exactly, the source
-   of three rounds of review findings.
+   removing one signs the person out everywhere else. **Answer: as
+   proposed.**
 8. **The vault (section 8).** Proposed: A now, C designed with the vault's
-   next model for Owner-level acts. Option: C in phase 2 for promotion to
-   Owner only.
-9. **A touch per MCP approval.** `docs/design/mcp.md` promised "a passkey
-   with user verification on Approve" against an agent driving the
-   person's browser. Proposed (section 4.4): a touch for every approval
-   and every MCP client connected, by anyone who has a passkey, secret
-   writes included. Option: only the window, which an agent in the
-   browser can use in the minutes after the person's own touch.
+   next model for Owner-level acts. **Answer: as proposed.**
+9. **A touch per MCP approval.** Proposed (section 4.4): a touch for every
+   approval and every MCP client connected, by anyone who has a passkey,
+   secret writes included. **Answer: as proposed.**
