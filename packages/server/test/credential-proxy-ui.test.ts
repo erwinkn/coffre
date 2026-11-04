@@ -856,6 +856,33 @@ test("a UI route's upstream goes out through the runtime's public fetch, and a r
   }
 });
 
+test("`/use/<a>/<b>` on a runtime without a public fetch asks the made-for list alone: the plan is given, and route `<a>` refuses before any use is made (C2b4; Fable's review of #486)", ON_015, async () => {
+  deploy(proxyOf({ insecureUpstreams: false, cacheSeconds: 0 }, false));
+  await save({ openai: { ...uiRoute('openai', ''), upstream: 'https://api.openai.example/v1' } as ProxyDefinition });
+  const token = await handle();
+  const kept = runtime.publicFetch;
+  delete runtime.publicFetch;
+  try {
+    await countingVault(async (calls) => {
+      // The place: the list says the handle was made for it, and the plan reads as it did, no route use asked.
+      const planned = await route('/use/market/dev', as(token));
+      assert.equal(planned.status, 200, await planned.clone().text());
+      assert.ok('env' in (await planned.json() as object), 'the plan');
+      const plan = calls();
+      assert.equal(plan.useRoute ?? 0, 0, JSON.stringify(plan));
+      // Route `openai` at `/models`: no use, which the vault would log for a request this runtime cannot send.
+      const none = await route('/use/openai/models', as(token));
+      assert.equal(none.status, 503, await none.clone().text());
+      const after = calls();
+      assert.equal(after.useRoute ?? 0, 0, JSON.stringify(after));
+      assert.equal(after.proxyItem ?? 0, 0, JSON.stringify(after));
+    });
+  } finally {
+    if (kept === undefined) delete runtime.publicFetch;
+    else runtime.publicFetch = kept;
+  }
+});
+
 test("a UI route through undici's public fetch, as a Node deployment sends one: a TLS upstream by its name, a body, a streamed digested body, a redirect brought back to the proxy (Fable's review of #467)", ON_015, async () => {
   // The fake upstream is `api.openai.example` over TLS, its certificate from an authority of this test's own. The lookup
   // is the one seam: it resolves the name to the fake, as DNS resolves a public name to its server; the rest is the

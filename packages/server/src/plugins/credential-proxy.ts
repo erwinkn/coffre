@@ -877,7 +877,9 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
     // made-for list chose, refuses before the vault has seen it (review r2 of #467).
     const known = proxy.handles.get(handle);
     const paths = known !== undefined && known.until > now ? known.paths : undefined;
-    const reading = paths === undefined
+    // The place itself asks which reading the URL is: no copy of either refuses its URL, the plan's or compute's when it
+    // is the place's, whatever list is kept (Fable's review of #486).
+    const reading = itself === 'place' ? null : paths === undefined
       ? (named === null && itself === null ? 1 : null)
       : named !== null && (paths ?? []).includes(named.path) ? 0 : stable !== null ? 1 : null;
     const last = reading === null ? undefined : proxy.ui.last.get(readings[named === null ? 0 : reading]!);

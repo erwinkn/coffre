@@ -355,6 +355,35 @@ test('the place itself (C2b4): `/use/<project>/dev` read both ways, the place fo
   await assert.rejects(vault.useRoute(w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: null })), /names its route/);
 });
 
+test("the place itself after a warm stable reading: the map's guess (stable, its keys' ids, the gate light) meets rows that pick the place, and the whole gate answers it, nothing used (C2b4; Fable's review of #486)", async () => {
+  const w = await routeWorld(db);
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  // Made for `other`, where route `<project>` and its key are saved: `/use/<project>/dev` is that route at `/dev`.
+  const other = await w.environment('other');
+  await w.grantAt(other, 'developer');
+  const key = await w.key('sk', false, other);
+  const name = await w.nameOf(key);
+  await w.save({ [w.slug]: { definition: route(w.slug, [name]), editor: ada } }, other);
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: other }])} WHERE id = ${w.credentialId}`);
+  const { vault } = await isolate();
+  const itself = () => w.askRoute('x', { named: { place: { project: w.slug, environment: 'dev' }, route: null }, stable: w.slug });
+  // Cold, then warm: the stable reading's values, the second asked with the map's ids, light.
+  for (const round of ['cold', 'warm']) {
+    const stable = answered(await vault.useRoute(itself()));
+    assert.equal(stable.reading, 'stable', round);
+    assert.deepEqual(values(stable), { [name]: 'sk' }, round);
+  }
+  const used = await count('log_uses');
+  // Made for dev since: the map still guesses the stable reading, light; the statement picks the place, whose answer
+  // is the reading and the whole gate, no key's use made.
+  await run(db.owner, sql`UPDATE credentials SET places = ${JSON.stringify([{ environmentId: w.dev }])} WHERE id = ${w.credentialId}`);
+  const place = answered(await vault.useRoute(itself()));
+  assert.equal(place.reading, 'named');
+  assert.deepEqual([place.stands, place.found, place.keys, place.outcome], [true, null, [], { ok: true, values: [] }]);
+  assert.deepEqual(place.place, { project: w.slug, environment: 'dev' });
+  assert.equal(await count('log_uses'), used, 'nothing used');
+});
+
 test("the place itself reads no definition, in either engine's statement: the reading and the gate are its answer, no level of the chain read, nothing used (C2b4; Sol's review r1 of #486)", async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
