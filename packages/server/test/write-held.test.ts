@@ -837,6 +837,8 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
     );
     assert.match(String(entry!.operationId), /^[0-9a-f-]{36}$/);
     assert.match(String(entry!.requestId), /^[0-9a-f-]{36}$/);
+    // Ada's session, which 0.14's entry never named (only a run's credential or a personal token's): nor does this.
+    assert.deepEqual([entry!.metadata.credentialId, entry!.token, entry!.run], [undefined, null, null], JSON.stringify(query));
     // No 0.14 entry of it: of the key's two versions, 0.14's log holds the root's first alone, down today's path.
     assert.deepEqual(shown.filter((one) => one.log === '0.14').map((one) => one.version), 'actor' in query ? [] : [1], JSON.stringify(query));
   }

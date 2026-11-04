@@ -22,8 +22,9 @@ export const RECORDS = {
   signOut: { starts: '{"op":"credential.revoke",', holds: '"reason":"sign_out"' },
   // A key write and a member's first add down the two-trip path (T179), which since 0.16.0 write no 0.14 entry: the
   // change is their only record, and names the read it was decided on (`inputs`, the digest, which only those two
-  // paths write). A key's change starts with its `digest`, its first key; an add's with `inputs`, its own first, as
-  // no change of today's path does (which starts with `old` or `op`).
+  // paths write). Keys sort, so every key write's change starts with its `digest`, today's path's too: that start only
+  // narrows the match to key writes, and `inputs` picks the two-trip ones out; drop it and every write is listed twice.
+  // An add's change starts with `inputs`, its own first, as no change of today's path does.
   written: { starts: '{"digest":', holds: '"inputs":"' },
   admitted: { starts: '{"inputs":"', holds: '"op":"member.add"' },
 } as const satisfies Record<string, { starts?: string; holds: string }>;

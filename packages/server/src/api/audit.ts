@@ -813,9 +813,18 @@ function withOrigins(entries: AuditEntryView[], origins: Map<string, CredentialO
     const origin = id === undefined ? undefined : origins.get(id);
     if (origin?.kind === 'signIn') return { ...entry, run: { exchangeSeq: Number(origin.seq), log: origin.log, claims: runClaims(origin.run) } };
     if (origin?.kind === 'personal') return { ...entry, token: { id: id!, label: origin.label } };
+    // A two-trip change names its request's credential whatever it is; 0.14's entry named only a run's or a personal
+    // token's (the request's provenance), so a session's or a CLI login's stays unsaid (Fable's review of #490).
+    if (id !== undefined && entry.log === '0.15' && TWO_TRIP.has(entry.action)) {
+      const { credentialId: _, ...metadata } = entry.metadata;
+      return { ...entry, metadata };
+    }
     return entry;
   });
 }
+
+/** The actions `twoTripView` makes of 0.15's changes. */
+const TWO_TRIP = new Set(['secret.write', 'member.add']);
 
 function runClaims(run: unknown): Record<string, string | number> {
   if (typeof run !== 'object' || run === null) return {};
