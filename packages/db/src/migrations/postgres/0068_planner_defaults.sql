@@ -150,7 +150,7 @@ DECLARE
     c_refresh bigint := greatest(1, least(60000, p_cap_window / 10));
     c_period bigint := p_at - ((p_at % c_refresh) + c_refresh) % c_refresh;
     -- Whether this session has yet to plan the four statements (T131), and the form the warm-up is at.
-    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0066';
+    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0068';
     form integer := 0;
     first_probe boolean;
     first_whole boolean;
@@ -1019,7 +1019,7 @@ BEGIN
                 whole := form % 2 = 1;
                 CONTINUE;
             END IF;
-            PERFORM set_config('coffre.use_planned', '0066', false);
+            PERFORM set_config('coffre.use_planned', '0068', false);
             dry := false;
             probe := first_probe;
             whole := first_whole;
@@ -1274,7 +1274,7 @@ $$;
 --> statement-breakpoint
 -- `use_route` as 0060 made it, but for its names' statement, which reads its arrays as `use_named_batch`'s does (above):
 -- planned on every call before (140 plans for 137 calls in the use tests), the plan for any values kept after five.
--- Its warm-up's mark is 0066's, so that a session warmed by 0060's plans this one's statements before the fence too.
+-- Its warm-up's mark is 0068's, so that a session warmed by 0060's plans this one's statements before the fence too.
 -- The same rows, in the same order; the signature and answer are 0060's.
 CREATE OR REPLACE FUNCTION use_route(
     p_token_hash bytea, p_project text, p_environment text, p_named text, p_stable text, p_reading smallint,
@@ -1334,7 +1334,7 @@ DECLARE
     -- A handle's gate that found it standing nowhere there, or at a place cut: the route is not read.
     v_unstood boolean := false;
     -- Whether this session planned the reading's statements, on its first call, before the fence (T200).
-    v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0066';
+    v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0068';
     -- The gate's answer, parsed once (T200): each `->>` of a json value parses its text whole again.
     g jsonb;
 BEGIN
@@ -1397,7 +1397,7 @@ BEGIN
         PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     END LOOP;
     IF NOT v_planned AND v_handle AND p_named IS NOT NULL THEN
-        PERFORM set_config('coffre.route_planned', '0066', false);
+        PERFORM set_config('coffre.route_planned', '0068', false);
     END IF;
     IF v_handle THEN
         g := gate::jsonb;

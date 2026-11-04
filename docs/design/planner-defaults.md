@@ -8,7 +8,7 @@ plans and runs at the server's own settings. Timeouts (`lock_timeout`,
 `bytea_output = 'hex'` and `TimeZone = 'UTC'` stay on the functions whose
 answer is text (below).
 
-Migration [0066](../../packages/db/src/migrations/postgres/0066_planner_defaults.sql)
+Migration [0068](../../packages/db/src/migrations/postgres/0068_planner_defaults.sql)
 resets the settings on the functions and rewrites the four whose plans
 leaned on them; `coffre migrate` resets what 0.15.0 set on the logins,
 where its login may ([deploy.md](../deploy.md#the-database-and-its-keys-for-either-deployment)).
@@ -33,7 +33,7 @@ unanalyzed and everything else analyzed:
 | `use_credential`'s main statement | plan for the call's values (custom) | plan for any values (generic) |
 |---|---|---|
 | 0060, the fence joined | 37,706 to 42,634 | 42,970 (one form 59,042) |
-| 0066, the fence `LIMIT 1` | 65 to 203 | 226 (every form 195 to 301) |
+| 0068, the fence `LIMIT 1` | 65 to 203 | 226 (every form 195 to 301) |
 
 0028's and 0029's statements, with more joins above the same fence, were
 estimated at 96,869 and 101,819 on fresh test databases
@@ -53,7 +53,7 @@ every call planned again. At 1,000 uses a second, before any autoanalyze:
 |---|---|---|
 | 0060, no planner settings | 12,864 for 12,824 calls | 4.4 ms |
 | 0060, once analyzed | 240 for 12,883 calls | 1.6 ms |
-| 0066, never analyzed | 240 for 12,859 calls | 1.7 ms |
+| 0068, never analyzed | 240 for 12,859 calls | 1.7 ms |
 
 The hot login's `force_generic_plan` hid that. A database without the
 fence's statistics is not unusual: a new one, one restored (`pg_restore`
@@ -81,7 +81,7 @@ partitioned table by values only the call knows. A plan for any values
 cannot prune at plan time: it names, and locks, every day (130 locks a use
 at 109 days, [0.15-plan.md](0.15-plan.md), T187). They held
 `force_custom_plan`, and the read functions also turned off sorts and bitmap
-scans. 0066 plans each of those statements per call with `EXECUTE`, which
+scans. 0068 plans each of those statements per call with `EXECUTE`, which
 prunes to the day and plans the index read newest first, the same plan the
 settings forced. Planning a covered use's probe costs about 0.09 ms
 (686 calls, 64 ms of planning), as the custom plan did before.
@@ -100,7 +100,7 @@ the use tests), and each batch's buffers carried that planning's reads,
 which move with the data. CI caught it as a batch's own buffers moving by
 7 between 1,000 and 10,000 forks.
 
-0066 reads each array through a scalar subquery,
+0068 reads each array through a scalar subquery,
 `unnest((SELECT v_layers))`. Its value is then unknown to both plans,
 both count ten, and the cache keeps the plan for any values after five
 calls, as 0.15.0's forced generic plans did. The rows and their order are
