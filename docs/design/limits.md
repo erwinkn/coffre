@@ -31,22 +31,38 @@ This document has four parts:
 | **d** | A defensive bound against abuse or garbage input (sizes, list lengths) | keep if generous and written down |
 | **e** | Unjustified: a guess, a copied default, or history | remove, or replace with a/b/c |
 
+Terms used below:
+
+- **use**: one `/use` call, a workload asking the vault for a key's value.
+- **hot config**: the Hyperdrive config (Workers) or pool (Node) of
+  `coffre_vault_hot`, the login only uses take, with 1 s `lock_timeout`
+  and 2 s `statement_timeout`.
+- **fence**: the lock row uses take shared and changes take exclusive.
+- **seal**, **checkpoint**: the checkpointer signs the log's newest entries
+  every 500 ms tick; an entry above the newest signed pair is unsealed.
+- **cover**: an isolate's note that it already logged a (credential, key)
+  use, so a repeat writes no row (R53).
+- **W208**, **T112**, **decision 13**: W208 is the Cloudflare hot-path
+  benchmark in [`hot-path-one.md`](hot-path-one.md), section "Cloudflare"
+  (line 1187); decision 13 (line 1333) leaves the `/use` cap's number to
+  T112, a measurement that never ran.
+
 "Bites" means it could refuse or slow legitimate load at R44's target:
 1,000+ `/use` a second on Workers, hundreds at once, some of them from one
 principal.
 
-Counts in the [inventory](#4-the-inventory): 227 rows, each one item or
+Counts in the [inventory](#4-the-inventory): 228 rows, each one item or
 a small group of like items (about 400 values in all). A row with two
-classes (27 rows, e.g. "a on Workers, e on Node") is counted under its
+classes (28 rows, e.g. "a on Workers, e on Node") is counted under its
 first.
 
 | Class | Rows | Rows that can bite R44 load (⚠) |
 |---|---|---|
-| a, real external | 22 | 2, both for their **e** half: the workload gate on Node (S1), setup's 20 connections on Paid (C2) |
-| b, policy | 50 | 1: the 3 s use deadline (C12), which turns any queue into `late`: right, but it makes every other limit here bite sooner |
-| c, derived | 38 | 1: `ABOVE_NEWEST` (V11), derived from a rate rather than the window |
-| d, defensive | 36 | 0 |
-| e, unjustified | 77 | 14 |
+| a, real external | 21 | 2, both for their **e** half: the workload gate on Node (S1), setup's 20 connections on Paid (C2) |
+| b, policy | 54 | 4: the sign-in count per binding, in the app and the vault (S8, V30), and its row lock (Q16), all CI sign-in; the 3 s use deadline (C12), which turns any queue into `late`: right, but it makes every other limit here bite sooner |
+| c, derived | 37 | 0 |
+| d, defensive | 37 | 1: `ABOVE_NEWEST` (V11), sized from a rate, so `capped` above ~4,000 `/use`/s |
+| e, unjustified | 75 | 11 |
 | none (a missing bound, or a knob no deployment can reach) | 4 | 0 |
 
 Format constants (IV and tag sizes, hash and MAC widths, key sizes, UUID
@@ -63,17 +79,28 @@ what happened on Equisafe's instance. Each is class **e** unless marked.
 1. **The vault's per-isolate `/use` cap: 10 calls in flight, on Workers
    and on Node** (`packages/vault/src/vault.ts:377`, `use.ts:105`). On
    Workers, 10 is node-postgres's default pool size, applied where there is
-   no pool. Section 2 explains it, and it is the cause of the ~470 startup
-   503s at 1,000 `/use`/s in the cold-start benchmark the lead cited. On
+   no pool: each call opens one connection of its own. The count covers a
+   use's database phase only. Its place is given back when the statement
+   answers (`use.ts:1293-1299`), before the key is opened at KMS
+   (`use.ts:638-643, 1559`), and a use of several keys opens them all at
+   once after that (`use.ts:497-501`). The lead's brief attributes the
+   ~470 startup 503s at 1,000 `/use`/s in a cold-start benchmark to this
+   cap. I have not seen that run's refusal breakdown, so section 2's
+   example shows how a warming isolate *can* fill it, not that it did. On
    Node it is also 10, but by accident: the code meant to read the hot
    pool's size reads a property that is never set (`vault/src/node.ts:101`,
-   item V2).
+   item V2), so the cap stays 10 even when a deployment passes a database
+   with a bigger pool.
 2. **`coffre setup` caps each Hyperdrive config at 20 connections, on
    Paid too** (`packages/cli/src/connections.ts:10`, "the most Free
    allows"). Paid allows 100 and defaults to 60. W208 measured that the
    hot config's pool *is* the `/use` ceiling: about 1,040/s at pool 40 on
-   its rig (`docs/design/hot-path-one.md:1197`). Setup's 20 halves that
-   ceiling, and re-running setup lowers a limit an operator raised.
+   its rig, which is Little's law, 40 connections ÷ ~38 ms a use
+   (`docs/design/hot-path-one.md:1197-1214`). By the same law 20 would
+   serve about half that: an estimate, not a run. Setup also lowers any
+   config above the database's share, and that part is right: it keeps
+   three configs inside `max_connections`. The 20 lowers it further, with
+   no database reason, on Paid.
 3. **Workload gate: 1,000 requests a second per service**
    (`packages/server/src/gate.ts:27`, `GATE_CEILING`). Every
    workload-session request (the `coffre serve` sidecar, the SDK) passes
@@ -81,25 +108,49 @@ what happened on Equisafe's instance. Each is class **e** unless marked.
    Object per service, and Cloudflare's soft limit is 1,000 requests a
    second per object. That is exactly R44's floor for one principal. On
    Node there is no Durable Object, and the same 1,000 is artificial.
-4. **CI sign-in is held to 5 a second for the whole instance.** Four
-   counts stack, and each 429 says `Retry-After: 60`:
-   - 300 a minute in total (`processLimits`, and `WORKLOADS_TOTAL` in the
-     examples' `wrangler.jsonc`);
-   - 30 a minute per source address;
-   - 60 a minute per binding (`EXCHANGES_PER_BINDING_MINUTE`, copied in
-     the vault as `SIGN_INS_PER_WINDOW`; "as 0.14 counts them");
-   - 32 in flight per isolate (`exchangeLimit.inFlight`).
+4. **CI sign-in: four counts and a row lock.** Each 429 from a count says
+   `Retry-After: 60`.
+   - 300 a minute for everyone (`WORKLOADS_TOTAL` in the examples'
+     `wrangler.jsonc`, `processLimits` on Node). On Workers Cloudflare
+     counts it per location, approximately, letting bursts through
+     (`wrangler.jsonc:52-56`); on Node, per process
+     (`workloads/limits.ts:3-10`; `docs/design/oidc.md:147-154`). So it
+     is a burst allowance per minute per location or process, not a
+     steady 5 a second for the instance.
+   - 30 a minute per source address, counted the same way.
+   - 60 a minute per binding, counted in the database, so for the whole
+     instance (`EXCHANGES_PER_BINDING_MINUTE`, and in the vault
+     `SIGN_INS_PER_WINDOW`). `docs/design/oidc.md:174-175` states it as
+     the design's policy and `formal/Credentials.tla` holds it
+     (`RateCap`), so it is a documented policy (class b). Whether Erwin
+     wants that number is Q4.
+   - 32 exchanges in flight per isolate or process
+     (`exchangeLimit.inFlight`). It is the only bound on how many wait,
+     because an exchange has no deadline of its own (item S6).
 
-   R44 names CI sign-in a hot path at 1,000+/s. Example: 200 matrix jobs
-   on one binding need about 4 minutes to all sign in.
-5. **AWS KMS: 8 calls at once per isolate, and with `awsKms` every `/use`
-   makes one** (`packages/core/src/kek/aws-kms.ts:36`). The comment says
-   "a Worker opens at most six connections anyway", but that limit is per
-   request, not per isolate, and since 2026-04 it queues rather than
-   fails. KMS's own quota is 10,000 to 100,000 a second per account and
-   region. The slot queue also hands a slot from one request to another
-   through a promise. AGENTS.md ("What an isolate keeps") forbids exactly
-   that: a request cancelled while holding a slot never gives it back.
+   Under all four, the vault's `sign_in` takes its binding's row
+   `FOR UPDATE` and holds it until it commits, through the credential's
+   insert and the binding's update (`0037_vault_bindings.sql:39-43,
+   82-91`). So one binding's sign-ins run one at a time whatever the
+   counts say, and each one waiting holds a database connection for up to
+   the function's 1 s `lock_timeout`. The same lock also keeps an unbind
+   from crossing a sign-in (`docs/formal.md:1941`, `BindingLocked`). R44
+   names CI sign-in a hot path at 1,000+/s. Example: 200 matrix jobs on
+   one binding need over 3 minutes to all sign in at 60 a minute, and with
+   that count gone they would still pass the row lock one by one.
+5. **AWS KMS: 8 calls at once per `awsKms` provider object, one per
+   isolate in practice** (`packages/core/src/kek/aws-kms.ts:36`). Every
+   AWS-backed key a use opens makes one Decrypt: no data key is kept
+   between uses. The comment says "a Worker opens at most six connections
+   anyway", but that limit is per request, not per isolate, and since
+   2026-04 it queues rather than fails. KMS's own quota is 10,000 to
+   100,000 a second per account and region. The slot queue also hands a
+   slot from one request to the next by resolving the waiter's promise
+   (`aws-kms.ts:250-290`), the pattern AGENTS.md ("What an isolate
+   keeps") forbids: if the request holding a slot is cancelled before its
+   `finally` runs, the slot is gone for good. The `/use` count is released
+   before the key is opened (item 1), so these slots are the only bound on
+   KMS calls today; without them, each request's own 6 connections are.
 6. **The migrator's `lock_timeout` is 5 minutes for the whole session**
    (`packages/db/src/migrate.ts:412`). It was meant for the advisory-lock
    wait, but every DDL statement after it waits up to 5 minutes for its
@@ -108,51 +159,70 @@ what happened on Equisafe's instance. Each is class **e** unless marked.
    length of the deploy.
 7. **The credential proxy's values cache: 1,000 entries per isolate**
    (`packages/server/src/plugins/credential-proxy.ts:3164`, "a handful of
-   handles in a dev loop"). Past it, every insert scans the whole map. It
-   has no single-flight, so hundreds of concurrent requests for one cold
-   entry each make their own vault use.
-8. **`asked-once`'s 3 s take-over** (`packages/server/src/asked-once.ts:32`,
-   "longer than a deploy's write and its seal take", never measured). The
-   vault's own budget for that call is 5 s (`KEY_BUDGET_MS`,
-   `READ_DEADLINE_MS`). A cold `about()` that takes 4 s is taken over and
-   asked twice: the herd T201 removed comes back.
-9. **Binding callers' cache and presign lifetime is fixed at 60 s**
-   (`packages/server/src/plugins.ts:605`, `now + 60_000`). This silently
-   overrides `cacheSeconds` and `expiresIn`.
-10. **The verifier reads at most 2,000 unsealed entries** (`ABOVE_NEWEST`,
-    `packages/vault/src/verifier.ts:62`, "four ticks' worth at R44's 1,000
-    uses a second"). Above about 4,000 `/use`/s it reports the log as not
-    verified (`ok: false`), because the number hardcodes a rate rather than
-    the checkpointer's own window (class c, wrongly derived).
-11. **The SDK and sidecar wait out a `Retry-After` of up to 300 s × 1.5**
-    after a failed re-sign-in, and every request through that sidecar fails
-    meanwhile (`packages/client/src/workload.ts:704`). Paired with item 4's
-    `Retry-After: 60`, one 429 at session renewal is a pod-wide outage of a
-    minute or more.
+   handles in a dev loop"). Past it, every insert scans the whole map. Two
+   requests for one cold entry each make their own vault use: there is no
+   sharing between them.
+8. **`asked-once`'s 3 s take-over and 6 s wait**
+   (`packages/server/src/asked-once.ts:32, 37`): "longer than a deploy's
+   write and its seal take", never measured. The call it waits on, the
+   vault's `about()` at an isolate's start, has no deadline of its own
+   (`vault/src/vault.ts:3683`, `#settled()`). A cold `about()` slower than
+   3 s is asked again by one waiting request, once every 3 s, not by the
+   whole herd. If no attempt settles within 6 s, every request waiting in
+   that isolate answers 503 `starting`.
+9. **The verifier reads at most 2,000 entries above the newest signed
+   pair** (`ABOVE_NEWEST`, `packages/vault/src/verifier.ts:62`). It is a
+   defensive bound: past it, a checkpointer that fell behind or rows a
+   writer planted are reported (`capped`), never read, and its comment
+   measures the 2,000 at 14 ms. But the number comes from a rate, "four
+   ticks' worth at R44's 1,000 uses a second". At 4,000 `/use`/s, one
+   500 ms tick alone writes 2,000 entries, so a checkpointer on time
+   reports `capped`. That shows in the audit API and the UI, and fails
+   `coffre verify` (`server/src/api/audit.ts:1293`,
+   `ui/src/lib/queries.ts:431`, `cli/src/verify/instance.ts:303`), not
+   on the hot path.
+10. **The SDK and sidecar wait out a `Retry-After` of up to 300 s × 1.5**
+    before they prove again (`packages/client/src/workload.ts:704`). A
+    session they hold keeps serving meanwhile, and a failed renewal keeps
+    the session until it expires (`workload.ts:278-334`). So the wait
+    bites only when no session is left: a pod's first sign-in, or a
+    session that expired while its renewals failed. Then every request
+    through that sidecar fails until the wait ends: 60 to 90 s after
+    item 4's `Retry-After: 60`.
 
-None of the 11 is set by any deployment. Every example, `dev/deployment`
+None of the 10 is set by any deployment. Every example, `dev/deployment`
 and `coffre init` run on the defaults.
 
 ### What the proposal does, in one paragraph
 
-On Workers, delete the per-isolate count. A `/use` waits at most its
-deadline (3 s, R53), and the deadline is already carried into Postgres
-and into the connection's close. Fast refusal comes from one rule on both
-runtimes: refuse at once a use that is predicted to miss its deadline,
-predicted from what the isolate or process observes. No count is
-configured. On Node, the one real value is the hot pool's size, and it
-comes from the database's `max_connections`, as `coffre setup` already
-computes it for Hyperdrive. Then:
+On Workers, replace the count of 10 with two bounds that each come from a
+real resource. First, how many uses an isolate holds at once, computed
+from Workers' 128 MB and the measured memory one waiting use holds.
+Second, refusing fast on overload, from the outcomes of the isolate's own
+recent uses, which reflect the shared Hyperdrive pool and Postgres.
+Section 2 specifies two candidates for the second. Neither is proven: each
+needs one measured run before it replaces anything. On Node, the one real
+value is the hot pool's size, from the database's `max_connections`, as
+`coffre setup` already computes it for Hyperdrive. Then:
 
 - remove the `uses` block from the vault's config, all five fields;
-- let setup give Paid configs the share the database allows (up to 100);
+- let setup give Paid configs the database's share, up to Paid's 100,
+  instead of stopping at 20;
 - shard the workload gate so no one service meets the Durable Object's
-  1,000/s;
-- drop the KMS slot queue;
+  1,000/s (TLA+ first);
+- replace the KMS slot queue with one that hands nothing between requests
+  (its model disposition first);
 - make the migrator's lock waits shorter than a use may wait;
 - compute every copied value (deadline, statement timeout, clock-ahead
   minute, refresh) from one source;
-- derive each `Retry-After` from what refused.
+- say for each `Retry-After` which of three it is: a known window's
+  reset, a measured recovery time, or a retry policy chosen and written
+  down.
+
+CI sign-in needs a design of its own before any of its limits goes: a
+deadline for the whole exchange, and the binding's row lock, which makes
+one binding's sign-ins take turns and also protects revocation (section
+3.3, TLA+ first).
 
 Section 3 has every item. Section 6 has the questions only Erwin can
 answer.
@@ -194,7 +264,7 @@ share are shared by every isolate at once:
 
 | Resource | Limit | Shared by | Source |
 |---|---|---|---|
-| Hyperdrive origin connections, hot config | `origin_connection_limit`: 5 to 20 on Free, 5 to 100 on Paid, default 60 on Paid. `coffre setup` sets ≤ 20 | every isolate, worldwide | Hyperdrive limits page; API reference |
+| Hyperdrive origin connections, hot config | `origin_connection_limit`: 5 to 20 on Free, 5 to 100 on Paid, default 60 on Paid. `coffre setup` sets ≤ 20. A **soft** limit: Hyperdrive may open more during network failures, and Cloudflare advises setting it below the database's own limit for that reason | every isolate, worldwide | Hyperdrive limits page; API reference; "Tune connection pool" |
 | Postgres CPU and `max_connections` | the database's | every config | the database |
 | Connections per request | 6 waiting for headers at once, the 7th queued | one request (the app's, with its service-binding calls) | Workers limits page |
 | Isolate memory | 128 MB | one isolate | Workers limits page |
@@ -205,10 +275,22 @@ isolates. W208 measured that: Cloudflare spread 2,500/s over at least ~150
 isolates, and "a cap of 8 each still admitted ~1,000 calls at once"
 (`hot-path-one.md:1214`).
 
-**On Node, the pool is real.** The hot path's postgres.js pool has `max`
-connections (`packages/db/src/connect.ts:26`, `max ?? 10`, again copied
-from node-postgres). A call past it waits in the driver's queue, which
-has no size limit and no timeout. Two problems:
+**On Node, the pool is real, and the driver pipelines.** The hot path's
+postgres.js pool has `max` connections (`packages/db/src/connect.ts:26`,
+`max ?? 10`, again copied from node-postgres). A query asked while every
+connection is busy is sent on a busy one, behind what that connection
+already runs, up to 100 queries each (`max_pipeline`,
+`packages/db/src/postgres-js/index.ts:548-561, 661`). Only past 10 × 100
+does a query wait in the driver's queue, which has no size limit and no
+timeout. So the queue has three parts: queries sent and running,
+queries sent behind them on the same connection, and queries not sent.
+Postgres runs one connection's queries one after another, so pipelining
+saves the round trips between them, not their execution: a pool serves
+about `max ÷ execution time` one-statement uses a second, not
+`max ÷ round trip`. Two caveats: a transaction keeps its connection to
+itself from BEGIN to COMMIT, and a pipelined statement waiting for a lock
+(up to the hot login's 1 s) holds up every statement behind it on that
+connection. Two problems:
 
 - **The derivation is dead code** (`packages/vault/src/node.ts:101`). It
   reads `hot.$client.options.max`, but Drizzle sets `$client` only in its
@@ -216,20 +298,25 @@ has no size limit and no timeout. Two problems:
   directly (`packages/db/src/database.ts:124`). So `connections` is
   always undefined, and the cap is always 10. Set the hot pool to 30 and
   the 11th concurrent use is still refused.
-- **No deployment can set the pool size.** `serveVault` and
-  `createCoffre` take URLs and pass no `max`.
+- **The URL-based setup exposes no pool size.** `serveVault` and
+  `localVault` also accept a `Database` already open
+  (`packages/vault/src/node.ts:43-55, 83-85`), so a deployment can pass
+  `openDatabase(url, { max: 30 })`; V2 still leaves the cap at 10.
+  `createCoffre` takes a URL and passes no `max`.
 
 ### Why the count refuses legitimate load
 
 The count bounds the wrong thing on both runtimes.
 
-**Workers, cold start.** An isolate that just started has an empty seal
+**Workers, cold start.** An illustration, with plausible numbers rather
+than measured ones. An isolate that just started has an empty seal
 cache, so its first uses each make the full statement with its probes,
 while Hyperdrive opens connections. At 1,000/s, an isolate that
 Cloudflare routes 200 requests to in its first second, each taking 80 ms
 cold instead of 30 ms warm, has about 16 in flight (200 × 0.08). Six of
-those 16 are answered 503 although the database is idle. That is the
-~470 startup 503s.
+those 16 are answered 503 although the database is idle. That is how a
+warming isolate can fill the cap; that it explains the ~470 startup 503s
+is the brief's diagnosis, not something this document shows.
 
 **Workers, warm, one principal.** A sidecar sending 300/s through one
 colo may land on 2 or 3 isolates. At 30 ms each, that is 3 to 4.5 in
@@ -238,11 +325,13 @@ doubles latency to 60 ms takes it to 6 to 9, and a 100 ms blip takes it
 past 10. The count turns a latency blip into errors, although the
 database has room.
 
-**Node.** The pool is 10 and the count is 10. With the database 25 ms
-away, the pool serves at most 400/s (10 ÷ 0.025). Past that, the count
-refuses at once whatever would have waited a few milliseconds for a
-connection. A burst of 30 concurrent uses at a local database (5 ms each)
-gets 20 refusals, although all 30 would have finished in 15 ms.
+**Node.** The pool is 10 and the count is 10. A use keeps its place in
+the count for its whole round trip, so with the database 25 ms away the
+count admits at most 400 a second (10 ÷ 0.025): the count's ceiling, not
+the pool's, since the driver would pipeline more on the same 10
+connections. A burst of 30 concurrent uses gets 20 refusals at once,
+although the driver would have sent all 30 at once, three to a
+connection.
 
 ### What does bound overload, measured
 
@@ -262,40 +351,61 @@ does no wasted work. What it doesn't do is refuse *fast*: the excess hears
 
 ### What should replace it
 
-**The deadline is the admission bound.** One value, the use's 3 s
-deadline (R53, policy), already enforced at three layers: the Worker's
-race, the connection's close, and Postgres. Nothing else should cap how
-many uses wait; a use that waits does no harm until its deadline. That
-leaves R44's fast refusal, which needs a signal that reflects the shared
-resource. Three candidates:
+Two needs, each with its own resource. Neither is a count of
+connections, since on Workers there is no pool to count.
 
-| Mechanism | What it reads | Numbers it needs | Works on Workers? | Cost |
-|---|---|---|---|---|
-| **A. Predicted lateness** (recommended): refuse at once a use whose predicted wait already exceeds its deadline. Predicted wait = the latency of this isolate's or process's recent settled uses. On Node, also the pool's queue: queued ahead ÷ pool size × recent hold time | its own uses' latency, which reflects Hyperdrive's queue and Postgres for every isolate alike | the deadline (b), the pool size on Node (a) | yes: every isolate sees the same queue in its own latency | a few lines; needs one measurement to confirm it does not oscillate |
-| B. No fast refusal: the excess is answered `late` within 3 s | nothing | the deadline | yes | none; but R44 says "refused fast" |
-| C. A shared counter in a Durable Object | a count across isolates | a count, guessed | no: at 1,000+/s the object itself meets its 1,000/s soft limit, and every use pays one more hop | rejected in decision 13 |
+**1. How many uses an isolate holds at once: its memory.** A use in
+flight holds a socket, the driver's state and buffers, its request and
+its timers (`packages/vault/src/cloudflare.ts:128-135`,
+`packages/db/src/hyperdrive.ts:224-232`, `packages/vault/src/use.ts:1293-1305`).
+The 3 s deadline bounds how *long* each one lives, not how many live at
+once: a burst reaches the isolate before any latency is known. The real
+limit is the isolate's 128 MB. So the bound is a count, but a computed
+one: `the share of 128 MB given to uses in flight ÷ the bytes one holds,
+measured`. For example, at 200 KB a use and half the isolate, about 320,
+against today's 10. The bytes are measured once, locally, with
+`pnpm bench:workers` holding N uses open against a stalled database; the
+share is a policy Erwin sets. Past it, 503 `overloaded` at once, as now.
 
-A worked example of **A** on Workers. Hyperdrive's hot pool is saturated
-and its queue adds 2.8 s, so the isolate's last uses settled `late` at
-3 s or answered just inside it. A new use arrives. Its predicted wait,
-2.8 s plus the use's own ~30 ms, leaves no margin within its 3 s, so it
-is answered 503 `overloaded`, `Retry-After: 1`, at once and with no
-connection. When the queue drains, uses settle in 40 ms again, the
-prediction falls, and admission opens. No count is configured anywhere.
-Two things stay open: how "recent" is defined (the last settled use, or
-the last second's), and that A only predicts wait (no isolate sees the
-queue length itself on Workers). One run on Erwin's Cloudflare
-(R34, under $5) would show whether A holds goodput at the ceiling as the
-no-cap run did, or oscillates. **I have not spent it**; see section 6.
+**2. Refusing fast on overload: the outcomes of recent uses.** When the
+shared resources (Hyperdrive's pool, Postgres) are saturated, every
+isolate sees it in its own uses' outcomes, at the same time. A rule
+reading them must never close for good: it must keep admitting some uses
+while it refuses, or it never sees the database recover. Two candidates,
+both unproven here:
 
-**On Node the same rule applies**, with the pool size as its one real
-input, and that size comes from the database: what `coffre setup` already
-computes for each Hyperdrive config (`hyperdriveLimit`, a share of
-`max_connections`), written where the Node deployment reads it. A queued
-query that has not been sent by its deadline is dropped unsent, as
-postgres.js 4's `queue_timeout` does. Then nothing abandoned piles up in
-the queue, the concern that made the count hold its place until the call
-settled (review r1 of #438).
+| | A. Predicted lateness | B. Adaptive throttling |
+|---|---|---|
+| Reads | the time from admission to the statement's answer, of the uses settled in the last second, a `late` one counted as the whole deadline | over the last minute or two, how many uses were asked and how many were *answered in time* (`ok` or refused by access rules, not `late` or `busy`) |
+| Refuses | when the 90th percentile of those times, plus what the use does after its statement (the key's opening, measured), passes the deadline. Example: a predicted 2.83 s wait, plus a key's opening at KMS (a Decrypt), leaves none of the 3 s | each new use with probability `max(0, (asked − K × in time) ÷ (asked + 1))` |
+| Old samples | dropped after the second; with none, admit | age out of the window |
+| Recovery | while refusing, admit one use in every N, so samples keep coming | built in: the probability stays below 1, so some uses always go through, and their success brings it down |
+| Numbers | the window, the percentile, N, each unsourced until measured | K: 2 is the published value (Google SRE book, "Handling Overload", client-side throttling) |
+| Risks | oscillation: admission opens, the pool refills, every isolate shuts at once | lags: it reacts over the window, not at once |
+
+Both need one run on Erwin's Cloudflare (R34, under $5) to show that goodput
+holds at the ceiling as W208's no-cap run did, and how fast admission
+reopens after the load drops. **I have not spent it**; see Q1. Until then,
+neither replaces the count; the memory bound (1.) can come first on its
+own, since it only raises today's 10 to a computed number.
+
+The baseline to beat: with no fast refusal at all, the excess is answered
+`late` within 3 s, the database does no wasted work (W208's no-cap run,
+above), and R44's "refused fast" is not met. A shared counter in a
+Durable Object was rejected in decision 13: at 1,000+/s the object itself
+meets its 1,000/s soft limit, and every use pays one more hop.
+
+**On Node**, the same two bounds apply: the process's memory for how many
+uses wait, and the same refusal rule. The pool's size is the one real
+input to how fast uses go, and it comes from the database: what
+`coffre setup` already computes for each Hyperdrive config
+(`hyperdriveLimit`, a share of `max_connections`), written where the
+Node deployment reads it (Q2). A query not sent by its deadline is dropped
+unsent, as postgres.js 4's `queue_timeout` does, so nothing abandoned
+piles up in the driver's queue: the concern that made the count hold its
+place until the call settled (review r1 of #438). A query already
+pipelined behind another can't be taken back; the refusal rule, not the
+queue, keeps that part short.
 
 ### What happens to `READ_HEAD_WAITERS`
 
@@ -341,13 +451,13 @@ Q = SQL). Items that change what a flow locks or waits on are marked
 | # | Item | Before | After | Why |
 |---|---|---|---|---|
 | 1 | `uses.connections`, `DEFAULT_CONNECTIONS` (V1) | `vault({ uses: { connections: 10 } })` is accepted; the default is 10 | gone | a pool that doesn't exist on Workers; dead code on Node |
-| 2 | `uses.inFlight`, the per-isolate count (V1) | the 11th concurrent use in an isolate gets 503 | admission by predicted lateness (section 2), or by the deadline alone | W208: a count per isolate bounds nothing across ~150 isolates |
+| 2 | `uses.inFlight`, the per-isolate count (V1) | the 11th concurrent use in an isolate gets 503 | first, a count computed from the isolate's memory (section 2, need 1); then a refusal rule from recent outcomes, once a run shows it holds (need 2, Q1) | 10 is a pool size where there is no pool; W208: a count per isolate doesn't bound the shared pool across ~150 isolates |
 | 3 | The `$client.options.max` probe (V2) | always undefined | gone; the pool size is passed in | dead code |
-| 4 | KMS `Slots(8)` (C1) | 8 KMS calls per isolate; the 9th waits on another request's promise | no slot queue; each request's KMS fetch runs within its own 6 connections; `ThrottlingException` retried as now | the per-request limit is the platform's own; the isolate-wide queue breaks the isolate rule |
+| 4 | KMS `Slots(8)` (C1) | 8 KMS calls per provider object; the 9th waits until another request's call resolves its promise | no queue between requests; each request's KMS fetches run within its own 6 connections; `ThrottlingException` retried as now. R45: no model holds KMS calls (`formal/` has no KMS concurrency), and this removes a wait between requests rather than adding one, so no model changes; the PR's reviewer confirms that | the per-request limit is the platform's own; the isolate-wide queue breaks the isolate rule |
 | 5 | `GATE_CEILING` on Node (S1) | a Node process refuses a service's 1,001st request in a second | no ceiling on Node; memory is bounded by the epoch's `jti` set, sized by the actual rate | the ceiling exists for the Durable Object |
-| 6 | `exchangeLimit.inFlight = 32` (S6) | 33rd concurrent CI sign-in in an isolate gets 429 `Retry-After: 60` | gone; a sign-in waits at most its own deadline | a guess, "past it, 429 at once (R44)" |
-| 7 | `processLimits` `total: 300` and `WORKLOADS_TOTAL` (S7) | 6th sign-in a second, instance-wide, gets 429 | gone, if Erwin agrees (Q4) | the instance's sign-in rate is R44's, not 5/s |
-| 8 | The sign-in count per binding, 60/min, in app and vault (S8, V30) | 61st sign-in a minute of one binding gets 429 | gone, or set by the binding's own policy, if Erwin agrees (Q4) | "as 0.14 counts them": history |
+| 6 | `exchangeLimit.inFlight = 32` (S6) | 33rd concurrent CI sign-in in an isolate gets 429 `Retry-After: 60` | **not yet.** Kept until an exchange has a deadline of its own (#35); then computed from memory, as #2 | 32 is a guess, but it is the only bound on waiting exchanges today: `signIn` has no deadline for the whole exchange (`api/workloads.ts:1242-1251`), and its reads, `vault.signIn` and sealing each run on their own (`:1382-1438`) |
+| 7 | `processLimits` `total: 300` and `WORKLOADS_TOTAL` (S7) | the 301st exchange in a minute, per Cloudflare location (approximate) or per Node process, gets 429 | gone, if Erwin agrees (Q4) | R44 sets the sign-in rate at 1,000+/s; 300 a minute is "size them to that" (oidc.md), never sized |
+| 8 | The sign-in count per binding, 60/min, in app and vault (S8, V30) | 61st sign-in a minute of one binding, instance-wide, gets 429 | Erwin's call (Q4): keep at a number he sets, set it per binding in its policy, or drop it. Dropping it changes `formal/Credentials.tla` (`RateCap`, `RateHeld`), and it alone does not let one binding's sign-ins run together: the row lock does that (#36) | a documented policy (oidc.md:174-175), modelled, but its 60 is "as 0.14 counts them" |
 | 9 | `uses.coverMs`, `uses.names`, `uses.batch` as deployment options (V3-V5) | accepted by `vault(…)` | internal constants (tests pass `VaultOptions`) | no deployment, doc or example sets them |
 | 10 | `processLimits({ perSource: 30, total: 300 })` restated in `examples/node` | the defaults, retyped | `processLimits()` | one source |
 
@@ -356,16 +466,16 @@ Q = SQL). Items that change what a flow locks or waits on are marked
 | # | Item | Before | After |
 |---|---|---|---|
 | 11 | Node hot pool size (D1) | `max ?? 10` in `connect.ts`, unreachable | the database's share, as setup computes it for Hyperdrive (`hyperdriveLimit`), one value written once (Q2) |
-| 12 | `coffre setup`'s Hyperdrive share (C2) | `min(share, 20)`; lowers a limit set higher | `min(share, the plan's max)`: 20 on Free, 100 on Paid. Ask for the share; if Cloudflare refuses past Free's 20, use 20. Never lower a limit someone set higher (its doc says only lower ones are kept) |
+| 12 | `coffre setup`'s Hyperdrive share (C2) | `min(share, 20)`; a config above it is lowered, one below kept (`cappedLimit`, `cli/src/connections.ts:39-46`) | `min(share, the plan's max)`: 20 on Free, 100 on Paid. Ask for the share; if Cloudflare refuses past Free's 20, use 20. Keep lowering a config above the share: that is the database's budget, and the comment names the failure it prevents (53300, `:24-31`). The share already holds 3 connections back, the headroom Cloudflare asks for under a soft limit; say so beside it |
 | 13 | `READ_HEAD_WAITERS` (V6) | 16, from one rig's 150 ms | `min(budget ÷ measured hold, vault share − 2)`, the derivation written beside it |
 | 14 | `HELD_PAST_DEADLINE_MS = 2_000` (V7) | "the hot login's `statement_timeout`", retyped | imported from the one constant that migration 0022, `HOT_SETTINGS` and conformance also read |
 | 15 | The use deadline, 3,000 (V8) | `USE_DEADLINE_MS` (core), `deadline_max()` (SQL 0022:121), `USE_DEADLINE_SECONDS` (`api/proxy.ts:89`), literals in `log-store.ts:485, 487, 629` and inside `AT_SLACK_MS` | `USE_DEADLINE_MS` once; a test holds `deadline_max()` to it |
 | 16 | The clock-ahead minute, 60,000 (V9) | `USE_AHEAD_MS`, `use.sqlite.ts:589`, SQL `+ 60000` in 0022 and 0024, inside `AT_SLACK_MS` | `USE_AHEAD_MS` once, `AT_SLACK_MS = USE_DEADLINE_MS + USE_AHEAD_MS`, a test for the SQL |
 | 17 | The bulk refresh, `min(60 s, window ÷ 10)` (V10) | `bulk.ts:41`, `log-store.ts:629`, SQL in 0022 and 0024 | `refreshMs` once, a test for the SQL copies |
-| 18 | `ABOVE_NEWEST = 2_000` (V11) | "four ticks at 1,000/s" | the checkpointer's own window bound, `WINDOW_MAX` (10,000), so it scales with what one tick may seal, not with a rate |
-| 19 | `TAKE_OVER_MS = 3_000` (S9) | a guess shorter than the vault's budget | the bound of the call it waits on (`about()`'s own deadline), and `WAIT_MS` twice that, as now |
+| 18 | `ABOVE_NEWEST = 2_000` (V11) | "four ticks at 1,000/s", 14 ms measured | a defensive bound on the verifier's work (class d): size it from that work's budget, CPU and memory per check, measured, not from a rate. `WINDOW_MAX` is not a derivation: it bounds what one tick seals, not how many entries wait unsealed. Until resized, document that above ~4,000 `/use`/s `capped` is expected |
+| 19 | `TAKE_OVER_MS = 3_000` (S9) | "longer than a deploy's write and its seal", never measured | `about()` has no deadline (`vault.ts:3683`, `#settled()`): measure its cold time on Workers, or give it a deadline of its own, then set the take-over above that and `WAIT_MS` twice it, as now |
 | 20 | `UNAVAILABLE_RETRY_AFTER = '5'` (S10) | justified by the 15 s write lock, used for every 503 including reads | each `Retry-After` from what refused (example below) |
-| 21 | Per-isolate caches (S11, V12, S12, S13) | values cache 1,000; `handles` 1,000; `UI_KEPT` 10,000 (clears all); `UseCache.max` 10,000 (clears all); `Accesses.KEPT` 1,000 | one memory budget for per-isolate caches, out of Workers' 128 MB, each cache's count computed from its entry's size; least recently used first, never clear-all; single-flight on a cold entry |
+| 21 | Per-isolate caches (S11, V12, S12, S13) | values cache 1,000; `handles` 1,000; `UI_KEPT` 10,000 (clears all); `UseCache.max` 10,000 (clears all); `Accesses.KEPT` 1,000 | one memory budget for per-isolate caches, out of Workers' 128 MB, each cache's count computed from its entry's size; least recently used first, never clear-all. Optionally, a cold entry asked once for all its requests, in `asked-once`'s Workers-safe way: settled state the isolate keeps, each request polling on its own timers and taking over a call not settled in time (`asked-once.ts:26-95`), never a pending promise shared between requests. **TLA+ first** for that part: it adds a wait between requests (R45), and `asked-once` itself has no model |
 | 22 | Ticket lifetimes (V13) | `TICKET_MS` and `REFUSAL_MS`, both 30,000, separately | one constant |
 | 23 | Checkpointer bounds on Node and Workers (V14) | `UPKEEP_BOUND_MS`, `OPEN_BOUND_MS`, the 30-day alarm retention, each defined twice | one module |
 | 24 | Sign-in session bounds (V15) | 168 h in core's policy check and in the vault's `LONGEST_SESSION_HOURS` | one constant |
@@ -374,15 +484,26 @@ Q = SQL). Items that change what a flow locks or waits on are marked
 | 27 | Token and binding defaults in the CLI and UI (C4) | 366, 90, the binding's 30 d / 24 h / 15 min, the role name 40/32/200, retyped | imported from core |
 | 28 | Server body caps pegged to the bulk limit (S15) | `MAX_BODY_KEYS` and `revealInput.keys` = 2,000, "above the vault's 1,000-key cap" | `2 × bulkLimit.count` from the vault's config, or `MAX_BODY_NODES`'s byte bound alone; a deployment that raises `bulkLimit` past 2,000 is silently capped today |
 
-Example for 20, `Retry-After` from what refused:
+Example for 20. A `Retry-After` is one of three things, and each says
+which:
 
-| Refusal | Before | After, and its source |
+- **a known reset:** the time until a count's window frees a slot, known
+  exactly (the gate already answers `ceil(retryAfterMs / 1000)`);
+- **a measured recovery:** how long the thing that refused takes to clear,
+  from a measurement written beside it;
+- **a retry policy:** a number chosen, with no claim about recovery,
+  written down as the policy it is (Erwin's or the design's).
+
+A lock timeout is none of these. Postgres's `lock_timeout` bounds one
+attempt to take one lock; a queue can clear at once or last longer.
+
+| Refusal | Before | After, and which kind |
 |---|---|---|
-| `/use` overloaded (predicted late) | 1 | 1: the hot login's `lock_timeout`, the shortest a queue clears in |
-| plain 503 on a read | 5 | `READ_LOCK_TIMEOUT_MS` ÷ 1,000 = 3 |
-| plain 503 on a write | 5 | `LOCK_TIMEOUT_MS`'s share, as the comment intends |
-| sign-in 429 from a count | 60, whatever the count | the count's own time to its next free slot (the gate already does this: `ceil(retryAfterMs / 1000)`) |
-| migrating | 30 | 30, unchanged, until a migration's own estimate exists |
+| `/use` overloaded | 1 | a retry policy, until a run measures how fast admission reopens (Q1) |
+| plain 503 on a read | 5 | a retry policy, written as such; a database or KMS outage has no recovery the code can know |
+| plain 503 on a write | 5 | the same |
+| sign-in 429 from a count | 60, whatever the count | a known reset: the count's own time to its next free slot |
+| migrating | 30 | a retry policy, until a migration's own estimate exists |
 
 ### 3.3 Change behaviour
 
@@ -390,10 +511,12 @@ Example for 20, `Retry-After` from what refused:
 |---|---|---|---|---|
 | 29 | Migrator lock waits (D2) | `SET lock_timeout = '5min'` for the session | `SET lock_timeout = '5min'` around `pg_advisory_lock` only, then a lock wait shorter than what a use may wait (the hot login's 1 s) for each DDL statement, retried a few times, failing the migration loudly rather than stalling `/use` | no (the migrator's lock order is unchanged) |
 | 30 | Workload gate on Workers (S1) | one Durable Object per service: 1,000/s per service | one object per (service, session-hash bucket), as `workload-access.md:2040` already lists ("several gates, by session hash"). Bucket count from the service's rate: one per 1,000/s observed, starting at 1 | **yes**: nonce and replay semantics per gate change (`formal/Workload*.cfg`) |
-| 31 | Proxy upstream `fetch` (S16) | no timeout | the request's own deadline (`answerBy`, which exists) as its signal | no |
-| 32 | Binding callers' `expiresAt` (S17) | `now + 60_000` | the binding row's own expiry, or `cacheSeconds` | no |
+| 31 | Proxy upstream `fetch` (S16) | no timeout | nothing yet: whether to bound an upstream request at all is a policy question (Q7). The values' `sendBy` is not one: it is the last time the credentials may *start* going out (`credential-proxy.ts:2759-2763`), checked just before the fetch (`:2868-2880`), and says nothing of how long an upload or a response may take | – |
+| 32 | Binding callers' `expiresAt` (S17) | `now + 60_000` when the caller has no session row: an upper bound of 60 s on longer cache and presign lifetimes, shorter ones kept (`Math.min`, `credential-proxy.ts:2122, 3166`) | the caller's own expiry, if it has one; else keep the 60 s, cited | no |
 | 33 | `HyperdrivePool` `connect_timeout` (D3) | the driver's 30 s | the call's deadline (`end(by)` covers uses; app and vault calls get theirs) | no |
-| 34 | SDK and sidecar `Retry-After` cap (C5) | obeyed up to 300 s × 1.5 | obeyed up to the session's remaining life; the sidecar serves on the old session while it lasts | no |
+| 34 | SDK and sidecar `Retry-After` cap (C5) | obeyed up to 300 s × 1.5, only when no session is left (the held session serves meanwhile) | keep the 300 s as a defensive cap, cited; the fix that matters is an honest `Retry-After` from the server (#20) | no |
+| 35 | A deadline for CI sign-in (S6) | none for the whole exchange; a function's 1 s `lock_timeout` bounds one lock, not the pool wait, network silence or the exchange | one deadline, from a policy Erwin sets (R58 allows a sign-in 1-2 s under load), carried into each step: the app's reads, `vault.signIn` and sealing, with cancellation, and into Postgres as the use deadline is. Then S6 becomes a computed memory bound (#6) | check `formal/Credentials` covers an exchange cut between steps |
+| 36 | One binding's sign-ins take turns (S8, V30) | `sign_in` holds the binding's row `FOR UPDATE` to commit (`0037_vault_bindings.sql:39-43, 82-91`); each waiter holds a connection up to 1 s; the app's side runs under `audited(…)` (`api/workloads.ts:1306`) | first, measure how long the row is held: one binding then signs in at most `1 ÷ hold` a second, e.g. 200/s at 5 ms. If that misses R44, redesign. The lock serves two properties (`docs/formal.md:1941`): the rate count (`RateHeld`) and an unbind ending every credential (`EndedBindingEndsCredentials`). Removing the rate (#8) leaves the second; a lock that lets sign-ins run together must still exclude an unbind, e.g. sign-ins share the row and an unbind takes it exclusive | **yes** |
 
 ### 3.4 Keep, with the source written beside it
 
@@ -401,7 +524,7 @@ These are right. Most already cite their source; the few that don't get
 the citation.
 
 - **Policy (b):** the 3 s use deadline (R53, R54), `bulkLimit` (R28,
-  R52), the 500 ms tick (R51, R54), the 2 s witness deadline (R51), the
+  R52), the chunk of a full chain walk (`CHAIN_WALK`, R25), the 500 ms tick (R51, R54), the 2 s witness deadline (R51), the
   hot login's 1 s lock / 2 s statement timeouts (R53, decision 13), token
   and session lifetimes (core `access.ts`, `workloads.ts`), clock skews
   (each with its reason), `MAX_PARENTS` (forking.md), `MAX_PROXY_ITEMS`
@@ -409,7 +532,7 @@ the citation.
 - **External (a):** Postgres's 65,535 bind parameters (`ROWS_AT_ONCE`,
   `GENESIS_BATCH`, `inArray` chunks), SQLite's 32,766 and its compound
   SELECT terms, Workers' 128 MB (`BATCH_BYTES`, `STATEMENTS_AT_ONCE`), the
-  Free plan's 10 ms CPU (`CHAIN_WALK`, `STEP_ROWS`), Cloudflare's 100 MB
+  Free plan's 10 ms CPU (`STEP_ROWS`), Cloudflare's 100 MB
   body (`MAX_DIGESTED_BODY`), S3's 5 GiB, GitHub's 100 per page, RFC 8628's
   `slow_down`, the Durable Object's 30 s `blockConcurrencyWhile` and its
   128-key delete.
@@ -443,7 +566,7 @@ or move, pointing to section 3's #).
 
 | ID | Name | Value | Where | Class | Source / why | Bites | Verdict |
 |---|---|---|---|---|---|---|---|
-| V1 | `uses.inFlight` ← `uses.connections` ← `DEFAULT_CONNECTIONS` | 10 per isolate / process | `vault.ts:377, 344`; `use.ts:105, 168`; `cloudflare.ts:57` | e | "pg's default"; "T112 measures it", never measured (7c83fd02, #378) | ⚠ | delete (#1, #2) |
+| V1 | `uses.inFlight` ← `uses.connections` ← `DEFAULT_CONNECTIONS` | 10 per isolate / process | `vault.ts:377, 344`; `use.ts:105, 168`; `cloudflare.ts:57` | e | "pg's default"; "T112 measures it", never measured (7c83fd02, #378). Counts a use's database phase only: released before the key's opening (`use.ts:1293-1299, 638-643`) | ⚠ | delete (#1, #2) |
 | V2 | Node's derivation from the hot pool | `$client.options.max`, always undefined | `node.ts:101` | e | dead: `createDatabase` sets no `$client` | ⚠ (via V1) | delete (#3) |
 | V3 | `uses.coverMs` | 60 s | `use.ts:105` | b | covers (R53), decision 8 | | internal (#9) |
 | V4 | `uses.names` | 10,000 | `use.ts:105, 191` | d | LRU of names → ids, ~3 MB full (22ef27a1, #412) | | internal (#9); fold into #21 |
@@ -453,7 +576,7 @@ or move, pointing to section 3's #).
 | V8 | `USE_DEADLINE_MS` copies | 3 s | `log-store.ts:485, 487, 629`; SQL `deadline_max()` | c | R53 | | derive (#15) |
 | V9 | `USE_AHEAD_MS` and copies | 60 s | `bulk.ts:37`; `use.sqlite.ts:589`; SQL 0022, 0024 | b | "the minute a Worker's clock may run ahead" (#393) | | derive copies (#16) |
 | V10 | `refreshMs` and copies | min(60 s, window ÷ 10) | `bulk.ts:41`; `log-store.ts:629`; SQL | c | decision 9 | | derive copies (#17) |
-| V11 | `ABOVE_NEWEST` | 2,000 entries | `verifier.ts:62` | c | "four ticks at 1,000/s" (f858d18f, #388) | ⚠ > 4k/s | derive (#18) |
+| V11 | `ABOVE_NEWEST` | 2,000 entries | `verifier.ts:62` | d | bounds a check's work against a checkpointer behind or planted rows, 14 ms measured; sized as "four ticks at 1,000/s" (f858d18f, #388) | ⚠ > 4k/s: `capped` in the audit API, UI and `coffre verify` | resize from its work (#18) |
 | V12 | `UseCache.max` | 10,000; clears the whole map | `use.ts:154, 180` | d | "past `max`, a map starts over" | many keys | #21 |
 | V13 | `TICKET_MS`, `REFUSAL_MS` | 30 s each | `admit.ts:215`; `refusal.ts:49` | e | "the write follows its read" (#474, #498) | | one constant (#22) |
 | V14 | `UPKEEP_BOUND_MS`, `OPEN_BOUND_MS` | 60 s; = `TICK_BOUND_MS` | `checkpointer-node.ts:65-66`; `checkpointer-workers.ts:111-113` | e | (205e8255, #437) | | one module (#23) |
@@ -472,7 +595,7 @@ or move, pointing to section 3's #).
 | V27 | `accessEntriesAbout(…, 100_000)` | 100,000; cuts silently | `vault.ts:3300` | e | none (2426111f) | | fix: page, never cut silently |
 | V28 | `WALKS` | 10,000 / 100 / 10,000 | `vault.ts:5378` | c | 40 µs an entry, ~1 s a walk (#270) | | keep |
 | V29 | `SIGNATURES_AT_ONCE` | 256 | `vault.ts:5408` | e | none (#87) | | keep, cite CPU per signature |
-| V30 | `SIGN_INS_PER_WINDOW`, `SIGN_IN_WINDOW_MS` | 60 per 60 s per binding | `credentials.ts:51-52` | e | "as 0.14 counts them" (#411) | ⚠ CI | #8, Q4 |
+| V30 | `SIGN_INS_PER_WINDOW`, `SIGN_IN_WINDOW_MS` | 60 per 60 s per binding | `credentials.ts:51-52` | b | stated in `docs/design/oidc.md:174-175`, held by `formal/Credentials.tla` (`RateCap`); its 60 "as 0.14 counts them" (#411) | ⚠ CI | #8, Q4 |
 | V31 | Sign-in end slack | +60 s | `credentials.ts:138`; `credentials.sqlite.ts:47` | e | none; differs from `CLOCK_SLACK_MS` | | one slack |
 | V32 | `CLOCK_SLACK_MS` | 5 min | `credentials.ts:336` | b | "a host a minute or two ahead" (Fable, PR 2) | | keep |
 | V33 | `BUSY_CODES` | 55P03, 57014 | `credentials.ts:75` | a | Postgres codes | | keep |
@@ -542,12 +665,12 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S3 | `FLUSH_MS`, `SKEW_MS`, `DURABLE_WINDOW_MS` | 10 s, 10 s, 1 h | `gate.ts:29-37` | e / e / b | eviction loses ≤ 10 s of counts | | keep, cite |
 | S4 | Gate fixed calendar second | – | `gate.ts:104` | e | 1,000 at the end of one second and 1,000 at the start of the next pass; refusals count too | | goes with #30 |
 | S5 | `POLL_MS`, `POLL_MAX_MS` | 1 → 20 ms | `asked-once.ts:38-39` | e | cheap | | keep |
-| S6 | `exchangeLimit.inFlight` | 32 per isolate | `api/workloads.ts:413` | e | "past it, 429 at once (R44)" | ⚠ CI | delete (#6) |
-| S7 | `processLimits` `total`, `WORKLOADS_TOTAL`, `MCP_TOTAL` | 300 a minute | `workloads/limits.ts:16`; `examples/workers/app/wrangler.jsonc:54-61` | e | "size them to that" (oidc.md §2) | ⚠ CI | #7, Q4 |
-| S8 | `EXCHANGES_PER_BINDING_MINUTE` | 60 | `api/workloads.ts:407` | e | "counted under its row"; copied in the vault (V30) | ⚠ CI | #8, Q4 |
+| S6 | `exchangeLimit.inFlight` | 32 per isolate | `api/workloads.ts:413` | e | "past it, 429 at once (R44)"; the only bound on waiting exchanges, which have no deadline | ⚠ CI | keep until #35, then compute (#6) |
+| S7 | `processLimits` `total`, `WORKLOADS_TOTAL`, `MCP_TOTAL` | 300 a minute, per Cloudflare location (approximate) or per Node process | `workloads/limits.ts:16`; `examples/workers/app/wrangler.jsonc:54-61` | e | "size them to that" (oidc.md §2) | ⚠ CI | #7, Q4 |
+| S8 | `EXCHANGES_PER_BINDING_MINUTE` | 60, instance-wide | `api/workloads.ts:407` | b | oidc.md:174-175, modelled; "counted under its row"; copied in the vault (V30) | ⚠ CI | #8, Q4 |
 | S8b | `processLimits` `perSource`, `perConnection` | 30, 120 a minute | `workloads/limits.ts:14-15` | d | abuse: anyone may send a token | NAT'd fleets | keep for refusals (Q4) |
 | S8c | `WINDOW_MS`, `MAX_KEYS` (Node limiter) | 60 s, 10,000 | `workloads/limits.ts:20-22` | b / d | fails open past 10,000 | | keep |
-| S9 | `TAKE_OVER_MS`, `WAIT_MS` | 3 s, 6 s | `asked-once.ts:32, 37` | e / c | "longer than a deploy's write and its seal" (T201, #475) | ⚠ cold | derive (#19) |
+| S9 | `TAKE_OVER_MS`, `WAIT_MS` | 3 s, 6 s | `asked-once.ts:32, 37` | e / c | "longer than a deploy's write and its seal" (T201, #475); `about()` has no deadline to derive from | ⚠ cold | measure, then derive (#19) |
 | S10 | `UNAVAILABLE_RETRY_AFTER` | '5' | `api/errors.ts:149` | c (wrongly) | the 15 s write lock, used for reads too | | #20 |
 | S11 | Proxy values cache | 1,000; O(n) eviction; no single-flight | `plugins/credential-proxy.ts:3164` | e | "a handful of handles in a dev loop" (#249) | ⚠ | #21 |
 | S12 | Proxy `handles` cache | 1,000 | `credential-proxy.ts:1011` | e | same | | #21 |
@@ -555,8 +678,8 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S13b | `Accesses.KEPT` | 1,000 principals; no single-flight | `accesses.ts:44` | d | "a few hundred principals is far more than an isolate serves" (#334) | | #21 |
 | S14 | `HEARTBEAT_STALE_AFTER_SECONDS` | 11 × 60 | `plugins/audit-watch.ts:293` | c | one late run plus a minute | | compute (#25) |
 | S15 | `MAX_BODY_KEYS`, `revealInput.keys` | 2,000 | `api/router.ts:41`; `api/routes.ts:44` | c | "above the vault's 1,000-key cap" | with `bulkLimit` > 2,000 | #28 |
-| S16 | Proxy upstream `fetch` | no timeout | `credential-proxy.ts:2875-2881` | – | missing bound | | #31 |
-| S17 | Binding `expiresAt` | now + 60 s | `plugins.ts:605` | e | none (#306) | ⚠ | #32 |
+| S16 | Proxy upstream `fetch` | no timeout | `credential-proxy.ts:2875-2881` | – | missing bound; `sendBy` bounds when sending starts, not the response | | #31, Q7 |
+| S17 | Binding `expiresAt` | now + 60 s with no session row: caps longer cache and presign lifetimes at 60 s | `plugins.ts:605` | e | none (#306) | | #32 |
 | S18 | `TOUCH_INTERVAL_MS` | 5 min; 3 copies; not claimed once | `workload-sessions.ts:52`; `api/signin.ts:319`; `mcp/service.ts:63` | e | "one write per credential per five minutes" | mild herd | one constant; claim the write once (UPDATE … WHERE last_used < …) |
 | S19 | `USES_AT_ONCE` | 4 a request | `api/keys.ts:182` | e | "leaves the isolate's admission room (R44)" | | delete with V1 |
 | S20 | `USE_DEADLINE_SECONDS` | 3 | `api/proxy.ts:89` | c | copy of `USE_DEADLINE_MS` | | #15 |
@@ -592,7 +715,7 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S50 | `MOST_DECIDING_MS`, `ADMITTING`, `MOST_WAITING_MS` | 60 s, 4 (1 cold), 15 s | `cloudflare-sockets.ts:59-76` | d / b / e | "past 16 or so ran into their time to decide" | | keep |
 | S51 | `IDLE_DATABASE_MS` | 10 s | `cloudflare-sockets.ts:125` | c | = `RECHECK_DEADLINE_MS`, retyped | | import |
 | S52 | Node WS `maxPayload` | 16 MiB | `node-sockets.ts:17` | e | = `MAX_BODY_BYTES` | | import |
-| S53 | `CHAIN_WALK`, `BATCH` | 10,000, 5,000 | `db/audit.ts:198, 201` | a | ~200 ms of a Worker's CPU; memory (#270) | | keep; `BATCH` shares V71 |
+| S53 | `CHAIN_WALK`, `BATCH` | 10,000, 5,000 | `db/audit.ts:198, 201` | b | R25: a full walk is explicit and chunked; one chunk is ~200 ms of a Worker's CPU (Paid, far above Free's 10 ms), a measured choice, not a platform limit; `BATCH`: memory (#270) | | keep, cite R25; `BATCH` shares V71 |
 | S54 | `auditRange` default | 1,000 | `db/queries.ts:3055` | e | callers override | | drop the default |
 | S55 | `inArray` chunks | 1,000 | `db/queries.ts:438-440, 735, 2902-2919` | a | bind parameters | | keep |
 | S56 | `READS_PER_STATEMENT`, `STATEMENTS_AT_ONCE` | 250, 4 | `db/queries.ts:1942, 1951` | a | SQLite's 500 terms; 130k reads held 617 MiB | | keep |
@@ -636,7 +759,7 @@ digests, provider-id and plugin-name patterns.
 | D8 | URL settings sent to Postgres | `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` | `postgres.ts:318` | b | they outrank role settings; setup strips them from the hot URL | | keep |
 | D9 | `query_timeout` in a URL | refused | `postgres.ts:305` | b | | | keep |
 | D10 | SQLite busy timeout | 5 s | `connect.ts:36` | e | tests and dev | | keep |
-| D11 | Driver `max_pipeline` | 100 | `postgres-js/index.ts:661` | e | upstream | | keep (Hyperdrive sends one at a time) |
+| D11 | Driver `max_pipeline` | 100 | `postgres-js/index.ts:661` | e | upstream | | keep, cite; on Node it is what lets a busy pool take more (section 2); on Workers a call's one connection sends its own queries only |
 | D12 | Driver redial backoff | (0.5..1) × min(3^n ÷ 100, 20) s | `postgres-js/index.ts:665` | e | upstream; Node waits up to 20 s after 7 failed redials | Node outage recovery | cap at the use deadline on the hot pool |
 | D13 | Driver `keep_alive` | 60 s | `postgres-js/index.ts:666` | e | no effect on Workers (no `setKeepAlive`) | | keep, note |
 | D14 | Parameter cap | ≥ 65,534 refused | `postgres-js/connection.ts:188` | a | Bind's Int16 count (off by one, from upstream) | | keep |
@@ -662,17 +785,18 @@ digests, provider-id and plugin-name patterns.
 | Q13 | Named batch | `n > p_limit` | 0068:1151 | b | `uses.batch` | | keep |
 | Q14 | Spent tokens, releases, bulk rows kept | 2 h; 25 h; window + refresh + deadline + 1 h | 0016:6; 0021:6; 0022:555 | c | | | test each against its TS twin |
 | Q15 | Days made ahead | −1..+3 | 0035:3; 0049:171 | b | `DAYS_AHEAD` | | keep |
+| Q16 | `sign_in`'s binding row lock | `FOR UPDATE`, held to commit; waiters up to its 1 s `lock_timeout` | 0037:39-43, 82-91 | b | `BindingLocked`: `RateHeld`, `EndedBindingEndsCredentials` (`docs/formal.md:1941`) | ⚠ CI: one binding's sign-ins take turns | measure, then #36 |
 
 ### 4.4 `@coffre/core`, `@coffre/client`, `coffre` (CLI), `@coffre/ui`, `@coffre/conformance`
 
 | ID | Name | Value | Where | Class | Source / why | Bites | Verdict |
 |---|---|---|---|---|---|---|---|
-| C1 | KMS `CONCURRENCY`, `ATTEMPTS`, `TIMEOUT_MS`, backoff | 8 a provider; 3; 5 s; 100 × 4^(n−1) × (1-2) ms | `core/src/kek/aws-kms.ts:33-36, 150` | e | "a Worker opens at most six connections anyway" (cf090259) | ⚠ with KMS | delete the slots (#4); cite the rest |
+| C1 | KMS `CONCURRENCY`, `ATTEMPTS`, `TIMEOUT_MS`, backoff | 8 a provider object, one Decrypt per AWS-backed key opened; 3; 5 s; 100 × 4^(n−1) × (1-2) ms | `core/src/kek/aws-kms.ts:33-36, 150` | e | "a Worker opens at most six connections anyway" (cf090259) | ⚠ with KMS | delete the slots (#4); cite the rest |
 | C2 | `HYPERDRIVE_CONNECTIONS` | 5 to 20 | `cli/src/connections.ts:10` | a (5, and 20 on Free) / e (20 on Paid) | "the most Free allows, which is plenty" (T78, #202) | ⚠ | #12 |
 | C2b | `HELD_BACK`, `CONFIGS` | 3, 3 | `cli/src/connections.ts:7, 16` | e / c | even split of `max_connections` | | Q2 |
 | C3 | Tunnel flow (client and CLI) | 1 MiB, 128 KiB, 1 MiB, 30 s | `client/src/workload-postgres.ts:53-61`; `cli/src/tunnels.ts:19-43` | d / a (30 s: under Cloudflare's 100 s idle) | defined twice | | #26 |
 | C4 | Retyped defaults | 366, 90 d, 30 d / 24 h / 15 min, 40 / 32 / 200, 120 | `cli/src/manage.ts:883-892`; `cli/src/trust.ts:235-775`; `ui/src/components/*` | c | | | #27 |
-| C5 | SDK `retryAfter()` cap, `backoff()` | 300 s × (1-1.5); 1 s × 2^n ≤ 60 s × (0.75-1.25) | `client/src/workload.ts:704-712` | e | "a fleet's replicas spread out" (121c64ca) | ⚠ sidecar | #34 |
+| C5 | SDK `retryAfter()` cap, `backoff()` | 300 s × (1-1.5); 1 s × 2^n ≤ 60 s × (0.75-1.25) | `client/src/workload.ts:704-712` | e | "a fleet's replicas spread out" (121c64ca); waited only when no session is left | ⚠ sidecar | #34 |
 | C6 | SDK `/use` resend | once, on 401 `use_dpop_nonce` only | `client/src/workload.ts:467` | b | | | keep |
 | C7 | SDK enrollment and session timers | 100 s nonce, 5 / 10 min waits, 30 s renew, 5 s margin, 3 s logout | `client/src/workload.ts:124-332` | c / e | | | import `EPOCH_MS`, cite the rest |
 | C8 | `MAX_DIGESTED_BODY` | 95 MiB | `client/src/dpop.ts:184` | a | Cloudflare's 100 MB on Free and Pro | | keep |
@@ -721,7 +845,7 @@ token lifetimes are test tooling, not product limits.
 |---|---|---|---|
 | HotPathOne | `D` (deadline), `BulkCount`, `BulkWindow`, `Refresh`, `MaxSkew`/`Ahead`, `Holds`, `Chunks` | `USE_DEADLINE_MS`, `bulkLimit` (R52), `refreshMs`, `USE_AHEAD_MS`, Hyperdrive holding a call, `WINDOW_MAX` | yes |
 | Batching, Bulk | `BulkCount`; `Cap`, `Window` | `bulkLimit` | yes |
-| Credentials, Lifecycle | `RateCap`, `Rate` | the sign-in count per binding (S8, V30) | yes: removing #8 removes a protection the model shows necessary, so the model changes with it |
+| Credentials, Lifecycle | `RateCap`, `Rate`; `BindingLocked` | the sign-in count per binding (S8, V30); the binding's row lock (Q16) | yes: removing #8 removes a protection the model shows necessary, so the model changes with it; #36 changes the lock |
 | Tunnel | `R`, `D`, `Bound` | `recheckSeconds`, `RECHECK_DEADLINE_MS` | yes, but `Bound = R + D` is entered by hand |
 | Routing, Workload | `W`; `CacheTicks`, `Recheck`, `Life` | `cacheSeconds`; `WORKLOAD_RECHECK_MS` | yes |
 | Audit, Reads | `Walk`, `AppBatch`, `CkptWalk`, `ScrubWalk`; `Chunk` | `CHAIN_WALK`, `BATCH`, `WALKS`; `PROJECTED_AT_ONCE` | yes |
@@ -737,6 +861,11 @@ Each against the vendor's page, quoted.
 
 - CPU: "10 ms" on Free; "5 min (default: 30 seconds)" on Paid. Waiting
   on network "does not count toward CPU time".
+- Requests: "100,000/day" on Free, resetting at midnight UTC, then error
+  1027 (or the route fails open); "No limit" on Paid. At R44's 1,000
+  requests a second, Free's day lasts about 100 seconds: **every R44
+  number in this document assumes Workers Paid.** Free's limits matter
+  only where R25 and R27 hold a request to Free's 10 ms of CPU.
 - Memory: "128 MB", "per-isolate, not per-invocation. A single isolate can
   handle many concurrent requests." No number for requests per isolate is
   documented anywhere.
@@ -765,6 +894,11 @@ Each against the vendor's page, quoted.
 - Origin connections per config: "~20" on Free, "~100" on Paid; "If not
   specified, defaults to 20 for free tier and 60 for paid tier"; "a
   minimum of 5 connections".
+- It is "a 'soft limit'": "it is possible for Hyperdrive to make more
+  connections to your database than this limit" during network failures,
+  so set it "lower than the limit of your origin database"
+  ([tune connection pool](https://developers.cloudflare.com/hyperdrive/configuration/tune-connection-pool/),
+  updated 2026-06-09).
 - "Hyperdrive does not limit the number of concurrent client connections
   from your Workers."
 - Query duration: 60 s. Initial connection: 15 s. Idle: 10 min.
@@ -795,12 +929,16 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
 
 ## 6. Questions for Erwin
 
-- **Q1. Fast refusal on Workers.** Accept mechanism A, predicted lateness
-  from the isolate's own recent uses (section 2), so that no count is
-  configured anywhere? I'd like one run on your Cloudflare to check that
-  it holds goodput at the ceiling as the no-cap run did (R34, under $5,
-  about an hour of a throwaway deployment). The alternative is B: no fast
-  refusal, with the excess answered `late` within 3 s.
+- **Q1. Fast refusal on Workers.** Two steps (section 2). First, replace
+  the count of 10 with one computed from memory: what share of an
+  isolate's 128 MB may uses in flight take (I'd say half), with the bytes
+  per use measured locally? Second, a refusal rule from recent outcomes:
+  A (predicted lateness) or B (adaptive throttling, the published one).
+  Neither is proven; I'd like one run on your Cloudflare to compare them
+  with no fast refusal at all (R34, under $5, about an hour of a throwaway
+  deployment): goodput at the ceiling, and how fast admission reopens.
+  Without the run, the choice is no fast refusal, the excess answered
+  `late` within 3 s.
 - **Q2. Pool sizes on Node.** One value per pool, from the database's
   `max_connections`, which `coffre setup` already splits for Hyperdrive.
   Should setup also write it for Node (in the deployment's config, beside
@@ -811,14 +949,19 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
   `READ_HEAD_WAITERS`, #13): from setup, written into `vault(…)`; or a
   fixed fraction, documented. The first is one more line of config, but a
   derived one.
-- **Q4. CI sign-in rate limits.** R44 names CI sign-in a hot path at
-  1,000+/s. Today four counts stack to about 5/s for the instance and 1/s
-  per binding. Proposal: keep a per-source count on *refused* exchanges
-  only (anyone may send a token, and each costs a signature check), and
-  drop the instance-wide total, the per-binding 60 a minute (app and
-  vault) and the 32 in flight. The per-binding count is modelled
-  (`Credentials.tla`'s `RateCap`), so its removal changes the model.
-  Is a per-binding count a protection you want, at a number you set?
+- **Q4. CI sign-in limits.** R44 names CI sign-in a hot path at
+  1,000+/s. Today, per Cloudflare location (or Node process), 300
+  exchanges a minute in all and 30 per address; for the instance, 60 a
+  minute per binding; and one binding's sign-ins take turns on its row
+  (#36). Proposal: keep the per-address count, on refused exchanges only
+  (anyone may send a token, and each costs a signature check); drop the
+  300 for everyone. The per-binding 60 is the design's policy
+  (`docs/design/oidc.md:174`), modelled (`RateCap`): keep it at a number
+  you set, set it per binding in its policy, or drop it? Whatever you
+  pick, one binding's sign-ins stay one at a time until the row lock is
+  redesigned (#36, TLA+ first), and the 32 in flight stays until a
+  sign-in has a deadline (#35): what deadline do you want for a sign-in
+  under load (R58 allows 1-2 s)?
 - **Q5. A statement bound for the app's and vault's logins.** Only the
   hot login has a `statement_timeout`. An app statement has no bound in
   Postgres. Should the app's and vault's logins get one, derived from
@@ -827,3 +970,10 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
   deployment can reach it. The uses log grows about 13.6 GB a day at
   1,000/s. It isn't a limit, but it is a knob that a deployment needs and
   can't set. Expose it (policy: days kept), or keep every day?
+- **Q7. A bound on the proxy's upstream request.** The credential proxy's
+  `fetch` to an upstream has no timeout (S16). The values' `sendBy` is not
+  one: it bounds when the credentials may start going out, not an upload
+  or a response. Bounding the upstream is a choice: a slow upstream holds
+  the request's memory and the Worker's connection, but a long upload or
+  a streamed response is legitimate. Leave it unbounded, or give it a
+  limit, for the headers only or for the whole response?
