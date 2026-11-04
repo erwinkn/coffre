@@ -1774,10 +1774,11 @@ export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | 
  * two-trip path. Wherever `written` says: the key writes down that path.
  * Since 0.16.0 neither writes a 0.14 entry (T179): their change is the
  * record. Up to `limit`, below `before`, of the members `actors` names if
- * it does: a sign-in's is a service, the rest's anyone's. One read, of
- * each index's entries, each member's, each environment's, as many as it
- * returns at most, however many other changes the log holds (R48); at a
- * place, of some members, each member's there.
+ * it does: a sign-in's is a service, the rest's anyone's. One round trip
+ * (`newest`: a statement a few hundred reads), of each index's entries,
+ * each member's, each environment's, as many as it returns at most,
+ * however many other changes the log holds (R48); at a place, of some
+ * members, each member's there.
  */
 export async function sealedPage(
   db: Queryable,
@@ -1809,9 +1810,8 @@ export async function sealedPage(
   const object = engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
     ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
-  const rows = await dialect.rowsOf<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
-    db,
-    newest(db, reads, columns, filter.before, filter.limit + 1),
+  const rows = await newest<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
+    db, reads, columns, filter.before, filter.limit + 1,
   );
   return {
     rows: rows.slice(0, filter.limit).map((row) => ({
@@ -1827,19 +1827,40 @@ const SIGN_INS: ChangeRecord[] = ['signIn'];
 const HIDDEN: ChangeRecord[] = ['issue', 'revoke', 'signOut'];
 
 /**
+ * The most reads one statement of `newest` takes: SQLite's default limit on
+ * a compound SELECT's terms is 500, and each read's few parameters keep
+ * Postgres's 65,535 far off (review r3 of #490).
+ */
+export const READS_PER_STATEMENT = 250;
+
+/**
  * The newest of the changes each of `reads` holds (a condition its index's
  * repeats), below `before`, `take` of them past the first `skip`: each read
  * on its own and newest first, no further than that, then the newest of
- * them all. One statement, of as many index entries as it reads, each
- * read's at most.
+ * them all. A statement of `READS_PER_STATEMENT` reads at most, asked
+ * together (one round trip), each of as many index entries as it reads,
+ * each read's at most; with more reads, as many statements, whose rows
+ * merge by `at`, then number, as one statement's would.
  */
-function newest(db: Queryable, reads: readonly SQL[], columns: SQL, before: ChangePoint | undefined, take: number, skip = 0): SQL {
+async function newest<Row extends { number: string | number | bigint; at: string | number }>(
+  db: Queryable, reads: readonly SQL[], columns: SQL, before: ChangePoint | undefined, take: number, skip = 0,
+): Promise<Row[]> {
   const { logChanges } = tablesOf(db);
-  const each = reads.map((where, i) => sql`SELECT * FROM (
-    SELECT ${columns} FROM ${logChanges}
-     WHERE ${and(where, before === undefined ? undefined : below(db, before))}
-     ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
-  return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
+  const statement = (part: readonly SQL[], take: number, skip: number) => {
+    const each = part.map((where, i) => sql`SELECT * FROM (
+      SELECT ${columns} FROM ${logChanges}
+       WHERE ${and(where, before === undefined ? undefined : below(db, before))}
+       ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
+    return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
+  };
+  if (reads.length <= READS_PER_STATEMENT) return dialect.rowsOf<Row>(db, statement(reads, take, skip));
+  const parts: SQL[][] = [];
+  for (let start = 0; start < reads.length; start += READS_PER_STATEMENT) parts.push(reads.slice(start, start + READS_PER_STATEMENT));
+  // Each statement's newest `skip + take`: the overall ones are among them.
+  const rows = (await Promise.all(parts.map((part) => dialect.rowsOf<Row>(db, statement(part, skip + take, 0))))).flat();
+  const at = (row: Row) => Number(row.at);
+  rows.sort((a, b) => at(b) - at(a) || (BigInt(b.number) > BigInt(a.number) ? 1 : BigInt(b.number) < BigInt(a.number) ? -1 : 0));
+  return rows.slice(skip, skip + take);
 }
 
 /**
@@ -1863,9 +1884,8 @@ export async function sealedReach(db: Queryable, filter: { actors?: readonly str
   const engine = dialect.engineOf(db);
   const reads = recordActors(filter.actors, isMember).map((actor) => and(recorded(engine, logChanges.payload, ...HIDDEN), actor === undefined ? undefined : eq(logChanges.actor, actor))!);
   if (reads.length === 0) return null;
-  const [row] = await dialect.rowsOf<{ number: string | number | bigint; at: string | number }>(
-    db,
-    newest(db, reads, sql`${logChanges.number} AS "number", ${logChanges.at} AS "at"`, filter.before, 1, HIDDEN_COUNTED - 1),
+  const [row] = await newest<{ number: string | number | bigint; at: string | number }>(
+    db, reads, sql`${logChanges.number} AS "number", ${logChanges.at} AS "at"`, filter.before, 1, HIDDEN_COUNTED - 1,
   );
   return row === undefined ? null : { at: Number(row.at), number: BigInt(row.number) };
 }

@@ -18,7 +18,7 @@ import { eq, sql } from 'drizzle-orm';
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { versionsOf } from '../src/db/queries.ts';
+import { READS_PER_STATEMENT, sealedPage, versionsOf } from '../src/db/queries.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, outcomes } from './api-fixture.ts';
@@ -639,6 +639,34 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
 test("the versions a report names by id are read a thousand a statement: an offboarding report of a member who wrote more than a statement takes parameters (review r2 of #490)", async () => {
   const ids = Array.from({ length: 70_000 }, () => randomUUID());
   assert.equal((await versionsOf(db.runtime, ids)).size, 0);
+});
+
+test("a page of many environments' key writes reads them a few hundred a statement, and lists the newest of them all: a project of more environments than SQLite's compound SELECT takes terms, or Postgres a statement parameters (review r3 of #490)", async () => {
+  await resetDatabase(db.owner);
+  const environments = Array.from({ length: 2 * READS_PER_STATEMENT + 100 }, () => randomUUID());
+  const [first, last] = [environments[10]!, environments.at(-10)!];
+  // Three key writes down the two-trip path, in two statements' reads: the first environment's, then the last's.
+  const plant = (number: bigint, at: number, environment: string) => run(db.owner, sql`
+    INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
+    VALUES (${number}, ${at}, ${`planted-${number}`}, ${randomUUID()}, ${`user:${ADA}`},
+      ${`{"digest":null,"environmentId":"${environment}","inputs":"00","key":null,"nature":"secret","op":"secret.write","projectId":"p","ref":{"id":"${randomUUID()}","kind":"secret"},"reference":null,"request":{"credential":"c","identity":null,"number":"1","operationId":null,"requestId":null},"source":null,"version":"v"}`},
+      ${Buffer.alloc(16)})`);
+  const base = 1n << 40n;
+  await plant(base + 1n, 2_000, last);
+  await plant(base + 2n, 1_000, first);
+  await plant(base + 3n, 1_000, last);
+  const page = async (limit: number, before?: { at: number; number: bigint }) => {
+    const { rows, more } = await sealedPage(db.runtime, { detail: false, limit, instance: false, written: { environmentIds: environments }, ...(before === undefined ? {} : { before }) });
+    return { rows: rows.map((row) => row.number - base), more };
+  };
+  // Newest first by when the vault asked, then by number, across both statements' rows.
+  assert.deepEqual(await page(10), { rows: [1n, 3n, 2n], more: false });
+  assert.deepEqual(await page(2), { rows: [1n, 3n], more: true });
+  assert.deepEqual(await page(2, { at: 1_000, number: base + 3n }), { rows: [2n], more: false });
+  // Past Postgres's 65,535 parameters in one statement: none of these environments holds a write.
+  const many = Array.from({ length: 17_000 }, () => randomUUID());
+  assert.deepEqual(await sealedPage(db.runtime, { detail: false, limit: 50, before: { at: 3_000, number: base }, instance: false, written: { environmentIds: many } }), { rows: [], more: false });
+  await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
 });
 
 test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", { skip: POSTGRES }, async () => {
