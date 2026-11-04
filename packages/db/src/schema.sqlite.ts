@@ -1044,6 +1044,15 @@ export const logChanges = sqliteTable(
     index('log_changes_written_actor_object_idx').on(table.actor, table.object, table.at, table.number).where(recorded('sqlite', table.payload, 'written')),
     index('log_changes_admitted_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'admitted')),
     index('log_changes_admitted_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'admitted')),
+    // The refusals of those two routes, recorded here in place of 0.14's deny entries since PR 6 (T179; refusal.ts): a key
+    // write's every one, one member's, one environment's and one member's there, as its writes; an add's, every one and
+    // one member's, as its adds.
+    index('log_changes_refused_write_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'refusedWrite')),
+    index('log_changes_refused_write_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'refusedWrite')),
+    index('log_changes_refused_write_environment_idx').on(recordField('sqlite', table.payload, 'environmentId'), table.at, table.number).where(recorded('sqlite', table.payload, 'refusedWrite')),
+    index('log_changes_refused_write_actor_environment_idx').on(table.actor, recordField('sqlite', table.payload, 'environmentId'), table.at, table.number).where(recorded('sqlite', table.payload, 'refusedWrite')),
+    index('log_changes_refused_add_idx').on(table.at, table.number).where(recorded('sqlite', table.payload, 'refusedAdd')),
+    index('log_changes_refused_add_actor_idx').on(table.actor, table.at, table.number).where(recorded('sqlite', table.payload, 'refusedAdd')),
   ],
 );
 

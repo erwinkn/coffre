@@ -14,6 +14,7 @@ import type { SecretValue } from './api/secrets.ts';
 import { findCredential, type ResolvedPath } from './db/queries.ts';
 import { namedAhead } from './db/read-ahead.ts';
 import { acceptance } from './named-use.ts';
+import { RefusalRecord } from './refused.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
 /**
@@ -30,7 +31,9 @@ import type { CoffreRuntime } from './runtime.ts';
  *
  * Null wherever this path does not serve the request: another route or shape, a token of another kind or refused for
  * its kind alone, a vault that does not serve it (older, mid-deploy; SQLite's; a key service's), or the vault's own
- * `served: false`, a refusal among them. The request then goes as ever, and is answered as ever.
+ * `served: false`. The request then goes as ever, and is answered as ever. A refusal of the vault's decision (PR 6) is
+ * served: the caller checked on its rows as a served try's, the route answers it as ever, and the vault records it
+ * where that answer would append a 0.14 entry (refused.ts): two round trips.
  */
 
 /** The kinds of token whose writes this path serves: a person's session, CLI login and personal token, and a service's token. */
@@ -89,6 +92,17 @@ export type WriteTry = {
   versionIds: string[];
 };
 
+/** A try the vault's decision refused on its read (PR 6): the route answers it, and the vault records it (`RefusalRecord`). */
+export type RefusedTry = { refused: RefusalRecord };
+
+/** A try as the vault answered it: decided and prepared, or refused. */
+export type Tried = WriteTry | RefusedTry;
+
+/** What a try's answer says of its caller and its place, served or refused: the rows, the standing, the vault's clock. */
+function answerOf(tried: Tried): { app: string; standing: WriteTry['answer']['standing']; at: number } {
+  return 'refused' in tried ? tried.refused.refused : tried.answer;
+}
+
 /**
  * A write the vault decided, for the route to commit (`ApiContext.written`): its tries, each a new request of the
  * vault's, three in all (`heldWrite`); the place as the vault's read found it; the credential's last use, which its
@@ -99,14 +113,14 @@ export class Written {
   readonly place: ResolvedPath | null;
   readonly touched: Touch | null;
   readonly tokenHash: Buffer;
-  #try: WriteTry | null;
-  readonly #ask: () => Promise<WriteTry | string>;
-  readonly #still: (tried: WriteTry) => Promise<boolean>;
-  readonly #placeOf: (tried: WriteTry) => ResolvedPath | null;
+  #try: Tried | null;
+  readonly #ask: () => Promise<Tried | string>;
+  readonly #still: (tried: Tried) => Promise<boolean>;
+  readonly #placeOf: (tried: Tried) => ResolvedPath | null;
 
   constructor(
-    asked: WriteAsked, tokenHash: Buffer, first: WriteTry, place: ResolvedPath | null, touched: Touch | null,
-    ask: () => Promise<WriteTry | string>, still: (tried: WriteTry) => Promise<boolean>, placeOf: (tried: WriteTry) => ResolvedPath | null,
+    asked: WriteAsked, tokenHash: Buffer, first: Tried, place: ResolvedPath | null, touched: Touch | null,
+    ask: () => Promise<Tried | string>, still: (tried: Tried) => Promise<boolean>, placeOf: (tried: Tried) => ResolvedPath | null,
   ) {
     this.asked = asked;
     this.tokenHash = tokenHash;
@@ -123,14 +137,19 @@ export class Written {
    * slugs, which a rename and a new environment of the old name may have moved to another since the first (review r1
    * of #469). Its read and decision are that other's, so it commits nothing at this one.
    */
-  at(tried: WriteTry, environment: { projectId: string; environmentId: string }): boolean {
+  at(tried: Tried, environment: { projectId: string; environmentId: string }): boolean {
     const place = this.#placeOf(tried);
     return place?.environment != null && place.project.id === environment.projectId && place.environment.id === environment.environmentId;
   }
 
   /** The try at hand, or null once let go. */
-  get current(): WriteTry | null {
+  get current(): Tried | null {
     return this.#try;
+  }
+
+  /** The try at hand's refusal, which the vault records in place of the entry its answer would append (`refuse`); else null. */
+  get refusal(): RefusalRecord | null {
+    return this.#try !== null && 'refused' in this.#try ? this.#try.refused : null;
   }
 
   /**
@@ -139,7 +158,7 @@ export class Written {
    * the caller's (`credential`: ended, or its rows not the same caller's, checked as the first's were), which answers
    * 401, as the credential's own check would: today's path would go on with the caller the first try checked.
    */
-  async again(): Promise<WriteTry | string> {
+  async again(): Promise<Tried | string> {
     this.wipe();
     const next = await this.#ask();
     if (next === 'forged' || next === 'ended') return 'credential';
@@ -159,8 +178,8 @@ export class Written {
   }
 }
 
-function wipeTry(tried: WriteTry): void {
-  for (const dek of tried.deks) dek.fill(0);
+function wipeTry(tried: Tried): void {
+  if ('deks' in tried) for (const dek of tried.deks) dek.fill(0);
 }
 
 /**
@@ -183,7 +202,7 @@ export async function writeAhead(
   const tokenHash = hashToken(token);
   // A new key's id, drawn once: the same for every try, as the place holds none until one commits.
   const ids = asked.names.map(() => randomUUID());
-  const ask = async (): Promise<WriteTry | string> => {
+  const ask = async (): Promise<Tried | string> => {
     const deks = asked.names.map(() => freshDek());
     const operationId = randomUUID();
     const versionIds = asked.names.map(() => randomUUID());
@@ -201,7 +220,7 @@ export async function writeAhead(
       });
       if (!answer.served) {
         for (const dek of deks) dek.fill(0);
-        return answer.why;
+        return 'ticket' in answer ? { refused: new RefusalRecord(runtime.vault, answer, 'secret.write') } : answer.why;
       }
       return { answer, deks, operationId, versionIds };
     } catch (error) {
@@ -217,13 +236,13 @@ export async function writeAhead(
   // today's path, whose second read of the row would take one put back meanwhile (formal/Writing.tla, Today).
   if (first === 'ended') return { identity: endedCredential(), written: null };
   if (typeof first === 'string') return null;
-  const rows = (tried: WriteTry) => namedAhead(runtime.db, tried.answer.app);
+  const rows = (tried: Tried) => namedAhead(runtime.db, answerOf(tried).app);
   const ahead = rows(first);
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them, its expiry at the
   // vault's `at` (one clock), its standing as the vault decided it (AuthChecked: before anything commits).
   const identity = await authenticateRequest(request, runtime, requestId, token, sourceIp, {
-    standing: first.answer.standing, at: first.answer.at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
+    standing: answerOf(first).standing, at: answerOf(first).at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
     touch: (touch) => {
       touched = touch;
     },
@@ -234,7 +253,7 @@ export async function writeAhead(
   }
   const credentialId = identity.credentialId;
   // A later try's rows, checked as the first's were: the same credential, its rows' MACs whole (`findCredential` reads nothing given them).
-  const still = async (tried: WriteTry): Promise<boolean> => {
+  const still = async (tried: Tried): Promise<boolean> => {
     const credential = rows(tried)?.credential;
     if (credential == null) return false;
     try {

@@ -1790,7 +1790,10 @@ export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | 
  * sign-outs, which 0.14 shows only when asked; and the first adds down the
  * two-trip path. Wherever `written` says: the key writes down that path.
  * Since 0.16.0 neither writes a 0.14 entry (T179): their change is the
- * record. Up to `limit`, below `before`, of the members `actors` names if
+ * record. And with `refusals`, their refusals, which the vault records in
+ * place of 0.14's deny entries since PR 6: an add's on a page of the
+ * instance's, a key write's wherever `at` says, but on a key's page, where
+ * 0.14's never stood (the route's refusal names no key). Up to `limit`, below `before`, of the members `actors` names if
  * it does: a sign-in's is a service, the rest's anyone's. One round trip
  * (`newest`: a statement a few hundred reads, a few statements at a
  * time past that), of each index's entries,
@@ -1800,7 +1803,10 @@ export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | 
  */
 export async function sealedPage(
   db: Queryable,
-  filter: { actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number; instance: boolean; written: WrittenAt | null },
+  filter: {
+    actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number; instance: boolean; written: WrittenAt | null;
+    refusals?: { instance: boolean; at: WrittenAt | null } | null;
+  },
   stop?: AbortController,
 ): Promise<{ rows: RecordedChange[]; more: boolean }> {
   const { logChanges } = tablesOf(db);
@@ -1810,23 +1816,31 @@ export async function sealedPage(
   // member's two forms, is more reads than a call takes arguments (review r4 of #490), and more than an isolate
   // holds at once, made together (review r5).
   const { written } = filter;
+  const refusals = filter.refusals ?? null;
+  // A key write's records wherever `at` says: every one, each member's; else at a key, or at each environment.
+  function* writes(record: 'written' | 'refusedWrite', at: WrittenAt): Generator<SQL> {
+    if ('all' in at) {
+      for (const actor of recordActors(filter.actors, isMember)) yield of([record], actor);
+      return;
+    }
+    // Of some members at a place: a read of each member's there (`log_changes_written_actor_environment_idx`,
+    // `…_actor_object_idx`), never the place's read with the others' passed over, which grows with their writes.
+    for (const actor of recordActors(filter.actors, isMember)) {
+      if ('secretId' in at) {
+        // A refusal names no key, as 0.14's entry of it named none.
+        if (record === 'written') yield and(of([record], actor), eq(logChanges.object, logObject('secret', at.secretId)))!;
+      } else for (const id of at.environmentIds) yield and(of([record], actor), eq(recordField(engine, logChanges.payload, 'environmentId'), id))!;
+    }
+  }
   function* reads(): Generator<SQL> {
     if (filter.instance) {
       for (const actor of recordActors(filter.actors, isService)) yield of(SIGN_INS, actor);
       if (filter.detail) for (const actor of recordActors(filter.actors, isMember)) yield of(HIDDEN, actor);
       for (const actor of recordActors(filter.actors, isMember)) yield of(['admitted'], actor);
     }
-    if (written === null) return;
-    if ('all' in written) {
-      for (const actor of recordActors(filter.actors, isMember)) yield of(['written'], actor);
-      return;
-    }
-    // Of some members at a place: a read of each member's there (`log_changes_written_actor_environment_idx`,
-    // `…_actor_object_idx`), never the place's read with the others' passed over, which grows with their writes.
-    for (const actor of recordActors(filter.actors, isMember)) {
-      if ('secretId' in written) yield and(of(['written'], actor), eq(logChanges.object, logObject('secret', written.secretId)))!;
-      else for (const id of written.environmentIds) yield and(of(['written'], actor), eq(recordField(engine, logChanges.payload, 'environmentId'), id))!;
-    }
+    if (refusals?.instance === true) for (const actor of recordActors(filter.actors, isMember)) yield of(['refusedAdd'], actor);
+    if (written !== null) yield* writes('written', written);
+    if (refusals?.at != null) yield* writes('refusedWrite', refusals.at);
   }
   const object = engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",

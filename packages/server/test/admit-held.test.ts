@@ -387,23 +387,44 @@ test("Bob demoted, then his row put back and its seal written into the demotion'
   assert.equal(await memberRow(NEW), undefined);
 });
 
-test('a refusal is answered as today\'s path answers it, status and body: one who runs no instance, a project no slug names, a role no instance has', { skip: POSTGRES }, async () => {
-  const cases: [string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>, Record<string, unknown>][] = [
-    ['Bob no admin', async (w) => void (await w.root.members.add(`user:${BOB}`, { role: 'developer' })), { role: 'developer' }],
-    ['a project no slug names', async () => {}, { role: 'developer', scope: { projects: { only: ['nowhere'] } } }],
-    ['an Owner, by an admin', async () => {}, { role: 'owner' }],
+test("a refusal is answered as today's path answers it, status and body: one who runs no instance, an Owner asked by an admin, refused on the vault's read and recorded by it in place of 0.14's deny entry (PR 6); a project no slug names, today's path's still", { skip: POSTGRES }, async () => {
+  // What the fast attempt answers by: the vault's refusal and its record, or today's path.
+  const cases: [string, (w: Awaited<ReturnType<typeof world>>) => Promise<void>, Record<string, unknown>, string | null][] = [
+    ['Bob no admin', async (w) => void (await w.root.members.add(`user:${BOB}`, { role: 'developer' })), { role: 'developer' }, 'app member.add deny'],
+    ['an Owner, by an admin', async () => {}, { role: 'owner' }, 'vault member.add deny'],
+    ['a project no slug names', async () => {}, { role: 'developer', scope: { projects: { only: ['nowhere'] } } }, null],
   ];
-  for (const [what, arrange, body] of cases) {
+  for (const [what, arrange, body, entry] of cases) {
     const attempt = async (fast: boolean) => {
       const w = await world({ fast });
       await arrange(w);
+      const everyone = await w.root.members.list();
       const made = await since(() => w.add(body));
-      return { status: made.result.status, body: made.result.body, entries: made.entries, row: await memberRow(NEW) };
+      // The list of everyone as it was: the record names the member asked for, whom no scan of the missing takes for one.
+      assert.deepEqual(await w.root.members.list(), everyone, what);
+      await assert.rejects(w.root.members.get(NEW), (error: { status?: number }) => error.status === 404, what);
+      return { answer: { status: made.result.status, body: made.result.body, row: await memberRow(NEW) }, entries: made.entries, changes: made.changes, answers: served(w.answers) };
     };
     const fast = await attempt(true);
     const today = await attempt(false);
-    assert.notEqual(fast.status, 200, what);
-    assert.deepEqual(fast, today, what);
+    assert.notEqual(fast.answer.status, 200, what);
+    assert.deepEqual(fast.answer, today.answer, what);
+    if (entry === null) {
+      assert.deepEqual(fast.answers, ['shape'], what);
+      assert.deepEqual({ entries: fast.entries, changes: fast.changes }, { entries: today.entries, changes: today.changes }, what);
+      continue;
+    }
+    // Today's deny entry, Bob's; the vault's record in its place, and nothing else of either log's.
+    assert.deepEqual(fast.answers, ['refused'], what);
+    assert.deepEqual(today.entries, [`${entry} user:${BOB}`], what);
+    assert.deepEqual(fast.entries, [], what);
+    assert.equal(fast.changes.length, 1, what);
+    const [record] = fast.changes;
+    assert.equal(record!.actor, `user:${BOB}`, what);
+    assert.equal(record!.payload.op, 'add.refused', what);
+    assert.equal(record!.payload.code, 'not_allowed', what);
+    assert.equal(record!.payload.principal, NEW, what);
+    assert.deepEqual((record!.payload.ref as { kind: string }).kind, 'request', what);
   }
 });
 

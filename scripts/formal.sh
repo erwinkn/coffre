@@ -530,6 +530,18 @@ REMOVALS=(
   # Today's commit not holding to the policy the caller was loaded with (`policyStill`): a roles change after its
   # decision does not stop it (review r3 of #469).
   "WritingFallBack TodayPolicyHeld TodayPolicyStandsAtCommit"
+  # A refusal down today's path, as before PR 6: a try the vault served, abandoned at its hold, then refused, goes on
+  # there with the caller the first try checked, and writes once the grant is back, the session revoked since (review
+  # r2 of #469). The refusal's record ends the request instead.
+  "WritingCaller RefusalLogged TodayCallerStandsAtDecision"
+  # The record written, and the request still sent down today's path after it: a refusal, and then a write.
+  "WritingCaller RefusalEnds RefusedOrWritten"
+  # The refusal recorded at the vault's decision, before the app checks the caller's rows: a token hash copied onto
+  # an Owner's credential puts a refusal in the Owner's name (round 6, for the record a refusal writes).
+  "WritingAdd RefusalAfterAuth RefusalsAuthentic"
+  # A refusal's record copied, MAC and all, as the newest change of Ada's member object, her row put back: its MAC is
+  # over its own object, the request's, so only the change's MAC check refuses it (T190's check, which PR 6 relies on).
+  "WritingRefuse ChangeMacChecked WritesStandAtCommit"
   # A use through a way in with no credentials row (WaysIn.tla, T147): an MCP connection, a Cloudflare binding,
   # Cloudflare Access. The use reads the way in and its account in its own statement, under the fence their ends take.
   "WaysInRevoke WayReadInUse EndOrdersUses"
@@ -636,13 +648,15 @@ EXPECTED=(
   # environment and the key's row again: a grant revoked or a session ended after the front door does not stop the
   # write (Writing.tla's WToday, WTodayCommit; reviews r1 and r3 of #469). Every
   # write has had this window since 0.14; the two-trip path closes it for the writes it serves (WritesStandAtCommit),
-  # 0.16 for every write (docs/design/two-trips.md, PR 6).
+  # and for their refusals since PR 6; what it does not serve keeps it (a key made a reference here; docs/design/two-trips.md,
+  # PR 3b and PR 7).
   "WritingFallBack TodayStandsAtCommit"
   # Today's path after a try the vault served goes on with the caller that try's read checked, and its wrap weighs the
   # caller's member and roles, not its session: a session revoked between that check and the wrap does not stop the
   # write (Writing.tla's Auth, WToday; review r2 of #469). Today's front door has had the same window before its wrap
-  # since 0.14; after a served try it spans those tries too. 0.16 closes it (docs/design/two-trips.md, PR 6).
-  "WritingCaller TodayCallerStandsAtDecision"
+  # since 0.14; after a served try it spans those tries too. A refused try no longer goes there (PR 6, WritingCaller);
+  # one the vault no longer serves (a key made a reference) still does (docs/design/two-trips.md, PR 3b and PR 7).
+  "WritingCallerShape TodayCallerStandsAtDecision"
 )
 
 # CI's shards, balanced by what each scenario took on a runner (seconds,

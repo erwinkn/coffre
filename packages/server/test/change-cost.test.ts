@@ -7,7 +7,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { createClient, type CoffreClient } from '@coffre/client';
+import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 import type { ProxyDefinition } from '@coffre/core/vault';
 import { createDatabase, type Client } from '@coffre/db';
@@ -28,6 +28,8 @@ const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round t
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const SERVICE = 'token:ci-web';
+/** A Viewer of market/dev, who runs no instance: refused a key write there, and any add. */
+const VIEWER = 'viewer@acme.example';
 
 /** A client whose statements go to the pool of the request under way: on Workers, each request opens its own. */
 class PerRequest {
@@ -55,6 +57,7 @@ let relays: { app: Relay; vault: Relay; hot: Relay };
 let appClient: PerRequest;
 let runtime: CoffreRuntime;
 let owner: CoffreClient;
+let viewer: CoffreClient;
 let calls = 0;
 let statements: string[] = [];
 const background: Promise<unknown>[] = [];
@@ -73,6 +76,8 @@ before(async () => {
   await root.secrets.set('market/dev', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
+  await root.members.add(`user:${VIEWER}`);
+  await root.access.set(`user:${VIEWER}`, { 'market/dev': 'viewer' });
 
   // Each Sync's statements, in the trace a failure prints; with `COFFRE_CHANGE_COST_RTT_MS`, each held that long, as
   // Hyperdrive far from its database holds it, for what a change takes end to end.
@@ -108,17 +113,21 @@ before(async () => {
     // What a request leaves running, waited for within it: its statements are its own.
     waitUntil: (promise) => void background.push(promise),
   };
-  // The Owner's browser session, as a page's calls send it.
-  const session = await asRequest(async () => {
-    const signed = await runtime.signin!.completeSignin({ provider: 'github', subject: 'root', emails: [ROOT], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
-    if (!('credential' in signed)) throw new Error('the Owner was not signed in');
-    return signed.credential.token;
-  });
-  owner = createClient({
-    url: ORIGIN,
-    headers: () => ({ cookie: `${sessionCookieName(runtime.auth)}=${session}`, 'sec-fetch-site': 'same-origin' }),
-    transport: (request) => fetchApi(request, runtime, { sourceIp: null }),
-  });
+  // The Owner's browser session, as a page's calls send it; and the Viewer's.
+  const browser = async (subject: string, email: string): Promise<CoffreClient> => {
+    const session = await asRequest(async () => {
+      const signed = await runtime.signin!.completeSignin({ provider: 'github', subject, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
+      if (!('credential' in signed)) throw new Error(`${email} was not signed in`);
+      return signed.credential.token;
+    });
+    return createClient({
+      url: ORIGIN,
+      headers: () => ({ cookie: `${sessionCookieName(runtime.auth)}=${session}`, 'sec-fetch-site': 'same-origin' }),
+      transport: (request) => fetchApi(request, runtime, { sourceIp: null }),
+    });
+  };
+  owner = await browser('root', ROOT);
+  viewer = await browser('viewer', VIEWER);
 });
 
 after(async () => {
@@ -167,11 +176,24 @@ const ROUTE: ProxyDefinition = {
 let made = 0;
 const fresh = () => `k${(made += 1)}`;
 
+/** A request the route refuses, 403, as asked: anything else fails the case. */
+async function refused(request: Promise<unknown>): Promise<void> {
+  try {
+    await request;
+  } catch (error) {
+    if (error instanceof CoffreError && error.status === 403) return;
+    throw error;
+  }
+  throw new Error('it was not refused');
+}
+
 /** Every change route, as the UI or CLI asks it: once to warm, once measured, each on rows of its own. */
 const CASES: Case[] = [
   { name: 'key set, one', run: () => owner.secrets.set('market/dev', { [fresh().toUpperCase()]: 'fake-value' }) },
   { name: 'key set, existing', run: () => owner.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` }) },
   { name: 'key set, five', run: () => owner.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 5 }, () => [fresh().toUpperCase(), 'fake-value']))) },
+  // Refused on the vault's read, and recorded by it (PR 6): as the write that is not, two round trips, and no 0.14 entry.
+  { name: 'key set, refused', run: () => refused(viewer.secrets.set('market/dev', { API_KEY: `fake-${randomUUID()}` })) },
   {
     name: 'key archived',
     setup: async (i) => void (await owner.secrets.set('market/dev', { [`GONE_${i}`]: 'fake-value' })),
@@ -232,6 +254,7 @@ const CASES: Case[] = [
   { name: 'member added', run: (i) => owner.members.add(`user:new-${i}@acme.example`) },
   { name: 'member added, a role', run: (i) => owner.members.add(`user:dev-${i}@acme.example`, { role: 'developer', scope: { projects: { only: ['market'] } } }) },
   { name: 'service account added', run: (i) => owner.members.add(`token:ci-${i}`) },
+  { name: 'member added, refused', run: (i) => refused(viewer.members.add(`user:turned-${i}@acme.example`)) },
   {
     name: 'access granted',
     setup: async (i) => void (await owner.members.add(`user:granted-${i}@acme.example`)),
@@ -282,6 +305,9 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'key set, one': { app: 1, vault: 1 },
   'key set, existing': { app: 1, vault: 1 },
   'key set, five': { app: 1, vault: 1 },
+  // Refused on the vault's read (PR 6): the read, then the vault's record of the refusal, which stands for 0.14's deny
+  // entry; the app answers it as today's path would, from what the read answered, reading nothing.
+  'key set, refused': { app: 0, vault: 2 },
   'key archived': { app: 12, vault: 2 },
   'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },
@@ -302,6 +328,7 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'member added': { app: 0, vault: 2 },
   'member added, a role': { app: 0, vault: 2 },
   'service account added': { app: 0, vault: 2 },
+  'member added, refused': { app: 0, vault: 2 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },

@@ -1018,10 +1018,17 @@ async function heldWrite(
     if (tried === null) return null;
     // A try whose read found the slugs at another environment (renamed since, another made with the old name): today's
     // path, which writes to this one's ids or refuses, as it does a rename after the router found the place.
+    if (!written.at(tried, environment)) {
+      written.wipe();
+      return null;
+    }
+    // Refused on its read (PR 6), the router's check passed (a later try, or the app's check and the vault's apart):
+    // answered as today's path answers its wrap's refusal, and recorded by the vault in place of that path's entry.
+    if ('refused' in tried) return refuse(ctx, vaultRefusal(ctx, tried.refused.refused.refusal, 'secret.write', { ...environment }));
     // A key a try found sensitive and a later one not (written again meanwhile as a secret): today's path too, which
     // keeps it sensitive (`sticky`), as the vault's read of the key's current value alone would not.
     for (const key of tried.answer.keys) if (key.sensitive) sticky.add(key.name);
-    if (!written.at(tried, environment) || tried.answer.keys.some((key) => !key.sensitive && sticky.has(key.name))) {
+    if (tried.answer.keys.some((key) => !key.sensitive && sticky.has(key.name))) {
       written.wipe();
       return null;
     }

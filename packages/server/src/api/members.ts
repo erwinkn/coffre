@@ -53,7 +53,7 @@ import { setAccess, type AccessChange, type AccessValue } from './access.ts';
 import { canAnywhere, placeOf, projectsReached } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, connectionRevokes, ObjectMoved, retrying, revokes } from './changes.ts';
-import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, withRefusals } from './context.ts';
+import { type ApiContext, audited, denied, Refusal, requireInstance, through, vaultCredential, vaultRefusal, withRefusals } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
 import type { ConnectedApp } from '../mcp/service.ts';
 import { keeps015 } from './changes.ts';
@@ -803,6 +803,9 @@ async function admitHeld(ctx: ApiContext): Promise<{ admitted: Admitted; project
   for (let tries = 1; ; tries += 1) {
     const tried = admission.current;
     if (tried === null) break;
+    // Refused on its read (PR 6), the app's own check passed (an Owner asked by an admin, a later try): answered as today's
+    // path answers the vault's refusal, and recorded by the vault in place of that path's entry (`refuse`).
+    if ('refused' in tried) throw vaultRefusal(ctx, tried.refused.refused.refusal, 'member.add');
     const written = await ctx.vault.admitWrite!({ ticket: tried.ticket });
     if (written.written) return { admitted: written.admitted, projects: tried.projects };
     // The writing vault leaves it to today's path (its config names the member an Owner: review r1 of #474).

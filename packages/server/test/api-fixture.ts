@@ -375,6 +375,7 @@ export function testVault(
     writeKeys: call('writeKeys'),
     admitRead: call('admitRead'),
     admitWrite: call('admitWrite'),
+    recordRefusal: call('recordRefusal'),
     waitSealed: call('waitSealed'),
     signIn: call('signIn'),
     revokeCredential: call('revokeCredential'),

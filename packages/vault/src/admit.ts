@@ -8,7 +8,7 @@ import { credentialEnded, readerOf, type Reader } from './decide.ts';
 import { exactly } from './exact.ts';
 import { noEdits, type CredentialInput, type PrincipalInput, type SealKeys } from './inputs.ts';
 import type { ChangeRow, LogMacKey } from './log-entry.ts';
-import { bytes, callerFirst, callerInputs, changeOf, holds, memberHolds, oldOf, stands, writeStanding, type MemberSealed, type CallerInputs, type RawCaller, type ReadObject, type Unserved } from './write.ts';
+import { bytes, callerFirst, callerInputs, changeOf, holds, memberHolds, oldOf, stands, writeStanding, type MemberSealed, type CallerInputs, type RawCaller, type ReadObject, type Refused, type Unserved } from './write.ts';
 
 /**
  * A member add in three round trips (T179 PR 5; docs/design/two-trips.md, "A member add", "As built: PR 5";
@@ -88,14 +88,17 @@ export type AdmitDecided = {
  * credential first (`callerFirst`); then, a member that has a row already (a re-admit, a role change) or a scope this
  * path does not resolve, today's (`shape`); then every newest change held to its MAC (T190) and each row to its newest
  * change's seal (StaleFirst), the member asked for among them, whose object has no change while it has no row; then
- * `admit`'s rules for a first add by someone who runs the instance. Anything `admit` would refuse is `refused` or
- * `shape`: today's path refuses it, logged.
+ * `admit`'s rules for a first add by someone who runs the instance. What `admit` refuses whatever else it reads (a
+ * person or a role asked by someone who runs no instance; an Owner asked by someone who owns none) is `Refused` (PR 6),
+ * which the vault records and the app answers as today's path would; anything else it would refuse is `refused` or
+ * `shape`: today's path refuses it, logged (a service account set up by someone who runs no instance, as the services
+ * setting lets them, is that path's to decide: PR 5b).
  */
 export function decideAdmit(
   keys: { seals: SealKeys; macs: readonly LogMacKey[]; members: MemberSealed },
   read: AdmitInputs,
   request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[]; asked: AdmitAsked; listed: boolean },
-): AdmitDecided | Unserved {
+): AdmitDecided | Refused | Unserved {
   const caller = callerFirst(keys, read, request);
   if (typeof caller === 'string') return caller;
   const { asked } = request;
@@ -126,9 +129,10 @@ export function decideAdmit(
   if (credentialEnded(caller.row, principal.row, request.at)) return 'ended';
   const reader = readerOf(principal.row, caller.row, roles.row ?? noEdits(), [], request.at);
   if (reader.status !== 'active') return 'refused';
+  const refused = (message: string): Refused => ({ refused: 'not_allowed', message, credential: caller.row, principal: principal.row!, reader });
   // Who runs the instance adds anyone (`admit`); anyone else only sets a service account up, with what the setting
-  // lets them give (`#setsUp`), which this read does not hold.
-  if (!runsInstance(reader.live)) return 'refused';
+  // lets them give (`#setsUp`), which this read does not hold: today's path. A person, or a role, they add nobody.
+  if (!runsInstance(reader.live)) return isSetUp(asked) ? 'refused' : refused(SETS_UP_ONLY);
   // `admit`'s and the route's checks of what is asked, each today's path's to refuse.
   if (asked.role !== undefined && !isInstanceRole(asked.role)) return 'shape';
   if (asked.scope !== undefined && asked.role === undefined) return 'shape';
@@ -152,8 +156,19 @@ export function decideAdmit(
     if (!isScope(scope)) return 'shape';
   }
   const role = asked.role ?? 'member';
-  if (role === 'owner' && !ownsInstance(reader.live)) return 'refused';
+  if (role === 'owner' && !ownsInstance(reader.live)) return refused(OWNERS_ONLY);
   return { credential: caller.row, principal: principal.row, reader, role, scope };
+}
+
+/** `admit`'s refusal of an Owner asked for by someone who owns no instance. */
+export const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
+
+/** `admit`'s refusal of anyone but a service account set up, asked for by someone who runs no instance (`#setsUp`). */
+export const SETS_UP_ONLY = 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up';
+
+/** Whether an add is a service account's with no role, as someone who runs no instance may set one up (`admit`'s `service`). */
+function isSetUp(asked: AdmitAsked): boolean {
+  return asked.principal.startsWith('token:') && (asked.role ?? 'member') === 'member' && asked.scope === undefined;
 }
 
 /** An add as the app asks it, checked: what no caller of the vault's sends is a bug of the app's, which fails the call. */
@@ -168,7 +183,7 @@ export function validateAdmitRead(input: AdmitReadInput): void {
 }
 
 /** What the add decided the caller holds, as `access` answers it: the app's caller for the rest of the request. */
-export function admitStanding(decided: AdmitDecided, at: number): Access {
+export function admitStanding(decided: Pick<AdmitDecided, 'credential' | 'principal' | 'reader'>, at: number): Access {
   return writeStanding(decided, at);
 }
 
@@ -203,13 +218,29 @@ const TICKET_DOMAIN = 'coffre.admit.v1\0';
 
 /** A prepared add, sealed under the vault's change MAC key (`log015.mac`), domain-separated from every log MAC. */
 export function sealTicket(key: LogMacKey, ticket: AdmitTicket): string {
-  const text = JSON.stringify(ticket);
-  const mac = createHmac('sha256', key.key).update(TICKET_DOMAIN).update(text, 'utf8').digest();
-  return `${Buffer.from(text, 'utf8').toString('base64url')}.${Buffer.concat([key.tag, mac]).toString('base64url')}`;
+  return sealUnder(TICKET_DOMAIN, key, ticket);
 }
 
 /** The prepared add a ticket carries, if one of these keys sealed it: `expired` once its time is past at `now`; else null, no ticket of the vault's. */
 export function openTicket(keys: readonly LogMacKey[], sealed: unknown, now: number): AdmitTicket | 'expired' | null {
+  const ticket = openUnder<AdmitTicket>(TICKET_DOMAIN, keys, sealed);
+  if (ticket === null || ticket.v !== 1 || typeof ticket.until !== 'number') return null;
+  return now > ticket.until ? 'expired' : ticket;
+}
+
+/**
+ * What the vault hands the app between two of its calls, sealed: the JSON of `value`, then the key's tag and an
+ * HMAC-SHA256 under the change MAC key over `domain` and that text, so that a ticket of one kind is never another's
+ * and no log entry's MAC is ever one.
+ */
+export function sealUnder(domain: string, key: LogMacKey, value: unknown): string {
+  const text = JSON.stringify(value);
+  const mac = createHmac('sha256', key.key).update(domain).update(text, 'utf8').digest();
+  return `${Buffer.from(text, 'utf8').toString('base64url')}.${Buffer.concat([key.tag, mac]).toString('base64url')}`;
+}
+
+/** What `sealUnder` sealed under `domain` and one of these keys; null for anything else. */
+export function openUnder<T>(domain: string, keys: readonly LogMacKey[], sealed: unknown): T | null {
   if (typeof sealed !== 'string') return null;
   const [body, tag, ...rest] = sealed.split('.');
   if (body === undefined || tag === undefined || rest.length > 0) return null;
@@ -217,12 +248,8 @@ export function openTicket(keys: readonly LogMacKey[], sealed: unknown, now: num
   const given = Buffer.from(tag, 'base64url');
   const holds = keys.some((key) => {
     if (given.length !== key.tag.length + 32 || !given.subarray(0, key.tag.length).equals(key.tag)) return false;
-    const mac = createHmac('sha256', key.key).update(TICKET_DOMAIN).update(text, 'utf8').digest();
+    const mac = createHmac('sha256', key.key).update(domain).update(text, 'utf8').digest();
     return timingSafeEqual(mac, given.subarray(key.tag.length));
   });
-  if (!holds) return null;
-  const ticket = JSON.parse(text) as AdmitTicket;
-  if (ticket.v !== 1 || typeof ticket.until !== 'number') return null;
-  return now > ticket.until ? 'expired' : ticket;
+  return holds ? (JSON.parse(text) as T) : null;
 }
-

@@ -550,9 +550,17 @@ export function requireProjectMaker(ctx: ApiContext, action: string, fields: Ent
  * the vault answers the same now (`Recalled.confirm`): otherwise nothing is
  * logged, and the request starts over (`AccessChanged`).
  */
-export async function refuse(ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'recalled'> }, refusal: Refusal): Promise<never> {
+export async function refuse(
+  ctx: Pick<ApiContext, 'db' | 'chainKey'> & { caller?: Pick<Caller, 'recalled'> } & Partial<Pick<ApiContext, 'written' | 'admission'>>,
+  refusal: Refusal,
+): Promise<never> {
   await ctx.caller?.recalled?.confirm();
-  await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [refusal.entry]));
+  // The refusal of the action the vault's decision refused on its read (T179 PR 6): the vault's record in 0.15's log
+  // stands for its entry (refused.ts); one whose ticket expired is appended as before.
+  const recording = ctx.written?.refusal ?? ctx.admission?.refusal ?? null;
+  if (recording === null || !recording.covers(refusal.entry) || !(await recording.record())) {
+    await ctx.db.transaction((tx) => appendAudit(tx, ctx.chainKey, [refusal.entry]));
+  }
   throw answered(refusal);
 }
 

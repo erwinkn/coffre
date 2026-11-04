@@ -331,16 +331,21 @@ export async function listAudit(
   }
   const before = startOf(query.before);
   if (before.seq !== undefined && before.seq !== 'done') filter.beforeSeq = before.seq;
-  // What 0.15's log alone records is the instance's, of no place, never refused, and some member's.
-  const recorded = (query.sealed === true || typeof query.before === 'string') && filter.within === undefined && query.path === undefined
-    && query.decision !== 'deny' && (filter.actors === undefined || filter.actors.some(isMember))
-    && before.change !== 'done';
+  // What 0.15's log alone records: on the instance's page, of no place, and some member's, its sign-ins, issues, revokes
+  // and first adds, allowed; and the first adds' refusals (T179 PR 6).
+  const sealedAsked = (query.sealed === true || typeof query.before === 'string') && before.change !== 'done';
+  const instance = sealedAsked && filter.within === undefined && query.path === undefined && (filter.actors === undefined || filter.actors.some(isMember));
+  const recorded = instance && query.decision !== 'deny';
   const start = before.change === 'done' ? undefined : before.change;
   const detail = query.detail === true;
   // The key writes 0.15's log records alone (T179, 0.16.0), where the page's place and its reader's scope meet; and,
-  // on a page of the instance's, its first adds (`sealedPage`). Allowed changes, never refused.
-  const loggedAsked = (query.sealed === true || typeof query.before === 'string') && query.decision !== 'deny' && before.change !== 'done';
-  const written = loggedAsked ? await writtenAt(ctx, filter) : null;
+  // on a page of the instance's, its first adds (`sealedPage`). Their refusals likewise, since PR 6, which the vault
+  // records in place of 0.14's deny entries: listed where those stood, with the deny ones.
+  const loggedAsked = sealedAsked && query.decision !== 'deny';
+  const refusalsAsked = sealedAsked && query.decision !== 'allow';
+  const placed = loggedAsked || refusalsAsked ? await writtenAt(ctx, filter) : null;
+  const written = loggedAsked ? placed : null;
+  const refusals = refusalsAsked ? { instance, at: placed } : null;
   // What it leaves out, counted: as before 0.15 without `sealed`; with it, when asked. No first-party page shows the
   // counts, and one that does not ask reads nothing for them, and always fills with what it shows.
   const counted = !detail && (query.sealed !== true && typeof query.before !== 'string' ? true : query.hidden === true);
@@ -371,7 +376,9 @@ export async function listAudit(
   // The page's reads and how far they are listed in one statement, so as of one moment (review r6).
   const [old, sealed, listedReads, reach] = await together([
     () => before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
-    (stop) => recorded || written !== null ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit, instance: recorded, written }, stop) : { rows: [], more: false },
+    (stop) => recorded || written !== null || refusals !== null
+      ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit, instance: recorded, written, refusals }, stop)
+      : { rows: [], more: false },
     () => used ? readsPageStanding(ctx.db, readsFilter) : null,
     () => counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
@@ -888,6 +895,7 @@ function sealedView(row: RecordedChange, keyWrites: KeyWrite[]): AuditEntryView 
   const payload = JSON.parse(row.payload) as Fields & { ref?: { kind?: unknown; id?: unknown }; signIn?: unknown; issue?: unknown; revoke?: unknown };
   const { ref } = payload;
   if (ref?.kind === 'secret' || ref?.kind === 'principal') return twoTripView(row, payload, keyWrites);
+  if (ref?.kind === 'request') return refusalView(row, payload);
   if (ref?.kind !== 'credential' || typeof ref.id !== 'string' || !isMember(row.actor)) return null;
   const record = (value: unknown): Fields | null => (typeof value === 'object' && value !== null ? (value as Fields) : null);
   const time = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) ? new Date(value).toISOString() : null);
@@ -1020,6 +1028,53 @@ function twoTripView(
     return entry;
   }
   if (ref.kind === 'principal' && op === 'member.add') return view('member.add', { subject: ref.id }, { role: payload.role ?? null, scope: payload.scope ?? null });
+  return null;
+}
+
+/**
+ * A refusal the vault recorded (T179 PR 6; refusal.ts), where 0.14's deny entry stood: a key write's, at the place its
+ * path names, as asked, with its keys; an add's, of the member asked for, with the role and scope asked. Its reason the
+ * vault's code, as 0.14's vault entries name theirs.
+ */
+function refusalView(row: RecordedChange, payload: Record<string, unknown>): AuditEntryView | null {
+  const request = typeof payload.request === 'object' && payload.request !== null ? payload.request as Record<string, unknown> : null;
+  const text = (value: unknown) => (typeof value === 'string' ? value : null);
+  const code = text(payload.code);
+  if (request === null || code === null || !isMember(row.actor)) return null;
+  const credentialId = text(payload.credential);
+  const view = (action: string, fields: Partial<AuditEntryView>, metadata: Record<string, unknown>): AuditEntryView => ({
+    seq: Number(row.number),
+    log: '0.15',
+    author: 'vault',
+    occurredAt: new Date(row.at).toISOString(),
+    ...actorParts(row.actor),
+    action,
+    decision: 'deny',
+    reason: code,
+    detail: false,
+    subject: null,
+    project: null,
+    environment: null,
+    key: null,
+    version: null,
+    secrets: null,
+    operationId: text(request.operationId),
+    relatedSeq: null,
+    requestId: text(request.requestId),
+    run: null,
+    token: null,
+    ...fields,
+    metadata: { ...metadata, reason: code, ...(credentialId === null ? {} : { credentialId }) },
+  });
+  if (payload.op === 'write.refused') {
+    const path = text(payload.path);
+    const [project, environment] = path === null ? [null, null] : path.split('/');
+    const keys = Array.isArray(payload.keys) ? payload.keys.filter((key): key is string => typeof key === 'string') : [];
+    return view('secret.write', { project: project ?? null, environment: environment ?? null }, { path, keys });
+  }
+  if (payload.op === 'add.refused' && typeof payload.principal === 'string') {
+    return view('member.add', { subject: payload.principal }, { role: payload.role ?? null, scope: payload.scope ?? null });
+  }
   return null;
 }
 

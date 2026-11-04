@@ -338,16 +338,18 @@ export interface Vault {
    * statement reads, under the fence shared, everything the decision weighs (`write_inputs`) and numbers the request;
    * the vault decides on that read alone, wraps each data key and prepares each key's change, the read's digest in it,
    * which the app's transaction holds the same read to again (`hold_inputs`) before it commits. `served: false` for
-   * any write it does not serve so, a refusal among them: the app writes as before, which answers and logs it. Only
-   * with `about().writes`.
+   * any write it does not serve so: the app writes as before, which answers and logs it; `refused`, for one its
+   * decision refuses (T179 PR 6), which the app answers as today's path would and the vault records once asked
+   * (`recordRefusal`). Only with `about().writes`.
    */
   writeKeys?(input: WriteKeysInput): Promise<WriteKeysOutcome>;
   /**
    * A member's first add decided on one read (T179 PR 5; docs/design/two-trips.md, "A member add"; formal/Writing.tla):
    * one statement reads everything the decision weighs (`admit_inputs`), with no lock; the vault decides on that read
    * alone and prepares the add, under its own MAC (`ticket`), which the app hands back to `admitWrite` once it has
-   * checked the caller's rows (`app`) as `authenticate` does. `served: false` for any add it does not serve so, a
-   * refusal among them: the app adds as before, which answers and logs it. Only with `about().admits`.
+   * checked the caller's rows (`app`) as `authenticate` does. `served: false` for any add it does not serve so: the
+   * app adds as before, which answers and logs it; `refused`, as a key write's (`recordRefusal`). Only with
+   * `about().admits`.
    */
   admitRead?(input: AdmitReadInput): Promise<AdmitReadOutcome>;
   /**
@@ -356,6 +358,13 @@ export interface Vault {
    * nothing written: the app asks `admitRead` again. Only with `about().admits`.
    */
   admitWrite?(input: AdmitWriteInput): Promise<AdmitWriteOutcome>;
+  /**
+   * The record of a refusal `writeKeys` or `admitRead` decided (T179 PR 6; docs/design/two-trips.md, "A refusal's
+   * record"), written once the app has checked the caller's rows that call answered, as it checks them before a change
+   * commits: one statement, a row of 0.15's log of the request's own (`log_refusal`), then the seal wait (R51). It
+   * stands for the 0.14 deny entry today's path writes. Only with `about().writes` or `about().admits`.
+   */
+  recordRefusal?(input: RecordRefusalInput): Promise<RecordRefusalOutcome>;
   /**
    * Answers once the log's entry `number` is sealed in a signed checkpoint
    * and, if a witness is configured, witnessed or past its 2 s (R51): what a
@@ -767,6 +776,7 @@ export type WriteKeysInput = Correlation & {
  */
 export type WriteKeysOutcome =
   | { served: false; why: string }
+  | VaultRefused
   | {
     served: true;
     at: number;
@@ -799,7 +809,22 @@ export type AdmitReadInput = Correlation & {
  */
 export type AdmitReadOutcome =
   | { served: false; why: string }
+  | VaultRefused
   | { served: true; at: number; app: string; standing: Access; ticket: string; admitted: Admitted; projects: { id: string; slug: string }[] };
+
+/**
+ * A write or an add the vault's decision refused, on its read (T179 PR 6): the refusal, as today's path's vault call
+ * would answer it (`Refusal`); the app's rows as the read found them and the caller as the vault decided them (`app`,
+ * `standing`, `at`), which the app checks as it checks a served try's; and the record, prepared under the vault's MAC
+ * (`ticket`), which `recordRefusal` writes once the app has.
+ */
+export type VaultRefused = { served: false; why: 'refused'; refusal: Refusal; at: number; app: string; standing: Access; ticket: string };
+
+/** A refusal's record, as `writeKeys` or `admitRead` prepared it. */
+export type RecordRefusalInput = { ticket: string };
+
+/** The record written and sealed, its number; or `expired`, the ticket's time past, nothing written. */
+export type RecordRefusalOutcome = { recorded: true; number: string } | { recorded: false; why: 'expired' };
 
 /** The add `admitRead` prepared, as it answered it. */
 export type AdmitWriteInput = { ticket: string };

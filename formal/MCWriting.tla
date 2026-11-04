@@ -6,7 +6,9 @@
 (* in Tamper and Add, T190's forged seal in Forge, PR 3's fallback to      *)
 (* today's path in FallBack and Forge, its caller in Caller (r2 of #469);  *)
 (* PR 5's add, its session and its fallback, in Add and Forge, its         *)
-(* session's generation in Rejoin (r1 of #474).                            *)
+(* session's generation in Rejoin (r1 of #474); PR 6's refusal records in  *)
+(* Refuse, Caller and Add, and what still goes down today's path in        *)
+(* FallBack and CallerShape.                                               *)
 (***************************************************************************)
 EXTENDS Writing
 
@@ -41,20 +43,33 @@ TamperProcs == {"w1", "end", "dbw", "sub", "ck"}
 \* refuse it too.
 ForgeProcs == {"w1", "bob", "end", "rev", "dem", "fsg", "ck"}
 
-\* Ada writes key k twice while her grant is taken away and given back, the
-\* roles redefined and her session revoked: a try the vault served whose
-\* hold fails, then a refusal, goes down today's path, which may write once
-\* the grant is back (PR 3's fallback). A roles change between its decision
-\* and its commit stops it (`policyStill`, review r3 of #469); her session
-\* revoked there does not (TodayStandsAtCommit, EXPECTED broken).
-FallBackProcs == {"w1", "w2", "rev", "bk", "rol", "end", "ck"}
+\* Ada writes key k while it is made a reference, the roles redefined and
+\* her session revoked: a try the vault served whose hold fails, then one
+\* it no longer serves (the key a reference), goes down today's path (PR 3's
+\* fallback; a refusal no longer does, PR 6). A roles change between its
+\* decision and its commit stops it (`policyStill`, review r3 of #469); her
+\* session revoked there does not (TodayStandsAtCommit, EXPECTED broken).
+FallBackProcs == {"w1", "shp", "rol", "end", "ck"}
 
 \* Ada writes key k while her grant is taken away and given back and her
-\* session revoked: a try the vault served whose hold fails, a refusal,
-\* then today's path once the grant is back, the session revoked before it
-\* (review r2 of #469). Today's path goes on with the caller the first try
-\* checked: it writes (TodayCallerStandsAtDecision, EXPECTED broken).
+\* session revoked: a try the vault served whose hold fails, then a refusal
+\* (review r2 of #469). Before PR 6 the refusal went down today's path, which
+\* wrote once the grant was back, for the caller the first try checked, her
+\* session revoked since; now it is recorded, and the request ends there
+\* (TodayCallerStandsAtDecision holds; without RefusalLogged it breaks).
 CallerProcs == {"w1", "rev", "bk", "end", "ck"}
+
+\* Ada writes key k while it is made a reference and her session revoked: a
+\* try the vault served whose hold fails, then today's path, which goes on
+\* with the caller the first try checked and writes, her session revoked
+\* since (TodayCallerStandsAtDecision, EXPECTED broken: what the two-trip
+\* path does not serve keeps today's window, PR 3b and PR 7).
+CallerShapeProcs == {"w1", "shp", "end", "ck"}
+
+\* Ada writes key k twice while her grant is taken away: one is refused and
+\* recorded (PR 6), and a database writer copies that record, MAC and all,
+\* as the newest change of her member object, her row put back to match.
+RefuseProcs == {"w1", "w2", "rev", "rfl", "ck"}
 
 \* Bob and Cy each add svc while an Owner demotes Bob and changes the
 \* policy so that only Owners add, a database writer copies a token hash

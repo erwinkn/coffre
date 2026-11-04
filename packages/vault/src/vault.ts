@@ -149,6 +149,8 @@ import {
   type WrapInput,
   type AdmitReadInput,
   type AdmitReadOutcome,
+  type RecordRefusalInput,
+  type RecordRefusalOutcome,
   type AdmitWriteInput,
   type AdmitWriteOutcome,
   type WriteKeysInput,
@@ -175,7 +177,8 @@ import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
-import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, parseAdmitInputs, scopeSlugs, sealTicket, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
+import { addRefusal, callRefusal, openRefusal, refusalRow, writeRefusal } from './refusal.ts';
+import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTicket, OWNERS_ONLY, parseAdmitInputs, scopeSlugs, sealTicket, SETS_UP_ONLY, TICKET_MS, validateAdmitRead, type AdmitAsked, type AdmitTicket } from './admit.ts';
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
@@ -536,7 +539,6 @@ function notLogged(error: unknown): Held {
 }
 
 /** Why a change to who is an Owner, scoped or not, is refused to anyone else: Owners make and unmake Owners. */
-const OWNERS_ONLY = 'only an Owner of the whole instance makes someone an Owner, or changes or removes one';
 
 /** Why nobody demotes or removes a person the deployment names (`owners`), themselves included. */
 function declaredOwner(principal: string): string {
@@ -2792,7 +2794,7 @@ class VaultService implements Vault {
   async #setsUp(d: Decision, acting: Standing, service: boolean, refused: (code: RefusalCode, message?: string) => Refused): Promise<void> {
     const setting = (await this.#settingsAt(d.tx, d.reports)).serviceAccounts;
     if (!service || !PERSON.test(acting.principal) || !setsUpServices(acting.live, setting, placesOf(await this.#livePlaces(d)))) {
-      throw refused('not_allowed', 'only admins and owners of the whole instance may add people or set their roles, and a service account takes access somewhere the instance lets people set one up');
+      throw refused('not_allowed', SETS_UP_ONLY);
     }
   }
 
@@ -3956,6 +3958,18 @@ class VaultService implements Vault {
     const inputs = parseInputs(read.inputs);
     const decided = decideWrite({ seals: log015.seals, macs: log015.macs, members: (row, grants) => this.#sealed(row, grants) }, inputs, { at, accepts: input.accepts, kinds: WRITE_KINDS, asked: input.keys });
     if (typeof decided === 'string') return unserved(decided);
+    // Refused on the read (PR 6): the record prepared, for `recordRefusal` once the app has checked the caller's rows.
+    if ('refused' in decided) {
+      const { credential, environment } = decided;
+      return {
+        served: false, why: 'refused', refusal: refusal(decided.refused, decided.message), at, app: read.app, standing: writeStanding(decided, at),
+        ticket: writeRefusal(log015.mac, at, {
+          code: decided.refused, actor: credential.principal, credential: credential.id, identity: inputs.credential.identityId, read: read.digest,
+          operationId: input.operationId ?? null, requestId: input.requestId ?? null, number: read.number,
+          projectId: environment.projectId, environmentId: environment.id, path: `${input.project}/${input.environment}`, keys: input.keys.map((key) => key.name),
+        }),
+      };
+    }
     const { credential, environment } = decided;
     const principal = credential.principal;
     const secrets: SecretRef[] = decided.keys.map((key) => ({
@@ -4013,6 +4027,17 @@ class VaultService implements Vault {
     const inputs = parseAdmitInputs(read.inputs, input.principal);
     const decided = decideAdmit({ seals: log015.seals, macs: log015.macs, members: (row, grants) => this.#sealed(row, grants) }, inputs, { at, accepts: input.accepts, kinds: ADMIT_KINDS, asked, listed: this.#listed(input.principal) });
     if (typeof decided === 'string') return unserved(decided);
+    // Refused on the read (PR 6), as a key write's.
+    if ('refused' in decided) {
+      const { credential } = decided;
+      return {
+        served: false, why: 'refused', refusal: refusal(decided.refused, decided.message), at, app: read.app, standing: admitStanding(decided, at),
+        ticket: addRefusal(log015.mac, at, {
+          code: decided.refused, actor: credential.principal, credential: credential.id, identity: inputs.credential.identityId, read: read.digest,
+          operationId: input.operationId ?? null, requestId: input.requestId ?? null, principal: input.principal, role: input.role, scope: input.scope,
+        }),
+      };
+    }
     const ticket: AdmitTicket = {
       v: 1, until: at + TICKET_MS, at, digest: read.digest, tokenHash: input.tokenHash, principal: input.principal, scopeSlugs: slugs,
       // Who the add is by, by ids, as the checked read resolved them (ActorFromRead): the write resolves no token.
@@ -4079,6 +4104,23 @@ class VaultService implements Vault {
     if (newest === null) throw new Error("an add's change committed with no number");
     await log015.sealThrough(newest);
     return { written: true, number: newest.toString(), admitted: { created: true, role, scope, generation: 0 } };
+  }
+
+  /**
+   * The record of a refusal `writeKeys` or `admitRead` decided (PR 6; refusal.ts), once the app has checked the caller's
+   * rows (RefusalAfterAuth): one statement (`log_refusal`), then the seal wait (R51, kept for refusals: D165). The
+   * record is the vault's, MAC'd here as it is written, its time this isolate's clock now.
+   */
+  async recordRefusal(input: RecordRefusalInput): Promise<RecordRefusalOutcome> {
+    const log015 = this.#prepared.log015;
+    if (log015 === null || !(this.#serveWrites() || this.#serveAdmits())) throw new Error('this vault records no refusal: it serves neither writeKeys nor admitRead');
+    const now = Date.now() + this.#prepared.options.clockOffset();
+    const opened = openRefusal(log015.macs, input?.ticket, now);
+    if (opened === 'expired') return { recorded: false, why: 'expired' };
+    if (opened === null) throw new Error("a refusal's ticket is the vault's own, as writeKeys or admitRead answered it: this one is not");
+    const number = await callRefusal(this.#db, refusalRow(log015.mac, opened, now));
+    await log015.sealThrough(number);
+    return { recorded: true, number: number.toString() };
   }
 
   /** Whether this vault serves `admitRead` and `admitWrite`: 0.15's log, on Postgres. */

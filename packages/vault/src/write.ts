@@ -1,4 +1,4 @@
-import type { Access, CredentialAcceptance, SecretColumns, WriteKeysInput } from '@coffre/core/vault';
+import { REFUSAL_MESSAGES, type Access, type CredentialAcceptance, type RefusalCode, type SecretColumns, type WriteKeysInput } from '@coffre/core/vault';
 import { storedRole } from '@coffre/db/grants';
 
 import { credentialEnded, keyRefusals, readerOf, sensitiveRefusals, useOnlyRefusals, type Reader } from './decide.ts';
@@ -16,8 +16,9 @@ import type { GrantRow, Member } from './store.ts';
  * (`hold_inputs`, ReadHeld). The read is one text, whose SHA-256 (the digest) the changes the Worker prepares carry.
  *
  * Served only for what this path holds whole: a patch of new values in an environment of its own (no fork, no
- * personal config) over keys that are live values or none, by a credential the vault's seals bear out. Anything else,
- * a refusal included, is `unserved`, and the request goes down today's path, which answers it, logged, as ever.
+ * personal config) over keys that are live values or none, by a credential the vault's seals bear out. Anything else
+ * is `unserved`, and the request goes down today's path, which answers it, logged, as ever; but a refusal of the
+ * decision's own (`WriteRefused`, PR 6), which the vault records (refusal.ts) and the app answers as that path would.
  *
  *   Ada's PATCH market/dev { API_KEY: "sk-…" }   write_request   the read, the number          one round trip
  *                                                 the Worker      decides, wraps, prepares       none
@@ -195,7 +196,7 @@ export type Unserved =
   | 'stale' // a row its object's newest change does not seal (StaleFirst), or 0.14's access entry the log does not account for
   | 'place' // no such place, or one this path leaves out (archived, deleted, a fork, a personal config)
   | 'shape' // a key this path leaves out: archived, a reference, a value replaced since it was listed
-  | 'refused'; // the decision refuses: today's path refuses it too, and logs the refusal
+  | 'refused'; // a refusal this path leaves to today's, which refuses it too and logs it (an add's caller who sets up a service account, or is not active)
 
 /** What the write is decided as: the caller, and each key's id, whether the write makes it, and its sensitivity. */
 export type WriteDecided = {
@@ -205,6 +206,15 @@ export type WriteDecided = {
   environment: EnvironmentInput;
   keys: { name: string; id: string; created: boolean; sensitive: boolean; before: ReadKey }[];
 };
+
+/**
+ * A refusal the decision made on the read (T179 PR 6): the first code of the rules that refused, and who asked, as the
+ * decision weighed them (the credential, the member, their reader), for the vault to answer and record it.
+ */
+export type Refused = { refused: RefusalCode; message: string; credential: CredentialInput; principal: PrincipalInput; reader: Reader };
+
+/** A key write's refusal: who asked, and the place as the read found it, which the record names. */
+export type WriteRefused = Refused & { environment: EnvironmentInput };
 
 /**
  * The decision, on the read alone (DecideOnRead), in the order the use path takes: every newest change held to its MAC
@@ -278,7 +288,7 @@ export function decideWrite(
   keys: { seals: SealKeys; macs: readonly LogMacKey[]; members: MemberSealed },
   read: WriteInputs,
   request: { at: number; accepts: CredentialAcceptance; kinds: readonly string[]; asked: readonly { name: string; id: string; replaces?: string | null }[] },
-): WriteDecided | Unserved {
+): WriteDecided | WriteRefused | Unserved {
   const { credential, principal, roles, policy, environment } = read;
   const caller = callerFirst(keys, read, request);
   if (typeof caller === 'string') return caller;
@@ -320,7 +330,10 @@ export function decideWrite(
   let codes = keyRefusals(reader, { principal: caller.row.principal, permission: 'secret.write', secrets, at: secrets, environments, needs: secrets.map(() => ['secret.write'] as const) });
   codes = useOnlyRefusals(codes, reader, { action: 'key.wrap', secrets });
   codes = sensitiveRefusals(codes, reader, { action: 'key.wrap', principal: caller.row.principal, secrets: decided.map(({ sensitive }) => ({ projectId: place.projectId, sensitive })) });
-  if (codes.some((code) => code !== null)) return 'refused';
+  // Refused by the rules alone, everything they weighed as its log has it: the vault's to record and the app's to answer
+  // as today's path would (its router's check, which the same rules make, or the vault's wrap), with no 0.14 entry.
+  const refused = codes.find((code) => code !== null) ?? null;
+  if (refused !== null) return { refused, message: REFUSAL_MESSAGES[refused], credential: caller.row, principal: principal.row, reader, environment: place };
   return { credential: caller.row, principal: principal.row, reader, environment: place, keys: decided };
 }
 
