@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"unicode/utf8"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // Section 7, guarantee 5: a check of the saved plan and the state for a
@@ -16,61 +19,166 @@ import (
 // their bytes, nor only `terraform show -json`. Provider private data is
 // base64 in a state file and raw JSON inside a plan's protobuf, and a
 // provider may encode it again itself.
+//
+// Every layer is read whole: a zip archive's files, a gzip stream, a
+// protobuf message's fields, a JSON document's strings (each decoded as
+// base64 too, however short), and the base64 runs of any other text. A
+// layer the check cannot read in full (too large, nested too deep) fails
+// the check: an unread layer never counts as clean.
 
-// base64Run is a run of base64 (either alphabet) long enough to hold a value.
-var base64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]{12,}={0,2}`)
+// base64Run is a run of base64 (either alphabet) in text that is not JSON:
+// 4 characters, the shortest that decodes to anything.
+var base64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]{4,}={0,2}`)
 
-const maxDepth = 6
+const (
+	maxDepth = 24       // layers within layers
+	maxSize  = 64 << 20 // bytes one zip file or gzip stream may hold
+)
 
-// leaks returns where secret appears in data, named from name: in its
-// bytes, in a zip archive's files, a gzip stream, a JSON document's
-// strings, and anything base64 decodes to, each searched again.
-func leaks(name string, data []byte, secret string) []string {
-	var found []string
-	seen := map[string]bool{}
-	var search func(where string, data []byte, depth int)
-	search = func(where string, data []byte, depth int) {
-		if depth > maxDepth || len(data) == 0 {
+var encodings = []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding}
+
+// leaks returns where secret appears in data, named from name, or an
+// error naming a layer it could not read in full.
+func leaks(name string, data []byte, secret string) ([]string, error) {
+	s := scan{secret: secret, seen: map[string]bool{}}
+	s.search(name, data, 0, true)
+	return s.found, s.err
+}
+
+type scan struct {
+	secret string
+	seen   map[string]bool
+	found  []string
+	err    error
+}
+
+// search looks for the secret in data, then in each layer data holds. A
+// layer's bytes are tried as protobuf only where proto says they may be
+// one: the plan's own record and the fields of a message within it.
+func (s *scan) search(where string, data []byte, depth int, proto bool) {
+	if s.err != nil || len(data) == 0 {
+		return
+	}
+	key := string(data)
+	if s.seen[key] {
+		return
+	}
+	s.seen[key] = true
+	if contains(data, s.secret) {
+		s.found = append(s.found, where)
+		return
+	}
+	if depth >= maxDepth {
+		s.err = fmt.Errorf("%s: nested more than %d layers deep; the check cannot read it all", where, maxDepth)
+		return
+	}
+	switch {
+	case bytes.HasPrefix(data, []byte("PK\x03\x04")):
+		archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			s.err = fmt.Errorf("%s: a zip archive that does not read: %w", where, err)
 			return
 		}
-		key := string(data)
-		if seen[key] {
-			return
-		}
-		seen[key] = true
-		if contains(data, secret) {
-			found = append(found, where)
-			return
-		}
-		if archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data))); err == nil {
-			for _, file := range archive.File {
-				if r, err := file.Open(); err == nil {
-					inner, _ := io.ReadAll(io.LimitReader(r, 64<<20))
-					_ = r.Close()
-					search(where+"/"+file.Name, inner, depth+1)
-				}
+		for _, file := range archive.File {
+			r, err := file.Open()
+			if err != nil {
+				s.err = fmt.Errorf("%s/%s: %w", where, file.Name, err)
+				return
 			}
-			return
+			inner, err := readAll(r)
+			_ = r.Close()
+			if err != nil {
+				s.err = fmt.Errorf("%s/%s: %w", where, file.Name, err)
+				return
+			}
+			s.search(where+"/"+file.Name, inner, depth+1, file.Name == "tfplan")
 		}
-		if r, err := gzip.NewReader(bytes.NewReader(data)); err == nil {
-			if inner, err := io.ReadAll(io.LimitReader(r, 64<<20)); err == nil {
-				search(where+"(gzip)", inner, depth+1)
+		return
+	case bytes.HasPrefix(data, []byte{0x1f, 0x8b}):
+		r, err := gzip.NewReader(bytes.NewReader(data))
+		if err == nil {
+			var inner []byte
+			if inner, err = readAll(r); err == nil {
+				s.search(where+"(gzip)", inner, depth+1, false)
+				return
 			}
 		}
+		// Not gzip after all: searched as bytes below.
+	}
+	if json.Valid(data) {
 		var document any
-		if json.Unmarshal(data, &document) == nil {
-			walkStrings(document, func(s string) { search(where+"(json)", []byte(s), depth+1) })
-		}
-		for _, run := range base64Run.FindAll(data, 4096) {
-			for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-				if decoded, err := encoding.DecodeString(string(run)); err == nil {
-					search(where+"(base64)", decoded, depth+1)
-				}
-			}
+		_ = json.Unmarshal(data, &document)
+		walkStrings(document, func(text string) {
+			s.search(where+"(json)", []byte(text), depth+1, false)
+			s.decode(where+"(json)", text, depth)
+		})
+		return
+	}
+	if proto && s.message(where, data, depth) {
+		return
+	}
+	if utf8.Valid(data) {
+		for _, run := range base64Run.FindAll(data, -1) {
+			s.decode(where, string(run), depth)
 		}
 	}
-	search(name, data, 0)
-	return found
+}
+
+// decode searches what text decodes to, in each base64 alphabet. Bytes that
+// are neither text nor an archive are only searched, not decoded again:
+// they are what most text decodes to, and hold no further layer.
+func (s *scan) decode(where, text string, depth int) {
+	for _, encoding := range encodings {
+		decoded, err := encoding.DecodeString(text)
+		if err != nil || len(decoded) == 0 {
+			continue
+		}
+		if utf8.Valid(decoded) || bytes.HasPrefix(decoded, []byte("PK\x03\x04")) || bytes.HasPrefix(decoded, []byte{0x1f, 0x8b}) {
+			s.search(where+"(base64)", decoded, depth+1, false)
+		} else if contains(decoded, s.secret) {
+			s.found = append(s.found, where+"(base64)")
+		}
+	}
+}
+
+// message searches each length-delimited field of data as a protobuf
+// message, and reports whether data parsed as one to its end.
+func (s *scan) message(where string, data []byte, depth int) bool {
+	var fields [][]byte
+	for rest := data; len(rest) > 0; {
+		number, kind, n := protowire.ConsumeTag(rest)
+		if n < 0 || number <= 0 {
+			return false
+		}
+		rest = rest[n:]
+		if kind == protowire.BytesType {
+			field, m := protowire.ConsumeBytes(rest)
+			if m < 0 {
+				return false
+			}
+			fields = append(fields, field)
+			rest = rest[m:]
+			continue
+		}
+		m := protowire.ConsumeFieldValue(number, kind, rest)
+		if m < 0 {
+			return false
+		}
+		rest = rest[m:]
+	}
+	for _, field := range fields {
+		s.search(where+"(proto)", field, depth+1, true)
+	}
+	return true
+}
+
+// readAll reads r to its end, or fails past maxSize.
+func readAll(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxSize+1))
+	if err == nil && len(data) > maxSize {
+		err = fmt.Errorf("larger than %d bytes; the check cannot read it all", maxSize)
+	}
+	return data, err
 }
 
 // contains reports whether data holds secret as it is or JSON-escaped.

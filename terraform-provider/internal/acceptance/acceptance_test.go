@@ -57,9 +57,7 @@ func TestLifecycle(t *testing.T) {
 		if got, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod", key); got != v1 {
 			t.Fatalf("the verifier read %q", got)
 		}
-		if got, _ := reveal(t, coffre.Tokens.Terraform, "infra/prod", key); got != "" {
-			t.Errorf("Terraform's own credential read the value back")
-		}
+		refused(t, coffre.Tokens.Terraform, "infra/prod", key)
 		if got, _ := reveal(t, "", "infra/prod", key); got != v1 {
 			t.Errorf("the Owner reads a secret: got %q", got)
 		}
@@ -80,9 +78,7 @@ func TestLifecycle(t *testing.T) {
 		if got, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod", key); got != v1 {
 			t.Errorf("the mark changed the value: %q", got)
 		}
-		if got, _ := reveal(t, "", "infra/prod", key); got != "" {
-			t.Errorf("the Owner read a sensitive value")
-		}
+		refused(t, "", "infra/prod", key)
 
 		// Looser alone is refused at plan; with a new version it writes the value again.
 		config("secret", "1", "")
@@ -292,6 +288,30 @@ func TestForks(t *testing.T) {
 			t.Errorf("the fork-only override reads %q", got)
 		}
 
+		// Reset again, so that the fork-only state holds no version: a saved plan to write it back, then an override by
+		// hand before its apply. Nothing guards the write by version, so the apply checks the key again and stops.
+		if status, answer := api(t, http.MethodPatch, "/api/secrets/infra/prod-eu/"+other, "", map[string]any{"inherit": true}); status != 200 {
+			t.Fatalf("reset: %d %v", status, answer)
+		}
+		alone.ok(tokenVars(coffre.Tokens.Fork, value(t, "alone")), "apply", "-refresh-only", "-auto-approve")
+		if id, ok := attributes(t, alone, "s")["version_id"]; !ok || id != nil {
+			t.Fatalf("a fork-only credential's state holds version_id %v after the reset", id)
+		}
+		alone.configure(variables + provider(r.url(), "token") + secret("s", "prod-eu", other, "secret", "2", ""))
+		alone.ok(tokenVars(coffre.Tokens.Fork, value(t, "again")), "plan", "-out=again.tfplan")
+		hand := value(t, "hand")
+		if status, answer := api(t, http.MethodPatch, "/api/secrets/infra/prod-eu", "", map[string]any{other: map[string]any{"value": hand, "sensitivity": "secret"}}); status != 200 {
+			t.Fatalf("an override by hand: %d %v", status, answer)
+		}
+		at = r.mark()
+		alone.fails("was written after this plan; plan again", tokenVars(coffre.Tokens.Fork, value(t, "again")), "apply", "again.tfplan")
+		if writes := patches(r.since(at)); len(writes) != 0 {
+			t.Errorf("the apply wrote over a version its plan did not see: %v", writes)
+		}
+		if got, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod-eu", other); got != hand {
+			t.Errorf("the override by hand was overwritten: %q", got)
+		}
+
 		// Removed in the fork: refused at plan, and at import.
 		removed := unique(t, "REMOVED")
 		write(t, "infra/prod", removed, map[string]any{"value": value(t, "parent"), "sensitivity": "secret"})
@@ -307,6 +327,30 @@ func TestForks(t *testing.T) {
 
 // Destroy with archive: refused without secret.archive, the resource kept in state; archived with a credential of a
 // role that holds it.
+// A new key name replaces the resource: the new key is created under its own rules, whatever the old one's
+// sensitivity, and the old key is kept.
+func TestReplace(t *testing.T) {
+	eachCLI(t, func(t *testing.T, w *workspace) {
+		r := newRecorder(t)
+		old, renamed := unique(t, "OLD"), unique(t, "NEW")
+		w.configure(variables + provider(r.url(), "token") + secret("s", "prod", old, "secret", "1", ""))
+		w.ok(tokenVars(coffre.Tokens.Terraform, value(t, "old")), "apply", "-auto-approve")
+		// Looser, the version unchanged: refused for the same key, a create for another.
+		w.configure(variables + provider(r.url(), "token") + secret("s", "prod", renamed, "plain", "1", ""))
+		w.ok(tokenVars(coffre.Tokens.Terraform, value(t, "new")), "plan", "-out=replace.tfplan")
+		w.ok(tokenVars(coffre.Tokens.Terraform, value(t, "new")), "apply", "replace.tfplan")
+		if got, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod", renamed); got != value(t, "new") {
+			t.Errorf("the new key reads %q", got)
+		}
+		if got, _ := reveal(t, coffre.Tokens.Verifier, "infra/prod", old); got != value(t, "old") {
+			t.Errorf("the old key, kept, reads %q", got)
+		}
+		if a := attributes(t, w, "s"); a["key"] != renamed || a["sensitivity"] != "plain" {
+			t.Errorf("the state after the replacement: %v", a)
+		}
+	})
+}
+
 func TestDestroyArchive(t *testing.T) {
 	eachCLI(t, func(t *testing.T, w *workspace) {
 		r := newRecorder(t)

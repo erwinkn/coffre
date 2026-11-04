@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+
 	"github.com/erwinkn/coffre/terraform-provider/internal/coffre"
 )
 
@@ -165,6 +168,77 @@ func TestOriginOf(t *testing.T) {
 	} {
 		if got, _ := originOf(raw); got != want {
 			t.Errorf("%s: %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// An update the plan saw no version for writes only while the key is still inherited, its version still hidden.
+func TestStillHidden(t *testing.T) {
+	id := "infra/prod-eu/KEY"
+	hidden := &coffre.Key{Key: "KEY", Parent: &coffre.Parent{State: "inherited"}}
+	if problem := stillHidden(id, hidden); problem != "" {
+		t.Errorf("still hidden: %q", problem)
+	}
+	for name, key := range map[string]*coffre.Key{
+		"gone":                nil,
+		"an override by hand": {Key: "KEY", VersionID: s("v9"), Parent: &coffre.Parent{State: "overridden"}},
+		"now visible":         {Key: "KEY", VersionID: s("p3"), Parent: &coffre.Parent{State: "inherited"}},
+		"removed":             {Key: "KEY", Parent: &coffre.Parent{State: "removed"}},
+		"the fork's own":      {Key: "KEY", VersionID: s("v1")},
+	} {
+		if problem := stillHidden(id, key); !strings.Contains(problem, "was written after this plan; plan again") {
+			t.Errorf("%s: %q", name, problem)
+		}
+	}
+}
+
+// A changed or unknown address is a replacement, which the old key's update rules do not decide.
+func TestMoved(t *testing.T) {
+	model := func(project, environment, key types.String) secretModel {
+		return secretModel{Project: project, Environment: environment, Key: key}
+	}
+	v := types.StringValue
+	state := model(v("infra"), v("prod"), v("OLD"))
+	for name, c := range map[string]struct {
+		plan  secretModel
+		moved bool
+	}{
+		"the same key":    {model(v("infra"), v("prod"), v("OLD")), false},
+		"another key":     {model(v("infra"), v("prod"), v("NEW")), true},
+		"another env":     {model(v("infra"), v("staging"), v("OLD")), true},
+		"another project": {model(v("market"), v("prod"), v("OLD")), true},
+		"a key unknown":   {model(v("infra"), v("prod"), types.StringUnknown()), true},
+	} {
+		if got := moved(state, c.plan); got != c.moved {
+			t.Errorf("%s: moved %v", name, got)
+		}
+	}
+}
+
+// A credential given empty fails, at validate and at configure, and never selects another way of signing in.
+func TestEmptyGiven(t *testing.T) {
+	v := types.StringValue
+	for name, c := range map[string]struct {
+		config providerModel
+		bad    string
+	}{
+		"token empty":         {providerModel{Token: v(""), Service: types.StringNull(), IDToken: types.StringNull()}, "token"},
+		"id_token empty":      {providerModel{Service: v("terraform"), IDToken: v(""), Token: types.StringNull()}, "id_token"},
+		"service empty":       {providerModel{Service: v(""), IDToken: types.StringNull(), Token: types.StringNull()}, "service"},
+		"unknown, at plan":    {providerModel{Token: types.StringUnknown(), Service: types.StringNull(), IDToken: types.StringNull()}, ""},
+		"a token":             {providerModel{Token: v("coffre_svc_x"), Service: types.StringNull(), IDToken: types.StringNull()}, ""},
+		"service and a token": {providerModel{Service: v("terraform"), IDToken: v("eyJ"), Token: types.StringNull()}, ""},
+	} {
+		var diags diag.Diagnostics
+		emptyGiven(c.config, &diags)
+		if c.bad == "" {
+			if diags.HasError() {
+				t.Errorf("%s: %v", name, diags)
+			}
+			continue
+		}
+		if len(diags) != 1 || !strings.Contains(diags[0].Summary(), c.bad+" is empty") {
+			t.Errorf("%s: %v", name, diags)
 		}
 	}
 }

@@ -148,3 +148,13 @@ func creatable(id string, key *coffre.Key) (replaces *string, problem string) {
 	}
 	return nil, fmt.Sprintf("%s exists in coffre; import it (terraform import <address> %s) to manage it", id, id)
 }
+
+// stillHidden says whether an update the plan saw no version for may write
+// with no replaces: only while the key is still inherited, its version
+// still hidden. Anything else was written after the plan.
+func stillHidden(id string, key *coffre.Key) string {
+	if key != nil && key.Parent != nil && key.Parent.State == "inherited" && key.VersionID == nil && !key.Archived && !key.IsReference() {
+		return ""
+	}
+	return fmt.Sprintf("%s was written after this plan; plan again", id)
+}

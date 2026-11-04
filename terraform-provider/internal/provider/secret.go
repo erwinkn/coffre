@@ -157,8 +157,16 @@ func (r *secretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 	if known {
 		plan.ID = types.StringValue(plan.id())
 	}
-	if req.State.Raw.IsNull() || len(resp.RequiresReplace) > 0 {
-		// A create: the key must be absent, or in a fork inherited, at plan and again at apply.
+	var state secretModel
+	if !req.State.Raw.IsNull() {
+		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+	}
+	if req.State.Raw.IsNull() || moved(state, plan) {
+		// A create, or a replacement's (a new address, which the attributes' RequiresReplace replaces): the key must be
+		// absent, or in a fork inherited, at plan and again at apply. The old key's rules do not apply to the new one.
 		plan.Version, plan.VersionID = types.Int64Unknown(), types.StringUnknown()
 		if known && r.client != nil {
 			listing, err := r.client.List(ctx, plan.Project.ValueString(), plan.Environment.ValueString())
@@ -174,8 +182,6 @@ func (r *secretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 		resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 		return
 	}
-	var state secretModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	private := readKept(ctx, req.Private.GetKey, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -192,6 +198,17 @@ func (r *secretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 		plan.Version, plan.VersionID = types.Int64Unknown(), types.StringUnknown()
 	}
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
+}
+
+// moved reports whether the plan names another key than the state: an
+// address attribute changed, or is unknown, so the resource is replaced.
+func moved(state, plan secretModel) bool {
+	for _, pair := range [][2]types.String{{state.Project, plan.Project}, {state.Environment, plan.Environment}, {state.Key, plan.Key}} {
+		if pair[1].IsUnknown() || pair[0].ValueString() != pair[1].ValueString() {
+			return true
+		}
+	}
+	return false
 }
 
 // optional is a known string's value, or nil while null or unknown.
@@ -321,6 +338,19 @@ func (r *secretResource) Update(ctx context.Context, req resource.UpdateRequest,
 	}
 	// The version the plan saw, from the prior state, never a fresh read: one written since makes this a 409 stale.
 	written := coffre.Write{Sensitivity: plan.Sensitivity.ValueString(), Replaces: optional(state.VersionID)}
+	if written.Replaces == nil {
+		// The plan saw no version: an inherited key whose parent's versions the credential is not told. Nothing guards the
+		// write, so the key must still be what the plan saw, as a create's is checked again at apply.
+		listing, err := client.List(ctx, plan.Project.ValueString(), plan.Environment.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("coffre: update", failure(id, err))
+			return
+		}
+		if problem := stillHidden(id, listing.Find(plan.Key.ValueString())); problem != "" {
+			resp.Diagnostics.AddError("coffre: update", problem)
+			return
+		}
+	}
 	if decided.Kind == write {
 		var value types.String
 		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("value_wo"), &value)...)

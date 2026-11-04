@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -89,6 +90,7 @@ func (p *coffreProvider) ValidateConfig(ctx context.Context, req provider.Valida
 	if problem := signInProblem(given(config.Service), given(config.IDToken), given(config.Token)); problem != "" {
 		resp.Diagnostics.AddError("coffre: how to sign in", problem)
 	}
+	emptyGiven(config, &resp.Diagnostics)
 	if !config.URL.IsUnknown() && !config.URL.IsNull() {
 		if _, problem := originOf(config.URL.ValueString()); problem != "" {
 			resp.Diagnostics.AddAttributeError(path.Root("url"), "coffre: url", problem)
@@ -107,6 +109,19 @@ func signInProblem(service, idToken, token bool) string {
 		return "sign in with service (GitHub Actions' OIDC, or with id_token another issuer's), or with token"
 	}
 	return ""
+}
+
+// emptyGiven fails each attribute given as "": a credential that came out
+// empty (an unset variable, a failed command) must stop the run, never
+// switch it to another way of signing in. Unknown values are checked again
+// at Configure, once known.
+func emptyGiven(config providerModel, diags *diag.Diagnostics) {
+	for name, value := range map[string]types.String{"service": config.Service, "id_token": config.IDToken, "token": config.Token} {
+		if !value.IsNull() && !value.IsUnknown() && value.ValueString() == "" {
+			diags.AddAttributeError(path.Root(name), "coffre: "+name+" is empty",
+				name+" is given but empty; leave it out, or give it a value: an empty "+name+" never falls back to another way of signing in")
+		}
+	}
 }
 
 // originOf reads the instance's URL as an origin: http(s), a host, no
@@ -130,6 +145,10 @@ func (p *coffreProvider) Configure(ctx context.Context, req provider.ConfigureRe
 	}
 	if config.URL.IsUnknown() || config.Service.IsUnknown() || config.IDToken.IsUnknown() || config.Token.IsUnknown() {
 		// Known at apply: the resources wait for it (`clientOf`).
+		return
+	}
+	emptyGiven(config, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
 		return
 	}
 	origin, problem := originOf(config.URL.ValueString())

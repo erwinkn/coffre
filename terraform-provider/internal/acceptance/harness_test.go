@@ -344,12 +344,21 @@ func api(t *testing.T, method, path, bearer string, body any) (int, map[string]a
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
 	var answer map[string]any
-	_ = json.NewDecoder(response.Body).Decode(&answer)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &answer); err != nil {
+			t.Fatalf("%s %s: %d, an answer that is not JSON: %v", method, path, response.StatusCode, err)
+		}
+	}
 	return response.StatusCode, answer
 }
 
-// reveal reads key's value in place as bearer (or the Owner), or "" with the status refused.
+// reveal reads key's value in place as bearer (or the Owner), or "" with the status refused. A 200 must hold the
+// value: an answer without it fails the test, never reads as "".
 func reveal(t *testing.T, bearer, place, key string) (string, int) {
 	t.Helper()
 	status, answer := api(t, http.MethodPost, "/api/reveals", bearer, map[string]any{"path": place + "/" + key})
@@ -357,8 +366,22 @@ func reveal(t *testing.T, bearer, place, key string) (string, int) {
 		return "", status
 	}
 	values, _ := answer["values"].(map[string]any)
-	value, _ := values[key].(string)
+	value, ok := values[key].(string)
+	if !ok {
+		t.Fatalf("reading %s/%s: 200 without its value: %v", place, key, answer)
+	}
 	return value, status
+}
+
+// refused fails t unless reading key in place as bearer (or the Owner) is refused: coffre's 404 not_available,
+// which answers a caller who may not read a key as it answers one asking for a key that does not exist (the
+// callers read the key with another credential first), never another failure that also returns no value.
+func refused(t *testing.T, bearer, place, key string) {
+	t.Helper()
+	got, answer := api(t, http.MethodPost, "/api/reveals", bearer, map[string]any{"path": place + "/" + key})
+	if got != http.StatusNotFound || answer["error"] != "not_available" {
+		t.Errorf("reading %s/%s: want 404 not_available, got %d %v", place, key, got, answer)
+	}
 }
 
 // listed is key as place lists it to bearer.

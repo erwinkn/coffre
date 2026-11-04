@@ -405,7 +405,27 @@ other writer's version stays in the history, and the audit log shows both.
 A write over an inherited key sends the inherited version's ID as
 `replaces`, which coffre checks against the parent's current version; when
 the list hid it (the credential is not told the parent's versions), the
-write has no `replaces` and is checked at plan and at apply, as a create.
+write has no `replaces` and is checked at plan and at apply, as a create:
+an update whose state holds no version lists the key again at apply and
+writes only while it is still inherited, its version still hidden, so an
+override written by hand since the plan stops the apply ("was written
+after this plan").
+
+An update's guard is the version in its prior state, which a saved plan
+carries. A create has no prior state, and Terraform plans every resource
+again at apply, so planned private data holds what that second plan
+listed, not what the approved plan saw: nothing carries the approved
+plan's inherited version to the create. A create over an inherited key
+therefore guards what it would overwrite, the fork: the check at apply
+refuses a key no longer inherited (an override written since the plan is
+"exists; import it"), and the write sends the inherited version that
+check listed, so a parent's write in between is refused too. A parent's
+write between the plan and that check is not one the override replaces:
+the parent keeps its version, and the fork, which read the parent's value
+until now, reads Terraform's, as the plan said. Holding the parent's
+version from the approved plan would take a computed attribute the plan
+fixes, and Terraform would report a change of it at apply as a provider
+bug ("produced an inconsistent final plan").
 
 **Adopting a key that exists.** A create refuses a key already live in
 coffre ("exists; import it"). In a fork, a key it inherits is not its own:
@@ -675,7 +695,11 @@ mirror.
     sensitivity-only change then fails at plan; a changed
     `value_wo_version` writes the override back, with `replaces` the
     inherited version, and with none from a credential scoped to the fork
-    alone; a key removed in the fork fails the plan, and its import;
+    alone, whose saved plan to write it back stops at apply when an
+    override is written by hand before it; a key removed in the fork fails
+    the plan, and its import;
+  - replacement: a new key name with a looser sensitivity and the same
+    `value_wo_version` creates the new key and keeps the old;
   - destroy with `keep` (the key and its versions stay) and with
     `archive`, without `secret.archive` (403, the resource stays in state)
     and with a credential scoped to a `terraform-archiver` role (archived);
