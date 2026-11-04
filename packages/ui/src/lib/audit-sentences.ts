@@ -545,6 +545,19 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'link',
     what: ({ entry }) => [`a ${text(entry.metadata.provider) ?? 'sign-in'} account`],
   },
+  // A passkey added at a first sign-in (docs/design/passkeys.md, section 3.2), with what no passkey stood behind, ended.
+  'passkey.add': {
+    did: 'added',
+    tried: 'add',
+    what: ({ entry }) => {
+      const ended = entry.metadata.ended as { credentials?: unknown; connections?: unknown } | undefined;
+      const count = (value: unknown) => (typeof value === 'number' ? value : 0);
+      const signedOut = count(ended?.credentials) + count(ended?.connections);
+      return [`a passkey${signedOut === 0 ? '' : `, ending ${signedOut} sign-in${signedOut === 1 ? '' : 's'} no passkey stood behind`}`];
+    },
+  },
+  // A touch of a passkey for a session, which a new one replaced (section 6.5).
+  'passkey.check': { did: 'confirmed a session with a passkey', tried: 'confirm a session with a passkey', what: () => [] },
   'account.unlink': {
     did: 'unlinked',
     tried: 'unlink',

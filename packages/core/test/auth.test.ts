@@ -68,3 +68,23 @@ test('signin passes its passkey policy on, optional unless set (passkeys.md, sec
   // @ts-expect-error: what a deployment's JavaScript could pass
   assert.throws(() => signin({ providers, passkeys: 'always' }), /passkeys is one of 'off', 'optional', 'required'/);
 });
+
+test("passkeys' relying party is the public URL's host, or a parent of it; an IP address starts nothing but `off` (passkeys.md, section 7.1)", () => {
+  const providers = [github({ clientId: 'id', clientSecret: 'secret' })];
+  const party = (passkeys: Parameters<typeof signin>[0]['passkeys'], url = 'https://secrets.acme.example') => {
+    const resolved = signin({ providers, passkeys }).resolve(url);
+    return resolved.mode === 'signin' ? resolved.signin.passkeys : null;
+  };
+  assert.deepEqual(party(undefined), { policy: 'optional', rpId: 'secrets.acme.example', origin: 'https://secrets.acme.example' });
+  assert.equal(party({ policy: 'required', rpId: 'acme.example' })?.rpId, 'acme.example');
+  assert.equal(party({ rpId: 'secrets.acme.example' })?.policy, 'optional');
+  assert.equal(party(undefined, 'http://localhost:3000')?.rpId, 'localhost', 'localhost is a name browsers make passkeys for');
+  assert.throws(() => party({ rpId: 'example' }), /passkeys.rpId example must be the public URL's host, secrets.acme.example, or a parent of it with at least two labels/);
+  assert.throws(() => party({ rpId: 'cme.example' }), /must be the public URL's host/, 'a suffix that cuts a label is no parent');
+  assert.throws(() => party({ rpId: 'other.example' }), /must be the public URL's host/);
+  assert.throws(() => signin({ providers, passkeys: { rpId: 'Acme.Example' } }), /passkeys.rpId is a domain name/, 'checked where the deployment wrote it');
+  for (const url of ['http://127.0.0.1:3000', 'http://[::1]:3000']) {
+    for (const policy of ['optional', 'required'] as const) assert.throws(() => party(policy, url), /passkeys need a public URL whose host is a name/, `${url} ${policy}`);
+    assert.equal(party('off', url)?.policy, 'off', 'off needs no relying party');
+  }
+});

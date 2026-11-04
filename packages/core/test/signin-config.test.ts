@@ -220,7 +220,7 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       workloads: null,
       mcp: null,
       // Passkeys default to `optional` (docs/design/passkeys.md, section 2).
-      passkeys: { policy: 'optional' },
+      passkeys: { policy: 'optional', rpId: 'secrets.acme.example', origin: 'https://secrets.acme.example' },
     },
   );
 });

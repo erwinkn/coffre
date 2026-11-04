@@ -4,6 +4,7 @@ import { ApiError, badRequest, UNAVAILABLE } from './api/errors.ts';
 import { narrowWorkload } from './api/narrow.ts';
 import {
   finishSignin,
+  passkeyStep,
   logout,
   pollDevice,
   exchangeWorkloadSession,
@@ -35,8 +36,10 @@ import { cspNonce, setSecurityHeaders } from './security-headers.ts';
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
 
-/** Exact paths outside the route table, and the one method each takes. */
-const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browserForm?: true }> = {
+type Method = 'GET' | 'POST';
+
+/** Exact paths outside the route table, and the methods each takes; a browser form's posts come from coffre's own pages. */
+const ROUTES: Record<string, { method: Method | readonly Method[]; handler: Handler; browserForm?: true }> = {
   '/livez': { method: 'GET', handler: async () => jsonResponse({ ok: true }) },
   '/readyz': {
     method: 'GET',
@@ -63,6 +66,8 @@ const ROUTES: Record<string, { method: 'GET' | 'POST'; handler: Handler; browser
   '/mcp': { method: 'POST', handler: mcpEndpoint },
   // Posted by coffre's own pages, with the browser's cookies.
   '/auth/signout': { method: 'POST', handler: signOut, browserForm: true },
+  // The passkey a sign-in waits for, or a step-up's (docs/design/passkeys.md, sections 3.1 and 6.2): what the page asks, and its answer.
+  '/api/auth/passkey': { method: ['GET', 'POST'], handler: passkeyStep, browserForm: true },
 };
 
 const PROVIDER_ROUTE = /^\/auth\/(signin|callback)\/([a-z0-9-]{1,32})$/;
@@ -76,10 +81,11 @@ export async function coffreRoute(request: Request, runtime: CoffreRuntime, sour
 
   const exact = ROUTES[pathname];
   if (exact !== undefined) {
+    const methods: readonly Method[] = typeof exact.method === 'string' ? [exact.method] : exact.method;
     // HEAD is GET without the body, which the platform drops: what a monitor asks /livez and /readyz.
-    const method = request.method === 'HEAD' && exact.method === 'GET' ? 'GET' : request.method;
-    if (method !== exact.method) return methodNotAllowed([exact.method]);
-    if (exact.browserForm && !isSameOrigin(request, runtime.publicUrl)) {
+    const method = request.method === 'HEAD' && methods.includes('GET') ? 'GET' : request.method;
+    if (!methods.includes(method as Method)) return methodNotAllowed([...methods]);
+    if (exact.browserForm && method === 'POST' && !isSameOrigin(request, runtime.publicUrl)) {
       return errorResponse(new ApiError('cross_origin', 'this must be sent from coffre itself'));
     }
     return exact.handler(request, runtime, sourceIp);

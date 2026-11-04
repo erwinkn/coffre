@@ -12,6 +12,8 @@ export * from './verifier.ts';
 // Passkeys' verifier; its CBOR reader stays the module's own.
 export {
   PASSKEY_ALGORITHMS,
+  base64urlLength,
+  MAX_CREDENTIAL_ID,
   verifyAssertion,
   verifyRegistration,
   type AssertionExpectation,

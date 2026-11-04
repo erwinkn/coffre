@@ -14,6 +14,7 @@ import {
   accountSessions,
   audit,
   deviceLogin,
+  passkey,
   environment,
   home,
   login,
@@ -42,6 +43,7 @@ import {
 import { AccountAppearancePage, AccountAppsPage, AccountPage, AccountProfilePage, AccountSessionsPage } from './pages/account';
 import { AuditPage } from './pages/audit';
 import { DevicePage } from './pages/device-login';
+import { PasskeyPage } from './pages/passkey';
 import { EnvironmentPage } from './pages/environment';
 import { LoginPage } from './pages/login';
 import { ProjectLayout } from './pages/project';
@@ -73,6 +75,7 @@ const routeTree = root.addChildren([
     createRoute({ getParentRoute: () => frame, path: '/login', ...login, component: LoginPage }),
     createRoute({ getParentRoute: () => frame, path: '/unregistered', ...unregistered, component: UnregisteredPage }),
     createRoute({ getParentRoute: () => frame, path: '/auth/device', ...deviceLogin, component: DevicePage }),
+    createRoute({ getParentRoute: () => frame, path: '/auth/passkey', ...passkey, component: PasskeyPage }),
   ]),
   nav.addChildren([
     createRoute({ ...under('/'), ...home }),

@@ -2718,7 +2718,10 @@ wait, READ COMMITTED:
   credentials, then for each one it ends the member's row exclusive and the
   credential's, and the new session it issues to the browser that touched,
   `n`. Her first passkey when she had none, a removal of `pa` keeping `pb`,
-  or an Owner's reset.
+  or an Owner's reset. The first is built (PR 4b: the enrollment at sign-in,
+  `audited`'s `factor` taking the lock before the head; the member's row is
+  `app_change`'s, as its prepared changes commit), the other two come with
+  Account → Passkeys (PR 6).
 
 `FactorApp` (PR 4a) puts the app's side beside the change instead:
 

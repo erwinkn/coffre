@@ -321,7 +321,6 @@ test("a registration is refused for each of section 7.2's checks, alone, with th
     ['an assertion answering a registration', { clientData: { type: 'webauthn.get' } }, {}, 'type'],
     ['UV clear and an algorithm not asked for: UV is the last check', { flags: FLAGS.UP }, { algorithms: [-8] }, 'algorithm'],
     ['transports that are no list', { response: inner((r) => void (r.transports = 'usb')) }, {}, 'malformed'],
-    ['a transport that is no name', { response: inner((r) => void (r.transports = ['USB 3'])) }, {}, 'malformed'],
     // The attestation object
     ['attestationObject missing', { response: inner((r) => void delete r.attestationObject) }, {}, 'malformed'],
     ['the attestation object in a map head wider than it needs', { response: inner((r) => {
@@ -384,6 +383,12 @@ function cborMap(bytes: Uint8Array): Map<number | string, unknown> {
   assert.ok(value instanceof Map);
   return value;
 }
+
+test("a registration keeps the transports WebAuthn names, once each, and drops one it does not: a browser ignores it when handed back (5.8.4)", async () => {
+  const result = await register({ response: inner((r) => void (r.transports = ['usb', 'USB 3', 'quantum', 'usb', 'nfc', 7])) });
+  assert.ok(result.ok, `${reason(result)}`);
+  assert.deepEqual(result.transports, ['nfc', 'usb']);
+});
 
 test('a registration answers what the row stores: the ID, the COSE key as attested, the algorithm, the AAGUID, the flags and the transports', async () => {
   for (const algorithm of ['Ed25519', 'ES256', 'RS256'] as const) {

@@ -102,6 +102,7 @@ test('signin({ mcp }) needs its three limits, and loopback clients only on a loo
     () => signin({ providers, mcp: { limits, allowLoopbackClientsForDevelopment: true } }).resolve('https://secrets.acme.example'),
     /allowLoopbackClientsForDevelopment is for an instance on loopback/,
   );
-  const local = signin({ providers, mcp: { limits, allowLoopbackClientsForDevelopment: true } }).resolve('http://127.0.0.1:3000');
+  // localhost: an IP address is no relying party for passkeys, which are on unless said (passkeys.md, section 7.1).
+  const local = signin({ providers, mcp: { limits, allowLoopbackClientsForDevelopment: true } }).resolve('http://localhost:3000');
   assert.equal(local.mode === 'signin' && local.signin.mcp?.allowLoopback, true);
 });

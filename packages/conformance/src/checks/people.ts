@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 
 import type { CoffreClient } from '@coffre/client';
 
+import { SoftAuthenticator } from '../authenticator.ts';
 import { bearer, Browser } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
@@ -69,8 +70,37 @@ export async function signIn(
   const back = await browser.fetch(callback);
   expect(back.status === 302 || back.status === 303, `the callback answered ${back.status}`, await back.text());
   const location = new URL(back.headers.get('location') ?? '/', deployment.origin);
+  if (location.pathname === '/auth/passkey') return passkeyStep(deployment, browser, email);
   const error = location.searchParams.get('error');
   return error === null ? { ok: true } : { ok: false, error, location: `${location.pathname}${location.search}` };
+}
+
+/** Each person's passkey, once coffre had them add one: the same browser's authenticator, whichever browser signs in. */
+const passkeys = new Map<string, SoftAuthenticator>();
+
+/**
+ * The passkey a sign-in waits for after the provider (docs/design/passkeys.md, section 3.1), as coffre's page asks the
+ * browser for it: a new one, kept, for a person who must add one (an Owner under `optional`); else a touch of theirs.
+ */
+async function passkeyStep(deployment: Deployment, browser: Browser, email: string): Promise<{ ok: true } | { ok: false; error: string; location: string }> {
+  const asked = await browser.fetch('/api/auth/passkey');
+  expect(asked.ok, 'the passkey page had nothing to ask', await asked.clone().text());
+  const { purpose, options } = (await asked.json()) as { purpose: string; options: { challenge: string; user?: { id: string } } };
+  const ceremony = { rpId: new URL(deployment.origin).hostname, origin: deployment.origin, challenge: new Uint8Array(Buffer.from(options.challenge, 'base64url')) };
+  let response;
+  if (purpose === 'enroll') {
+    const key = await SoftAuthenticator.create('ES256');
+    response = await key.register({ ...ceremony, userHandle: new Uint8Array(Buffer.from(options.user!.id, 'base64url')) });
+    passkeys.set(email, key);
+  } else {
+    const key = passkeys.get(email);
+    expect(key !== undefined, `${email} holds a passkey conformance never added`);
+    response = await key!.assert(ceremony);
+  }
+  const answered = await browser.send('POST', '/api/auth/passkey', { response });
+  if (answered.ok) return { ok: true };
+  const { error } = (await answered.json()) as { error: string };
+  return { ok: false, error, location: '/auth/passkey' };
 }
 
 export async function signInAdmin(deployment: Deployment) {

@@ -21,6 +21,7 @@ export {
   home,
   login,
   oauthAuthorize,
+  passkey,
   project,
   projectEnvironments,
   projects,

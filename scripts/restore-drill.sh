@@ -30,9 +30,11 @@ source_db="${COFFRE_DRILL_DATABASE:-coffre_drill}"
 restored_db="${source_db}_restored"
 scratch_db="${source_db}_scratch"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/coffre-drill.XXXXXX")"
+export COFFRE_DEV_PASSKEY_FILE="$scratch/passkeys.json"
 export COFFRE_DEV_URL="http://127.0.0.1:$port" COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port" COFFRE_DEV_IDP_PORT="$idp_port"
-# The drill's stack is never behind a tunnel, whatever the shell exports.
-export COFFRE_DEV_PUBLIC_URL="$COFFRE_DEV_URL" COFFRE_DEV_IDP_PUBLIC_URL="$COFFRE_DEV_IDP_URL"
+# The drill's stack is never behind a tunnel, whatever the shell exports. coffre is at localhost, a name browsers make
+# passkeys for (docs/design/passkeys.md, section 7.1); the Owner's, which its sign-in adds, is kept for both halves.
+export COFFRE_DEV_PUBLIC_URL="http://localhost:$port" COFFRE_DEV_IDP_PUBLIC_URL="$COFFRE_DEV_IDP_URL"
 owner_url() { echo "postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"; }
 psql_as_owner() { docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -qU coffre_owner "$@"; }
 log() { printf '\n==> %s\n' "$1"; }
@@ -63,7 +65,7 @@ start_coffre() {
     local state="$scratch/state-$1-$RANDOM"
     (
         cd examples/workers
-        export PUBLIC_URL="$COFFRE_DEV_URL" OWNERS="$COFFRE_OWNERS" WRANGLER_SEND_METRICS=false
+        export PUBLIC_URL="$COFFRE_DEV_PUBLIC_URL" OWNERS="$COFFRE_OWNERS" WRANGLER_SEND_METRICS=false
         export GITHUB_CLIENT_ID=coffre-local GITHUB_CLIENT_SECRET=coffre-local-secret
         export APP_KEY="$COFFRE_APP_KEY" VAULT_KEY_ID="$COFFRE_VAULT_KEY_ID" VAULT_KEY="$2"
         export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$1"

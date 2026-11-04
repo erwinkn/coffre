@@ -82,9 +82,12 @@ pnpm install
 pnpm dev        # Postgres, the dev IdP, coffre and its vault, then seed data
 ```
 
-Open http://127.0.0.1:3000 and sign in through either button as
+Open http://localhost:3000 and sign in through either button as
 `admin@acme.example`, the Owner, or any seeded person (`lead@`, `dev@`,
-`auditor@`, `outsider@`, all at `acme.example`). The dev IdP plays GitHub and
+`auditor@`, `outsider@`, all at `acme.example`). Owners sign in with a
+passkey, and the seed made the Owner's, in software: `node dev/passkey.mjs`
+hands it to a Chrome you drive, or `COFFRE_DEV_PASSKEYS=off pnpm dev` turns
+passkeys off. The dev IdP plays GitHub and
 an OpenID Connect provider, and asks which person you are. `pnpm dev` runs a
 deployment like `examples/workers` on the packages' sources, so an edit
 anywhere reloads in place; it resets and reseeds its database each time.
@@ -134,7 +137,7 @@ other's sources.
 ## The CLI
 
 `pnpm coffre <command>` runs the CLI from this checkout; `pnpm coffre login
-http://127.0.0.1:3000` signs it in to the local stack. A deployed instance
+http://localhost:3000` signs it in to the local stack. A deployed instance
 needs only its address:
 
 ```sh

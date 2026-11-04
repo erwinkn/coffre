@@ -1,12 +1,42 @@
 // Being a browser at a local stack: signing in through the dev IdP's
-// stand-in GitHub, and calling the API as coffre's own pages do. The seed
-// and the restore drill both act this way, so what they do is audited like
-// anything a person does.
+// stand-in GitHub, with a passkey when coffre asks for one, and calling the
+// API as coffre's own pages do. The seed and the restore drill both act this
+// way, so what they do is audited like anything a person does.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+import { SoftAuthenticator } from '@coffre/conformance/authenticator';
 
 /** The cookie a redirect sets, not one it clears, as a request sends it back; null for none. */
 function cookieOf(response) {
     const set = response.headers.getSetCookie().find((cookie) => !/=;|max-age=0/i.test(cookie));
     return response.status === 302 && set !== undefined ? set.split(';')[0] : null;
+}
+
+/** The cookies a response sets, not those it clears, as a request sends them back. */
+function cookiesOf(response) {
+    return response.headers.getSetCookie().filter((cookie) => !/=;|max-age=0/i.test(cookie)).map((cookie) => cookie.split(';')[0]);
+}
+
+/**
+ * The software passkeys of the people this browser signs in, by email (docs/design/passkeys.md, section 7.1): kept in
+ * `file` when given, so that another process signs them in again (the restore drill's two halves) and a browser's
+ * virtual authenticator can take one (`dev/passkey.mjs`). Synced passkeys, whose counter stays 0, so that any copy
+ * signs in. Throwaway keys, for a local stack only.
+ */
+function passkeyStore(file) {
+    const saved = file !== undefined && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+    return {
+        async get(email) {
+            return saved[email] === undefined ? null : SoftAuthenticator.restore(saved[email]);
+        },
+        async put(email, key) {
+            saved[email] = await key.save();
+            if (file === undefined) return;
+            mkdirSync(dirname(file), { recursive: true });
+            writeFileSync(file, `${JSON.stringify(saved, null, 2)}\n`, { mode: 0o600 });
+        },
+    };
 }
 
 /**
@@ -17,7 +47,8 @@ function cookieOf(response) {
  * call against its own. Those answer only a person's browser, so this one sends
  * everything to `api` and `idp` instead, saying it is at the public origin.
  */
-export function browser(api, idp, tunnel = {}) {
+export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
+    const keys = passkeyStore(passkeys);
     const site = tunnel.api ?? api;
     const home = tunnel.idp ?? idp;
     const toLoopback = (address) => {
@@ -41,7 +72,36 @@ export function browser(api, idp, tunnel = {}) {
         form.set('email', email);
         const approve = await fetch(toLoopback(authorize.origin + authorize.pathname), { method: 'POST', body: form, redirect: 'manual' });
         const back = await fetch(toLoopback(approve.headers.get('location') ?? `${site}/`), { headers: { cookie: pending }, redirect: 'manual' });
+        if (back.status === 302 && new URL(back.headers.get('location'), site).pathname === '/auth/passkey') return passkeyStep(email, cookiesOf(back).join('; '));
         return cookieOf(back);
+    }
+
+    /**
+     * The passkey coffre asks for after the provider (section 3.1): a new one for a person who must add one, kept;
+     * else a touch of the one kept for them. The session cookie, or null when coffre turns them away.
+     */
+    async function passkeyStep(email, cookie) {
+        const asked = await fetch(`${api}/api/auth/passkey`, { headers: { cookie } });
+        if (!asked.ok) throw new Error(`the passkey step for ${email}: ${asked.status} ${await asked.text()}`);
+        const { purpose, options } = await asked.json();
+        const ceremony = { rpId: new URL(site).hostname, origin: new URL(site).origin, challenge: new Uint8Array(Buffer.from(options.challenge, 'base64url')) };
+        let response;
+        if (purpose === 'enroll') {
+            const key = await SoftAuthenticator.create('ES256', { synced: true });
+            response = await key.register({ ...ceremony, userHandle: new Uint8Array(Buffer.from(options.user.id, 'base64url')) });
+            await keys.put(email, key);
+        } else {
+            const key = await keys.get(email);
+            if (key === null) throw new Error(`${email} holds a passkey this browser does not: start the stack over, or sign in as someone else`);
+            response = await key.assert(ceremony);
+        }
+        const answered = await fetch(`${api}/api/auth/passkey`, {
+            method: 'POST',
+            headers: { cookie, origin: site, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
+            body: JSON.stringify({ response }),
+        });
+        if (!answered.ok) return null;
+        return cookiesOf(answered).find((pair) => /^(__Host-)?coffre_session=/.test(pair)) ?? null;
     }
 
     async function signIn(email) {

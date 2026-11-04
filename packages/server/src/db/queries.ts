@@ -1567,6 +1567,117 @@ const passkeyStatement = prepared((db) => {
     .where(eq(credentials.tokenHash, sql.placeholder('tokenHash')));
 });
 
+// --- passkeys: the ceremonies' reads and writes (docs/design/passkeys.md, sections 3 and 7) --------------------------
+
+/**
+ * A person's live passkeys at a generation, oldest first, each its MAC the app's (a row that fails it is reported and
+ * passed over, as no passkey): what a ceremony offers (`allowCredentials`) and an add excludes.
+ */
+export async function livePasskeys(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<PasskeyRow[]> {
+  const { passkeys } = tablesOf(db);
+  const rows = await db.select().from(passkeys)
+    .where(and(eq(passkeys.principal, principal), eq(passkeys.generation, generation), isNull(passkeys.removedAt)))
+    .orderBy(asc(passkeys.createdAt));
+  return rows.filter((row) => checkAuthRow(chainKey, 'passkeys', row));
+}
+
+/**
+ * How many passkey rows a person has ever had, at any generation and removed ones included, and how many of them are
+ * live at `generation`: one statement. The first is an enrollment's `passkeysEver` (section 3.2): rows are never
+ * deleted, so every add moves it for good, and a sealed state that names the old count enrolls nothing again.
+ */
+export async function passkeyCounts(db: Queryable, principal: string, generation: number): Promise<{ ever: number; live: number }> {
+  const { passkeys } = tablesOf(db);
+  const [row] = await db
+    .select({
+      ever: count(),
+      live: sql<number>`coalesce(sum(case when ${passkeys.generation} = ${generation} and ${passkeys.removedAt} is null then 1 else 0 end), 0)`,
+    })
+    .from(passkeys)
+    .where(eq(passkeys.principal, principal));
+  return { ever: Number(row?.ever ?? 0), live: Number(row?.live ?? 0) };
+}
+
+/** The passkey a response's credential ID names, whoever's, live or not; null for none. Its MAC is checked: a row that fails it throws (`verifyAuthRow`). */
+export async function passkeyByCredentialId(db: Queryable, chainKey: Buffer, credentialId: Buffer): Promise<PasskeyRow | null> {
+  const { passkeys } = tablesOf(db);
+  const [row] = await db.select().from(passkeys).where(eq(passkeys.credentialId, credentialId)).limit(1);
+  if (row === undefined) return null;
+  verifyAuthRow(chainKey, 'passkeys', row);
+  return row;
+}
+
+/**
+ * An assertion taken (section 7.3): its passkey's replay mark and counter moved forward, in one statement, inside the
+ * transaction that makes what the touch is for. 0 when it did not move: replayed, overtaken by a newer challenge, a
+ * counter that did not move, or a passkey removed, or no longer the person's at that generation, meanwhile.
+ */
+export async function touchPasskey(
+  tx: Queryable,
+  touch: { id: string; principal: string; generation: number; issuedAt: Date; signCount: number },
+): Promise<number> {
+  const { passkeys } = tablesOf(tx);
+  return changedRows(
+    await tx
+      .update(passkeys)
+      .set({ lastChallengeAt: touch.issuedAt, signCount: touch.signCount, lastUsedAt: new Date() })
+      .where(and(
+        eq(passkeys.id, touch.id),
+        eq(passkeys.principal, touch.principal),
+        eq(passkeys.generation, touch.generation),
+        isNull(passkeys.removedAt),
+        or(isNull(passkeys.lastChallengeAt), lt(passkeys.lastChallengeAt, touch.issuedAt)),
+        // A counter that moves, or one that never does: synced passkeys keep 0.
+        touch.signCount === 0 ? eq(passkeys.signCount, 0) : lt(passkeys.signCount, touch.signCount),
+      )),
+  );
+}
+
+/** A passkey added, signed as the app signs one (section 5.1). */
+export async function insertPasskey(
+  tx: Queryable,
+  chainKey: Buffer,
+  row: Omit<NewRow<Tables['passkeys']>, 'authMac'> & {
+    id: string; principal: string; generation: number; userHandle: Buffer; credentialId: Buffer; publicKey: Buffer; algorithm: number;
+  },
+): Promise<void> {
+  const signed = { ...row, removedAt: null };
+  await insert(tx, tablesOf(tx).passkeys, { ...signed, authMac: authMac(chainKey, 'passkeys', signed) });
+}
+
+/**
+ * The person's factor lock (section 6.1), which every change to their passkeys takes first, before the log's head, and
+ * the vault's issue of their tokens takes too (migration 0064): `pg_advisory_xact_lock(1717658484, hashtext(<principal>))`,
+ * started now, not once awaited, so that it goes ahead of the head in the transaction's first Sync. SQLite's one writer
+ * is the lock.
+ */
+export function lockFactor(tx: Transaction, principal: string): Promise<unknown> {
+  if (dialect.engineOf(tx) !== 'postgres') return Promise.resolve();
+  return dialect.rowsNow(tx, sql`SELECT pg_advisory_xact_lock(1717658484, hashtext(${principal}))::text AS locked`);
+}
+
+/**
+ * A person's approved device codes that no CLI has redeemed yet and that name no passkey: what a first passkey denies
+ * (section 6.1), each a compare-and-set on its MAC, and a denial names nobody (`device_authorizations_approval_names_principal`).
+ * The ids it denied.
+ */
+export async function denyUnbackedApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<string[]> {
+  const { deviceAuthorizations } = tablesOf(tx);
+  const rows = await tx.select().from(deviceAuthorizations).where(and(
+    eq(deviceAuthorizations.principal, principal),
+    eq(deviceAuthorizations.decision, 'approved'),
+    isNull(deviceAuthorizations.consumedAt),
+    isNull(deviceAuthorizations.passkeyId),
+    gt(deviceAuthorizations.expiresAt, at),
+  ));
+  const denied: string[] = [];
+  for (const row of rows) {
+    if (!checkAuthRow(chainKey, 'device_authorizations', row)) continue;
+    if ((await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0 })) > 0) denied.push(row.id);
+  }
+  return denied;
+}
+
 /** A credential as `findCredential` reads it: its row, its sign-in account's, the database's clock, and the newest policy change. */
 export type CredentialRead = {
   credential: Tables['credentials']['$inferSelect'];
@@ -2268,6 +2379,11 @@ export async function priorConnections(db: Queryable, chainKey: Buffer, principa
   const rows = await db.select().from(mcpConnections).where(and(eq(mcpConnections.principal, principalOf(principal)), lt(mcpConnections.generation, generation),
     isNull(mcpConnections.revokedAt), gt(mcpConnections.expiresAt, at)));
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
+}
+
+/** A person's credentials of this membership, live at `at`, that name no passkey: what a first passkey ends (passkeys.md, section 6.1). */
+export function unbackedCredentials(principal: { type: string; id: string }, generation: number, at: Date): CredentialsWhere {
+  return (credentials) => and(eq(credentials.principal, principalOf(principal)), eq(credentials.generation, generation), isNull(credentials.passkeyId), gt(credentials.expiresAt, at));
 }
 
 /** A member's credentials of a membership before `generation`, live at `at`: expired ones are dead already, and a CI service leaves one behind each run. */

@@ -20,7 +20,7 @@ const API = process.env.COFFRE_DEV_URL;
 const ADMIN = 'admin@acme.example';
 const LEAVER = 'dev@acme.example';
 const CANARY = 'market/prod/DRILL_CANARY';
-const { trySignIn, signIn, send, call } = browser(API, process.env.COFFRE_DEV_IDP_URL);
+const { trySignIn, signIn, send, call } = browser(API, process.env.COFFRE_DEV_IDP_URL, { api: process.env.COFFRE_DEV_PUBLIC_URL }, { passkeys: process.env.COFFRE_DEV_PASSKEY_FILE });
 
 const say = (line) => process.stderr.write(`    ${line}\n`);
 const member = (principal) => `/api/members/${encodeURIComponent(principal)}`;

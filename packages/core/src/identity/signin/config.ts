@@ -89,7 +89,14 @@ export type PasskeyPolicy = 'off' | 'optional' | 'required';
 
 export const PASSKEY_POLICIES: readonly PasskeyPolicy[] = ['off', 'optional', 'required'];
 
-export type PasskeysConfig = { policy: PasskeyPolicy };
+/**
+ * How a deployment sets passkeys up: the policy alone, or with the WebAuthn relying party's ID, which is `publicUrl`'s
+ * host unless set, or a parent of it (section 7.1): `{ policy: 'required', rpId: 'acme.example' }`.
+ */
+export type PasskeysOptions = PasskeyPolicy | { policy?: PasskeyPolicy; rpId?: string };
+
+/** Passkeys, checked: the policy, the RP ID every ceremony names, and the one origin a response may come from (section 7.1). */
+export type PasskeysConfig = { policy: PasskeyPolicy; rpId: string; origin: string };
 
 /**
  * Workload identity: CI runs that sign in as a service with the ID token
@@ -395,8 +402,8 @@ export function defineSignin(options: {
   cliSessionDays?: number;
   workloads?: WorkloadsOptions;
   mcp?: McpOptions;
-  /** The passkey policy, `optional` unless set (section 2 of docs/design/passkeys.md). */
-  passkeys?: PasskeyPolicy;
+  /** The passkey policy, `optional` unless set, and the RP ID (sections 2 and 7.1 of docs/design/passkeys.md). */
+  passkeys?: PasskeysOptions;
 }): SigninConfig {
   if (options.providers.length === 0) {
     throw new Error('sign-in needs at least one provider');
@@ -418,14 +425,47 @@ export function defineSignin(options: {
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
     workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads, publicOrigin(options.publicUrl)),
     mcp: options.mcp === undefined ? null : mcpConfig(options.mcp, publicOrigin(options.publicUrl)),
-    passkeys: { policy: passkeyPolicy(options.passkeys) },
+    passkeys: passkeysConfig(options.passkeys, publicOrigin(options.publicUrl)),
   };
 }
 
-function passkeyPolicy(value: PasskeyPolicy | undefined): PasskeyPolicy {
-  if (value === undefined) return 'optional';
-  if (!PASSKEY_POLICIES.includes(value)) throw new Error(`passkeys is one of ${PASSKEY_POLICIES.map((policy) => `'${policy}'`).join(', ')}`);
-  return value;
+/**
+ * The passkeys option, checked against the public URL (section 7.1): the RP ID is its host, or a parent of it on a label
+ * boundary with at least two labels. A host no browser makes a passkey for, an IP address, fails unless passkeys are
+ * `off`: every sign-in of a person who has one, and under `required` every sign-in, would be out of reach.
+ */
+export function passkeysConfig(options: PasskeysOptions | undefined, origin: string): PasskeysConfig {
+  const { policy: asked, rpId: named } = checkPasskeysOption(options);
+  const policy = asked ?? 'optional';
+  const host = new URL(origin).hostname;
+  if (policy !== 'off' && !isDomainName(host)) {
+    throw new Error(
+      `passkeys need a public URL whose host is a name, and ${host} is not one: browsers make no passkey there. ` +
+        "Locally, use http://localhost:<port>; or set passkeys: 'off'",
+    );
+  }
+  if (named !== undefined && named !== host && !(named.includes('.') && host.endsWith(`.${named}`))) {
+    throw new Error(`passkeys.rpId ${named} must be the public URL's host, ${host}, or a parent of it with at least two labels`);
+  }
+  return { policy, rpId: named ?? host, origin };
+}
+
+/** The option's shape alone, before any URL: a policy, and an RP ID that is a domain name. */
+export function checkPasskeysOption(options: PasskeysOptions | undefined): { policy?: PasskeyPolicy; rpId?: string } {
+  const { policy, rpId } = typeof options === 'string' || options === undefined ? { policy: options } : options;
+  if (policy !== undefined && !PASSKEY_POLICIES.includes(policy)) {
+    throw new Error(`passkeys is one of ${PASSKEY_POLICIES.map((value) => `'${value}'`).join(', ')}`);
+  }
+  if (rpId !== undefined && (typeof rpId !== 'string' || !isDomainName(rpId))) throw new Error('passkeys.rpId is a domain name, lowercase: acme.example');
+  return { policy, rpId };
+}
+
+const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** A lowercase DNS name, `localhost` included; never an IP address, which URLs give bare (IPv4) or in brackets (IPv6). */
+function isDomainName(host: string): boolean {
+  if (host.length === 0 || host.length > 253 || /^[0-9.]+$/.test(host) || host.startsWith('[')) return false;
+  return host.split('.').every((label) => LABEL.test(label));
 }
 
 /** MCP, checked: its three limits given, each one a limiter; loopback clients only on a loopback instance. */

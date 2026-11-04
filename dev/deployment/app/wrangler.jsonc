@@ -10,7 +10,9 @@
   "compatibility_date": "2026-08-06",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "COFFRE_PUBLIC_URL": "http://127.0.0.1:3000",
+    // localhost, not 127.0.0.1: browsers make passkeys for a name, never for an IP address (docs/design/passkeys.md, section 7.1).
+    "COFFRE_PUBLIC_URL": "http://localhost:3000",
+    "COFFRE_DEV_PASSKEYS": "optional",
     "COFFRE_DEV_IDP_URL": "http://127.0.0.1:8081",
     "COFFRE_DEV_IDP_PUBLIC_URL": "http://127.0.0.1:8081"
   },

@@ -11,7 +11,7 @@ import type { Written } from '../write-ahead.ts';
 import type { Admission } from '../admit-ahead.ts';
 import { AppChanges, keeps015 } from './changes.ts';
 import type { WatchContext, Watcher } from '../watch.ts';
-import { policyNow, wayInStands } from '../db/queries.ts';
+import { lockFactor, policyNow, wayInStands } from '../db/queries.ts';
 import { can, type Caller, type Place } from './caller.ts';
 import { ApiError, forbidden, UnloggedRefusal, vaultRefused } from './errors.ts';
 import type { Asking, Decided, DecidedMany } from './keys.ts';
@@ -220,17 +220,25 @@ export class Refusal extends Error {
  * statement that appends the entries, so the locks they take (the issue
  * lock, and the fence but for an issue) are held from there to the commit
  * only; answered once sealed (R51).
+ *
+ * `factor` names a person whose passkeys the work changes: their factor
+ * lock is taken first, ahead of the head (`lockFactor`).
  */
 export async function audited<T>(
   ctx: Pick<ApiContext, 'db' | 'chainKey' | 'vault'> & { caller?: Pick<Caller, 'policySeq' | 'policy' | 'recalled'> },
   work: (tx: Transaction, log: AuditEntry[]) => Promise<T>,
   changes: AppChanges | null = null,
+  factor: string | null = null,
 ): Promise<T> {
   // Under 0.15's log, its entries say so: once cut over, the log refuses a write's entry that does not (migration 0047).
   const log015 = await keeps015(ctx.vault);
   try {
     const result = await ctx.db.transaction(async (tx) => {
       const log: AuditEntry[] = [];
+      // A change to a person's passkeys takes their factor lock first, before the head (docs/design/passkeys.md,
+      // section 6.1; formal/Factor.tla's FactorFirst): the vault's issue of their tokens takes it, and no head.
+      const factored = factor === null ? null : lockFactor(tx, factor);
+      factored?.catch(() => {});
       // Take the head before any application rows, with what the append reads under it; then the policy, then the
       // work's first reads: asked together, they go in that order under one Sync (postgres-js's `gather`).
       const held = lockLogHeadRead(tx, appLogKey(ctx.chainKey));
@@ -240,6 +248,7 @@ export async function audited<T>(
       // left unawaited behind an earlier refusal fails no one.
       fenced?.catch(() => {});
       working.catch(() => {});
+      await factored;
       const locked = await held;
       await fenced;
       const result = await working;

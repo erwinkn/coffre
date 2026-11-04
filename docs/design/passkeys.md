@@ -252,6 +252,33 @@ verified, then enrolls at the generation that answered. Conformance runs
 The page also says what to do without the passkey: "Lost your passkeys? An
 Owner can reset them" (section 3.7). There is no fallback that skips it.
 
+**As built (PR 4b).** The page is `/auth/passkey`, a page of the
+deployment's Start app (`@coffre/ui/pages/passkey`), so what it asks and
+its answer are `GET` and `POST /api/auth/passkey` (`passkeyStep` in
+`packages/server/src/auth-routes.ts`): the page reads the question in the
+browser, which alone can answer it, and its button asks the browser at
+once, as a touch must follow the click. The answer sets the session
+cookie and says where to go (`{ next }`); a passkey that did not answer
+leaves the sign-in to try again, with another passkey too, and any other
+refusal clears the cookie. The cookie's value names its purpose, whose key
+opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
+callback's reads (`SigninService.afterProvider`) are the identity, the
+vault's answer about the person, unless the deployment names them an
+Owner (asking would admit them; their member row is read instead), and
+one statement of their passkeys, live and ever (`passkeyCounts`): a few
+reads where step 2 says one, none of them a write. The post's checks are
+in `finishPasskey`, then `completeSignin`'s transaction with the touch
+(`touchPasskey`) or the first passkey (below) in it. `passkey-signin.test.ts`
+holds the flows, on both engines, through the deployment's routes, with
+the software authenticator. The sealed cookie carries the provider's name
+whole; a profile that makes it longer than the 4,096 bytes a browser must
+keep (RFC 6265, section 6.1), which it would drop unsaid, ends the sign-in
+with `profile_too_long` instead. The bounds on the answer's fields are the
+verifier's, each from the spec or the algorithms coffre takes where one sets
+it (credential ID, user handle, signature); the body's size and the fields
+the spec leaves open (client data, authenticator data, the attestation
+object) have no such source yet, and are listed open in PR 4b's notes.
+
 ### 3.2 The first sign-in under `required`
 
 Bob was invited; this is Bob's first sign-in. The callback finds the invited
@@ -309,6 +336,19 @@ keychain that already holds one for Bob replaces it instead of keeping two,
 and the `userHandle` an assertion returns is checked against the row of the
 passkey it names (7.2). A configured Owner not yet admitted gets one at
 registration, as anyone does; nothing about it depends on the generation.
+
+**As built (PR 4b).** The enrollment's transaction takes the person's
+factor lock first (`audited`'s `factor`, `lockFactor`), then the head; it
+checks the count of their passkey rows, removed ones included, and that
+none is live, in one statement (`passkeyCounts`), adds the passkey, ends
+what no passkey stands behind (section 6.1: credentials and MCP
+connections of this membership naming none, through their prepared
+changes, and approved device codes not yet redeemed that name none,
+denied), and issues the session, with `account.link`, `passkey.add` and
+`sign_in` entries. A configured Owner the vault has not admitted is
+admitted at the post, by `completeSignin`'s question to the vault, once
+the attestation has verified. The passkey's name is "Passkey <n>" until
+Account → Passkeys (PR 6) names them by their AAGUID.
 
 ### 3.3 `optional`: the prompt
 
@@ -1081,6 +1121,19 @@ never puts off signing in to GitHub again.
 `GET /api/me` answers `passkeys: { policy, enrolled, confirmedUntil }`, which
 the pages read to decide when to open the dialog before sending.
 
+**As built (PR 4b): the step-up.** A page whose `GET /api/me` answers `401
+passkey_required` goes to `/auth/passkey?step-up=1&next=…` (the shell's
+loader). `GET /api/auth/passkey?step-up=1` reads the browser's session
+whatever its passkey (live, of a member at its generation), and answers a
+touch of its person's live passkeys with a sealed state bound to it; none
+live, it answers 404 and the page sends the person to sign in again,
+which, under `required`, adds one. `POST /api/auth/passkey { state,
+response }` checks the touch (`SigninService.stepUp`), then in one
+transaction ends the session it came in on, conditionally, moves the
+replay mark and issues the new session, confirmed, with the old one's
+account and end; `passkey.check` entries, allowed or denied. PR 5's fresh
+check is the same transaction from another door.
+
 **Why a new session per touch, not a column updated in place.** Updating
 the session's `confirmed_at` would refresh every copy of its token: a
 cookie stolen at 09:00 would wait for Ada's touch at 10:02 and promote
@@ -1131,6 +1184,18 @@ credential", which the check above needs.
   it signs in adds a passkey at its first risky act, and touches it at
   each check. The dev stack keeps the policy people will run, and the seed
   exercises the passkey path every time it runs.
+- **As built (PR 4b).** The dev stack serves at `http://localhost:3000`
+  (`dev/start.sh`, its `wrangler.jsonc`), and `COFFRE_DEV_PASSKEYS` sets
+  its policy, `optional` unless said. Under it the Owner,
+  `admin@acme.example`, adds a passkey at the seed's sign-in (section 2's
+  rule for Owners, which this section predates), so a person or an agent
+  signing in as the Owner by hand needs that passkey: the seed's browser
+  keeps the keys it adds in a file of the stack's state, and `node
+  dev/passkey.mjs <DevTools WebSocket URL>` hands the Owner's to a Chrome
+  as a virtual authenticator while it runs (`agent-browser cdp-url` gives
+  one); `COFFRE_DEV_PASSKEYS=off` is the dev IdP alone. The restore drill
+  and conformance run at `localhost` too, each with its own software
+  authenticator.
 
 ### 7.2 What each response must hold
 
@@ -1517,7 +1582,9 @@ running `passkeys: 'required'`:
    6.1, the per-request check, the check before named reveals, the step-up,
    the seed's authenticator, and AGENTS.md's sign-in URL
    moved to `localhost`. Waits for #436 and T171, which touch the
-   callback.
+   callback. Built in two: 4a (#497), the server's side, every check and
+   the model's app side; 4b, the ceremonies, the startup check and the
+   dev stack.
 5. **Fresh checks**: `FRESH_ROUTES` and its `handler` answer, the
    challenges and checks routes, the dialog, the device, MCP approval and
    consent ceremonies, the CLI's step-up through the device flow, the link

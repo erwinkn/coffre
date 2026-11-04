@@ -132,18 +132,31 @@ const fail = (reason: PasskeyReason, message: string): never => {
   throw new Refused(reason, message);
 };
 
-// Bounds on what a browser may send, decoded: a credential ID's 1,023 bytes
-// by spec; attestation statements carry certificate chains, a TPM's the
-// longest at a few KiB.
-const MAX_CREDENTIAL_ID = 1023;
+// Bounds on what a browser may send, decoded. From the spec: a credential
+// ID is 16 to 1,023 bytes (WebAuthn L3, "Credential ID"), a user handle 64
+// at most (5.4.3). From the algorithms coffre takes: an RSA key of 2,048 to
+// 4,096 bits (docs/design/passkeys.md, section 7.2), whose signature is as
+// long as its modulus, the longest of the three (Ed25519's is 64 bytes,
+// ES256's DER at most 72). The rest bound input the spec leaves open
+// (client data, extensions, an attestation statement's certificate chain, a
+// TPM's the longest at a few KiB) to what one request may make the parser
+// hold, which no protocol or platform sets: open under R70.
+export const MAX_CREDENTIAL_ID = 1023;
 const MIN_CREDENTIAL_ID = 16;
+const MIN_RSA_BITS = 2048;
+const MAX_RSA_BITS = 4096;
+const MAX_SIGNATURE = MAX_RSA_BITS / 8;
+const MAX_USER_HANDLE = 64;
 const MAX_CLIENT_DATA = 4096;
 const MAX_AUTHENTICATOR_DATA = 4096;
 const MAX_ATTESTATION_OBJECT = 32768;
-const MAX_SIGNATURE = 1024;
-const MAX_USER_HANDLE = 64;
-const MAX_TRANSPORTS = 8;
 const MAX_CBOR_DEPTH = 16;
+
+/** The transports WebAuthn L3 names (5.8.4), the ones a browser acts on when handed back. */
+const TRANSPORTS: ReadonlySet<string> = new Set(['ble', 'hybrid', 'internal', 'nfc', 'smart-card', 'usb']);
+
+/** How long a base64url text of `bytes` bytes is, unpadded. */
+export const base64urlLength = (bytes: number): number => Math.ceil((bytes * 4) / 3);
 
 // clientDataJSON is decoded as WebAuthn says, UTF-8 decode, which drops a
 // leading byte order mark; CBOR text keeps every character it holds
@@ -248,7 +261,7 @@ const isObject = (value: unknown): value is Json => typeof value === 'object' &&
 function bytesOf(record: Json, field: string, max: number): Uint8Array {
   const text = record[field];
   // Four characters for three bytes: a longer string cannot decode within `max`.
-  if (typeof text !== 'string' || text.length === 0 || text.length > Math.ceil((max * 4) / 3)) return fail('malformed', `${field} is not base64url within ${max} bytes`);
+  if (typeof text !== 'string' || text.length === 0 || text.length > base64urlLength(max)) return fail('malformed', `${field} is not base64url within ${max} bytes`);
   const bytes = fromBase64url(text);
   if (bytes === null || bytes.length > max) return fail('malformed', `${field} is not canonical base64url within ${max} bytes`);
   return bytes;
@@ -390,7 +403,7 @@ async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorith
     const e = unsigned(byteParam(key, -2));
     // Whole bytes, less the leading zero bits of the first: clz32 counts 24 more on a byte.
     const bits = n.length === 0 ? 0 : n.length * 8 - (Math.clz32(n[0]) - 24);
-    if (bits < 2048 || bits > 4096) return fail('key', `RSA modulus of ${bits} bits, not 2048 to 4096`);
+    if (bits < MIN_RSA_BITS || bits > MAX_RSA_BITS) return fail('key', `RSA modulus of ${bits} bits, not ${MIN_RSA_BITS} to ${MAX_RSA_BITS}`);
     if (e.length === 0 || e.length > 4 || !(e[e.length - 1] & 1) || (e.length === 1 && e[0] < 3)) return fail('key', 'RSA exponent is not an odd number from 3 to 2^32');
     const jwk = { kty: 'RSA', n: base64url(n), e: base64url(e), alg: 'RS256', ext: true };
     return { algorithm, key: await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']) };
@@ -455,14 +468,15 @@ async function answer<T>(run: () => Promise<T>): Promise<T | PasskeyRefusal> {
   }
 }
 
-/** The transports the browser listed: short lowercase names, display only, unknown ones kept. */
+/**
+ * The transports the browser listed that WebAuthn names, once each: a hint handed back to `get()`, whose browser
+ * ignores any other (5.8.4), so one it does not know hints nothing and is dropped, not refused.
+ */
 function transportsOf(response: Json): string[] {
   const list = response.transports;
   if (list === undefined) return [];
-  if (!Array.isArray(list) || list.length > MAX_TRANSPORTS || !list.every((item) => typeof item === 'string' && /^[a-z-]{1,32}$/.test(item))) {
-    return fail('malformed', 'transports is not a short list of names');
-  }
-  return [...new Set(list as string[])];
+  if (!Array.isArray(list)) return fail('malformed', 'transports is not a list');
+  return [...TRANSPORTS].filter((transport) => list.includes(transport));
 }
 
 /** A `create()` response, `credential.toJSON()`, held to section 7.2's registration checks. */

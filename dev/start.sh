@@ -41,10 +41,11 @@ owner_url="postgresql://coffre_owner:local-dev-only@127.0.0.1:${COFFRE_POSTGRES_
 # What deployment/app/src/server.ts, the dev IdP and the seed read. The app's
 # Hyperdrive binding reaches Postgres as the restricted runtime login, and
 # the vault's as its own.
-local_url="http://127.0.0.1:$port"
-export COFFRE_DEV_URL="$local_url"
+export COFFRE_DEV_URL="http://127.0.0.1:$port"
 export COFFRE_DEV_IDP_URL="http://127.0.0.1:$idp_port"
-# What a browser uses: the tunnels' URLs when given, else the loopback ones.
+# What a browser uses: the tunnels' URLs when given, else coffre at localhost, a name browsers make passkeys for
+# (127.0.0.1 is none: docs/design/passkeys.md, section 7.1), and the dev IdP on loopback.
+local_url="http://localhost:$port"
 export COFFRE_DEV_PUBLIC_URL="${COFFRE_DEV_PUBLIC_URL:-$local_url}"
 export COFFRE_DEV_IDP_PUBLIC_URL="${COFFRE_DEV_IDP_PUBLIC_URL:-$COFFRE_DEV_IDP_URL}"
 COFFRE_DEV_PUBLIC_URL="${COFFRE_DEV_PUBLIC_URL%/}"
@@ -61,6 +62,10 @@ if [ "$COFFRE_DEV_PUBLIC_URL" = "$local_url" ] && [ "$COFFRE_DEV_IDP_PUBLIC_URL"
     echo "warning: only one of COFFRE_DEV_PUBLIC_URL and COFFRE_DEV_IDP_PUBLIC_URL is set; sign-in from another machine needs both" >&2
 fi
 export COFFRE_PUBLIC_URL="$COFFRE_DEV_PUBLIC_URL"
+# The passkey policy, `optional` as deployments run it; `off` signs every persona in with the dev IdP alone. The seed's
+# browser keeps the passkeys it adds in this file, for dev/passkey.mjs to hand to a browser of yours.
+export COFFRE_DEV_PASSKEYS="${COFFRE_DEV_PASSKEYS:-optional}"
+export COFFRE_DEV_PASSKEY_FILE="$state_dir/passkeys.json"
 export COFFRE_DEV_IDP_PORT="$idp_port"
 export COFFRE_STATE_DIR="$state_dir"
 export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE="postgresql://coffre_runtime:local-runtime-only@127.0.0.1:${COFFRE_POSTGRES_PORT:-55432}/$database"
@@ -141,6 +146,10 @@ cat <<BANNER
 
     web + API   $COFFRE_DEV_PUBLIC_URL   (either button, then admin@acme.example
                 or another persona)
+    passkeys    $COFFRE_DEV_PASSKEYS: Owners sign in with one, and the seed added
+                admin@acme.example's. Hand it to a Chrome you drive, while
+                this runs:  node dev/passkey.mjs <DevTools WebSocket URL>
+                or start with COFFRE_DEV_PASSKEYS=off for the dev IdP alone.
     vault       beside it, reached only through the app's VAULT binding
     dev IdP     $COFFRE_DEV_IDP_PUBLIC_URL
 

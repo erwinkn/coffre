@@ -25,6 +25,12 @@ const MESSAGES: Record<string, string> = {
     'Your access record failed coffre’s integrity check: it was changed outside coffre. An owner must remove you and add you again.',
   passkey_required:
     'You have a passkey here, so signing in takes it too. Sign in again, and touch your passkey when coffre asks.',
+  passkey_failed: 'Your passkey did not confirm it’s you. Sign in again, and touch a passkey of yours when coffre asks.',
+  passkey_exists:
+    'A passkey was added to your account since this sign-in began. Sign in again, and touch it when coffre asks.',
+  session_ended: 'That session ended, or another tab replaced it. Sign in again.',
+  profile_too_long:
+    'Your provider sent more about your account than a browser keeps through the passkey step. Tell whoever runs coffre.',
   unknown_provider: 'That sign-in option is not configured here.',
   link_session: 'Your session changed while linking. Sign in again, then retry.',
 };

@@ -12,6 +12,17 @@ export function pendingCookieName(auth: AuthConfig): string {
   return secure(auth) ? '__Host-coffre_signin' : 'coffre_signin';
 }
 
+/** The sign-in waiting for its passkey (docs/design/passkeys.md, section 3.1): `__Host-` where the origin is HTTPS. */
+export function passkeyCookieName(auth: AuthConfig): string {
+  return secure(auth) ? '__Host-coffre_passkey' : 'coffre_passkey';
+}
+
+/**
+ * The longest cookie a browser must keep, its name, value and attributes together: 4,096 bytes (RFC 6265, section 6.1).
+ * It drops a longer one without a word.
+ */
+export const COOKIE_BYTES = 4096;
+
 export function cookieHeader(
   auth: AuthConfig,
   name: string,
