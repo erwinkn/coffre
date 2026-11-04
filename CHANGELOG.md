@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A credential's preview and issue name what it will not read from the
+  environments' live keys (T214).** `withheld`, the hint a service
+  credential's preview and issue give its issuer, read every reference
+  ever made into the environments asked, by a scan of
+  `secret_references`, which grew with the instance and cost 267 pages
+  where the budget held 17. It now starts from each live key and reads
+  its own version or its newest reference by index, 34 pages however the
+  references grow. A key whose only sensitive reference was repointed to
+  a source that is not sensitive, replaced by a value of its own, or
+  archived no longer names its place. A broken reference still does, on
+  both logs. The vault decides each read on its own, so the hint never
+  let a value through.
+
 - **Passkeys, the server's side (T176, PR 4a; in progress).**
   `signin({ passkeys })` takes the policy, `'off'`, `'optional'` (the
   default) or `'required'`, and every request on a person's session, CLI

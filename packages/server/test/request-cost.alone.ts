@@ -1265,7 +1265,8 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const history = await pages();
   for (const [name, statements] of Object.entries(small)) {
     for (const [grown, label] of [[archived, 'archived keys of its own'], [elsewhere, 'keys of other projects'], [history, 'references made since']] as const) {
-      // The places tree of everything counts every live key of every project, which the second growth adds: only the first bears on it.
+      // The places tree of everything counts every live key of every project, which the second growth adds and the third keeps:
+      // only the first bears on it.
       if (name === 'the places tree of everything' && grown !== archived) continue;
       assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
       for (const [i, { text, pages: before }] of statements.entries()) {
