@@ -341,7 +341,9 @@ test("on Workers, a day's counts are written within a flush and read back after 
   assert.equal((held.stored.get(`count:${perDay.windowMs}:stripe`) as { refused: boolean }).refused, true);
 });
 
-test('on Workers, a write that fails is written by the retried alarm, and an alarm that could not be set is set by the next request', async () => {
+test('on Workers, a write that fails is written by the retried alarm, and an alarm that could not be set is set by the next request', async (t) => {
+  // On a stopped clock, 01:30 UTC: the day's window cannot turn over between the failed request and its retry (T218).
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
   const held = objectState();
   const object = new CoffreGates(held.state, {});
   await held.started();

@@ -19,8 +19,8 @@ import { route, routeWorld } from './route-world.ts';
 import { CONFIG, emptyLog, LOG_015, useDatabases } from './use-world.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 
-/** What the statement-counting uses need of one bulk-cap period, far more than they take (T218). */
-const PERIOD_ROOM_MS = 5000;
+/** What the statement-counting uses need of one bulk-cap period: each call before the last measured one may take its 3 s deadline, so room for two of them and a margin (T218). */
+const PERIOD_ROOM_MS = 10_000;
 
 let db: TestDatabase;
 before(async () => {
