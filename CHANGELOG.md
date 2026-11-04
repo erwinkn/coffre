@@ -14,6 +14,25 @@
   then fail with nothing changed, naming the statement and what held
   coffre's tables, prepared transactions included.
 
+- **The places a request names are read without counting their keys,
+  and a count reads only the keys it counts (T221).** Every read of the
+  projects and environments (`places()`: a member's report, `me`, the
+  members list and most other routes) counted each environment's live
+  keys, which only the project list and a page's shell show. Postgres
+  planned that count either as one scan of the keys' table or as an
+  index scan for each environment, a table page for each key, and which
+  one it picked followed `secrets.environment_id`'s statistics: a
+  member's report read 48 pages one run and 1,183 the next (T166's
+  flake), and with 29,262 live keys the project list read 29,889 pages
+  on every page render. Now only the project list and the shell count,
+  in one read of the standing environments' live keys, by id: 598 pages
+  there. Keys left live in deleted environments (0.14's log leaves them
+  so) went from 308 to 945 pages with 40,000 of them, and from 166 to
+  169 now, though Postgres can still pick a scan of the whole table that
+  reads and drops them. The other reads read no key at all. A count can
+  still read a page for each key it counts, when the archived keys'
+  order makes Postgres pick an index scan (T226).
+
 - **A key's newest reference is read by its own index, never through
   other keys' references (T220).** Every read of a key's newest
   reference row, `use_credential` (`/use`), the vault's object reads and
