@@ -478,7 +478,8 @@ function exposure(
     byVersion.set(version, {
       version,
       wrote: (previous?.wrote ?? false) || row.action !== 'secret.read',
-      at: row.occurredAt,
+      // The latest: 0.15's log's key writes come after 0.14's entries and reads, not in time with them (T179, review r2 of #490).
+      at: previous !== undefined && Date.parse(previous.at) > Date.parse(row.occurredAt) ? previous.at : row.occurredAt,
     });
   }
 

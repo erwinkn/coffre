@@ -18,6 +18,7 @@ import { eq, sql } from 'drizzle-orm';
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
+import { versionsOf } from '../src/db/queries.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, outcomes } from './api-fixture.ts';
@@ -635,6 +636,11 @@ test("a try the vault served, abandoned at its hold, then not served (the key ma
   assert.equal(verified, true);
 });
 
+test("the versions a report names by id are read a thousand a statement: an offboarding report of a member who wrote more than a statement takes parameters (review r2 of #490)", async () => {
+  const ids = Array.from({ length: 70_000 }, () => randomUUID());
+  assert.equal((await versionsOf(db.runtime, ids)).size, 0);
+});
+
 test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", { skip: POSTGRES }, async () => {
   const w = await world();
   await w.root.environments.create('market/prod');
@@ -673,6 +679,12 @@ test("a key write down the two-trip path, recorded in 0.15's log alone, is liste
   for (const query of [{}, { path: 'market' }]) assert.deepEqual((await written(reader, query)).filter((entry) => entry.log === '0.15'), [], JSON.stringify(query));
   // The offboarding report names the value she wrote, still current, as one to rotate.
   assert.deepEqual((await w.root.members.get(`user:${ADA}`)).exposed.map(({ key, version, how }) => `${key} v${version} ${how}`), ['API_KEY v2 wrote']);
+  // Read again later: the report names when she last saw it, the read, though the write is listed after it (review r2 of #490).
+  const [{ at: wroteAt }] = await rowsOf<{ at: string | number }>(db.owner, sql`SELECT at FROM log_changes WHERE payload LIKE ${'{"digest":%"inputs":"%'} AND actor = ${`user:${ADA}`}`);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal((await clientFor(w.deps, ADA).secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'fake-new');
+  const [seen] = (await w.root.members.get(`user:${ADA}`)).exposed;
+  assert.deepEqual([seen?.how, Date.parse(seen!.at) > Number(wroteAt)], ['wrote', true], JSON.stringify({ seen, wroteAt }));
   // A change edited around coffre is listed marked: the vault does not vouch for it.
   const row = (await keyRow('API_KEY'))!;
   await run(db.owner, sql`UPDATE log_changes SET actor = ${`user:${ROOT}`} WHERE object = ${logObject('secret', row.id)} AND payload LIKE ${'{"digest":%"inputs":"%'}`);

@@ -2721,12 +2721,21 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
   return found;
 }
 
-/** These versions' numbers and recipes, by id: what a key write recorded in 0.15's log alone names by id (T179). */
+/**
+ * These versions' numbers and recipes, by id: what a key write recorded in 0.15's log alone names by id (T179). A
+ * thousand ids a statement, as `secretPlaces` reads keys: an offboarding report names every version a member ever
+ * wrote, and one statement takes no more than 65,534 parameters (review r2 of #490).
+ */
 export async function versionsOf(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; recipe: string | null }>> {
-  if (ids.length === 0) return new Map();
   const { secretVersions } = tablesOf(db);
-  const rows = await db.select({ id: secretVersions.id, version: secretVersions.version, recipe: secretVersions.recipe }).from(secretVersions).where(inArray(secretVersions.id, [...new Set(ids)]));
-  return new Map(rows.map(({ id, version, recipe }) => [id, { version, recipe }]));
+  const unique = [...new Set(ids)];
+  const found = new Map<string, { version: number; recipe: string | null }>();
+  for (let start = 0; start < unique.length; start += 1000) {
+    const rows = await db.select({ id: secretVersions.id, version: secretVersions.version, recipe: secretVersions.recipe }).from(secretVersions)
+      .where(inArray(secretVersions.id, unique.slice(start, start + 1000)));
+    for (const { id, version, recipe } of rows) found.set(id, { version, recipe });
+  }
+  return found;
 }
 
 function secretPlaceRows(db: Queryable, where: SQL): Promise<SecretPlaceRow[]> {
