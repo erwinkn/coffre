@@ -803,7 +803,7 @@ export class SigninService {
       return passkeys.length === 0 ? null : { purpose: 'signin', email, options: requestOptions(this.config.passkeys, state, passkeys) };
     }
     const person = { email, name: state.account.name, site: this.config.page.title };
-    return { purpose: 'enroll', email, options: creationOptions(this.config.passkeys, { challenge: state.challenge, userHandle: state.userHandle! }, person, passkeys) };
+    return { purpose: 'enroll', email, options: creationOptions(this.config.passkeys, { challenge: state.challenge, userHandle: state.userHandle!, issuedAt: state.issuedAt }, person, passkeys) };
   }
 
   /**

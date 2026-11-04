@@ -8,8 +8,15 @@ import { base64urlLength, deriveKey, MAX_CREDENTIAL_ID, PASSKEY_ALGORITHMS, seal
 /** How long a challenge, and the state it travels in, lasts: five minutes, as the design Erwin approved sets (sections 3.1 and 7.3). */
 export const CEREMONY_TTL_SECONDS = 5 * 60;
 
-/** How long the browser waits for the touch: the challenge's lifetime. */
-const TIMEOUT_MS = CEREMONY_TTL_SECONDS * 1000;
+/**
+ * What is left of a ceremony's lifetime, ms, which its options give the browser as `timeout`: the state lasts
+ * `CEREMONY_TTL_SECONDS` from its challenge (`issuedAt`, which `seal` dates it from), so `create()` and `get()` wait no
+ * longer than it can be answered, and the page knows when its step ends (`Lifetime`, `@coffre/ui`'s passkey-answer.ts):
+ * a page left open past it asks the authenticator for nothing (review r9 of #500).
+ */
+export function remainingMs(state: { issuedAt: number }, now = Date.now()): number {
+  return Math.max(0, state.issuedAt + CEREMONY_TTL_SECONDS * 1000 - now);
+}
 
 /**
  * Why a sealed state was made, each opened by its own key (section 7.2, step 1): `signin` and `enroll` ride in the
@@ -75,9 +82,9 @@ export class CeremonyStates {
     };
   }
 
-  /** The state, sealed, prefixed by its purpose, which picks the key that opens it. */
+  /** The state, sealed, prefixed by its purpose, which picks the key that opens it; it lasts from its challenge. */
   seal(state: Sealed): string {
-    return `${state.purpose}.${seal(this.#keys[state.purpose], state, CEREMONY_TTL_SECONDS)}`;
+    return `${state.purpose}.${seal(this.#keys[state.purpose], state, CEREMONY_TTL_SECONDS, state.issuedAt)}`;
   }
 
   /** The state, if it opens under the key its prefix names, is that purpose's, and is unexpired; null otherwise. */
@@ -141,14 +148,14 @@ function transportsOf(stored: string): string[] {
 }
 
 /** A touch of one of these passkeys, user verification required (sections 3.1 and 7.4). */
-export function requestOptions(config: PasskeysConfig, state: { challenge: string }, passkeys: readonly OfferedPasskey[]): RequestOptionsJSON {
-  return { challenge: state.challenge, rpId: config.rpId, allowCredentials: passkeys.map(descriptor), userVerification: USER_VERIFICATION, timeout: TIMEOUT_MS };
+export function requestOptions(config: PasskeysConfig, state: { challenge: string; issuedAt: number }, passkeys: readonly OfferedPasskey[]): RequestOptionsJSON {
+  return { challenge: state.challenge, rpId: config.rpId, allowCredentials: passkeys.map(descriptor), userVerification: USER_VERIFICATION, timeout: remainingMs(state) };
 }
 
 /** A new passkey for the person, of the three algorithms the verifier takes, attestation none (section 3.2). */
 export function creationOptions(
   config: PasskeysConfig,
-  state: { challenge: string; userHandle: string },
+  state: { challenge: string; userHandle: string; issuedAt: number },
   person: { email: string; name: string | null; site: string },
   existing: readonly OfferedPasskey[],
 ): CreationOptionsJSON {
@@ -160,7 +167,7 @@ export function creationOptions(
     authenticatorSelection: { residentKey: 'preferred', userVerification: USER_VERIFICATION },
     attestation: 'none',
     excludeCredentials: existing.map(descriptor),
-    timeout: TIMEOUT_MS,
+    timeout: remainingMs(state),
   };
 }
 

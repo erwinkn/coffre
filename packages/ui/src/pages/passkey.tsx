@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage } from '../lib/passkey-answer';
+import { lifetime, memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage, type Lifetime } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -13,6 +13,9 @@ const Route = pageRoute<typeof passkey>();
 type Step =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestJSON; state?: string }
   | { purpose: 'enroll'; email: string; options: CreationJSON };
+
+/** A step, and when it ends, timed from its GET (`Lifetime`). */
+type Timed = Step & { life: Lifetime };
 
 type Descriptor = { type: 'public-key'; id: string; transports?: string[] };
 type RequestJSON = { challenge: string; rpId: string; allowCredentials: Descriptor[]; userVerification: UserVerificationRequirement; timeout: number };
@@ -39,7 +42,7 @@ export function PasskeyPage() {
   const search = Route.useSearch();
   const stepUp = search['step-up'] === '1';
   // `unavailable`: coffre did not answer what to ask; the sign-in still waits, so the page offers to ask again.
-  const [step, setStep] = useState<Step | 'none' | 'unavailable' | null>(null);
+  const [step, setStep] = useState<Timed | 'none' | 'unavailable' | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,8 +51,9 @@ export function PasskeyPage() {
   // An answer coffre did not answer: the next press sends it again, never asks for another (`sendPasskey`).
   const [unanswered, setUnanswered] = useState(false);
   // What the step holds between presses: an enrollment's in `localStorage`, shared by its tabs and reloads; a touch's here.
+  // Either reads the step ended once its lifetime is over, a page restored from the back-forward cache included.
   const keeper = useMemo(
-    () => (step === null || typeof step === 'string' ? null : step.purpose === 'enroll' ? storedKeeper(browserStorage(), step.options.challenge, step.options.timeout) : memoryKeeper()),
+    () => (step === null || typeof step === 'string' ? null : step.purpose === 'enroll' ? storedKeeper(browserStorage(), step.options.challenge, step.life) : memoryKeeper(step.life)),
     [step],
   );
 
@@ -58,8 +62,10 @@ export function PasskeyPage() {
     let current = true;
     setStep(null);
     setUnanswered(false);
+    const sent = Date.now();
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
-      if (current) setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
+      if (!current) return;
+      setStep(answer.kind === 'ok' ? { ...answer.value, life: lifetime(sent, Date.now(), answer.value.options.timeout) } : answer.kind === 'refused' ? 'none' : 'unavailable');
     });
     return () => {
       current = false;
@@ -116,7 +122,7 @@ export function PasskeyPage() {
 
   const enroll = step.purpose === 'enroll';
 
-  async function answer(current: Step) {
+  async function answer(current: Timed) {
     if (keeper === null) return;
     setBusy(true);
     setError(null);

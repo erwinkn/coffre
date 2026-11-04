@@ -31,17 +31,42 @@ export async function passkeyAnswer<T>(request: Promise<Response>): Promise<Pass
 
 /**
  * What a passkey step holds between presses: `asking`, a `create()` or `get()` open for it; `unsent`, the
- * authenticator's answer, which coffre did not answer; `done`, an answer coffre did answer, the step ended.
+ * authenticator's answer, which coffre did not answer; `done`, an answer coffre did answer, or the step's lifetime
+ * over: the step ended.
  */
 export type Kept = { kind: 'asking' } | { kind: 'unsent'; body: string } | { kind: 'done' };
 
 /** Where a step's `Kept` lives: read, and written, null to forget it. */
 export type Keeper = { read(): Kept | null; write(kept: Kept | null): void };
 
-/** A touch's keeper: the page's own memory. A second `get()` replaces nothing, so other tabs need not know. */
-export function memoryKeeper(): Keeper {
+/**
+ * When a step ends on the server, on this browser's clock (`Date.now()`), from its options' `timeout`, what was left
+ * of it when the server answered the GET: `ends`, at the earliest (the GET's send plus `timeout`), `endedBy`, at the
+ * latest (its arrival plus `timeout`). From `ends` on the page asks the authenticator for nothing: the server may have
+ * ended the step, and a `create()` then could replace on the authenticator the passkey another tab of it added
+ * (review r9 of #500). Every tab's `ends` comes before any tab's `endedBy`, so what one tab keeps until its `endedBy`
+ * lasts as long as any tab of the step may still ask.
+ */
+export type Lifetime = { ends: number; endedBy: number };
+
+/** The lifetime of a step whose GET left at `sent` and came back at `received` with this `timeout`. */
+export function lifetime(sent: number, received: number, timeout: number): Lifetime {
+  return { ends: sent + timeout, endedBy: received + timeout };
+}
+
+/** A keeper that reads `done` once the step's lifetime is over, whatever it holds. */
+function ending(keeper: Keeper, life: Lifetime, now: () => number): Keeper {
+  return { read: () => (now() >= life.ends ? { kind: 'done' } : keeper.read()), write: keeper.write };
+}
+
+function memory(): Keeper {
   let kept: Kept | null = null;
   return { read: () => kept, write: (next) => void (kept = next) };
+}
+
+/** A touch's keeper: the page's own memory. A second `get()` replaces nothing, so other tabs need not know. */
+export function memoryKeeper(life: Lifetime, now: () => number = Date.now): Keeper {
+  return ending(memory(), life, now);
 }
 
 /** The `Storage` methods a keeper uses: `localStorage`'s, or a test's. */
@@ -54,15 +79,16 @@ const PREFIX = 'coffre.passkey.';
  * under the step's challenge, which the sign-in's cookie carries, so two tabs of it, or the page again after a reload,
  * find the same entry. A second `create()` for the step, from another tab or a reloaded page, could replace on the
  * authenticator the passkey the first one added, as the page's own memory (review r7) could not stop. Each entry
- * lasts the step's `timeout`, from when it is written: the ceremony's lifetime, which the step's challenge cannot
- * outlive (`CEREMONY_TTL_SECONDS`, which the server gives `create()` as its timeout), and the longest a `create()`
- * stays open, so an `asking` left by a tab closed mid-`create()` lapses when that `create()` would have. Expired
- * entries, any step's, are removed when one is made. Where the browser keeps no storage (or refuses it), the page's
- * memory stands in: one tab's protection, review r7's.
+ * lasts until the step's `endedBy`, past every tab's `ends` (`Lifetime`), so no tab finds it gone while it may still
+ * ask; an `asking` left by a tab closed mid-`create()` lapses with the step. Expired entries, any step's, are removed
+ * when one is made. Where the browser keeps no storage, or refuses a read or a write, the page's memory holds the
+ * step from then on, one tab's protection, review r7's: a write that failed left nothing for a read to find, and its
+ * memory has it (review r9).
  */
-export function storedKeeper(storage: KeptStorage | null, challenge: string, timeoutMs: number, now: () => number = Date.now): Keeper {
+export function storedKeeper(storage: KeptStorage | null, challenge: string, life: Lifetime, now: () => number = Date.now): Keeper {
   const key = `${PREFIX}${challenge}`;
-  const memory = memoryKeeper();
+  const mine = memory();
+  let shared = storage;
   const live = (value: string | null): Kept | null => {
     if (value === null) return null;
     try {
@@ -73,32 +99,35 @@ export function storedKeeper(storage: KeptStorage | null, challenge: string, tim
     }
   };
   try {
-    for (let i = (storage?.length ?? 0) - 1; i >= 0; i--) {
-      const other = storage!.key(i);
-      if (other?.startsWith(PREFIX) && live(storage!.getItem(other)) === null) storage!.removeItem(other);
+    for (let i = (shared?.length ?? 0) - 1; i >= 0; i--) {
+      const other = shared!.key(i);
+      if (other?.startsWith(PREFIX) && live(shared!.getItem(other)) === null) shared!.removeItem(other);
     }
   } catch {
-    // Storage refused: the memory alone keeps this step.
+    shared = null;
   }
-  return {
+  const stored: Keeper = {
     read() {
       try {
-        if (storage !== null) return live(storage.getItem(key));
+        if (shared !== null) return live(shared.getItem(key));
       } catch {
-        // Fall through to the memory.
+        shared = null;
       }
-      return memory.read();
+      return mine.read();
     },
     write(kept) {
-      memory.write(kept);
+      mine.write(kept);
       try {
-        if (kept === null) storage?.removeItem(key);
-        else storage?.setItem(key, JSON.stringify({ ...kept, until: now() + timeoutMs }));
+        if (kept === null) shared?.removeItem(key);
+        else shared?.setItem(key, JSON.stringify({ ...kept, until: life.endedBy }));
       } catch {
-        // The memory holds it.
+        // Kept in memory from now on. What the storage held stays: another tab finds this step `asking` at worst,
+        // and asks for nothing.
+        shared = null;
       }
     },
   };
+  return ending(stored, life, now);
 }
 
 /**
@@ -109,7 +138,8 @@ export function storedKeeper(storage: KeptStorage | null, challenge: string, tim
  * (`passkey_exists`): the person would hold no key coffre knows (review r7 of #500). Sent again, the same passkey either
  * completes the step or, the first having committed, ends it with `passkey_exists`, and the key on the device is the
  * one coffre holds. For the same reason a press finds the step `elsewhere` while another tab's `create()` is open, and
- * ended (`state_mismatch`, "started in another tab") once another tab's answer was answered (review r8). A touch is
+ * ended (`state_mismatch`, "expired, or finished in another tab") once another tab's answer was answered (review r8),
+or the step's lifetime is over (review r9). A touch is
  * the same, in this page alone: the same assertion again, never a second touch for one challenge. `ask` throws as the
  * browser's `create()` or `get()` does, and its throw forgets the press: no passkey was made.
  */

@@ -14,6 +14,7 @@ import { defineSignin, SigninError, type PasskeysOptions, type SigninProvider } 
 import type { Vault } from '@coffre/core/vault';
 import { and, eq, isNull } from 'drizzle-orm';
 
+import { CEREMONY_TTL_SECONDS, CeremonyStates, creationOptions, remainingMs, requestOptions, type StepUpState } from '../src/api/ceremony.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -606,4 +607,24 @@ test("a session no passkey stands behind is taken under optional only while its 
 
   await rows.removePasskey(db.owner, deps.chainKey, held!.id);
   assert.equal(await me(browser), 'ok', 'removed by the app, its person holds none');
+});
+
+test("a step's options say what is left of its five minutes, from its challenge, which its sealed state lasts as long as: the page asks nothing past it (review r9 of #500)", () => {
+  const TTL = CEREMONY_TTL_SECONDS * 1000;
+  assert.equal(remainingMs({ issuedAt: 1_000 }, 1_000), TTL);
+  assert.equal(remainingMs({ issuedAt: 1_000 }, 61_000), TTL - 60_000);
+  assert.equal(remainingMs({ issuedAt: 1_000 }, 1_000 + TTL + 1), 0);
+
+  const config = { policy: 'optional', rpId: 'secrets.acme.example', origin: ORIGIN } as const;
+  const state: StepUpState = { purpose: 'step-up', credentialId: randomUUID(), principal: `user:${ADA}`, generation: 0, next: '/', challenge: 'c', issuedAt: Date.now() - 4 * 60_000 };
+  for (const { timeout } of [
+    requestOptions(config, state, []),
+    creationOptions(config, { ...state, userHandle: 'h' }, { email: ADA, name: null, site: 'coffre' }, []),
+  ]) {
+    assert.ok(timeout <= 60_000 && timeout > 50_000, `about a minute left of five: ${timeout}`);
+  }
+
+  const states = new CeremonyStates(randomBytes(32));
+  assert.notEqual(states.open(states.seal(state), ['step-up']), null, 'a minute left: it opens');
+  assert.equal(states.open(states.seal({ ...state, issuedAt: Date.now() - TTL - 1 }), ['step-up']), null, 'sealed now, but its challenge is older than five minutes');
 });

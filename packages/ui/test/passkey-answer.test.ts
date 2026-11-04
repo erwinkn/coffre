@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage } from '../src/lib/passkey-answer.ts';
+import { lifetime, memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage } from '../src/lib/passkey-answer.ts';
+
+const MINUTES_5 = 5 * 60 * 1000;
+/** A step whose GET left and came back at 0, with five minutes left of it. */
+const FIVE_MINUTES = lifetime(0, 0, MINUTES_5);
 
 const json = (body: unknown, status: number) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 
@@ -62,7 +66,7 @@ test("an answer coffre did not answer is sent again, the same, never asked of th
   };
 
   // Lost on the way, then a 503: the same passkey both times, the authenticator asked once.
-  const page = memoryKeeper();
+  const page = memoryKeeper(FIVE_MINUTES, () => 0);
   assert.deepEqual(await sendPasskey(page, ask, send), { kind: 'unavailable' });
   assert.deepEqual(await sendPasskey(page, ask, send), { kind: 'unavailable' });
   // The first had committed: the server ends the step, and the key on the device is the one it holds.
@@ -71,7 +75,7 @@ test("an answer coffre did not answer is sent again, the same, never asked of th
   assert.deepEqual(sent, Array(3).fill('{"response":"passkey 1"}'));
 
   // A refusal that keeps the step drops the answer it refused: the next press asks for another.
-  const again = memoryKeeper();
+  const again = memoryKeeper(FIVE_MINUTES, () => 0);
   assert.deepEqual(await sendPasskey(again, ask, send), { kind: 'refused', code: 'passkey_failed' });
   assert.deepEqual(await sendPasskey(again, ask, send), { kind: 'ok', value: { next: '/projects' } });
   assert.equal(asked, 3);
@@ -92,13 +96,11 @@ function storage(): KeptStorage & { entries: Map<string, string> } {
   };
 }
 
-const MINUTES_5 = 5 * 60 * 1000;
-
 test("two tabs, or a reload, of one enrollment make one passkey: an unanswered one is sent again from any of them, an answered one ends the others, and none asks while another's create() is open (review r8 of #500)", async () => {
   const shared = storage();
   let now = 0;
   const clock = () => now;
-  const tab = () => storedKeeper(shared, 'challenge-1', MINUTES_5, clock);
+  const tab = () => storedKeeper(shared, 'challenge-1', FIVE_MINUTES, clock);
   let asked = 0;
   const ask = async () => `{"response":"passkey ${++asked}"}`;
   const sent: string[] = [];
@@ -125,27 +127,27 @@ test("two tabs, or a reload, of one enrollment make one passkey: an unanswered o
   // Another step: tab 1's create() is open, so tab 2 asks for nothing.
   let made!: (body: string) => void;
   const open = new Promise<string>((resolve) => (made = resolve));
-  const first = storedKeeper(shared, 'challenge-2', MINUTES_5, clock);
+  const first = storedKeeper(shared, 'challenge-2', FIVE_MINUTES, clock);
   replies.push(() => json({ next: '/projects' }, 200));
   const pressed = sendPasskey(first, () => open, send);
-  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge-2', MINUTES_5, clock), ask, send), { kind: 'elsewhere' });
+  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge-2', FIVE_MINUTES, clock), ask, send), { kind: 'elsewhere' });
   made('{"response":"tab 1"}');
   assert.deepEqual(await pressed, { kind: 'ok', value: { next: '/projects' } });
   assert.equal(asked, 1);
 
   // A create() cancelled forgets the press: no passkey was made, and the next one asks.
-  const cancelled = storedKeeper(shared, 'challenge-3', MINUTES_5, clock);
+  const cancelled = storedKeeper(shared, 'challenge-3', FIVE_MINUTES, clock);
   await assert.rejects(sendPasskey(cancelled, () => Promise.reject(new DOMException('cancelled', 'NotAllowedError')), send), { name: 'NotAllowedError' });
   replies.push(() => json({ next: '/projects' }, 200));
-  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge-3', MINUTES_5, clock), ask, send), { kind: 'ok', value: { next: '/projects' } });
+  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge-3', FIVE_MINUTES, clock), ask, send), { kind: 'ok', value: { next: '/projects' } });
   assert.equal(asked, 2);
 
-  // A tab closed mid-create() leaves `asking`, which lapses with that create()'s timeout, the ceremony's lifetime;
-  // the next keeper made removes every lapsed entry.
-  storedKeeper(shared, 'challenge-4', MINUTES_5, clock).write({ kind: 'asking' });
-  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge-4', MINUTES_5, clock), ask, send), { kind: 'elsewhere' });
+  // A tab closed mid-create() leaves `asking`, which lapses with the step; the next keeper made removes every lapsed
+  // entry.
+  storedKeeper(shared, 'challenge-4', FIVE_MINUTES, clock).write({ kind: 'asking' });
+  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge-4', FIVE_MINUTES, clock), ask, send), { kind: 'elsewhere' });
   now += MINUTES_5;
-  storedKeeper(shared, 'challenge-5', MINUTES_5, clock);
+  storedKeeper(shared, 'challenge-5', FIVE_MINUTES, clock);
   assert.deepEqual([...shared.entries.keys()], []);
 });
 
@@ -163,11 +165,69 @@ test('a browser that keeps no storage, or refuses it, keeps the step in the page
     },
     removeItem: () => {},
   };
-  for (const kept of [storedKeeper(null, 'c', MINUTES_5), storedKeeper(refusing, 'c', MINUTES_5)]) {
+  for (const kept of [storedKeeper(null, 'c', FIVE_MINUTES, () => 0), storedKeeper(refusing, 'c', FIVE_MINUTES, () => 0)]) {
     let asked = 0;
     const replies = [json({ error: 'unavailable' }, 503), json({ next: '/' }, 200)];
     assert.deepEqual(await sendPasskey(kept, async () => `${++asked}`, () => replies.shift()!), { kind: 'unavailable' });
     assert.deepEqual(await sendPasskey(kept, async () => `${++asked}`, () => replies.shift()!), { kind: 'ok', value: { next: '/' } });
     assert.equal(asked, 1);
   }
+});
+
+test("a storage that reads but will not write leaves the step to the page's memory: the answer the write lost is sent again, never asked for again (review r9 of #500)", async () => {
+  // Full from the start (`QuotaExceededError` on every write), or from the second write on, `asking` already stored.
+  for (const failFrom of [1, 2]) {
+    const shared = storage();
+    let writes = 0;
+    const full: KeptStorage = {
+      ...shared,
+      get length() {
+        return shared.length;
+      },
+      setItem: (key, value) => {
+        if (++writes >= failFrom) throw new DOMException('full', 'QuotaExceededError');
+        shared.setItem(key, value);
+      },
+    };
+    const page = storedKeeper(full, 'c', FIVE_MINUTES, () => 0);
+    let asked = 0;
+    const replies = [json({ error: 'unavailable' }, 503), json({ error: 'passkey_exists' }, 400)];
+    const sent: string[] = [];
+    const send = (body: string) => (sent.push(body), replies.shift()!);
+    // The enrollment committed, its answer lost: Try again sends the same passkey, which ends the step.
+    assert.deepEqual(await sendPasskey(page, async () => `passkey ${++asked}`, send), { kind: 'unavailable' });
+    assert.deepEqual(await sendPasskey(page, async () => `passkey ${++asked}`, send), { kind: 'refused', code: 'passkey_exists' });
+    assert.equal(asked, 1);
+    assert.deepEqual(sent, ['passkey 1', 'passkey 1']);
+    // What the storage held stays: another tab finds this step `asking`, and asks for nothing.
+    if (failFrom === 2) assert.deepEqual(await sendPasskey(storedKeeper(shared, 'c', FIVE_MINUTES, () => 0), async () => `passkey ${++asked}`, send), { kind: 'elsewhere' });
+    assert.equal(asked, 1);
+  }
+});
+
+test("a page left open past its step's lifetime asks the authenticator for nothing, whatever the storage forgot: a create() then could replace the passkey another tab added (review r9 of #500)", async () => {
+  const shared = storage();
+  let now = 0;
+  const clock = () => now;
+  let asked = 0;
+  const ask = async () => `passkey ${++asked}`;
+  const send = () => json({ next: '/projects' }, 200);
+
+  // Tab A's GET took 10 ms there and back; tab B's left 5 ms later and took 10 ms too. Both are told five minutes left.
+  const a = storedKeeper(shared, 'challenge', lifetime(0, 10, MINUTES_5), clock);
+  const b = storedKeeper(shared, 'challenge', lifetime(5, 15, MINUTES_5), clock);
+  assert.deepEqual(await sendPasskey(a, ask, send), { kind: 'ok', value: { next: '/projects' } });
+  // Past A's `ends`, before B's: B may still ask, and A's entry, kept to A's `endedBy`, says the step was answered.
+  now = MINUTES_5 + 2;
+  assert.deepEqual(await sendPasskey(b, ask, send), { kind: 'refused', code: 'state_mismatch' });
+  // Past every `endedBy` the entry is gone, as is the step: B, a page restored from the back-forward cache, a tab of
+  // another sign-in's making, ends without asking.
+  now = MINUTES_5 + 60_000;
+  storedKeeper(shared, 'another', lifetime(now, now, MINUTES_5), clock);
+  assert.deepEqual([...shared.entries.keys()].filter((key) => key.endsWith('.challenge')), []);
+  assert.deepEqual(await sendPasskey(b, ask, send), { kind: 'refused', code: 'state_mismatch' });
+  assert.deepEqual(await sendPasskey(storedKeeper(shared, 'challenge', lifetime(5, 15, MINUTES_5), clock), ask, send), { kind: 'refused', code: 'state_mismatch' });
+  // A touch's page alike.
+  assert.deepEqual(await sendPasskey(memoryKeeper(lifetime(5, 15, MINUTES_5), clock), ask, send), { kind: 'refused', code: 'state_mismatch' });
+  assert.equal(asked, 1);
 });

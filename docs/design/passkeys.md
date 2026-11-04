@@ -287,13 +287,26 @@ therefore lives in `localStorage`, under its challenge (`storedKeeper`):
 `asking` while a `create()` is open, `unsent` once it answered, `done` once
 coffre answered it. A press that finds `asking` makes nothing ("another tab
 is adding your passkey"), finds `unsent` sends that answer, and finds `done`
-ends the page as a sign-in finished in another tab. An entry lasts the
-step's `timeout`, the ceremony's five minutes, which is also how long a
-`create()` stays open, so a tab closed mid-`create()` blocks nothing longer;
-lapsed entries are removed as new ones are made. The answer it holds is a
-public key and an attestation of `none`, no secret, and only the browser
-holding the sign-in's cookie can send it. Where the browser keeps no
-storage, or refuses it, the page's memory stands in. Two tabs pressed
+ends the page as a sign-in finished in another tab. The step ends five
+minutes after its challenge (`issuedAt`, from which the sealed state's
+expiry is dated), and its options' `timeout` is what is left of those when
+the GET is answered (`remainingMs`), so the page knows when the step ends
+on its own clock (`Lifetime`): at the earliest, the GET's send plus
+`timeout` (`ends`); at the latest, its arrival plus `timeout` (`endedBy`).
+From `ends` on, a press asks the authenticator for nothing and ends the
+page, a page restored from the back-forward cache included: an entry that
+had lapsed, and a page that then made a `create()` of an expired step,
+could replace the passkey another tab added (review r9). An entry lasts
+until its writer's `endedBy`, which comes after every tab's `ends`, so no
+tab finds it gone while it may still ask; a tab closed mid-`create()`
+blocks nothing past the step, and lapsed entries are removed as new ones
+are made. The answer it holds is a public key and an attestation of
+`none`, no secret, and only the browser holding the sign-in's cookie can
+send it. Where the browser keeps no storage, or refuses a read or a
+write, the page's memory holds the step from then on: a write that failed
+leaves nothing for a later read to find, and the memory has it (review
+r9). What the storage held stays, so another tab finds the step `asking`
+at worst, and asks for nothing. Two tabs pressed
 within the same instant can still both read nothing (storage has no
 compare-and-set across tabs); a person cannot press two tabs' buttons at
 once. A touch keeps its step in the page alone: a second `get()` replaces
