@@ -2276,11 +2276,16 @@ another (`WritingTamper`), her session revoked and its row put back by a
 database writer who also writes the row's seal into the revoke's change in
 the log, or her grant taken and her member row put back so, and Bob's row
 put back so after his demotion while he adds svc (`WritingForge`, T190),
-her two writes while her grant is taken away and given back and the roles
-redefined, a try the vault served abandoned at its hold and the next
-refused, down today's path (`WritingFallBack`, PR 3), or while her grant
-is taken and given back and her session revoked before that path
-(`WritingCaller`, review r2 of #469). Bob and Cy each add svc while Bob is demoted,
+her write while the key is made a reference, the roles redefined and her
+session revoked, a try the vault served abandoned at its hold and the next
+not served, down today's path (`WritingFallBack`, PR 3), or while the key
+is made a reference and her session revoked before that path
+(`WritingCallerShape`, review r2 of #469); her write while her grant is
+taken and given back and her session revoked, a try abandoned at its hold
+and the next refused, which the refusal's record ends (`WritingCaller`, PR
+6); her two writes while her grant is taken away, one refused and its
+record copied by a database writer as the newest change of her member
+object, her row put back to match (`WritingRefuse`, PR 6). Bob and Cy each add svc while Bob is demoted,
 the policy changes so that only Owners add, a database writer copies a
 token hash onto Bob's credential and the adders' session is revoked
 (`WritingAdd`; PR 5: the add's read holds the adder's session, and an add
@@ -2300,9 +2305,24 @@ round 1 in Rejoin. Every other change is one atomic step; the checkpointer seals
 whatever has committed at each tick. A hold that fails asks again, three
 tries in all, then gives up (409).
 
-**Today's path** (PR 3's `served: false`). A write the vault refuses, or
-whose read finds an object other than the caller's credential not as its
-log has it, goes down today's path, in two steps, as the code takes it.
+**A refusal's record** (PR 6). A try the decision refuses on its read is
+answered there: once the app has checked the caller's rows (RefusalAfterAuth),
+the vault writes its record (`Refuse`, `log_refusal`), a row of the log's
+changes of the request's own object, numbered under the fence shared, which
+moves no object's newest change; then the seal wait, then the answer. Two
+round trips at a first try (`TwoTrips`). `RefusalsReplay`: a key write's
+refusal is recorded only where the log at the request's number refuses it
+too. `RefusalsAuthentic`: recorded only as the caller its token is.
+`RefusedOrWritten`: a request ends with its refusal or its change, never
+both, one refusal at most. A copy of the record as another object's newest
+change is a change whose MAC fails (`Refile`), which ChangeMacChecked
+refuses.
+
+**Today's path** (PR 3's `served: false`). A write whose read finds an
+object other than the caller's credential not as its log has it, or a key
+the two-trip path does not write (`shape`, the key made a reference: on
+any try), goes down today's path, in two steps, as the code takes it; and,
+before PR 6 (RefusalLogged off), a write the vault refuses.
 The vault decides on the rows as they are (`WToday`), holding each object
 but the credential to its newest change's seal, and that change to its
 MAC once T190 is in it (TodayChangeMacChecked), and wraps the key; then the
@@ -2315,7 +2335,8 @@ its `auth_mac` alone; that is why a caller's own credential, not as its log
 has it or revoked, answers 401 at the vault's read and never goes there. A
 session revoked after that check does not stop the write
 (`TodayCallerStandsAtDecision`, which TLC must find broken in
-`WritingCaller`: today's front door has had that window before its wrap
+`WritingCallerShape`, and which holds in `WritingCaller` since PR 6 ends a
+refused request at its record: today's front door has had that window before its wrap
 since 0.14, and after a try the vault served it spans those tries too;
 review r2 of #469 found the r1 model rechecked the session at the wrap,
 which the code does not). A write
@@ -2333,8 +2354,8 @@ write has had since 0.14 (`TodayStandsAtCommit`, which TLC must find
 broken in `WritingFallBack`, on a session revoked: listed under EXPECTED
 in `scripts/formal.sh`). The
 two-trip path closes it for the writes it serves (`WritesStandAtCommit`
-holds of those alone); PR 6 closes it for every write
-([two-trips.md](design/two-trips.md)). Review r1 of #469 found the
+holds of those alone), and PR 6 for their refusals; what it does not
+serve keeps it until it does (PR 3b, PR 7; [two-trips.md](design/two-trips.md)). Review r1 of #469 found the
 model's first today's path, one atomic step, hid this window.
 `OneWritePerRequest`: a request writes once, whichever path commits it.
 `WritesNameTheirWrap`: its write names the wrap of the try that committed
@@ -2356,6 +2377,10 @@ it.
 | a request goes down today's path only from a try that committed nothing (FallBackUncommitted) | `OneWritePerRequest` (FallBack): a seal wait failing after the COMMIT taken for `served: false`, and the key written twice |
 | today's commit holds to the policy the caller was loaded with (TodayPolicyHeld: `audited`'s `policyStill`) | `TodayPolicyStandsAtCommit` (FallBack): the roles redefined after today's wrap, and the write commits on a right the caller no longer has (review r3 of #469) |
 | a change answers once sealed (WaitForSeal) | `AnsweredSealed` |
+| a refused try is answered by the vault's record of it, and goes nowhere else (RefusalLogged, PR 6) | `TodayCallerStandsAtDecision` (Caller): the refusal down today's path, after a try abandoned at its hold, goes on with the caller the first try checked, and writes once her grant is back, her session revoked since (review r2 of #469) |
+| the record ends the request (RefusalEnds) | `RefusedOrWritten` (Caller): a refusal recorded, and then a write down today's path |
+| the record is written once the app has checked the caller's rows (RefusalAfterAuth) | `RefusalsAuthentic` (Add): a token hash copied onto an Owner's credential, and a refusal recorded in the Owner's name |
+| the change's MAC check (ChangeMacChecked), against a copied record | `WritesStandAtCommit` (Refuse): the record copied as Ada's member object's newest change, her row put back, and her write commits on a grant the log took away |
 
 `TwoTrips` holds in every scenario: a write or an add that commits at its
 first try made two round trips. It follows from the steps' shape, so it says
@@ -2373,10 +2398,13 @@ not the model's: `decide.ts` takes one `WriteInputs`, made only from that
 answer. `DecideOnRead` shows why that matters, and `Unheld` what each part
 of the read holds; neither proves a given `write_inputs` complete. The hold
 reads, takes no lock and writes nothing. A request here is the record that
-binds it: its committed change, or the outcome record the Worker MACs when
-nothing commits; the ids the vault's statement resolves sit unsealed beside
-the request row, which proves nothing from them (two-trips.md, "The
-request and its refusals"). `RequestsReplay` checks that the decision's
+binds it: its committed change, or its refusal's record when the decision
+refused it (PR 6); the ids the vault's statement resolves would sit unsealed
+beside a request row, which PR 6 leaves for a replay of writes (two-trips.md,
+"The request and its refusals", "As built: PR 6"). That the readers of the
+log's changes take a refusal's record for no object's change is the code's
+(its object the request's own, its payload its own kind), held by tests,
+not the model's: the model's record moves no seal. `RequestsReplay` checks that the decision's
 inputs are the log at the request's number; that the replay recomputes the
 same decision from them is HotPathOne's `ReplayAgrees`. The decision is
 `decide.ts`'s, reduced to its inputs; which roles write where is the Lean

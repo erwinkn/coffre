@@ -963,6 +963,15 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   assert.deepEqual(await audit({ decision: 'allow' }), pages.allow);
   // Every other reader as it was (the Owner's reveal above logs a read of its own: after the pages).
   assert.deepEqual(await readers(), before);
+  // A reader of market/dev alone (an auditor there) reads it, on the whole log and the place's page; of prod alone, not.
+  const bob = 'bob@acme.example';
+  await w.root.members.add(`user:${bob}`);
+  await w.root.access.set(`user:${bob}`, { 'market/dev': 'auditor' });
+  const reader = clientFor(w.deps, bob);
+  const refusals = async (query: Parameters<typeof reader.audit.list>[0]) => (await reader.audit.list({ sealed: 'true', decision: 'deny', ...query })).entries.filter((entry) => entry.log === '0.15');
+  for (const query of [{}, { path: 'market' }, { path: 'market/dev' }]) assert.equal((await refusals(query)).length, 1, JSON.stringify(query));
+  await w.root.access.set(`user:${bob}`, { 'market/dev': null, 'market/prod': 'auditor' });
+  for (const query of [{}, { path: 'market' }]) assert.deepEqual(await refusals(query), [], JSON.stringify(query));
   // The record: a change of nothing, its object its request's own, MAC'd by the vault, sealed.
   const [only, ...others] = await refusalRecords();
   assert.equal(others.length, 0);

@@ -1,9 +1,9 @@
 # A change in two round trips (T179)
 
 Status: design and model (formal/Writing.tla). The key write's path is built (PR 3, below, "As built: PR 3"), an
-admin's first member add (PR 5, "As built: PR 5"), and the contraction, in 0.16.0 ("As built: the contraction"):
-each now two round trips. First grants, a set-up by someone who runs no instance, and the request row and outcome
-records (PR 6b) follow.
+admin's first member add (PR 5, "As built: PR 5"), the contraction, in 0.16.0 ("As built: the contraction"), each
+now two round trips, and their refusals' records (PR 6, "As built: PR 6"), two round trips too. First grants and a
+set-up by someone who runs no instance (PR 5b) follow; the stored request row waits for a replay of writes.
 
 R57 wants a change answered in under 200 ms in 0.16. Erwin's target (2026-11-02):
 **a key write and a member add each make at most two database round trips on the
@@ -452,7 +452,9 @@ statement's answer, as a use's second call writes its MAC'd row:
   digest, the credential's and the identity's ids and the refusal's code, MAC'd by the Worker and written by a
   second vault statement (`write_outcome`). One more round trip, on a
   refusal only: a refusal is not a change, and today `Refusal` pays a 0.14
-  deny entry for it;
+  deny entry for it. As built (PR 6, "As built: PR 6"): for a refusal of the decision's, a row of `log_changes`
+  of the request's own object, written by `log_refusal` once the app has checked the caller's rows; the request
+  row it would bind is not stored yet;
 - allowed but asked again (the hold failed): nothing more; the next try is
   a request of its own.
 
@@ -850,7 +852,8 @@ Each with what the key write and the first member add then cost:
    the request ("The request and its refusals"), and a refusal is answered
    and logged by the vault's outcome record (`write_outcome`,
    `admit_outcome`), no longer by today's path and its 0.14 deny entries;
-   the audit pages list those refusals.
+   the audit pages list those refusals. Built as PR 6, the outcome records alone, for the refusals of the
+   decision's: "As built: PR 6". The request row waits for a replay of writes, which would read it.
 7. **The other change routes**, each in the same shape; references join the
    key write once `write_request` seals their making and their end, and a
    remote key-encryption key once the request and outcome records stand
@@ -1138,3 +1141,97 @@ no entry; listed on the instance's pages alone; the log verifying through a role
 and not with the row forged; the row deleted, the member missing), packages/server/test/change-cost.test.ts (the two
 budgets), packages/server/test/request-cost.alone.ts (the pages' reads flat as others' writes and adds grow), and the
 conformance checks above.
+
+## As built: PR 6
+
+The refusals of the two two-trip routes, on Postgres with 0.15's log (`log_refusal`, migration 0067; the vault's
+`recordRefusal`, packages/vault/src/refusal.ts; the app's packages/server/src/refused.ts and `refuse` in
+api/context.ts). A key write or a first add the vault's decision refuses on its read is answered as today's path
+answers it and recorded by the vault in 0.15's log, in place of the 0.14 deny entry that path appends.
+`change-cost.test.ts` holds a refused key write and a refused add each to `{ app: 0, vault: 2 }` (a dozen before):
+
+```
+vault  write_request (or admit_read): the read, the number                                 1
+       the Worker: MACs, seals, the decision: refused; the record prepared (its ticket)
+app    the rows' auth_mac, in memory; the route's check, or its handler, refuses as today's path,
+       the caller as the vault's read decided it, the place as it found it, reading nothing
+vault  log_refusal: the record, under the fence shared                                      1
+       waitSealed                                                                           the seal
+```
+
+Example: Ada, a Viewer of market/dev, `PATCH /secrets/market/dev { API_KEY: "sk-…" }`. The vault's read finds her
+grant, the rules refuse `no_grant`; the app's router, its caller her standing as the read decided it, refuses as it
+always has, 403 "you need secret.write on market/dev"; where it would append the app's deny entry, the vault writes:
+
+```
+log_changes  number 4211, object log_object('request', <its id>), actor user:ada@acme.example, seal NULL,
+             payload {"code":"no_grant","credential":"<her session>","environmentId":"<dev>","identity":"<id>",
+                      "keys":["API_KEY"],"op":"write.refused","path":"market/dev","projectId":"<market>",
+                      "read":"<the read's digest>","ref":{"id":"<its id>","kind":"request"},
+                      "request":{"number":"4209","operationId":"…","requestId":"…"}}
+```
+
+What it serves: the refusals the rules make on a read whose every object stood (its MACs, its seals, the caller's
+credential): a key write's `keyRefusals` (`no_grant`, a protected place, a credential scope), a first add asked of
+a person or with a role by someone who runs no instance, an Owner asked by an admin. What keeps today's path: a read
+not as its log has it (`tampered`, `stale`: that path's check records its finding, which the members' watermark reads,
+PR 4a), a caller not active, a service account set up by someone who runs no instance (`#setsUp`, which the read does
+not hold: PR 5b), and everything the two-trip path does not serve.
+
+How it holds (formal/Writing.tla, `Refuse`; the scenarios Refuse, Caller and Add):
+
+- **A change of nothing.** The record is a row of `log_changes`, so that the checkpointer MACs it, seals it in its
+  window and its tiles, and retention keeps it, as every change. Its object is the request's own,
+  `log_object('request', id)`, which no other row's is: every reader that asks an object's newest change (a use, a
+  hold, `write_inputs`, the members' watermark, `missingMembers` of one) never meets it. Its payload starts
+  `{"code":"`, as no other change's does, so no record kind of change-records.ts but its own takes it
+  (`refusedWrite`, `refusedAdd`); the replay passes over it as the log's own (`LOGS_OWN`), and the verifier finds it
+  well formed (its `ref` names its object). Its request id is drawn for it alone, never a change's (a key write's are
+  derived from the request's number and each key's object), so no idempotency check of a change's ever meets it.
+- **Recorded as the caller its token is** (RefusalAfterAuth): the vault prepares the record at its decision, under its
+  change MAC key, domain-separated (a ticket, 30 s, as an add's), and writes it only when the app hands it back,
+  once the app has checked the caller's rows that read answered. A token hash copied onto an Owner's credential never
+  puts a refusal in the Owner's name: the app's check answers 401, and nothing is recorded. Without, TLC finds it
+  (WritingAdd, `RefusalsAuthentic`).
+- **It ends the request** (RefusalEnds). Before PR 6 a refusal went down today's path, which, after a try the vault
+  served and a hold that failed, went on with the caller the first try checked: Ada's grant taken (the hold fails),
+  the retry refused, her grant given back and her session revoked, today's path wrote (review r2 of #469). Now the
+  refusal is answered there (WritingCaller, `TodayCallerStandsAtDecision` holds; without RefusalLogged it breaks).
+  What the two-trip path no longer serves on a retry (the key made a reference) still goes there, and keeps that
+  window (WritingCallerShape, an expected gap; PR 3b, PR 7).
+- **Under the fence shared**, as a use: it waits for a change's hold to its COMMIT and the checkpointer's barrier waits
+  for it, so its number is sealed in order; it holds up no use, and moves no object a use or a hold reads. A use's
+  cached cover asks again once (it compares the log's newest change, which the record moves, as a sign-in does).
+- **Sealed before the answer** (R51; D165 kept for refusals): `recordRefusal` waits for the record's seal, as a change
+  does. A refusal answered is in a signed checkpoint.
+- **Forged or copied.** The record's MAC covers every column but its number, its object and its request id among them.
+  Copied by a database writer as the newest change of Ada's member object, her row put back to match, it is a change
+  whose MAC fails: the vault refuses the member `tampered`, as any forged change (WritingRefuse, ChangeMacChecked).
+  Copied whole under another request id, it is listed and marked forged on the audit pages.
+
+Its answer: the app's caller is the vault's read's (`standing`, its rows checked), the place the read's, so the
+router's check refuses as it would on today's path, its message and its status; one the app's check lets through (a
+later try, or the app's check and the vault's apart: an Owner asked by an admin) is answered as that path answers the
+vault's own refusal (`vaultRefused`). `refuse` records it where it would append a deny entry of the action the vault
+refused (`secret.write`, `member.add`); a ticket expired meanwhile (the app took more than 30 s) appends the entry as
+before. No credential's last use is written on a refusal: no app statement carries it, as an add's carries none.
+
+The audit pages list the records where the deny entries stood: a key write's on the whole log, its place's and its
+environment's pages, the refused member's, a reader of its environment's, and `decision=deny`; an add's on the
+instance's pages; neither on `decision=allow`, nor at a key (the route's refusal named none). Six partial indexes
+(every one, one member's, one environment's and one member's there; an add's every one and one member's), and
+statistics on their markers, keep a page to as many entries as it lists (R48).
+
+**What it leaves out: the request row.** The design stores, beside each request, the read `write_inputs` answered and
+the request as asked, MAC'd (above, "The request and its refusals"), so that a replay of writes could decide each
+again. Nothing reads it yet: no verifier replays a write's decision. It waits for one; the record names the read's
+digest and the request's number, which such a row would be held to.
+
+The regressions: packages/server/test/write-held.test.ts (a refusal answered as today's path answers it, status and
+body, the record in place of the deny entry; every reader as it was after a refusal, the audit pages listing it where
+0.14's entry stood and nowhere else; the record sealed by a checkpointer before the answer, the trees verifying, the
+replay without a fault; a record copied onto Ada's member object refused as forged, and one copied whole marked
+forged; a refused retry ending the request, and a retry not served still going down today's path),
+packages/server/test/admit-held.test.ts (an add refused for someone who runs no instance, and an Owner asked by an
+admin, answered as today's path, the list of everyone as it was), and packages/server/test/change-cost.test.ts (both
+at two round trips).

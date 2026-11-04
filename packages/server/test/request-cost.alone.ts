@@ -1305,6 +1305,9 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   const [envA, envC, key] = [randomUUID(), randomUUID(), randomUUID()];
   const THIRD = 'user:third@acme.example';
   const writes = (written: Parameters<typeof sealedPage>[1]['written'], actors?: string[]) => sealedPage(counted, { ...(actors === undefined ? {} : { actors }), detail: false, limit: 100, instance: false, written });
+  // Their refusals, which the vault records since PR 6: a key write's where its writes are listed, an add's on the instance's pages.
+  const refusals = (at: Parameters<typeof sealedPage>[1]['written'], actors?: string[], instance = false) =>
+    sealedPage(counted, { ...(actors === undefined ? {} : { actors }), detail: false, limit: 100, instance: false, written: null, refusals: { instance, at } });
   const credentials = Array.from({ length: 20 }, () => randomUUID());
   /** How far a page below Ada's stretch counts, read before each measure. */
   let reached: ChangePoint | null = null;
@@ -1343,6 +1346,13 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     // Of two members, as an actor's page names a person (`user:` and the bare name): each one's read on its own, never
     // one read of both sorted, which would grow with either's history there, nor the place's with others' passed over.
     "an environment's key writes by two people": () => writes({ environmentIds: [envA] }, [ADA, THIRD]),
+    'every refused key write': () => refusals({ all: true }),
+    "a person's refused key writes": () => refusals({ all: true }, [ADA]),
+    "an environment's refused key writes": () => refusals({ environmentIds: [envA] }),
+    "an environment's refused key writes by a person": () => refusals({ environmentIds: [envA] }, [ADA]),
+    'every refused add': () => refusals(null, undefined, true),
+    "a person's refused adds": () => refusals(null, [ADA], true),
+    "through the API, a person's refusals": () => root.audit.list({ actor: ADA, sealed: '1', decision: 'deny', limit: 50 }),
   };
   const pages = async () => {
     const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
@@ -1363,9 +1373,11 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   };
   // A key write down the two-trip path, at an environment: its payload starts with its `digest` and names its read.
   const writtenAt = (environment: string) => sql`${`{"digest":null,"environmentId":"${environment}","inputs":"00","key":null,"nature":"secret","op":"secret.write","projectId":"p","ref":{"id":"`} || gen_random_uuid() || '","kind":"secret"},"reference":null,"request":{"credential":"c","identity":null,"number":"1","operationId":null,"requestId":null},"source":null,"version":"v"}'`;
+  // A key write's refusal at an environment, and an add's, as the vault records them (PR 6): their payloads start with their code.
+  const refusedAt = (environment: string) => sql`${`{"code":"no_grant","credential":"c","environmentId":"${environment}","identity":null,"keys":["K"],"op":"write.refused","path":"market/dev","projectId":"p","read":"00","ref":{"id":"`} || gen_random_uuid() || '","kind":"request"},"request":{"number":"1","operationId":null,"requestId":null}}'`;
   const credential = (record: string) => sql.raw(`'{"op":"credential.${record}","ref":{"id":"' || gen_random_uuid() || '","kind":"credential"}'`);
   // Each kind of change as the vault writes its payload, canonical (keys in order): `g` its row's place in the batch.
-  const payloads: Record<'signIn' | 'member' | 'issue' | 'revoke' | 'signOut' | 'unbound' | 'renew' | 'written' | 'writtenC' | 'admitted', (actor: string) => SQL> = {
+  const payloads: Record<'signIn' | 'member' | 'issue' | 'revoke' | 'signOut' | 'unbound' | 'renew' | 'written' | 'writtenC' | 'admitted' | 'refused' | 'refusedC' | 'refusedAdd', (actor: string) => SQL> = {
     signIn: () => sql`${credential('issue')} || ',"signIn":{"binding":"b","issuer":"i","proof":"oidc","run":{"run_id":"' || g || '"}}}'`,
     member: () => sql`'{"op":"member.add","ref":{"id":"token:x","kind":"principal"}}'`,
     issue: (actor: string) => sql.raw(`'{"caller":"person","expiresAt":1,"generation":1,"issue":{"by":"${actor}","kind":"personal","label":"l' || g || '","via":null},"op":"credential.issue","principal":"${actor}","ref":{"id":"' || gen_random_uuid() || '","kind":"credential"},"scope":[]}'`),
@@ -1376,6 +1388,9 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     written: () => writtenAt(envA),
     writtenC: () => writtenAt(envC),
     admitted: () => sql`'{"inputs":"00","op":"member.add","ref":{"id":"token:x' || g || '","kind":"principal"},"request":{"credential":"c","identity":null,"operationId":null,"requestId":null},"role":"member","scope":null}'`,
+    refused: () => refusedAt(envA),
+    refusedC: () => refusedAt(envC),
+    refusedAdd: () => sql`'{"code":"not_allowed","credential":"c","identity":null,"op":"add.refused","principal":"user:x' || g || '","read":"00","ref":{"id":"' || gen_random_uuid() || '","kind":"request"},"request":{"operationId":null,"requestId":null},"role":"owner"}'`,
   };
   /**
    * `count` changes numbered from `from`, each asked at the millisecond `at` + its place (`from`'s by default), long
@@ -1430,6 +1445,10 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     await plant(1_200_100, 100, ADA, 'written', { object: sql`log_object('secret', ${key})` });
     await plant(1_201_000, 20_000, 'user:other@acme.example', 'writtenC');
     await plant(1_230_000, 1_000, 'user:admin@acme.example', 'admitted');
+    // Refusals (PR 6): Ada's at envA, others' at envC, an admin's adds.
+    await plant(1_240_000, 100, ADA, 'refused');
+    await plant(1_241_000, 20_000, 'user:other@acme.example', 'refusedC');
+    await plant(1_262_000, 1_000, 'user:admin@acme.example', 'refusedAdd');
     await settle();
     reached = await sealedReach(counted, { actors: [ADA], before: stretch.before });
     const small = await pages();
@@ -1457,6 +1476,11 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     await plant(1_510_000, 50_000, 'user:other@acme.example', 'written', { object: sql`log_object('secret', ${key})` });
     // And a third person's, older than all of Ada's there.
     await plant(1_560_000, 50_000, THIRD, 'written', { at: 1_000 });
+    // 50,000 refusals more of others at envC and at Ada's environment, 50,000 of hers elsewhere, 50,000 refused adds.
+    await plant(1_610_000, 50_000, 'user:other@acme.example', 'refusedC');
+    await plant(1_660_000, 50_000, 'user:other@acme.example', 'refused');
+    await plant(1_710_000, 50_000, ADA, 'refusedC');
+    await plant(1_760_000, 50_000, 'user:admin@acme.example', 'refusedAdd');
     await settle();
     reached = await sealedReach(counted, { actors: [ADA], before: stretch.before });
     const grown = await pages();
@@ -1509,6 +1533,13 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     assert.deepEqual((await writes({ environmentIds: [envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [1_510_000n]);
     assert.deepEqual((await writes({ environmentIds: [envA, envC] }, [ADA])).rows.map(({ number }) => number).slice(0, 1), [1_510_000n]);
     assert.deepEqual((await writes({ environmentIds: [envA, envC] })).rows.map(({ number }) => number).slice(0, 1), [1_560_000n]);
+    // The refusals: Ada's newest at envA, past others' there since; every one's newest, hers at envC; the adds'.
+    assert.deepEqual((await refusals({ environmentIds: [envA] }, [ADA])).rows.map(({ number }) => number).slice(0, 2), [1_240_100n, 1_240_099n]);
+    assert.equal((await refusals({ environmentIds: [envA] }, [ADA])).rows.length, 100);
+    assert.deepEqual((await refusals({ environmentIds: [envA] })).rows.map(({ number }) => number).slice(0, 1), [1_710_000n]);
+    assert.deepEqual((await refusals({ all: true })).rows.map(({ number }) => number).slice(0, 1), [1_760_000n]);
+    assert.deepEqual((await refusals(null, undefined, true)).rows.map(({ number }) => number).slice(0, 1), [1_810_000n]);
+    assert.deepEqual((await refusals(null, [ADA], true)).rows, []);
     const origins = await originsOf(counted, [...credentials, ...tokens]);
     assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));
     assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
