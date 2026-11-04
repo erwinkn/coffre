@@ -1582,20 +1582,19 @@ export async function livePasskeys(db: Queryable, chainKey: Buffer, principal: s
 }
 
 /**
- * How many passkey rows a person has ever had, at any generation and removed ones included, and how many of them are
- * live at `generation`: one statement. The first is an enrollment's `passkeysEver` (section 3.2): rows are never
- * deleted, so every add moves it for good, and a sealed state that names the old count enrolls nothing again.
+ * Every passkey row a person has had, at any generation, removed ones included, each held to its MAC (a row that fails
+ * it throws, `verifyAuthRow`): how many there are, an enrollment's `passkeysEver` (section 3.2; rows are never deleted,
+ * so every add moves it for good, and a sealed state that names the old count enrolls nothing again), and how many are
+ * live at `generation`. Read under the head by what decides on a person holding none: their first passkey, and a sign-in
+ * the provider alone answers. It reads the rows rather than count them for their MACs: a removal forged in the database
+ * (`removed_at` set, the MAC left as it was) refuses, where a count read it as no passkey and let another be the first
+ * (R64; review r2 of #500). By `passkeys_principal_idx`.
  */
-export async function passkeyCounts(db: Queryable, principal: string, generation: number): Promise<{ ever: number; live: number }> {
+export async function passkeyHistory(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<{ ever: number; live: number }> {
   const { passkeys } = tablesOf(db);
-  const [row] = await db
-    .select({
-      ever: count(),
-      live: sql<number>`coalesce(sum(case when ${passkeys.generation} = ${generation} and ${passkeys.removedAt} is null then 1 else 0 end), 0)`,
-    })
-    .from(passkeys)
-    .where(eq(passkeys.principal, principal));
-  return { ever: Number(row?.ever ?? 0), live: Number(row?.live ?? 0) };
+  const rows = await db.select().from(passkeys).where(eq(passkeys.principal, principal));
+  for (const row of rows) verifyAuthRow(chainKey, 'passkeys', row);
+  return { ever: rows.length, live: rows.filter((row) => row.generation === generation && row.removedAt === null).length };
 }
 
 /** A member as a sign-in's callback weighs them (`signinMembers`). */

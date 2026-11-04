@@ -47,7 +47,9 @@ const asAssertion = (v: W3cVector) => ({
   response: { clientDataJSON: toBase64url(hex(v.authentication.clientDataJSON)), authenticatorData: toBase64url(hex(v.authentication.authenticatorData)), signature: toBase64url(hex(v.authentication.signature)) },
 });
 
-const W3C_SITE = { origin: 'https://example.org', rpId: 'example.org' };
+/** What the server holds a response's CBOR to: its body's value count (`MAX_BODY_NODES`). */
+const VALUES = 20_000;
+const W3C_SITE = { origin: 'https://example.org', rpId: 'example.org', values: VALUES };
 
 /** The passkey a vector's registration attested, read from its bytes: a vector whose UV bit is clear registers nothing. */
 const attestedBy = (v: W3cVector): StoredPasskey => {
@@ -133,7 +135,7 @@ test("SimpleWebAuthn's registrations, from U2F and packed security keys, TPM, An
   const registrations = Object.entries(vectors.simplewebauthn.registration as Record<string, Fixture>);
   assert.equal(registrations.length, 8);
   for (const [name, f] of registrations) {
-    const result = await verifyRegistration(f.response, { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID });
+    const result = await verifyRegistration(f.response, { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID, values: VALUES });
     assert.equal(reason(result), f.requireUserVerification ? 'ok' : 'user_verification', name);
     if (result.ok) assert.deepEqual(result.credentialId, b64(f.response.id as string), name);
   }
@@ -160,7 +162,7 @@ test("SimpleWebAuthn's assertions verify against their credentials, and their co
       algorithm: -7,
       userHandle: response.response.userHandle ? b64(response.response.userHandle) : new Uint8Array(16),
     };
-    const expected: AssertionExpectation = { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID, passkey };
+    const expected: AssertionExpectation = { challenge: b64(f.expectedChallenge), origin: f.expectedOrigin, rpId: f.expectedRPID, values: VALUES, passkey };
     const result = await verifyAssertion(f.response, expected);
     assert.equal(reason(result), refused[name] ?? (f.requireUserVerification ? 'ok' : 'user_verification'), name);
     if (refused[name]) continue;
@@ -174,7 +176,7 @@ test("SimpleWebAuthn's assertions verify against their credentials, and their co
 
 // --- one negative case per check ----------------------------------------------
 
-const SITE = { origin: 'https://secrets.acme.example', rpId: 'secrets.acme.example' };
+const SITE = { origin: 'https://secrets.acme.example', rpId: 'secrets.acme.example', values: VALUES };
 const CHALLENGE = hex('5c'.repeat(32));
 const HANDLE = hex('a1'.repeat(16));
 
@@ -377,6 +379,32 @@ test("a registration is refused for each of section 7.2's checks, alone, with th
   const wordy = await register({ publicKey: cose([1, 2], [3, 'x\n'.repeat(10_000)], [-1, 1], [-2, x], [-3, y]) });
   assert.equal(reason(wordy), 'algorithm');
   assert.ok(!wordy.ok && wordy.message === 'algorithm string was not asked for', !wordy.ok ? wordy.message : '');
+});
+
+test("a response decodes to no more CBOR values than its request may hold, all its CBOR counted together: one more than it holds is refused", async () => {
+  // The fewest values each honest ceremony passes with: one fewer refuses, as malformed.
+  for (const [name, run] of [['registration', register], ['assertion', assertion]] as const) {
+    let fewest = 1;
+    while (reason(await run({}, { values: fewest })) === 'malformed') fewest++;
+    assert.equal(reason(await run({}, { values: fewest })), 'ok', name);
+    assert.ok(fewest > 10 && fewest < 100, `${name}: ${fewest}`);
+  }
+  // An attestation statement nested a million maps deep, two megabytes the verifier ignores: built, it was about
+  // 150 MiB of maps (review r2 of #500); now refused at the request's 20,000th value, before anything past it is built.
+  const deep = inner((r) => {
+    const original = cborMap(b64(String(r.attestationObject)));
+    const nested = new Uint8Array(2_000_001).fill(0xa1);
+    for (let i = 1; i < nested.length; i += 2) nested[i] = 0x01;
+    r.attestationObject = toBase64url(Buffer.concat([
+      Uint8Array.of(0xa3), encodeCbor('fmt'), encodeCbor('packed'), encodeCbor('attStmt'), nested,
+      encodeCbor('authData'), encodeCbor(original.get('authData') as Uint8Array),
+    ]));
+  });
+  const refused = await register({ response: deep });
+  assert.ok(!refused.ok && refused.reason === 'malformed' && /more CBOR values/.test(refused.message), JSON.stringify(refused));
+  // The reader's own count, called directly: a value per item and per map key.
+  assert.deepEqual(readCbor(Uint8Array.of(0xa1, 0x01, 0x82, 0x02, 0x03), 0, { left: 5 }), [new Map([[1, [2, 3]]]), 5]);
+  assert.throws(() => readCbor(Uint8Array.of(0xa1, 0x01, 0x82, 0x02, 0x03), 0, { left: 4 }), /more CBOR values/);
 });
 
 function cborMap(bytes: Uint8Array): Map<number | string, unknown> {

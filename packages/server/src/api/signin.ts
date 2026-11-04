@@ -29,6 +29,7 @@ import { authMac, AuthRowTampered, issuedBy, issuingBinding } from '../auth-rows
 import { answerOf, shownActive, type Shows } from '../db/answers.ts';
 import { appLogKey } from '../db/audit.ts';
 import type { AuditEntry } from '../db/audit.ts';
+import { MAX_BODY_NODES } from '../http.ts';
 import {
   findBinding,
   findCredential,
@@ -56,7 +57,7 @@ import {
   passkeyBehind,
   passkeyByToken,
   passkeyByCredentialId,
-  passkeyCounts,
+  passkeyHistory,
   livePasskeys,
   liveConnections,
   touchPasskey,
@@ -126,7 +127,7 @@ export type SigninRefusal =
   | 'account_mismatch'
   /** Linking: the account already belongs to someone else. */
   | 'already_linked'
-  /** The matching person's record failed the vault's integrity check. */
+  /** The matching person's record failed the vault's integrity check, or one of their passkeys' rows the app's (R64). */
   | 'tampered'
   /**
    * The person holds a live passkey, and the provider alone signed them in (docs/design/passkeys.md, section 6.1): a
@@ -551,12 +552,21 @@ export class SigninService {
       return audited(this.#deps, async (tx, log) => {
         // Under the head, which every change to the person's passkeys holds too: the provider alone signs in nobody who
         // holds a live passkey, while the policy is not `off`, and a touch only with a passkey still live (passkeys.md,
-        // section 6.1); a first passkey only while it is still the first (section 3.2). Asked together, one round trip.
+        // section 6.1); a first passkey only while it is still the first (section 3.2). What decides on the person
+        // holding none reads every row of theirs, each held to its MAC (`passkeyHistory`): a removal forged in the
+        // database refuses rather than read as none (R64). Asked together, one round trip.
+        const none = () => passkeyHistory(tx, this.#deps.chainKey, principalOf(principal), standing.generation).catch((error: unknown) => {
+          if (error instanceof AuthRowTampered) throw new SigninRefused('tampered');
+          throw error;
+        });
         const [member, backed] = await Promise.all([
           this.#stillMember(tx, principal, standing, known?.accessSeq),
           factor?.kind === 'enroll'
-            ? passkeyCounts(tx, principalOf(principal), standing.generation).then(({ ever, live }) => ever === factor.state.passkeysEver && live === 0)
-            : this.#issuedBacked(tx, { principal: principalOf(principal), generation: standing.generation, passkeyId }),
+            ? none().then(({ ever, live }) => ever === factor.state.passkeysEver && live === 0)
+            // `passkeyStands`' rule for a credential that names none, `optional` and none held, on rows checked.
+            : factor === null && this.#deps.signin.passkeys.policy === 'optional'
+              ? none().then(({ live }) => live === 0)
+              : this.#issuedBacked(tx, { principal: principalOf(principal), generation: standing.generation, passkeyId }),
         ]);
         if (!member) throw refuse('deactivated', preparedId);
         // Whoever answered passed the provider but not the factor: no entry, as section 3.1 promises such a visitor
@@ -737,7 +747,7 @@ export class SigninService {
         next,
         ...challenge(),
         userHandle: purpose === 'enroll' ? userHandle() : null,
-        // Removed ones included, every generation's (`passkeyCounts`): the post adds the first only while it is still this.
+        // Removed ones included, every generation's (`passkeyHistory`): the post adds the first only while it is still this.
         passkeysEver: purpose === 'enroll' ? (row?.ever ?? 0) : null,
       },
     });
@@ -787,7 +797,8 @@ export class SigninService {
       return passkeyRefused(meta, state.principal, 'state_mismatch', "the provider's issuer changed since the callback");
     }
     const profile: SignedInAccount = { provider: state.account.provider, subject: state.account.subject, emails: state.account.email === null ? [] : [state.account.email], name: state.account.name };
-    const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId };
+    // The response's CBOR held to the bound its request's JSON is (`MAX_BODY_NODES`): one count of what a body builds.
+    const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, values: MAX_BODY_NODES };
     if (state.purpose === 'enroll') {
       const verified = await verifyRegistration(response, expected);
       if (!verified.ok) return passkeyRefused(meta, state.principal, 'passkey_failed', verified.reason);
@@ -872,7 +883,7 @@ export class SigninService {
       return await withRefusals(this.#deps, async () => {
         const passkey = await this.#passkeyAnswering(response, state);
         if (passkey === null) throw deny('unknown_credential');
-        const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, passkey: storedOf(passkey) };
+        const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, values: MAX_BODY_NODES, passkey: storedOf(passkey) };
         const verified = await verifyAssertion(response, expected);
         if (!verified.ok) throw deny(verified.reason, passkey.id);
         const standing = await this.#standing(principal);

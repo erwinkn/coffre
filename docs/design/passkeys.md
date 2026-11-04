@@ -298,7 +298,14 @@ object, have none of their own, and the request they come in is read to
 the bound the API reads every control-plane body to (`API_BODY_BYTES`),
 once the cookie it must carry has opened. Their CBOR is read with a list of
 what is open, not the call stack, so however deep it nests it costs no
-stack (RFC 8949, section 10), and needs no depth limit.
+stack (RFC 8949, section 10), and needs no depth limit. What it decodes to
+is counted, though: every item and map key of the attestation object, the
+authenticator data's CBOR and the COSE key, together, is held to the count
+the API holds a body's JSON values to (`MAX_BODY_NODES`, 20,000, R27's CPU
+budget), one count of what a body builds. Without it, a megabyte of maps
+nested one byte apiece, in an attestation statement the verifier ignores,
+built about 150 MiB of them before anything refused it, past the 128 MB a
+Worker's isolate has (review r2 of #500).
 
 ### 3.2 The first sign-in under `required`
 
@@ -360,8 +367,10 @@ registration, as anyone does; nothing about it depends on the generation.
 
 **As built (PR 4b).** The enrollment's transaction takes the person's
 factor lock first (`audited`'s `factor`, `lockFactor`), then the head; it
-checks the count of their passkey rows, removed ones included, and that
-none is live, in one statement (`passkeyCounts`), adds the passkey, ends
+reads every passkey row of theirs, removed ones included, by
+`passkeys_principal_idx`, holds each to its MAC, and checks their number
+and that none is live, in one statement (`passkeyHistory`), adds the
+passkey, ends
 what no passkey stands behind (section 6.1: credentials and MCP
 connections of this membership naming none, through their prepared
 changes, and approved device codes not yet redeemed that name none,
@@ -369,7 +378,12 @@ denied), and issues the session, with `account.link`, `passkey.add` and
 `sign_in` entries. A configured Owner the vault has not admitted is
 admitted at the post, by `completeSignin`'s question to the vault, once
 the attestation has verified. The passkey's name is "Passkey <n>" until
-Account → Passkeys (PR 6) names them by their AAGUID.
+Account → Passkeys (PR 6) names them by their AAGUID. It reads the rows,
+not a count, for their MACs: a removal written in the database alone
+(`removed_at` set, the MAC as the app signed the live row) refuses the
+sign-in, `tampered`, where a count read it as no passkey and let another
+be the first (R64; review r2 of #500). A sign-in the provider alone
+answers under `optional` reads the same, for the same reason.
 
 ### 3.3 `optional`: the prompt
 
@@ -761,6 +775,8 @@ export const passkeys = pgTable('passkeys', {
   foreignKey({ name: 'passkeys_principal_fkey', columns: [table.principal], foreignColumns: [vaultMembers.principal] }).onDelete('restrict'),
   // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
   index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+  // Every passkey a person has had (PR 4b, migration 0069): the callback's count, and the first passkey's checked read.
+  index('passkeys_principal_idx').on(table.principal),
 ]);
 ```
 

@@ -661,6 +661,9 @@ export const passkeys = pgTable(
     }).onDelete('restrict'),
     // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
     index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+    // Every passkey a person has had, removed ones included: the callback's count of them, and what the first passkey and
+    // a sign-in the provider alone answers read under the head, each row held to its MAC (`passkeyHistory`).
+    index('passkeys_principal_idx').on(table.principal),
   ],
 );
 

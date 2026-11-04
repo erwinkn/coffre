@@ -438,3 +438,26 @@ test("a new passkey whose credential ID is another person's already is refused a
   const done = await browser.answer({ response: await register(other, (await browser.step()).body.options) });
   assert.deepEqual(done, { status: 200, body: { next: '/projects/market' } });
 });
+
+test("a passkey's removal forged in the database, its MAC left as it was, refuses: neither another first passkey nor the provider alone signs its person in (R64; review r2 of #500)", async () => {
+  await enroll(deployment('required'), ADA, await SoftAuthenticator.create());
+  // Removed in the database alone: what the app signed says live.
+  await db.owner.update(passkeys).set({ removedAt: new Date(), removedBy: `user:${ROOT}` }).where(eq(passkeys.principal, `user:${ADA}`));
+  const before = await counts();
+
+  // The callback reads the rows unchecked, and asks for a first passkey; the answer, under the head, reads them checked.
+  const again = new Browser(deployment('required'));
+  assert.equal(await again.provider(ADA), '/auth/passkey');
+  const step = await again.step();
+  assert.equal(step.body.purpose, 'enroll');
+  assert.deepEqual(await again.answer({ response: await register(await SoftAuthenticator.create(), step.body.options) }), { status: 400, body: { error: 'tampered' } });
+  assert.equal(again.session, undefined);
+
+  // Under optional, the callback reads no passkey and signs in by the provider alone, which, under the head, refuses.
+  const alone = new Browser(deployment('optional'));
+  await alone.fetch('/auth/signin/acme?next=/projects/market');
+  const back = await alone.fetch(`/auth/callback/acme?email=${encodeURIComponent(ADA)}`);
+  assert.equal(back.headers.get('location'), '/login?error=tampered');
+  assert.equal(alone.session, undefined);
+  assert.deepEqual(await counts(), before, 'no passkey, session or identity written');
+});
