@@ -952,10 +952,14 @@ request goes today's path, as one the vault does not serve does, and is
 answered as any request is (`401`, `503`), never from the check itself: its
 credential check, the app's statement, refuses it `401 passkey_required`
 before the route's transaction, so nothing is written in either log, and
-what the vault prepared is dropped (`passkey-check.test.ts` holds both
-paths, and the fast one served on Postgres). Each is one
-round trip more on the request's side: `key set` 1 to 2 and `member added`
-0 to 1 in `change-cost.test.ts`, and a person's reveal one statement before
+what the vault prepared is dropped. A try the vault's read refused (T179
+PR 6, a Developer's member add) goes the same way: the passkey's `401`
+answers it, as on today's path, whose credential check comes before the
+route's, and the vault's refusal is never recorded, its ticket left to
+expire (`passkey-check.test.ts` holds both paths, the fast one served on
+Postgres, and the refusal unrecorded). Each is one
+round trip more on the request's side: `key set` 1 to 2, `member added`
+0 to 1, and their refusals' 0 to 1 in `change-cost.test.ts`, and a person's reveal one statement before
 its use in `proxy-use-cost.test.ts`. Teaching the vault's statements the
 check would save it, through `accepts` as `named-use.ts` asks of any new
 check; that is a task of its own.

@@ -261,8 +261,10 @@ test('a reveal by a credential whose passkey fails its MAC gets the 401 any requ
 test('a key write or a member\'s add by a credential the check refuses is refused before it writes, by the fast path and today\'s alike', async () => {
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${BOB}`, { role: 'admin' });
-  // The vault's fast-path calls, counted: Postgres's 0.15 vault serves them, SQLite's never (today's path alone).
+  // The vault's fast-path calls, counted: Postgres's 0.15 vault serves them, SQLite's never (today's path alone). And
+  // the refusals it records in place of 0.14's deny entry (T179 PR 6).
   const served = { writes: 0, adds: 0 };
+  let recorded = 0;
   const vault = deps.vault;
   deps = { ...deps, vault: new Proxy(vault, {
     get(target, key) {
@@ -270,6 +272,7 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
       if (typeof value !== 'function') return value;
       if (key === 'writeKeys') return async (...args: unknown[]) => { const answer = await (value as (...a: unknown[]) => Promise<{ served: boolean }>).apply(target, args); if (answer.served) served.writes++; return answer; };
       if (key === 'admitRead') return async (...args: unknown[]) => { const answer = await (value as (...a: unknown[]) => Promise<{ served: boolean }>).apply(target, args); if (answer.served) served.adds++; return answer; };
+      if (key === 'recordRefusal') return async (...args: unknown[]) => { recorded++; return (value as (...a: unknown[]) => Promise<unknown>).apply(target, args); };
       return (value as (...a: unknown[]) => unknown).bind(target);
     },
   }) };
@@ -282,9 +285,12 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
   // Taken while they hold no passkey.
   assert.equal(await answer(ada!.secrets.set('market/dev', { API_KEY: 'ada-1' })), 'ok');
   assert.equal(await answer(bob!.members.add('user:carol@acme.example', { role: 'developer' })), 'ok');
+  // Ada, a Developer, may not add a member: refused, and on the fast path the vault records the refusal.
+  assert.equal(await answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })), 'forbidden');
   // The fast paths are Postgres's, under 0.15's log (`admit-held.test.ts`); elsewhere both go today's way.
   const fast = process.env.COFFRE_TEST_ENGINE !== 'sqlite' && LOG === '0.15' ? { writes: 1, adds: 1 } : { writes: 0, adds: 0 };
   assert.deepEqual(served, fast, "the fast path served each on Postgres, under 0.15's log");
+  assert.equal(recorded, fast.adds, "the fast path's refusal was the vault's to record");
   const keyNow = async () => {
     const { values, version } = await root.secrets.reveal('market/dev', ['API_KEY']);
     return { values, version };
@@ -302,8 +308,12 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
     answer(ada!.secrets.dryRun('market/dev', { API_KEY: 'ada-3' })),
     // A member's add: the fast path's shape.
     answer(bob!.members.add('user:dan@acme.example', { role: 'developer' })),
+    // An add the vault refuses on its read: the passkey's refusal comes first, as on today's path, and the vault's
+    // refusal is not recorded (its ticket expires unused).
+    answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })),
   ]);
-  assert.deepEqual(answers, ['passkey_required', 'passkey_required', 'passkey_required']);
+  assert.deepEqual(answers, ['passkey_required', 'passkey_required', 'passkey_required', 'passkey_required']);
+  assert.equal(recorded, fast.adds, 'no refusal recorded for a credential the check refuses');
   assert.deepEqual(served, { writes: 2 * fast.writes, adds: 2 * fast.adds }, 'where it serves them, the vault served the refused write and add too');
   assert.deepEqual(await keyNow(), before, 'the key is as it was');
   assert.deepEqual(await membersNow(), members, 'nobody was added');
