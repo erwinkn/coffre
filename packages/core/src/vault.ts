@@ -359,8 +359,8 @@ export interface Vault {
    */
   admitWrite?(input: AdmitWriteInput): Promise<AdmitWriteOutcome>;
   /**
-   * The record of a refusal `writeKeys` or `admitRead` decided (T179 PR 6; docs/design/two-trips.md, "A refusal's
-   * record"), written once the app has checked the caller's rows that call answered, as it checks them before a change
+   * The record of a refusal `writeKeys` or `admitRead` decided (T179 PR 6; docs/design/two-trips.md, "As built: PR
+   * 6"), written once the app has checked the caller's rows that call answered, as it checks them before a change
    * commits: one statement, a row of 0.15's log of the request's own (`log_refusal`), then the seal wait (R51). It
    * stands for the 0.14 deny entry today's path writes. Only with `about().writes` or `about().admits`.
    */

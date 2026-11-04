@@ -1024,6 +1024,21 @@ test("a refused key write whose record committed but whose seal did not come in 
   assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
 });
 
+test("a key write the router let through, refused on a later try's read, its ticket expired before its record: today's 0.14 deny entry, naming the write's operation as today's wrap refusal does, and no record (Fable's review of PR 6)", { skip: POSTGRES }, async () => {
+  // The router's check passes on the first try's answer; the grant taken at its hold, the second try's read refuses.
+  const w = await world();
+  w.between(async () => void (await w.root.access.set(`user:${ADA}`, { 'market/dev': null })));
+  const { seq } = (await run(db.owner, sql`SELECT coalesce(max(seq), 0)::text AS seq FROM audit_log`) as { seq: string }[])[0]!;
+  // The vault finds the ticket expired: nothing recorded, and the app appends the entry it stands for.
+  w.deps.vault.recordRefusal = async () => ({ recorded: false, why: 'expired' });
+  assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
+  assert.deepEqual(served(w.answers), ['served', 'refused']);
+  const denies = await run(db.owner, sql`SELECT operation_id AS operation FROM audit_log WHERE seq > ${seq} AND action = 'secret.write' AND decision = 'deny'`) as { operation: string | null }[];
+  assert.equal(denies.length, 1);
+  assert.match(String(denies[0]!.operation), /^[0-9a-f-]{36}$/);
+  assert.deepEqual(await refusalRecords(), []);
+});
+
 test("two retries of one refusal's ticket at once, both finding no record: the second's insert waits for the first's, and both answer its number, one record written, never a duplicate key (review r1 of PR 6)", { skip: POSTGRES }, async () => {
   const w = await world();
   await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });

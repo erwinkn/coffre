@@ -7,7 +7,7 @@ import type { AuditEntry } from './db/audit.ts';
 
 /**
  * A key write or a member's first add the vault's decision refused on its read (T179 PR 6; docs/design/two-trips.md,
- * "A refusal's record"). The app answers it as today's path would, for the caller that read decided, checked on its
+ * "As built: PR 6"). The app answers it as today's path would, for the caller that read decided, checked on its
  * rows as a served try's is: its router's check or its handler refuses it, with the same status and body. Where that
  * path appends a 0.14 deny entry of the action the vault refused, the vault records the refusal in 0.15's log instead
  * (`refuse`, in api/context.ts), once: the read and the record, two round trips, and no entry.

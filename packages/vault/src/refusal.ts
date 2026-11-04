@@ -7,7 +7,7 @@ import { entryMac, type LogMacKey } from './log-entry.ts';
 export { callRefusal } from './refusal.postgres.ts';
 
 /**
- * A refusal's record (T179 PR 6; docs/design/two-trips.md, "A refusal's record"; formal/Writing.tla, `Refuse`): what a
+ * A refusal's record (T179 PR 6; docs/design/two-trips.md, "As built: PR 6"; formal/Writing.tla, `Refuse`): what a
  * key write or a member's first add the vault's decision refused on its read leaves in 0.15's log, in place of the 0.14
  * deny entry today's path writes. A row of `log_changes`, so that the checkpoints seal it, the trees hold it and
  * retention keeps it as they do every change, but a change of nothing: its object is the request's own

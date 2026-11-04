@@ -92,8 +92,11 @@ export type WriteTry = {
   versionIds: string[];
 };
 
-/** A try the vault's decision refused on its read (PR 6): the route answers it, and the vault records it (`RefusalRecord`). */
-export type RefusedTry = { refused: RefusalRecord };
+/**
+ * A try the vault's decision refused on its read (PR 6): the route answers it, and the vault records it (`RefusalRecord`).
+ * Its operation, which the record names and an expired ticket's 0.14 entry names too, as today's path's does.
+ */
+export type RefusedTry = { refused: RefusalRecord; operationId: string };
 
 /** A try as the vault answered it: decided and prepared, or refused. */
 export type Tried = WriteTry | RefusedTry;
@@ -220,7 +223,7 @@ export async function writeAhead(
       });
       if (!answer.served) {
         for (const dek of deks) dek.fill(0);
-        return 'ticket' in answer ? { refused: new RefusalRecord(runtime.vault, answer, 'secret.write') } : answer.why;
+        return 'ticket' in answer ? { refused: new RefusalRecord(runtime.vault, answer, 'secret.write'), operationId } : answer.why;
       }
       return { answer, deks, operationId, versionIds };
     } catch (error) {
