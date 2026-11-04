@@ -51,18 +51,18 @@ Terms used below:
 1,000+ `/use` a second on Workers, hundreds at once, some of them from one
 principal.
 
-Counts in the [inventory](#4-the-inventory): 237 rows, each one item or
+Counts in the [inventory](#4-the-inventory): 238 rows, each one item or
 a small group of like items (about 420 values in all). A row with two
 classes (30 rows, e.g. "a on Workers, e on Node") is counted under its
 first.
 
 | Class | Rows | Rows that can bite R44 load (⚠) |
 |---|---|---|
-| a, real external | 22 | 2, both for their **e** half: the workload gate on Node (S1), setup's 20 connections on Paid (C2) |
+| a, real external | 23 | 3: AWS's STS quota under AWS sign-in (S78), and two for their **e** half: the workload gate on Node (S1), setup's 20 connections on Paid (C2) |
 | b, policy | 55 | 4: the sign-in count per binding, in the app and the vault (S8, V30), and its row lock (Q16), all CI sign-in; the 3 s use deadline (C12), which turns any queue into `late`: right, but it makes every other limit here bite sooner |
-| c, derived | 38 | 0 |
+| c, derived | 37 | 0 |
 | d, defensive | 40 | 1: `ABOVE_NEWEST` (V11), sized from a rate: `capped` past 2,000 unsealed entries, e.g. at 4,000 new entries a second |
-| e, unjustified | 78 | 11 |
+| e, unjustified | 79 | 11 |
 | none (a missing bound, or a knob no deployment can reach) | 4 | 0 |
 
 Format constants (IV and tag sizes, hash and MAC widths, key sizes, UUID
@@ -144,6 +144,12 @@ what happened on Equisafe's instance. Each is class **e** unless marked.
    names CI sign-in a hot path at 1,000+/s. Example: 200 matrix jobs on
    one binding need over 3 minutes to all sign in at 60 a minute, and with
    that count gone they would still pass the row lock one by one.
+   An AWS sign-in also meets AWS's own limit, which no change in coffre
+   lifts: each proof is one `GetCallerIdentity` (`workloads/aws.ts:284-294`,
+   not cached), counted against the signing account's STS quota of 600
+   requests a second per Region, shared with its `AssumeRole` and the like
+   (S78). It is adjustable, by a ticket to AWS support. So 1,000 AWS
+   sign-ins a second from one account and Region needs that raised first.
 5. **AWS KMS: 8 calls at once per `awsKms` provider object, one per
    isolate in practice** (`packages/core/src/kek/aws-kms.ts:36`). Every
    AWS-backed key a use opens makes one Decrypt: no data key is kept
@@ -650,7 +656,7 @@ or move, pointing to section 3's #).
 | V54 | Alarm delete batch | 128 | `checkpointer-workers.ts:240` | a | DO `delete([])` takes 128 keys | | keep |
 | V55 | Alarm list page | 1,000 | `checkpointer-workers.ts:395` | e | "a list is 1,000 keys at most": that is Workers KV's limit; DO storage `list` has none | | fix the comment |
 | V56 | Tick history | 64 | `checkpointer-workers.ts:316` | d | status ring | | keep |
-| V57 | Alarm file | past 1,000,000 bytes, rewritten keeping the last 30 days | `checkpointer-node.ts:125-132, 259-265` | d / e | a compaction trigger, not a cap: what 30 days hold can stay above 1 MB, and then every append reads, filters and rewrites the whole file. Neither its size nor that work has a byte bound | | bound it: compact on a size and a count of days, or keep a file a day and delete whole days |
+| V57 | Alarm file | past 1,000,000 bytes, rewritten keeping the last 30 days | `checkpointer-node.ts:125-132, 259-265` | d / e | a compaction trigger, not a cap: what 30 days hold can stay above 1 MB, and then every append reads, filters and rewrites the whole file. Neither its size nor that work has a byte bound | | two separate fixes. A file a day, deleting whole days, ends the rewrites (each append is one append) but bounds only time: one busy day can still hold any number of bytes. A byte bound needs a budget (bytes or alarms) and a rule for when it is full (drop the oldest, drop new ones, or alert); left open |
 | V58 | `OPEN_AGAIN_MS` | 10 s | `checkpointer-node.ts:275` | e | none | | as V37 |
 | V59 | `TICK_MS` | 500 ms | `log-checkpointer.ts:98` | b | R51, R54 | | keep |
 | V60 | `DAYS_AHEAD` | 3 | `log-checkpointer.ts:107` | d | a use in a day with no partition fails | | keep |
@@ -769,6 +775,7 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S75 | Credential `limit` (`perMinute`, `perDay`) | none by default; ≥ 1 | `credential-proxy.ts:3976-3990` | b | the operator's own (#308) | by design | keep |
 | S76 | `rotateAfterDays` | 365 unless the deployment says; `null` turns it off | `config.ts:43, 62` | b | a deployment's policy: a value unchanged this long is flagged, never refused | | keep |
 | S77 | `WRITES_LOST`, `REFUSAL_LOG_MS` | 3 writes again a beat; a refusal logged once a minute by reason and service | `plugins/audit-watch.ts:149`; `api/workloads.ts:418` | e | | | keep, cite |
+| S78 | AWS STS request quota | 600 requests a second per AWS account and Region, shared by `GetCallerIdentity`, `AssumeRole`, `GetSessionToken` and three more; adjustable by a support ticket | `workloads/aws.ts:284-294` | a | AWS's [STS request quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html#reference_iam-quotas-sts-requests). Every AWS proof a binding could take is one `GetCallerIdentity`, forwarded as the workload signed it and not cached, so it counts against the workload's own account in the Region it signed for | ⚠ CI | keep; Q4: 1,000 AWS sign-ins a second from one account and Region needs that quota raised first |
 
 Format, fine: the CSP nonce (16 B), HSTS max-age, the Postgres protocol
 magic numbers, the SCRAM sizes, `HANDLE` (43 chars), the hmac MAC (32 B),
@@ -853,10 +860,10 @@ digests, provider-id and plugin-name patterns.
 | C28 | Conformance requirements | bulk 1,000, credential ≤ 5 min + 5 s, 429 within 200 tokens, hot login 1 s / 2 s, read listed in 20 s, readiness 10 / 20 s | `conformance/src/checks/*.ts`; `main.ts:36` | c | | | import each from its source |
 | C29 | `MAX_BINDINGS` | 16 live bindings a service; the 17th gets 409 | `core/src/identity/workloads.ts:184`; `server/src/api/workloads.ts:641`; read as a sign-in's candidate count, `:319` | e | none written (a2eece64, #100). It also bounds a sign-in's work: every candidate binding of the issuer is read and matched | a service signed into from more than 16 CI configurations | cite the sign-in's work, or size it from that work's cost |
 | C30 | Binding shape | claims 16, a claim 256 B, issuer 400 B, `reads` 64 environments × 256 keys, `sources` 16 | `core/src/identity/workloads.ts:185-187, 253, 699-701` | d | input bounds on a row every sign-in reads | | keep |
-| C31 | CLI tunnel `HANDSHAKE_MS` | 70 s for coffre to answer the upgrade, then both ends close | `cli/src/tunnels.ts:44-50, 61` | c | above coffre's 15 s wait for a turn and 45 s to admit (S50, S47), so coffre's own refusal is the one said; the sum is retyped | | compute from S47 and S50 |
+| C31 | CLI tunnel `HANDSHAKE_MS` | 70 s for coffre to answer the upgrade, then both ends close | `cli/src/tunnels.ts:44-50, 61` | e | its comment says it outlasts coffre's 15 s wait for a turn and 45 s to admit (S50, S47), so coffre's refusal is the one said. It does not: `MOST_WAITING_MS` does not end the wait, it lets 4 admissions run at once and the connection still waits its turn (`cloudflare-sockets.ts:203-218`). With 4 admissions under way, the 5th to 8th connections can wait one 45 s wave, then take 45 s of their own: 90 s, past 70. And 15 + 45 is 60, not 70: the 10 s is an unexplained margin | | a real bound on coffre's queue first (a deadline for the whole wait, or a policy), then compute this from it |
 | C32 | DPoP proof bounds | proof 2,048 characters, 32 signed headers | `client/src/dpop.ts:20-22` | d | the verifier refuses past them, the signer never makes them | | keep |
 | C33 | SDK redirects | 20 | `client/src/workload.ts:137` | a | the Fetch standard's redirect limit | | keep |
-| C34 | CLI and core timers | `watch` waits ≤ 15 min after failed rounds, a new Worker 90 s to answer, a pasted address retried 2 s, clipboard cleared after 30 s, clipboard tool 3 s; an unwritten fork 10 min (`UNWRITTEN_FORK_MS`) | `cli/src/watch.ts:12`; `cli/src/workers.ts:103`; `cli/src/cloudflare.ts:215`; `cli/src/clipboard.ts:9, 89`; `core/src/access.ts:230` | e / b | the fork's is argued ("a fork writes its row only well within it"); the CLI's are a person's patience | | keep |
+| C34 | CLI and core timers | `watch`'s interval 5 s to 24 h (`--interval`), and after a failed round a wait that doubles up to the larger of 15 min and that interval (`--interval 1h` keeps 1 h), a new Worker 90 s to answer, a pasted address retried 2 s, clipboard cleared after 30 s, clipboard tool 3 s; an unwritten fork 10 min (`UNWRITTEN_FORK_MS`) | `cli/src/watch.ts:12, 36-43, 92`; `cli/src/workers.ts:103`; `cli/src/cloudflare.ts:215`; `cli/src/clipboard.ts:9, 89`; `core/src/access.ts:230` | e / b | the fork's is argued ("a fork writes its row only well within it"); the CLI's are a person's patience | | keep |
 
 Format, fine: IV 12, tag 16, KEK and DEK 32, hashes 32, tile height 8
 and width 256, seeds 32, RSA 2,048-4,096, token patterns, 2^53 leaves.
@@ -958,6 +965,12 @@ the shared quota for symmetric cryptographic operations is "10,000
 (shared)", or 20,000 or 100,000 in some regions, per account and region,
 and adjustable.
 
+**AWS STS** ([request quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html#reference_iam-quotas-sts-requests)):
+"600 requests per second, per account, per Region" for requests made with
+AWS credentials, shared by `AssumeRole`, `DecodeAuthorizationMessage`,
+`GetAccessKeyInfo`, `GetCallerIdentity`, `GetFederationToken` and
+`GetSessionToken`; an increase is "a ticket with AWS support".
+
 **Drivers:** node-postgres's `max` "By default this is set to 10"
 ([pool](https://node-postgres.com/apis/pool)). postgres.js: `max: 10`,
 `connect_timeout: 30`; version 4 adds `queue_timeout`, which "rejects it
@@ -1005,7 +1018,9 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
   pick, one binding's sign-ins stay one at a time until the row lock is
   redesigned (#36, TLA+ first), and the 32 in flight stays until a
   sign-in has a deadline (#35): what deadline do you want for a sign-in
-  under load (R58 allows 1-2 s)?
+  under load (R58 allows 1-2 s)? An AWS fleet at that rate also needs its
+  own account's STS quota raised (600 a second per Region, S78): a
+  prerequisite for the deployment, not a coffre setting.
 - **Q5. A statement bound for the app's and vault's logins.** Only the
   hot login has a `statement_timeout`. An app statement has no bound in
   Postgres. Should the app's and vault's logins get one, derived from
