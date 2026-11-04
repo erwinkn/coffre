@@ -13,7 +13,7 @@ import {
 import { limitOp, objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
 import { emptyReplay, readUse, replay } from '../src/log-replay.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { SEAL_KEYS, World } from './world.ts';
+import { ask, DEV, market, MINE, SEAL_KEYS, World } from './world.ts';
 
 // The 0.15 plan's PR 3 properties, on random logs over a small instance:
 //
@@ -272,16 +272,41 @@ test(`rows that are not the replay's change a decision only to stale or tampered
   const truth = decideUse(SEAL_KEYS, replayView, request);
   const capOnly = bulkMoved && (live === null || live === 'bulk_limit') && (truth === null || truth === 'bulk_limit');
   if (live !== truth) assert.ok(live === 'stale' || live === 'tampered' || capOnly, `live ${live}, the replay ${truth}`);
-  // The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught. The key's own
-  // only once the caller's standing, which comes first, lets it on (T158, review d5 of #416): a caller it refuses is
-  // refused alike whatever the key's rows, which the log refuses too. And the standing's own past the credential only
-  // once it reaches (review r1 of D153, formal/Probing.tla's AcceptedFirst): one missing, revoked, ended or of another
-  // generation is the app's 401 whatever anything else reads, roles, policy and the key's row included (T213).
-  const checked = checkSeals(SEAL_KEYS, replayView, request);
-  const weighed = !reaches(checked, request) ? callerInputsOf(replayView, request)
-    : standingRefusal(checked, request) === null ? inputsOf(replayView, request) : standingInputsOf(replayView, request);
+  const weighed = weighedOf(replayView, request);
   if (weighed.some((key) => perturbed.has(key))) assert.ok(live === 'stale' || live === 'tampered', `a weighed input was not the log's, and live answered ${live}`);
 }, settings));
+
+// Seed 2701149061 (review r2 of #492): Ada seeks a key her personal config does not hold. The use reads that config and
+// not its parent (`useEnvironments`), so an edit of the parent, its seal kept, changes nothing; one of a key she holds
+// there, which reads the parent, is caught.
+test('a personal config\'s parent is weighed only when the use reads it', () => {
+  const world = market();
+  const replayed = replay(SEAL_KEYS, world.log, undefined, emptyReplay());
+  const parent = objectKey({ kind: 'environment', id: DEV });
+  const rows = new Map(world.rows);
+  rows.set(parent, { ...rows.get(parent)!, row: edited(rows.get(parent)!.row) });
+  const decide = (on: typeof rows, request: UseRequest) => decideUse(SEAL_KEYS, readUse(on, world.newest, world.limit, new Map(), request), request);
+  const absent = ask(1, 7, { place: MINE });
+  assert.equal(decide(world.rows, absent), decide(rows, absent));
+  assert.ok(!weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), absent), absent).includes(parent));
+  const held = ask(1, 6);
+  assert.equal(decide(world.rows, held), null);
+  assert.equal(decide(rows, held), 'tampered');
+  assert.ok(weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), held), held).includes(parent));
+});
+
+/**
+ * The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught. The key's own
+ * only once the caller's standing, which comes first, lets it on (T158, review d5 of #416): a caller it refuses is
+ * refused alike whatever the key's rows, which the log refuses too. And the standing's own past the credential only
+ * once it reaches (review r1 of D153, formal/Probing.tla's AcceptedFirst): one missing, revoked, ended or of another
+ * generation is the app's 401 whatever anything else reads, roles, policy and the key's row included (T213).
+ */
+function weighedOf(view: UseView, request: UseRequest): string[] {
+  const checked = checkSeals(SEAL_KEYS, view, request);
+  return !reaches(checked, request) ? callerInputsOf(view, request)
+    : standingRefusal(checked, request) === null ? inputsOf(view, request) : standingInputsOf(view, request);
+}
 
 /** An edit around the vault: the row changed, its seal kept. */
 function edited(row: Input): Input {
@@ -314,7 +339,11 @@ function callerInputsOf(view: UseView, request: UseRequest): string[] {
   ];
 }
 
-/** The inputs the caller's standing weighs: theirs, the roles, the policy, the key's row, the place where it is held or sought. */
+/**
+ * The inputs the caller's standing weighs: theirs, the roles, the policy, the key's row, the place where it is held or
+ * sought, and a personal config's parent when the use read it (`standingParents`): a key absent from the config reads
+ * only the config (T213, review r2 of #492).
+ */
 function standingInputsOf(view: UseView, request: UseRequest): string[] {
   const credential = view.credential.row;
   const stand = view.secret.row === null ? request.place : view.secret.row.environmentId;
@@ -324,7 +353,7 @@ function standingInputsOf(view: UseView, request: UseRequest): string[] {
     ...(credential === null ? [] : [objectKey({ kind: 'principal', id: credential.principal })]),
     objectKey(ROLES_REF), objectKey(POLICY_REF), objectKey({ kind: 'secret', id: request.secretId }),
     ...(stand === null ? [] : [objectKey({ kind: 'environment', id: stand })]),
-    ...(place?.owner != null && place.parentId !== null ? [objectKey({ kind: 'environment', id: place.parentId })] : []),
+    ...(place?.owner != null && place.parentId !== null && view.environments.has(place.parentId) ? [objectKey({ kind: 'environment', id: place.parentId })] : []),
   ];
 }
 
