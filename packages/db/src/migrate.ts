@@ -105,7 +105,7 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
  * Clear what 0.15.0 set on the runtime logins, server-wide: `jit = off` on
  * each, and `plan_cache_mode = force_generic_plan` on the hot login alone
  * (`logins` and `hot`: the tests' own roles). From 0.16.0 every statement plans
- * and runs at the server's settings (0063, docs/design/planner-defaults.md).
+ * and runs at the server's settings (0066, docs/design/planner-defaults.md).
  *
  * Only those values on those logins, which coffre set (an administrator's
  * own setting of either stays, generic plans on another login included),

@@ -110,7 +110,7 @@
 
 - **Postgres plans every statement at its own settings (T207).** Coffre
   sets no `jit`, `plan_cache_mode` or `enable_*` on any function or
-  login. `0063_planner_defaults` resets them on the functions; `coffre
+  login. `0066_planner_defaults` resets them on the functions; `coffre
   migrate` resets the `jit = off` and `force_generic_plan` that 0.15.0
   set on the runtime logins, where its login has `CREATEROLE` and `ADMIN`
   on them, and leaves an administrator's own values. 0022 no longer gives

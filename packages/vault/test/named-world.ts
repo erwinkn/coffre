@@ -313,17 +313,19 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
 /**
  * What `call` reads at each of a new session's first calls, at the server's planner settings (`weighInTurn`), and what
  * its controls read at each, each in a new session of its own: its twin, of a key its world never made (`twinOf`), and
- * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call. After one call
- * unweighed, of that last control, in a session of its own: the first session to plan after a batch's rolled-back
- * writes (its standing cells', weighed) read 1 or 2 more blocks of `log_bulk` at its first call than any after it, the
- * same request again included (T207 r5: held, a batch's first key, 75 beside 74, then 74 asked again after its
- * controls). That call carries nothing of the key, so it settles the pages for every request alike and hides no read of
- * a key's, which every weighing of the request would show.
+ * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call. Each of the three is
+ * first called once unweighed, in a session of its own: after a batch's rolled-back writes (its standing cells',
+ * weighed), a request's first scan of `log_bulk` read 1 or 2 more blocks than any after it, the same request again
+ * included, and settling the last control alone left the key's own first call to differ (docs/design/planner-defaults.md,
+ * "Holding it"). A settled request still plans afresh in each weighed
+ * session, so a read the planning or the call makes by the key's id shows at every weighing (a dry run reading
+ * `secrets` by `p_secret` fails the matrices).
  */
 export async function weighedInTurn(call: HotCall | null): Promise<{ asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null> {
   if (ENGINE !== 'postgres' || call === null) return null;
-  await weighInTurn(HOT_URL, absentOf(call), 1);
-  return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, twinOf(call)), absent: await weighInTurn(HOT_URL, absentOf(call)) };
+  const controls = { twin: twinOf(call), absent: absentOf(call) };
+  for (const request of [call, controls.twin, controls.absent]) await weighInTurn(HOT_URL, request, 1);
+  return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, controls.twin), absent: await weighInTurn(HOT_URL, controls.absent) };
 }
 
 /** A session of the hot login's to weigh calls in alike (`bufferedBy`): its plans made once, by the first. */

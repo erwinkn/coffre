@@ -8,7 +8,7 @@ plans and runs at the server's own settings. Timeouts (`lock_timeout`,
 `bytea_output = 'hex'` and `TimeZone = 'UTC'` stay on the functions whose
 answer is text (below).
 
-Migration [0063](../../packages/db/src/migrations/postgres/0063_planner_defaults.sql)
+Migration [0066](../../packages/db/src/migrations/postgres/0066_planner_defaults.sql)
 resets the settings on the functions and rewrites the four whose plans
 leaned on them; `coffre migrate` resets what 0.15.0 set on the logins,
 where its login may ([deploy.md](../deploy.md#the-database-and-its-keys-for-either-deployment)).
@@ -33,7 +33,7 @@ unanalyzed and everything else analyzed:
 | `use_credential`'s main statement | plan for the call's values (custom) | plan for any values (generic) |
 |---|---|---|
 | 0060, the fence joined | 37,706 to 42,634 | 42,970 (one form 59,042) |
-| 0063, the fence `LIMIT 1` | 65 to 203 | 226 (every form 195 to 301) |
+| 0066, the fence `LIMIT 1` | 65 to 203 | 226 (every form 195 to 301) |
 
 0028's and 0029's statements, with more joins above the same fence, were
 estimated at 96,869 and 101,819 on fresh test databases
@@ -53,7 +53,7 @@ every call planned again. At 1,000 uses a second, before any autoanalyze:
 |---|---|---|
 | 0060, no planner settings | 12,864 for 12,824 calls | 4.4 ms |
 | 0060, once analyzed | 240 for 12,883 calls | 1.6 ms |
-| 0063, never analyzed | 240 for 12,859 calls | 1.7 ms |
+| 0066, never analyzed | 240 for 12,859 calls | 1.7 ms |
 
 The hot login's `force_generic_plan` hid that. A database without the
 fence's statistics is not unusual: a new one, one restored (`pg_restore`
@@ -81,7 +81,7 @@ partitioned table by values only the call knows. A plan for any values
 cannot prune at plan time: it names, and locks, every day (130 locks a use
 at 109 days, [0.15-plan.md](0.15-plan.md), T187). They held
 `force_custom_plan`, and the read functions also turned off sorts and bitmap
-scans. 0063 plans each of those statements per call with `EXECUTE`, which
+scans. 0066 plans each of those statements per call with `EXECUTE`, which
 prunes to the day and plans the index read newest first, the same plan the
 settings forced. Planning a covered use's probe costs about 0.09 ms
 (686 calls, 64 ms of planning), as the custom plan did before.
@@ -100,7 +100,7 @@ the use tests), and each batch's buffers carried that planning's reads,
 which move with the data. CI caught it as a batch's own buffers moving by
 7 between 1,000 and 10,000 forks.
 
-0063 reads each array through a scalar subquery,
+0066 reads each array through a scalar subquery,
 `unnest((SELECT v_layers))`. Its value is then unknown to both plans,
 both count ten, and the cache keeps the plan for any values after five
 calls, as 0.15.0's forced generic plans did. The rows and their order are
@@ -194,14 +194,22 @@ its own database did, and holds it to every other check
     two must fetch as many blocks of the key's tables at every call.
     Each key of a matrix row lives in a world of its own, whose rows sit
     where its writes put them, so the check holds each key to its own
-    world's twin, not to the other worlds. Before them, one call of the
-    control below, unweighed, in a session of its own: the first session
-    to plan after a batch's rolled-back writes read 1 or 2 more `log_bulk`
-    blocks at its first call than every session after it, the same request
-    asked again included (75 beside 74 for held, a batch's first key, in
-    three runs out of three; 74 again when it was asked after its
-    controls). That call carries nothing of the key, so it cannot hide a
-    read of the key's, which every weighing would show. The twin changes only the
+    world's twin, not to the other worlds. Before they are weighed, each
+    of the three requests (the key's, its twin and the control below) is
+    called once, unweighed, in a session of its own, as `weigh` drops its
+    first run. A batch's rolled-back writes leave dead entries in
+    `log_bulk`'s index under the keys they wrote, and the first scan to
+    meet them visits their heap page and marks them dead, so no scan after
+    it does (our reading of the runs below; the pages were not inspected):
+    that first request reads 1 or 2 more `log_bulk` blocks than
+    every one after it, the same request asked again included (75 beside
+    74, in CI's shards 3/6 and 5/6 and in three local runs out of three;
+    74 again when it was asked after its controls). One settling call of
+    the control alone (T207 r5) left the key's own entries for the key's
+    first weighed call to meet (shard 5/6). The settling calls run in
+    sessions of their own, so a read a session makes of the key as it
+    plans, as T207 r2's dry run did, still shows in every weighed session.
+    The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so
     each refusal is also held to a second control (`absentOf`), the twin

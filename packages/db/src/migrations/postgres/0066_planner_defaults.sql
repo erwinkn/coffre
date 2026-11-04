@@ -1,5 +1,5 @@
 -- 0.16.0, T207: every function plans and runs with the server's planner settings (R69). 0029 to 0062 set `jit = off` on every function that runs as its owner, `plan_cache_mode` (generic on `app_read`, custom on `use_covered`, `log_reads_by` and `log_reads_at`), and `enable_seqscan`, `enable_sort` or `enable_bitmapscan` off on three of them, each to keep a plan the planner would otherwise not have chosen. Each statement is now one whose plan stands at the defaults: its estimates far below `jit_above_cost`, the day queries planned per call by `EXECUTE` where they must prune (below), and `use_credential`'s fence read as the one row it is (below). This resets those settings and only those: `search_path`, the lock timeouts, and `bytea_output` and `TimeZone` on the functions whose answer is text, stay. Additive (AGENTS.md, "expand, then contract"): every signature and answer is 0.15.0's, and 0.15.0 runs on them.
--- The settings, reset on every other function that had them: their bodies are unchanged.
+-- The settings, reset on every other function that had them: their bodies are unchanged. (`issue_token` has none since 0064, which made both its signatures again.)
 ALTER FUNCTION public.prune_consumed_tokens(integer) RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.vault_releases_keep() RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.prune_vault_releases(integer) RESET jit;--> statement-breakpoint
@@ -17,7 +17,6 @@ ALTER FUNCTION public.end_reference(uuid,bigint) RESET jit;--> statement-breakpo
 ALTER FUNCTION public.app_change(text,text,text,bigint,text,text,bytea,bytea,bytea,bytea) RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.app_read(bytea,text,text,text[]) RESET plan_cache_mode RESET enable_seqscan RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.revoke_credential(text,bigint,text,text,bytea,bytea,bytea,uuid,bytea,bytea,bigint,text,boolean,bigint,uuid[],text[]) RESET jit;--> statement-breakpoint
-ALTER FUNCTION public.issue_token(text,bigint,text,text,bytea,bytea,text,integer,bigint,integer,bigint,uuid,bytea,bigint,bigint,uuid[],text[],text,uuid,text,bytea,bytea,text,text,text,text,text,bigint) RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.issuing_credential(uuid) RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.sign_in(text,bigint,text,text,bytea,bytea,uuid,text,integer,text,text,text,text,text,text,bytea,bytea,bigint,boolean,integer,bigint,bigint,uuid,text,bytea,bytea,text,text,text,text,text,bigint,bigint,text,text) RESET jit;--> statement-breakpoint
 ALTER FUNCTION public.change_bindings(bigint,text,boolean,text,integer,bigint,integer,bigint,uuid,bytea,bigint,uuid,integer,bigint,uuid[],text[],text,integer,uuid[],uuid[],text[],uuid,bytea,text,text,text,text,text,text,text,text,text,text,bigint,bytea,uuid[],bytea[],bytea[],bytea[],bytea[],uuid[],uuid[],bytea[],bytea[],bytea[],bytea[],bigint,text,text[],uuid[],text[],bytea[],bytea[]) RESET jit;--> statement-breakpoint
@@ -151,7 +150,7 @@ DECLARE
     c_refresh bigint := greatest(1, least(60000, p_cap_window / 10));
     c_period bigint := p_at - ((p_at % c_refresh) + c_refresh) % c_refresh;
     -- Whether this session has yet to plan the four statements (T131), and the form the warm-up is at.
-    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0063';
+    dry boolean := current_setting('coffre.use_planned', true) IS DISTINCT FROM '0066';
     form integer := 0;
     first_probe boolean;
     first_whole boolean;
@@ -1020,7 +1019,7 @@ BEGIN
                 whole := form % 2 = 1;
                 CONTINUE;
             END IF;
-            PERFORM set_config('coffre.use_planned', '0063', false);
+            PERFORM set_config('coffre.use_planned', '0066', false);
             dry := false;
             probe := first_probe;
             whole := first_whole;
@@ -1275,7 +1274,7 @@ $$;
 --> statement-breakpoint
 -- `use_route` as 0060 made it, but for its names' statement, which reads its arrays as `use_named_batch`'s does (above):
 -- planned on every call before (140 plans for 137 calls in the use tests), the plan for any values kept after five.
--- Its warm-up's mark is 0063's, so that a session warmed by 0060's plans this one's statements before the fence too.
+-- Its warm-up's mark is 0066's, so that a session warmed by 0060's plans this one's statements before the fence too.
 -- The same rows, in the same order; the signature and answer are 0060's.
 CREATE OR REPLACE FUNCTION use_route(
     p_token_hash bytea, p_project text, p_environment text, p_named text, p_stable text, p_reading smallint,
@@ -1335,7 +1334,7 @@ DECLARE
     -- A handle's gate that found it standing nowhere there, or at a place cut: the route is not read.
     v_unstood boolean := false;
     -- Whether this session planned the reading's statements, on its first call, before the fence (T200).
-    v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0063';
+    v_planned boolean := current_setting('coffre.route_planned', true) IS NOT DISTINCT FROM '0066';
     -- The gate's answer, parsed once (T200): each `->>` of a json value parses its text whole again.
     g jsonb;
 BEGIN
@@ -1398,7 +1397,7 @@ BEGIN
         PERFORM pg_advisory_xact_lock_shared(1668244070, 0);
     END LOOP;
     IF NOT v_planned AND v_handle AND p_named IS NOT NULL THEN
-        PERFORM set_config('coffre.route_planned', '0063', false);
+        PERFORM set_config('coffre.route_planned', '0066', false);
     END IF;
     IF v_handle THEN
         g := gate::jsonb;

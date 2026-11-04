@@ -148,7 +148,7 @@ export function turnsApart(key: string, asked: readonly Weighed[], controls: { t
 }
 
 /**
- * The settings the hot path's functions mark a session with once they have planned its statements (0060, 0063): a
+ * The settings the hot path's functions mark a session with once they have planned its statements (0060, 0066): a
  * session's own (`set_config(…, false)`), which a transaction rolled back takes back, and which Postgres lists in no
  * view (`pg_settings` hides a placeholder's).
  */

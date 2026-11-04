@@ -86,7 +86,7 @@ $$;
 
 -- A use names no day of the log (0057, R48, T187): a plan of the use functions' statements may be one for any values,
 -- and such a plan of `log_uses` names, and locks at every use, each day's partition. Its cover's probe is `use_covered`'s,
--- planned each call for its own values by EXECUTE (0063); the use functions only insert into `log_uses`.
+-- planned each call for its own values by EXECUTE (0066); the use functions only insert into `log_uses`.
 DO $$
 BEGIN
     -- By its name, whatever its arguments: a release that changes them must not leave the pin on an overload no use calls.
