@@ -278,6 +278,16 @@ one, it applies only with `--yes`. It applies it under the migration lock,
 with the database's privileges reasserted, and writes plain lines to a CI
 log: no colours, no spinner.
 
+It waits up to 5 minutes for another run: this database's, for the
+migration lock, or another database's of the same server changing the
+roles they share. A migration's statement waits no more than half a second
+for a table, half what a use waits: waiting longer for a table that a long
+transaction holds would queue every request on that table behind it. The
+migrations are tried 5 times, a second apart, then fail with nothing
+changed, naming the statement and what held coffre's tables (a backup's
+`pg_dump`, a session idle in a transaction, a prepared transaction): wait
+for it to end, or end it, and migrate again.
+
 From a laptop, run it in the deployment's directory as well: anywhere else,
 it says where it runs, and asks for nothing.
 
