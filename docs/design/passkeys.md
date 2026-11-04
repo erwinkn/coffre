@@ -853,7 +853,7 @@ export const passkeys = pgTable('passkeys', {
   foreignKey({ name: 'passkeys_principal_fkey', columns: [table.principal], foreignColumns: [vaultMembers.principal] }).onDelete('restrict'),
   // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
   index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
-  // Every passkey a person has had (PR 4b, migration 0070): the callback's count, and the first passkey's checked read.
+  // Every passkey a person has had (PR 4b, migration 0071): the callback's count, and the first passkey's checked read.
   index('passkeys_principal_idx').on(table.principal),
 ]);
 ```
