@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A write names the version it made, and a mark the one it marks (T108).**
+  `PATCH /api/secrets/:project/:environment` answers each key it wrote
+  with the new version's id beside its number,
+  `{ version: 4, versionId: "…", sensitivity: "secret" }`: the id the list
+  shows and a later write's `replaces` names. A mark that leaves the key
+  as it is, already that strict, names the version it kept. A mark,
+  `{ sensitivity: "sensitive" }`, now takes `replaces` too, as a value
+  does: named as listed, the mark is refused with 409 `stale` once
+  someone wrote the key after that list, and marks nothing. These are the
+  two additions the write-only Terraform provider needs
+  ([docs/design/terraform-provider.md](docs/design/terraform-provider.md),
+  section 3): a saved plan's stricter `sensitivity` never marks a version
+  written after the plan, and the provider knows its own version from
+  one written right after it without listing again. Old clients read
+  the extra field as nothing.
 - **A key in the path: `path()` (T208).** Telegram's Bot API takes its
   token in the URL's path (`/bot<token>/sendMessage`, and files under
   `/file/bot<token>/…`), so a credential may now name a segment's

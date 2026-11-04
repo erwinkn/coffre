@@ -18,7 +18,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { auditLog } from './db/tables.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps, outcomes } from './api-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -124,7 +124,7 @@ test('an Owner of the project, or of the whole instance, makes a sensitive value
   for (const [client, key] of [[root, 'ROOT_KEY'], [olga, 'OLGA_KEY'], [lena, 'LENA_KEY']] as const) {
     assert.equal((await client.secrets.list('market/prod')).loosenable, true, key);
     const result = await client.secrets.set('market/prod', { [key]: { sensitivity: 'secret' } });
-    assert.deepEqual(result.keys[key], { version: 2, sensitivity: 'secret' });
+    assert.deepEqual(outcomes(result.keys[key]), { version: 2, sensitivity: 'secret' });
     assert.ok(!JSON.stringify(result).includes(VALUE), 'the answer carries no value');
     assert.deepEqual((await root.secrets.history(`market/prod/${key}`)).versions.map(({ version, sensitivity }) => [version, sensitivity]), [[2, 'secret'], [1, 'sensitive']]);
     // A secret now, read by whoever reads secrets there: its Owner, as anyone's reveal, logged as one.

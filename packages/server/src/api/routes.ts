@@ -173,8 +173,12 @@ const sensitiveValue = z.object({
   replaces: z.string().max(64).optional(),
 }).strict();
 
-/** The key's current value, kept, made stricter: as strict already is no change, and looser is refused (409). */
-const marked = z.object({ sensitivity }).strict();
+/**
+ * The key's current value, kept, made stricter: as strict already is no
+ * change, and looser is refused (409). With `replaces`, the version it
+ * marks, as listed, or the mark is refused (409 `stale`).
+ */
+const marked = z.object({ sensitivity, replaces: z.string().max(64).optional() }).strict();
 
 /** A patch of an environment's keys (`PATCH /secrets/:project/:environment`): what its route parses, and the key write's front door before it (write-ahead.ts). */
 export const secretPatch = z.record(secretKey, z.union([secretValue, generatedValue, plainValue, sensitiveValue, marked, z.object({ ref: z.string().max(400) }).strict()]).nullable())

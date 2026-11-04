@@ -274,7 +274,8 @@ export async function loosening({ admin, reader, leaver }: People): Promise<stri
     expect((await admin.api.secrets.list(DEV)).loosenable === true, 'the admin, an Owner of the whole instance, is told they do not loosen');
     const marked = await admin.api.secrets.set(DEV, { [LOOSE]: { sensitivity: 'secret' } });
     expect(!JSON.stringify(marked).includes(value), "the admin's loosening answered the value", marked);
-    expect(JSON.stringify(marked.keys[LOOSE]) === JSON.stringify({ version: 2, sensitivity: 'secret' }), 'the loosening made no new secret version', marked.keys);
+    const loosened = marked.keys[LOOSE];
+    expect(loosened !== undefined && 'version' in loosened && loosened.version === 2 && loosened.sensitivity === 'secret', 'the loosening made no new secret version', marked.keys);
     const read = await reader.api.secrets.reveal(path);
     expect(read.values[LOOSE] === value, "the reader did not read the loosened value as dev's secret");
     const versions = (await admin.api.secrets.history(path)).versions.map((version) => version.sensitivity);

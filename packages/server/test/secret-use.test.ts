@@ -14,7 +14,7 @@ import { ROLES, roleGrants } from '@coffre/core/access';
 import { createClient, type CoffreClient } from '@coffre/client';
 
 import { replayStored } from '@coffre/vault/node';
-import { clientFor, LOG, usesLogged } from './api-fixture.ts';
+import { clientFor, LOG, usesLogged, outcomes } from './api-fixture.ts';
 import { db, deps, entries, ORIGIN, refusedFor, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { coffreRoute } from '../src/app.ts';
 import { checkPlugins } from '../src/plugins.ts';
@@ -88,7 +88,7 @@ test('a Contributor lists the keys and writes values, and is refused every value
   assert.equal((await contributor.secrets.history('market/dev/API_KEY')).versions.length, 1);
   assert.ok(typeof (await contributor.environments.version('market/dev')).version === 'string');
   // A value of their own, written without reading the one before.
-  assert.deepEqual((await contributor.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' })).keys, { WEBHOOK: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes((await contributor.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' })).keys), { WEBHOOK: { version: 2, sensitivity: 'secret' } });
   // The environment's read says why; a key's is the one "no" (D153), the why in the app's entry.
   const whole = await refusal(contributor.secrets.reveal('market/dev'));
   assert.equal(whole.status, 403);
@@ -225,7 +225,7 @@ test("a Viewer of base who contributes to its fork dev reads none of base's secr
   assert.equal((await contributor.secrets.reveal('market/base/SHARED')).values.SHARED, 'shared_0123456789');
   assert.deepEqual([listed.get('ZONE')!.value, listed.get('ZONE')!.readable], ['eu', true]);
   // Override: a value of dev-base's own, written unread.
-  assert.deepEqual((await contributor.secrets.set('market/dev-base', { SHARED: 'shared_dev_0123456789' })).keys, { SHARED: { version: 1, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes((await contributor.secrets.set('market/dev-base', { SHARED: 'shared_dev_0123456789' })).keys), { SHARED: { version: 1, sensitivity: 'secret' } });
   const overridden = (await contributor.secrets.list('market/dev-base')).keys.find((entry) => entry.key === 'SHARED')!;
   assert.deepEqual([overridden.parent?.state, overridden.readable], ['overridden', false]);
 });

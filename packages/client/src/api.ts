@@ -308,6 +308,7 @@ export type Api = {
         replaces?: string;
       } | {
         sensitivity: "plain" | "secret" | "sensitive";
+        replaces?: string;
       } | {
         ref: string;
       };
@@ -317,6 +318,7 @@ export type Api = {
       keys: {
         [key: string]: {
           version: number;
+          versionId: string;
           sensitivity: "plain" | "secret" | "sensitive";
         } | {
           archived: true;
@@ -3268,6 +3270,7 @@ export type SetResult = {
   keys: {
     [key: string]: {
       version: number;
+      versionId: string;
       sensitivity: "plain" | "secret" | "sensitive";
     } | {
       archived: true;

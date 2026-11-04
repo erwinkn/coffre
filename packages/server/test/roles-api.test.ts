@@ -13,8 +13,7 @@ import {
   openTestDatabase,
   resetDatabase,
   testDeps,
-  type FixtureDeps,
-} from './api-fixture.ts';
+  type FixtureDeps, outcomes } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const AUDITOR = 'user:auditor@acme.example';
@@ -229,7 +228,7 @@ test('writing to an archived key requires an explicit restore', async () => {
   await assert.rejects(root.secrets.set('market/prod', { API_KEY: 'rotated' }), { status: 409 });
   await root.secrets.update('market/prod/API_KEY', { archived: false });
   assert.deepEqual(
-    (await root.secrets.set('market/prod', { API_KEY: 'rotated' })).keys,
+    outcomes((await root.secrets.set('market/prod', { API_KEY: 'rotated' })).keys),
     { API_KEY: { version: 2, sensitivity: 'secret' } },
   );
   assert.equal((await root.secrets.reveal('market/prod/API_KEY')).values.API_KEY, 'rotated');

@@ -5,7 +5,7 @@ import { asc, eq } from 'drizzle-orm';
 
 import { auditLog } from './db/tables.ts';
 import { serveApi } from '../src/api/router.ts';
-import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps } from './api-fixture.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, outcomes } from './api-fixture.ts';
 
 const ROOT = 'admin@acme.example';
 const DEV = 'dev@acme.example';
@@ -57,7 +57,7 @@ beforeEach(async () => {
 test('a secrets patch writes the keys it names, archives the nulls, and leaves the rest alone', async () => {
   await root.secrets.set('market/prod', { A: '1', B: '2', C: '3' });
   const { keys } = await root.secrets.set('market/prod', { A: null, B: '2b', D: '4' });
-  assert.deepEqual(keys, { A: { archived: true }, B: { version: 2, sensitivity: 'secret' }, D: { version: 1, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(keys), { A: { archived: true }, B: { version: 2, sensitivity: 'secret' }, D: { version: 1, sensitivity: 'secret' } });
 
   const listed = await root.secrets.list('market/prod');
   const byKey = Object.fromEntries(listed.keys.map((entry) => [entry.key, entry]));
@@ -78,7 +78,7 @@ test('a null needs secret.archive, and a refused patch writes none of its keys',
   assert.ok((await actions()).includes('deny secret.write'));
 
   // Writing alone is within the role.
-  assert.deepEqual((await dev.secrets.set('market/prod', { B: 'changed' })).keys, { B: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes((await dev.secrets.set('market/prod', { B: 'changed' })).keys), { B: { version: 2, sensitivity: 'secret' } });
 });
 
 test('a place patch changes only the fields it names', async () => {

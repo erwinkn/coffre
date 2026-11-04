@@ -722,3 +722,19 @@ export async function holdSomething(owner: Database, vault: Vault, service: stri
   if (!granted.ok) throw new Error(`could not give ${service} something to hold: ${granted.refusal.message}`);
   return id;
 }
+
+const VERSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * A write's outcomes (`SetOutcome`) as a test compares them, by version and
+ * nature: each `versionId` checked to be a version's id, then left out.
+ */
+export function outcomes<T>(written: T): T {
+  if (Array.isArray(written)) return written.map(outcomes) as T;
+  if (written === null || typeof written !== 'object') return written;
+  return Object.fromEntries(Object.entries(written).flatMap(([name, value]) => {
+    if (name !== 'versionId') return [[name, outcomes(value)]];
+    assert.match(String(value), VERSION_ID, 'a written version names its id');
+    return [];
+  })) as T;
+}
