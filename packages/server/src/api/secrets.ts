@@ -203,7 +203,7 @@ export type SecretValue =
   | { value: string; generated: Generation; replaces?: string; sensitivity?: 'secret' | 'sensitive' }
   | { value: string; plain: true; replaces?: string }
   | { value: string; sensitivity: Sensitivity; replaces?: string }
-  | { sensitivity: Sensitivity }
+  | { sensitivity: Sensitivity; replaces?: string }
   | { ref: string };
 
 /** What a write says of who sees each key's value, where it says it. */
@@ -214,7 +214,7 @@ function askedSensitivity(value: SecretValue | null): Sensitivity | undefined {
 }
 
 /** Whether a patch's value only marks the key's current value, stricter or, by an Owner, looser, writing no value. */
-function isMark(value: SecretValue | null): value is { sensitivity: Sensitivity } {
+function isMark(value: SecretValue | null): value is { sensitivity: Sensitivity; replaces?: string } {
   return value !== null && typeof value === 'object' && !('value' in value) && 'sensitivity' in value;
 }
 
@@ -229,8 +229,13 @@ export type PersonalView = { of: string; fallback: boolean };
 /** A reset in a fork, or its undoing: the key as it is now, and the environment that holds the parent's. */
 export type InheritResult = { key: string; archived: boolean; folder: string | null; from: string };
 
-/** What a write did to each key: its new version and who sees it, its archiving, or the reference it is now. */
-export type SetOutcome = { version: number; sensitivity: Sensitivity } | { archived: true } | { reference: string };
+/**
+ * What a write did to each key: its new version, by number and id, and who
+ * sees it, its archiving, or the reference it is now. The id is the one a
+ * list shows and a later write `replaces`: a client that keeps it knows its
+ * own version from one written after it (the Terraform provider does).
+ */
+export type SetOutcome = { version: number; versionId: string; sensitivity: Sensitivity } | { archived: true } | { reference: string };
 export type SetResult = { operationId: string; keys: Record<string, SetOutcome> };
 
 type Environment = { projectId: string; environmentId: string };
@@ -909,7 +914,7 @@ export async function setSecrets(
             ...environment, secretId: secret.secretId, operationId, relatedSeq: sealed.seqs[i],
             metadata: { key, version: secret.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, previous.get(key) ?? null) },
           }));
-          keys[key] = { version: secret.version, sensitivity: level };
+          keys[key] = { version: secret.version, versionId, sensitivity: level };
           return {
             id: versionId, secretId: secret.secretId, version: secret.version, ...sealed.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: level === 'plain' ? value : null, sensitive: level === 'sensitive',
@@ -929,14 +934,14 @@ export async function setSecrets(
               ...environment, secretId: secret.secretId, operationId, relatedSeq: rewrapped.seqs[i],
               metadata: { key, version: secret.version, ...recipeDetail, ...sensitivityDetail(to, was), kept: from.version },
             }));
-          keys[key] = { version: secret.version, sensitivity: to };
+          keys[key] = { version: secret.version, versionId, sensitivity: to };
           return {
             id: versionId, secretId: secret.secretId, version: secret.version, ...rewrapped.values[i],
             createdBy: ctx.caller.principal.id, ...recipeRow(recipe), plaintext: null, sensitive: to === 'sensitive',
           };
         }),
       ];
-      for (const { key, version, sensitivity } of unchangedMarks(marks, prepared, levelNow)) keys[key] = { version, sensitivity };
+      for (const { key, version, versionId, sensitivity } of unchangedMarks(marks, prepared, levelNow)) keys[key] = { version, versionId, sensitivity };
       await insert(tx, secretVersions, versions);
       const now = new Date();
       for (const { id, secretId, version } of versions) {
@@ -1066,8 +1071,8 @@ async function heldOnce(
       })),
       touched,
     });
-    const log = items.map(({ key, level, recipe }) => {
-      keys[key.name] = { version: key.version, sensitivity: level };
+    const log = items.map(({ key, level, recipe, versionId }) => {
+      keys[key.name] = { version: key.version, versionId, sensitivity: level };
       return allowed(ctx, 'secret.write', {
         ...environment, secretId: key.id, operationId, relatedSeq: key.seq,
         metadata: { key: key.name, version: key.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, key.created ? null : level) },
@@ -1220,10 +1225,15 @@ async function marking(
 /** The marks that leave a key as it is, already that strict: each answers its current version. */
 function unchangedMarks(
   marks: readonly { key: string; to: Sensitivity }[],
-  prepared: ReadonlyMap<string, { currentVersion: number }>,
+  prepared: ReadonlyMap<string, { currentVersion: number; currentVersionId: string | null }>,
   levelNow: (key: string) => Sensitivity | null,
-): { key: string; version: number; sensitivity: Sensitivity }[] {
-  return marks.filter(({ key, to }) => levelNow(key) === to).map(({ key, to }) => ({ key, version: prepared.get(key)!.currentVersion, sensitivity: to }));
+): { key: string; version: number; versionId: string; sensitivity: Sensitivity }[] {
+  return marks.filter(({ key, to }) => levelNow(key) === to).map(({ key, to }) => {
+    const row = prepared.get(key)!;
+    // A mark has a value of its own to keep (`marking` refuses one without), so a current version.
+    if (row.currentVersionId === null) throw new Error(`${key} has no version of its own to keep`);
+    return { key, version: row.currentVersion, versionId: row.currentVersionId, sensitivity: to };
+  });
 }
 
 /**
@@ -1359,8 +1369,13 @@ export async function dryRunSecrets(
     need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', { operationId, metadata: { dryRun: true } });
     const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
     // In a fork, an archived key its parent holds is an override reset to the parent's: writing it overrides again, a change.
-    const resettable = await resetKeys(ctx.db, place);
-    // Refuse what the write would refuse before opening anything.
+    const inherited = await inheritedOf(ctx.db, place);
+    const resettable = new Set(inherited?.held.keys());
+    // Refuse what the write would refuse before opening anything: first a value or a mark that names the version it
+    // `replaces`, once another is current, as the write refuses it, `stale`.
+    const own = new Map([...rows].map(([key, row]) => [key, { archivedAt: row.archivedAt, currentVersionId: row.current?.id ?? null }]));
+    const stale = regenerated(patch, own, inherited);
+    if (stale !== null) throw new ApiError('conflict', stale, 'stale');
     for (const [key, value] of Object.entries(patch)) {
       if (value !== null && rows.get(key)?.archivedAt != null && !resettable.has(key)) {
         throw conflict(`${key} is archived; unarchive it before writing a new version`);

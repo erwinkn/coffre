@@ -16,7 +16,7 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { eq } from 'drizzle-orm';
 
 import { replayStored } from '@coffre/vault/node';
-import { clientFor, LOG, refusedIn, testVault } from './api-fixture.ts';
+import { clientFor, LOG, refusedIn, testVault, outcomes } from './api-fixture.ts';
 import { withTriggersLifted } from './db/engine.ts';
 import { db, deps, DEV, entries, ORIGIN, ROOT, route, runtime, sessionFor, useMcp } from './mcp-fixture.ts';
 import { secretVersions } from './db/tables.ts';
@@ -118,7 +118,7 @@ test('a write that names no sensitivity keeps a sensitive key sensitive and make
 
 test('marking a key stricter keeps its value as a new version; as strict already is unchanged, and looser is refused to all but an Owner', async () => {
   const marked = await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive' }, REGION: { sensitivity: 'secret' }, API_KEY: { sensitivity: 'sensitive' } });
-  assert.deepEqual({ ...marked.keys }, { WEBHOOK: { version: 2, sensitivity: 'sensitive' }, REGION: { version: 2, sensitivity: 'secret' }, API_KEY: { version: 1, sensitivity: 'sensitive' } });
+  assert.deepEqual(outcomes({ ...marked.keys }), { WEBHOOK: { version: 2, sensitivity: 'sensitive' }, REGION: { version: 2, sensitivity: 'secret' }, API_KEY: { version: 1, sensitivity: 'sensitive' } });
   assert.deepEqual(await levels('market/dev'), { API_KEY: 'sensitive', DB_PASSWORD: 'sensitive', REGION: 'secret', WEBHOOK: 'sensitive' });
   assert.equal((await root.secrets.list('market/dev')).keys.find((entry) => entry.key === 'REGION')!.value, null, 'a secret lists no value');
   // The same values, which a service account reads as before.
@@ -142,6 +142,33 @@ test('marking a key stricter keeps its value as a new version; as strict already
   assert.deepEqual(loosening!.metadata, { key: 'WEBHOOK', from: 'sensitive', to: 'secret', reason: 'not_owner' });
   assert.equal((await refusal(root.secrets.set('market/dev', { NOTHING: { sensitivity: 'sensitive' } }))).status, 409, 'no value to mark');
   assert.deepEqual(await history('market/dev/WEBHOOK'), [[2, 'sensitive'], [1, 'secret']]);
+});
+
+test('a mark names the version it marks, as listed, and is refused as stale once another was written; each outcome names the version it made or kept', async () => {
+  const listed = async (key: string) => (await root.secrets.list('market/dev')).keys.find((entry) => entry.key === key)!.versionId!;
+  const before = await listed('WEBHOOK');
+  // Another writer, between this client's list and its mark: the mark marks nothing, and says why.
+  const rotated = await root.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' });
+  assert.equal(rotated.keys.WEBHOOK && 'versionId' in rotated.keys.WEBHOOK && rotated.keys.WEBHOOK.versionId, await listed('WEBHOOK'), "a value's outcome names the version the list shows");
+  // A dry run refuses it as the write would, a mark or a value alike.
+  for (const value of [{ sensitivity: 'sensitive', replaces: before }, { value: 'whsec_guess_0123456789', sensitivity: 'secret', replaces: before }] as const) {
+    const preview = await refusal(root.secrets.dryRun('market/dev', { WEBHOOK: value }));
+    assert.deepEqual([preview.status, preview.reason], [409, 'stale'], 'a dry run of a stale write is refused as stale');
+  }
+  assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { WEBHOOK: { sensitivity: 'sensitive', replaces: await listed('WEBHOOK') } })).keys }, { WEBHOOK: 'changed' });
+  const stale = await refusal(root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive', replaces: before } }));
+  assert.deepEqual([stale.status, stale.reason], [409, 'stale']);
+  assert.match(stale.message, /WEBHOOK changed since it was listed/);
+  assert.deepEqual(await history('market/dev/WEBHOOK'), [[2, 'secret'], [1, 'secret']], 'a stale mark makes no version');
+  // Named as current, it marks; as strict already, it keeps the version it names.
+  const current = await listed('WEBHOOK');
+  const marked = await root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive', replaces: current }, API_KEY: { sensitivity: 'sensitive', replaces: await listed('API_KEY') } });
+  assert.deepEqual(outcomes(marked.keys), { WEBHOOK: { version: 3, sensitivity: 'sensitive' }, API_KEY: { version: 1, sensitivity: 'sensitive' } });
+  const made = marked.keys.WEBHOOK as { versionId: string };
+  const kept = marked.keys.API_KEY as { versionId: string };
+  assert.notEqual(made.versionId, current);
+  assert.equal(made.versionId, await listed('WEBHOOK'), "a mark's outcome names the version it made");
+  assert.equal(kept.versionId, await listed('API_KEY'), 'a mark that changes nothing names the version it kept');
 });
 
 test('a person reads every value of an environment but its sensitive ones, which it names; one is refused on any credential, an Owner included', async () => {

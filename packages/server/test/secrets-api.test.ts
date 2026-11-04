@@ -12,7 +12,7 @@ import {
   secretVersions,
 } from './db/tables.ts';
 import { postgresOnly, withLogUnlocked, withTriggersLifted } from './db/engine.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps, outcomes } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';
 
 const ROOT = 'admin@acme.example';
@@ -90,14 +90,14 @@ async function versionCount(): Promise<number> {
 test('the API runs on the restricted runtime login', postgresOnly('the restricted runtime role exists only on Postgres'), async () => {
   const identity = await db.runtime.execute<{ current_user: string }>(sql`SELECT current_user`);
   assert.equal(identity[0]!.current_user, 'coffre_runtime');
-  assert.deepEqual((await root.secrets.set('market/dev', { RUNTIME_PROOF: 'works' })).keys, {
+  assert.deepEqual(outcomes((await root.secrets.set('market/dev', { RUNTIME_PROOF: 'works' })).keys), {
     RUNTIME_PROOF: { version: 1, sensitivity: 'secret' },
   });
 });
 
 test('writing a secret is audited without its value', async () => {
   const written = await root.secrets.set('market/dev', { DATABASE_URL: 'db-demo://user:pw@host/db' });
-  assert.deepEqual(written.keys, { DATABASE_URL: { version: 1, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(written.keys), { DATABASE_URL: { version: 1, sensitivity: 'secret' } });
   const rows = await auditRows();
   assert.deepEqual(rows.map(({ action, decision }) => ({ action, decision })), [
     { action: 'secret.write', decision: 'allow' },
@@ -122,7 +122,7 @@ test('a value holding a lone surrogate is rejected, rather than stored as anothe
 
 test('one patch writes one version and one audit entry per key, together', async () => {
   const written = await root.secrets.set('market/dev', { A: '1', B: '2', C: '3' });
-  assert.deepEqual(written.keys, { A: { version: 1, sensitivity: 'secret' }, B: { version: 1, sensitivity: 'secret' }, C: { version: 1, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(written.keys), { A: { version: 1, sensitivity: 'secret' }, B: { version: 1, sensitivity: 'secret' }, C: { version: 1, sensitivity: 'secret' } });
   assert.equal(await versionCount(), 3);
   const rows = await auditRows();
   assert.deepEqual(rows.map((row) => [row.action, row.metadata.key]), [
@@ -168,7 +168,7 @@ test('null archives a secret, and that needs secret.archive', async () => {
 
 test('writing twice appends a version rather than mutating one', async () => {
   await root.secrets.set('market/dev', { API_KEY: 'v1' });
-  assert.deepEqual((await root.secrets.set('market/dev', { API_KEY: 'v2' })).keys.API_KEY, { version: 2, sensitivity: 'secret' });
+  assert.deepEqual(outcomes((await root.secrets.set('market/dev', { API_KEY: 'v2' })).keys.API_KEY), { version: 2, sensitivity: 'secret' });
   assert.equal(await versionCount(), 2);
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'v2');
 });
@@ -485,7 +485,7 @@ test('a competing first write discards the provisional ID and wraps the next ver
     return result;
   });
   const written = await root.secrets.set('market/dev', { RACE: 'retried' });
-  assert.deepEqual(written.keys, { RACE: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(written.keys), { RACE: { version: 2, sensitivity: 'secret' } });
   assert.equal(prepared.length, 3);
   assert.notEqual(prepared[0].secretId, prepared[1].secretId);
   assert.deepEqual(prepared[2], { secretId: prepared[1].secretId, version: 2 });

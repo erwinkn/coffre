@@ -20,7 +20,7 @@ import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
+import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, outcomes } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -145,13 +145,14 @@ test('a key write the vault decided on its read commits in two of the app\'s rou
   const wrote = await w.write({ NEW_KEY: 'fake-new', API_KEY: 'fake-again' });
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   assert.deepEqual(served(w.answers), ['served']);
-  assert.deepEqual(wrote.body.keys, { NEW_KEY: { version: 1, sensitivity: 'secret' }, API_KEY: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(wrote.body.keys), { NEW_KEY: { version: 1, sensitivity: 'secret' }, API_KEY: { version: 2, sensitivity: 'secret' } });
   const answer = w.answers[0]!;
   assert.ok(answer.served);
   // Each change is the key's newest, its payload naming the request's number, its credential and the read's digest,
   // each under its own request id, derived from the request's number and its object.
   for (const name of ['NEW_KEY', 'API_KEY']) {
     const row = (await keyRow(name))!;
+    assert.equal((wrote.body.keys as Record<string, { versionId?: string }>)[name]?.versionId, row.currentVersionId, 'its outcome names the version it made');
     assert.equal((await versionOf(row.currentVersionId))?.createdBy, `ada@acme.example`);
     const [change] = await run(db.owner, sql`SELECT request_id, payload FROM log_changes WHERE object = ${logObject('secret', row.id)} ORDER BY number DESC LIMIT 1`) as { request_id: string; payload: string }[];
     const payload = JSON.parse(change!.payload) as { request?: { number: string; credential: string; identity: string | null }; inputs?: string };
@@ -175,7 +176,7 @@ test("numbers past 2^53 (Ada's newest access entry, every object's newest change
   assert.ok(seq > past && !exactAsNumber(seq), `Ada's access_seq ${seq} is past 2^53, and no JS number holds it`);
   const wrote = await w.write({ NEW_KEY: 'fake-new', API_KEY: 'fake-again' });
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
-  assert.deepEqual(wrote.body.keys, { NEW_KEY: { version: 1, sensitivity: 'secret' }, API_KEY: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(wrote.body.keys), { NEW_KEY: { version: 1, sensitivity: 'secret' }, API_KEY: { version: 2, sensitivity: 'secret' } });
   // On Postgres the two-trip path served it, its request numbered exactly; SQLite's writes take today's path.
   if (TEST_ENGINE === 'postgres' && LOG === '0.15') {
     assert.deepEqual(served(w.answers), ['served']);
@@ -204,7 +205,7 @@ test("the head held and every place in the reads' line taken when Ada writes: th
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   assert.ok(Date.now() - started >= 400, `written after ${Date.now() - started} ms, before the head was free`);
   assert.deepEqual(served(w.answers), ['served']);
-  assert.deepEqual(wrote.body.keys, { API_KEY: { version: 2, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(wrote.body.keys), { API_KEY: { version: 2, sensitivity: 'secret' } });
 });
 
 test("Ada's grant taken between the vault's read and the hold: the hold fails, the write asks again, and the vault's refusal answers, nothing written (WritingRevoke, rev)", { skip: POSTGRES }, async () => {
@@ -260,7 +261,7 @@ test('the key Ada makes made meanwhile by another, sensitive: her write asks aga
   const wrote = await w.write({ NEW_KEY: 'fake-ada' });
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   assert.deepEqual(served(w.answers), ['served', 'served']);
-  assert.deepEqual(wrote.body.keys, { NEW_KEY: { version: 2, sensitivity: 'sensitive' } });
+  assert.deepEqual(outcomes(wrote.body.keys), { NEW_KEY: { version: 2, sensitivity: 'sensitive' } });
   const row = (await keyRow('NEW_KEY'))!;
   assert.equal((await versionOf(row.currentVersionId))?.sensitive, true);
 });
@@ -288,7 +289,7 @@ test("API_KEY sensitive when the vault first read it, written again as a secret 
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   // The second try found it a secret: today's path writes it, sensitive, as the first try found it.
   assert.deepEqual(served(w.answers), ['served', 'served']);
-  assert.deepEqual(wrote.body.keys, { API_KEY: { version: 4, sensitivity: 'sensitive' } });
+  assert.deepEqual(outcomes(wrote.body.keys), { API_KEY: { version: 4, sensitivity: 'sensitive' } });
   const row = (await keyRow('API_KEY'))!;
   assert.equal((await versionOf(row.currentVersionId))?.sensitive, true);
 });
@@ -319,7 +320,7 @@ test('the key written by another between the read and the hold: both commit, one
   const wrote = await w.write({ API_KEY: 'fake-ada' });
   assert.equal(wrote.status, 200, JSON.stringify(wrote.body));
   assert.deepEqual(served(w.answers), ['served', 'served']);
-  assert.deepEqual(wrote.body.keys, { API_KEY: { version: 3, sensitivity: 'secret' } });
+  assert.deepEqual(outcomes(wrote.body.keys), { API_KEY: { version: 3, sensitivity: 'secret' } });
   const versions = await run(db.owner, sql`SELECT v.version, v.created_by FROM secret_versions v JOIN secrets s ON s.id = v.secret_id WHERE s.key = 'API_KEY' ORDER BY v.version`) as { version: number; created_by: string }[];
   assert.deepEqual(versions.map((row) => [Number(row.version), row.created_by]), [[1, ROOT], [2, ROOT], [3, ADA]]);
 });
