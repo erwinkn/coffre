@@ -80,6 +80,22 @@ func TestLeakCheckReadsEverything(t *testing.T) {
 	if found, err := leaks("deep", deep, short); err == nil {
 		t.Errorf("a layer past the depth limit counted as clean: %v", found)
 	}
+	// A gzip stream in private data, the value past the size limit or past where the stream is cut: an error, never clean.
+	var large bytes.Buffer
+	g := gzip.NewWriter(&large)
+	_, _ = g.Write(make([]byte, maxSize))
+	_, _ = g.Write([]byte(short))
+	_ = g.Close()
+	var cut bytes.Buffer
+	g = gzip.NewWriter(&cut)
+	_, _ = g.Write([]byte(strings.Repeat("fake-other ", 1000) + short))
+	_ = g.Close()
+	for name, stream := range map[string][]byte{"too large": large.Bytes(), "cut short": cut.Bytes()[:cut.Len()/2]} {
+		state, _ := json.Marshal(map[string]any{"resources": []any{map[string]any{"instances": []any{map[string]any{"private": base64.StdEncoding.EncodeToString(stream)}}}}})
+		if found, err := leaks(name, state, short); err == nil {
+			t.Errorf("a gzip stream %s counted as clean: %v", name, found)
+		}
+	}
 }
 
 // checkClean fails t when value is in the workspace's state files or the saved plan's records.

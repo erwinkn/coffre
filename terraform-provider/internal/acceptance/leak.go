@@ -95,15 +95,19 @@ func (s *scan) search(where string, data []byte, depth int, proto bool) {
 		}
 		return
 	case bytes.HasPrefix(data, []byte{0x1f, 0x8b}):
-		r, err := gzip.NewReader(bytes.NewReader(data))
-		if err == nil {
-			var inner []byte
-			if inner, err = readAll(r); err == nil {
-				s.search(where+"(gzip)", inner, depth+1, false)
+		// Bytes whose header does not read are not gzip (no reader would
+		// open them), and are searched as bytes below. Once the header
+		// reads, the stream is read whole or fails the check: one too
+		// large or cut short may hold the value past where reading stopped.
+		if r, err := gzip.NewReader(bytes.NewReader(data)); err == nil {
+			inner, err := readAll(r)
+			if err != nil {
+				s.err = fmt.Errorf("%s(gzip): %w", where, err)
 				return
 			}
+			s.search(where+"(gzip)", inner, depth+1, false)
+			return
 		}
-		// Not gzip after all: searched as bytes below.
 	}
 	if json.Valid(data) {
 		var document any
