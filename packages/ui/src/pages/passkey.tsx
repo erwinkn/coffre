@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
+import { passkeyAnswer } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -37,7 +38,9 @@ type CreationJSON = {
 export function PasskeyPage() {
   const search = Route.useSearch();
   const stepUp = search['step-up'] === '1';
-  const [step, setStep] = useState<Step | 'none' | null>(null);
+  // `unavailable`: coffre did not answer what to ask; the sign-in still waits, so the page offers to ask again.
+  const [step, setStep] = useState<Step | 'none' | 'unavailable' | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Why the step ended without a session, when it did: said above the way back in.
@@ -46,14 +49,14 @@ export function PasskeyPage() {
   useEffect(() => {
     const query = stepUp ? `?step-up=1${search.next === undefined ? '' : `&next=${encodeURIComponent(search.next)}`}` : '';
     let current = true;
-    fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })
-      .then(async (response) => (response.ok ? ((await response.json()) as Step) : 'none'))
-      .catch(() => 'none' as const)
-      .then((answer) => current && setStep(answer));
+    setStep(null);
+    void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
+      if (current) setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
+    });
     return () => {
       current = false;
     };
-  }, [stepUp, search.next]);
+  }, [stepUp, search.next, attempt]);
 
   const again = `/login${search.next === undefined ? '' : `?next=${encodeURIComponent(search.next)}`}`;
   if (step === null) {
@@ -62,6 +65,23 @@ export function PasskeyPage() {
         <div className="signin-head">
           <Spinner />
         </div>
+      </section>
+    );
+  }
+  if (step === 'unavailable') {
+    return (
+      <section className="card signin" aria-labelledby="passkey-title">
+        <div className="signin-head">
+          <h1 className="signin-title" id="passkey-title">
+            No answer from coffre
+          </h1>
+          <p className="signin-lede">
+            {stepUp ? 'Your session is still waiting for its passkey.' : 'Your sign-in is still waiting for its passkey.'} Try again in a moment.
+          </p>
+        </div>
+        <button className="btn btn-primary" type="button" onClick={() => setAttempt((n) => n + 1)}>
+          Try again
+        </button>
       </section>
     );
   }
@@ -96,22 +116,26 @@ export function PasskeyPage() {
         ? await navigator.credentials.create({ publicKey: creationOptions(current.options) })
         : await navigator.credentials.get({ publicKey: requestOptions(current.options) });
       if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-      const response = await fetch('/api/auth/passkey', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...('state' in current ? { state: current.state } : {}) }),
-      });
-      const body = (await response.json().catch(() => ({}))) as { next?: string; error?: string };
-      if (response.ok && body.next !== undefined) {
+      const answer = await passkeyAnswer<{ next?: unknown }>(
+        fetch('/api/auth/passkey', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...('state' in current ? { state: current.state } : {}) }),
+        }),
+      );
+      if (answer.kind === 'ok' && typeof answer.value.next === 'string') {
         // A full navigation: the new session cookie is the next page's.
-        window.location.assign(body.next);
+        window.location.assign(answer.value.next);
         return;
       }
-      if (body.error === 'passkey_failed') {
+      if (answer.kind !== 'refused') {
+        // No answer to go by: the sign-in still waits, and a touch is asked again.
+        setError('coffre did not answer just now. Try your passkey again in a moment.');
+      } else if (answer.code === 'passkey_failed') {
         setError(enroll ? 'That passkey could not be added. Try again, or another one.' : 'That passkey did not confirm it’s you. Try again, or another one.');
       } else {
-        setEnded(signinErrorMessage(body.error ?? 'state_mismatch') ?? signinErrorMessage('state_mismatch'));
+        setEnded(signinErrorMessage(answer.code ?? 'state_mismatch') ?? signinErrorMessage('state_mismatch'));
       }
     } catch (thrown) {
       // Cancelled, timed out, or a passkey this browser already holds for you: the person decides what next.

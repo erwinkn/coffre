@@ -264,7 +264,12 @@ browser, which alone can answer it, and its button asks the browser at
 once, as a touch must follow the click. The answer sets the session
 cookie and says where to go (`{ next }`); a passkey that did not answer
 leaves the sign-in to try again, with another passkey too, and any other
-refusal clears the cookie. The cookie's value names its purpose, whose key
+refusal clears the cookie. An answer that is no refusal (no response, a
+5xx such as `503 unavailable` or `migrating`, a 408 or 429, a body that
+does not parse) clears nothing, so the page says coffre did not answer and
+asks again, the question or the touch, rather than send the person back to
+their provider (`passkeyAnswer`, `packages/ui/src/lib/passkey-answer.ts`).
+The cookie's value names its purpose, whose key
 opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
 callback's reads (`SigninService.afterProvider`) are step 2's, in one round
 trip: the identity (`findIdentity`) and, beside it, one statement of the
