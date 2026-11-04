@@ -9,7 +9,7 @@ import { later, laterRows } from './later.ts';
 import { prepared } from './prepared.ts';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf } from './dialect.ts';
 
-export { recorded, RECORDS, type ChangeRecord } from './change-records.ts';
+export { recordField, recorded, RECORDS, type ChangeRecord } from './change-records.ts';
 
 /**
  * Appending to the audit log, the one table both the app and the vault
@@ -173,6 +173,19 @@ export function lockLogHeadRead(tx: Transaction, key: LogKey): Promise<HeldHead>
   });
   const reading = readUnderHead(tx, key);
   return Promise.all([locking, reading]).then(([, held]) => held);
+}
+
+/**
+ * Lock the log's head and read nothing under it, not waited for (`later`): it goes first in the transaction's next
+ * Sync, before whatever is asked after it. For a write that appends no 0.14 entry and still orders itself after every
+ * writer that takes the head before its rows (`audited`, `app_change`): 0.16.0's two-trip key write, whose one Sync is
+ * BEGIN, this, its hold, its rows, its changes and COMMIT (docs/design/two-trips.md, "Locks"). SQLite's transactions
+ * hold the whole file.
+ */
+export function laterHead(tx: Transaction): void {
+  if (engineOf(tx) === 'sqlite') return;
+  later(tx, sql`SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE`);
+  holding.add(tx);
 }
 
 /**

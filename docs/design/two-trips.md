@@ -1,8 +1,9 @@
 # A change in two round trips (T179)
 
-Status: design and model (formal/Writing.tla). The key write's path is built (PR 3, below, "As built: PR 3"), and
-an admin's first member add (PR 5, "As built: PR 5"); first grants, a set-up by someone who runs no instance and the
-contraction follow.
+Status: design and model (formal/Writing.tla). The key write's path is built (PR 3, below, "As built: PR 3"), an
+admin's first member add (PR 5, "As built: PR 5"), and the contraction, in 0.16.0 ("As built: the contraction"):
+each now two round trips. First grants, a set-up by someone who runs no instance, and the request row and outcome
+records (PR 6b) follow.
 
 R57 wants a change answered in under 200 ms in 0.16. Erwin's target (2026-11-02):
 **a key write and a member add each make at most two database round trips on the
@@ -160,7 +161,7 @@ takes today's.
    path writes it on its own first, as `verify` would have). Only then it encrypts: the AAD binds `project|environment|key` by
    id (`envelope.ts`), which it learns from the answer. No round trip. Then
    it sends **one Sync**: BEGIN, 0.14's head `FOR UPDATE` (its first
-   statement, and kept after PR 6 as a lock alone: see "Locks"), the
+   statement, a lock alone since the contraction: see "Locks"), the
    credential's `last_used_at`, when due (its row before the issue lock,
    as `issue_token` takes it: see "Locks"), **the
    hold** (`hold_inputs`: the issue lock shared, the fence exclusive, then
@@ -283,13 +284,14 @@ rows**:
   dismissals, a project's or environment's rename) is `audited`, and takes
   0.14's head first. One that committed before ours took the head is in
   the hold's read; one after waits for our COMMIT. One more reason the head
-  stays a lock after PR 6.
+  stays a lock after the contraction.
 - **After the fence.** `hold_inputs` takes the issue lock shared and then
   the fence exclusive, as `app_change` does; `app_change_strict` takes them
-  again later in the transaction, which an advisory lock allows. Once the
-  contraction drops 0047's head from `revoke_credential`, a session's revoke takes the
-  fence and not the head: a hold before the fence could pass, the revoke
-  commit, and our write after it.
+  again later in the transaction, which an advisory lock allows. Were
+  0047's head gone from `revoke_credential` (it stays in 0.16.0, below), a
+  session's revoke would take the fence and not the head: a hold before the
+  fence could pass, the revoke commit, and our write after it. The model's
+  revoke takes the fence alone, the stronger adversary.
 - **In a statement after the locks.** `hold_inputs` takes them, then calls
   `write_inputs` in its next statement: READ COMMITTED reads afresh at each
   statement, so the read sees every change that committed before the locks
@@ -342,7 +344,7 @@ tries in all, as `retrying` gives moved rows now; then 409 `changed`, with
 fails fast (R44); it never queues. Each try is two round trips, and each
 committed try made exactly two.
 
-As built in PR 3, and kept as it is by PR 6 and PR 7: a hold that fails
+As built in PR 3, and kept as it is by the contraction, PR 6b and PR 7: a hold that fails
 (`hold_inputs` raises `coffre_moved`, or a new key's name is taken first)
 rolls the app's transaction back and asks the vault again, three tries in
 all, then 409 `changed` with `Retry-After: 1`. A try the vault no longer
@@ -362,7 +364,7 @@ as it always has (formal/Writing.tla, `WToday` and `WTodayCommit`). A
 grant revoked or a session ended between its decision and its commit does
 not stop it, the window every write has had since 0.14
 (`TodayStandsAtCommit`, an expected gap in `scripts/formal.sh`), which this
-path closes for the writes it serves and PR 6 for every write. PR 6's outcome record moves only
+path closes for the writes it serves. PR 6b's outcome record moves only
 the refusals off it; what the two-trip path does not serve (forks until
 PR 3b, references and a key service until PR 7, SQLite) keeps it.
 
@@ -386,15 +388,15 @@ hold fails; the retry is refused; her grant is given back and her session
 revoked; today's path then writes version 2, 200. Today's front door has
 the same window between its check and its wrap; after a served try it
 spans those tries too, a few round trips. `write-held.test.ts` pins this
-(it flips when PR 6 closes the window), and formal/Writing.tla's
+(it flips once no write goes down today's path), and formal/Writing.tla's
 `TodayCallerStandsAtDecision` is an expected gap (`WritingCaller`).
 
 What an abandoned try leaves behind, with nothing waiting on it:
 
 - **its number**, drawn from `log_number` by `write_request`: a gap in the
   log, which a checkpoint seals past as it does a rolled-back change's;
-- **its 0.14 `key.wrap` entries**, one per key, committed by the vault
-  before it answered (until the contraction stops them): records of wraps that were
+- **before the contraction, its 0.14 `key.wrap` entries**, one per key, committed by the vault
+  before it answered (0.16.0 writes none): records of wraps that were
   made, each an allowed key operation with no intent left open, which no
   `secret.write` names. The committed try's `secret.write` names its own
   try's wrap (`relatedSeq`), and a request writes once whichever path
@@ -572,12 +574,13 @@ finds, not whom the change is by. One before the hold moves the digest (the
 hold calls `write_inputs` with the hash again), and the request asks again,
 where the check refuses it.
 
-**The issue lock before the fence** (round 6). Until PR 6 the add still
-appends 0.14's `member.add` entry, and `audit_log_fence`, the trigger on
+**The issue lock before the fence** (round 6). Until the contraction the add
+appended 0.14's `member.add` entry, and `audit_log_fence`, the trigger on
 that append, takes the issue lock shared. Taken after the fence, it could
 wait on a barrier holding the issue lock exclusive, which waits for the
 fence the add holds. So `admit_write` takes the issue lock shared before
-the fence, as `app_change` and `hold_inputs` do.
+the fence, as `app_change` and `hold_inputs` do, and keeps that order with
+no append.
 
 Example (round 5). Bob, a Developer on all of `market` and no admin, sets
 up svc with a developer grant on `market` while the services setting lets
@@ -602,8 +605,8 @@ the request id, the read's digest, the actor's ids and the refusal's code,
 MAC'd by the Worker and written, the read stored beside, by a second vault
 statement (`admit_outcome`). The read
 writes nothing, so without it a refused add would leave no record once
-0.14's `member.add` deny entry stops (PR 6). Two trips on a refusal, off
-the budget.
+0.14's `member.add` deny entry stops (PR 6b; until then a refusal goes down
+today's path, which appends it). Two trips on a refusal, off the budget.
 
 A warm vault could skip step 1: the isolate keeps the actor's inputs, as
 the use path keeps its seal cache, and the write's hold refuses them if
@@ -639,17 +642,20 @@ it, holding the app's key, which defeats the MAC. The vault's 0.14 entries
 `audit_log` entry. Their record is the request and the change in the log:
 actor, request, object, payload, MAC'd by the vault (`log-entry.ts`). SQL
 stores them, and the checkpointer checks them before sealing. This is the
-contract the 0.15 plan already planned (0.15-plan.md, "11. The contract, in 0.16"), now PR 6's.
+contract the 0.15 plan already planned (0.15-plan.md, "11. The contract, in 0.16"), made by the contraction in
+0.16.0 for these two routes ("As built: the contraction"); the request's own record is PR 6b's.
 
 **The audit pages have to read them first.** Today the sealed pages render
 sign-ins only (`sealedPage`), a place-filtered page never reaches the log,
 and an offboarding report's "wrote" side reads `secret.write` entries
 (`queries.ts`). Stopping the appends before that changes would lose records:
 a removed member's report would stop naming the values they wrote. So the
-pages render writes, their refusals and member changes from the log, place
-filters included, and the offboarding report reads its "wrote" from the log,
-a release before the appends stop (§11's own precondition: readers leave
-`audit_log` first).
+pages render writes and member adds from the log, place filters included,
+and the offboarding report reads its "wrote" from the log, in the same
+change that stops the appends (§11's own precondition: readers leave
+`audit_log` first, at the latest with the writers; D169 put both in
+0.16.0). Refusals keep today's path and its 0.14 entries until PR 6b's
+outcome records.
 
 ## What it guarantees
 
@@ -700,7 +706,7 @@ no round trip: it is a statement of the same Sync.
   fence. That waits for nobody: every statement that locks a key's row
   holds 0.14's head first (`audited`, `app_change`, `change_input`), and
   the vault and the uses lock none. The head stays its first statement
-  after the contraction stops the appends, a lock and nothing read: `app_change`
+  now the contraction has stopped the appends, a lock and nothing read: `app_change`
   takes the head again inside, so without it a two-trip write (rows, then
   head) and a route still head-first (`patchSecret`: head, then rows)
   would wait on each other until Postgres kills one. Neither Writing (its
@@ -710,19 +716,24 @@ no round trip: it is a statement of the same Sync.
 - a member add's write: both members' queues and rows in principal order,
   then 0.14's head, then the issue lock shared, then the fence, then the
   hold, as `change_input` and `lockMembers` lock now (the issue lock before
-  the fence: while 0.14's `member.add` append stays, its trigger takes the
-  issue lock, and after the fence that could wait on a barrier).
+  the fence: while 0.14's `member.add` append stayed, its trigger took the
+  issue lock, and after the fence that could wait on a barrier; the order
+  stays, the head a lock alone).
 
 The fence is held from the hold to COMMIT: one read of the request's
 objects and names more than `app_change` holds it for now, inside the same
 Sync. No round trip is spent while it is held.
 
-**A session's revoke takes 0.14's head too, today.** 0047 put the head first
-in `revoke_credential`, to order it against 0.14's checks on isolates still
-serving them (Migration015's `EntryLessHead`). The model leaves it out, as
-the contraction will once 0.14's path is gone: a revoke that takes the fence alone is
-the stronger adversary, and the hold after the fence is what holds then.
-Dropping it is a migration of its own (PR 6).
+**A session's revoke takes 0.14's head too, in 0.16.0 still.** 0047 put the
+head first in `revoke_credential`, to order it against 0.14's checks on
+isolates still serving them (Migration015's `EntryLessHead`). 0.14.5's
+isolates may serve beside 0.16.0: an upgrade straight from 0.14.5 rolls out
+over them, and a rollback to 0.14.5 serves reads and uses. So the revoke
+keeps the head, as the two-trip write and add keep it as a lock
+(formal/WriteLocks.tla's revoke: the head, the row, the fence). It may go
+once no release that meets 0.14.5 is supported. The model's revoke leaves it
+out: one that takes the fence alone is the stronger adversary, and the hold
+after the fence is what holds against it.
 
 ## The seal wait
 
@@ -744,8 +755,15 @@ then contract). Each direction:
   no such entry, its row MAC'd without one, would be refused there (fail
   closed) until they drain. So the vault's own decisions move to seals
   first (the row is its object's newest change, as a use checks), in a
-  release that still writes 0.14's entries. The appends stop one release
-  later. That move comes before `write_request` too (PR 2, below): the
+  release that still writes 0.14's entries. AGENTS.md would stop the
+  appends one release later; 0.16.0 stops them in the same release (D169,
+  Erwin's call). Isolates of an earlier release still serve beside it,
+  while it rolls out (each app with a vault of its own release: the app
+  answers 503 `deploying` to another's, below) and after a rollback: they
+  serve the members they knew, and refuse, failing closed, a member 0.16.0
+  added. That is the price (docs/deploy.md, "From 0.14.5 to 0.16"); and why
+  0.16.0's changes still take 0.14's head ("A session's revoke takes 0.14's
+  head too"). That move comes before `write_request` too (PR 2, below): the
   0.14 check is a walk back through the member's access entries, by MAC
   (`newestAuthentic`, a page at a time), which one statement cannot do.
 - **Old app isolates, new writes.** They fence their writes on the newest
@@ -788,7 +806,7 @@ Each with what the key write and the first member add then cost:
    adversary of formal/Writing.tla's scenarios (each review round's P1
    among them), each failing with its part of the read left out.
    Key write: 1 + 2 + 2 = 5 round trips (16 today). Built without
-   `write_outcome` and the request row, which come with PR 6: a refusal
+   `write_outcome` and the request row, which come with PR 6b: a refusal
    takes today's path meanwhile ("Retries"). See "As built: PR 3" below,
    for what it serves and what it leaves to later PRs.
 4. **The audit pages, the offboarding report and the members' watermark
@@ -802,8 +820,8 @@ Each with what the key write and the first member add then cost:
    later finding reads tampered for good. After it, nothing reads these
    routes' 0.14 entries. Split in two (D166): PR 4a, the members' watermark
    ("As built: PR 4a"); PR 4b, the audit pages and the offboarding report
-   on the log, with fuller payloads and the refusals of outcome records,
-   designed and landed with PR 6.
+   on the log, landed with the contraction (6, "As built: the
+   contraction"); the refusals of outcome records with PR 6b.
 5. **The member add's front door, `admit_inputs`, read, write and
    `admit_outcome`**, the scope carried by slug, the app's `auth_mac`
    check between the read and the write (a test puts a known token's hash
@@ -815,19 +833,24 @@ Each with what the key write and the first member add then cost:
    person's or a service account's, with no first grants and without `admit_outcome`
    (a refusal takes today's path, as PR 3's): "As built: PR 5". First grants and a
    set-up by someone who runs no instance (the read holding the places, the protected
-   set and the services setting, as the steps above have it) are PR 5b.
-6. **The contraction.** The two routes stop writing 0.14's entries;
-   `revoke_credential` drops the head (a migration); the app's statement
-   keeps it as a lock (above). The services setting's changes move into
-   `log_changes` with §11's other vault changes, and `admit_inputs` reads
-   the setting's newest change there. `change-cost.test.ts` holds a key write to `{ app: 1, vault: 1 }`
-   and a first member add to `{ app: 0, vault: 2 }`. The request row and
-   `write_outcome` land here: a refusal is answered and logged by the
-   vault's outcome record, no longer by today's path. The retry loop
-   stays as PR 3 built it.
-   The contraction ships after a release that still writes 0.14's entries,
-   so that the releases before it, which read them, never serve after it;
-   which release is still open.
+   set and the services setting, as the steps above have it) are PR 5b, with
+   the services setting's changes moved into `log_changes` beside §11's
+   other vault changes, `admit_inputs` reading its newest change there.
+6. **The contraction, in 0.16.0, with PR 4b.** The two routes stop writing
+   0.14's entries; the app's statement, the add's write and
+   `revoke_credential` keep 0.14's head as a lock (above).
+   `change-cost.test.ts` holds a key write to `{ app: 1, vault: 1 }` and a
+   first member add to `{ app: 0, vault: 2 }`. The audit pages, the
+   offboarding report and the list of everyone read the two routes'
+   changes in the same PR. The retry loop stays as PR 3 built it. AGENTS.md
+   would ship it a release after one that still writes 0.14's entries;
+   Erwin put it in 0.16.0 itself (D169), and a rollback to an earlier
+   release refuses the members it added. "As built: the contraction".
+6b. **The request row and the outcome records.** `write_request` stores
+   the request ("The request and its refusals"), and a refusal is answered
+   and logged by the vault's outcome record (`write_outcome`,
+   `admit_outcome`), no longer by today's path and its 0.14 deny entries;
+   the audit pages list those refusals.
 7. **The other change routes**, each in the same shape; references join the
    key write once `write_request` seals their making and their end, and a
    remote key-encryption key once the request and outcome records stand
@@ -874,7 +897,7 @@ What it does not build yet, and why that is sound meanwhile:
   statement under the fence (RequestUnderFence), and each change carries that number, the credential and identity
   it was decided for and the read's digest in its payload, under the vault's MAC. The stored read and the outcome
   record (`write_outcome`) are for the replay of a decision and for the audit pages' refusals, which read 0.14's
-  entries until PR 4 and PR 6. So every refusal, a vault's, a seal's or a MAC's, goes down today's path, which
+  entries until PR 4 and PR 6b. So every refusal, a vault's, a seal's or a MAC's, goes down today's path, which
   refuses and logs it as now: a refusal costs today's trips, and the vault's `writeKeys` call before them (R64
   allows a refused request's extra trips). Its status and body are today's, pinned by `write-held.test.ts`. A
   forged change's refusal relies on today's path checking MACs too: T190 (#466), which this PR builds on
@@ -957,7 +980,7 @@ How it holds, and what it leaves to later PRs:
 - **Two adds of one member**: the second's hold finds the first's row, its change and its 0.14 entry; read again, it
   is no first add, and today's path answers it as it answers an add of a member (`created: false`). The members'
   primary key backs it: a unique violation is read again too.
-- **No outcome record** (`admit_outcome`, with PR 6's `write_outcome`): every refusal goes down today's path, which
+- **No outcome record** (`admit_outcome`, with PR 6b's `write_outcome`): every refusal goes down today's path, which
   refuses and logs it as now, after the vault's read (R64 allows a refusal's extra trip). Its status and body are
   today's, pinned by `admit-held.test.ts`.
 - **No last use**: the add has no app statement to carry the credential's `last_used_at`; its next use or key write
@@ -1020,7 +1043,8 @@ Read by:
 
 The same row found again after a change is another finding: the vault's once-per-process key includes the change
 weighed, where it had left the second unlogged. A finding of 0.14's that stands when a deployment takes the contraction is
-settled by no access entry after: PR 6 settles them by the change that follows, its own rule to write.
+settled as before by the member's next change: 0.16.0 stops the access entry of a first add alone, of someone with no
+row, and every other change of a member still writes one (docs/formal.md, "Findings.tla").
 
 The regressions: packages/vault/test/vault.test.ts (a finding names the change its check weighed and stands until a
 change after it, the same row then found again; settled by a change whose 0.14 entries are taken out, as the contraction
@@ -1031,3 +1055,86 @@ settled), packages/vault/test/bindings.test.ts (a finding from `#notLogged`, nam
 packages/server/test/tamper-watermark.test.ts (the list, the member page and the report agree, through a renumbering
 of the change named, a change settling them with its 0.14 entries gone; a member with a change and no row reads
 tampered in their report). Each fails with its protection taken out.
+
+## As built: the contraction
+
+In 0.16.0 (D169), with PR 4b's readers. On Postgres with 0.15's log, the two-trip key write and the two-trip first add
+append no 0.14 entry: the vault's `key.wrap` and `member.add` and the app's `secret.write` are gone from those paths,
+and their changes in `log_changes` are their record. `change-cost.test.ts` holds a key write, one key or five, to
+`{ app: 1, vault: 1 }` (2 + 3 in PR 3, 16 before) and a first add to `{ app: 0, vault: 2 }` (3 in PR 5, 14 before):
+
+```
+key write   vault  write_request: the fence shared, then the read and the number            1
+                   the Worker: MACs, seals, the decision; wraps, prepares the changes
+            app    the rows' auth_mac, in memory; each value encrypted
+                   BEGIN, 0.14's head (a lock alone), the last use when due, hold_inputs,
+                   the rows, the versions, the changes, COMMIT                            1
+            vault  waitSealed                                                              the seal
+first add   vault  admit_read                                                              1
+            app    the rows' auth_mac, in memory; the prepared add handed back
+            vault  BEGIN, the bound, the members' rows, 0.14's head (a lock alone),
+                   admit_hold, the row, the change, COMMIT                                 1
+                   waitSealed                                                              the seal
+```
+
+**What a change records now.** Its payload names, under the vault's MAC, the request it was decided on: for a key
+write its number, the credential and identity, the app's operation and request ids (`operationId`, `requestId`,
+which 0.14's entries carried) and the read's digest; for an add the same but the number (its read numbers nothing),
+and no `old`, as no 0.14 entry accounts for it. The add's row stores `access_seq` 0: under 0.15's log nothing weighs
+the column against an entry (`#onLog` weighs the member's newest access entry against their newest change, and a
+first add has neither); a later change down today's path writes its entry and moves the column, as before.
+
+**Who reads them.** Each reader of the two routes' 0.14 entries now reads the changes, every other route's entries
+as before:
+
+- **The audit pages** (`sealedPage`, asked with `sealed`): a key write where its `secret.write` stood, on the whole
+  log, its project's, its environment's (deleted ones among a project's), its key's and its writer's pages, and to a
+  reader of some places at those places (`writtenAt`: the page's place met with the reader's `within`); a first add
+  where its `member.add` stood, on the instance's pages alone, as every record of no place. Each is the vault's,
+  vouched for as every record of 0.15's log a page lists (`vouched`), and named after it is read: the key, its place
+  and its version's number by id (`withNames`), so a key renamed since shows its name now, and one deleted its id
+  alone. Two record kinds of change-records.ts tell them apart from every other change by how their payload starts and
+  the read it names (`written`, `admitted`); eight partial indexes over them (migration 0065: every one, one actor's, one
+  environment's by the payload's `environmentId`, one key's, one actor's at one environment or key; and the adds', every
+  one and one actor's) keep a page to as many index entries as it lists, however long the log grows (R48;
+  `request-cost.alone.ts`). Of some members at a place, a read of each one's there (review r1 of #490): one of the
+  place's, others' passed over, grew with their writes there. And statistics on the conditions' `strpos(…)`
+  (`log_changes_records_stats`), which ANALYZE measures: Postgres's guess for them made a key with 50,000 writes look
+  like 80, and read them all to sort a page (3,680 pages) rather than walk its index; statistics, not a planner
+  setting (R69).
+- **The offboarding report** (`memberActivity`): a member's key writes from the log beside their entries and reads,
+  one more statement beside its first reads, no round trip.
+- **The list of everyone's missing members** (`missingMembers`): those a two-trip add named in its payload, their
+  row gone, beside those 0.14's entries name.
+- **`coffre verify`** (`verifyLog`, `#partlyReplayed`): with no two-trip add in 0.15's log, as before. With some
+  (`fastAdded`, `log_changes_admitted_idx`), every row still names the newest 0.14 access entry about the member (0
+  for one added so and changed no further); everyone else is replayed from 0.14's access entries as before; those
+  added so are held to 0.15's log, as `#sweep` holds them (`#integrity`: the 0.4 MAC, the row's seal against its
+  newest change, that change's MAC, no 0.14 access entry past the one it accounts for), a deleted row included. A
+  later change of one of them down today's path (a removal, a role change) is a change 0.14's replay never saw the
+  member admitted for: the walk stops there (`unadmitted-change`, which a checkpoint's tally keeps, as it follows from
+  0.14's log alone), and past it every row, and everyone the walk saw an entry about, is held to 0.15's log instead.
+- **Conformance**: a version's record is its app entry or its key's change, never both (`writesAgree`); an add is a
+  vault entry or the vault's change (`accessAuthorship`); an access change commits nothing while either log refuses
+  its writes (`noAuditNoAccess`).
+
+`revoke_credential` keeps 0.14's head (EntryLessHead), since 0.14.5's isolates may still serve beside 0.16.0
+(above, "A session's revoke takes 0.14's head too").
+
+**What stays.** Every other change appends its 0.14 entry, and so does every refusal of these two routes, which goes
+down today's path until PR 6b's outcome records. A finding of 0.14's still settles at the member's next such change.
+A release before 0.16.0, rolled back to, refuses a member the two-trip add made: it checks a member against their
+newest 0.14 access entry, finds none, reads the row as tampered, and can neither add nor remove them again (0.15.0's
+start-over replays 0.14's entries, which never admitted them). Going forward to 0.16.0 again serves them; restoring
+the backup taken before the upgrade loses them. docs/deploy.md has the upgrade hold member changes during its watch
+for this. Keys written by the two-trip path open on such a release as any other; its audit page lists none of them.
+
+The regressions: packages/server/test/write-held.test.ts (a write's change names its request, its operation and its
+request id, and no 0.14 entry stands beside it; an abandoned try leaves no entry in either log; the write listed on
+the whole log, its project's, environment's and key's pages, its writer's, a reader of its environment's, and none of
+another place's, another member's or the refusals'; its value in the writer's offboarding report; its change edited
+around coffre listed as forged), packages/server/test/admit-held.test.ts (an add's change with its ids and no `old`,
+no entry; listed on the instance's pages alone; the log verifying through a role change down today's path after it,
+and not with the row forged; the row deleted, the member missing), packages/server/test/change-cost.test.ts (the two
+budgets), packages/server/test/request-cost.alone.ts (the pages' reads flat as others' writes and adds grow), and the
+conformance checks above.

@@ -538,33 +538,42 @@ export function payloadOf(ref: Ref, op: Op, old?: bigint, extra?: { request: Wri
 }
 
 /** A key write's request, as its changes carry it (`prepareChanges`). */
-export type WriteRequest = { number: bigint; credential: string; identity: string | null; inputs: string };
-
-/** What a change's payload says of its request: its number, and the credential and identity it was decided for. */
-type WriteRequestPart = { number: string; credential: string; identity: string | null };
-
-/** What an add's change says of its request, which no number names (its read numbers nothing): the credential and identity it was decided for. */
-type AdmitRequestPart = { credential: string; identity: string | null };
+export type WriteRequest = { number: bigint; credential: string; identity: string | null; inputs: string } & Asked;
 
 /**
- * A member's first add's change (T179 PR 5, admit.ts), made from the read its decision weighed: from no object (no row,
- * no seal) to the member's, `member.add`, the 0.14 entry it accounts for (`old`) and its request in its payload (the
- * credential and identity it was decided for, the read's digest, `inputs`, which `change_input_strict` holds to the read
- * its transaction held), sealed and MAC'd by the vault's keys. As `Changes.commit` makes a decision's.
+ * The app's ids of the request and of the one action it is part of (`Correlation`), as its 0.14 entries carried them:
+ * 0.16.0 writes none on the two-trip routes, so their changes carry them, under the vault's MAC, for the audit pages.
+ */
+type Asked = { operationId: string | null; requestId: string | null };
+
+/** What a change's payload says of its request: its number, the credential and identity it was decided for, the app's ids. */
+type WriteRequestPart = { number: string; credential: string; identity: string | null } & Asked;
+
+/** What an add's change says of its request, which no number names (its read numbers nothing): the credential and identity it was decided for, the app's ids. */
+type AdmitRequestPart = { credential: string; identity: string | null } & Asked;
+
+/**
+ * A member's first add's change (T179, admit.ts), made from the read its decision weighed: from no object (no row, no
+ * seal) to the member's, `member.add`, its request in its payload (the credential and identity it was decided for, the
+ * app's ids, the read's digest, `inputs`, which `change_input_strict` holds to the read its transaction held), sealed
+ * and MAC'd by the vault's keys. As `Changes.commit` makes a decision's, but that it accounts for no 0.14 entry (no
+ * `old`): 0.16.0 writes none on this path, and the change is the add's only record.
  */
 export function admitChange(
   keys: Pick<ChangeKeys, 'seals' | 'mac'>,
-  add: { at: number; actor: string; principal: string; after: Input; op: Op; old: bigint; credential: string; identity: string | null; inputs: string },
+  add: { at: number; actor: string; principal: string; after: Input; op: Op; credential: string; identity: string | null; inputs: string } & Asked,
 ): ChangeCall {
   const ref: Ref = { kind: 'principal', id: add.principal };
   const seal = sealOf(keys.seals[0]!, ref, add.after);
-  const payload = payloadOf(ref, add.op, add.old, { request: { credential: add.credential, identity: add.identity }, inputs: add.inputs });
+  const { credential, identity, operationId, requestId } = add;
+  const payload = payloadOf(ref, add.op, undefined, { request: { credential, identity, operationId, requestId }, inputs: add.inputs });
   const row = { at: add.at, requestId: randomUUID(), object: objectKey(ref), actor: add.actor, payload, seal };
   return { ref, ...row, value: writes(ref) ? rowValue(add.after) : null, sealFrom: null, mac: entryMac(keys.mac, { tree: 'changes', row }) };
 }
 
 function requestPart(request: WriteRequest): { request: WriteRequestPart; inputs: string } {
-  return { request: { number: request.number.toString(), credential: request.credential, identity: request.identity }, inputs: request.inputs };
+  const { number, credential, identity, operationId, requestId, inputs } = request;
+  return { request: { number: number.toString(), credential, identity, operationId, requestId }, inputs };
 }
 
 /**

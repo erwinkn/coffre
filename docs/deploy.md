@@ -292,14 +292,26 @@ upgrade notes. 0.16 moves the audit log to 0.15's log (the cutover),
 as 0.15.0 did. Once it has cut over, the database refuses every write of
 0.14's.
 
-0.16's vault decides about a member from 0.15's log alone, but 0.16 still
-writes each change's 0.14 entry too, because the releases before it read
-them. A 0.14.5 rolled back to serves reads only as long as those entries
-are there (below). And 0.15.0's vault checks each member against their
-newest 0.14 access entry: without one, as for a member added by a release
-that wrote none, it reads their row as tampered and refuses them. A later
-release stops writing them (the contraction, `docs/design/two-trips.md`,
-PR 6); its release notes will say which release it upgrades from.
+0.16.0 also stops writing 0.14's entries for its two fast changes, on
+Postgres: a key write and a member's first add (the contraction,
+[two-trips.md](design/two-trips.md#as-built-the-contraction)). Their
+record is their change in 0.15's log, which the audit pages and the
+offboarding report read; every other change still writes its 0.14 entry.
+The releases before 0.16.0 check a member against their newest 0.14
+access entry, and refuse one who has none. So **a rollback refuses the
+members 0.16.0 added**. Example: upgrade 0.14.5 to 0.16.0, an Owner adds
+Ada, roll back to 0.14.5: 0.14.5 finds no `member.add` entry for Ada,
+reads her row as tampered, and refuses her, her reads and uses included.
+0.15.0 to 0.16.0 and back to 0.15.0 does the same. A key 0.16.0 wrote
+still opens on the release rolled back to (its reads weigh the reader's
+member and grants, not the write's entry), but its audit page lists none
+of 0.16.0's key writes and adds, and its `coffre verify` reports those
+members. Nothing on the old release repairs them: 0.14.5 writes nothing,
+and 0.15.0 can neither add again nor remove a member its 0.14 log never
+admitted ("remove them to start over", then "the log never admitted
+them"). Going forward to 0.16.0 again serves them as before; restoring
+step 1's backup loses them with everything else since. So until the watch
+after step 4 is over (step 6), add no member, and a rollback stays exact.
 
 The steps follow [0.15.0's release notes](../CHANGELOG.md#0150-2026-11-01)
 ("Upgrading a deployment from 0.14"), with 0.16's setup in step 3.
@@ -363,6 +375,11 @@ Nothing serves 0.16 before step 4.
 5. **Check it**: `/readyz` green, `coffre --url <instance> verify
    instance` passes, the audit page shows a sealed log, and, if the
    deployment has a `credentialProxy`, a `/use` through it answers.
+6. **Watch it, adding no member**, for as long as you would still roll
+   back (ten minutes at least). Key writes and every other change may go
+   on. A member added in that time is refused by a rollback, and stays
+   refused there until you go forward again or restore step 1's backup
+   (above).
 
 What answers what, step by step, as 0.15.0's rehearsal of the same cutover
 measured it:
@@ -384,7 +401,8 @@ In the rehearsal (50 uses a second, a sign-in every 5 s, a write every
 - *After the cutover*: 0.14.5 serves **reads only**. Values open and uses
   work for the sessions and tokens already held, but every write is
   refused with a 500, sign-ins, token exchanges and session renewals
-  included. Migration 0047's trigger refuses any 0.14 entry that 0.15's
+  included. A member 0.16.0 added is refused outright, as tampered
+  (above), until 0.16.0 is back. Migration 0047's trigger refuses any 0.14 entry that 0.15's
   log does not record. One write slips through: a workload's session
   renewal (`/api/auth/workload/renew`), which appends no entry. Its row
   then no longer matches its 0.15 seal, so once 0.16 is back, that
@@ -422,9 +440,11 @@ A deployment already on 0.15.0 upgrades to 0.16 as to any release
 ([Upgrading](#upgrading)), with one edit `coffre update` leaves to it: on
 Workers, step 2's `VaultEntry` type for `app/src/coffre.ts`'s `VAULT`
 binding, without which the typecheck fails ("Property 'call' is
-missing"). The Proxy tab is opt-in there too, as step 2 says. While on 0.15.0, don't rotate the vault's
-signing key or a local vault key: every change would fail at its seal.
-0.16 supports the rotation.
+missing"). The Proxy tab is opt-in there too, as step 2 says. Watch it
+as step 6 says: rolled back to 0.15.0, a member 0.16.0 added is refused
+as tampered, and 0.15.0 cannot repair them (above). While on 0.15.0,
+don't rotate the vault's signing key or a local vault key: every change
+would fail at its seal. 0.16 supports the rotation.
 
 ### From a release before 0.4.0
 

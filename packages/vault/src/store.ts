@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type Crede
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { entryColumns, numbersIn, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { entryColumns, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
@@ -65,12 +65,15 @@ export { newestVaultEntries } from '@coffre/db/log';
  * to the row's new version and waits again, its lock's clock started over,
  * so only the statement's own bound ends it.
  */
-export async function boundLockWaits(tx: Transaction, ms: number, statements = false): Promise<void> {
+export async function boundLockWaits(tx: Transaction, ms: number, statements = false, { final = false }: { final?: boolean } = {}): Promise<void> {
   if (engineOf(tx) !== 'postgres') return;
   const bound = String(Math.trunc(ms));
-  await tx.execute(statements
+  const statement = statements
     ? sql`SELECT set_config('lock_timeout', ${bound}, true), set_config('statement_timeout', ${bound}, true)`
-    : sql.raw(`SET LOCAL lock_timeout = ${bound}`));
+    : sql.raw(`SET LOCAL lock_timeout = ${bound}`);
+  // `final`: nothing awaits it, it goes first in what the transaction asks next (`later`).
+  if (final) later(tx, statement);
+  else await tx.execute(statement);
 }
 
 /**
@@ -191,11 +194,25 @@ export async function instanceOwners(db: Queryable): Promise<Member[]> {
  * scripts/test-schema.sh holds the pair to that order: keep them together.
  */
 export async function lockMembers(tx: Transaction, principals: readonly string[], shared = false): Promise<Map<string, Member>> {
+  const rows = await membersLocked(tx, principals, shared);
+  return new Map((rows as (StoredMember & { queued?: unknown })[]).map(({ queued: _, ...row }) => [row.principal, memberOf(row)]));
+}
+
+/**
+ * `lockMembers` for a write that needs none of the rows, only their locks: not waited for (`later`), it goes in its
+ * place in what the transaction asks next, its COMMIT at the latest.
+ */
+export function laterLockMembers(tx: Transaction, principals: readonly string[]): void {
+  later(tx, membersLocked(tx, principals, false));
+}
+
+/** The members' queues and rows, locked in principal order (`lockMembers`). */
+function membersLocked(tx: Transaction, principals: readonly string[], shared: boolean) {
   const { vaultMembers } = tablesOf(tx);
   const queued: Record<string, SQL> = engineOf(tx) === 'postgres'
     ? { queued: sql`${sql.raw(shared ? 'pg_advisory_xact_lock_shared' : 'pg_advisory_xact_lock')}(${MEMBER_QUEUE}, hashtext(${vaultMembers.principal}))` }
     : {};
-  const rows = await forUpdate(
+  return forUpdate(
     tx,
     tx
       .select({ ...memberColumns(tx), ...queued })
@@ -204,7 +221,6 @@ export async function lockMembers(tx: Transaction, principals: readonly string[]
       .orderBy(asc(vaultMembers.principal)),
     shared ? 'share' : 'no key update',
   );
-  return new Map((rows as (StoredMember & { queued?: unknown })[]).map(({ queued: _, ...row }) => [row.principal, memberOf(row)]));
 }
 
 /**
@@ -515,6 +531,21 @@ export async function memberLogs(db: Queryable, principals: readonly string[]): 
   if (principals.length === 0) return new Map();
   const rows = await rowsOf<MemberLogColumns & { principal: string; access: string | number | bigint | null }>(db, engineOf(db) === 'postgres' ? memberLogsPostgres(principals) : memberLogsSqlite(principals));
   return new Map(rows.map((row) => [row.principal, { ...memberLogOf(row), access: row.access == null ? null : BigInt(String(row.access)) }]));
+}
+
+/**
+ * Whom a first add down the two-trip path added (T179, since 0.16.0): the
+ * principals its change in 0.15's log names, `{"id": principal, …}` its
+ * `ref`, which 0.14's log holds no entry of. Unchecked: a change written
+ * around the vault only adds to whom `verifyLog` holds to 0.15's log, which
+ * checks each one's newest change. One read of `log_changes_admitted_idx`,
+ * as many rows as were added so.
+ */
+export async function fastAdded(db: Queryable): Promise<Set<string>> {
+  const engine = engineOf(db);
+  const principal = engine === 'postgres' ? sql.raw(`(payload::jsonb -> 'ref' ->> 'id')`) : sql.raw(`json_extract(payload, '$.ref.id')`);
+  const rows = await rowsOf<{ principal: string | null }>(db, sql`SELECT DISTINCT ${principal} AS principal FROM log_changes WHERE ${recorded(engine, sql.raw('payload'), 'admitted')}`);
+  return new Set(rows.flatMap(({ principal }) => (principal === null ? [] : [principal])));
 }
 
 /** The vault's newest allowed access entry about principal `p`, unchecked: one probe, as a use's (`m_access`, 0053). */

@@ -14,6 +14,41 @@
   yet: build it and use it through `dev_overrides`
   ([terraform-provider/README.md](terraform-provider/README.md)). `pnpm
   test:terraform` runs its tests against a local coffre, in CI too.
+
+- **Breaking: a key write and a member's first add write no 0.14 entry,
+  and a rollback refuses the members 0.16.0 added (T179, the
+  contraction).** On Postgres with 0.15's log, the two-trip key write
+  (`PATCH /secrets/<project>/<env>` of values) and the two-trip first add
+  (`PUT /members/<member>`) append neither the vault's `key.wrap` or
+  `member.add` nor the app's `secret.write`: their change in 0.15's log is
+  their record, its payload naming the request's operation and id. So a
+  key write makes two round trips, the vault's statement and the app's
+  one Sync (five before, sixteen in 0.15.0), and a first add two, both
+  the vault's (three before, fourteen). The audit pages list those changes
+  where the entries stood, on the whole log, a project's, an environment's,
+  a key's and a member's page, and to a reader of some places at those
+  places; an offboarding report counts the values a member wrote so;
+  `coffre verify` still replays 0.14's access entries for everyone they
+  account for, and holds the members added so to 0.15's log, as the
+  vault's own checks do (and every member, once a later change of one of
+  them leaves the replay nothing to follow); and the list of everyone
+  finds a member whose row is gone by their add's change. Every other
+  change still writes its 0.14 entry. Eight partial indexes on
+  `log_changes`, and statistics on their conditions, serve the pages
+  (migration 0065). AGENTS.md's rule ships what stops a write one
+  release after the code stops reading it; this release breaks it once,
+  on Erwin's call (D169). The releases before 0.16.0 check a member
+  against their newest 0.14 access entry and refuse one who has none. Example: upgrade
+  0.14.5 to 0.16.0, an Owner adds Ada, roll back to 0.14.5: 0.14.5 finds
+  no `member.add` entry for Ada, reads her row as tampered and refuses
+  her. 0.15.0, upgraded and rolled back to, does the same, and can neither
+  add her again nor remove her (its 0.14 log never admitted her). Going
+  forward to 0.16.0 again serves her as before; restoring the backup taken
+  before the upgrade loses her with everything since. So add no member
+  while you might still roll back (docs/deploy.md, "From 0.14.5 to 0.16",
+  step 6). Keys 0.16.0 wrote still open on a rollback, but its audit page
+  lists none of those writes and adds.
+
 - **A write names the version it made, and a mark the one it marks (T108).**
   `PATCH /api/secrets/:project/:environment` answers each key it wrote
   with the new version's id beside its number,
@@ -223,7 +258,7 @@
   their page, their report, `coffre migrate` and the vault's conversion
   read it as standing while that change is still their newest. Until now
   each compared the finding with the member's newest 0.14 access entry,
-  which the contraction stops writing (PR 6): a member found tampered after it would have
+  which the contraction stops writing (above): a member found tampered after it would have
   read tampered for good. Findings that name no change, 0.14's, keep that
   rule. The same row found again after a change is logged again, where a
   process logged it once. A member's report finds them missing (tampered)
@@ -246,8 +281,8 @@
   Everything else adds as before: first grants (`access`), a set-up by
   someone who runs no instance, a re-admit or a role change, a member
   the config names, SQLite, and every refusal, which that path answers
-  and logs as before, after the vault's read. 0.14's `member.add` entry
-  is still written; the contraction drops it, and the add to two round trips.
+  and logs as before, after the vault's read. The contraction (above)
+  drops its 0.14 `member.add` entry, and the add to two round trips.
 - **A key write makes five round trips, not sixteen (T179 PR 3).** On
   Postgres with 0.15's log, `PATCH /secrets/<project>/<env>` of values
   (given or generated), at an environment of its own, by a session, a CLI
@@ -270,7 +305,7 @@
   sensitive value asked for, a dry run, a fork or `dev@me`, a binding's or
   a workload's token, SQLite, a key service's vault, and every refusal,
   which that path answers and logs as before, after the vault's one call.
-  0.14's entries are still written; the contraction drops them, and the write to two
+  The contraction (above) drops its 0.14 entries, and the write to two
   round trips (docs/design/two-trips.md, "As built: PR 3").
 
 - **A use and a change trust a newest change's seal only once its MAC

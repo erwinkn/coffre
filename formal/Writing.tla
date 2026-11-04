@@ -38,16 +38,16 @@
 (*               4. the seal wait, then the answer.                        *)
 (* Each asks again at most MaxTries times in all, then answers 409.        *)
 (*                                                                         *)
-(* As built (PR 5), an add's write is two statements of one transaction,   *)
-(* three round trips in all: the members' rows and 0.14's head, read for   *)
-(* its `member.add` entry's MAC, then that entry (its trigger takes the    *)
-(* issue lock shared, then the fence), the hold, the rows, COMMIT. The     *)
-(* head and the rows taken a statement early only add order: a change that *)
-(* takes either waits for the add, and one that takes neither (a session's *)
-(* revoke, a database writer) is what the hold, after the fence, weighs.   *)
-(* AWrite is the second statement; whether the first's locks can close a   *)
-(* cycle is WriteLocks.tla's (AddLocks). TwoTrips is the target's shape    *)
-(* (PR 6), as for a key write.                                             *)
+(* As built, an add's write is one transaction of two statements, sent as  *)
+(* one Sync (0.16.0, the contraction: no `member.add` entry, so no head    *)
+(* read before a MAC): the members' rows and 0.14's head, a lock with      *)
+(* nothing read under it, then the hold (`admit_hold`: the issue lock      *)
+(* shared, the fence, the read again), the rows, COMMIT. The head and the  *)
+(* rows taken a statement early only add order: a change that takes either *)
+(* waits for the add, and one that takes neither (a session's revoke, a    *)
+(* database writer) is what the hold, after the fence, weighs. AWrite is   *)
+(* the second statement; whether the first's locks can close a cycle is    *)
+(* WriteLocks.tla's (AddLocks). TwoTrips is the shape, as for a key write. *)
 (* The read holds the adder's session too (`cred`): ended, or not as its   *)
 (* log has it, the add answers 401 there and then, as a key write's does.  *)
 (* An add the vault leaves to today's path (refused, an object not as its  *)
@@ -73,8 +73,8 @@
 (* object but the caller's credential not as the log has it) or from its   *)
 (* decision (refused), on its first try or on a later one, after a try the *)
 (* vault served and the app's hold abandoned: that try's request number    *)
-(* and its wrap stay (0.14's `key.wrap` entry), a gap the checkpointer     *)
-(* seals past and a record of a wrap no change names. The caller's own     *)
+(* stays, a gap the checkpointer seals past (0.16.0 writes no `key.wrap`   *)
+(* on the two-trip path; today's path writes its own). The caller's own    *)
 (* credential, not as its log has it or ended, answers 401 and never goes  *)
 (* there: the credential's own check holds its row to its MAC alone, and   *)
 (* would take one a database writer put back meanwhile. Nor is it weighed  *)
@@ -93,10 +93,10 @@
 (* steps by the app's statement only when its hold runs before the fence)  *)
 (* and the fence; from a hold to its COMMIT, both (`held`), which a        *)
 (* database writer ignores. A session's revoke takes the fence, not the    *)
-(* head: PR 6's, once 0047's head in `revoke_credential` is contracted     *)
-(* away.                                                                   *)
-(* Today's revoke takes the head too, which only adds order, so this is    *)
-(* the stronger adversary.                                                 *)
+(* head: 0047's `revoke_credential` takes the head too, and keeps it in    *)
+(* 0.16.0 while 0.14.5 may serve beside it (Migration015's EntryLessHead;  *)
+(* WriteLocks.tla checks its locks), which only adds order: the revoke     *)
+(* here is the stronger adversary.                                         *)
 (*                                                                         *)
 (* Objects have seals: a counter per object, its newest change's number    *)
 (* in the log, moved by each change. A row stores its seal too; a database *)
@@ -446,10 +446,11 @@ WRest(p) ==
     /\ Goto(p, "w.decide")
     /\ UNCHANGED <<ok, names, svc, kver, seal, putBack, forged, gen, sealedTo, head, held, tries, trips, writes, admits, answered>>
 
-\* The Worker decides on the read; allowed, it wraps the key (0.14's
-\* `key.wrap`, committed now: the try's, `wrap`) and seals the change, and
-\* the app checks the caller's rows. No round trip. Refused: today's path,
-\* which refuses and logs it as ever. The rows not the caller's: 401.
+\* The Worker decides on the read; allowed, it wraps the key (the try's,
+\* `wrap`, which its change names by the request's number; no 0.14
+\* `key.wrap` entry since 0.16.0) and seals the change, and the app checks
+\* the caller's rows. No round trip. Refused: today's path, which refuses
+\* and logs it as ever. The rows not the caller's: 401.
 WDecide(p) ==
     /\ pc[p] = "w.decide"
     /\ IF ~Decide(p, l[p].read)
@@ -838,7 +839,7 @@ TodayPolicyStandsAtCommit == \A w \in writes \cup admits : w.today => w.policy
 \* ... not at its commit: a revoke or a session's end between the vault's
 \* wrap and the app's COMMIT does not stop it (EXPECTED in scripts/formal.sh: the window every
 \* write has had since 0.14, which the two-trip path closes for the writes
-\* it serves, and PR 6 for every write).
+\* it serves; the rest keep it until they take that path, PR 3b and PR 7).
 TodayStandsAtCommit == \A w \in writes \cup admits : w.today => w.stands
 
 \* Each key change goes from the object it was made from: two writes from
@@ -881,9 +882,11 @@ CommitsAuthentic == \A c \in writes \cup admits : c.authentic
 \* and one that committed never falls back.
 OneWritePerRequest == \A v, w \in writes : v.p = w.p => v = w
 
-\* A write names the wrap of the try that committed it (its `secret.write`
-\* entry names that try's `key.wrap`), never an abandoned try's: those
-\* stay in 0.14's log as wraps no change names.
+\* A write names the wrap of the try that committed it, never an abandoned
+\* try's: a two-trip write's change carries its own request's number (an
+\* abandoned try leaves a gap in the numbers), and today's `secret.write`
+\* entry names its own path's `key.wrap` (an abandoned one of those stays
+\* in 0.14's log as a wrap no change names).
 WritesNameTheirWrap == \A w \in writes : w.wrap = w.t
 
 \* Every change answers only once sealed (R51).

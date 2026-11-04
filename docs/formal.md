@@ -1883,7 +1883,7 @@ chain or a deletion the chain and the slugs disagree on refuse it.
 | 0.15 changes also advance 0.14's fence (DualFence) | `NothingAllowedAfterAnswer` |
 | a trigger takes the 0.15 fence for each 0.14 access change (OldWritesFence), or refuses it once the cutover is there (OldWritesRefused): each covers for the other | `NothingAllowedAfterAnswer` |
 | 0.14's writes refused once the cutover is there (OldWritesRefused, PR 9b) | `OldWritesBeforeAnchor`: a late write lands past the anchor, which no 0.15 change seals |
-| a 0.15 change that writes no 0.14 entry takes 0.14's head all the same (EntryLessHead; Migration015EntryLess, PR 9b) | `NothingAllowedAfterAnswer`: a revoke commits and answers between 0.14's check of the row and its commit |
+| a 0.15 change that writes no 0.14 entry takes 0.14's head all the same (EntryLessHead; Migration015EntryLess, PR 9b), while 0.14's isolates may serve beside it, which they still may beside 0.16.0 (an upgrade from 0.14.5's rollout, or a rollback to it): the two-trip write and add take it as a lock too | `NothingAllowedAfterAnswer`: a revoke commits and answers between 0.14's check of the row and its commit |
 | 0.14's head before the 0.15 fence (ChangeHeadFirst) | `NoWaitCycle` |
 | the object's member row before 0.14's head (RowFirst): 0.14 takes rows before its head, so the order is row, head, fence | `NoWaitCycle` |
 | a 0.15 use reads the object's newest authentic 0.14 access entry (UsesSeeOldWrites), or 0.14's late writes are refused: each covers for the other, the refusal being a trigger the database's owner can drop | `AllowedOnlyWhenGranted`: a row put back over a late write |
@@ -2387,8 +2387,8 @@ made in a project or a project made under an old slug is not an object
 here: it is a move of `names`, as a rename is (a key's object holds no
 name). Names are app rows, unsealed, as today; each move of one is an app
 write under 0.14's head. A session's revoke takes the fence and not 0.14's
-head, as it will once the contraction takes 0047's head away; today's takes the
-head too, which only adds order. The app's statement is two steps: its
+head, the stronger adversary: 0047's `revoke_credential` takes the head
+too, which only adds order, and keeps it in 0.16.0 (EntryLessHead). The app's statement is two steps: its
 hold (the head, the issue lock, the fence, the read again) and its COMMIT
 (the rows, the change). Between them `held` names who holds the head and
 the fence, and every change that takes one of them (a revoke, a give-back,
@@ -2405,10 +2405,11 @@ is an UPDATE of the credential's row, which `issue_token` takes shared
 before the issue lock: the write makes it before the hold, after 0.14's
 head, the order WriteLocks.tla checks (below). An add's write takes its rows, in
 principal order, then the head, then the fence, as `change_input` does, and
-holds after them. As built (PR 5) the rows and the head are a statement of
-their own, a round trip before the rest, for the head's read that 0.14's
-`member.add` entry's MAC needs: taken early, they only add order (a change
-that takes either waits; one that takes neither, a session's revoke, is what
+holds after them. As built, the rows and the head are the first statements
+of its one Sync, locks with nothing read under them (0.16.0's contraction:
+no `member.add` entry, whose MAC needed the head's read, a round trip
+before the rest, in PR 5): taken first, they only add order (a change that
+takes either waits; one that takes neither, a session's revoke, is what
 the hold after the fence weighs), so `AWrite` stays one step, and whether
 those locks can close a cycle is WriteLocks.tla's `AddLocks`. Today's add
 (`admit`) decides and writes in one transaction under the rows and the
@@ -2421,7 +2422,7 @@ number.
 
 ### WriteLocks.tla
 
-The locks of PR 3's key write, against the transactions that take the same
+The locks of the two-trip key write (PR 3; one Sync since 0.16.0), against the transactions that take the same
 ones, with what Writing.tla leaves out: Postgres's lock queue. A request
 waits for every holder of its lock in a conflicting mode, and also for every
 request queued ahead of it that conflicts: a shared request queues behind a
@@ -2444,14 +2445,14 @@ holder and no request ahead of it conflicts, and commits with them all.
 |---|---|
 | the write updates its credential's row before the hold, as the issue and the revoke take it: row, issue lock, fence (TouchFirst) | `NoWaitCycle`: the write holds the issue lock and the fence and waits for the row, which the issue holds shared, queued for the issue lock behind the barrier, which waits for the write's issue lock (review r1 of #469, which saw it stall a write and a use 908 ms) |
 
-**A member add's** (PR 5, `AddLocks.cfg`, `Flow = "add"`): its first
-statement locks the members' rows (`lockMembers`) and 0.14's head, its
-second appends `member.add`, whose trigger takes the issue lock shared
-and then the fence, and holds the read. Against a change of the adder's
-member (`#decide`, `change_input`: the row, the head, the issue lock, the
-fence), a token issued to the adder (`issue_token`: the members' rows
-shared, the credential's, the issue lock), the barrier, a revoke and a
-use. 28,408 states.
+**A member add's** (PR 5, `AddLocks.cfg`, `Flow = "add"`): it locks the
+members' rows (`lockMembers`) and 0.14's head, then `admit_hold` takes the
+issue lock shared and then the fence, and holds the read (until 0.16.0, a
+`member.add` append's trigger took those two). Against a change of the
+adder's member (`#decide`, `change_input`: the row, the head, the issue
+lock, the fence), a token issued to the adder (`issue_token`: the members'
+rows shared, the credential's, the issue lock), the barrier, a revoke and
+a use. 28,408 states.
 
 | protection | turned off, TLC finds |
 |---|---|
@@ -2466,7 +2467,8 @@ page, `coffre migrate` and the vault's conversion read it (T179 PR 4a;
 only once its own check passes their row, so a change made after a
 finding's check means the row checked out since. 0.14's rule compares the
 finding with the member's newest access entry, which every change wrote;
-the contraction writes none, and that watermark would freeze. Under 0.15's log a
+the contraction writes none for a first add down the two-trip path
+(0.16.0), and that watermark would freeze. Under 0.15's log a
 finding names the member's newest change its check weighed, by the
 change's MAC (`{"change": "<its MAC, hex>"}` in its metadata, `changeName`),
 and stands while that change is still their newest. Not by its number: a
@@ -2491,7 +2493,14 @@ a finding whose check read the vault's newest change, none made since,
 stands. `Settles`: a change after every finding's check settles them.
 `Findings.cfg` has no access entries (the contraction), 82,200 states;
 `Findings015.cfg` writes one beside each change, and 0.14's findings beside
-0.15's, 408,314.
+0.15's, 408,314. 0.16.0 contracts a first add down the two-trip path
+alone: every other change of a member still writes its access entry, so a
+finding of 0.14's, which names no change, settles at the member's next
+such change, as `Findings015.cfg` checks. The two-trip add is of someone
+with no row; a finding of 0.14's about them (their row deleted around the
+vault) stands past it, until their next change down today's path: the
+deletion is a database writer's (R64), and the finding errs on the side of
+standing.
 
 | protection | turned off, TLC finds |
 |---|---|

@@ -20,7 +20,7 @@ import {
 } from 'drizzle-orm/pg-core';
 
 import { ACTIVE_SUBJECT } from './active-subject.ts';
-import { recorded } from './change-records.ts';
+import { recordField, recorded } from './change-records.ts';
 
 const bytea = customType<{ data: Buffer }>({
   dataType: () => 'bytea',
@@ -1191,6 +1191,18 @@ export const logChanges = pgTable(
     // none: left out.
     index('log_changes_issue_revoke_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'issue', 'revoke', 'signOut')),
     index('log_changes_issue_revoke_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'issue', 'revoke', 'signOut')),
+    // The key writes and the first adds down the two-trip path, recorded here alone since 0.16.0 (T179; change-records.ts),
+    // ordered as the sign-ins: what the audit pages list where 0.14's `secret.write` and `member.add` stood, every one,
+    // one member's, one environment's (by the payload's, `recordField`) and one key's; and an offboarding report's writes.
+    index('log_changes_written_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    index('log_changes_written_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    index('log_changes_written_environment_idx').on(recordField('postgres', table.payload, 'environmentId'), table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    index('log_changes_written_object_idx').on(table.object, table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    // One member's at one place, each read bounded by its page however many others' writes the place holds (review r1 of #490).
+    index('log_changes_written_actor_environment_idx').on(table.actor, recordField('postgres', table.payload, 'environmentId'), table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    index('log_changes_written_actor_object_idx').on(table.actor, table.object, table.at, table.number).where(recorded('postgres', table.payload, 'written')),
+    index('log_changes_admitted_idx').on(table.at, table.number).where(recorded('postgres', table.payload, 'admitted')),
+    index('log_changes_admitted_actor_idx').on(table.actor, table.at, table.number).where(recorded('postgres', table.payload, 'admitted')),
   ],
 );
 

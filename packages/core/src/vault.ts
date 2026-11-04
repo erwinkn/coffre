@@ -759,8 +759,9 @@ export type WriteKeysInput = Correlation & {
 
 /**
  * What the vault decided of a key write: none, the app writing as before; or each key's id (made, or as the place
- * holds it), whether the write makes it, its sensitivity and its data key wrapped, with the seq of its `key.wrap`
- * entry, its change, prepared (the read's digest in its payload), the read's digest the app's hold compares, the app's
+ * holds it), whether the write makes it, its sensitivity and its data key wrapped (0.16.0 logs no `key.wrap` entry of
+ * it: its change records the write), its change, prepared (the read's digest and the request's number in its payload),
+ * the read's digest the app's hold compares, the app's
  * rows as the read found them (`app`, as `app_read` answers them, with the database's clock), the caller as the
  * vault decided them (`standing`, as `access` answers), and the instant the credential's end was judged at (`at`).
  */
@@ -773,7 +774,7 @@ export type WriteKeysOutcome =
     app: string;
     standing: Access;
     digest: string;
-    keys: { name: string; id: string; created: boolean; version: number; sensitive: boolean; wrapped: WrappedKey; seq: number }[];
+    keys: { name: string; id: string; created: boolean; version: number; sensitive: boolean; wrapped: WrappedKey }[];
     changes: PreparedChange[];
   };
 

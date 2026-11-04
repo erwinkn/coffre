@@ -276,12 +276,12 @@ const seals = new Map<number, string | null>();
  * A fork prepares twice. The pin that would fold it into the write is T179's (sealed-inputs.md).
  */
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
-  // A key write decided on one read (T179 PR 3; docs/design/two-trips.md): the vault's statement, 0.14's `key.wrap`
-  // entries (the head, then the append: until 0.16 stops them), and the app's two, the head and then everything with
-  // the COMMIT, however many keys. 0.16's contraction makes it { app: 1, vault: 1 } (PR 6).
-  'key set, one': { app: 2, vault: 3 },
-  'key set, existing': { app: 2, vault: 3 },
-  'key set, five': { app: 2, vault: 3 },
+  // A key write decided on one read (T179; docs/design/two-trips.md): the vault's statement, then the app's one Sync, the
+  // head (a lock alone) and everything with the COMMIT, however many keys. No 0.14 entry since 0.16.0's contraction:
+  // the changes record the write, in 0.15's log alone.
+  'key set, one': { app: 1, vault: 1 },
+  'key set, existing': { app: 1, vault: 1 },
+  'key set, five': { app: 1, vault: 1 },
   'key archived': { app: 12, vault: 2 },
   'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },
@@ -296,12 +296,12 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'environment renamed': { app: 6, vault: 2 },
   'environment protected': { app: 5, vault: 9 },
   'environment archived': { app: 10, vault: 2 },
-  // A first add decided on one read (T179 PR 5; docs/design/two-trips.md, "A member add"): the vault's read; then its
-  // write, the members' rows and 0.14's head (read for its `member.add` entry's MAC, until 0.16 stops it), then the hold,
-  // the entry, the row, the change and the COMMIT. No app statement. 0.16's contraction makes it { app: 0, vault: 2 }.
-  'member added': { app: 0, vault: 3 },
-  'member added, a role': { app: 0, vault: 3 },
-  'service account added': { app: 0, vault: 3 },
+  // A first add decided on one read (T179; docs/design/two-trips.md, "A member add"): the vault's read; then its write,
+  // one Sync: the members' rows and 0.14's head (a lock alone), the hold, the row, the change and the COMMIT. No app
+  // statement, and no 0.14 `member.add` entry since 0.16.0's contraction: the change records the add.
+  'member added': { app: 0, vault: 2 },
+  'member added, a role': { app: 0, vault: 2 },
+  'service account added': { app: 0, vault: 2 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },

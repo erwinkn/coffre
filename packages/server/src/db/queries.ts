@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type Enviro
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
-import { logObject, newestSeqQuery, newestVaultSeq, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
+import { logObject, newestSeqQuery, newestVaultSeq, recordField, recorded, withinBytes, type ChangeRecord } from '@coffre/db/log';
 import { findingsOf, findingStands, readGrants, storedRole, tamperedMembers } from '@coffre/db/grants';
 import * as dialect from '@coffre/db/dialect';
 import { ahead, canonicalTimestamp, changedRows, clock, clockMillis, forUpdate, migrationLedger, tombstone, truth, type Table } from '@coffre/db/dialect';
@@ -422,6 +422,23 @@ export async function places(
   for (const place of found) {
     const slugOf = new Map(place.environments.map((environment) => [environment.id, environment.slug]));
     for (const environment of place.environments) environment.parentSlug = environment.parentId === null ? null : (slugOf.get(environment.parentId) ?? null);
+  }
+  return found;
+}
+
+/**
+ * The ids of these projects' environments, deleted ones among them: where a page of the log reads what was written
+ * (`writtenAt`). The environments alone, by `environments_project_id_slug_key`, a thousand projects a statement: as
+ * many rows as environments, however many keys they hold, where `places` counts each one's (review r7 of #490).
+ */
+export async function environmentIdsOf(db: Queryable, projectIds: readonly string[]): Promise<Map<string, string[]>> {
+  const { environments } = tablesOf(db);
+  const unique = [...new Set(projectIds)];
+  const found = new Map<string, string[]>(unique.map((id) => [id, []]));
+  for (let start = 0; start < unique.length; start += 1000) {
+    const rows = await db.select({ id: environments.id, projectId: environments.projectId }).from(environments)
+      .where(inArray(environments.projectId, unique.slice(start, start + 1000)));
+    for (const { id, projectId } of rows) found.get(projectId)!.push(id);
   }
   return found;
 }
@@ -1051,8 +1068,10 @@ export async function memberAccess(db: Queryable, principal: string, now: Date):
  * step down that index (a skip scan), and an access entry looked for only
  * of those without a row: as many steps as there are principals, however
  * long their histories grow (R48). A change's object names its member by
- * a hash alone, which a scan cannot turn back into a principal: the list
- * of everyone reads 0.14's entries alone, until PR 4b (with PR 6).
+ * a hash alone, which a scan cannot turn back into a principal; but a first
+ * add down the two-trip path, which since 0.16.0 writes no access entry,
+ * names them in its payload: those too, one entry each of
+ * `log_changes_admitted_idx`, as many as were added so.
  */
 export async function missingMembers(db: Queryable, member?: { type: string; id: string }): Promise<string[]> {
   if (member !== undefined) {
@@ -1065,6 +1084,9 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     return rows.map((row) => row.principal);
   }
   const next = (after: SQL | null) => sql`(SELECT subject_principal FROM audit_log WHERE author = 'vault' AND subject_principal ${after === null ? sql`IS NOT NULL` : sql`> ${after}`} ORDER BY subject_principal LIMIT 1)`;
+  const engine = dialect.engineOf(db);
+  // Whom a first add down the two-trip path added: its payload's `ref`, `{"id": principal, "kind": "principal"}`.
+  const added = engine === 'postgres' ? sql.raw(`(log_changes.payload::jsonb -> 'ref' ->> 'id')`) : sql.raw(`json_extract(log_changes.payload, '$.ref.id')`);
   // A plain read, `select …`, which a page's other reads may go with (`groupReads`, @coffre/db/hyperdrive).
   const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT principal FROM (
     WITH RECURSIVE named (principal) AS (
@@ -1079,6 +1101,9 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
         SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = named.principal AND decision = 'allow'
           AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})
       )
+    UNION
+    SELECT a.principal FROM (SELECT ${added} AS principal FROM log_changes WHERE ${recorded(engine, sql.raw('log_changes.payload'), 'admitted')}) AS a
+    WHERE NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = a.principal)
   ) AS missing ORDER BY principal`);
   return rows.map((row) => row.principal);
 }
@@ -1202,9 +1227,11 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
   // Their reads and writes, and every restore, few, each someone's choice, for whichever secrets were seen: one statement.
   // Beside it, their uses, under 0.15's log.
   const members = actorIds.flatMap((id) => [`user:${id}`, `token:${id}`]);
-  const [logged, used] = await Promise.all([
+  // And their key writes 0.15's log records alone (T179, 0.16.0), each a change naming its key and version by id.
+  const [logged, used, wrote] = await Promise.all([
     entries(and(allowed, or(and(inArray(auditLog.actor, members), inArray(auditLog.action, ['secret.read', 'secret.write'])), eq(auditLog.action, 'secret.restore')))),
     readAlready ?? readsBy(db, members),
+    writtenBy(db, members),
   ]);
   const restores = logged.filter((row) => row.action === 'secret.restore');
   const seen = logged.filter((row) => row.action !== 'secret.restore');
@@ -1213,7 +1240,7 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
     return row.action !== 'secret.read' || row.secretId !== null || !Array.isArray(listed) ? null : listed as { secretId?: unknown }[];
   };
   const ids = seen.flatMap((row) => (listedOf(row) ?? []).flatMap(({ secretId }) => (typeof secretId === 'string' ? [secretId] : [])));
-  const [now, usedRows] = await Promise.all([secretPlaces(db, ids), readsOf(db, used)]);
+  const [now, usedRows, wroteRows] = await Promise.all([secretPlaces(db, ids), readsOf(db, used), writesOf(db, wrote)]);
   const rows = seen.flatMap((row) => {
     const listed = listedOf(row);
     if (listed === null) return [row];
@@ -1232,7 +1259,53 @@ export async function memberActivity(db: Queryable, actorIds: string[], readAlre
       }];
     });
   });
-  return [...rows, ...usedRows, ...restores].map(shown);
+  return [...rows, ...usedRows, ...wroteRows, ...restores].map(shown);
+}
+
+/**
+ * The key writes by these members that 0.15's log records alone (T179, 0.16.0): each change's actor, time, key and
+ * version, by id, from its payload. One read of `log_changes_written_actor_idx`, each member's entries.
+ */
+async function writtenBy(db: Queryable, members: readonly string[]): Promise<{ actor: string; at: number; secret: string; version: string }[]> {
+  if (members.length === 0) return [];
+  const { logChanges } = tablesOf(db);
+  const rows = await db.select({ actor: logChanges.actor, at: logChanges.at, payload: logChanges.payload }).from(logChanges)
+    .where(and(recorded(dialect.engineOf(db), logChanges.payload, 'written'), inArray(logChanges.actor, [...members])));
+  // Ids of a payload's own, which a database writer may have written anything into: looked up only as ids.
+  const id = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+  return rows.flatMap(({ actor, at, payload }) => {
+    let parsed: { ref?: { id?: unknown }; version?: unknown };
+    try {
+      parsed = JSON.parse(payload) as typeof parsed;
+    } catch {
+      return [];
+    }
+    const { ref, version } = parsed;
+    return id(ref?.id) && id(version) ? [{ actor, at: Number(at), secret: ref.id, version }] : [];
+  });
+}
+
+/** Their key writes from 0.15's log (`writtenBy`), as `memberActivity` lists writes: each version they wrote, by its number. */
+async function writesOf(db: Queryable, wrote: Awaited<ReturnType<typeof writtenBy>>) {
+  if (wrote.length === 0) return [];
+  const [now, versions] = await Promise.all([secretPlaces(db, wrote.map(({ secret }) => secret)), versionsOf(db, wrote.map(({ version }) => version))]);
+  return wrote.flatMap(({ actor, at, secret, version }) => {
+    const found = now.get(secret);
+    const number = versions.get(version)?.version;
+    if (found === undefined || number === undefined) return [];
+    return [{
+      actor,
+      action: 'secret.write',
+      secretId: secret,
+      metadata: JSON.stringify({ version: number }),
+      occurredAt: at,
+      key: found.key,
+      currentVersion: found.currentVersion,
+      archived: found.archivedAt !== null || found.environmentArchivedAt !== null || found.projectArchivedAt !== null,
+      project: found.project,
+      environment: found.environment,
+    }];
+  });
 }
 
 /** Their reads under 0.15's log (`readsBy`), as `memberActivity` lists reads (above): each version they read. */
@@ -1704,29 +1777,62 @@ function recordActors(actors: readonly string[] | undefined, kind: (name: string
 }
 
 /**
+ * Where a page lists the key writes 0.15's log records alone (T179, 0.16.0): every one, on a page of the whole log;
+ * those at these environments, on a place's page or a reader's of some places; those of one key.
+ */
+export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | { secretId: string };
+
+/**
  * The changes 0.15's log records in place of 0.14's entries, newest first by
  * when the vault asked, `at`, then by number: one that waited for a lock
- * takes its number after one that asked later. The sign-ins; and, with
- * `detail`, the token issues, revokes and sign-outs, which 0.14 shows only
- * when asked. Up to `limit`, below `before`, of the members `actors` names
- * if it does: a sign-in's is a service, the rest's anyone's. One read, of
- * each index's entries, each member's, as many as it returns at most,
- * however many other changes the log holds (R48).
+ * takes its number after one that asked later. On a page of the instance's
+ * (`instance`): the sign-ins; with `detail`, the token issues, revokes and
+ * sign-outs, which 0.14 shows only when asked; and the first adds down the
+ * two-trip path. Wherever `written` says: the key writes down that path.
+ * Since 0.16.0 neither writes a 0.14 entry (T179): their change is the
+ * record. Up to `limit`, below `before`, of the members `actors` names if
+ * it does: a sign-in's is a service, the rest's anyone's. One round trip
+ * (`newest`: a statement a few hundred reads, a few statements at a
+ * time past that), of each index's entries,
+ * each member's, each environment's, as many as it returns at most,
+ * however many other changes the log holds (R48); at a place, of some
+ * members, each member's there.
  */
 export async function sealedPage(
   db: Queryable,
-  filter: { actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number },
+  filter: { actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number; instance: boolean; written: WrittenAt | null },
+  stop?: AbortController,
 ): Promise<{ rows: RecordedChange[]; more: boolean }> {
-  const reads = recordActors(filter.actors, isService).map((actor) => ({ records: SIGN_INS, actor }));
-  if (filter.detail) reads.push(...recordActors(filter.actors, isMember).map((actor) => ({ records: HIDDEN, actor })));
-  if (reads.length === 0) return { rows: [], more: false };
   const { logChanges } = tablesOf(db);
-  const object = dialect.engineOf(db) === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
+  const engine = dialect.engineOf(db);
+  const of = (records: ChangeRecord[], actor: string | undefined) => and(recorded(engine, logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor))!;
+  // The reads one at a time, as `newest` takes them: a project's page of tens of thousands of environments, of a
+  // member's two forms, is more reads than a call takes arguments (review r4 of #490), and more than an isolate
+  // holds at once, made together (review r5).
+  const { written } = filter;
+  function* reads(): Generator<SQL> {
+    if (filter.instance) {
+      for (const actor of recordActors(filter.actors, isService)) yield of(SIGN_INS, actor);
+      if (filter.detail) for (const actor of recordActors(filter.actors, isMember)) yield of(HIDDEN, actor);
+      for (const actor of recordActors(filter.actors, isMember)) yield of(['admitted'], actor);
+    }
+    if (written === null) return;
+    if ('all' in written) {
+      for (const actor of recordActors(filter.actors, isMember)) yield of(['written'], actor);
+      return;
+    }
+    // Of some members at a place: a read of each member's there (`log_changes_written_actor_environment_idx`,
+    // `…_actor_object_idx`), never the place's read with the others' passed over, which grows with their writes.
+    for (const actor of recordActors(filter.actors, isMember)) {
+      if ('secretId' in written) yield and(of(['written'], actor), eq(logChanges.object, logObject('secret', written.secretId)))!;
+      else for (const id of written.environmentIds) yield and(of(['written'], actor), eq(recordField(engine, logChanges.payload, 'environmentId'), id))!;
+    }
+  }
+  const object = engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
     ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
-  const rows = await dialect.rowsOf<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
-    db,
-    newest(db, reads, columns, filter.before, filter.limit + 1),
+  const rows = await newest<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
+    db, reads(), columns, filter.before, filter.limit + 1, 0, stop,
   );
   return {
     rows: rows.slice(0, filter.limit).map((row) => ({
@@ -1742,19 +1848,86 @@ const SIGN_INS: ChangeRecord[] = ['signIn'];
 const HIDDEN: ChangeRecord[] = ['issue', 'revoke', 'signOut'];
 
 /**
- * The newest of the changes `reads` asks for, below `before`, `take` of
- * them past the first `skip`: each index, each member's, read on its own
- * and newest first, no further than that, then the newest of them all. One
- * statement, of as many index entries as it reads, each read's at most.
+ * The most reads one statement of `newest` takes: SQLite's default limit on
+ * a compound SELECT's terms is 500, and each read's few parameters keep
+ * Postgres's 65,535 far off (review r3 of #490).
  */
-function newest(db: Queryable, reads: { records: ChangeRecord[]; actor: string | undefined }[], columns: SQL, before: ChangePoint | undefined, take: number, skip = 0): SQL {
+export const READS_PER_STATEMENT = 250;
+
+/**
+ * The most statements of `newest` made and asked at once: with more reads,
+ * the next is made once one has answered, so that an isolate holds no more
+ * than these, and the newest rows so far, however many reads a page takes
+ * (review r5 of #490: 130,000 reads made at once held 617 MiB, past
+ * Workers' 128 MB).
+ */
+export const STATEMENTS_AT_ONCE = 4;
+
+/**
+ * The newest of the changes each of `reads` holds (a condition its index's
+ * repeats), below `before`, `take` of them past the first `skip`: each read
+ * on its own and newest first, no further than that, then the newest of
+ * them all. A statement of `READS_PER_STATEMENT` reads at most, each of as
+ * many index entries as it reads, each read's at most: up to that many
+ * reads, one statement, one round trip. With more, a statement of each
+ * `READS_PER_STATEMENT`, `STATEMENTS_AT_ONCE` asked together, each made
+ * from `reads` as it is asked; their rows merge by `at`, then number, as
+ * one statement's would, keeping the newest `skip + take`. The first of
+ * them to fail aborts `stop` with its error, at once, and so does a read
+ * beside them that shares it: no statement is asked after that, and once
+ * those asked have answered, `newest` fails with the first error.
+ */
+async function newest<Row extends { number: string | number | bigint; at: string | number }>(
+  db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0, stop = new AbortController(),
+): Promise<Row[]> {
   const { logChanges } = tablesOf(db);
-  const engine = dialect.engineOf(db);
-  const each = reads.map(({ records, actor }, i) => sql`SELECT * FROM (
-    SELECT ${columns} FROM ${logChanges}
-     WHERE ${and(recorded(engine, logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor), before === undefined ? undefined : below(db, before))}
-     ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
-  return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
+  const statement = (part: readonly SQL[], take: number, skip: number) => {
+    const each = part.map((where, i) => sql`SELECT * FROM (
+      SELECT ${columns} FROM ${logChanges}
+       WHERE ${and(where, before === undefined ? undefined : below(db, before))}
+       ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
+    return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
+  };
+  const left = reads[Symbol.iterator]();
+  const nextPart = (): SQL[] => {
+    const part: SQL[] = [];
+    while (part.length < READS_PER_STATEMENT) {
+      const next = left.next();
+      if (next.done === true) break;
+      part.push(next.value);
+    }
+    return part;
+  };
+  stop.signal.throwIfAborted();
+  const first = nextPart();
+  if (first.length === 0) return [];
+  const second = nextPart();
+  if (second.length === 0) return dialect.rowsOf<Row>(db, statement(first, take, skip));
+  // Each statement's newest `skip + take`: the overall ones are among them.
+  const keep = skip + take;
+  const at = (row: Row) => Number(row.at);
+  const byNewest = (a: Row, b: Row) => at(b) - at(a) || (BigInt(b.number) > BigInt(a.number) ? 1 : BigInt(b.number) < BigInt(a.number) ? -1 : 0);
+  let kept: Row[] = [];
+  const made = [first, second];
+  // The first statement to fail fails the page: no other is asked after it, and those already asked are
+  // waited for, so that a failed page leaves none running behind it (review r6 of #490). It says so at once, as a
+  // read beside it that fails does (review r7), so that the page fails with the first error, not one met while
+  // waiting (review r8): `stop`'s reason, which a later abort leaves as it is.
+  const asking = async () => {
+    while (!stop.signal.aborted) {
+      try {
+        const part = made.pop() ?? nextPart();
+        if (part.length === 0) return;
+        const rows = await dialect.rowsOf<Row>(db, statement(part, keep, 0));
+        kept = kept.concat(rows).sort(byNewest).slice(0, keep);
+      } catch (error) {
+        stop.abort(error);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: STATEMENTS_AT_ONCE }, asking));
+  stop.signal.throwIfAborted();
+  return kept.slice(skip, skip + take);
 }
 
 /**
@@ -1774,12 +1947,12 @@ export const HIDDEN_COUNTED = 1000;
  * index entries, each member's, from the indexes alone.
  */
 export async function sealedReach(db: Queryable, filter: { actors?: readonly string[]; before?: ChangePoint }): Promise<ChangePoint | null> {
-  const reads = recordActors(filter.actors, isMember).map((actor) => ({ records: HIDDEN, actor }));
-  if (reads.length === 0) return null;
   const { logChanges } = tablesOf(db);
-  const [row] = await dialect.rowsOf<{ number: string | number | bigint; at: string | number }>(
-    db,
-    newest(db, reads, sql`${logChanges.number} AS "number", ${logChanges.at} AS "at"`, filter.before, 1, HIDDEN_COUNTED - 1),
+  const engine = dialect.engineOf(db);
+  const reads = recordActors(filter.actors, isMember).map((actor) => and(recorded(engine, logChanges.payload, ...HIDDEN), actor === undefined ? undefined : eq(logChanges.actor, actor))!);
+  if (reads.length === 0) return null;
+  const [row] = await newest<{ number: string | number | bigint; at: string | number }>(
+    db, reads, sql`${logChanges.number} AS "number", ${logChanges.at} AS "at"`, filter.before, 1, HIDDEN_COUNTED - 1,
   );
   return row === undefined ? null : { at: Number(row.at), number: BigInt(row.number) };
 }
@@ -2631,6 +2804,23 @@ export async function secretPlaces(db: Queryable, ids: readonly string[]): Promi
   const found = new Map<string, SecretPlaceRow>();
   for (let start = 0; start < unique.length; start += 1000) {
     for (const row of await secretPlaceRows(db, inArray(secrets.id, unique.slice(start, start + 1000)))) found.set(row.id, row);
+  }
+  return found;
+}
+
+/**
+ * These versions' numbers and recipes, by id: what a key write recorded in 0.15's log alone names by id (T179). A
+ * thousand ids a statement, as `secretPlaces` reads keys: an offboarding report names every version a member ever
+ * wrote, and one statement takes no more than 65,534 parameters (review r2 of #490).
+ */
+export async function versionsOf(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; recipe: string | null }>> {
+  const { secretVersions } = tablesOf(db);
+  const unique = [...new Set(ids)];
+  const found = new Map<string, { version: number; recipe: string | null }>();
+  for (let start = 0; start < unique.length; start += 1000) {
+    const rows = await db.select({ id: secretVersions.id, version: secretVersions.version, recipe: secretVersions.recipe }).from(secretVersions)
+      .where(inArray(secretVersions.id, unique.slice(start, start + 1000)));
+    for (const { id, version, recipe } of rows) found.set(id, { version, recipe });
   }
   return found;
 }

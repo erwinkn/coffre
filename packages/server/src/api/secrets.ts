@@ -6,7 +6,7 @@ import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coff
 import { isTombstone } from '@coffre/core/schemas';
 import { handsBack, type HolderRef, type SecretColumns, type SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
-import { lockLogHeadRead } from '@coffre/db/log';
+import { laterHead } from '@coffre/db/log';
 import { isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
 import { dismissedKeys, secretReferences, secrets, secretVersions } from '@coffre/db/schema';
 
@@ -993,13 +993,16 @@ export async function setSecrets(
 /**
  * A key write the vault decided on one read (T179 PR 3; docs/design/two-trips.md, "A key write", step 4;
  * formal/Writing.tla's WApp and WCommit): each value encrypted under its data key, bound to its key's ids as the
- * vault's read found or made them; then one transaction of two round trips:
+ * vault's read found or made them; then one transaction of one round trip:
  *
- *   BEGIN, 0.14's head FOR UPDATE and its read                    the entries' MAC needs the head first
+ *   BEGIN, 0.14's head FOR UPDATE, a lock alone                   after every writer that takes it before its rows
+ *   the credential's last use, if due (`verify` left it here)
  *   hold_inputs: the issue lock, the fence, the vault's read      `coffre_moved` unless it reads as decided
  *   the new keys' rows, the versions, each key's current version
- *   the credential's last use, if due (`verify` left it here)
- *   0.14's entries, and each key's change (`app_change_strict`)  then COMMIT                    one Sync
+ *   each key's change (`app_change_strict`), then COMMIT                                          one Sync
+ *
+ * Its changes record the write, in 0.15's log alone: 0.16.0 appends no 0.14 `secret.write` entry here, and the audit
+ * pages list the changes (`writtenPage`).
  *
  * then the seal wait (R51). A hold that fails, or a new key another write made first, rolls it all back, and the
  * write is asked of the vault again, a request of its own: three tries in all, then 409 `changed`. Null where the
@@ -1060,9 +1063,10 @@ async function heldOnce(
   const changes = AppChanges.of(ctx.vault, answer.changes);
   const keys: Record<string, SetOutcome> = {};
   const touched = written.touched;
+  for (const { key, level, versionId } of items) keys[key.name] = { version: key.version, versionId, sensitivity: level };
   await ctx.db.transaction(async (tx) => {
-    // 0.14's head first, read: what its entries' MAC chains from (two-trips.md, "Locks": head, issue lock, fence, hold, rows).
-    const locked = await lockLogHeadRead(tx, appLogKey(ctx.chainKey));
+    // 0.14's head first, a lock alone (two-trips.md, "Locks": head, credential, issue lock, fence, hold, rows).
+    laterHead(tx);
     heldWrites(tx, {
       hold: { tokenHash: written.tokenHash, project: written.asked.project, environment: written.asked.environment, keys: names, digest: Buffer.from(answer.digest, 'hex') },
       made: items.filter(({ key }) => key.created).map(({ key }) => ({ id: key.id, ...environment, key: key.name })),
@@ -1071,14 +1075,7 @@ async function heldOnce(
       })),
       touched,
     });
-    const log = items.map(({ key, level, recipe, versionId }) => {
-      keys[key.name] = { version: key.version, versionId, sensitivity: level };
-      return allowed(ctx, 'secret.write', {
-        ...environment, secretId: key.id, operationId, relatedSeq: key.seq,
-        metadata: { key: key.name, version: key.version, ...(recipe === null ? {} : { recipe: recipe.recipe }), ...sensitivityDetail(level, key.created ? null : level) },
-      });
-    });
-    await changes.commit(tx, async (calls) => (await appendAudit(tx, ctx.chainKey, log, calls, true, { final: true, locked })).later);
+    await changes.commit(tx);
   }).catch((error: unknown) => {
     // A new key another write made first, by its name: the vault's read is no longer this write's.
     throw isUniqueViolation(error) ? new ObjectMoved() : changes.failed(error);
