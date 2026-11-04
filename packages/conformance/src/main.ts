@@ -5,6 +5,7 @@
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
+import { end } from './end.ts';
 import { boot, type Kind } from './harness.ts';
 import { Failure } from './report.ts';
 import { conform } from './suite.ts';
@@ -43,48 +44,45 @@ const { values, positionals } = parseArgs({
   },
 });
 const [command, target] = positionals;
-if (values.help || command === undefined) exit(values.help ? 0 : 2, USAGE);
+const { code, message } = await run();
+await end(code, message);
 
-if (command === 'probe') exit(2, 'coffre-conformance probe is now `coffre verify instance`, in the coffre CLI: npx @coffre/cli verify instance');
-if (command !== 'workers' && command !== 'node') exit(2, USAGE);
-const kind: Kind = command;
-const dir = resolve(target ?? '.');
-const port = Number(values.port);
-const bulkLimit = Number(values['bulk-limit']);
-if (!Number.isInteger(port) || !Number.isInteger(bulkLimit) || bulkLimit < 1) exit(2, USAGE);
+async function run(): Promise<{ code: number; message: string }> {
+  if (values.help || command === undefined) return { code: values.help ? 0 : 2, message: USAGE };
+  if (command === 'probe') {
+    return { code: 2, message: 'coffre-conformance probe is now `coffre verify instance`, in the coffre CLI: npx @coffre/cli verify instance' };
+  }
+  if (command !== 'workers' && command !== 'node') return { code: 2, message: USAGE };
+  const kind: Kind = command;
+  const dir = resolve(target ?? '.');
+  const port = Number(values.port);
+  const bulkLimit = Number(values['bulk-limit']);
+  if (!Number.isInteger(port) || !Number.isInteger(bulkLimit) || bulkLimit < 1) return { code: 2, message: USAGE };
 
-console.log(`coffre-conformance: ${kind} from ${dir}`);
-let deployment;
-try {
-  deployment = await boot(kind, dir, {
-    port,
-    postgres: values.postgres,
-    runtime: values.runtime,
-    vaultRuntime: values['vault-runtime'],
-    hotRuntime: values['hot-runtime'],
-  });
-} catch (error) {
-  const detail = error instanceof Failure && error.detail !== undefined ? `\n${String(error.detail)}` : '';
-  exit(1, `the deployment did not start: ${error instanceof Error ? error.message : String(error)}${detail}`);
-}
-console.log(`  up on ${deployment.origin}`);
-let ran: Awaited<ReturnType<typeof conform>>;
-try {
-  ran = await conform(deployment, { bulkLimit, browser: values.browser || null });
-} finally {
-  await deployment.stop();
-}
-// Once the processes have stopped: what they wrote late is in, and every request has ended.
-const { failed } = ran;
-const afterwards = await ran.afterwards(deployment.output());
-if (afterwards !== undefined) console.error(`\n${afterwards}`);
-exit(failed.length === 0 ? 0 : 1, summary(failed));
-
-function summary(failed: string[]): string {
-  return failed.length === 0 ? 'conformant' : `NOT conformant: ${failed.join(', ')}`;
-}
-
-function exit(code: number, message: string): never {
-  (code === 0 ? console.log : console.error)(message);
-  process.exit(code);
+  console.log(`coffre-conformance: ${kind} from ${dir}`);
+  let deployment;
+  try {
+    deployment = await boot(kind, dir, {
+      port,
+      postgres: values.postgres,
+      runtime: values.runtime,
+      vaultRuntime: values['vault-runtime'],
+      hotRuntime: values['hot-runtime'],
+    });
+  } catch (error) {
+    const detail = error instanceof Failure && error.detail !== undefined ? `\n${String(error.detail)}` : '';
+    return { code: 1, message: `the deployment did not start: ${error instanceof Error ? error.message : String(error)}${detail}` };
+  }
+  console.log(`  up on ${deployment.origin}`);
+  let ran: Awaited<ReturnType<typeof conform>>;
+  try {
+    ran = await conform(deployment, { bulkLimit, browser: values.browser || null });
+  } finally {
+    await deployment.stop();
+  }
+  // Once the processes have stopped: what they wrote late is in, and every request has ended.
+  const { failed } = ran;
+  const afterwards = await ran.afterwards(deployment.output());
+  if (afterwards !== undefined) console.error(`\n${afterwards}`);
+  return failed.length === 0 ? { code: 0, message: 'conformant' } : { code: 1, message: `NOT conformant: ${failed.join(', ')}` };
 }
