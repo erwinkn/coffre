@@ -1327,6 +1327,157 @@ test("a project's audit page reads as many pages however many keys the project h
 });
 
 /**
+ * The reads that name the places, and count nothing in them: a member's report, `me`, the members list. Each reads no
+ * key, so as many pages however many the instance holds (T221). A count of them read every live key of the places, a
+ * page for each when Postgres picked an index scan for each environment (1,184 pages for 1,282 keys), 30 to 48 when it
+ * picked one bitmap scan, and which it picked followed the statistics of `secrets` (T166's flake): with keys counted,
+ * these grow with the keys, whichever plan runs.
+ */
+test("a member's report, `me` and the members list read as many pages however many keys the instance holds (T221)", POSTGRES, async () => {
+  const someone = (await root.members.list()).members.find((entry) => entry.member.startsWith('user:'))!.member;
+  const reads: Record<string, () => Promise<unknown>> = {
+    "a member's report": () => root.members.get(someone),
+    me: () => root.me(),
+    'the members list': () => root.members.list(),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const statements = [...app.recorded].filter((statement) => /^\s*(select|with)\b/i.test(statement.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+      app.recorded = null;
+      read[name] = [];
+      for (const statement of statements) {
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects`);
+  await settle();
+  const small = await pages();
+  try {
+    // 400 live keys more in each live environment, about 25,000 in all, each environment's among the others' in the heap.
+    await db.owner.execute(sql`
+      INSERT INTO secrets (project_id, environment_id, key, current_version)
+      SELECT e.project_id, e.id, 'PLACE_KEY_' || g, 0 FROM generate_series(1, 400) g CROSS JOIN environments e WHERE e.archived_at IS NULL`);
+    await settle();
+    const grown = await pages();
+    for (const [name, statements] of Object.entries(small)) {
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with 25,000 keys more, ${before} before:\n${plan}`);
+      }
+    }
+  } finally {
+    await db.owner.execute(sql`DELETE FROM secrets WHERE starts_with(key, 'PLACE_KEY_')`);
+    await settle();
+  }
+});
+
+
+/**
+ * What the project list and a render's shell count of the places (T221): each environment's live keys, each project's
+ * team keys. A count reads the keys, so it grows with them: here, with the table's and its live index's pages, as one
+ * bitmap scan reads them, where an index scan for each environment read a page for each key (29,889 pages for 29,262
+ * live keys in 706). Postgres can still pick an index scan of the keys that reads a page for each, when the archived
+ * keys' order makes the table look sorted by environment (`countedPlaceRows`): this holds the shape, not every plan.
+ */
+test("the project list and a render's shell count the keys within twice their table's and index's pages (T221)", POSTGRES, async () => {
+  const reads: Record<string, () => Promise<unknown>> = {
+    'the project list': () => root.projects.list(),
+    "an owner's project page": () => projectPage('owner'),
+    "a viewer's environment page": () => environmentPage('viewer'),
+  };
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects`);
+  try {
+    // 400 live keys more in each live environment, about 25,000 in all, each environment's among the others' in the heap.
+    await db.owner.execute(sql`
+      INSERT INTO secrets (project_id, environment_id, key, current_version)
+      SELECT e.project_id, e.id, 'COUNTED_KEY_' || g, 0 FROM generate_series(1, 400) g CROSS JOIN environments e WHERE e.archived_at IS NULL`);
+    await settle();
+    const [{ pages: table }] = await db.owner.execute<{ pages: number }>(sql`
+      SELECT sum(relpages)::int AS pages FROM pg_class WHERE relname IN ('secrets', 'secrets_live_idx')`);
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const counts = [...app.recorded].filter((statement) => /\bcount\(/i.test(statement.text) && /"secrets"/.test(statement.text));
+      app.recorded = null;
+      assert.ok(counts.some((statement) => statement.text.includes('"team_keys"')), `${name} counted no places`);
+      for (const statement of counts) {
+        const { pages, plan } = (await app.work(statement))!;
+        assert.ok(pages <= 2 * table! + 16, `${name}: ${statement.text.replace(/\s+/g, ' ').slice(0, 80)} read ${pages} pages, the keys' table and index ${table}:\n${plan}`);
+      }
+    }
+  } finally {
+    await db.owner.execute(sql`DELETE FROM secrets WHERE starts_with(key, 'COUNTED_KEY_')`);
+    await settle();
+  }
+});
+
+/**
+ * The keys of deleted places, which 0.14's log leaves unarchived (review r1 of T221): a count names the standing
+ * environments, so Postgres can seek their keys alone. 100 deleted environments of 400 keys each: the project list's
+ * count read 166 pages, then 169; a count over every live key read 308, then 945. This holds that plan's shape, not
+ * every plan: with fewer, larger environments Postgres can scan the table and filter the deleted ones' keys out (one
+ * standing environment of 4,000 keys beside two deleted ones of 4,000 each: 67 pages, then 191, review r2).
+ */
+test("the project list and a render's shell count no deleted place's keys in this fixture (T221)", POSTGRES, async () => {
+  const reads: Record<string, () => Promise<unknown>> = {
+    'the project list': () => root.projects.list(),
+    "an owner's project page": () => projectPage('owner'),
+    "a viewer's environment page": () => environmentPage('viewer'),
+  };
+  const pages = async () => {
+    const read: Record<string, { text: string; pages: number | null; plan?: string }[]> = {};
+    for (const [name, run] of Object.entries(reads)) {
+      await run();
+      app.recorded = [];
+      await run();
+      const counts = [...app.recorded].filter((statement) => /\bcount\(/i.test(statement.text) && /"secrets"/.test(statement.text));
+      app.recorded = null;
+      assert.ok(counts.some((statement) => statement.text.includes('"team_keys"')), `${name} counted no places`);
+      read[name] = [];
+      for (const statement of counts) {
+        const work = await app.work(statement);
+        read[name].push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+      }
+    }
+    return read;
+  };
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects`);
+  await settle();
+  const small = await pages();
+  try {
+    // 100 deleted environments in the live projects, 400 keys each, left live as 0.14's log leaves a deleted place's keys.
+    await db.owner.execute(sql`
+      INSERT INTO environments (project_id, slug, name)
+      SELECT p.id, 'gone~counted-' || g, 'gone' FROM (SELECT id FROM projects WHERE slug NOT LIKE '%~%' ORDER BY slug LIMIT 10) p CROSS JOIN generate_series(1, 10) g`);
+    await db.owner.execute(sql`
+      INSERT INTO secrets (project_id, environment_id, key, current_version)
+      SELECT e.project_id, e.id, 'GONE_KEY_' || g, 0 FROM environments e CROSS JOIN generate_series(1, 400) g WHERE starts_with(e.slug, 'gone~counted-')`);
+    await settle();
+    const grown = await pages();
+    for (const [name, statements] of Object.entries(small)) {
+      assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
+      for (const [i, { text, pages: before }] of statements.entries()) {
+        const { pages: after, plan } = grown[name]![i]!;
+        assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${name}: ${text} read ${after} pages with 40,000 deleted places' keys, ${before} before:\n${plan}`);
+      }
+    }
+  } finally {
+    await db.owner.execute(sql`DELETE FROM secrets WHERE starts_with(key, 'GONE_KEY_')`);
+    await db.owner.execute(sql`DELETE FROM environments WHERE starts_with(slug, 'gone~counted-')`);
+    await settle();
+  }
+});
+
+/**
  * What the audit pages read of what 0.15's log alone records (D147): the
  * sign-ins through trust bindings (T156), and the token issues, revokes and
  * sign-outs (T164). A page of them, every member's and one's, with the

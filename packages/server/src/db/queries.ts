@@ -367,10 +367,10 @@ export type PlaceRow = {
   /**
    * Distinct live keys across its live environments but personal configs,
    * the team's: the project list's count for whoever lists every one of
-   * them. Null unless asked for (`teamKeys`).
+   * them. Null unless counted (`counts`).
    */
   teamKeys: number | null;
-  /** Each with its live secret count, its own rows: a fork's inherited keys are its parent's. */
+  /** Each with its live secret count, its own rows (a fork's inherited keys are its parent's), null unless counted. */
   environments: {
     id: string;
     slug: string;
@@ -380,33 +380,42 @@ export type PlaceRow = {
     parentSlug: string | null;
     /** A personal config's owner: listed to them and to the project's maintainers alone. */
     owner: string | null;
-    secretCount: number;
+    secretCount: number | null;
   }[];
 };
 
 /**
- * Every project with its environments and their live secret counts, by
- * slug. Deleted ones are left out, unless asked for their `tombstones`, to
- * name an id the log holds. `within` reads only the projects of these ids,
- * for a request whose caller reaches no others: it reads as many rows, and
- * counts as many secrets, however many projects there are beside them.
- * `teamKeys` counts each project's team keys too, in the same statement.
+ * Every project with its environments, by slug. Deleted ones are left out,
+ * unless asked for their `tombstones`, to name an id the log holds. `within`
+ * reads only the projects of these ids, for a request whose caller reaches no
+ * others: it reads as many rows however many projects there are beside them.
+ *
+ * `counts` counts each environment's live secrets and each project's team keys,
+ * in the same statement: what the project list shows, and a render's shell. A
+ * count reads the keys of the places it reads (`countedPlaceRows`), so unasked
+ * the statement reads no `secrets` at all (T221): a member's report, `me` and
+ * the rest read as many pages however many keys the instance holds, and by one
+ * plan, where a count's plan followed the statistics of `secrets` (T166's
+ * flake, 48 pages one run and 1,183 the next).
  */
 export async function places(
   db: Queryable,
-  { tombstones = false, within, teamKeys: counted = false }: { tombstones?: boolean; within?: readonly string[]; teamKeys?: boolean } = {},
+  { tombstones = false, within, counts: counted = false }: { tombstones?: boolean; within?: readonly string[]; counts?: boolean } = {},
 ): Promise<PlaceRow[]> {
   if (within?.length === 0) return [];
-  const rows = within !== undefined
-    ? await placeRows(db, tombstones, counted, within)
-    : tombstones ? await everyPlace(db) : counted ? await liveCountedPlaces(db) : await livePlaces(db);
+  if (counted && tombstones) throw new Error('places: only live places are counted');
+  const rows: (Awaited<ReturnType<typeof placeRows>>[number] & { secretCount?: number; teamKeys?: number | null })[] = counted
+    ? (within !== undefined ? await countedPlaceRows(db, within) : await liveCountedPlaces(db))
+    : within !== undefined ? await placeRows(db, tombstones, within) : tombstones ? await everyPlace(db) : await livePlaces(db);
   const found: PlaceRow[] = [];
   for (const { project, environment, secretCount, teamKeys } of rows) {
     let place = found.at(-1);
     if (place?.id !== project.id) {
-      place = { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt, folder: project.folder, teamKeys: counted ? Number(teamKeys ?? 0) : null, environments: [] };
+      place = { id: project.id, slug: project.slug, name: project.name, archivedAt: project.archivedAt, folder: project.folder, teamKeys: counted ? 0 : null, environments: [] };
       found.push(place);
     }
+    // The project's team keys come with each of its environments that holds keys.
+    if (counted && teamKeys != null) place.teamKeys = Number(teamKeys);
     if (environment === null) continue;
     place.environments.push({
       id: environment.id,
@@ -416,7 +425,7 @@ export async function places(
       parentId: environment.parentId,
       parentSlug: null,
       owner: environment.owner,
-      secretCount: Number(secretCount),
+      secretCount: counted ? Number(secretCount) : null,
     });
   }
   for (const place of found) {
@@ -443,38 +452,86 @@ export async function environmentIdsOf(db: Queryable, projectIds: readonly strin
   return found;
 }
 
-function placeRows(db: Queryable, tombstones: boolean, counted: boolean, within?: readonly string[]) {
-  const { projects, environments, secrets } = tablesOf(db);
+/** The projects and their environments, a row each (a project with none, a row of its own), and nothing of their keys. */
+function placeRows(db: Queryable, tombstones: boolean, within?: readonly string[]) {
+  const { projects, environments } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
-  // Each project's team keys (`PlaceRow.teamKeys`), in the same statement, when asked: what the project list counts.
-  // Unasked, the subquery reads nothing (`false`), and the statement is the same shape.
-  const team = db
-    .select({ projectId: secrets.projectId, keys: countDistinct(secrets.key).as('team_keys') })
+  return db
+    .select({ project: projects, environment: environments })
+    .from(projects)
+    .leftJoin(environments, and(eq(environments.projectId, projects.id), alive(environments.slug)))
+    .where(and(alive(projects.slug), within === undefined ? undefined : inArray(projects.id, [...within])))
+    .orderBy(asc(projects.slug), asc(environments.slug));
+}
+
+/**
+ * The live places' rows, each with its environment's live keys counted and its project's team keys (`PlaceRow.teamKeys`).
+ * Both counts come from one read of the keys (`live`, a CTE named twice, so Postgres reads it once), and that read
+ * names the standing environments it counts by id, `= ANY(ARRAY(…))`, so Postgres can scan `secrets_live_idx` over
+ * those ids alone, past the keys of deleted environments (0.14's log leaves them unarchived). Grouped over all of
+ * `secrets_live_idx`, the count read every deleted environment's keys: with 40,000 keys in 100 deleted environments,
+ * the project list's count went from 308 pages to 945, where this one went from 166 to 169 (`request-cost.alone.ts`,
+ * review r1 of T221). That is a plan, not a promise: Postgres may scan the whole table and filter the deleted
+ * environments' keys out, as with one standing environment of 4,000 keys beside two deleted ones of 4,000 each
+ * (67 pages, then 191, review r2).
+ *
+ * This bounds what it reads to the keys it counts, not their pages: Postgres picks between a bitmap scan, each table
+ * page once, and an index scan, a table page for each key, by `secrets.environment_id`'s correlation, computed over the
+ * archived keys too. With 600,000 archived keys in environment order and 41,200 live ones among them, this count reads
+ * 19,861 pages, as every shape of it that reads the table does; a covering index reads 514 there, and 61,491 once
+ * scattered updates have cleared the visibility map. Only counts kept as the keys change would bound it (T226).
+ */
+function countedPlaceRows(db: Queryable, within?: readonly string[]) {
+  const { projects, environments, secrets } = tablesOf(db);
+  const counted = db
+    .select({ id: environments.id })
+    .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.projectId))
+    .where(and(standing(environments.slug), standing(projects.slug), within === undefined ? undefined : inArray(environments.projectId, [...within])));
+  const live = db.$with('live').as(db
+    .select({ environmentId: secrets.environmentId, projectId: secrets.projectId, key: secrets.key })
     .from(secrets)
-    .innerJoin(environments, and(eq(environments.id, secrets.environmentId), isNull(environments.archivedAt), isNull(environments.owner), standing(environments.slug)))
-    .where(counted ? and(isNull(secrets.archivedAt), within === undefined ? undefined : inArray(secrets.projectId, [...within])) : sql`false`)
-    .groupBy(secrets.projectId)
+    .where(and(
+      isNull(secrets.archivedAt),
+      dialect.engineOf(db) === 'postgres' ? sql`${secrets.environmentId} = ANY(ARRAY(${counted}))` : inArray(secrets.environmentId, counted),
+    )));
+  const keys = db
+    .select({ environmentId: live.environmentId, projectId: live.projectId, keys: count().as('keys') })
+    .from(live)
+    .groupBy(live.environmentId, live.projectId)
+    .as('keys');
+  const team = db
+    .select({ projectId: live.projectId, keys: countDistinct(live.key).as('team_keys') })
+    .from(live)
+    .innerJoin(environments, and(eq(environments.id, live.environmentId), isNull(environments.archivedAt), isNull(environments.owner)))
+    .groupBy(live.projectId)
     .as('team');
+  // An environment's count and its project's team keys, a row for each environment with keys: a subquery, so that the
+  // statement starts `select`, a read the others of a request ride with (`plainRead` in @coffre/db).
+  const counts = db
+    .with(live)
+    .select({ environmentId: keys.environmentId, keys: keys.keys, teamKeys: team.keys })
+    .from(keys)
+    .leftJoin(team, eq(team.projectId, keys.projectId))
+    .as('counts');
   return db
     .select({
       project: projects,
       environment: environments,
-      secretCount: count(secrets.id),
-      teamKeys: team.keys,
+      secretCount: sql<number>`coalesce(${counts.keys}, 0)`,
+      teamKeys: counts.teamKeys,
     })
     .from(projects)
-    .leftJoin(environments, and(eq(environments.projectId, projects.id), alive(environments.slug)))
-    .leftJoin(secrets, and(eq(secrets.environmentId, environments.id), isNull(secrets.archivedAt)))
-    .leftJoin(team, eq(team.projectId, projects.id))
-    .where(and(alive(projects.slug), within === undefined ? undefined : inArray(projects.id, [...within])))
-    .groupBy(projects.id, environments.id, team.keys)
+    .leftJoin(environments, and(eq(environments.projectId, projects.id), standing(environments.slug)))
+    .leftJoin(counts, eq(counts.environmentId, environments.id))
+    .where(and(standing(projects.slug), within === undefined ? undefined : inArray(projects.id, [...within])))
     .orderBy(asc(projects.slug), asc(environments.slug));
 }
 
 // What most requests read of the instance, every project and environment: built once (`prepared`).
-const livePlaces = prepared((db) => placeRows(db, false, false));
-const liveCountedPlaces = prepared((db) => placeRows(db, false, true));
-const everyPlace = prepared((db) => placeRows(db, true, false));
+const livePlaces = prepared((db) => placeRows(db, false));
+const liveCountedPlaces = prepared((db) => countedPlaceRows(db));
+const everyPlace = prepared((db) => placeRows(db, true));
 
 // --- folders --------------------------------------------------------------------
 // One level, for projects and for an environment's secrets, which arrange
