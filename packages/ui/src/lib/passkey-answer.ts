@@ -54,14 +54,15 @@ export const browserClock = (): Instant => ({ wall: Date.now(), elapsed: perform
  * plus `timeout`, on the wall clock) or `elapsedEnds` (the same on the tab's elapsed clock). A `create()` of an ended
  * step could replace, on the authenticator, the passkey another tab of it added (review r9 of #500), and neither clock
  * alone can be trusted: the wall clock moves back when corrected, the elapsed one stops in a sleep (review r10).
- * `endedBy`, the GET's arrival plus `timeout` on the wall clock, comes after this tab's `ends`: the step's shared entry
- * is kept until the latest `endedBy` of the tabs that read it (`storedKeeper`).
+ * `endedBy`, the GET's arrival plus `timeout` on the wall clock, is no earlier than this tab's `ends`, even with the
+ * clock moved back during the GET (review r11): the step's shared entry is kept until the latest `endedBy` of the tabs
+ * that read it (`storedKeeper`).
  */
 export type Lifetime = { ends: number; endedBy: number; elapsedEnds: number };
 
 /** The lifetime of a step whose GET left at `sent` and came back at `received` with this `timeout`. */
 export function lifetime(sent: Instant, received: Instant, timeout: number): Lifetime {
-  return { ends: sent.wall + timeout, endedBy: received.wall + timeout, elapsedEnds: sent.elapsed + timeout };
+  return { ends: sent.wall + timeout, endedBy: Math.max(sent.wall, received.wall) + timeout, elapsedEnds: sent.elapsed + timeout };
 }
 
 const over = (life: Lifetime, at: Instant) => at.wall >= life.ends || at.elapsed >= life.elapsedEnds;
@@ -86,14 +87,17 @@ export type KeptStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | '
 
 const PREFIX = 'coffre.passkey.';
 
-/** A stored entry: what its step holds, if anything, and until when, on the wall clock, any tab may still ask. */
-type Entry = { kept: Kept | null; until: number };
+/**
+ * A stored entry: its `id`, drawn by the tab that made it; what its step holds, if anything; and until when, on the
+ * wall clock, any tab may still ask.
+ */
+type Entry = { id: string; kept: Kept | null; until: number };
 
 function parse(value: string | null): Entry | null {
   if (value === null) return null;
   try {
     const entry = JSON.parse(value) as Partial<Entry>;
-    return typeof entry.until === 'number' ? { kept: entry.kept ?? null, until: entry.until } : null;
+    return typeof entry.id === 'string' && typeof entry.until === 'number' ? { id: entry.id, kept: entry.kept ?? null, until: entry.until } : null;
   } catch {
     return null;
   }
@@ -105,40 +109,65 @@ function parse(value: string | null): Entry | null {
  * find the same entry. A second `create()` for the step, from another tab or a reloaded page, could replace on the
  * authenticator the passkey the first one added, as the page's own memory (review r7) could not stop.
  *
- * Its own entry a tab reads whatever its `until`: only the tab's `Lifetime` ends its step. The entry's `until` only
- * says when a tab of another step may remove it, and each tab that reads the step pushes it to its own `endedBy` as it
- * makes its keeper, so the entry outlives, on the wall clock that every tab shares, every tab's `ends`. Timed by the
- * writer alone, an entry could lapse before a tab whose GET came after a clock correction: tab A at 0 with 300 s left,
- * the clock moved 60 s ahead, tab B at 10 with 290 s left; A's entry, until 300 on A's reading, lapsed at 240 s, B's
- * step ran to 300 s, and B made a second passkey (review r10). An `asking` left by a tab closed mid-`create()` lapses
- * with the step. Where the browser keeps no storage, or refuses a read or a write, the page's memory holds the step
- * from then on, one tab's protection, review r7's: a write that failed left nothing for a read to find, and its memory
- * has it (review r9). A tab that cannot push the entry's `until` reads it still, as it could before.
+ * A tab holds to the entry it found, or made, as its keeper opened: that entry gone, or another in its place, its step
+ * ended. Only a tab of another step removes an entry, once its `until` lapsed, which a clock moved ahead or a full
+ * storage can bring before a tab of the step is done with it; and the page that read it may since have been answered,
+ * with nothing left to say so. Read as never asked, a missing entry let that page `create()` a second passkey (review
+ * r11, a lapsed entry with a clock moved back, or one whose `until` a full storage would not push); read as ended, the
+ * page asks for nothing, and a reload asks the server again, whose options name the passkey added since
+ * (`excludeCredentials`), which the authenticator will not make again. The entry's `id` tells another tab's entry, a
+ * reload's made after the first lapsed, from the one the tab found.
+ *
+ * Each tab that reads the step pushes the entry's `until` to its own `endedBy` as it makes its keeper, so the entry
+ * outlives, on the wall clock that every tab shares, every tab's `ends`. Timed by the writer alone, an entry could lapse
+ * before a tab whose GET came after a clock correction: tab A at 0 with 300 s left, the clock moved 60 s ahead, tab B
+ * at 10 with 290 s left; A's entry, until 300 on A's reading, lapsed at 240 s (review r10). An `asking` left by a tab
+ * closed mid-`create()` lapses with the step. Where the browser keeps no storage, or refuses a read, or a write while
+ * the step has no entry yet, or a write later, the page's memory holds the step from then on, one tab's protection,
+ * review r7's: a write that failed left nothing for a read to find, and its memory has it (review r9). A read refused
+ * before the tab wrote anything reads the step ended: what another tab did, it cannot know.
  */
 export function storedKeeper(storage: KeptStorage | null, challenge: string, life: Lifetime, clock: () => Instant = browserClock): Keeper {
   const key = `${PREFIX}${challenge}`;
   const mine = memory();
   let shared = storage;
+  let id = '';
   const store = (kept: Kept | null) => {
     const until = Math.max(life.endedBy, parse(shared!.getItem(key))?.until ?? -Infinity);
-    shared!.setItem(key, JSON.stringify({ kept, until } satisfies Entry));
+    shared!.setItem(key, JSON.stringify({ id, kept, until } satisfies Entry));
   };
-  try {
-    const now = clock().wall;
-    for (let i = (shared?.length ?? 0) - 1; i >= 0; i--) {
-      const other = shared!.key(i);
-      if (other?.startsWith(PREFIX) && other !== key && !((parse(shared!.getItem(other))?.until ?? -Infinity) > now)) shared!.removeItem(other);
+  const toMemory = () => {
+    shared = null;
+    if (mine.read() === null) mine.write({ kind: 'done' });
+  };
+  if (shared !== null) {
+    try {
+      const now = clock().wall;
+      for (let i = shared.length - 1; i >= 0; i--) {
+        const other = shared.key(i);
+        if (other?.startsWith(PREFIX) && other !== key && !((parse(shared.getItem(other))?.until ?? -Infinity) > now)) shared.removeItem(other);
+      }
+      const found = parse(shared.getItem(key));
+      id = found?.id ?? crypto.randomUUID();
+      try {
+        store(found?.kept ?? null);
+      } catch (error) {
+        // Not pushed: an entry found is still read, and ends the step when it goes. None found, none made: the page's.
+        if (found === null) throw error;
+      }
+    } catch {
+      shared = null;
     }
-    if (shared !== null) store(parse(shared.getItem(key))?.kept ?? null);
-  } catch {
-    // Not pushed: what the storage holds is still read.
   }
   const stored: Keeper = {
     read() {
       try {
-        if (shared !== null) return parse(shared.getItem(key))?.kept ?? null;
+        if (shared !== null) {
+          const entry = parse(shared.getItem(key));
+          return entry?.id === id ? entry.kept : { kind: 'done' };
+        }
       } catch {
-        shared = null;
+        toMemory();
       }
       return mine.read();
     },

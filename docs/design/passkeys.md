@@ -306,15 +306,28 @@ every tab that read it. Timed by its writer alone, it could not: tab A's
 GET at 0 with 300 s left, the clock moved 60 s ahead at 10 s, tab B's GET
 then with 290 s left; A's entry, until 300 by A's reading, lapsed at
 240 s real time while B's step ran to 300 s, and B made a second passkey
-(review r10). A tab reads its own step's entry whatever its expiry, and
-only a tab of another step removes a lapsed one, as it opens; a tab closed
-mid-`create()` blocks nothing past the step. The answer it holds is a public key and an attestation of
+(review r10). The arrival is taken as no earlier than the send, so a
+clock moved back during the GET does not end the entry before the tab
+(review r11). Only a tab of another step removes an entry, once its
+expiry lapsed, as it opens; a tab closed mid-`create()` blocks nothing
+past the step. A tab holds to the entry it found or made as it opened,
+named by a random `id`: that entry gone, or another in its place, the
+step ended for that tab, and a press asks for nothing. An entry can lapse
+before a tab of its step is done (a clock moved ahead, then back; or a
+full storage that would not push its expiry), and the tab that read it
+may since have been answered, with nothing left to say so: read as
+never asked, the missing entry let that tab `create()` again with options
+that name no passkey (review r11). A reload asks the server again, and
+its options name the passkeys added since (`excludeCredentials`), which
+the authenticator will not make again. The answer it holds is a public key and an attestation of
 `none`, no secret, and only the browser holding the sign-in's cookie can
-send it. Where the browser keeps no storage, or refuses a read or a
-write of the step, the page's memory holds the step from then on (a tab
-that cannot push the expiry as it opens still reads the entry): a write that failed
-leaves nothing for a later read to find, and the memory has it (review
-r9). What the storage held stays, so another tab finds the step `asking`
+send it. Where the browser keeps no storage, or refuses a read, a write
+of the step's first entry, or a later write, the page's memory holds the
+step from then on (a tab that cannot push the expiry of an entry it found
+still reads it): a write that failed leaves nothing for a later read to
+find, and the memory has it (review r9). A read refused after the tab
+opened, the tab having written nothing, reads the step ended: what
+another tab did it cannot know. What the storage held stays, so another tab finds the step `asking`
 at worst, and asks for nothing. Two tabs pressed
 within the same instant can still both read nothing (storage has no
 compare-and-set across tabs); a person cannot press two tabs' buttons at

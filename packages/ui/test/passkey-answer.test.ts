@@ -289,3 +289,86 @@ test("a clock corrected between two tabs' GETs neither drops the entry before th
   assert.deepEqual(await sendPasskey(slept, ask, send), { kind: 'refused', code: 'state_mismatch' });
   assert.equal(asked, 2);
 });
+
+test("an entry gone, or another in its place, ends the step for the tabs that read it: a lapsed entry is no step never asked (review r11 of #500)", async () => {
+  // Real time, in ms; the wall clock, `real + correction`; tab A's elapsed clock from 0, tab B's from its GET at 10 s.
+  let real = 0;
+  let correction = 0;
+  const wall = () => real + correction;
+  const tabA = () => ({ wall: wall(), elapsed: real });
+  const tabB = () => ({ wall: wall(), elapsed: real - 10_000 });
+  let asked = 0;
+  const ask = async () => `passkey ${++asked}`;
+  const lost = () => Promise.reject(new TypeError('Failed to fetch'));
+
+  // A storage full when tab B pushes the entry's `until`. A's GET at 0, its entry until 300 s; the clock moves 60 s
+  // ahead at 10 s and B reads the step, 290 s left, but cannot push the entry to 360 s.
+  const entries = storage();
+  let full = false;
+  const quota: KeptStorage = {
+    ...entries,
+    get length() {
+      return entries.length;
+    },
+    setItem: (key, value) => {
+      if (full) throw new DOMException('full', 'QuotaExceededError');
+      entries.setItem(key, value);
+    },
+  };
+  const a = storedKeeper(quota, 'challenge', lifetime(tabA(), tabA(), MINUTES_5), tabA);
+  real = 10_000;
+  correction = 60_000;
+  full = true;
+  const b = storedKeeper(quota, 'challenge', lifetime(tabB(), tabB(), MINUTES_5 - 10_000), tabB);
+  full = false;
+  // A enrolls; the answer is lost. At 250 s, 310 s on the wall clock, another step's tab removes A's lapsed entry.
+  assert.deepEqual(await sendPasskey(a, ask, lost), { kind: 'unavailable' });
+  real = 250_000;
+  storedKeeper(quota, 'another', lifetime(tabB(), tabB(), MINUTES_5), tabB);
+  assert.ok(!entries.entries.has('coffre.passkey.challenge'));
+  // B, within both its clocks, asks the authenticator for nothing: its options name no passkey, and a create() could
+  // replace the one A added.
+  assert.deepEqual(await sendPasskey(b, ask, lost), { kind: 'refused', code: 'state_mismatch' });
+  assert.equal(asked, 1);
+
+  // With storage that works: A's answer lost at 0, the clock moved 400 s ahead at 10 s, another step's tab removes the
+  // entry, the clock moved back at 20 s. Neither clock says A's step is over, and A asks for nothing.
+  const shared = storage();
+  real = 0;
+  correction = 0;
+  const again = storedKeeper(shared, 'challenge-2', lifetime(tabA(), tabA(), MINUTES_5), tabA);
+  assert.deepEqual(await sendPasskey(again, ask, lost), { kind: 'unavailable' });
+  real = 10_000;
+  correction = 400_000;
+  storedKeeper(shared, 'another', lifetime(tabA(), tabA(), MINUTES_5), tabA);
+  real = 20_000;
+  correction = 0;
+  // A reload's entry, made after the first was removed, is another one: A's page still ends; the reload, whose GET
+  // asked the server again (its options name A's passkey), may ask.
+  const reload = storedKeeper(shared, 'challenge-2', lifetime(tabA(), tabA(), MINUTES_5 - 20_000), tabA);
+  assert.deepEqual(await sendPasskey(again, ask, lost), { kind: 'refused', code: 'state_mismatch' });
+  assert.equal(asked, 2);
+  assert.deepEqual(await sendPasskey(reload, ask, () => json({ error: 'passkey_exists' }, 400)), { kind: 'refused', code: 'passkey_exists' });
+  assert.equal(asked, 3);
+
+  // A clock moved back during the GET keeps the entry to no earlier than the tab's own end.
+  const back = lifetime({ wall: 100_000, elapsed: 0 }, { wall: 40_000, elapsed: 50 }, MINUTES_5);
+  assert.ok(back.endedBy >= back.ends);
+
+  // A storage that stops reading after the tab read the step, the tab having written nothing, reads it ended.
+  let reads = true;
+  const failing: KeptStorage = {
+    ...entries,
+    get length() {
+      return entries.length;
+    },
+    getItem: (key) => {
+      if (!reads) throw new DOMException('denied', 'SecurityError');
+      return entries.getItem(key);
+    },
+  };
+  const page = storedKeeper(failing, 'challenge-3', lifetime(tabA(), tabA(), MINUTES_5), tabA);
+  reads = false;
+  assert.deepEqual(await sendPasskey(page, ask, lost), { kind: 'refused', code: 'state_mismatch' });
+  assert.equal(asked, 3);
+});
