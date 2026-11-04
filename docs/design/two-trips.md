@@ -1148,7 +1148,13 @@ The refusals of the two two-trip routes, on Postgres with 0.15's log (`log_refus
 `recordRefusal`, packages/vault/src/refusal.ts; the app's packages/server/src/refused.ts and `refuse` in
 api/context.ts). A key write or a first add the vault's decision refuses on its read is answered as today's path
 answers it and recorded by the vault in 0.15's log, in place of the 0.14 deny entry that path appends.
-`change-cost.test.ts` holds a refused key write and a refused add each to `{ app: 0, vault: 2 }` (a dozen before):
+`change-cost.test.ts` holds a refused key write and a refused add each to `{ app: 0, vault: 2 }`. Measured with it,
+every Sync held 20 ms, the seal apart (at `f2b3d947`; before, at `d284f61e`):
+
+| route | before: app, vault Syncs | ms | PR 6: app, vault Syncs | ms |
+|---|---|---|---|---|
+| key set, refused | 6, 2 | 191 | 0, 2 | 89 |
+| member added, refused | 5, 2 | 165 | 0, 2 | 47 |
 
 ```
 vault  write_request (or admit_read): the read, the number                                 1
