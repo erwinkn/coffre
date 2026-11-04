@@ -1369,8 +1369,13 @@ export async function dryRunSecrets(
     need(ctx, 'secret.read', placeOf(place.project, place.environment), 'secret.read', { operationId, metadata: { dryRun: true } });
     const rows = new Map((await environmentSecrets(ctx.db, environment.environmentId)).map((row) => [row.key, row]));
     // In a fork, an archived key its parent holds is an override reset to the parent's: writing it overrides again, a change.
-    const resettable = await resetKeys(ctx.db, place);
-    // Refuse what the write would refuse before opening anything.
+    const inherited = await inheritedOf(ctx.db, place);
+    const resettable = new Set(inherited?.held.keys());
+    // Refuse what the write would refuse before opening anything: first a value or a mark that names the version it
+    // `replaces`, once another is current, as the write refuses it, `stale`.
+    const own = new Map([...rows].map(([key, row]) => [key, { archivedAt: row.archivedAt, currentVersionId: row.current?.id ?? null }]));
+    const stale = regenerated(patch, own, inherited);
+    if (stale !== null) throw new ApiError('conflict', stale, 'stale');
     for (const [key, value] of Object.entries(patch)) {
       if (value !== null && rows.get(key)?.archivedAt != null && !resettable.has(key)) {
         throw conflict(`${key} is archived; unarchive it before writing a new version`);

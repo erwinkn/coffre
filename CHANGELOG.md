@@ -10,7 +10,9 @@
   as it is, already that strict, names the version it kept. A mark,
   `{ sensitivity: "sensitive" }`, now takes `replaces` too, as a value
   does: named as listed, the mark is refused with 409 `stale` once
-  someone wrote the key after that list, and marks nothing. These are the
+  someone wrote the key after that list, and marks nothing. A dry run
+  (`?dryRun=1`) of a value or a mark whose `replaces` is stale is now
+  refused the same way, where it used to preview `changed`. These are the
   two additions the write-only Terraform provider needs
   ([docs/design/terraform-provider.md](docs/design/terraform-provider.md),
   section 3): a saved plan's stricter `sensitivity` never marks a version

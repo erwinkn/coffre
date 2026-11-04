@@ -150,6 +150,12 @@ test('a mark names the version it marks, as listed, and is refused as stale once
   // Another writer, between this client's list and its mark: the mark marks nothing, and says why.
   const rotated = await root.secrets.set('market/dev', { WEBHOOK: 'whsec_rotated_0123456789' });
   assert.equal(rotated.keys.WEBHOOK && 'versionId' in rotated.keys.WEBHOOK && rotated.keys.WEBHOOK.versionId, await listed('WEBHOOK'), "a value's outcome names the version the list shows");
+  // A dry run refuses it as the write would, a mark or a value alike.
+  for (const value of [{ sensitivity: 'sensitive', replaces: before }, { value: 'whsec_guess_0123456789', sensitivity: 'secret', replaces: before }] as const) {
+    const preview = await refusal(root.secrets.dryRun('market/dev', { WEBHOOK: value }));
+    assert.deepEqual([preview.status, preview.reason], [409, 'stale'], 'a dry run of a stale write is refused as stale');
+  }
+  assert.deepEqual({ ...(await root.secrets.dryRun('market/dev', { WEBHOOK: { sensitivity: 'sensitive', replaces: await listed('WEBHOOK') } })).keys }, { WEBHOOK: 'changed' });
   const stale = await refusal(root.secrets.set('market/dev', { WEBHOOK: { sensitivity: 'sensitive', replaces: before } }));
   assert.deepEqual([stale.status, stale.reason], [409, 'stale']);
   assert.match(stale.message, /WEBHOOK changed since it was listed/);
