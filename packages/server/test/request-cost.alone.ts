@@ -1173,12 +1173,16 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const everything = [ids.dev!, ids.prod!, ids.busy!];
   // A sensitive value of market/prod's own, and one market/busy reads through a reference into shop. With none, a plan
   // of `sensitiveFrom` that scans a table can stop at an empty join after a handful of pages, and the count said which
-  // plan Postgres picked, not what the statement reads; with them, a scan shows (T214).
+  // plan Postgres picked, not what the statement reads; with them, a scan shows (T214). The growth above keeps what it
+  // made, a sensitive value of market/busy's own among what it may, so these add to what the environments held before.
+  const before = await sensitiveFrom(counted, everything);
   await root.secrets.set('market/prod', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
   await root.secrets.set('shop/dev', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
   await root.secrets.set('market/busy', { COST_REFERS: { ref: 'shop/dev/COST_SENSITIVE' } });
   const shop = (await places(counted)).find((project) => project.slug === 'shop')!;
-  assert.deepEqual(await sensitiveFrom(counted, everything), new Map([[ids.prod!, new Set([market!.id])], [ids.busy!, new Set([shop.id])]]));
+  const added = new Map(before);
+  for (const [environment, project] of [[ids.prod!, market!.id], [ids.busy!, shop.id]] as const) added.set(environment, new Set([...(before.get(environment) ?? []), project]));
+  assert.deepEqual(await sensitiveFrom(counted, everything), added);
   /** Each statement of these reads, run under EXPLAIN: its pages. */
   const reads: Record<string, () => Promise<unknown>> = {
     'the places tree of everything': () => places(counted),
