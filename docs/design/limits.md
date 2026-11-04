@@ -715,7 +715,7 @@ patterns, and the email bounds (254 / 64 / 63: RFC 5321 and 1035).
 | S9 | `TAKE_OVER_MS`, `WAIT_MS` | 3 s, 6 s | `asked-once.ts:32, 37` | e / c | "longer than a deploy's write and its seal" (T201, #475); `about()` has no deadline to derive from | ⚠ cold | measure, then derive (#19) |
 | S10 | `UNAVAILABLE_RETRY_AFTER` | '5' | `api/errors.ts:149` | c (wrongly) | the 15 s write lock, used for reads too | | #20 |
 | S11 | Proxy values cache | 1,000; O(n) eviction; no single-flight | `plugins/credential-proxy.ts:3164` | e | "a handful of handles in a dev loop" (#249) | ⚠ | #21 |
-| S12 | Proxy `handles` cache | 1,000 | `credential-proxy.ts:1011` | e | same | | #21 |
+| S12 | Proxy `handles` cache (`madeFor`) | 1,000 | `credential-proxy.ts:1011` | e | same | | #21 |
 | S13 | `UI_KEPT` | 10,000; clears all | `credential-proxy.ts:576` | e | "a map starts over" (#467) | | #21 |
 | S13b | `Accesses.KEPT` | 1,000 principals; no single-flight | `accesses.ts:44` | d | "a few hundred principals is far more than an isolate serves" (#334) | | #21 |
 | S14 | `HEARTBEAT_STALE_AFTER_SECONDS` | 11 × 60 | `plugins/audit-watch.ts:293` | c | one late run plus a minute | | compute (#25) |
