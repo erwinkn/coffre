@@ -5,6 +5,8 @@ dist/
 .env.local
 *.log
 .logs/
+# A local build of the Terraform provider (terraform-provider/README.md).
+terraform-provider/terraform-provider-coffre
 
 # TanStack Start / Vite build output.
 .output/

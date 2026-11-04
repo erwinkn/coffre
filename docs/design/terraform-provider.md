@@ -689,10 +689,12 @@ mirror.
     the error of section 3, and a saved plan with a token per phase
     succeeds;
   - a credential expiring mid-apply: the GitHub path trades again.
-- CI: a job "Terraform provider" runs both on changes to
-  `terraform-provider/`, to `packages/server/src/api/`, or to
-  `packages/client/src/api.ts`, with Go and both Terraform binaries pinned by
-  version and checksum, as `pnpm formal` pins TLC.
+- CI: a job "Terraform provider" (`pnpm test:terraform`,
+  `scripts/terraform-provider.sh`) runs both on every full validation, with
+  Go and both Terraform binaries pinned by version and checksum, as `pnpm
+  formal` pins TLC. (Planned for changes to `terraform-provider/`, the API
+  routes and the client alone; on every run it needs no path filter beside
+  the Validate gate, and takes about two minutes after the build.)
 
 ## 9. Decisions
 
