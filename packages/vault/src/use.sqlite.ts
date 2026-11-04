@@ -811,7 +811,8 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
   // A route's named call's cover rides only past every change of the route's own inputs too (0071).
   const cover = routeInputs !== null && call.cover !== undefined && BigInt(call.cover.number) <= routeInputs ? undefined : call.cover;
   const covered = cover !== undefined && b !== undefined && b.last >= period && (cached || BigInt(cover.number) > (inputs ?? 0n))
-    && await rows.cover({ ...call, cover });
+    // The call itself, whose cover this is: a batch's rows find a cover by the call they were read for.
+    && await rows.cover(call as UseCall & { cover: Cover });
   // A use whose key would take its principal's lock, to enter the cap's set or move on in it, named or by ids, takes it
   // only in the call the vault makes once it has decided the use (0045, T158, D153): else `decide`, nothing written, its
   // rows for the vault to decide on. SQLite's one writer at a time makes the lock implicit; the call is the same, so
