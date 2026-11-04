@@ -600,14 +600,14 @@ GRANT SELECT ON log_config, log_changes, log_uses, log_bulk, log_fence, log_chec
 --> statement-breakpoint
 GRANT SELECT ON SEQUENCE log_number TO coffre_backup;
 --> statement-breakpoint
--- The 0.15 hot path's login (plan, PR 2): the vault's, through coffre_vault, with the hot path's settings, which set on coffre_vault_runtime would change 0.14's behaviour from this migration to the deploy. lock_timeout and statement_timeout bound what a use waits for and runs (R53); generic plans, because Postgres's auto mode planned use_credential's statement about ten times as often, 26 ms a plan under load (hot-path-one.md, decision 7). A role's settings apply to the role that logs in, never through a group, so they are this role's own. Made here unable to log in, as 0019 makes coffre_backup: `coffre setup`, or the host, gives it a password (plan, PR 5), which is never ours.
+-- The 0.15 hot path's login (plan, PR 2): the vault's, through coffre_vault, with the hot path's settings, which set on coffre_vault_runtime would change 0.14's behaviour from this migration to the deploy. lock_timeout and statement_timeout bound what a use waits for and runs (R53). (Until 0.16.0 this also gave it generic plans; Postgres now plans at the server's settings, and a database migrated before keeps this migration's earlier text in its ledger: docs/design/planner-defaults.md.) A role's settings apply to the role that logs in, never through a group, so they are this role's own. Made here unable to log in, as 0019 makes coffre_backup: `coffre setup`, or the host, gives it a password (plan, PR 5), which is never ours.
 DO $$
 DECLARE
     held text[];
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot') THEN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolcreaterole)) THEN
-            RAISE EXCEPTION '% may not create roles, and this migration makes coffre_vault_hot: migrate as a login with CREATEROLE, or have one run CREATE ROLE coffre_vault_hot NOLOGIN; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user;
+            RAISE EXCEPTION '% may not create roles, and this migration makes coffre_vault_hot: migrate as a login with CREATEROLE, or have one run CREATE ROLE coffre_vault_hot NOLOGIN; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user;
         END IF;
         -- Roles are the server's, and the migration lock each database's: another database's 0022 may make it meanwhile.
         BEGIN
@@ -642,13 +642,13 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'coffre_vault_hot may set or grant coffre_vault: have its grantor run REVOKE coffre_vault FROM coffre_vault_hot, then migrate again';
     END IF;
-    -- A setting for this database alone would override the role's at login: one of the three there is refused.
+    -- A setting for this database alone would override the role's at login: either there is refused.
     IF EXISTS (
         SELECT 1 FROM pg_db_role_setting s, unnest(s.setconfig) AS setting
          WHERE s.setrole = 'coffre_vault_hot'::regrole AND s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
-           AND split_part(setting, '=', 1) IN ('lock_timeout', 'statement_timeout', 'plan_cache_mode')
+           AND split_part(setting, '=', 1) IN ('lock_timeout', 'statement_timeout')
     ) THEN
-        RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout, statement_timeout or plan_cache_mode in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
+        RAISE EXCEPTION 'coffre_vault_hot has its own lock_timeout or statement_timeout in this database, over the hot path''s: run ALTER ROLE coffre_vault_hot IN DATABASE % RESET ALL, then migrate again', quote_ident(current_database());
     END IF;
     -- Only what differs, each tried, and a refusal said with what to run: changing a role another made takes, on
     -- Postgres 16, CREATEROLE and its ADMIN, and granting the group its ADMIN (as setup's changeRole says it).
@@ -659,14 +659,13 @@ BEGIN
         END IF;
         IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
         IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
-        IF NOT coalesce(held @> ARRAY['plan_cache_mode=force_generic_plan'], false) THEN ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; END IF;
         IF NOT EXISTS (
             SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
         ) THEN
             GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE;
         END IF;
     EXCEPTION WHEN insufficient_privilege THEN
-        RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; ALTER ROLE coffre_vault_hot SET plan_cache_mode = force_generic_plan; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+        RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
     END;
 END
 $$;

@@ -36,7 +36,7 @@ import { WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
-import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, weighed, weighingSession, type HotCall, type Weighed } from './named-world.ts';
+import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
 import { change, emptyLog, seal, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
@@ -246,6 +246,9 @@ async function cell(row: Row, key: Key) {
         // world: what its call reads must not hang on what the measured isolate's history held.
         cold: null as HotCall | null, coldBuffers: null as number | null, coldKeyBlocks: null as number | null, coldBlocks: null as Weighed['blocks'] | null,
         coldAnswer: null as { code: string; route: string } | null,
+        // Standing nowhere, what it reads at each of a new session's first calls, at the server's planner settings
+        // (`weighedInTurn`): weighed with the rest.
+        early: row.lost !== 'they stand', turns: null as { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null,
       };
       await measured.end();
       return result;
@@ -352,7 +355,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
    * weighed while the others still ran, a cell read what their writes left half done (W268: a row of no key read spread
    * 7); each in a session of its own, on plans made anew, one now and then read hundreds more.
    */
-  const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null }>(results: T[]) => {
+  const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null; early: boolean; turns: { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null }>(results: T[]) => {
     if (ENGINE !== 'postgres') return;
     // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
     // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
@@ -373,6 +376,9 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
     } finally {
       await session.end();
     }
+    // Each in a new session of its own, at the server's planner settings: what a connection's first calls read, before
+    // its plan cache settles, for a key as for every other (T207, Sol's review r2).
+    for (const r of results) if (r.early) r.turns = await weighedInTurn(r.sent);
   };
   // The instance's one policy and roles, which the first world makes, before the cells' worlds run side by side.
   await namedWorld(db);
@@ -402,6 +408,11 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
           differing.push(`${label}: ${r.key}, blocks of the key's tables ${r.keyBlocks} beside ${r.coldKeyBlocks} for a key its world never made`);
         }
       }
+      // And at each of a new session's first calls, plans made for each call's own values and their making included: as
+      // many blocks of the key's relations as its world's twin, of a key never made, and as that twin asked with no id,
+      // cover or seal the isolate kept, at the same call (T207, Sol's reviews r2 and r4; `turnsApart`: held to its own
+      // world's, as a first call's dry run reads the caller's own rows).
+      for (const r of results) if (r.turns !== null) for (const line of turnsApart(r.key, r.turns.asked, r.turns)) differing.push(`${label}: ${line}`);
       const keyBlocks = new Set(results.flatMap((r) => (r.keyBlocks === null ? [] : [r.keyBlocks])));
       if (keyBlocks.size > 1) differing.push(`${label}: blocks of the key's tables ${results.map((r) => `${r.key} ${r.keyBlocks}`).join(', ')}`);
       const read = results.flatMap((r) => (r.buffers === null || r.coldBuffers === null ? [] : [{ ...r, beyond: r.buffers - r.coldBuffers }]));

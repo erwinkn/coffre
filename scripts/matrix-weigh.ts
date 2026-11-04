@@ -10,15 +10,19 @@ export type HotCall = { query: string; args: unknown[] };
 export type WeighingSession = ReturnType<typeof postgresClient>;
 
 /**
- * A session to weigh calls in (`weigh`), at `url`, the hot login's: one connection, whose generic plans (the login's
- * `force_generic_plan`) its first call makes, for every call after it. With no sequential scan where an index serves,
- * as an instance's tables grown past a few pages are planned: a test's are a page or three, where a scan that stops at
- * its first match reads as many pages as precede the row it finds (T194: the `credentials` heap, read 2 to 20 rows
- * deep, as each world's credential fell), and where a key's rows read before its standing was decided would cost no
- * more than any key's, the table's every page whatever the key.
+ * A session to weigh calls in (`weigh`), at `url`, the hot login's: one connection, planned as an instance's tables
+ * grown past a few pages are. With no sequential scan where an index serves: a test's tables are a page or three, where
+ * a scan that stops at its first match reads as many pages as precede the row it finds (T194: the `credentials` heap,
+ * read 2 to 20 rows deep, as each world's credential fell), and where a key's rows read before its standing was decided
+ * would cost no more than any key's, the table's every page whatever the key. With the plans for any values that the
+ * server's plan cache keeps for the use statements at its own settings, within a session's first few calls (T207,
+ * docs/design/planner-defaults.md), which its first call makes, for every call after it: refusing sequential scans
+ * costs those plans so much more than each call's own that the cache would never keep them, and each call would be
+ * weighed on a plan for its own values. Without JIT, which those costs would reach (past the hot login's 2 s
+ * `statement_timeout`) and which reads no buffer. These are the weighing's own, never a login's or a function's.
  */
 export function weighingSession(url: string): WeighingSession {
-  return postgresClient(url, { max: 1, connection: { enable_seqscan: 'off' } });
+  return postgresClient(url, { max: 1, connection: { enable_seqscan: 'off', plan_cache_mode: 'force_generic_plan', jit: 'off' } });
 }
 
 /**
@@ -53,34 +57,128 @@ export type Weighed = { buffers: number; keyBlocks: number; blocks: Record<strin
  * and deadline are now's, so that it is not refused `late`; whatever it would write is rolled back.
  */
 export async function weigh(session: WeighingSession, call: HotCall): Promise<Weighed> {
-  const counters = `SELECT c.relname AS name, pg_stat_get_xact_blocks_fetched(c.oid)::int AS n FROM pg_class c
-    WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'i', 'p')`;
   let least: Weighed | null = null;
   for (let run = 0; run < 4; run += 1) {
-    const args = [...call.args];
-    const now = Date.now();
-    // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
-    // first, then at, purpose and deadline; `callRoute`'s, its caller and route first, then at, purpose and deadline.
-    if (call.query.includes('use_named_batch')) [args[8], args[10]] = [String(now), String(now + 3000)];
-    else if (call.query.includes('use_route')) [args[13], args[15]] = [String(now), String(now + 3000)];
-    else [args[3], args[7]] = [String(now), String(now + 3000)];
-    const read = await session.begin(async (tx) => {
-      const before = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
-      const [plan] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${call.query}`, args as never[]) as unknown as { 'QUERY PLAN': { Plan: Buffers }[] }[];
-      const after = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
-      const was = new Map(before.map((row) => [row.name, row.n]));
-      const blocks = Object.fromEntries(after.map((row) => [row.name, row.n - (was.get(row.name) ?? 0)]).filter(([, n]) => n !== 0));
-      throw new RolledBack({ plan: plan!['QUERY PLAN'][0]!.Plan, blocks });
-    }).then(() => null, (error: unknown) => {
-      if (error instanceof RolledBack) return error.read;
-      throw error;
-    });
+    const read = await weighOnce(session, call);
     if (run === 0) continue;
-    const buffers = read!.plan['Shared Hit Blocks'] + read!.plan['Shared Read Blocks'];
-    if (least !== null && least.buffers <= buffers) continue;
-    least = { buffers, keyBlocks: keyBlocksOf(read!.blocks), blocks: read!.blocks };
+    if (least !== null && least.buffers <= read.buffers) continue;
+    least = read;
   }
   return least!;
+}
+
+/**
+ * How many calls of a new session `weighInTurn` weighs: a statement's first five runs each plan for their own values
+ * (a session's first call runs each form once dry, T131), its sixth makes the plan for any values the cache keeps,
+ * and its seventh runs on it, as every call after does.
+ */
+export const EARLY_CALLS = 7;
+
+/**
+ * What `call` reads at each of a new session's first `calls` calls, as a connection of the hot login's reads it in
+ * production: at the server's own planner settings, which `weighingSession` leaves (T207, Sol's review r2;
+ * docs/design/planner-defaults.md). A key's refusal is held to the same blocks of the key's relations as every other
+ * key's at each call: its plans for each call's own values, and the making of them, included. Each call is weighed
+ * once, in a transaction rolled back, and the marks it leaves (`MARKS`, a warm-up's) are set again after it, as a call
+ * that commits leaves them. Sequential scans stay on: a table a page or three long is read whole by a scan, whatever
+ * the key, which `weighingSession`'s weighing on its settled plans, sequential scans off, does not take for granted.
+ */
+export async function weighInTurn(url: string, call: HotCall, calls = EARLY_CALLS): Promise<Weighed[]> {
+  const session = postgresClient(url, { max: 1 });
+  try {
+    const read: Weighed[] = [];
+    for (let n = 0; n < calls; n += 1) {
+      const { marks, ...weighed } = await weighOnce(session, call);
+      read.push(weighed);
+      for (const [name, value] of marks) await session.unsafe('SELECT set_config($1, $2, false)', [name, value]);
+    }
+    return read;
+  } finally {
+    await session.end();
+  }
+}
+
+/** A key's name no world of the matrices makes. */
+export const NEVER_MADE = 'NEVER_MADE_BY_ANY_WORLD';
+
+/**
+ * A named call's twin: the same request, of a key its world never made (`p_key`, the 19th argument). It reads all the
+ * world's own rows the call does, and no key's.
+ */
+export function twinOf<T extends HotCall>(call: T): T {
+  if (typeof call.args[18] !== 'string') throw new Error('a named call names its key, the 19th argument');
+  const args = [...call.args];
+  args[18] = NEVER_MADE;
+  return { ...call, args } as T;
+}
+
+/**
+ * A named call's control of no key: its twin (`twinOf`), and nothing the isolate kept of the key it asked of (Sol's
+ * review r4): no id (`p_secret`, the 2nd argument), no cover (the 9th to 11th), no seals or cap (the 12th to 15th), its
+ * caller, place and every other input as they were. `twinOf`'s twin keeps the key's id, and reads by it whatever the call
+ * does: a dry run planned for the id passed (T207 r2) reads as many blocks for a held key's twin as for the key, and only
+ * this one shows them.
+ */
+export function absentOf<T extends HotCall>(call: T): T {
+  const { args } = twinOf(call);
+  args[1] = null;
+  for (let n = 8; n <= 14; n += 1) args[n] = null;
+  return { ...call, args } as T;
+}
+
+/**
+ * Where a key's refusal, weighed in turn in a session of its own (`weighInTurn`), fetched blocks of the key's relations
+ * apart from a control's, weighed so too, at the same call: its twin, of a key never made (`twinOf`), and its twin with
+ * nothing of the key the isolate kept (`absentOf`). One line a call and control, both counts and what they are made of.
+ * Held to its own world's controls, not to another key's world: each cell is a world of its own, whose rows sit where
+ * its writes put them, a block more or less of the caller's own from one world to another, the same for every key the
+ * caller names. The pages a batch's rolled-back writes left are settled before (`weighedInTurn`, T207 r5).
+ */
+export function turnsApart(key: string, asked: readonly Weighed[], controls: { twin: readonly Weighed[]; absent: readonly Weighed[] }): string[] {
+  return (['twin', 'absent'] as const).flatMap((of) => {
+    const control = controls[of];
+    const kind = of === 'twin' ? 'a key its world never made' : 'a key never made, asked with no id, cover or seal';
+    return Array.from({ length: Math.max(asked.length, control.length) }, (_, n) => n).flatMap((n) => {
+      const [a, t] = [asked[n], control[n]];
+      if (a === undefined || t === undefined) return [`call ${n + 1} of a new session, ${key} weighed ${a === undefined ? 'not' : `but not ${kind}`}`];
+      if (a.keyBlocks === t.keyBlocks) return [];
+      return [`call ${n + 1} of a new session, ${key}: blocks of the key's tables ${a.keyBlocks} beside ${t.keyBlocks} for ${kind}; blocks apart (${of}/${key}): ${blocksApart(t.blocks, a.blocks).join(', ')}`];
+    });
+  });
+}
+
+/**
+ * The settings the hot path's functions mark a session with once they have planned its statements (0060, 0068): a
+ * session's own (`set_config(…, false)`), which a transaction rolled back takes back, and which Postgres lists in no
+ * view (`pg_settings` hides a placeholder's).
+ */
+const MARKS = ['coffre.use_planned', 'coffre.route_planned'];
+
+/** One run of `call`, rolled back: its buffers, its key's blocks, each relation's, and the marks it left (`MARKS`). */
+async function weighOnce(session: WeighingSession, call: HotCall): Promise<Weighed & { marks: [string, string][] }> {
+  const counters = `SELECT c.relname AS name, pg_stat_get_xact_blocks_fetched(c.oid)::int AS n FROM pg_class c
+    WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'i', 'p')`;
+  const args = [...call.args];
+  const now = Date.now();
+  // `callUse`'s order: credential, key, request, at, purpose, place, MAC, deadline; `callNamedBatch`'s, the names
+  // first, then at, purpose and deadline; `callRoute`'s, its caller and route first, then at, purpose and deadline.
+  if (call.query.includes('use_named_batch')) [args[8], args[10]] = [String(now), String(now + 3000)];
+  else if (call.query.includes('use_route')) [args[13], args[15]] = [String(now), String(now + 3000)];
+  else [args[3], args[7]] = [String(now), String(now + 3000)];
+  const read = await session.begin(async (tx) => {
+    const before = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
+    const [plan] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${call.query}`, args as never[]) as unknown as { 'QUERY PLAN': { Plan: Buffers }[] }[];
+    const after = await tx.unsafe(counters) as unknown as { name: string; n: number }[];
+    const marks = await tx.unsafe(`SELECT name, current_setting(name, true) AS setting FROM unnest($1::text[]) name WHERE current_setting(name, true) IS NOT NULL`, [MARKS] as never[]) as unknown as { name: string; setting: string }[];
+    const was = new Map(before.map((row) => [row.name, row.n]));
+    const blocks = Object.fromEntries(after.map((row) => [row.name, row.n - (was.get(row.name) ?? 0)]).filter(([, n]) => n !== 0));
+    throw new RolledBack({ plan: plan!['QUERY PLAN'][0]!.Plan, blocks, marks: marks.map((m) => [m.name, m.setting] as [string, string]) });
+  }).then(() => null, (error: unknown) => {
+    if (error instanceof RolledBack) return error.read;
+    throw error;
+  });
+  const buffers = read!.plan['Shared Hit Blocks'] + read!.plan['Shared Read Blocks'];
+  return { buffers, keyBlocks: keyBlocksOf(read!.blocks), blocks: read!.blocks, marks: read!.marks };
 }
 
 /**
@@ -102,9 +200,9 @@ export function blocksApart(a: Record<string, number>, b: Record<string, number>
 type Buffers = { 'Shared Hit Blocks': number; 'Shared Read Blocks': number };
 
 class RolledBack extends Error {
-  readonly read: { plan: Buffers; blocks: Record<string, number> };
+  readonly read: { plan: Buffers; blocks: Record<string, number>; marks: [string, string][] };
 
-  constructor(read: { plan: Buffers; blocks: Record<string, number> }) {
+  constructor(read: { plan: Buffers; blocks: Record<string, number>; marks: [string, string][] }) {
     super('rolled back');
     this.read = read;
   }

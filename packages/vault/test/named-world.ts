@@ -14,7 +14,7 @@ import type { Input, Op } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
-import { weigh, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
+import { absentOf, twinOf, weigh, weighInTurn, weighingSession as weighingSessionAt, type HotCall, type Weighed, type WeighingSession } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, HOT_URL, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { change, CONFIG, genesis, LOG_015, ROOT, seal, SIGNING_KEY, world } from './use-world.ts';
 
@@ -286,7 +286,7 @@ export async function slowed(db: TestDatabase, options: { connections?: number }
   return { vault, cache: prepared.uses, statements: () => statements, last: () => last, slow: (ms: number) => { delay = ms; }, connect, end: () => pool.end() };
 }
 
-export { keyBlocksOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
+export { absentOf, keyBlocksOf, turnsApart, twinOf, type HotCall, type Weighed } from '../../../scripts/matrix-weigh.ts';
 
 /**
  * The shared buffers `call` reads, the least of a few runs, each of `EXPLAIN (ANALYZE, BUFFERS)` in a transaction rolled
@@ -308,6 +308,24 @@ export async function weighed(call: HotCall | null, on?: WeighingSession): Promi
   } finally {
     if (on === undefined) await session.end();
   }
+}
+
+/**
+ * What `call` reads at each of a new session's first calls, at the server's planner settings (`weighInTurn`), and what
+ * its controls read at each, each in a new session of its own: its twin, of a key its world never made (`twinOf`), and
+ * that twin with nothing the isolate kept of the key (`absentOf`); null on SQLite, or for no call. Each of the three is
+ * first called once unweighed, in a session of its own: after a batch's rolled-back writes (its standing cells',
+ * weighed), a request's first scan of `log_bulk` read 1 or 2 more blocks than any after it, the same request again
+ * included, and settling the last control alone left the key's own first call to differ (docs/design/planner-defaults.md,
+ * "Holding it"). A settled request still plans afresh in each weighed
+ * session, so a read the planning or the call makes by the key's id shows at every weighing (a dry run reading
+ * `secrets` by `p_secret` fails the matrices).
+ */
+export async function weighedInTurn(call: HotCall | null): Promise<{ asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null> {
+  if (ENGINE !== 'postgres' || call === null) return null;
+  const controls = { twin: twinOf(call), absent: absentOf(call) };
+  for (const request of [call, controls.twin, controls.absent]) await weighInTurn(HOT_URL, request, 1);
+  return { asked: await weighInTurn(HOT_URL, call), twin: await weighInTurn(HOT_URL, controls.twin), absent: await weighInTurn(HOT_URL, controls.absent) };
 }
 
 /** A session of the hot login's to weigh calls in alike (`bufferedBy`): its plans made once, by the first. */
