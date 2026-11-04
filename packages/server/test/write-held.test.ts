@@ -666,6 +666,14 @@ test("a page of many environments' key writes reads them a few hundred a stateme
   // Past Postgres's 65,535 parameters in one statement: none of these environments holds a write.
   const many = Array.from({ length: 17_000 }, () => randomUUID());
   assert.deepEqual(await sealedPage(db.runtime, { detail: false, limit: 50, before: { at: 3_000, number: base }, instance: false, written: { environmentIds: many } }), { rows: [], more: false });
+  // Ada's page of a project of 65,000 environments: of her two forms, 130,000 reads, more than a call takes
+  // arguments, which a spread into `push` threw on before any statement ran (review r4 of #490). Her write at
+  // the last environment, in the last statement's reads, is listed.
+  const project = [...Array.from({ length: 65_000 - 1 }, () => randomUUID()), last];
+  assert.deepEqual(
+    (await sealedPage(db.runtime, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: project } })).rows.map((row) => row.number - base),
+    [1n, 3n],
+  );
   await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
 });
 

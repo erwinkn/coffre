@@ -1787,23 +1787,26 @@ export async function sealedPage(
   const { logChanges } = tablesOf(db);
   const engine = dialect.engineOf(db);
   const of = (records: ChangeRecord[], actor: string | undefined) => and(recorded(engine, logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor))!;
+  // One read at a time, never spread into `push`: a project's page of tens of thousands of environments, of a
+  // member's two forms, is more reads than a call takes arguments (review r4 of #490).
   const reads: SQL[] = [];
   if (filter.instance) {
-    reads.push(...recordActors(filter.actors, isService).map((actor) => of(SIGN_INS, actor)));
-    if (filter.detail) reads.push(...recordActors(filter.actors, isMember).map((actor) => of(HIDDEN, actor)));
-    reads.push(...recordActors(filter.actors, isMember).map((actor) => of(['admitted'], actor)));
+    for (const actor of recordActors(filter.actors, isService)) reads.push(of(SIGN_INS, actor));
+    if (filter.detail) for (const actor of recordActors(filter.actors, isMember)) reads.push(of(HIDDEN, actor));
+    for (const actor of recordActors(filter.actors, isMember)) reads.push(of(['admitted'], actor));
   }
   const { written } = filter;
   if (written !== null) {
-    if ('all' in written) reads.push(...recordActors(filter.actors, isMember).map((actor) => of(['written'], actor)));
+    if ('all' in written) for (const actor of recordActors(filter.actors, isMember)) reads.push(of(['written'], actor));
     else {
       const places = 'secretId' in written
         ? [eq(logChanges.object, logObject('secret', written.secretId))]
         : written.environmentIds.map((id) => eq(recordField(engine, logChanges.payload, 'environmentId'), id));
       // Of some members at a place: a read of each member's there (`log_changes_written_actor_environment_idx`,
       // `…_actor_object_idx`), never the place's read with the others' passed over, which grows with their writes.
-      const actors = recordActors(filter.actors, isMember);
-      reads.push(...actors.flatMap((actor) => places.map((place) => and(of(['written'], actor), place)!)));
+      for (const actor of recordActors(filter.actors, isMember)) {
+        for (const place of places) reads.push(and(of(['written'], actor), place)!);
+      }
     }
   }
   if (reads.length === 0) return { rows: [], more: false };
