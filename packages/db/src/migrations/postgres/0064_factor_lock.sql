@@ -93,3 +93,20 @@ CREATE OR REPLACE FUNCTION issue_token(
                               p_via, p_via_seal, p_via_end, p_policy_seq, p_protected, p_slugs, p_app_key,
                               p_id, p_kind, p_auth_mac, p_token_hash, p_token_hint, p_label, p_created_by, p_scope, p_places, p_expires, NULL::uuid)
 $$;
+--> statement-breakpoint
+-- The wrapper runs as its owner, which `CREATE OR REPLACE` keeps (0036's), while the overload belongs to the login that
+-- made it: the same role where one owner migrates, as `coffre setup` makes it, but not where a member of the owner does
+-- (a managed Postgres's admin login, say; `scripts/test-schema-owner.sh`). Its owner could then not execute the
+-- overload, which PUBLIC may not, and every issue of the previous release's vault would fail during the rollout. So it
+-- is granted it by name, as 0057, 0058 and 0060 grant the use functions' callers their callees.
+DO $$
+DECLARE
+    v_legacy regprocedure := 'public.issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint)';
+    v_overload regprocedure := 'public.issue_token(text, bigint, text, text, bytea, bytea, text, integer, bigint, integer, bigint, uuid, bytea, bigint, bigint, uuid[], text[], text, uuid, text, bytea, bytea, text, text, text, text, text, bigint, uuid)';
+    v_owner name := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_legacy);
+BEGIN
+    IF NOT has_function_privilege(v_owner, v_overload, 'EXECUTE') THEN
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_overload, v_owner);
+    END IF;
+END
+$$;
