@@ -463,6 +463,13 @@
       "when": 1793771247930,
       "tag": "0068_planner_defaults",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1793796942777,
+      "tag": "0069_newest_reference_seek",
+      "breakpoints": true
     }
   ]
 }

@@ -30,7 +30,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import {
   distinctSecretCounts, environmentSecrets, insertBinding, liveKeysIn, lock, memberStanding, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder,
-  HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, sensitiveFrom, type ChangePoint,
+  HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, secretObjects, sensitiveFrom, type ChangePoint,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { readsByStanding, readsPage, readsStanding } from '../src/db/reads.ts';
@@ -1183,12 +1183,20 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const added = new Map(before);
   for (const [environment, project] of [[ids.prod!, market!.id], [ids.busy!, shop.id]] as const) added.set(environment, new Set([...(before.get(environment) ?? []), project]));
   assert.deepEqual(await sensitiveFrom(counted, everything), added);
+  // A key with a value of its own, and market/busy's reference, as 0.15's objects take them (`secretObjects`): its source
+  // and its newest reference row read by the holder's index, never through other keys' references (T220).
+  const idOf = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT id FROM secrets WHERE archived_at IS NULL AND ${where}`))[0]!.id;
+  const plain = await idOf(sql`environment_id = ${ids.dev!} AND key = 'API_KEY'`);
+  const refers = await idOf(sql`environment_id = ${ids.busy!} AND key = 'COST_REFERS'`);
+  assert.equal((await secretObjects(counted, { ids: [refers] })).get(refers)?.columns.source, await idOf(sql`project_id = ${shop.id} AND key = 'COST_SENSITIVE'`));
   /** Each statement of these reads, run under EXPLAIN: its pages. */
   const reads: Record<string, () => Promise<unknown>> = {
     'the places tree of everything': () => places(counted),
     'the places tree of one project': () => places(counted, { within: [market!.id] }),
     "an environment's keys": () => environmentSecrets(counted, ids.dev!),
     "an environment's key": () => environmentSecrets(counted, ids.dev!, { key: 'API_KEY' }),
+    "a key's object": () => secretObjects(counted, { ids: [plain] }),
+    "a reference's object": () => secretObjects(counted, { ids: [refers] }),
     // The environment that piles up archived keys of its own, read by key.
     "an archiving environment's key": () => environmentSecrets(counted, ids.prod!, { key: 'API_KEY' }),
     "an archiving environment's heads by key": () => secretHeads(counted, ids.prod!, { keys: ['API_KEY', 'DATABASE_URL'] }),

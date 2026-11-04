@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **A key's newest reference is read by its own index, never through
+  other keys' references (T220).** Every read of a key's newest
+  reference row, `use_credential` (`/use`), the vault's object reads and
+  the app's (`secretObjects`), asked for `secret_id = <key> ORDER BY
+  created_seq DESC LIMIT 1`, which Postgres could serve by walking
+  `secret_references_created_seq_key` backwards, through every newer row
+  of every other key's, where few keys hold many references: a use of a
+  reference read 254 buffers, and 542 once another key had been
+  repointed 5,000 times, where it now reads 105 either way. Each now
+  seeks the key's newest row in `secret_references_holder_idx`.
+  Migration 0069 makes `use_credential`, `use_route`, `change_input` and
+  `end_reference` again with that lookup alone changed.
+
 - **A credential's preview and issue name what it will not read from the
   environments' live keys (T214).** `withheld`, the hint a service
   credential's preview and issue give its issuer, read every reference
