@@ -198,11 +198,12 @@ test('under optional, a Developer with no passkey signs in by the provider alone
   assert.equal((await bob.step()).body.purpose, 'enroll');
 });
 
-test("an Owner the deployment names, never admitted, passes the provider and stops: the callback writes nothing, the vault's members included; the passkey's answer admits and enrolls them, and they sign in again with it (sections 3.1, 13.22, 13.27)", async () => {
-  // The deployment names LATER too, now: a vault of that configuration, over the same database and keys, which
-  // declares them as it starts (R3). On a cold isolate the callback reads the members beside the vault's first call,
-  // whose start lands after: here, its `about`, which settles it, answered as the configuration says without it, and
-  // the vault started by the post's own call. Held first (review r1 of #500): named, and no row of theirs.
+/**
+ * A deployment that names LATER an Owner too, now: a vault of that configuration, over the same database and keys,
+ * which declares them as it starts (R3), and that vault as a cold isolate's callback meets it, its `about` answered as
+ * the configuration says without it starting (review r1 of #500).
+ */
+function laterOwner() {
   const later = testVault([ROOT], { owners: [ROOT, NAMED, LATER] }, { kek });
   const cold = new Proxy(later, {
     get(target, key) {
@@ -210,6 +211,15 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
       return Reflect.get(target, key, target);
     },
   });
+  return { later, cold };
+}
+
+test("an Owner the deployment names, never admitted, passes the provider and stops: the callback writes nothing, the vault's members included; the passkey's answer admits and enrolls them, and they sign in again with it (sections 3.1, 13.22, 13.27)", async () => {
+  // The deployment names LATER too, now: a vault of that configuration, over the same database and keys, which
+  // declares them as it starts (R3). On a cold isolate the callback reads the members beside the vault's first call,
+  // whose start lands after: here, its `about`, which settles it, answered as the configuration says without it, and
+  // the vault started by the post's own call. Held first (review r1 of #500): named, and no row of theirs.
+  const { cold } = laterOwner();
   const runtime = deployment('required', undefined, cold);
   assert.ok((await cold.about()).owners?.includes(LATER), 'the deployment names them an Owner');
   assert.deepEqual(await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${LATER}`)), [], 'no row of theirs');
@@ -217,7 +227,7 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   const browser = new Browser(runtime);
   assert.equal(await browser.provider(LATER), '/auth/passkey');
   const sealed = runtime.signin!.ceremonies.open(browser.jar.get('__Host-coffre_passkey') ?? null, ['signin', 'enroll']);
-  assert.equal(sealed?.generation, null, 'the step names no generation: none is theirs yet');
+  assert.equal(sealed?.generation, 0, "the step names a first admission's generation: no row is theirs yet");
   const step = await browser.step();
   assert.equal(step.status, 200);
   assert.equal(step.body.purpose, 'enroll');
@@ -244,6 +254,30 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   const again = await touch(runtime, LATER, key);
   assert.equal(await me(again), 'ok');
   assert.equal((await sessionRow(again)).passkeyId, added!.id);
+});
+
+test("an enrollment begun before an Owner's first admission adds nothing once they were admitted, removed and admitted again: it was for their first membership, never a later one (section 3.1; review r3 of #500)", async () => {
+  const { later, cold } = laterOwner();
+  const runtime = deployment('required', undefined, cold);
+  const browser = new Browser(runtime);
+  assert.equal(await browser.provider(LATER), '/auth/passkey');
+  const step = await browser.step();
+  assert.equal(step.body.purpose, 'enroll');
+
+  // Within its five minutes: the vault admits them at generation 0, a deployment that no longer names them removes
+  // them, and an Owner adds them back, at the generation their removal left, 1.
+  assert.equal((await later.access(`user:${LATER}`)).generation, 0);
+  const root = clientFor(deps, ROOT);
+  await root.members.remove(`user:${LATER}`);
+  await root.members.add(`user:${LATER}`, { role: 'owner' });
+  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${LATER}`));
+  assert.deepEqual([row!.status, row!.generation], ['active', 1]);
+  const before = await counts();
+
+  const done = await browser.answer({ response: await register(await SoftAuthenticator.create('ES256'), step.body.options) });
+  assert.deepEqual(done, { status: 400, body: { error: 'state_mismatch' } });
+  assert.equal(browser.session, undefined, 'no session');
+  assert.deepEqual(await counts(), before, 'no passkey, no session, nothing bound');
 });
 
 test('a touch signs in once: the same assertion again, a key of another person, another origin, or no user verification signs nobody in (sections 7.2, 7.3, 13.1-13.6)', async () => {
@@ -385,6 +419,34 @@ test('a session no passkey stands behind steps up with a touch: a new session, c
   assert.deepEqual(checks.map(({ decision }) => decision), ['allow']);
 });
 
+test("a touch at sign-in ends the session the browser came in on in its own transaction: a copy of the old cookie is dead even when the sign-out after it fails (section 6.5; review r3 of #500)", async () => {
+  const key = await SoftAuthenticator.create('ES256');
+  const runtime = deployment('required');
+  const browser = await enroll(runtime, ADA, key);
+  const copy = new Browser(runtime);
+  for (const [name, value] of browser.jar) copy.jar.set(name, value);
+  const old = await sessionRow(browser);
+  assert.equal(await me(copy), 'ok');
+
+  // The sign-out the route asks after the new session, made to fail: the vault down, or the process gone, then.
+  const signin = runtime.signin as unknown as { signOut: () => Promise<void> };
+  let signOuts = 0;
+  signin.signOut = async () => {
+    signOuts++;
+    throw new Error('the vault is unreachable');
+  };
+  assert.equal(await browser.provider(ADA), '/auth/passkey');
+  const step = await browser.step();
+  assert.equal(step.body.purpose, 'signin');
+  assert.deepEqual(await browser.answer({ response: await assertion(key, step.body.options) }), { status: 200, body: { next: '/projects/market' } });
+  assert.equal(await me(browser), 'ok');
+  assert.notEqual((await sessionRow(browser)).id, old.id);
+  assert.equal(await me(copy), 'unauthenticated', 'the old session ended with the new one');
+  assert.equal(signOuts, 0, 'nothing left to sign out after');
+  const [ended] = await db.owner.select().from(credentials).where(eq(credentials.id, old.id));
+  assert.ok(ended!.revokedAt !== null);
+});
+
 test('nothing to ask: no pending sign-in, or a step-up for a session whose person holds no passkey, answers 404 (section 3.1)', async () => {
   const runtime = deployment('optional');
   const browser = new Browser(runtime);
@@ -460,4 +522,21 @@ test("a passkey's removal forged in the database, its MAC left as it was, refuse
   assert.equal(back.headers.get('location'), '/login?error=tampered');
   assert.equal(alone.session, undefined);
   assert.deepEqual(await counts(), before, 'no passkey, session or identity written');
+});
+
+
+test("a session no passkey stands behind is taken under optional only while its person holds none: a removal forged in the database, its MAC left as it was, does not pass it; the same removal made by the app does (sections 6.2, R64; review r3 of #500)", async () => {
+  await enroll(deployment('required'), ADA, await SoftAuthenticator.create());
+  // Made while passkeys were off: no passkey stands behind it, and its person holds one.
+  const browser = new Browser(deployment('off'));
+  assert.equal(await browser.provider(ADA), '/projects/market');
+  browser.runtime = deployment('optional');
+  assert.equal(await me(browser), 'passkey_required');
+
+  const [held] = await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${ADA}`));
+  await db.owner.update(passkeys).set({ removedAt: new Date(), removedBy: `user:${ROOT}` }).where(eq(passkeys.id, held!.id));
+  assert.equal(await me(browser), 'unauthenticated', 'a forged removal refuses, as a tampered row does');
+
+  await rows.removePasskey(db.owner, deps.chainKey, held!.id);
+  assert.equal(await me(browser), 'ok', 'removed by the app, its person holds none');
 });

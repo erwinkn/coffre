@@ -244,9 +244,13 @@ yet, on an empty instance too. Under passkeys the callback only reads: it
 matches the email against the members' rows and the deployment's `owners`
 (`vault.about().owners`; the settling `about()` can do on a cold vault is
 the door's, which ran before the callback, below). An Owner named in config with no
-member row yet gets an `enroll` cookie with `generation: null`; the `POST`
-admits them through `vault.access`, as today, once the attestation has
-verified, then enrolls at the generation that answered. Conformance runs
+member row yet gets an `enroll` cookie with `generation: 0`, a first
+admission's; the `POST` admits them through `vault.access`, as today, once
+the attestation has verified, and enrolls only if the vault answered that
+generation. A cookie names a membership, never "whichever comes": one
+whose person the vault admitted, removed and admitted again within its
+five minutes is at generation 1 by then (a removal moves the generation, a
+readmission keeps it), and refuses, `state_mismatch` (review r3 of #500). Conformance runs
 `required` on an empty database and on a cold vault (section 13).
 
 The page also says what to do without the passkey: "Lost your passkeys? An
@@ -1002,7 +1006,13 @@ is the table above, for browser and CLI sessions and personal tokens
 are not checked. The statement that reads the credential
 (`credentialRow`, every variant: a request's, `GET /api/me`'s with the
 vault's rows, a page's) joins the passkey it names by its primary key and
-asks `EXISTS` of `passkeys_live_idx`. The passkey's MAC is checked by
+asks of `passkeys_live_idx`, then of `passkeys_principal_idx`, whether its
+person holds a live passkey at the credential's generation, only removed
+ones, or none ever. Only removed ones, for a credential that names none,
+reads those rows, one statement more, and holds each to its MAC: a removal
+written in the database alone would otherwise pass a session made while
+the passkey was live, under `off` or by the previous release, and fails
+as a tampered row does (R64; review r3 of #500, PR 4b). The passkey's MAC is checked by
 `passkeyStands`, on the one branch whose answer reads the row, so a row
 changed around the app refuses the credential it backs as any tampered row
 does (`401 unauthenticated`), and refuses nothing the check exempts: a
@@ -1170,6 +1180,15 @@ transaction ends the session it came in on, conditionally, moves the
 replay mark and issues the new session, confirmed, with the old one's
 account and end; `passkey.check` entries, allowed or denied. PR 5's fresh
 check is the same transaction from another door.
+
+A touch at sign-in does the same with the session cookie the browser
+answered with, when it is the person's: the transaction that moves the
+replay mark and issues the new session ends it too, and a cookie already
+ended is no refusal there, since a sign-in needs no session. The route's
+sign-out after a sign-in, which swallows its failures, is left for
+another person's cookie: before, a vault or database failure, or a crash,
+between the new session and that sign-out left a copy of the old cookie
+alive (review r3 of #500).
 
 **Why a new session per touch, not a column updated in place.** Updating
 the session's `confirmed_at` would refresh every copy of its token: a

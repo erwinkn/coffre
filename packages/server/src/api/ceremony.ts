@@ -31,8 +31,13 @@ export type PendingFactor = {
   account: { provider: string; issuerHash: string; subject: string; email: string | null; name: string | null };
   /** `user:<email>`. */
   principal: string;
-  /** Their generation when the callback read it; null for an Owner the deployment names whom no sign-in has admitted yet. */
-  generation: number | null;
+  /**
+   * The membership the step is for: their row's generation when the callback read it, active or not (a removed member
+   * comes back at the one their removal left), and 0, a first admission's, for an Owner the deployment names whom the
+   * vault holds no row of yet. The post holds the vault's answer to it, so a removal and readmission meanwhile, which
+   * moves it, refuses (review r3 of #500).
+   */
+  generation: number;
   /** Where to land: a path on this origin. */
   next: string;
   /** 32 random bytes, base64url. */

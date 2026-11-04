@@ -50,6 +50,7 @@ import {
   liveCredentialsWhere,
   priorCredentials,
   revokeCredentialsWhere,
+  type CredentialsWhere,
   priorConnections,
   revokePriorMembership,
   update,
@@ -222,7 +223,11 @@ export type HandlePlace = { environmentId: string; personal: boolean };
 export type PersonalToken = { id: string; label: string; expiresAt: string };
 
 export type SigninResult =
-  | { ok: true; principal: PrincipalRef; credential: IssuedCredential }
+  /**
+   * `replaced`: the session the browser came in on, its person's, ended in the transaction that issued this one (a
+   * touch, passkeys.md, section 6.5), which leaves the browser nothing to sign out.
+   */
+  | { ok: true; principal: PrincipalRef; credential: IssuedCredential; replaced?: true }
   /**
    * With `account_mismatch`, `providers`: the ids of the providers the person
    * already signs in with. Theirs to know: the provider has just verified
@@ -531,9 +536,9 @@ export class SigninService {
       if (known !== undefined && factor === null && ownsInstance(standing) && (previous === null || previous.generation === standing.generation)) {
         throw new StepWanted(standing);
       }
-      // The passkey step was for this person, at this generation; an Owner the deployment names, admitted just now by
-      // the vault's answer above, at the one it answered (passkeys.md, section 3.1).
-      if (factor !== null && (factor.state.principal !== principalOf(principal) || (factor.state.generation ?? standing.generation) !== standing.generation)) {
+      // The passkey step was for this person, at this generation: an Owner the deployment names, admitted just now by
+      // the vault's answer above, at the first one, 0, and never at a later membership (passkeys.md, section 3.1).
+      if (factor !== null && (factor.state.principal !== principalOf(principal) || factor.state.generation !== standing.generation)) {
         return passkeyRefused(meta, factor.state.principal, 'state_mismatch', 'the passkey step was for another person or membership');
       }
       // What the session names: the passkey touched, or the one added (section 3.2).
@@ -546,8 +551,13 @@ export class SigninService {
         const at = new Date();
         const prior = previous === null ? await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, priorCredentials(principal, standing.generation, at)) : [];
         const apps = previous === null ? await priorConnections(this.#deps.db, this.#deps.chainKey, principal, standing.generation, at) : [];
-        const unbacked = factor?.kind === 'enroll' ? await this.#unbacked(this.#deps.db, principal, standing.generation, at) : { credentials: [], connections: [] };
-        return [this.#issueChange('browser', principal, plan), ...revokes([...prior, ...unbacked.credentials]), ...connectionRevokes([...apps, ...unbacked.connections])];
+        const session = this.#replacing(factor, principal);
+        const [unbacked, replaced] = await Promise.all([
+          factor?.kind === 'enroll' ? this.#unbacked(this.#deps.db, principal, standing.generation, at) : { credentials: [], connections: [] },
+          session === null ? [] : liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, session),
+        ]);
+        const ending = new Map([...prior, ...unbacked.credentials, ...replaced].map((row) => [row.id, row]));
+        return [this.#issueChange('browser', principal, plan), ...revokes([...ending.values()]), ...connectionRevokes([...apps, ...unbacked.connections])];
       });
       return audited(this.#deps, async (tx, log) => {
         // Under the head, which every change to the person's passkeys holds too: the provider alone signs in nobody who
@@ -587,6 +597,11 @@ export class SigninService {
         let identityId: string;
         let generation: number;
         const ended = { credentials: [] as string[], connections: [] as string[], approvals: [] as string[] };
+        // The session the browser came in on, the person's, ends with this transaction, not after it, where a failure or
+        // a crash would leave a copy of its cookie alive (section 6.5; review r3 of #500). Ended meanwhile, it is no refusal.
+        const session = this.#replacing(factor, principal);
+        const replaced = session === null ? [] : await revokeCredentialsWhere(tx, this.#deps.chainKey, session, { revokedAt: now, revokedBy: principal.id });
+        ended.credentials.push(...replaced);
         if (bound !== null) {
           principalId = memberOf(bound.principal).id;
           identityId = bound.id;
@@ -669,7 +684,7 @@ export class SigninService {
           decision: 'allow',
           metadata: { ...account, identityId, targetCredentialId: credential.id, ...(passkeyId === null ? {} : { passkeyId }) },
         });
-        return { ok: true as const, principal, credential };
+        return { ok: true as const, principal, credential, ...(replaced.length > 0 ? { replaced: true as const } : {}) };
       }, changes, factor?.kind === 'enroll' ? principalOf(principal) : null);
       });
     });
@@ -685,6 +700,16 @@ export class SigninService {
       liveConnections(db, this.#deps.chainKey, principalOf(principal), at),
     ]);
     return { credentials: credentialRows, connections: connections.filter((row) => row.generation === generation && row.passkeyId === null) };
+  }
+
+  /**
+   * The session a touch replaces (section 6.5): the browser session whose cookie the browser answered with, if it is
+   * this person's; null for none to look for. Another person's is no part of this sign-in's change, and the route signs
+   * it out as today.
+   */
+  #replacing(factor: Factor | null, principal: PrincipalRef): CredentialsWhere | null {
+    if (factor === null || factor.replaces === null || !isCoffreToken(factor.replaces)) return null;
+    return credentialsBy.session(hashToken(factor.replaces), principalOf(principal));
   }
 
   // --- passkeys at sign-in (docs/design/passkeys.md, sections 3.1, 3.2 and 6.2) -----------------------------
@@ -737,7 +762,7 @@ export class SigninService {
     const principal = principalOf({ type: 'user', id });
     const row = members.get(principal);
     const active = row?.status === 'active' && (previous === null || previous.generation === row.generation) ? row : null;
-    const step = (purpose: 'signin' | 'enroll', generation: number | null) => ({
+    const step = (purpose: 'signin' | 'enroll', generation: number) => ({
       ok: 'passkey' as const,
       state: {
         purpose,
@@ -752,8 +777,9 @@ export class SigninService {
       },
     });
     if (active !== null && active.live > 0) return step('signin', active.generation);
-    // An Owner the deployment names, admitted or not: their row as the vault last committed it, if any.
-    if (owners.has(id)) return step('enroll', active?.generation ?? null);
+    // An Owner the deployment names, admitted or not: at their row's generation, whatever its status, and with no row,
+    // at a first admission's, 0 (review r3 of #500).
+    if (owners.has(id)) return step('enroll', row?.generation ?? 0);
     if (active !== null && policy === 'required') return step('enroll', active.generation);
     try {
       return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null, accessSeq: row?.accessSeq ?? null });
@@ -769,7 +795,7 @@ export class SigninService {
    */
   async passkeyStep(state: PendingFactor): Promise<PasskeyStep | null> {
     const email = memberOf(state.principal).id;
-    const passkeys = state.generation === null ? [] : await livePasskeys(this.#deps.db, this.#deps.chainKey, state.principal, state.generation);
+    const passkeys = await livePasskeys(this.#deps.db, this.#deps.chainKey, state.principal, state.generation);
     if (state.purpose === 'signin') {
       return passkeys.length === 0 ? null : { purpose: 'signin', email, options: requestOptions(this.config.passkeys, state, passkeys) };
     }
@@ -783,15 +809,15 @@ export class SigninService {
    * moved, or the passkey added, in its transaction. A refusal writes no entry: whoever answered passed the provider
    * but not the factor. It goes to the process log.
    */
-  async finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta): Promise<SigninResult> {
+  async finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta, replaces: string | null = null): Promise<SigninResult> {
     try {
-      return await this.#finishPasskey(state, response, meta);
+      return await this.#finishPasskey(state, response, meta, replaces);
     } catch (error) {
       return refusalOrThrow(error);
     }
   }
 
-  async #finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta): Promise<SigninResult> {
+  async #finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta, replaces: string | null): Promise<SigninResult> {
     // The issuer that verified the account, sealed at the callback, is still the one this provider ID names.
     if (this.#issuerHash(state.account.provider) !== state.account.issuerHash) {
       return passkeyRefused(meta, state.principal, 'state_mismatch', "the provider's issuer changed since the callback");
@@ -816,22 +842,22 @@ export class SigninService {
         synced: verified.backupEligible,
         name: `Passkey ${state.passkeysEver! + 1}`,
       };
-      return this.#signedIn(profile, meta, { kind: 'enroll', state, id: row.id, row });
+      return this.#signedIn(profile, meta, { kind: 'enroll', state, id: row.id, row, replaces });
     }
     const passkey = await this.#passkeyAnswering(response, state);
     if (passkey === null) return passkeyRefused(meta, state.principal, 'passkey_failed', 'unknown_credential');
     const verified = await verifyAssertion(response, { ...expected, passkey: storedOf(passkey) });
     if (!verified.ok) return passkeyRefused(meta, state.principal, 'passkey_failed', verified.reason);
-    return this.#signedIn(profile, meta, { kind: 'touch', state, passkey, signCount: verified.signCount });
+    return this.#signedIn(profile, meta, { kind: 'touch', state, passkey, signCount: verified.signCount, replaces });
   }
 
   /**
    * The passkey a response names, if it is a live one of the person's at the state's generation: another member's, or
    * one removed since the options were sent, is unknown here (section 7.2, step 3). A row that fails its MAC is too.
    */
-  async #passkeyAnswering(response: unknown, state: { principal: string; generation: number | null }): Promise<PasskeyRow | null> {
+  async #passkeyAnswering(response: unknown, state: { principal: string; generation: number }): Promise<PasskeyRow | null> {
     const credentialId = responseCredentialId(response);
-    if (credentialId === null || state.generation === null) return null;
+    if (credentialId === null) return null;
     const row = await passkeyByCredentialId(this.#deps.db, this.#deps.chainKey, credentialId).catch((error: unknown) => {
       if (error instanceof AuthRowTampered) return null;
       throw error;
@@ -912,7 +938,7 @@ export class SigninService {
               ...plan, identityId: session.identityId, label: session.label, createdBy: principal.id, passkeyId: passkey.id, confirmedAt: now,
             });
             log.push(check('allow', { passkeyId: passkey.id, issued: credential.id }));
-            return { ok: true as const, principal, credential };
+            return { ok: true as const, principal, credential, replaced: true as const };
           }, changes);
         });
       });
@@ -1039,7 +1065,7 @@ export class SigninService {
    */
   async #issuedBacked(tx: Transaction, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<boolean> {
     if (this.#deps.signin.passkeys.policy === 'off') return true;
-    return this.#backed(holder, await passkeyBehind(tx, holder));
+    return this.#backed(holder, await passkeyBehind(tx, this.#deps.chainKey, holder));
   }
 
   #liveCredential(row: Awaited<ReturnType<typeof findCredential>>, access: Access, now: Date): boolean {
@@ -1244,7 +1270,7 @@ export class SigninService {
     if (passkeyChecked(row.kind) && this.#deps.signin.passkeys.policy !== 'off') {
       let read = row.passkeyRead ?? request.passkey ?? null;
       try {
-        read ??= await passkeyByToken(db, tokenHash);
+        read ??= await passkeyByToken(db, this.#deps.chainKey, tokenHash);
       } catch (error) {
         if (error instanceof AuthRowTampered) throw error;
         throw new CredentialUncheckable(error);
@@ -2010,11 +2036,13 @@ const isOpen = (now: Date) => (row: { decidedAt: Date | null; expiresAt: Date })
  * person's, whose counter it moves; or a first passkey, added with the session, its row made ready but for whose and
  * which generation, which the sign-in decides.
  */
+/** `replaces`: the session cookie the browser answered with, if any, which a touch replaces when it is the person's (section 6.5). */
 type Factor =
-  | { kind: 'touch'; state: PendingFactor; passkey: PasskeyRow; signCount: number }
+  | { kind: 'touch'; state: PendingFactor; passkey: PasskeyRow; signCount: number; replaces: string | null }
   | {
       kind: 'enroll';
       state: PendingFactor;
+      replaces: string | null;
       id: string;
       row: {
         id: string; userHandle: Buffer; credentialId: Buffer; publicKey: Buffer; algorithm: number; signCount: number; lastChallengeAt: Date;

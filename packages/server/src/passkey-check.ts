@@ -33,7 +33,12 @@ export function passkeyStands(
   read: PasskeyRead,
 ): boolean {
   if (policy === 'off') return true;
-  if (holder.passkeyId === null) return policy === 'optional' && !read.held;
+  if (holder.passkeyId === null) {
+    if (policy !== 'optional') return false;
+    // Holding none rests on removals, one of them forged (`passkeyOf`): as a row that fails its MAC on the branch that reads it.
+    if (read.held === 'tampered') throw new AuthRowTampered('passkeys');
+    return !read.held;
+  }
   const { passkey } = read;
   if (passkey !== null) verifyAuthRow(chainKey, 'passkeys', passkey);
   return passkey !== null && passkey.id === holder.passkeyId && passkey.removedAt === null
@@ -123,7 +128,7 @@ export async function sourceStands(
 export async function passkeyAhead(runtime: CoffreRuntime, token: string, kind: TokenKind): Promise<PasskeyRead | 'ordinary' | undefined> {
   if (!passkeyChecked(kind) || runtime.auth.mode !== 'signin' || runtime.auth.signin.passkeys.policy === 'off') return undefined;
   try {
-    const read = await passkeyByToken(runtime.db, hashToken(token));
+    const read = await passkeyByToken(runtime.db, runtime.chainKey, hashToken(token));
     if (read === null) return undefined;
     return passkeyStands(runtime.chainKey, runtime.auth.signin.passkeys.policy, read.holder, read) ? read : 'ordinary';
   } catch {

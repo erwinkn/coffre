@@ -420,7 +420,8 @@ export async function finishSignin(
 
 /**
  * A browser's new session: its cookie, set, and the session it signed in on before, if any, signed out, rather than
- * left alive until it expires.
+ * left alive until it expires: here, after the new one, unless the sign-in's own transaction ended it (`replaced`, a
+ * touch's, passkeys.md, section 6.5).
  */
 async function signedInCookies(
   request: Request,
@@ -430,7 +431,7 @@ async function signedInCookies(
 ): Promise<string[]> {
   const sessionName = sessionCookieName(runtime.auth);
   const previous = readCookie(request, sessionName);
-  if (previous !== null) await runtime.signin!.signOut(previous, meta).catch(() => {});
+  if (previous !== null && result.replaced !== true) await runtime.signin!.signOut(previous, meta).catch(() => {});
   const maxAge = (Date.parse(result.credential.expiresAt) - Date.now()) / 1000;
   return [cookieHeader(runtime.auth, sessionName, result.credential.token, maxAge)];
 }
@@ -492,7 +493,7 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
     return answered(await signin.stepUp(body.state, token, body.response, meta), stepUp.next, []);
   }
   if (state === null) return refused('state_mismatch', [clear]);
-  const result = await signin.finishPasskey(state, body.response, meta);
+  const result = await signin.finishPasskey(state, body.response, meta, token);
   // A passkey that did not answer may be tried again, another one too, while the sign-in lasts; anything else starts over.
   return answered(result, state.next, result.ok !== true && result.reason === 'passkey_failed' ? [] : [clear]);
 }
