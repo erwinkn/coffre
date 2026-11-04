@@ -34,14 +34,15 @@ BEGIN
         PERFORM 1 FROM public.credentials c WHERE c.id = p_via FOR SHARE;
         -- Its end as the vault authenticated it (`p_via_end`, the earlier of its expiry and its hard end, which its seal
         -- covers): the columns still say so, and it is still ahead. A seal compares bytes, never the columns it was made of.
-        -- And the passkey it names, the one this issue carries, still the actor's and not removed.
+        -- And the passkey it names, the one this issue carries, still the actor's at the generation checked above, and not
+        -- removed: live as `passkeys_live_idx` defines it (a member's removal moves their generation past their passkeys).
         IF NOT EXISTS (SELECT 1 FROM public.credentials c
                         WHERE c.id = p_via AND c.principal = p_actor AND c.revoked_at IS NULL AND c.seal = p_via_seal
                           AND floor(extract(epoch FROM least(c.expires_at, coalesce(c.not_after, c.expires_at))) * 1000)::bigint = p_via_end
                           AND c.passkey_id IS NOT DISTINCT FROM p_passkey)
            OR p_via_end <= (extract(epoch FROM clock_timestamp()) * 1000)::bigint
            OR p_via_seal IS DISTINCT FROM (SELECT c.seal FROM public.log_changes c WHERE c.object = public.log_object('credential', p_via::text) ORDER BY c.number DESC LIMIT 1)
-           OR (p_passkey IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.passkeys k WHERE k.id = p_passkey AND k.principal = p_actor AND k.removed_at IS NULL)) THEN
+           OR (p_passkey IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.passkeys k WHERE k.id = p_passkey AND k.principal = p_actor AND k.generation = p_actor_generation AND k.removed_at IS NULL)) THEN
             RETURN json_build_object('state', 'ended');
         END IF;
     END IF;

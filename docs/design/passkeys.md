@@ -725,7 +725,8 @@ their identities: someone removed and added back starts with none.
 
 ```ts
 // credentials: the passkey that confirmed this credential, and when it was touched.
-// Set on browser and CLI sessions, and copied onto what they make: personal tokens and handles (no confirmed_at).
+// Set on browser and CLI sessions, and copied onto what they make: personal tokens, service tokens and handles
+// (no confirmed_at; section 6.3).
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
 
@@ -850,6 +851,17 @@ Removing a passkey ends everything, not only what that passkey confirmed:
 any session could have been confirmed by any of the person's passkeys at
 some point, and "everywhere else" is a rule a person can predict.
 
+**Where the change revokes, and in which order it locks** (PR 4). The app
+revokes the rows itself, in its own transaction, as a member's removal
+does today (`revokeCredentialsWhere` in `members.ts`): the vault's log
+entries for what it ends are prepared before the transaction
+(`AppChanges.prepare`), since no app transaction stays open across a vault
+call, and the transaction re-reads under the lock what to end, and retries
+if that is not what it prepared. Within it the factor lock comes first,
+before the audit head and any row, as in the vault's issue: an app
+transaction that issues takes it in the same place, so no two transactions
+take the head and the factor lock in opposite orders (`FactorFirst`).
+
 That leaves no way back for a credential no passkey stands behind. Bob's
 terminal from before the first passkey was revoked when Bob added it, and
 stays revoked when an Owner later resets Bob's passkeys. A device code Bob
@@ -911,7 +923,7 @@ handles, personal tokens and service tokens alike. Built in PR 3
   last argument is the passkey the issue carries, `p_passkey`. It takes
   `pg_advisory_xact_lock(1717658484, hashtext(<issuer>))` first, then
   checks `via` as before, and also that `via` names exactly that passkey,
-  still its issuer's and not removed; otherwise `ended`, with nothing
+  still its issuer's, of their generation, and not removed; otherwise `ended`, with nothing
   written. The row it inserts names the passkey, which the app's MAC on
   the row covers (section 5.2). The vault never copies the passkey from
   `via` on its own: the MAC is the app's, made before the call, and a row
@@ -1123,7 +1135,8 @@ Erwin's answer to open question 5 (D170): `required`, and not a setting.
 `USER_VERIFICATION` in `@coffre/core/identity` is the one place it is
 spelled: what `create()` and `get()` ask for, and what the verifier holds
 every response to, with no way for a caller to ask for less. The verifier
-checks it last (section 9), so a `user_verification` refusal means the
+checks it last (the order is in the header of
+`packages/core/src/identity/webauthn.ts`), so a `user_verification` refusal means the
 response passed every other check.
 
 ## 8. The app authenticates, the vault authorizes: where the check lives

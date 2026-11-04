@@ -412,12 +412,12 @@ test('an issue takes the issue lock, never the fence: it commits while a change 
 // migration 0064; formal/Factor.tla) -------------------------------------------------------------------------------------
 
 /** A passkey of `principal`'s, as the app writes one at enrollment (PR 4); its MAC is the app's, which the vault never reads. */
-async function passkeyOf(principal: string): Promise<string> {
+async function passkeyOf(principal: string, generationsAgo = 0): Promise<string> {
   const { passkeys, vaultMembers } = tablesOf(db.owner);
   const [member] = await db.owner.select({ generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
   const id = randomUUID();
   await db.owner.insert(passkeys).values({
-    id, authMac: randomBytes(32), principal, generation: member!.generation, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
+    id, authMac: randomBytes(32), principal, generation: member!.generation - generationsAgo, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
     algorithm: -7, transports: '[]', synced: true, name: 'iCloud Keychain', createdBy: principal.slice('user:'.length),
   });
   return id;
@@ -453,6 +453,14 @@ test("a token carries the passkey of the credential it came in on, and only that
   const { credentials, passkeys } = tablesOf(db.owner);
   const [row] = await db.owner.select({ passkeyId: credentials.passkeyId }).from(credentials).where(eq(credentials.id, made.credential.id));
   assert.equal(row!.passkeyId, passkey);
+  // One of an earlier generation of theirs, which a removal from the vault ended (`passkeys_live_idx`), though its
+  // session somehow named it: not live, nothing comes of it.
+  const stale = await passkeyOf(ROOT, 1);
+  await db.owner.update(credentials).set({ passkeyId: stale }).where(eq(credentials.id, token.credential.id));
+  const old = await w.vault.issueToken!(handle(stale));
+  assert.equal(!old.ok && old.refused, 'ended');
+  assert.equal(await credentialRows(), 2, 'nothing written');
+  await db.owner.update(credentials).set({ passkeyId: passkey }).where(eq(credentials.id, token.credential.id));
   // Removed (its session not revoked, which a removal does too): nothing more comes of it.
   await db.owner.update(passkeys).set({ removedAt: new Date(), removedBy: 'root@acme.example' }).where(eq(passkeys.id, passkey));
   const outcome = await w.vault.issueToken!(handle(passkey));

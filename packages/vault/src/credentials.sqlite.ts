@@ -108,14 +108,14 @@ export async function issueOnSqlite(tx: Queryable, c: IssueCall): Promise<Answer
     }).from(credentials).where(eq(credentials.id, input.via));
     const [newest] = await tx.select({ seal: logChanges.seal }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'credential', id: input.via }))).orderBy(desc(logChanges.number)).limit(1);
     // Its end as the vault authenticated it, still the columns' and still ahead (as `issue_token`); and the passkey it
-    // names, the one this issue carries, still the actor's and not removed.
+    // names, the one this issue carries, still the actor's at their generation and not removed.
     const sealedAs = read.via?.seal ?? null;
     const end = read.via?.columns.expiresAt ?? null;
     const ends = via === undefined ? null : Math.min(via.expiresAt.getTime(), via.notAfter?.getTime() ?? Infinity);
-    const [passkey] = k.passkeyId === null ? [] : await tx.select({ principal: passkeys.principal, removedAt: passkeys.removedAt }).from(passkeys).where(eq(passkeys.id, k.passkeyId));
+    const [passkey] = k.passkeyId === null ? [] : await tx.select({ principal: passkeys.principal, generation: passkeys.generation, removedAt: passkeys.removedAt }).from(passkeys).where(eq(passkeys.id, k.passkeyId));
     if (via === undefined || via.principal !== input.actor || via.revokedAt !== null || sealedAs === null || end === null || ends !== end || end <= now
       || !same(via.seal ?? null, sealedAs) || !same(newest?.seal ?? null, sealedAs) || (via.passkeyId ?? null) !== k.passkeyId
-      || (k.passkeyId !== null && (passkey === undefined || passkey.principal !== input.actor || passkey.removedAt !== null))) {
+      || (k.passkeyId !== null && (passkey === undefined || passkey.principal !== input.actor || passkey.generation !== read.actor.generation || passkey.removedAt !== null))) {
       return { state: 'ended' };
     }
   }
