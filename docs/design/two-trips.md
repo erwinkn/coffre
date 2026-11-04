@@ -1203,7 +1203,9 @@ How it holds (formal/Writing.tla, `Refuse`; the scenarios Refuse, Caller and Add
   for it, so its number is sealed in order; it holds up no use, and moves no object a use or a hold reads. A use's
   cached cover asks again once (it compares the log's newest change, which the record moves, as a sign-in does).
 - **Sealed before the answer** (R51; D165 kept for refusals): `recordRefusal` waits for the record's seal, as a change
-  does. A refusal answered is in a signed checkpoint.
+  does. A refusal answered is in a signed checkpoint. A seal that does not come in time answers 503, as a change's
+  does, but in words of its own (`REFUSAL_UNSEALED_MESSAGE`, refused.ts): "coffre did not make this change", where a
+  change's says it made it (review r2 of PR 6). The record stands, and the next checkpointer seals it.
 - **Forged or copied.** The record's MAC covers every column but its number, its object and its request id among them.
   Copied by a database writer as the newest change of Ada's member object, her row put back to match, it is a change
   whose MAC fails: the vault refuses the member `tampered`, as any forged change (WritingRefuse, ChangeMacChecked).

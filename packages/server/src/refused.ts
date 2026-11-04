@@ -1,4 +1,7 @@
-import type { Vault, VaultRefused } from '@coffre/core/vault';
+import { isUnsealed, type Vault, type VaultRefused } from '@coffre/core/vault';
+
+import { ApiError, REFUSAL_UNSEALED_MESSAGE } from './api/errors.ts';
+import { logged } from './logged.ts';
 
 import type { AuditEntry } from './db/audit.ts';
 
@@ -31,9 +34,19 @@ export class RefusalRecord {
     return entry.decision === 'deny' && entry.action === this.#action;
   }
 
-  /** The record written and sealed, once however often asked; false where its ticket expired, nothing written. */
+  /**
+   * The record written and sealed, once however often asked; false where its ticket expired, nothing written. Written
+   * but not sealed in time, it answers 503 as a change does, in words of its own: no change was made (review r2).
+   */
   record(): Promise<boolean> {
-    this.#recorded ??= this.#vault.recordRefusal!({ ticket: this.refused.ticket }).then((outcome) => outcome.recorded);
+    this.#recorded ??= this.#vault.recordRefusal!({ ticket: this.refused.ticket }).then(
+      (outcome) => outcome.recorded,
+      (error: unknown) => {
+        if (!isUnsealed(error)) throw error;
+        console.error("a refusal's record was not sealed in time", logged(error));
+        throw new ApiError('unavailable', REFUSAL_UNSEALED_MESSAGE);
+      },
+    );
     return this.#recorded;
   }
 }

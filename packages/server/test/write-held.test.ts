@@ -32,7 +32,8 @@ import { parsePath } from '../src/api/paths.ts';
 import { READS_PER_STATEMENT, sealedPage, STATEMENTS_AT_ONCE, versionsOf } from '../src/db/queries.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, outcomes } from './api-fixture.ts';
+import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
+import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault, outcomes } from './api-fixture.ts';
 import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -53,7 +54,7 @@ const run = (on: Queryable, query: ReturnType<typeof sql>) => rowsOf(on, query);
  * A fresh instance: market/dev holding API_KEY, Ada a developer there, and each one's browser session. `fast: false`:
  * a vault that serves no `writeKeys`, every write down today's path, to answer as the two-trip path's refusals must.
  */
-async function world({ fast = true, past = 0n, sealer }: { fast?: boolean; past?: bigint; sealer?: (signingKey: Buffer) => Promise<Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside'>> } = {}) {
+async function world({ fast = true, past = 0n, sealer }: { fast?: boolean; past?: bigint; sealer?: (signingKey: Buffer) => Promise<Pick<RunningCheckpointer, 'sealThrough' | 'heldOutside'> | { sealThrough: typeof sealedNow; heldOutside: typeof nothingHeld }> } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
   // Sealed at once, unless a checkpointer of the test's own seals each change (and refusal) before it answers.
@@ -1004,6 +1005,25 @@ test("a refused write leaves every reader of the log as it was (the lead's condi
   // (Sealed into the trees by a checkpointer and replayed: the test of that, below.)
 });
 
+test("a refused key write whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the key as it was, and no 0.14 entry (review r2 of PR 6)", { skip: POSTGRES }, async () => {
+  const sealing = stallingSeal();
+  const w = await world({ sealer: async () => ({ sealThrough: sealing.sealThrough, heldOutside: nothingHeld }) });
+  await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });
+  const before = await keyRow('API_KEY');
+  sealing.stalled = true;
+  const made = await since(() => w.write({ API_KEY: 'fake-ada' }));
+  assert.equal(made.result.status, 503, JSON.stringify(made.result.body));
+  assert.deepEqual(made.result.body, { error: 'unavailable', message: REFUSAL_UNSEALED_MESSAGE });
+  assert.deepEqual(served(w.answers), ['refused']);
+  assert.deepEqual(await keyRow('API_KEY'), before);
+  // The record written, which the next checkpointer seals; no deny entry beside it.
+  assert.deepEqual(made.entries, []);
+  assert.deepEqual((await refusalRecords()).map((each) => each.payload.op), ['write.refused']);
+  // Sealing again, the same write is refused as before, 403.
+  sealing.stalled = false;
+  assert.equal((await w.write({ API_KEY: 'fake-ada' })).status, 403);
+});
+
 test("two retries of one refusal's ticket at once, both finding no record: the second's insert waits for the first's, and both answer its number, one record written, never a duplicate key (review r1 of PR 6)", { skip: POSTGRES }, async () => {
   const w = await world();
   await w.root.access.set(`user:${ADA}`, { 'market/dev': 'viewer' });
@@ -1030,11 +1050,16 @@ test("two retries of one refusal's ticket at once, both finding no record: the s
   const retries = Promise.all([recordRefusal({ ticket }), recordRefusal({ ticket })]);
   const waiting = async () => Number((await run(db.owner, sql`SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
     WHERE NOT l.granted AND l.locktype = 'transactionid' AND a.datname = current_database()`) as { n: number }[])[0]!.n);
-  for (let tries = 0; (await waiting()) < 2; tries += 1) {
-    assert.ok(tries < 500, 'both retries wait at their insert');
-    await new Promise((resolve) => setTimeout(resolve, 10));
+  // Released however the wait ends, and both settled: a failed wait must not leave the row's transaction open (review r2).
+  try {
+    for (let tries = 0; (await waiting()) < 2; tries += 1) {
+      assert.ok(tries < 500, 'both retries wait at their insert');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  } finally {
+    release();
+    await Promise.allSettled([holding, retries]);
   }
-  release();
   await holding;
   assert.deepEqual(await retries, [{ recorded: true, number: record!.number }, { recorded: true, number: record!.number }]);
   // And once committed, a retry after them finds it first.

@@ -7,7 +7,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { issuedGrant } from '@coffre/core/access';
 import { sealEntry, type LogFields } from '@coffre/core/audit';
-import type { Through, UseInput, UseOutcome, Vault, VaultEntry } from '@coffre/core/vault';
+import { UNSEALED, type Through, type UseInput, type UseOutcome, type Vault, type VaultEntry } from '@coffre/core/vault';
 import { tablesOf, type Database } from '@coffre/db';
 import { openDatabase } from '@coffre/db/connect';
 import { rowsOf } from '@coffre/db/dialect';
@@ -300,6 +300,21 @@ export function hotDatabaseUrl(): string {
 
 /** A checkpointer that seals everything at once: what a change waits on, in a test with no tree. */
 export const sealedNow: NonNullable<VaultOptions['sealThrough']> = async () => ({}) as Awaited<ReturnType<NonNullable<VaultOptions['sealThrough']>>>;
+
+/**
+ * A checkpointer that seals at once until `stalled` is set, then answers every wait as a stalled one does: the change
+ * committed, its seal not in time (`Unsealed`, T169).
+ */
+export function stallingSeal(): { sealThrough: NonNullable<VaultOptions['sealThrough']>; stalled: boolean } {
+  const sealing = {
+    stalled: false,
+    sealThrough: (async (...args) => {
+      if (sealing.stalled) throw new Error(`change ${String(args[0])} ${UNSEALED}: the test's checkpointer stalled; try again shortly`);
+      return sealedNow(...args);
+    }) as NonNullable<VaultOptions['sealThrough']>,
+  };
+  return sealing;
+}
 
 /** No pair held outside, as a signer that never signed: what a vault with no checkpointer is verified against. */
 export const nothingHeld: NonNullable<VaultOptions['heldOutside']> = async () => [];

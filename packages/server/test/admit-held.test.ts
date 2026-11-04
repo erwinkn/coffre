@@ -22,7 +22,8 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { localVault, spoken } from '@coffre/vault/node';
 
-import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault } from './api-fixture.ts';
+import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
+import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -45,10 +46,10 @@ const { vaultMembers, credentials } = tablesOf(db.owner);
  * A fresh instance: projects market and billing, Bob an admin of the whole instance, and his browser session. `fast:
  * false`: a vault that serves no `admitRead`, every add down today's path, to answer as the two-trip path's refusals must.
  */
-async function world({ fast = true, past = 0n }: { fast?: boolean; past?: bigint } = {}) {
+async function world({ fast = true, past = 0n, sealThrough = sealedNow }: { fast?: boolean; past?: bigint; sealThrough?: typeof sealedNow } = {}) {
   await resetDatabase(db.owner);
   const kek = randomBytes(32);
-  const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld });
+  const vault = testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough, heldOutside: nothingHeld });
   const deps = testDeps(db.runtime, [ROOT], { vault });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
@@ -378,6 +379,23 @@ test("Bob's token hash copied onto a Developer's session: the vault reads the De
   if (TEST_ENGINE === 'postgres') assert.deepEqual(served(w.answers), ['refused']);
   assert.deepEqual(await run(db.owner, sql`SELECT number FROM log_changes WHERE payload LIKE '%"op":"add.refused"%'`), []);
   assert.equal(await memberRow(NEW), undefined);
+});
+
+test("a refused first add whose record committed but whose seal did not come in time: 503, in words that say no change was made, never a change's; the member not added, and no 0.14 entry (review r2 of PR 6)", { skip: POSTGRES }, async () => {
+  const sealing = stallingSeal();
+  const w = await world({ sealThrough: sealing.sealThrough });
+  sealing.stalled = true;
+  const made = await since(() => w.add({ role: 'owner' }));
+  assert.equal(made.result.status, 503, JSON.stringify(made.result.body));
+  assert.deepEqual(made.result.body, { error: 'unavailable', message: REFUSAL_UNSEALED_MESSAGE });
+  assert.deepEqual(served(w.answers), ['refused']);
+  assert.equal(await memberRow(NEW), undefined);
+  // The record written, which the next checkpointer seals; no deny entry beside it.
+  assert.deepEqual(made.entries, []);
+  assert.deepEqual(made.changes.map((change) => change.payload.op), ['add.refused']);
+  // Sealing again, the same add is refused as before, 403.
+  sealing.stalled = false;
+  assert.equal((await w.add({ role: 'owner' })).status, 403);
 });
 
 test("Bob's session revoked and its row put back, live: the vault's read refuses it on the log's newest change, 401, never down today's path (dbw)", { skip: POSTGRES }, async () => {
