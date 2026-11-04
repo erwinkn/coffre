@@ -9,6 +9,7 @@ import {
   auditHashAt,
   auditHead,
   auditPage,
+  environmentIdsOf,
   isMember,
   latestCheckpoint,
   latestTallied,
@@ -368,11 +369,11 @@ export async function listAudit(
   // A page that counts 0.15's records reads how far it may (`sealedReach`) beside the page.
   const counting = recorded && counted;
   // The page's reads and how far they are listed in one statement, so as of one moment (review r6).
-  const [old, sealed, listedReads, reach] = await Promise.all([
-    before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
-    recorded || written !== null ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit, instance: recorded, written }) : { rows: [], more: false },
-    used ? readsPageStanding(ctx.db, readsFilter) : null,
-    counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
+  const [old, sealed, listedReads, reach] = await together([
+    () => before.seq === 'done' ? { rows: [], more: false } : auditPage(ctx.db, filter),
+    (signal) => recorded || written !== null ? sealedPage(ctx.db, { actors: filter.actors, detail, before: start, limit: query.limit, instance: recorded, written }, signal) : { rows: [], more: false },
+    () => used ? readsPageStanding(ctx.db, readsFilter) : null,
+    () => counting ? sealedReach(ctx.db, { actors: filter.actors, before: start }) : null,
   ]);
   const reads = listedReads ?? { rows: [], more: false };
   // Where the log has no pair (0.14's log alone, or none sealed yet) nothing is listed and no cursor is shown
@@ -434,6 +435,28 @@ export async function listAudit(
 }
 
 /**
+ * Each of `asks` started together, as `Promise.all` would, sharing one signal: the first to fail aborts it, so that
+ * a read made of many statements (`sealedPage`) asks no more of them, and fails with its error once every one has
+ * settled. A page that failed leaves nothing running behind it: on Node, its reads go on connections of their own,
+ * and one failed on another left a project's page asking hundreds of statements after it answered (review r7 of #490).
+ */
+async function together<T extends readonly unknown[]>(asks: { [K in keyof T]: (signal: AbortSignal) => T[K] | Promise<T[K]> }): Promise<T> {
+  const controller = new AbortController();
+  let failed: { error: unknown } | undefined;
+  const settled = await Promise.allSettled(asks.map(async (ask) => {
+    try {
+      return await ask(controller.signal);
+    } catch (error) {
+      failed ??= { error };
+      controller.abort(error);
+      throw error;
+    }
+  }));
+  if (failed !== undefined) throw failed.error;
+  return settled.map((outcome) => (outcome as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
+/**
  * Where a page lists the key writes 0.15's log records alone (`WrittenAt`): at its place, a key, an environment, or
  * a project's environments, deleted ones among them, as 0.14's entries stay readable by a tombstone's slug; within
  * what its reader reads, as `within` holds 0.14's (a project's environments but those `except` names, and each
@@ -442,7 +465,7 @@ export async function listAudit(
 async function writtenAt(ctx: ApiContext, filter: AuditFilter): Promise<WrittenAt> {
   const { within } = filter;
   const projects = [...new Set([...(filter.environmentId === undefined && filter.projectId !== undefined ? [filter.projectId] : []), ...(within?.projectIds ?? [])])];
-  const environmentsOf = new Map((projects.length === 0 ? [] : await places(ctx.db, { tombstones: true, within: projects })).map((project) => [project.id, project.environments.map(({ id }) => id)]));
+  const environmentsOf = await environmentIdsOf(ctx.db, projects);
   const at = filter.environmentId !== undefined ? [filter.environmentId] : filter.projectId !== undefined ? environmentsOf.get(filter.projectId) ?? [] : null;
   // A set of what is left out, and one environment at a time: a reader's places may be tens of thousands.
   let readable: Set<string> | null = null;

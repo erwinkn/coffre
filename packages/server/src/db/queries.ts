@@ -426,6 +426,23 @@ export async function places(
   return found;
 }
 
+/**
+ * The ids of these projects' environments, deleted ones among them: where a page of the log reads what was written
+ * (`writtenAt`). The environments alone, by `environments_project_id_slug_key`, a thousand projects a statement: as
+ * many rows as environments, however many keys they hold, where `places` counts each one's (review r7 of #490).
+ */
+export async function environmentIdsOf(db: Queryable, projectIds: readonly string[]): Promise<Map<string, string[]>> {
+  const { environments } = tablesOf(db);
+  const unique = [...new Set(projectIds)];
+  const found = new Map<string, string[]>(unique.map((id) => [id, []]));
+  for (let start = 0; start < unique.length; start += 1000) {
+    const rows = await db.select({ id: environments.id, projectId: environments.projectId }).from(environments)
+      .where(inArray(environments.projectId, unique.slice(start, start + 1000)));
+    for (const { id, projectId } of rows) found.get(projectId)!.push(id);
+  }
+  return found;
+}
+
 function placeRows(db: Queryable, tombstones: boolean, counted: boolean, within?: readonly string[]) {
   const { projects, environments, secrets } = tablesOf(db);
   const alive = (slug: AnyColumn) => (tombstones ? undefined : standing(slug));
@@ -1784,6 +1801,7 @@ export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | 
 export async function sealedPage(
   db: Queryable,
   filter: { actors?: readonly string[]; detail: boolean; before?: ChangePoint; limit: number; instance: boolean; written: WrittenAt | null },
+  signal?: AbortSignal,
 ): Promise<{ rows: RecordedChange[]; more: boolean }> {
   const { logChanges } = tablesOf(db);
   const engine = dialect.engineOf(db);
@@ -1814,7 +1832,7 @@ export async function sealedPage(
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
     ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
   const rows = await newest<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
-    db, reads(), columns, filter.before, filter.limit + 1,
+    db, reads(), columns, filter.before, filter.limit + 1, 0, signal,
   );
   return {
     rows: rows.slice(0, filter.limit).map((row) => ({
@@ -1857,7 +1875,7 @@ export const STATEMENTS_AT_ONCE = 4;
  * one statement's would, keeping the newest `skip + take`.
  */
 async function newest<Row extends { number: string | number | bigint; at: string | number }>(
-  db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0,
+  db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0, signal?: AbortSignal,
 ): Promise<Row[]> {
   const { logChanges } = tablesOf(db);
   const statement = (part: readonly SQL[], take: number, skip: number) => {
@@ -1877,6 +1895,7 @@ async function newest<Row extends { number: string | number | bigint; at: string
     }
     return part;
   };
+  signal?.throwIfAborted();
   const first = nextPart();
   if (first.length === 0) return [];
   const second = nextPart();
@@ -1888,10 +1907,11 @@ async function newest<Row extends { number: string | number | bigint; at: string
   let kept: Row[] = [];
   const made = [first, second];
   // The first statement to fail fails the page: no other is asked after it, and those already asked are
-  // waited for, so that a failed page leaves none running behind it (review r6 of #490).
+  // waited for, so that a failed page leaves none running behind it (review r6 of #490). So does `signal`'s
+  // abort, a read beside it that failed (review r7).
   let failed: { error: unknown } | undefined;
   const asking = async () => {
-    while (failed === undefined) {
+    while (failed === undefined && signal?.aborted !== true) {
       try {
         const part = made.pop() ?? nextPart();
         if (part.length === 0) return;
@@ -1904,6 +1924,7 @@ async function newest<Row extends { number: string | number | bigint; at: string
   };
   await Promise.all(Array.from({ length: STATEMENTS_AT_ONCE }, asking));
   if (failed !== undefined) throw failed.error;
+  signal?.throwIfAborted();
   return kept.slice(skip, skip + take);
 }
 

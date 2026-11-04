@@ -18,6 +18,10 @@ import { eq, sql } from 'drizzle-orm';
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
+import { listAudit } from '../src/api/audit.ts';
+import { callerFrom } from '../src/api/caller.ts';
+import type { ApiContext } from '../src/api/context.ts';
+import { parsePath } from '../src/api/paths.ts';
 import { READS_PER_STATEMENT, sealedPage, STATEMENTS_AT_ONCE, versionsOf } from '../src/db/queries.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
@@ -735,6 +739,55 @@ test("a page of many environments' key writes reads them a few hundred a stateme
   // The four first asked together, the third of which failed: none after.
   assert.equal(asked, STATEMENTS_AT_ONCE, `${asked} statements asked`);
   await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+});
+
+test("a project's audit page whose 0.14 read fails asks no more of its key writes' statements, and fails once those asked have answered: a read beside them that fails stops them too (review r7 of #490)", { skip: POSTGRES }, async () => {
+  const w = await world();
+  const [{ id: market }] = await run(db.owner, sql`SELECT id FROM projects WHERE slug = 'market'`) as [{ id: string }];
+  // A project of 5,000 environments: its page's key writes, 20 statements of 250 reads.
+  await run(db.owner, sql`INSERT INTO environments (id, project_id, slug, name)
+    SELECT gen_random_uuid(), ${market}, 'env-' || g, 'Env ' || g FROM generate_series(1, 5000) g`);
+  const caller = callerFrom({ type: 'user', id: ROOT }, await w.deps.vault.access(`user:${ROOT}`), null);
+  // Each of the key writes' statements slowed, so that 0.14's read, refused at once, fails while they are asked.
+  let asked = 0;
+  let running = 0;
+  const slowed = new Proxy(db.runtime, { get: (target, key, receiver) => {
+    const value = Reflect.get(target, key, receiver) as unknown;
+    if (key !== 'execute' || typeof value !== 'function') return value;
+    return async (...args: unknown[]) => {
+      asked += 1;
+      running += 1;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
+      } finally {
+        running -= 1;
+      }
+    };
+  } });
+  const ctx = {
+    db: slowed, chainKey: w.deps.chainKey, previousChainKeys: [], vault: w.deps.vault, waitUntil: () => {}, signin: null, workloads: null, mcp: null,
+    caller, requestId: randomUUID(), sourceIp: null, credentialId: null, provenance: null, via: null, personalToken: null, credentialExpiresAt: null, rotateAfterDays: null,
+  } as unknown as ApiContext;
+  const query = { path: parsePath('market'), sealed: true, detail: false, hidden: false, limit: 50 };
+  // Its whole page first, every statement asked.
+  await listAudit(ctx, query);
+  // Of its 5,001 environments (dev's too), 21 statements; and the page's reads, which no failure stops, once asked.
+  const all = asked;
+  const writes = Math.ceil(5001 / READS_PER_STATEMENT);
+  assert.ok(all >= writes, `${all} statements on the whole page`);
+  await run(db.owner, sql`REVOKE SELECT ON audit_log FROM coffre_app`);
+  try {
+    asked = 0;
+    await assert.rejects(listAudit(ctx, query), (error: { code?: string; cause?: { code?: string } }) => (error.code ?? error.cause?.code) === '42501');
+    assert.equal(running, 0, 'a statement was left running after the page failed');
+    const atFailure = asked;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(asked, atFailure, `${asked - atFailure} statements asked after the page failed`);
+    assert.ok(asked <= STATEMENTS_AT_ONCE + all - writes, `${asked} of the page's ${all} statements asked`);
+  } finally {
+    await run(db.owner, sql`GRANT SELECT ON audit_log TO coffre_app`);
+  }
 });
 
 test("a key write down the two-trip path, recorded in 0.15's log alone, is listed where 0.14's `secret.write` stood: the whole log, its project's, environment's and key's pages, Ada's, a reader of its environment's; none of another place's, another member's or the refusals' (T179, 0.16.0)", { skip: POSTGRES }, async () => {

@@ -1245,6 +1245,47 @@ test("a read of an environment's keys reads as many pages however many keys the 
 });
 
 /**
+ * A project's audit page, through the API, as coffre's own pages ask it: where 0.15's log records key writes alone
+ * (T179, 0.16.0), it reads the project's environments, and only those, never a count of each one's keys, which grew
+ * with every key the project holds (review r7 of #490).
+ */
+test("a project's audit page reads as many pages however many keys the project holds", POSTGRES, async () => {
+  const asked = () => root.audit.list({ path: 'market', sealed: '1', limit: 50 });
+  const pages = async () => {
+    await asked();
+    app.recorded = [];
+    await asked();
+    const statements = [...app.recorded].filter((statement) => /^\s*(select|with)\b/i.test(statement.text)).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+    app.recorded = null;
+    const read: { text: string; pages: number | null; plan?: string }[] = [];
+    for (const statement of statements) {
+      const work = await app.work(statement);
+      read.push({ text: statement.text.replace(/\s+/g, ' ').slice(0, 80), pages: work?.pages ?? null, plan: work?.plan });
+    }
+    return read;
+  };
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects`);
+  await settle();
+  const small = await pages();
+  try {
+    // 20,000 live keys in market/dev.
+    await db.owner.execute(sql`
+      INSERT INTO secrets (project_id, environment_id, key, current_version)
+      SELECT e.project_id, e.id, 'PAGE_KEY_' || g, 0 FROM environments e JOIN projects p ON p.id = e.project_id CROSS JOIN generate_series(1, 20000) g
+      WHERE p.slug = 'market' AND e.slug = 'dev'`);
+    await settle();
+    const grown = await pages();
+    assert.deepEqual(grown.map(({ text }) => text), small.map(({ text }) => text), 'the page ran other statements');
+    for (const [i, { text, pages: before }] of small.entries()) {
+      const { pages: after, plan } = grown[i]!;
+      assert.ok(after !== null && before !== null && after <= 2 * before + 16, `${text} read ${after} pages with 20,000 keys more, ${before} before:\n${plan}`);
+    }
+  } finally {
+    await db.owner.execute(sql`DELETE FROM secrets WHERE starts_with(key, 'PAGE_KEY_')`);
+  }
+});
+
+/**
  * What the audit pages read of what 0.15's log alone records (D147): the
  * sign-ins through trust bindings (T156), and the token issues, revokes and
  * sign-outs (T164). A page of them, every member's and one's, with the
