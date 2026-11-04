@@ -1239,10 +1239,30 @@ test("a read of an environment's keys reads as many pages however many keys the 
     FROM environments e JOIN projects p ON p.id = e.project_id CROSS JOIN generate_series(1, 120) g WHERE p.slug LIKE 'other-%'`);
   await settle();
   const elsewhere = await pages();
+  // market/busy's reference made long ago, and a key of shop's repointed 5,000 times since: newer rows of another
+  // holder's, which a lookup of market/busy's newest that walks the references by `created_seq` reads one by one (review
+  // r1 of #502). Their entries in the log, at seqs before any other, copy its oldest, as the log's growth above does.
+  await db.owner.execute(sql`
+    INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash, metadata)
+    SELECT e.seq - g, e.author, e.key_id, e.occurred_at, e.actor, e.action, e.decision, e.prev_hash, e.mac, e.hash, e.metadata
+    FROM (SELECT * FROM audit_log ORDER BY seq LIMIT 1) e CROSS JOIN generate_series(1, 5001) g`);
+  await db.owner.execute(sql`
+    UPDATE secret_references SET created_seq = (SELECT min(seq) FROM audit_log)
+    WHERE secret_id = (SELECT id FROM secrets WHERE environment_id = ${ids.busy!} AND key = 'COST_REFERS')`);
+  await db.owner.execute(sql`
+    INSERT INTO secrets (project_id, environment_id, key, archived_at) VALUES (${shop.id}, (SELECT environment_id FROM secrets
+      WHERE project_id = ${shop.id} AND key = 'COST_SENSITIVE'), 'COST_REPOINTED', now())`);
+  await db.owner.execute(sql`
+    INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
+    SELECT gen_random_uuid(), s.project_id, s.environment_id, s.id, s.project_id, s.environment_id, s.id,
+      (SELECT min(seq) FROM audit_log) + g, 'system:load'
+    FROM secrets s CROSS JOIN generate_series(1, 5000) g WHERE s.key = 'COST_REPOINTED'`);
+  await settle();
+  const history = await pages();
   for (const [name, statements] of Object.entries(small)) {
-    for (const [grown, label] of [[archived, 'archived keys of its own'], [elsewhere, 'keys of other projects']] as const) {
+    for (const [grown, label] of [[archived, 'archived keys of its own'], [elsewhere, 'keys of other projects'], [history, 'references made since']] as const) {
       // The places tree of everything counts every live key of every project, which the second growth adds: only the first bears on it.
-      if (name === 'the places tree of everything' && grown === elsewhere) continue;
+      if (name === 'the places tree of everything' && grown !== archived) continue;
       assert.deepEqual(grown[name]!.map(({ text }) => text), statements.map(({ text }) => text), `${name} ran other statements`);
       for (const [i, { text, pages: before }] of statements.entries()) {
         const { pages: after, plan } = grown[name]![i]!;

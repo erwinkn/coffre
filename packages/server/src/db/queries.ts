@@ -2983,8 +2983,13 @@ export async function sensitiveFrom(db: Queryable, environmentIds: readonly stri
   const ids = [...new Set(environmentIds)];
   const live = and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt));
   const sensitive = (versionId: SQL | AnyColumn) => sql`(SELECT ${secretVersions.sensitive} FROM ${secretVersions} WHERE ${secretVersions.id} = ${versionId})`;
-  const newest = sql`(SELECT ${secretReferences.sourceSecretId} FROM ${secretReferences}
-    WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  // The holder's newest reference, as a seek on (secret_id, created_seq) to the last row at or before the holder's:
+  // its source if that row is the holder's. As `secret_id = holder ORDER BY created_seq DESC`, Postgres could walk
+  // `secret_references_created_seq_key` backwards instead, through every newer row of every other holder's, when few
+  // holders hold many rows (review r1 of #502); only `secret_references_holder_idx` serves this order.
+  const newest = sql`(SELECT CASE WHEN ${secretReferences.secretId} = ${secrets.id} THEN ${secretReferences.sourceSecretId} END
+    FROM ${secretReferences} WHERE ${secretReferences.secretId} <= ${secrets.id}
+    ORDER BY ${secretReferences.secretId} DESC, ${secretReferences.createdSeq} DESC LIMIT 1)`;
   // The source's project, if its current version is sensitive. `source` names the source's row, so `secrets` in
   // `newest` is still the holder's.
   const sourceProject = sql<string | null>`(SELECT source.project_id FROM ${secrets} source
