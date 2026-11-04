@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+
+import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS } from '@coffre/core/vault';
+
 import { engineOfUrl } from './connect.ts';
 import type { Engine } from './dialect.ts';
 import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
@@ -33,6 +36,12 @@ export async function restrictDatabase(client: Pick<PostgresClient, 'unsafe'>): 
   await holdHotLogin(client);
   await clearPlannerSettings(client);
 }
+
+/**
+ * The hot path's login's timeouts as Postgres stores and reports them (`pg_db_role_setting`, `SHOW`): whole seconds,
+ * from `HOT_LOCK_TIMEOUT_MS` and `HOT_STATEMENT_TIMEOUT_MS` (`@coffre/core/vault`), as 0022 wrote them.
+ */
+export const HOT_SETTINGS = { lock_timeout: `${HOT_LOCK_TIMEOUT_MS / 1000}s`, statement_timeout: `${HOT_STATEMENT_TIMEOUT_MS / 1000}s` } as const;
 
 /**
  * What 0022 gives `coffre_vault_hot`, given again when it lacks it: its
@@ -82,8 +91,8 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'coffre_vault_hot' AND (NOT rolinherit OR rolcreatedb OR rolcreaterole)) THEN
           ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE;
         END IF;
-        IF NOT coalesce(held @> ARRAY['lock_timeout=1s'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '1s'; END IF;
-        IF NOT coalesce(held @> ARRAY['statement_timeout=2s'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '2s'; END IF;
+        IF NOT coalesce(held @> ARRAY['lock_timeout=${HOT_SETTINGS.lock_timeout}'], false) THEN ALTER ROLE coffre_vault_hot SET lock_timeout = '${HOT_SETTINGS.lock_timeout}'; END IF;
+        IF NOT coalesce(held @> ARRAY['statement_timeout=${HOT_SETTINGS.statement_timeout}'], false) THEN ALTER ROLE coffre_vault_hot SET statement_timeout = '${HOT_SETTINGS.statement_timeout}'; END IF;
         IF NOT EXISTS (
           SELECT 1 FROM pg_auth_members WHERE member = 'coffre_vault_hot'::regrole AND roleid = 'coffre_vault'::regrole AND inherit_option
         ) THEN
@@ -92,7 +101,7 @@ export async function holdHotLogin(client: Pick<PostgresClient, 'unsafe'>): Prom
         EXIT;
       EXCEPTION
         WHEN insufficient_privilege THEN
-          RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''1s''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''2s''; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
+          RAISE EXCEPTION '% may not make coffre_vault_hot what 0.15 needs (%): have a login with CREATEROLE and ADMIN on both roles run ALTER ROLE coffre_vault_hot INHERIT NOCREATEDB NOCREATEROLE; ALTER ROLE coffre_vault_hot SET lock_timeout = ''${HOT_SETTINGS.lock_timeout}''; ALTER ROLE coffre_vault_hot SET statement_timeout = ''${HOT_SETTINGS.statement_timeout}''; GRANT coffre_vault TO coffre_vault_hot WITH ADMIN FALSE, INHERIT TRUE, SET FALSE first', current_user, SQLERRM;
         WHEN internal_error OR unique_violation THEN
           IF attempt = 5 THEN RAISE; END IF;
           PERFORM pg_sleep(0.2);

@@ -3,6 +3,8 @@
 // cannot write the app's tables, and neither can rewrite the log. The
 // vault's hot path's login, 0.15's uses', holds the vault's rights and no
 // more, under its own timeouts. Postgres only: SQLite has no logins.
+import { HOT_SETTINGS } from '@coffre/db/migrate';
+
 import { using, type Sql } from '../database.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, Skip } from '../report.ts';
@@ -106,7 +108,7 @@ export async function hotLogin(deployment: Deployment): Promise<string> {
       current_setting('lock_timeout') AS lock, current_setting('statement_timeout') AS statement,
       has_table_privilege(current_user, 'vault_members', 'INSERT') AS members`);
     expect(login.name === 'coffre_vault_hot', `the hot path's URL logs in as ${login.name}, not coffre_vault_hot`);
-    expect(login.lock === '1s' && login.statement === '2s', "the hot path's login lacks its timeouts", login);
+    expect(login.lock === HOT_SETTINGS.lock_timeout && login.statement === HOT_SETTINGS.statement_timeout, "the hot path's login lacks its timeouts", login);
     expect(login.members, "the hot path's login cannot write members, as the vault's can");
     return `as coffre_vault_hot, lock 1s, statement 2s; ${await vaultRefuses(sql, appTables)}`;
   });

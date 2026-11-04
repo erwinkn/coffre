@@ -1,3 +1,4 @@
+import { ROLE_ID_MAX } from '@coffre/core/access';
 import { sql } from 'drizzle-orm';
 import {
   blob,
@@ -296,8 +297,9 @@ export const vaultGrants = sqliteTable(
     ),
     check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR (${isSlug(table.environmentSlug, 63)})`),
     // A role's id, one that ships or one an Owner made (`ROLE_ID`): which the instance's policy defines, and which of them an
-    // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md).
-    check('vault_grants_role_check', sql`length(${table.role}) BETWEEN 2 AND 32 AND ${table.role} GLOB '[a-z]*' AND ${table.role} NOT GLOB '*[^a-z0-9-]*'`),
+    // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md). Its length is
+    // `ROLE_ID`'s; a database migrated holds its own copy, which `vault/test/sql-copies.test.ts` holds to it.
+    check('vault_grants_role_check', sql`length(${table.role}) BETWEEN 2 AND ${sql.raw(String(ROLE_ID_MAX))} AND ${table.role} GLOB '[a-z]*' AND ${table.role} NOT GLOB '*[^a-z0-9-]*'`),
     unique('vault_grants_on_project').on(table.principal, table.projectId),
     unique('vault_grants_on_environment').on(table.principal, table.environmentId),
     unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),

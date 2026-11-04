@@ -40,6 +40,7 @@ import { processGates } from './gate.ts';
 import { logged } from './logged.ts';
 import { publicConnect, upgrade } from './node-sockets.ts';
 import { createRuntime, type CoffreRuntime } from './runtime.ts';
+import { SCHEDULE_MINUTES } from './schedule.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { nodeTransport } from './workloads/node-transport.ts';
 
@@ -68,8 +69,6 @@ export type CoffreNode = {
    */
   upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void;
 };
-
-const SCHEDULE_MINUTES = 5;
 
 /** Walks of the audit watch's backlog after a scheduled run, at most: 10,000 entries each, a million a run. */
 const BACKLOG_WALKS = 100;

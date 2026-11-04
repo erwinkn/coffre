@@ -11,6 +11,8 @@
 // The object holds what one run's connections share, and nothing an
 // instance decides: access, the vault and the log stay where every request
 // reaches them, through the plugin's context.
+import { TUNNEL_COUNT_EVERY as COUNT_EVERY, TUNNEL_FLOW as FLOW, TUNNEL_WINDOW as WINDOW } from '@coffre/client/workload';
+
 import { cloudflareSourceIp } from './auth.ts';
 import type { Connect, Pipe, SocketSession } from './plugins.ts';
 import { workersSocket, type WorkersSocket } from './workers-socket.ts';
@@ -27,7 +29,7 @@ type ObjectState = { waitUntil(promise: Promise<unknown>): void };
 /** A WebSocket's admission: the plugin's refusal, or its session (`admitSocket`), and the decision itself told to `hold`, if it outlasts the answer. */
 export type Admit = (request: Request, sourceIp: string | null, hold: (deciding: Promise<unknown>) => void) => Promise<Response | SocketSession>;
 
-/**
+/*
  * How a plugin's WebSocket carries its bytes on Workers, its client saying
  * it will with a header, `coffre-tunnel-flow: credit`. A Workers WebSocket
  * has no back-pressure, either way: what one side sends faster than the
@@ -38,12 +40,10 @@ export type Admit = (request: Request, sourceIp: string | null, hold: (deciding:
  * says it paces so with a first `0`, before any byte, and ends a client
  * that sends past its window or counts what it was never sent: a peer that
  * ignores the window could otherwise fill the object. The client's `0`
- * every 30 seconds keeps an idle connection alive (`coffre run`'s
- * listener, packages/cli/src/tunnels.ts).
+ * every `TUNNEL_KEEPALIVE_MS` keeps an idle connection alive (`coffre run`'s
+ * listener, packages/cli/src/tunnels.ts). The numbers are the client's
+ * (`@coffre/client/workload`), which every end of a tunnel imports.
  */
-export const FLOW = 'coffre-tunnel-flow';
-/** What either side may send that the other has not counted back. */
-const WINDOW = 1024 * 1024;
 /** What the object takes from a client before it ends it: a window, and the message that crossed it. */
 const MOST_HELD = 2 * WINDOW;
 /**
@@ -57,8 +57,6 @@ const MOST_SESSIONS = 32;
  * otherwise keep it forever. An admission holds no window.
  */
 const MOST_DECIDING_MS = 60_000;
-/** How much the object takes before it counts it back: well under the window, so that neither side waits on the other. */
-const COUNT_EVERY = 128 * 1024;
 /**
  * The admissions an object runs at once, the rest waiting their turn in
  * the order they came: one until a connection is in, which leaves the run's

@@ -7,6 +7,7 @@ import {
   HANDLE_POLICY,
   heldColumns,
   issuesCredential,
+  CREDENTIAL_LABEL_MAX,
   MAX_PERSONAL_TOKEN_MINUTES,
   MAX_SERVICE_TOKEN_DAYS,
   ownsProject,
@@ -21,7 +22,7 @@ import {
   type ServiceAccount,
   type ServiceSetting,
 } from '@coffre/core/access';
-import { EXCHANGED_CREDENTIAL_MS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
+import { EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
 import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
@@ -52,8 +53,6 @@ export const SIGN_INS_PER_WINDOW = 60;
 export const SIGN_IN_WINDOW_MS = 60_000;
 
 
-/** The longest a session's hard end may be, past its sign-in: the most `sessionHours` takes (workloads.ts's policy check). */
-const LONGEST_SESSION_HOURS = 168;
 
 /** What the change of a sign-in records besides its op (D147): its binding, proof, issuer, the run's claims, and a session's key and hard end. */
 type SignInRecord = { binding: string; proof: string; issuer: string; run: Record<string, string | number>; jkt?: string; notAfter?: number };
@@ -134,7 +133,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
     scope = sealedSessionScope(null, binding, policy);
     longest = SESSION_MS;
     const fields: readonly string[] = POLICY_FIELDS[binding.profile as WorkloadProfile] ?? [];
-    const hours = fields.includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : LONGEST_SESSION_HOURS;
+    const hours = fields.includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : MAX_SESSION_HOURS;
     if (credential.notAfter > at + hours * 3_600_000 + 60_000) throw new SignInRefused('expired');
   }
   if (credential.scope !== scope) throw new Error('a credential a binding makes reaches what its binding does: its scope, as the vault makes it from the binding');
@@ -197,7 +196,7 @@ function checkCredential(c: SignInCredential): void {
   const time = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
   if (typeof c?.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(c.id)
     || (c.kind !== 'service' && c.kind !== 'workload') || !isBase64(c.tokenHash, 32) || !isBase64(c.authMac, 32) || !text(c.tokenHint, 64)
-    || !optional(c.label, 120) || (c.scope !== null && typeof c.scope !== 'string') || (c.places !== null && typeof c.places !== 'string')
+    || !optional(c.label, CREDENTIAL_LABEL_MAX) || (c.scope !== null && typeof c.scope !== 'string') || (c.places !== null && typeof c.places !== 'string')
     || !time(c.expiresAt) || (c.notAfter !== null && !time(c.notAfter)) || !optional(c.jkt, 128)) {
     throw new Error('a sign-in\'s credential is its row: an id, its kind, its token\'s hash and hint, its times, and the app\'s MAC');
   }
@@ -303,7 +302,7 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   }
   if (typeof c?.id !== 'string' || !UUID.test(c.id) || (c.kind !== 'service' && c.kind !== 'personal' && c.kind !== 'handle') || !isBase64(c.tokenHash, 32)
     || !isBase64(c.authMac, 32) || typeof c.tokenHint !== 'string' || c.tokenHint.length === 0 || c.tokenHint.length > 64
-    || (c.label !== null && (typeof c.label !== 'string' || c.label.length > 120)) || typeof c.scope !== 'string' || (c.places !== null && typeof c.places !== 'string')
+    || (c.label !== null && (typeof c.label !== 'string' || c.label.length > CREDENTIAL_LABEL_MAX)) || typeof c.scope !== 'string' || (c.places !== null && typeof c.places !== 'string')
     || typeof c.expiresAt !== 'number' || !Number.isSafeInteger(c.expiresAt) || typeof c.createdBy !== 'string'
     || (c.passkeyId !== null && (typeof c.passkeyId !== 'string' || !UUID.test(c.passkeyId)))) {
     throw new Error('an issue\'s token is its row: an id, its kind, its token\'s hash and hint, its scope as stored, its end, its maker, its passkey, and the app\'s MAC');

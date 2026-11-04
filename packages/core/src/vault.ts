@@ -1764,6 +1764,16 @@ export type LogVerification =
 /** The longest a use may take from its time to its answer, held in Postgres too (R53): no use is decided later than this after its `at`. */
 export const USE_DEADLINE_MS = 3000;
 
+/**
+ * The hot path's login's timeouts (`coffre_vault_hot`, which every use runs as): a lock wait, then the whole
+ * statement, both inside the use deadline, so that a statement that reached Postgres cannot run on long after its
+ * Worker gave up (R53: the overload bound comes from the pool and these timeouts; hot-path-one.md, "On the vault
+ * login"). Migration 0022 wrote them as SQL, which never changes; `holdHotLogin` (`@coffre/db/migrate`) gives them
+ * again, `coffre setup` and conformance hold a login to them, and tests hold the role's settings to these.
+ */
+export const HOT_LOCK_TIMEOUT_MS = 1000;
+export const HOT_STATEMENT_TIMEOUT_MS = 2000;
+
 /** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
 export function newUseRequestId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8));

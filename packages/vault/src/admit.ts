@@ -211,7 +211,11 @@ export type AdmitTicket = {
   operationId: string | null;
 };
 
-/** How long a prepared add is taken: the write follows its read by the app's check, in memory. */
+/**
+ * How long a ticket the vault prepares is taken, a prepared add's and a refusal's record (`refusal.ts`) alike: the
+ * write follows its read by the app's check, in memory (#474, #498). A bound the design chose, not measured
+ * (the limits audit, #501, V13).
+ */
 export const TICKET_MS = 30_000;
 
 const TICKET_DOMAIN = 'coffre.admit.v1\0';

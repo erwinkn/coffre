@@ -9,38 +9,30 @@
 // password is empty: the sidecar's boundary is the pod.
 import { createServer, type Socket } from 'node:net';
 
-import { upgradeHeaders, upgradeRefused, type Workload } from '@coffre/client/workload';
+import {
+  TUNNEL_COUNT_EVERY as COUNT_EVERY,
+  TUNNEL_FLOW as FLOW,
+  TUNNEL_HIGH_WATER as HIGH_WATER,
+  TUNNEL_KEEPALIVE_MS as KEEPALIVE_MS,
+  TUNNEL_WINDOW as WINDOW,
+  upgradeHeaders,
+  upgradeRefused,
+  type Workload,
+} from '@coffre/client/workload';
 import { WebSocket } from 'ws';
 
 /** A tunnel the plan names: the key the app reads its database's URL from, and coffre's end of it. */
 export type Tunnel = { key: string; url: string };
 
-/** How much one side may hold for the other before it stops reading: a few COPY chunks. */
-const HIGH_WATER = 1024 * 1024;
-
-/**
- * Credit flow, asked for in a header (on Workers, whose WebSockets have no
- * back-pressure: packages/server/src/cloudflare-sockets.ts): each side
- * counts back what it took, in text messages, each the bytes taken from
- * binary messages since its last, and sends at most `WINDOW` bytes the
- * other has not counted. coffre's first message says whether it paces: a
- * count, `0`, before any byte, or a byte, from a coffre on Node, which
- * reads its socket only as fast as it writes and ignores the counts. Until
- * it says, the listener holds the app to the window; it counts back
- * whatever coffre it reaches.
+/*
+ * Credit flow, asked for in a header (`TUNNEL_FLOW`, `@coffre/client/workload`, where its numbers are, and why): each
+ * side counts back what it took, in text messages, each the bytes taken from binary messages since its last, and
+ * sends at most `WINDOW` bytes the other has not counted. coffre's first message says whether it paces: a count, `0`,
+ * before any byte, or a byte, from a coffre on Node, which reads its socket only as fast as it writes and ignores the
+ * counts. Until it says, the listener holds the app to the window; it counts back whatever coffre it reaches. Every
+ * `KEEPALIVE_MS`, a count, which keeps a psql left at its prompt alive with its Durable Object, and a ping, whose pong
+ * must come before the next, or the connection is gone, as when a laptop's network changes without a word.
  */
-const FLOW = 'coffre-tunnel-flow';
-const WINDOW = 1024 * 1024;
-/** How much the app takes before the listener counts it back: well under the window. */
-const COUNT_EVERY = 128 * 1024;
-/**
- * How often an open connection says it is there, idle or not: a count,
- * which reaches coffre's end, so that a psql left at its prompt outlives
- * Cloudflare's idle timeout (100 seconds), and keeps its Durable Object;
- * and a ping, whose pong must come before the next, or the connection is
- * gone, as when a laptop's network changes without a word.
- */
-const KEEPALIVE_MS = 30_000;
 /**
  * How long coffre has to answer the upgrade: a coffre that does not is gone,
  * and both ends close, rather than wait forever on it. Longer than coffre's

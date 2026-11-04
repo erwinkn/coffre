@@ -20,7 +20,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 import { postgresClient, postgresSession, quoteIdentifier, quoteLiteral, type PostgresClient } from '@coffre/db/connect';
-import { migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
+import { HOT_SETTINGS, migrateDatabase, type MigrationPlan } from '@coffre/db/migrate';
 
 import { cappedLimit, type Connections, connectionsOf, hyperdriveLimit, limitReason, tooFewConnections } from './connections.ts';
 import { readDatabaseUrl } from './database-url.ts';
@@ -653,9 +653,6 @@ const BOUNDARY = [
     privilege: "has_schema_privilege($1, 'public', 'CREATE') OR has_database_privilege($1, current_database(), 'CREATE')",
   },
 ] as const;
-
-/** The settings 0022 gives the hot path's login, which bound a use, as Postgres reports them. */
-const HOT_SETTINGS = { lock_timeout: '1s', statement_timeout: '2s' } as const;
 
 /**
  * A hot path's URL without the administrator's own values of its settings:

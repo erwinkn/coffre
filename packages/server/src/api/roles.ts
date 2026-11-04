@@ -16,6 +16,7 @@ import {
   PROJECT_ONLY_PERMISSIONS,
   protects,
   ROLE_ID,
+  ROLE_ID_RULE,
   ROLES,
   type Holdings,
   type InstanceRole,
@@ -209,7 +210,7 @@ function proposed(ctx: ApiContext, kind: Kind, id: string, definition: RoleInput
   const fixed = kind === 'role' ? FIXED_ROLES.roles.includes(id) : (FIXED_ROLES.instanceRoles as readonly string[]).includes(id);
   if (fixed) throw badRequest(`${id} is not edited: it holds ${id === 'member' ? 'nothing' : 'everything'}, always`);
   if (kind === 'instance-role' && !isInstanceRole(id)) throw notFound(`no instance role ${id}: an Owner makes project roles`);
-  if (kind === 'role' && !ROLE_ID.test(id)) throw badRequest('a role is named by lowercase letters, digits and dashes, 2 to 32, starting with a letter');
+  if (kind === 'role' && !ROLE_ID.test(id)) throw badRequest(ROLE_ID_RULE);
   if (definition === null) {
     if (kind === 'role' && !isBuiltinRole(id) && !Object.hasOwn(ctx.caller.policy.roles, id)) throw notFound(`no role ${id}`);
     return kind === 'role' ? { kind, role: id, definition: null } : { kind, role: id as InstanceRole, definition: null };

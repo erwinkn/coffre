@@ -1,3 +1,4 @@
+import { CREDENTIAL_LABEL_MAX } from '@coffre/core/access';
 import { EXCHANGE_SKEW_SECONDS, SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
 import { z } from 'zod';
@@ -51,7 +52,7 @@ async function browserIdentity(
 
 /** A device-login body carries a short label or a device code, nothing more: it is read in at most this many bytes, as anyone may call it. */
 const DEVICE_BODY_BYTES = 4 * 1024;
-const deviceStart = z.object({ client_label: z.string().trim().max(120).optional() });
+const deviceStart = z.object({ client_label: z.string().trim().max(CREDENTIAL_LABEL_MAX).optional() });
 
 /**
  * POST /api/auth/device: start a device login (RFC 8628). The CLI gets a

@@ -594,6 +594,28 @@ function child(parent: Core, key: ProofKey, token: string, expiresAt: number, pl
 }
 
 /**
+ * A database tunnel's credit flow, which every end of one speaks: coffre's (on Workers, packages/server's
+ * `cloudflare-sockets.ts`), the SDK's stream (`@coffre/client/workload/postgres`) and `coffre run`'s listener (the
+ * CLI). The client asks for it in the `TUNNEL_FLOW` header; then each side sends at most `TUNNEL_WINDOW` bytes the
+ * other has not counted back, and counts back what it took every `TUNNEL_COUNT_EVERY`. A Workers WebSocket has no
+ * back-pressure, so the window is what bounds the bytes an object holds for a session: three windows of each of its
+ * sessions within its 128 MB (`MOST_SESSIONS`, there). The count, an eighth of the window, is the design's: well
+ * under it, so that neither side waits on the other.
+ */
+export const TUNNEL_FLOW = 'coffre-tunnel-flow';
+export const TUNNEL_WINDOW = 1024 * 1024;
+export const TUNNEL_COUNT_EVERY = 128 * 1024;
+/** How much a client's end sends before it waits for its WebSocket to send it: a few COPY chunks, the design's choice. */
+export const TUNNEL_HIGH_WATER = 1024 * 1024;
+/**
+ * How often a client's end of an open tunnel says it is there, idle or not: a count, which keeps an idle connection
+ * and its Durable Object alive, and, from `coffre run`, a ping whose pong must come before the next, which finds a
+ * peer gone without a word. Cloudflare closes an idle WebSocket after "a period of time" its WebSockets page
+ * (updated 2026-08-14) gives no number for; the 100 s this was set under is unverified (the limits audit, #501, C3).
+ */
+export const TUNNEL_KEEPALIVE_MS = 30_000;
+
+/**
  * The headers that sign a WebSocket's upgrade to `url` (a tunnel's), made
  * outside `coffre.fetch`: the session, and a proof of a GET at its `https`
  * form with a nonce fresh enough that the gate takes it, since an upgrade

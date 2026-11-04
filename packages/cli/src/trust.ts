@@ -35,6 +35,7 @@ import {
   GOOGLE_ISSUER,
   KEY_NAMING_PROFILES,
   parseCidr,
+  POLICY_DEFAULTS,
   POLICY_FIELDS,
   PROFILE_URNS,
   type BindingClaims,
@@ -232,12 +233,12 @@ A workload signs in for a key-bound session, by its platform's proof:
        coffre trust <service> --vercel <team> --owner-id team_… --project-id prj_…
                     [--vercel-environment production] [--issuer https://oidc.vercel.com] [--claim …]
        coffre trust <service> --enrollment --replicas <n> [--minted-by <service>] [--approve]
-                    [--session-days 30] [--overlap-minutes 15] [--on-contention freeze|alert]
+                    [--session-days ${POLICY_DEFAULTS.sessionDays}] [--overlap-minutes ${POLICY_DEFAULTS.overlapMinutes}] [--on-contention freeze|alert]
        coffre trust <service> --cloudflare
        coffre trust <service> (--github … | --gitlab … | --issuer …) --workload
          and, for any of them:
                     [--reads <project>/<env>=<KEY>,… | <project>/<env>=*] [--source <cidr> …]
-                    [--session-hours 24] [--unsigned-uploads]
+                    [--session-hours ${POLICY_DEFAULTS.sessionHours}] [--unsigned-uploads]
          --aws, --kubernetes and --gcp look up the IDs they bind with the aws, kubectl and gcloud you
          are signed in to; --role-id, --uid and a unique ID skip the lookup
          --reads lists the values its sessions may read, which its platform then holds: every other
@@ -758,8 +759,8 @@ export function policyLines(profile: string, policy: PolicyView | null): string[
   const uploads = policy.unsignedUploads === true ? '; streamed uploads no digest binds go through' : '';
   // An enrollment's session lives as long as its code, renewed or dead within 90 s; a Worker's call is no session.
   const sessions = profile === 'enrollment'
-    ? `  sessions key-bound, each renewed every 30 s and ended at its code's expiry, ${policy.sessionDays ?? 30} days after minting${uploads}`
-    : profile === 'cloudflare' ? null : `  sessions key-bound, at most ${policy.sessionHours ?? 24} h from each proof${uploads}`;
+    ? `  sessions key-bound, each renewed every 30 s and ended at its code's expiry, ${policy.sessionDays ?? POLICY_DEFAULTS.sessionDays} days after minting${uploads}`
+    : profile === 'cloudflare' ? null : `  sessions key-bound, at most ${policy.sessionHours ?? POLICY_DEFAULTS.sessionHours} h from each proof${uploads}`;
   const lines = sessions === null ? [] : [sessions];
   if (policy.audience !== undefined) lines.push(`  audience ${policy.audience}`);
   else if (policy.keyAudience === true || (KEY_NAMING_PROFILES as readonly string[]).includes(profile)) lines.push("  audience names the session's key: <publicUrl>#jkt=<thumbprint>");
@@ -771,8 +772,8 @@ export function policyLines(profile: string, policy: PolicyView | null): string[
   if (policy.sources !== undefined) lines.push(`  from     ${policy.sources.join(', ')}`);
   if (profile === 'enrollment') {
     const minted = policy.mintedBy === undefined ? 'its managers' : `its managers and ${shownMember(policy.mintedBy)}`;
-    lines.push(`  codes    minted by ${minted}, ${policy.sessionDays ?? 30} days each; up to ${2 * (policy.replicas ?? 1)} sessions of ${policy.replicas} replica${policy.replicas === 1 ? '' : 's'}`);
-    lines.push(`           ${policy.onContention === 'alert' ? 'alerts' : 'freezes'} when a copy contends past ${policy.overlapMinutes ?? 15} minutes of overlap${policy.approve === true ? '; each session waits for approval' : ''}`);
+    lines.push(`  codes    minted by ${minted}, ${policy.sessionDays ?? POLICY_DEFAULTS.sessionDays} days each; up to ${2 * (policy.replicas ?? 1)} sessions of ${policy.replicas} replica${policy.replicas === 1 ? '' : 's'}`);
+    lines.push(`           ${policy.onContention === 'alert' ? 'alerts' : 'freezes'} when a copy contends past ${policy.overlapMinutes ?? POLICY_DEFAULTS.overlapMinutes} minutes of overlap${policy.approve === true ? '; each session waits for approval' : ''}`);
   }
   return lines;
 }

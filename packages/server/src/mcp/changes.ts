@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { apiMember, CoffreError, shownMember, type CoffreClient, type RouteInput } from '@coffre/client';
-import { credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, INSTANCE_ROLES, INSTANCE_ROLE_NAMES, makesProjects, MAX_SCOPE_PLACES, MAX_SERVICE_TOKEN_DAYS, ROLE_NAMES, runsInstance, scopeInWords, type InstanceRole, type Permission } from '@coffre/core/access';
 import {
   BEARER_PROFILES,
   claimValues,
@@ -757,7 +757,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     scope: 'manage-access',
     idempotent: false,
     destructive: false,
-    input: z.object({ service, label: z.string().trim().min(1).max(120).optional(), expiresInDays: z.number().int().min(1).max(366), scope: credentialScope }).strict(),
+    input: z.object({ service, label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).optional(), expiresInDays: z.number().int().min(1).max(MAX_SERVICE_TOKEN_DAYS), scope: credentialScope }).strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
@@ -830,7 +830,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
           .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
           .describe('The ID token claims a run must carry, such as repository_id and ref; event_name or pipeline_source may be a list, as ["push", "pull_request"]; environment, on GitHub, the GitHub environment the job runs in, as "production", matched whatever its case'),
         scope: credentialScope,
-        label: z.string().trim().min(1).max(120).optional(),
+        label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).optional(),
       })
       .strict(),
     names: ({ service }) => [serviceMember(service)],

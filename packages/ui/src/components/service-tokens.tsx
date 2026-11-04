@@ -1,5 +1,5 @@
 import type { TokenRow } from '@coffre/client';
-import { credentialScopeInWords } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, DEFAULT_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
@@ -14,7 +14,8 @@ import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { Key, Plus, X } from './icons';
 
-const LIFETIMES = [30, 90, 180, 365] as const;
+/** The lifetimes the form offers, in days: a month, a quarter, half a year and a year, and always the default. */
+const LIFETIMES = [...new Set([30, 90, 180, 365, DEFAULT_SERVICE_TOKEN_DAYS])].sort((a, b) => a - b);
 
 /**
  * The bearer tokens a service account presents to the API, for CI without
@@ -141,7 +142,7 @@ export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string
 function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGrant[] }) {
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState('');
-  const [days, setDays] = useState<number>(90);
+  const [days, setDays] = useState<number>(DEFAULT_SERVICE_TOKEN_DAYS);
   const [scope, setScope] = useState(() => wholeScope(grants));
   const [issued, setIssued] = useState<{ token: string; expiresAt: string } | null>(null);
   const coffre = useCoffre();
@@ -195,7 +196,7 @@ function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGran
                 <input
                   className="input"
                   value={label}
-                  maxLength={120}
+                  maxLength={CREDENTIAL_LABEL_MAX}
                   placeholder="GitHub Actions deploy"
                   onChange={(event) => setLabel(event.target.value)}
                 />

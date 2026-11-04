@@ -198,6 +198,24 @@ export const WITNESS_DEADLINE_MS = 2000;
 export const TICK_BOUND_MS = 10_000;
 
 /**
+ * How long a checkpointer's runner, on Node and on Workers alike, waits on an open (the newest pair and the trees'
+ * edges) and on the next days of uses made without one: as long as a tick (T169).
+ */
+export const OPEN_BOUND_MS = TICK_BOUND_MS;
+
+/**
+ * How long it waits on the log's upkeep after a tick: retention drops a day's partition and its tiles, hourly. A bound
+ * chosen in T169 (205e8255, #437), not measured (the limits audit, #501, V14).
+ */
+export const UPKEEP_BOUND_MS = 60_000;
+
+/**
+ * How long a checkpointer keeps its alarms, in a Durable Object's storage or in the Node runner's file (the limits
+ * audit, #501, V57).
+ */
+export const ALARMS_KEPT_MS = 30 * 86_400_000;
+
+/**
  * How long a change waits for the ticks that seal it, and its proof (T169).
  * Past it the change, committed and in force, answers `Unsealed`: the app
  * says 503, try again. The witnesses' 2 s come after.

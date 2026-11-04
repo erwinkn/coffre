@@ -78,7 +78,7 @@ import {
   Unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { credentialScopeInWords, ROLE_ID } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, ROLE_ID } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 import { regenerateWrite, type GeneratedWrite } from '@coffre/core/recipe';
 
@@ -1330,10 +1330,10 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
   // A plan reads values too, and is asked again as `run`'s reads are.
   const at = (path: string, headers: Record<string, string>) =>
     retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
-  // A label is 120 characters at most: the paths go in whole, the label names as many as fit.
+  // A label is `CREDENTIAL_LABEL_MAX` characters at most: the paths go in whole, the label names as many as fit.
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   // Asked again too: a handle weighed from a policy another change overtook is made from none, and refused to be asked again.
-  const handle = await client(to, undefined, [], retryingPolicyChange).handles.create({ label: label.length <= 120 ? label : `${label.slice(0, 119)}…`, paths: [...paths] });
+  const handle = await client(to, undefined, [], retryingPolicyChange).handles.create({ label: label.length <= CREDENTIAL_LABEL_MAX ? label : `${label.slice(0, CREDENTIAL_LABEL_MAX - 1)}…`, paths: [...paths] });
   const planOf = async (path: string): Promise<Plan> => {
     const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });
     const body = (await response.json().catch(() => ({}))) as { message?: string };

@@ -33,12 +33,24 @@ export { USE_DEADLINE_MS };
  * ahead` past it.
  */
 
-/** How far past the database's clock a use may be stamped (`ahead` refuses past it): no use is decided earlier than this before its `at`. */
+/**
+ * How far past the database's clock a use may be stamped (`ahead` refuses past it): no use is decided earlier than
+ * this before its `at`. A bound the design chose for a Worker's clock (W228, migration 0028; hot-path-one.md, "Amended
+ * by W228"), not a measured skew. The functions of 0024 on write it as `+ 60000`, which a test holds to this.
+ */
 export const USE_AHEAD_MS = 60_000;
+
+/**
+ * The bulk refresh (sealed-inputs.md, "`refresh` is a minute, or a tenth of a shorter window"): a hot key writes its
+ * row once a `REFRESH_MAX_MS` rather than on every use, and a short window's set lags it by a tenth at most. The
+ * functions of 0024 on write it as `least(60000, window / 10)`, which a test holds to these.
+ */
+export const REFRESH_MAX_MS = 60_000;
+export const REFRESH_WINDOW_SHARE = 10;
 
 /** How stale a key's row may get before a use moves it on: a minute, or a tenth of a shorter window, at least 1 ms. */
 export function refreshMs(limit: BulkLimit): number {
-  return Math.max(1, Math.min(60_000, Math.floor(limit.windowMs / 10)));
+  return Math.max(1, Math.min(REFRESH_MAX_MS, Math.floor(limit.windowMs / REFRESH_WINDOW_SHARE)));
 }
 
 /** The start of `at`'s refresh period: what a use that writes its key's row writes. */

@@ -1,4 +1,4 @@
-import { MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, PERMISSIONS, protects, type Permission } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, MAX_PERSONAL_TOKEN_MINUTES, MAX_SCOPE_PLACES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, protects, ROLE_DESCRIPTION_MAX, ROLE_NAME_MAX, type Permission } from '@coffre/core/access';
 import { MAX_BINDINGS, MAX_CLAIMS, MAX_KEYS, WORKLOAD_PROFILES, type JSONWebKeySet, type WorkloadProfile } from '@coffre/core/identity';
 import { MAX_RECIPE_LENGTH, recipeProblem } from '@coffre/core/recipe';
 import { displayName, environmentSlug, folderName, instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
@@ -191,8 +191,8 @@ export const secretPatch = z.record(secretKey, z.union([secretValue, generatedVa
 const role = roleId;
 /** A role's definition, both columns (docs/design/roles.md): the vault checks it whole (`definitionProblem`). */
 const roleDefinition = z.object({
-  name: z.string().max(40),
-  description: z.string().max(200),
+  name: z.string().max(ROLE_NAME_MAX),
+  description: z.string().max(ROLE_DESCRIPTION_MAX),
   permissions: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
   protected: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
 }).strict();
@@ -258,9 +258,9 @@ function serviceId(member: string): string {
 /** What a token is made with, as `POST /members/:member/tokens` takes it: a service's or a person's. */
 const tokenInput = z.object({
   // Printed in lists, the log and terminals: no control character, which could rewrite what is shown around it.
-  label: z.string().trim().min(1).max(120).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
+  label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).refine((label) => !/\p{Cc}/u.test(label), 'a label cannot hold a control character').nullable().default(null),
   // A service token's lifetime, in days.
-  expiresInDays: z.number().int().min(1).max(366).optional(),
+  expiresInDays: z.number().int().min(1).max(MAX_SERVICE_TOKEN_DAYS).optional(),
   // A personal token's, in minutes: an afternoon's script or agent, a week at most.
   expiresInMinutes: z.number().int().min(1).max(MAX_PERSONAL_TOKEN_MINUTES).optional(),
   scope: credentialScope,
@@ -584,7 +584,7 @@ export const routes = {
         .record(z.string().max(64), z.union([z.string().max(1024), z.array(z.string().max(64)).min(1).max(16)]))
         .refine((claims) => Object.keys(claims).length <= MAX_CLAIMS, `a binding names at most ${MAX_CLAIMS} claims`),
       scope: credentialScope,
-      label: z.string().trim().min(1).max(120).nullable().default(null),
+      label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).nullable().default(null),
       replaces: z.array(z.string().uuid()).max(MAX_BINDINGS).default([]),
       // The issuer's keys, for one coffre asks nothing: then the issuer is any string its tokens name.
       jwks: keySet.optional(),
