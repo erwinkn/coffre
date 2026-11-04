@@ -1356,18 +1356,34 @@ export async function requestsUnique(db: Queryable): Promise<boolean> {
 }
 
 /**
+ * `value`, over `y`, of a key's newest reference row, null for a key with
+ * none: a seek on `secret_references_holder_idx`, (secret_id, created_seq),
+ * to the last row at or before the key's newest, taken only if that row is
+ * the key's. `secretId`: the key's id, as its query names it. As `secret_id
+ * = key ORDER BY created_seq DESC LIMIT 1`, the equality makes `secret_id` a
+ * constant of the order, which `secret_references_created_seq_key` then
+ * serves too: where few keys hold many rows, Postgres walks it backwards,
+ * through every newer row of every other key's (T220). Only the holder index
+ * serves this order. `use_credential`, `change_input` and `end_reference`
+ * seek alike (0069).
+ */
+function ofNewestReference(secretId: SQL, value: SQL): SQL<string | null> {
+  return sql<string | null>`(SELECT CASE WHEN y.secret_id = ${secretId} THEN ${value} END FROM secret_references y
+    WHERE y.secret_id <= ${secretId} ORDER BY y.secret_id DESC, y.created_seq DESC LIMIT 1)`;
+}
+
+/**
  * A key's source as its object holds it: its newest reference row's, unless
  * that row has ended (`ended_at`, 0029): a reference broken, replaced or
- * cut. Null for a key with no reference row. `secretId`: the key's id, as
- * its query names it.
+ * cut. Null for a key with no reference row.
  */
 function newestSource(secretId: SQL): SQL<string | null> {
-  return sql<string | null>`(SELECT CASE WHEN y.ended_at IS NULL THEN y.source_secret_id END FROM secret_references y WHERE y.secret_id = ${secretId} ORDER BY y.created_seq DESC LIMIT 1)`;
+  return ofNewestReference(secretId, sql`CASE WHEN y.ended_at IS NULL THEN y.source_secret_id END`);
 }
 
 /** ... and that row's id, which the object holds beside its source. */
 function newestReference(secretId: SQL): SQL<string | null> {
-  return sql<string | null>`(SELECT CASE WHEN y.ended_at IS NULL THEN y.id END FROM secret_references y WHERE y.secret_id = ${secretId} ORDER BY y.created_seq DESC LIMIT 1)`;
+  return ofNewestReference(secretId, sql`CASE WHEN y.ended_at IS NULL THEN y.id END`);
 }
 
 /**
@@ -1388,7 +1404,7 @@ export async function endReferenceRows(tx: Transaction, ids: readonly string[], 
   const listed = sql.join(ids.map((id) => sql`${id}`), sql`, `);
   const standing = await rowsOf<{ id: string; holder: string; seal: Buffer | Uint8Array | null }>(tx, sql`SELECT y.id, x.id AS holder, x.seal FROM secret_references y JOIN secrets x ON x.id = y.secret_id
     WHERE y.id IN (${listed}) AND y.ended_at IS NULL AND x.archived_at IS NULL AND x.current_version_id IS NULL
-      AND y.id = (SELECT z.id FROM secret_references z WHERE z.secret_id = x.id ORDER BY z.created_seq DESC LIMIT 1)`);
+      AND y.id = ${ofNewestReference(sql`x.id`, sql`y.id`)}`);
   for (const row of standing) {
     if (row.seal !== null || (await newestSeal(tx, { kind: 'secret', id: row.holder })) !== null) {
       // Postgres's code for it, `invalid_parameter_value`, as `end_reference` raises it.
@@ -1559,10 +1575,11 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
       }
       done = changedRows(await tx.update(secrets).set({ seal: call.seal }).where(eq(secrets.id, ref.id)));
       if (row.archivedAt !== null) break;
-      const [newest] = await tx.select({ id: secretReferences.id, endedAt: secretReferences.endedAt }).from(secretReferences)
-        .where(eq(secretReferences.secretId, ref.id)).orderBy(desc(secretReferences.createdSeq)).limit(1);
-      if (newest === undefined || newest.endedAt !== null) throw new StaleRow("the secret object's reference has no standing row: stale");
-      await tx.update(secretReferences).set({ endedAt: new Date(call.at) }).where(eq(secretReferences.id, newest.id));
+      // Its newest reference row, sought as `ofNewestReference` seeks it.
+      const [last] = await tx.select({ id: secretReferences.id, holder: secretReferences.secretId, endedAt: secretReferences.endedAt }).from(secretReferences)
+        .where(lte(secretReferences.secretId, ref.id)).orderBy(desc(secretReferences.secretId), desc(secretReferences.createdSeq)).limit(1);
+      if (last === undefined || last.holder !== ref.id || last.endedAt !== null) throw new StaleRow("the secret object's reference has no standing row: stale");
+      await tx.update(secretReferences).set({ endedAt: new Date(call.at) }).where(eq(secretReferences.id, last.id));
       break;
     }
     case 'environment': {
@@ -1761,7 +1778,7 @@ export async function everyEnvironment(db: Queryable): Promise<EnvironmentRead[]
 
 /** Every key, archived or not, as `readObject` makes one (store.ts), with its newest reference row whole. */
 export async function everySecret(db: Queryable): Promise<SecretRead[]> {
-  const newest = (column: string) => sql.raw(`(SELECT y.${column} FROM secret_references y WHERE y.secret_id = s.id ORDER BY y.created_seq DESC LIMIT 1)`);
+  const reference = (column: string) => ofNewestReference(sql`s.id`, sql.raw(`y.${column}`));
   const rows = await rowsOf<{
     id: string; project_id: string; environment_id: string; archived: boolean | number; seal: Buffer | Uint8Array | null; version_id: string | null;
     sensitive: boolean | number | null; plaintext: string | null; kek_provider: string | null; kek_id: string | null; kek_version: string | null; wrapped_dek: Buffer | Uint8Array | null;
@@ -1770,8 +1787,8 @@ export async function everySecret(db: Queryable): Promise<SecretRead[]> {
   }>(db, sql`SELECT s.id, s.project_id, s.environment_id, s.archived_at IS NOT NULL AS archived, s.seal, s.current_version_id AS version_id,
       s.current_version_id IS NULL OR (v.secret_id = s.id AND v.version = (SELECT max(w.version) FROM secret_versions w WHERE w.secret_id = s.id)) AS newest,
       v.sensitive, v.plaintext, v.kek_provider, v.kek_id, v.kek_version, v.wrapped_dek,
-      ${newest('id')} AS reference_id, ${newest('source_secret_id')} AS reference_source, ${newest('created_seq')} AS reference_seq,
-      ${newest('ended_at')} IS NOT NULL AS reference_ended
+      ${reference('id')} AS reference_id, ${reference('source_secret_id')} AS reference_source, ${reference('created_seq')} AS reference_seq,
+      ${reference('ended_at')} IS NOT NULL AS reference_ended
     FROM secrets s LEFT JOIN secret_versions v ON v.id = s.current_version_id`);
   return rows.map((row) => ({
     id: row.id,

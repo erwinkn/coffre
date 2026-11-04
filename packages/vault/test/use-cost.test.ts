@@ -4,19 +4,21 @@
 // both forms (probing, and from the seal cache).
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
-import { createDatabase } from '@coffre/db';
+import { createDatabase, tablesOf, type Database } from '@coffre/db';
 import { postgresClient, type PostgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { GATE_ROLES } from '../src/decide.ts';
+import { readObject } from '../src/store.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
+import type { Input } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
 import { newRequestId } from '../src/use.ts';
-import { HOT_URL, openTestDatabase, postgresOnly, rows, run, type TestDatabase } from './database.ts';
+import { HOT_URL, openTestDatabase, postgresOnly, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
-import { ask, CONFIG, emptyLog, LOG_015, useDatabases, world } from './use-world.ts';
+import { ask, change, CONFIG, emptyLog, LOG_015, ROOT, seal, useDatabases, world } from './use-world.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 
 /** What the statement-counting uses need of one bulk-cap period: each call before the last measured one may take its 3 s deadline, so room for two of them and a margin (T218). */
@@ -384,4 +386,125 @@ test("T165 (PR 2): a named batch's first statement reads no key without standing
   console.log(JSON.stringify({ few, small, large, refused, grown }));
   assert.ok(Math.max(refused.listed, refused.held, refused.never, grown) - Math.min(refused.listed, refused.held, refused.never, grown) <= 2,
     `a refusal's buffers: ${JSON.stringify({ ...refused, grown })}`);
+});
+
+/**
+ * T220: a use of a reference reads its key's newest reference row by `secret_references_holder_idx`, never the
+ * references other keys made since. As `y.secret_id = s.id ORDER BY y.created_seq DESC LIMIT 1` (0068 and before),
+ * where few keys hold many reference rows, Postgres walked `secret_references_created_seq_key` backwards instead,
+ * reading each newer row of another key's before the key's own: here 5,000 of them, a key repointed over and over.
+ * Another key's 5,000 older rows are there from the start, so that both measures read indexes of the same depth.
+ */
+test("T220: a reference's use reads its newest reference by its holder, its buffers the same however many references another key made since", { ...postgresOnly('the hot path'), timeout: 600_000 }, async () => {
+  const w = await world();
+  const source = await w.key('the source');
+  /**
+   * A key of dev's with no value of its own and `count` reference rows to the source, each made by an entry of 0.14's
+   * log past the cutover, as `grow` writes them (a row's `created_seq` names its entry): its newest row's id.
+   */
+  const referring = async (count: number): Promise<{ id: string; reference: string }> => {
+    const id = randomUUID();
+    await db.owner.insert(tablesOf(db.owner).secrets).values({ id, projectId: w.project, environmentId: w.dev, key: `HELD_${id.slice(0, 8)}` });
+    const [newest] = await rows<{ reference: string }>(db.owner, sql`WITH made AS (
+        INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, metadata, prev_hash, mac, hash, log015)
+        SELECT (SELECT coalesce(max(seq), 0) FROM audit_log) + g, 'vault', 'vault:x', ${Date.now()}, 'system:x', 'reference.create', 'allow', '{}',
+               ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, ${Buffer.alloc(32)}, true
+          FROM generate_series(1, ${count}) g RETURNING seq
+      ), rows AS (
+        INSERT INTO secret_references (id, project_id, environment_id, secret_id, source_project_id, source_environment_id, source_secret_id, created_seq, created_by)
+        SELECT gen_random_uuid(), ${w.project}, ${w.dev}, ${id}, ${w.project}, ${w.dev}, ${source}, seq, ${ROOT} FROM made RETURNING id, created_seq
+      )
+      SELECT id AS reference FROM rows ORDER BY created_seq DESC LIMIT 1`);
+    return { id, reference: newest!.reference };
+  };
+  await referring(5000);
+  // The key used, sealed as 0.15's vault makes one (use.test.ts).
+  const { id: holder, reference } = await referring(1);
+  const object: Input = { kind: 'secret', id: holder, projectId: w.project, environmentId: w.dev, version: '', nature: 'secret', key: null, digest: null, source, reference };
+  await change({ kind: 'secret', id: holder }, { op: 'genesis', value: object }, object, seal('secrets', 'id', holder));
+  const call = 'use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)';
+  /**
+   * A probing use of `key`'s buffers, the least of five runs on a connection of its own (the R48 test says why),
+   * after one that checks what it read of the key: `read`, its source and reference.
+   */
+  const buffers = async (key: string, read: [string | null, string | null]): Promise<number> => {
+    const client = postgresClient(HOT_URL, { max: 1 });
+    try {
+      let least = Infinity;
+      for (let i = 0; i < 6; i += 1) {
+        const at = Date.now();
+        const requestId = newRequestId();
+        const mac = entryMac(logMacKey(randomBytes(32)), { tree: 'uses', row: { at, requestId: BigInt(requestId), credential: w.credentialId, secret: key, purpose: 4, place: null } });
+        const args = [w.credentialId, key, requestId, String(at), mac, String(at + 3000)] as never[];
+        if (i === 0) {
+          const [row] = await client.unsafe(`SELECT ${call}::text AS use`, args) as unknown as { use: string }[];
+          const answered = JSON.parse(row!.use) as { s_source: string | null; s_reference: string | null };
+          assert.deepEqual([answered.s_source, answered.s_reference], read, `what the use read of the key: ${row!.use.slice(0, 200)}`);
+          continue;
+        }
+        const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM ${call}`, args);
+        const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+        least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+      }
+      return least;
+    } finally {
+      await client.end();
+    }
+  };
+  // As autovacuum leaves a table that stopped growing.
+  const settle = () => run(db.owner, sql`VACUUM ANALYZE secret_references, secrets, audit_log`);
+  await settle();
+  // The reference's use, and the source's, a key with a value of its own. On 0068, the reference's read 254 buffers
+  // alone, 105 here: its source holds no reference row, which its source's lookup (`xref`) found only once it had
+  // read every row there is; and 542 behind the newer rows.
+  /**
+   * The statements `read` sends on the vault's login, each run again under EXPLAIN once they are planned: their
+   * buffers, summed. What a change reads of a key's object (`readObject`, store.ts).
+   */
+  const sent = async (read: (db: Database) => Promise<unknown>): Promise<number> => {
+    const statements: { text: string; values: unknown[] }[] = [];
+    const client = postgresClient(VAULT_URL, { max: 1 });
+    const recording = new Proxy(client, {
+      get(target, key) {
+        const value: unknown = Reflect.get(target, key, target);
+        if (key !== 'unsafe') return value;
+        return (text: string, values: unknown[] = [], ...rest: unknown[]) => {
+          statements.push({ text, values });
+          return (value as (...a: unknown[]) => unknown).apply(target, [text, values, ...rest]);
+        };
+      },
+    });
+    try {
+      await read(createDatabase(recording));
+      statements.length = 0;
+      await read(createDatabase(recording));
+      let total = 0;
+      for (const { text, values } of statements) {
+        const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${text}`, values as never[]);
+        const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+        total += node['Shared Hit Blocks'] + node['Shared Read Blocks'];
+      }
+      return total;
+    } finally {
+      await client.end();
+    }
+  };
+  const objectOf = (id: string) => async (db: Database) => {
+    const { row } = await readObject(db, { kind: 'secret', id });
+    assert.equal(row?.kind === 'secret' ? row.source : undefined, id === holder ? source : null, "the object's source");
+  };
+  const measure = async () => ({
+    reference: await buffers(holder, [source, reference]), value: await buffers(source, [null, null]),
+    "a reference's object": await sent(objectOf(holder)), "a value's object": await sent(objectOf(source)),
+  });
+  const alone = await measure();
+  // Another key of dev's, repointed 5,000 times since: each row newer than the key's.
+  await referring(5000);
+  await settle();
+  const behind = await measure();
+  console.log(JSON.stringify({ alone, behind }));
+  for (const [form, before] of Object.entries(alone)) {
+    const after = behind[form as keyof typeof behind];
+    assert.ok(after - before <= 2, `${form}: ${before} buffers alone, ${after} behind another key's 5,000 newer references`);
+  }
 });

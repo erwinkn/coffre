@@ -685,6 +685,24 @@ export async function tombstoneSlug(db: Queryable, slug: string, day: Date, with
 
 // --- 0.15's objects -----------------------------------------------------------
 
+/**
+ * `value`, of a key's newest reference row, null for a key with none: a seek
+ * on `secret_references_holder_idx`, (secret_id, created_seq), to the last
+ * row at or before the key's newest, taken only if that row is the key's.
+ * `holder` names the key's id in the outer query. As `secret_id = holder
+ * ORDER BY created_seq DESC LIMIT 1`, the equality makes `secret_id` a
+ * constant of the order, which `secret_references_created_seq_key` then
+ * serves too: where few keys hold many rows, Postgres walks it backwards,
+ * through every newer row of every other key's (T220: a key's object read
+ * 288 pages once another key had 5,000 newer rows, 4 before;
+ * `request-cost.alone.ts`). Only the holder index serves this order.
+ */
+function ofNewestReference(db: Queryable, holder: AnyColumn, value: SQL): SQL<string | null> {
+  const { secretReferences } = tablesOf(db);
+  return sql<string | null>`(SELECT CASE WHEN ${secretReferences.secretId} = ${holder} THEN ${value} END FROM ${secretReferences}
+    WHERE ${secretReferences.secretId} <= ${holder} ORDER BY ${secretReferences.secretId} DESC, ${secretReferences.createdSeq} DESC LIMIT 1)`;
+}
+
 /** A row as an object of 0.15's log takes it (@coffre/core/vault's columns), with the seal on it. */
 export type ObjectRead<C> = { columns: C; seal: Buffer | null };
 
@@ -703,11 +721,9 @@ export type SecretRead = ObjectRead<SecretColumns> & { archived: boolean };
 export async function secretObjects(db: Queryable, by: { ids: readonly string[] } | { under: Doomed }): Promise<Map<string, SecretRead>> {
   const { secrets, secretVersions, secretReferences } = tablesOf(db);
   // Its newest reference row's source, unless that row has ended (`ended_at`): the vault's end of it, logged.
-  const source = sql<string | null>`(SELECT CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.sourceSecretId} END FROM ${secretReferences}
-    WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  const source = ofNewestReference(db, secrets.id, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.sourceSecretId} END`);
   // And that row's id, which the object holds beside its source.
-  const reference = sql<string | null>`(SELECT CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.id} END FROM ${secretReferences}
-    WHERE ${secretReferences.secretId} = ${secrets.id} ORDER BY ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  const reference = ofNewestReference(db, secrets.id, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.id} END`);
   const read = (where: SQL) => db
     .select({
       id: secrets.id,
@@ -2983,13 +2999,8 @@ export async function sensitiveFrom(db: Queryable, environmentIds: readonly stri
   const ids = [...new Set(environmentIds)];
   const live = and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt));
   const sensitive = (versionId: SQL | AnyColumn) => sql`(SELECT ${secretVersions.sensitive} FROM ${secretVersions} WHERE ${secretVersions.id} = ${versionId})`;
-  // The holder's newest reference, as a seek on (secret_id, created_seq) to the last row at or before the holder's:
-  // its source if that row is the holder's. As `secret_id = holder ORDER BY created_seq DESC`, Postgres could walk
-  // `secret_references_created_seq_key` backwards instead, through every newer row of every other holder's, when few
-  // holders hold many rows (review r1 of #502); only `secret_references_holder_idx` serves this order.
-  const newest = sql`(SELECT CASE WHEN ${secretReferences.secretId} = ${secrets.id} THEN ${secretReferences.sourceSecretId} END
-    FROM ${secretReferences} WHERE ${secretReferences.secretId} <= ${secrets.id}
-    ORDER BY ${secretReferences.secretId} DESC, ${secretReferences.createdSeq} DESC LIMIT 1)`;
+  // The holder's newest reference's source, ended or not (above).
+  const newest = ofNewestReference(db, secrets.id, sql`${secretReferences.sourceSecretId}`);
   // The source's project, if its current version is sensitive. `source` names the source's row, so `secrets` in
   // `newest` is still the holder's.
   const sourceProject = sql<string | null>`(SELECT source.project_id FROM ${secrets} source
