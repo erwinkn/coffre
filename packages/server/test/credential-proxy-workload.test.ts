@@ -25,7 +25,7 @@ import { WebSocket } from 'ws';
 import { allowed, audited } from '../src/api/context.ts';
 import { resolveConfig } from '../src/config.ts';
 import { insertSession } from '../src/db/workloads.ts';
-import { processGates, type Gates } from '../src/gate.ts';
+import type { Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, form, header, hmac, json, path, postgres, privateKey, sigv4 } from '../src/plugins/credential-proxy.ts';
@@ -36,6 +36,7 @@ import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport
 import { clientFor, contextFor, holdSomething, LOG, LOG_014_ONLY, openTestDatabase, resetDatabase, testDeps, usesLogged, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, environments } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
+import { pinnedGates } from './window-fixture.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -149,7 +150,7 @@ beforeEach(async () => {
   received = 0;
   alerts = [];
   background = [];
-  gates = processGates();
+  gates = pinnedGates();
   deps = testDeps(db.runtime, [ROOT]);
   vaultCalls = 0;
   const access = deps.vault.access.bind(deps.vault);

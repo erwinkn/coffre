@@ -24,7 +24,7 @@ import { eq, sql, type SQL } from 'drizzle-orm';
 
 import { allowed, audited } from '../src/api/context.ts';
 import { resolveConfig } from '../src/config.ts';
-import { processGates, type Gates } from '../src/gate.ts';
+import type { Gates } from '../src/gate.ts';
 import { upgrade } from '../src/node-sockets.ts';
 import { bindingRoute, checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { proxyCodeOf } from '../src/proxy-code.ts';
@@ -38,6 +38,7 @@ import { clientFor, contextFor, holdSomething, LOG, openTestDatabase, resetDatab
 import { TEST_ENGINE } from './db/engine.ts';
 import { credentials, environments } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
+import { pinnedGates } from './window-fixture.ts';
 
 const ON_015 = { skip: LOG === '0.14' ? "proxy definitions are 0.15's log's objects" : false };
 const ORIGIN = 'https://secrets.acme.example';
@@ -122,7 +123,7 @@ beforeEach(async () => {
   forgetProxyGates();
   forgetKeys();
   reached = [];
-  gates = processGates();
+  gates = pinnedGates();
   deps = testDeps(db.runtime, [ROOT]);
   calls = new Map();
   const vault = deps.vault as unknown as Record<string, unknown>;
