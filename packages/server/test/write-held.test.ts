@@ -710,6 +710,30 @@ test("a page of many environments' key writes reads them a few hundred a stateme
     if (made < project.length) assert.ok(start.read <= made, `statement ${i + 1} started with ${start.read} environments read`);
     assert.ok(start.asking <= STATEMENTS_AT_ONCE, `statement ${i + 1} asked with ${start.asking} at once`);
   });
+  // A statement that fails fails the page, and no statement is asked after it: the others already asked are
+  // waited for, none left running, and the page rejects with its error (review r6 of #490: the other workers
+  // went on to ask all 520).
+  const cancelled = new Error('canceling statement due to statement timeout');
+  let asked = 0;
+  let running = 0;
+  const failing = new Proxy(db.runtime, { get: (target, key, receiver) => {
+    const value = Reflect.get(target, key, receiver) as unknown;
+    if (key !== method || typeof value !== 'function') return value;
+    return async (...args: unknown[]) => {
+      asked += 1;
+      running += 1;
+      try {
+        if (asked === 3) throw cancelled;
+        return await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
+      } finally {
+        running -= 1;
+      }
+    };
+  } });
+  await assert.rejects(sealedPage(failing, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: project } }), (error) => error === cancelled);
+  assert.equal(running, 0, 'a statement was left running after the page failed');
+  // The four first asked together, the third of which failed: none after.
+  assert.equal(asked, STATEMENTS_AT_ONCE, `${asked} statements asked`);
   await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
 });
 

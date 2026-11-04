@@ -1887,13 +1887,23 @@ async function newest<Row extends { number: string | number | bigint; at: string
   const byNewest = (a: Row, b: Row) => at(b) - at(a) || (BigInt(b.number) > BigInt(a.number) ? 1 : BigInt(b.number) < BigInt(a.number) ? -1 : 0);
   let kept: Row[] = [];
   const made = [first, second];
+  // The first statement to fail fails the page: no other is asked after it, and those already asked are
+  // waited for, so that a failed page leaves none running behind it (review r6 of #490).
+  let failed: { error: unknown } | undefined;
   const asking = async () => {
-    for (let part = made.pop() ?? nextPart(); part.length > 0; part = made.pop() ?? nextPart()) {
-      const rows = await dialect.rowsOf<Row>(db, statement(part, keep, 0));
-      kept = kept.concat(rows).sort(byNewest).slice(0, keep);
+    while (failed === undefined) {
+      try {
+        const part = made.pop() ?? nextPart();
+        if (part.length === 0) return;
+        const rows = await dialect.rowsOf<Row>(db, statement(part, keep, 0));
+        kept = kept.concat(rows).sort(byNewest).slice(0, keep);
+      } catch (error) {
+        failed ??= { error };
+      }
     }
   };
   await Promise.all(Array.from({ length: STATEMENTS_AT_ONCE }, asking));
+  if (failed !== undefined) throw failed.error;
   return kept.slice(skip, skip + take);
 }
 
