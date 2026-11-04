@@ -1775,7 +1775,8 @@ export type WrittenAt = { all: true } | { environmentIds: readonly string[] } | 
  * Since 0.16.0 neither writes a 0.14 entry (T179): their change is the
  * record. Up to `limit`, below `before`, of the members `actors` names if
  * it does: a sign-in's is a service, the rest's anyone's. One round trip
- * (`newest`: a statement a few hundred reads), of each index's entries,
+ * (`newest`: a statement a few hundred reads, a few statements at a
+ * time past that), of each index's entries,
  * each member's, each environment's, as many as it returns at most,
  * however many other changes the log holds (R48); at a place, of some
  * members, each member's there.
@@ -1787,34 +1788,33 @@ export async function sealedPage(
   const { logChanges } = tablesOf(db);
   const engine = dialect.engineOf(db);
   const of = (records: ChangeRecord[], actor: string | undefined) => and(recorded(engine, logChanges.payload, ...records), actor === undefined ? undefined : eq(logChanges.actor, actor))!;
-  // One read at a time, never spread into `push`: a project's page of tens of thousands of environments, of a
-  // member's two forms, is more reads than a call takes arguments (review r4 of #490).
-  const reads: SQL[] = [];
-  if (filter.instance) {
-    for (const actor of recordActors(filter.actors, isService)) reads.push(of(SIGN_INS, actor));
-    if (filter.detail) for (const actor of recordActors(filter.actors, isMember)) reads.push(of(HIDDEN, actor));
-    for (const actor of recordActors(filter.actors, isMember)) reads.push(of(['admitted'], actor));
-  }
+  // The reads one at a time, as `newest` takes them: a project's page of tens of thousands of environments, of a
+  // member's two forms, is more reads than a call takes arguments (review r4 of #490), and more than an isolate
+  // holds at once, made together (review r5).
   const { written } = filter;
-  if (written !== null) {
-    if ('all' in written) for (const actor of recordActors(filter.actors, isMember)) reads.push(of(['written'], actor));
-    else {
-      const places = 'secretId' in written
-        ? [eq(logChanges.object, logObject('secret', written.secretId))]
-        : written.environmentIds.map((id) => eq(recordField(engine, logChanges.payload, 'environmentId'), id));
-      // Of some members at a place: a read of each member's there (`log_changes_written_actor_environment_idx`,
-      // `…_actor_object_idx`), never the place's read with the others' passed over, which grows with their writes.
-      for (const actor of recordActors(filter.actors, isMember)) {
-        for (const place of places) reads.push(and(of(['written'], actor), place)!);
-      }
+  function* reads(): Generator<SQL> {
+    if (filter.instance) {
+      for (const actor of recordActors(filter.actors, isService)) yield of(SIGN_INS, actor);
+      if (filter.detail) for (const actor of recordActors(filter.actors, isMember)) yield of(HIDDEN, actor);
+      for (const actor of recordActors(filter.actors, isMember)) yield of(['admitted'], actor);
+    }
+    if (written === null) return;
+    if ('all' in written) {
+      for (const actor of recordActors(filter.actors, isMember)) yield of(['written'], actor);
+      return;
+    }
+    // Of some members at a place: a read of each member's there (`log_changes_written_actor_environment_idx`,
+    // `…_actor_object_idx`), never the place's read with the others' passed over, which grows with their writes.
+    for (const actor of recordActors(filter.actors, isMember)) {
+      if ('secretId' in written) yield and(of(['written'], actor), eq(logChanges.object, logObject('secret', written.secretId)))!;
+      else for (const id of written.environmentIds) yield and(of(['written'], actor), eq(recordField(engine, logChanges.payload, 'environmentId'), id))!;
     }
   }
-  if (reads.length === 0) return { rows: [], more: false };
   const object = engine === 'postgres' ? sql`CAST(${logChanges.object} AS text)` : logChanges.object;
   const columns = sql`${logChanges.number} AS "number", ${logChanges.at} AS "at", ${logChanges.actor} AS "actor", ${logChanges.payload} AS "payload",
     ${logChanges.requestId} AS "request_id", ${object} AS "object", ${logChanges.seal} AS "seal", ${logChanges.mac} AS "mac"`;
   const rows = await newest<{ number: string | number | bigint; at: string | number; actor: string; payload: string; request_id: string; object: string; seal: Uint8Array | null; mac: Uint8Array }>(
-    db, reads, columns, filter.before, filter.limit + 1,
+    db, reads(), columns, filter.before, filter.limit + 1,
   );
   return {
     rows: rows.slice(0, filter.limit).map((row) => ({
@@ -1837,16 +1837,27 @@ const HIDDEN: ChangeRecord[] = ['issue', 'revoke', 'signOut'];
 export const READS_PER_STATEMENT = 250;
 
 /**
+ * The most statements of `newest` made and asked at once: with more reads,
+ * the next is made once one has answered, so that an isolate holds no more
+ * than these, and the newest rows so far, however many reads a page takes
+ * (review r5 of #490: 130,000 reads made at once held 617 MiB, past
+ * Workers' 128 MB).
+ */
+export const STATEMENTS_AT_ONCE = 4;
+
+/**
  * The newest of the changes each of `reads` holds (a condition its index's
  * repeats), below `before`, `take` of them past the first `skip`: each read
  * on its own and newest first, no further than that, then the newest of
- * them all. A statement of `READS_PER_STATEMENT` reads at most, asked
- * together (one round trip), each of as many index entries as it reads,
- * each read's at most; with more reads, as many statements, whose rows
- * merge by `at`, then number, as one statement's would.
+ * them all. A statement of `READS_PER_STATEMENT` reads at most, each of as
+ * many index entries as it reads, each read's at most: up to that many
+ * reads, one statement, one round trip. With more, a statement of each
+ * `READS_PER_STATEMENT`, `STATEMENTS_AT_ONCE` asked together, each made
+ * from `reads` as it is asked; their rows merge by `at`, then number, as
+ * one statement's would, keeping the newest `skip + take`.
  */
 async function newest<Row extends { number: string | number | bigint; at: string | number }>(
-  db: Queryable, reads: readonly SQL[], columns: SQL, before: ChangePoint | undefined, take: number, skip = 0,
+  db: Queryable, reads: Iterable<SQL>, columns: SQL, before: ChangePoint | undefined, take: number, skip = 0,
 ): Promise<Row[]> {
   const { logChanges } = tablesOf(db);
   const statement = (part: readonly SQL[], take: number, skip: number) => {
@@ -1856,14 +1867,34 @@ async function newest<Row extends { number: string | number | bigint; at: string
        ORDER BY ${logChanges.at} DESC, ${logChanges.number} DESC LIMIT ${skip + take}) AS ${sql.raw(`r${i}`)}`);
     return sql`${sql.join(each, sql` UNION ALL `)} ORDER BY "at" DESC, "number" DESC LIMIT ${take} OFFSET ${skip}`;
   };
-  if (reads.length <= READS_PER_STATEMENT) return dialect.rowsOf<Row>(db, statement(reads, take, skip));
-  const parts: SQL[][] = [];
-  for (let start = 0; start < reads.length; start += READS_PER_STATEMENT) parts.push(reads.slice(start, start + READS_PER_STATEMENT));
+  const left = reads[Symbol.iterator]();
+  const nextPart = (): SQL[] => {
+    const part: SQL[] = [];
+    while (part.length < READS_PER_STATEMENT) {
+      const next = left.next();
+      if (next.done === true) break;
+      part.push(next.value);
+    }
+    return part;
+  };
+  const first = nextPart();
+  if (first.length === 0) return [];
+  const second = nextPart();
+  if (second.length === 0) return dialect.rowsOf<Row>(db, statement(first, take, skip));
   // Each statement's newest `skip + take`: the overall ones are among them.
-  const rows = (await Promise.all(parts.map((part) => dialect.rowsOf<Row>(db, statement(part, skip + take, 0))))).flat();
+  const keep = skip + take;
   const at = (row: Row) => Number(row.at);
-  rows.sort((a, b) => at(b) - at(a) || (BigInt(b.number) > BigInt(a.number) ? 1 : BigInt(b.number) < BigInt(a.number) ? -1 : 0));
-  return rows.slice(skip, skip + take);
+  const byNewest = (a: Row, b: Row) => at(b) - at(a) || (BigInt(b.number) > BigInt(a.number) ? 1 : BigInt(b.number) < BigInt(a.number) ? -1 : 0);
+  let kept: Row[] = [];
+  const made = [first, second];
+  const asking = async () => {
+    for (let part = made.pop() ?? nextPart(); part.length > 0; part = made.pop() ?? nextPart()) {
+      const rows = await dialect.rowsOf<Row>(db, statement(part, keep, 0));
+      kept = kept.concat(rows).sort(byNewest).slice(0, keep);
+    }
+  };
+  await Promise.all(Array.from({ length: STATEMENTS_AT_ONCE }, asking));
+  return kept.slice(skip, skip + take);
 }
 
 /**

@@ -18,7 +18,7 @@ import { eq, sql } from 'drizzle-orm';
 import { sessionCookieName } from '../src/auth.ts';
 import { resolveConfig } from '../src/config.ts';
 import { fetchApi } from '../src/fetch-api.ts';
-import { READS_PER_STATEMENT, sealedPage, versionsOf } from '../src/db/queries.ts';
+import { READS_PER_STATEMENT, sealedPage, STATEMENTS_AT_ONCE, versionsOf } from '../src/db/queries.ts';
 import { acceptance } from '../src/named-use.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, outcomes } from './api-fixture.ts';
@@ -674,6 +674,42 @@ test("a page of many environments' key writes reads them a few hundred a stateme
     (await sealedPage(db.runtime, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: project } })).rows.map((row) => row.number - base),
     [1n, 3n],
   );
+  // And made as they are asked, a few statements at a time: 130,000 reads made at once, and their 520 statements
+  // asked together, held 617 MiB, past Workers' 128 MB (review r5 of #490). Each statement starts with no more
+  // of the project's environments read than its own and those before it, and no more than a few are asked at once.
+  let read = 0;
+  const counted = new Proxy(project, { get: (target, key, receiver) => {
+    if (typeof key === 'string' && /^\d+$/.test(key)) read = Math.max(read, Number(key) + 1);
+    return Reflect.get(target, key, receiver);
+  } });
+  const method = TEST_ENGINE === 'postgres' ? 'execute' : 'all';
+  const starts: { read: number; asking: number }[] = [];
+  let asking = 0;
+  const watched = new Proxy(db.runtime, { get: (target, key, receiver) => {
+    const value = Reflect.get(target, key, receiver) as unknown;
+    if (key !== method || typeof value !== 'function') return value;
+    return async (...args: unknown[]) => {
+      asking += 1;
+      starts.push({ read, asking });
+      try {
+        return await (value as (...args: unknown[]) => Promise<unknown>).apply(target, args);
+      } finally {
+        asking -= 1;
+      }
+    };
+  } });
+  assert.deepEqual(
+    (await sealedPage(watched, { actors: [`user:${ADA}`, `token:${ADA}`], detail: false, limit: 50, instance: false, written: { environmentIds: counted } })).rows.map((row) => row.number - base),
+    [1n, 3n],
+  );
+  assert.equal(starts.length, Math.ceil(2 * project.length / READS_PER_STATEMENT));
+  starts.forEach((start, i) => {
+    // The first two statements' reads are made before either is asked; each later one's, as it is. Ada's account's
+    // reads read the environments once, her tokens' again, so only the first pass tells how far they were read.
+    const made = Math.max(i + 1, 2) * READS_PER_STATEMENT;
+    if (made < project.length) assert.ok(start.read <= made, `statement ${i + 1} started with ${start.read} environments read`);
+    assert.ok(start.asking <= STATEMENTS_AT_ONCE, `statement ${i + 1} asked with ${start.asking} at once`);
+  });
   await run(db.owner, sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
 });
 

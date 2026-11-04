@@ -444,10 +444,13 @@ async function writtenAt(ctx: ApiContext, filter: AuditFilter): Promise<WrittenA
   const projects = [...new Set([...(filter.environmentId === undefined && filter.projectId !== undefined ? [filter.projectId] : []), ...(within?.projectIds ?? [])])];
   const environmentsOf = new Map((projects.length === 0 ? [] : await places(ctx.db, { tombstones: true, within: projects })).map((project) => [project.id, project.environments.map(({ id }) => id)]));
   const at = filter.environmentId !== undefined ? [filter.environmentId] : filter.projectId !== undefined ? environmentsOf.get(filter.projectId) ?? [] : null;
-  const readable = within === undefined ? null : new Set([
-    ...within.projectIds.flatMap((id) => environmentsOf.get(id) ?? []).filter((id) => !(within.except ?? []).includes(id)),
-    ...within.environmentIds,
-  ]);
+  // A set of what is left out, and one environment at a time: a reader's places may be tens of thousands.
+  let readable: Set<string> | null = null;
+  if (within !== undefined) {
+    const except = new Set(within.except ?? []);
+    readable = new Set(within.environmentIds);
+    for (const project of within.projectIds) for (const id of environmentsOf.get(project) ?? []) if (!except.has(id)) readable.add(id);
+  }
   const environmentIds = at === null ? (readable === null ? null : [...readable]) : readable === null ? at : at.filter((id) => readable.has(id));
   if (filter.secretId !== undefined) return environmentIds === null || environmentIds.includes(filter.environmentId!) ? { secretId: filter.secretId } : { environmentIds: [] };
   return environmentIds === null ? { all: true } : { environmentIds };
