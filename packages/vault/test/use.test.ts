@@ -466,12 +466,15 @@ test('no function run as its owner compiles its statements (0029): JIT cost a us
   const fns = await rows<{ fn: string; config: string[] | null }>(db.owner, sql`SELECT oid::regprocedure::text AS fn, proconfig AS config FROM pg_proc
     WHERE pronamespace = 'public'::regnamespace AND prosecdef`);
   assert.ok(fns.some((f) => f.fn.startsWith('use_credential(')), 'use_credential among them');
-  // R69 (Erwin 11-03) forbids planner and JIT overrides: 0064's issue_token, both signatures, sets none, and T207 (#482)
-  // turns this test around for every function. Until then the rest keep theirs, and issue_token alone is held to none.
+  // R69 (Erwin 11-03) forbids planner and JIT overrides: 0064's issue_token, both signatures, and 0067's log_refusal
+  // (T179 PR 6) set none, and T207 (#482) turns this test around for every function. Until then the rest keep theirs,
+  // and those alone are held to none.
   const issue = (f: { fn: string }) => f.fn.startsWith('issue_token(');
-  assert.deepEqual(fns.filter((f) => !issue(f) && !f.config?.includes('jit=off')).map((f) => f.fn), []);
-  assert.deepEqual(fns.filter((f) => issue(f) && f.config?.some((c) => c.startsWith('jit='))).map((f) => f.fn), []);
+  const none = (f: { fn: string }) => issue(f) || f.fn.startsWith('log_refusal(');
+  assert.deepEqual(fns.filter((f) => !none(f) && !f.config?.includes('jit=off')).map((f) => f.fn), []);
+  assert.deepEqual(fns.filter((f) => none(f) && f.config?.some((c) => c.startsWith('jit='))).map((f) => f.fn), []);
   assert.equal(fns.filter(issue).length, 2, 'the old signature and the overload with a passkey');
+  assert.equal(fns.filter((f) => f.fn.startsWith('log_refusal(')).length, 1, 'the refusals\' record');
 });
 
 test('a session\'s first call plans its four statements before it takes the fence (T131)', postgresOnly('the fence'), async () => {
