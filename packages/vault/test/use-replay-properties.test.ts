@@ -7,11 +7,13 @@ import { EVERYWHERE, type CallerKind, type InstanceRole } from '@coffre/core/acc
 import type { Purpose } from '@coffre/core/vault';
 
 import { refreshMs, USE_AHEAD_MS, USE_DEADLINE_MS, type BulkRows } from '../src/bulk.ts';
-import { checkSeals, decideUse, standingRefusal, useEnvironments, type UseCode, type UseRequest, type UseView } from '../src/decide.ts';
+import {
+  checkSeals, credentialEnded, decideUse, standingRefusal, useEnvironments, type CheckedView, type UseCode, type UseRequest, type UseView,
+} from '../src/decide.ts';
 import { limitOp, objectKey, POLICY_REF, ROLES_REF, sealOf, type Input, type Nature, type Op, type Ref } from '../src/inputs.ts';
 import { emptyReplay, readUse, replay } from '../src/log-replay.ts';
 import { propertySettings } from '../../../scripts/property-settings.ts';
-import { SEAL_KEYS, World } from './world.ts';
+import { ask, DEV, market, MINE, SEAL_KEYS, World } from './world.ts';
 
 // The 0.15 plan's PR 3 properties, on random logs over a small instance:
 //
@@ -27,6 +29,8 @@ const settings = propertySettings(200);
 
 const PROJECTS = ['00000000-0000-4000-8000-00000000000a', '00000000-0000-4000-8000-00000000000b'];
 const ENVIRONMENTS = [0, 1, 2, 3, 4, 5].map((n) => `00000000-0000-4000-8000-0000000000e${n}`);
+/** Each environment's project: the even ones top-level, each odd one in its parent's (`environments_parent_in_project`). */
+const projectOf = (environmentId: string) => PROJECTS[Math.floor(ENVIRONMENTS.indexOf(environmentId) / 2) % 2]!;
 const KEYS = [0, 1, 2, 3, 4, 5, 6, 7].map((n) => `00000000-0000-4000-8001-0000000000a${n}`);
 const CREDENTIALS = [0, 1, 2, 3, 4].map((n) => `00000000-0000-4000-8002-0000000000c${n}`);
 const PRINCIPALS = ['user:ada@acme.example', 'user:bo@acme.example', 'token:ci', 'token:deploy'];
@@ -69,7 +73,7 @@ function drawChange(tc: hegel.TestCase): [Ref, Op] {
       // As `secretObject` makes them: a plain value with its text's digest and no key, a reference with neither.
       const plain = !reference && nature === 'plain';
       return [{ kind: 'secret', id: pick(tc, KEYS) }, {
-        op: 'secret.write', projectId: PROJECTS[ENVIRONMENTS.indexOf(environment) % 2]!, environmentId: environment, version: `v${tc.draw(gs.integers({ minValue: 0, maxValue: 99 }))}`,
+        op: 'secret.write', projectId: projectOf(environment), environmentId: environment, version: `v${tc.draw(gs.integers({ minValue: 0, maxValue: 99 }))}`,
         nature, key: reference || plain ? null : WRAPPED, digest: plain ? PLAIN_DIGEST : null, source: reference ? pick(tc, KEYS) : null, reference: reference ? 'r' : null,
       }];
     }
@@ -80,7 +84,7 @@ function drawChange(tc: hegel.TestCase): [Ref, Op] {
       // Even ones are top-level; odd ones forks of the one before, or a personal config.
       const parentId = n % 2 === 1 ? ENVIRONMENTS[n - 1]! : null;
       return [{ kind: 'environment', id }, {
-        op: 'environment.create', projectId: PROJECTS[n % 2]!, slug: pick(tc, ['dev', 'prod', 'fork']),
+        op: 'environment.create', projectId: projectOf(id), slug: pick(tc, ['dev', 'prod', 'fork']),
         owner: parentId !== null && tc.draw(gs.booleans()) ? pick(tc, PRINCIPALS.slice(0, 2)) : null, parentId, protected: tc.draw(gs.booleans()),
       }];
     }
@@ -113,7 +117,7 @@ function drawWorld(tc: hegel.TestCase): { world: World; at: number; decided: Map
   const decided = new Map<UseCode | null, number>();
   world.change(POLICY_REF, limitOp({ count: tc.draw(gs.integers({ minValue: 1, maxValue: 6 })), windowMs: 60_000 }));
   ENVIRONMENTS.forEach((id, n) => world.change({ kind: 'environment', id }, {
-    op: 'environment.create', projectId: PROJECTS[n % 2]!, slug: pick(tc, ['dev', 'prod']), protected: tc.draw(gs.booleans()),
+    op: 'environment.create', projectId: projectOf(id), slug: pick(tc, ['dev', 'prod']), protected: tc.draw(gs.booleans()),
     // Odd ones a fork of the one before, or Ada's personal config of it.
     parentId: n % 2 === 1 ? ENVIRONMENTS[n - 1]! : null, owner: n % 2 === 1 && tc.draw(gs.booleans()) ? PRINCIPALS[0]! : null,
   }));
@@ -128,12 +132,13 @@ function drawWorld(tc: hegel.TestCase): { world: World; at: number; decided: Map
     world.change({ kind: 'credential', id }, { op: 'credential.issue', principal, caller, scope, expiresAt: null, generation: 0 });
   });
   KEYS.forEach((id, n) => {
-    const environmentId = ENVIRONMENTS[n % ENVIRONMENTS.length]!;
     const reference = n === KEYS.length - 1;
+    // The reference in a top-level environment of the other project: a personal config holds none.
+    const environmentId = reference ? ENVIRONMENTS[2]! : ENVIRONMENTS[n % ENVIRONMENTS.length]!;
     const nature = pick(tc, NATURES);
     const plain = !reference && nature === 'plain';
     world.change({ kind: 'secret', id }, {
-      op: 'secret.write', projectId: PROJECTS[(n % ENVIRONMENTS.length) % 2]!, environmentId, version: 'v0', nature,
+      op: 'secret.write', projectId: projectOf(environmentId), environmentId, version: 'v0', nature,
       key: reference || plain ? null : WRAPPED, digest: plain ? PLAIN_DIGEST : null, source: reference ? KEYS[0]! : null, reference: reference ? 'r' : null,
     });
   });
@@ -143,13 +148,41 @@ function drawWorld(tc: hegel.TestCase): { world: World; at: number; decided: Map
     at += tc.draw(gs.integers({ minValue: 0, maxValue: 500 }));
     if (tc.draw(gs.integers({ minValue: 0, maxValue: 2 })) === 0) {
       const [ref, op] = drawChange(tc);
-      world.change(ref, op, at);
+      if (!personalReference(world, op)) world.change(ref, op, at);
     } else {
       const code = world.use(drawRequest(tc, at));
       decided.set(code, (decided.get(code) ?? 0) + 1);
     }
   }
+  assertReachable(world);
   return { world, at, decided };
+}
+
+/**
+ * A reference written in a personal config or to a key held in one, which the app and the vault refuse
+ * (`secrets.ts`, `referenceRefusal`): a key's own environment decides its standing, and a personal config's is
+ * weighed with its parent, which a use reads only through the key's value (`useEnvironments`).
+ */
+function personalReference(world: World, op: Op): boolean {
+  if (op.op !== 'secret.write' || op.source === null) return false;
+  const owned = (environmentId: string | undefined) => {
+    const row = environmentId === undefined ? undefined : world.rows.get(objectKey({ kind: 'environment', id: environmentId }))?.row;
+    return row?.kind === 'environment' && row.owner !== null;
+  };
+  const source = world.rows.get(objectKey({ kind: 'secret', id: op.source }))?.row;
+  return owned(op.environmentId) || owned(source?.kind === 'secret' ? source.environmentId : undefined);
+}
+
+/** The world is one the app can make: each fork in its parent's project, no reference held in a personal config (T213). */
+function assertReachable(world: World): void {
+  const environments = new Map<string, Extract<Input, { kind: 'environment' }>>();
+  for (const { row } of world.rows.values()) if (row.kind === 'environment') environments.set(row.id, row);
+  for (const environment of environments.values()) {
+    if (environment.parentId !== null) assert.equal(environments.get(environment.parentId)?.projectId, environment.projectId, `fork ${environment.id} in its parent's project`);
+  }
+  for (const { row } of world.rows.values()) {
+    if (row.kind === 'secret' && row.source !== null) assert.equal(environments.get(row.environmentId)?.owner ?? null, null, `reference ${row.id} held in a personal config`);
+  }
 }
 
 /** The changes a run makes allow a share of its uses, and refuse others for many reasons: the properties are about something. */
@@ -239,13 +272,41 @@ test(`rows that are not the replay's change a decision only to stale or tampered
   const truth = decideUse(SEAL_KEYS, replayView, request);
   const capOnly = bulkMoved && (live === null || live === 'bulk_limit') && (truth === null || truth === 'bulk_limit');
   if (live !== truth) assert.ok(live === 'stale' || live === 'tampered' || capOnly, `live ${live}, the replay ${truth}`);
-  // The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught. The key's own
-  // only once the caller's standing, which comes first, lets it on (T158, review d5 of #416): a caller it refuses is
-  // refused alike whatever the key's rows, which the log refuses too.
-  const stands = standingRefusal(checkSeals(SEAL_KEYS, replayView, request), request) === null;
-  const weighed = stands ? inputsOf(replayView, request) : standingInputsOf(replayView, request);
+  const weighed = weighedOf(replayView, request);
   if (weighed.some((key) => perturbed.has(key))) assert.ok(live === 'stale' || live === 'tampered', `a weighed input was not the log's, and live answered ${live}`);
 }, settings));
+
+// Seed 2701149061 (review r2 of #492): Ada seeks a key her personal config does not hold. The use reads that config and
+// not its parent (`useEnvironments`), so an edit of the parent, its seal kept, changes nothing; one of a key she holds
+// there, which reads the parent, is caught.
+test('a personal config\'s parent is weighed only when the use reads it', () => {
+  const world = market();
+  const replayed = replay(SEAL_KEYS, world.log, undefined, emptyReplay());
+  const parent = objectKey({ kind: 'environment', id: DEV });
+  const rows = new Map(world.rows);
+  rows.set(parent, { ...rows.get(parent)!, row: edited(rows.get(parent)!.row) });
+  const decide = (on: typeof rows, request: UseRequest) => decideUse(SEAL_KEYS, readUse(on, world.newest, world.limit, new Map(), request), request);
+  const absent = ask(1, 7, { place: MINE });
+  assert.equal(decide(world.rows, absent), decide(rows, absent));
+  assert.ok(!weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), absent), absent).includes(parent));
+  const held = ask(1, 6);
+  assert.equal(decide(world.rows, held), null);
+  assert.equal(decide(rows, held), 'tampered');
+  assert.ok(weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), held), held).includes(parent));
+});
+
+/**
+ * The inputs the replay's decision weighs, in its order: one of them not the replay's is always caught. The key's own
+ * only once the caller's standing, which comes first, lets it on (T158, review d5 of #416): a caller it refuses is
+ * refused alike whatever the key's rows, which the log refuses too. And the standing's own past the credential only
+ * once it reaches (review r1 of D153, formal/Probing.tla's AcceptedFirst): one missing, revoked, ended or of another
+ * generation is the app's 401 whatever anything else reads, roles, policy and the key's row included (T213).
+ */
+function weighedOf(view: UseView, request: UseRequest): string[] {
+  const checked = checkSeals(SEAL_KEYS, view, request);
+  return !reaches(checked, request) ? callerInputsOf(view, request)
+    : standingRefusal(checked, request) === null ? inputsOf(view, request) : standingInputsOf(view, request);
+}
 
 /** An edit around the vault: the row changed, its seal kept. */
 function edited(row: Input): Input {
@@ -263,8 +324,26 @@ function edited(row: Input): Input {
   }
 }
 
-/** The object keys a decision on `view` weighs, in its order. */
-/** The inputs the caller's standing weighs: theirs, the roles, the policy, the key's row, the place where it is held or sought. */
+/** Whether the use's credential reaches at all, as the replay's rows have it: there, and not ended at the request's time. */
+function reaches(view: CheckedView, request: UseRequest): boolean {
+  const credential = view.credential.row;
+  return credential !== null && !credentialEnded(credential, view.principal?.row ?? null, request.at);
+}
+
+/** The inputs that decide whether the credential reaches: its row, and its account's, whose generation it must be. */
+function callerInputsOf(view: UseView, request: UseRequest): string[] {
+  const credential = view.credential.row;
+  return [
+    objectKey({ kind: 'credential', id: request.credential }),
+    ...(credential === null ? [] : [objectKey({ kind: 'principal', id: credential.principal })]),
+  ];
+}
+
+/**
+ * The inputs the caller's standing weighs: theirs, the roles, the policy, the key's row, the place where it is held or
+ * sought, and a personal config's parent when the use read it (`standingParents`): a key absent from the config reads
+ * only the config (T213, review r2 of #492).
+ */
 function standingInputsOf(view: UseView, request: UseRequest): string[] {
   const credential = view.credential.row;
   const stand = view.secret.row === null ? request.place : view.secret.row.environmentId;
@@ -274,10 +353,11 @@ function standingInputsOf(view: UseView, request: UseRequest): string[] {
     ...(credential === null ? [] : [objectKey({ kind: 'principal', id: credential.principal })]),
     objectKey(ROLES_REF), objectKey(POLICY_REF), objectKey({ kind: 'secret', id: request.secretId }),
     ...(stand === null ? [] : [objectKey({ kind: 'environment', id: stand })]),
-    ...(place?.owner != null && place.parentId !== null ? [objectKey({ kind: 'environment', id: place.parentId })] : []),
+    ...(place?.owner != null && place.parentId !== null && view.environments.has(place.parentId) ? [objectKey({ kind: 'environment', id: place.parentId })] : []),
   ];
 }
 
+/** The object keys a decision on `view` weighs, in its order. */
 function inputsOf(view: UseView, request: UseRequest): string[] {
   const credential = view.credential.row;
   const secret = view.secret.row;

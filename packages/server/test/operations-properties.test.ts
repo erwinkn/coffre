@@ -177,6 +177,31 @@ async function scenario(operations: readonly Operation[]) {
   };
   /** Whether ada's instance role reads and writes the environment of this slug. */
   const adaDevelops = (member: Member, slug: Slug) => member === 'ada' && model.role.name === 'developer' && (model.role.only === null || model.role.only === slug);
+  /**
+   * Whether ada holds everything `role` does at the place the grant key
+   * names: by a grant there, or on its project, of that role or developer
+   * (viewer's permissions are developer's, less writing, and the policy
+   * protects no environment), or by her Developer role over it, which
+   * takes in a whole project only unscoped. Archived or not.
+   */
+  function adaHolds(role: Role, key: string): boolean {
+    const atLeast = (held: Role | undefined) => held === 'developer' || held === role;
+    const grants = model.grants.ada;
+    if (key === 'billing:prod') return atLeast(grants.get(key)) || adaDevelops('ada', 'prod');
+    if (key.startsWith('project:')) return atLeast(grants.get(key)) || (model.role.name === 'developer' && model.role.only === null);
+    const environment = model.environments.find((each) => `env:${each.n}` === key)!;
+    return atLeast(grants.get(key)) || atLeast(grants.get(`project:${model.project!.generation}`)) || adaDevelops('ada', environment.slug);
+  }
+  /**
+   * Whether ada, signed in, sets ci up with `role` at `key` without running
+   * the instance, as the setting (everywhere) lets any person: she holds
+   * that role there, and every grant ci holds, which it must hold one of
+   * (it was admitted by the root, not her). `givesService`,
+   * `managesService` (T213).
+   */
+  const adaSetsUpCi = (role: Role, key: string) =>
+    model.active.ada && signedIn('ada') && adaHolds(role, key)
+    && model.grants.ci.size > 0 && [...model.grants.ci].every(([held, heldRole]) => adaHolds(heldRole, held));
   function may(member: Member, environment: Environment | undefined, write = false): boolean {
     if (!model.active[member] || model.project === null || model.project.archived || environment === undefined || environment.archived) return false;
     if (adaDevelops(member, environment.slug)) return true;
@@ -394,18 +419,24 @@ async function scenario(operations: readonly Operation[]) {
       case 'grant':
       case 'revoke':
       case 'grant-as-ada': {
-        // The root grants, or ada, as an instance owner only: her own grants are viewer and developer.
+        // The root grants; or ada, as an Admin, who manages access, or setting a service account up. Never to herself:
+        // an Admin is refused 409, and anyone else lacks grant.manage first (T213).
         const granting = op.kind !== 'revoke';
         const asAda = op.kind === 'grant-as-ada';
+        const herself = asAda && op.member === 'ada';
         const where = grantPath(op);
         const key = grantKey(op);
         const previousRole = key === null ? undefined : model.grants[op.member].get(key);
-        const permitted = model.active[op.member] && key !== null && (!asAda || adaManages());
+        const permitted = model.active[op.member] && key !== null && !herself
+          && (!asAda || adaManages() || adaSetsUpCi(op.role, key));
         const noOp = permitted && (granting ? previousRole === op.role : previousRole === undefined);
         const previous = noOp ? await state() : undefined;
-        // On every project is no place a grant can be: refused before anyone's rights are asked.
+        // On every project is no place a grant can be: refused before anyone's rights are asked. But only of a caller
+        // signed in: ada with no live credential (removed, every one of hers ended) is the app's 401 before it reads the
+        // request (T213).
         const everyProject = op.scope === 'every' || op.scope === 'every-env';
-        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true, everyProject ? 400 : undefined);
+        const status = asAda && !signedIn('ada') ? 401 : everyProject ? 400 : herself && key !== null && adaManages() ? 409 : undefined;
+        const result = await allowed(() => (asAda ? client('ada') : root).access.set(principal(op.member), { [where]: granting ? op.role : null }), permitted, true, status);
         if (result) {
           assert.equal(result.changes[where], noOp ? 'unchanged' : !granting ? 'revoked' : previousRole === undefined ? 'created' : 'updated');
           if (granting) model.grants[op.member].set(key!, op.role);
@@ -626,6 +657,9 @@ test('API operation sequence covers invitation, grants, values, removal, re-admi
     { ...base, kind: 'revoke-token' },
     { ...base, kind: 'remove' },
     { ...base, kind: 'remove' },
+    // Removed, her credentials ended: 401 for whatever she asks, a grant on every project too (T213).
+    { ...base, kind: 'grant-as-ada', scope: 'every' },
+    { ...base, kind: 'grant-as-ada' },
     { ...base, kind: 'invite' },
     { ...base, kind: 'remove', member: 'ci' },
     { ...base, kind: 'invite', member: 'ci' },
@@ -729,6 +763,30 @@ test('API operation sequence covers references: made, read in both projects, rot
     { ...base, kind: 'archive-holder' },
     { ...base, kind: 'break' },
     { ...base, kind: 'archive-holder' },
+  ]);
+});
+
+test('API operation sequence covers a person setting a service account up: what she holds, to one whose every grant she holds', () => {
+  const base: Operation = { kind: 'grant-as-ada', member: 'ci', environment: 'dev', to: 'dev', scope: 'environment', role: 'viewer', value: 'set up', credential: 0 };
+  return scenario([
+    // ci holds market/prod as a developer, which ada does not: she sets nothing up for it, not even where she holds viewer.
+    base,
+    // market gone, ci holds billing/prod alone, as ada does; in the new market she holds nothing yet, then viewer.
+    { ...base, kind: 'retire-project' },
+    { ...base, kind: 'create-project' },
+    { ...base, scope: 'project' },
+    { ...base, kind: 'grant', member: 'ada', scope: 'project' },
+    { ...base, scope: 'project', role: 'developer' },
+    // The shrunk failure of seed 450058576: viewer on market, given as she holds it (T213).
+    { ...base, scope: 'project' },
+    { ...base, kind: 'create-env' },
+    { ...base, role: 'developer' },
+    // A Developer everywhere holds developer everywhere, and gives it.
+    { ...base, kind: 'owner', member: 'ada', scope: 'every' },
+    { ...base, role: 'developer' },
+    // An Admin manages access, but grants herself nothing.
+    { ...base, kind: 'owner', member: 'ada', scope: 'project' },
+    { ...base, member: 'ada', scope: 'project' },
   ]);
 });
 
