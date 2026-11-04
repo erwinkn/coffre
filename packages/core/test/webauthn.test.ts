@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { USER_VERIFICATION } from '@coffre/core/identity';
 import { encodeCbor, FLAGS, SoftAuthenticator, toBase64url, type CborValue, type SoftAlgorithm, type Tweak } from '@coffre/conformance/authenticator';
 
 import {
@@ -12,7 +13,6 @@ import {
   type PasskeyAlgorithm,
   type RegistrationExpectation,
   type StoredPasskey,
-  USER_VERIFICATION,
 } from '../src/identity/webauthn.ts';
 
 // docs/design/passkeys.md, sections 7.2 and 9: the W3C's vectors and
