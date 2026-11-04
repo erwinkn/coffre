@@ -10,7 +10,20 @@ EXTENDS Factor
    one, a removal or an Owner's reset. *)
 
 FactorProcs == {"iss", "old", "chg"}
-Op(kind) == [kind |-> kind]
-FactorOps == [p \in FactorProcs |-> IF p = "chg" THEN {Op("first"), Op("remove"), Op("reset")} ELSE {Op("issue")}]
+Op(kind) == [kind |-> kind, cred |-> None]
+Changing == {Op("first"), Op("remove"), Op("reset")}
+FactorOps == [p \in FactorProcs |-> IF p = "chg" THEN Changing ELSE {Op("issue")}]
+
+-----------------------------------------------------------------------------
+(* FactorApp: the app issues on Ada's session (an MCP connection, a token
+   the vault leaves to it), and the previous release's app signs her in
+   during the rollout, while a change to her passkeys runs; a request asks
+   with what either issued (T176 PR 4). *)
+
+FactorAppProcs == {"app", "prev", "chg", "req"}
+FactorAppOps == [p \in FactorAppProcs |->
+    CASE p = "chg" -> Changing
+      [] p = "req" -> {[kind |-> "use", cred |-> "s"], [kind |-> "use", cred |-> "o"]}
+      [] OTHER -> {Op("issue")}]
 
 =============================================================================

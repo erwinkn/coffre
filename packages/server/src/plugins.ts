@@ -613,6 +613,7 @@ async function workloadIdentity(
       credentialId: standing.kind === 'session' ? caller.credentialId : null,
       bindingId: standing.kind === 'binding' ? binding.id : null,
       credentialExpiresAt: row?.expiresAt.toISOString() ?? null,
+      passkeyId: null,
       provenance: caller.credentialId,
       personalToken: null,
       handlePlaces: null,

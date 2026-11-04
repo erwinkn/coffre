@@ -314,6 +314,8 @@ async function call(
     sourceIp,
     credentialId: null,
     credentialExpiresAt: null,
+    // What it issues carries the connection's passkey, as a session's does its own (passkeys.md, section 6.3).
+    passkeyId: connection.passkeyId,
     provenance: connection.id,
     personalToken: null,
     handlePlaces: null,

@@ -55,3 +55,16 @@ test('signin checks its options where they are written, and resolves against the
   assert.throws(() => signin({ providers, cliSessionDays: 400 }), /cliSessionDays must be a number above 0 and at most 365/);
   assert.throws(() => auth.resolve('http://secrets.acme.example'), /the public URL must use HTTPS/);
 });
+
+test('signin passes its passkey policy on, optional unless set (passkeys.md, section 2; review r1 of #497)', () => {
+  const providers = [github({ clientId: 'id', clientSecret: 'secret' })];
+  const policy = (auth: ReturnType<typeof signin>) => {
+    const resolved = auth.resolve('https://secrets.acme.example');
+    return resolved.mode === 'signin' ? resolved.signin.passkeys.policy : null;
+  };
+  assert.equal(policy(signin({ providers })), 'optional');
+  assert.equal(policy(signin({ providers, passkeys: 'required' })), 'required');
+  assert.equal(policy(signin({ providers, passkeys: 'off' })), 'off');
+  // @ts-expect-error: what a deployment's JavaScript could pass
+  assert.throws(() => signin({ providers, passkeys: 'always' }), /passkeys is one of 'off', 'optional', 'required'/);
+});

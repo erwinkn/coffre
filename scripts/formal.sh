@@ -152,6 +152,12 @@ REMOVALS=(
   "Factor ChangeTakesFactor ChangeEndsAll"
   "Factor FactorFirst NoWaitCycle"
   "Factor IssueChecksPasskey NamesItsSource"
+  # The app's own issues (T176 PR 4): the head orders them against a change, which takes it after the factor lock; each
+  # checks its source and the passkey rule under it; and every request refuses what the previous release issued past it.
+  "FactorApp ChangeTakesHead ChangeEndsAll"
+  "FactorApp AppIssueChecks IssuedBacked"
+  "FactorApp AppIssueChecks LiveFromLive"
+  "FactorApp RequestChecks ServedBacked"
   "Bulk BulkRecountUnderHead CapHolds"
   "Bulk CountsTheRequest CapHolds"
   "Bulk PerPrincipal CapHolds"

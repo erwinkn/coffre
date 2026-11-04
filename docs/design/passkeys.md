@@ -5,8 +5,9 @@ Written on 2026-10-31, phase 1 of T176: the design and a mock of its screens
 building it for 0.16 on 2026-11-03; section 14's PRs land in order, and
 he answered section 15's questions on 2026-11-03 (D170), which this
 document now follows. Built so far: the verifier (PR 1, section 9), the
-storage (PR 2, section 5), and the vault's issue under the factor lock
-(PR 3, section 6.3).
+storage (PR 2, section 5), the vault's issue under the factor lock
+(PR 3, section 6.3), and what holds a credential to its passkey, at every
+request and every issue (PR 4a, sections 6.1, 6.2 and 6.4).
 
 Erwin's decisions, from a team request on 2026-10-31:
 
@@ -858,9 +859,26 @@ entries for what it ends are prepared before the transaction
 (`AppChanges.prepare`), since no app transaction stays open across a vault
 call, and the transaction re-reads under the lock what to end, and retries
 if that is not what it prepared. Within it the factor lock comes first,
-before the audit head and any row, as in the vault's issue: an app
-transaction that issues takes it in the same place, so no two transactions
-take the head and the factor lock in opposite orders (`FactorFirst`).
+then the log's head (`audited` takes it before any row), then the rows.
+
+**The app's own issues take the head, not the factor lock** (PR 4a). Every
+app transaction takes the log's head first, a sign-in's, a poll's, an MCP
+consent's and the app's path for a token alike, and a change takes it
+right after the factor lock, so the head is what orders an app issue
+against a change: one commits before the other reads. The factor lock is
+for the vault's issue, which takes no head. `formal/Factor.tla`'s
+`FactorApp` scenario shows it: without the change taking the head, a
+sign-in that commits between the change's read and its commit is missed
+(`ChangeEndsAll`), and no app issue needs the factor lock for any
+invariant. An earlier draft of this paragraph had every app issue take the
+factor lock before the head too; that bought nothing but a second lock in
+every sign-in. Under the head each app issue checks its source live and
+the passkey rule (`AppIssueChecks`): a sign-in by the provider alone is
+refused (`passkey_required`) to a person who holds a live passkey, a poll
+redeems an approval only while its passkey is live (or, naming none, while
+the person holds none), and an MCP consent or a token issued on the app's
+path only while the session it comes from still stands behind it
+(`sourceStands`).
 
 That leaves no way back for a credential no passkey stands behind. Bob's
 terminal from before the first passkey was revoked when Bob added it, and
@@ -900,6 +918,68 @@ client is made again by its person.
 With 6.1, the check refuses what the revocations have already ended; it is
 there for what no change marks: sessions made before the deployment turned
 `required` on, and sessions made while `off` for a person who has a passkey.
+
+**As built (PR 4a).** `passkeyStands` in `packages/server/src/passkey-check.ts`
+is the table above, for browser and CLI sessions and personal tokens
+(`passkeyChecked`); handles, services' credentials and workload sessions
+are not checked. The statement that reads the credential
+(`credentialRow`, every variant: a request's, `GET /api/me`'s with the
+vault's rows, a page's) joins the passkey it names by its primary key and
+asks `EXISTS` of `passkeys_live_idx`. The passkey's MAC is checked by
+`passkeyStands`, on the one branch whose answer reads the row, so a row
+changed around the app refuses the credential it backs as any tampered row
+does (`401 unauthenticated`), and refuses nothing the check exempts: a
+service's token issued from that session, or any credential under `off`
+(review r1 of #497). An MCP connection's read
+(`findConnection`) does the same, for every call through it, its code and
+its refreshes. `formal/Factor.tla`'s `RequestChecks` is this check:
+without it, the previous release's sign-in during a rollout serves a
+session no passkey stands behind (`ServedBacked`).
+
+Three kinds of request read their credential in the vault's own call
+rather than the app's statement, and the vault answers nothing of
+passkeys: a use by name, one key or several (`useByName`, `useManyByName`),
+a key write (`writeAhead`, T179) and a member's add (`admitAhead`). For a
+person's credential, with passkeys not `off`, each runs the check as one
+statement of its own (`passkeyByToken`: the credential by its token's hash,
+the passkey it names and the person's, nothing of what the request asks).
+A use by name runs it before the vault's call (section 6.4); a key write
+and an add, whose first call releases nothing and writes nothing that
+commits without the app's transaction, run it beside that call, on the
+request's own client, so it costs a statement and no time. Refused, or
+unanswered (a passkey row that fails its MAC, a read that fails), the
+request goes today's path, as one the vault does not serve does, and is
+answered as any request is (`401`, `503`), never from the check itself: its
+credential check, the app's statement, refuses it `401 passkey_required`
+before the route's transaction, so nothing is written in either log, and
+what the vault prepared is dropped. A try the vault's read refused (T179
+PR 6, a Developer's member add) goes the same way: the passkey's `401`
+answers it, as on today's path, whose credential check comes before the
+route's, and the vault's refusal is never recorded, its ticket left to
+expire (`passkey-check.test.ts` holds both paths, the fast one served on
+Postgres, and the refusal unrecorded). Each is one
+round trip more on the request's side: `key set` 1 to 2, `member added`
+0 to 1, and their refusals' 0 to 1 in `change-cost.test.ts`, and a person's reveal one statement before
+its use in `proxy-use-cost.test.ts`. Teaching the vault's statements the
+check would save it, through `accepts` as `named-use.ts` asks of any new
+check; that is a task of its own.
+
+What a request issues names its credential's passkey, copied, never its
+touch (`confirmed_at` null): personal tokens, handles and service tokens,
+on the vault's path (which holds `via` to it, section 6.3) and the app's;
+an MCP connection, the consenting session's (5.2). What a connection
+issues (a service token through `issue_service_token`, or its person's
+personal token) names the connection's passkey, and goes the app's way:
+the vault holds `via` to a credential, which a connection is not, and
+refused a passkey with no `via` as a programming error. Under the head,
+`sourceStands` reads the connection as it reads a session, live and its
+passkey with it, and the issue's recheck (`#currentCaller`, or the
+service token's own) refuses one whose passkey has gone
+(`mcp-oauth.test.ts`; review of #497 by Fable 5.1). Until PR 5's device
+ceremony asks a touch per code, a device approval copies the approving
+session's passkey too, and the CLI session its poll redeems names it with
+no `confirmed_at`: a terminal approved by a confirmed browser keeps working
+for a person who holds a passkey, and is not fresh.
 
 ### 6.3 Handles
 
@@ -964,7 +1044,10 @@ resolves the key before it decides on the caller.
 
 So the named path stays, for people too, and the passkey check goes before
 it: for a person's credential, while passkeys are not `off`, the app runs
-the check of 6.2 in one statement before the vault call. The statement
+the check of 6.2 in one statement before the vault call, for one key and
+for several (`passkeyAhead`, which `named-use.ts` calls). Refused, the request goes
+the ordinary way, whose credential check refuses it `401 passkey_required`
+with the same statement, before anything reads the key. The statement
 reads the credential and the person's passkeys, nothing about the key, so
 a refusal says nothing about the key and costs the same whatever was
 asked. A passkey removed between that statement and the vault's call

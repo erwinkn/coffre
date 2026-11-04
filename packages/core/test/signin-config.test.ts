@@ -219,6 +219,8 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       cliSessionDays: 30,
       workloads: null,
       mcp: null,
+      // Passkeys default to `optional` (docs/design/passkeys.md, section 2).
+      passkeys: { policy: 'optional' },
     },
   );
 });

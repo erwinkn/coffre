@@ -1391,6 +1391,8 @@ export async function findCredential(
   const stands = binding === null ? null : await standingBinding(db, chainKey, binding, row.credential.principal, row.credential.generation);
   return {
     ...row.credential,
+    /** What stands behind it, read with it (`passkeyOf`): undefined when the row came from a read that did not (`app_read`, the vault's). */
+    passkeyRead: passkeyOf(row),
     /** For a credential a trust binding issued: whether that binding still stands. Null for any other. */
     bindingStands: binding === null ? null : stands !== null,
     /** Its scope, as stored: its own, or for one a binding issued, the binding's. */
@@ -1410,19 +1412,87 @@ export async function findCredential(
 }
 
 function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) => SQL, shown: 'answer' | 'settings' | null = null) {
-  const { credentials, identities } = tablesOf(db);
+  const { credentials, identities, passkeys } = tablesOf(db);
   // The newest policy change, as `newestPolicySeq` reads it on its own.
   const newestPolicy = sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`;
   return db
     .select({
       credential: credentials, identity: identities, now: clock(db), policySeq: newestPolicy,
+      // The passkey it names, by its primary key, and whether its person holds a live one (section 6.2 of passkeys.md).
+      passkey: passkeys, passkeyHeld: heldSql(sql`${credentials.principal}`, sql`${credentials.generation}`),
       ...(shown === 'answer' ? { answer: sql<unknown>`(${answerQuery(db, sql`${credentials.principal}`)})` } : {}),
       ...(shown === 'settings' ? { settings: sql<string | null>`(${settingsQuery()})` } : {}),
     })
     .from(credentials)
     .leftJoin(identities, eq(identities.id, credentials.identityId))
+    .leftJoin(passkeys, eq(passkeys.id, credentials.passkeyId))
     .where(by(credentials));
 }
+
+/**
+ * Whether a person holds a live passkey at a generation: one probe of `passkeys_live_idx`, which most often finds none.
+ * Written out, not through drizzle's table, so that a statement that also joins `passkeys` (`credentialRow`) keeps the two
+ * apart.
+ */
+function heldSql(principal: SQL, generation: SQL): SQL<boolean> {
+  return truth(sql`EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal} AND held.generation = ${generation} AND held.removed_at IS NULL)`);
+}
+
+/**
+ * What would stand behind a credential an issue makes (passkeys.md, section 6.1), read under the log's head as the
+ * request's check reads its own (`credentialRow`): the passkey it would name, by id (its MAC the check's), and whether
+ * `principal` holds a live passkey at `generation`. One statement.
+ */
+export async function passkeyBehind(db: Queryable, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<PasskeyRead> {
+  const { passkeys } = tablesOf(db);
+  const [row] = await db
+    .select({ passkey: passkeys, passkeyHeld: heldSql(sql`${holder.principal}`, sql`${holder.generation}`), now: clock(db) })
+    .from(sql`(SELECT 1) one`)
+    .leftJoin(passkeys, holder.passkeyId === null ? sql`1 = 0` : eq(passkeys.id, holder.passkeyId));
+  return passkeyOf(row!)!;
+}
+
+export type PasskeyRow = Tables['passkeys']['$inferSelect'];
+
+/**
+ * What a credential or MCP connection needs behind it (docs/design/passkeys.md, section 6.2), read in the statement that
+ * reads it: the passkey it names, null for none; and whether its person holds a live passkey. The passkey's MAC is not
+ * checked here but by the check, where its answer depends on the row (`passkeyStands`): a credential the check passes
+ * over (a service's, a handle, any under `off`) never fails on a passkey it does not need (review r1 of #497).
+ */
+export type PasskeyRead = { passkey: PasskeyRow | null; held: boolean };
+
+/** The passkey read with a row (`credentialRow`, `findConnection`), unchecked (`PasskeyRead`); undefined for a row read without it. */
+function passkeyOf(row: { passkey?: PasskeyRow | null; passkeyHeld?: boolean }): PasskeyRead | undefined {
+  if (row.passkeyHeld === undefined) return undefined;
+  return { passkey: row.passkey ?? null, held: row.passkeyHeld };
+}
+
+/**
+ * What stands behind the credential a token is, on its own: for the requests whose credential the vault reads in its own
+ * call (a named use, a key write, an admit), which answers no passkey (section 6.4). It reads the credential, its
+ * passkey and the person's, nothing about what the request asks for, so that what it answers says nothing of that. Null
+ * for no such credential.
+ */
+export async function passkeyByToken(db: Queryable, tokenHash: Buffer): Promise<(PasskeyRead & { holder: PasskeyHolder }) | null> {
+  const [row] = await passkeyStatement(db, { tokenHash });
+  return row === undefined ? null : { ...passkeyOf(row)!, holder: row.holder };
+}
+
+/** Whose credential `passkeyByToken` read: what the check decides on (`passkeyStands`). Its MAC is the vault's call's to answer, and the app's to check after. */
+export type PasskeyHolder = { kind: string; principal: string; generation: number; passkeyId: string | null };
+
+const passkeyStatement = prepared((db) => {
+  const { credentials, passkeys } = tablesOf(db);
+  return db
+    .select({
+      holder: { kind: credentials.kind, principal: credentials.principal, generation: credentials.generation, passkeyId: credentials.passkeyId },
+      passkey: passkeys, passkeyHeld: heldSql(sql`${credentials.principal}`, sql`${credentials.generation}`), now: clock(db),
+    })
+    .from(credentials)
+    .leftJoin(passkeys, eq(passkeys.id, credentials.passkeyId))
+    .where(eq(credentials.tokenHash, sql.placeholder('tokenHash')));
+});
 
 /** A credential as `findCredential` reads it: its row, its sign-in account's, the database's clock, and the newest policy change. */
 export type CredentialRead = {
@@ -1432,6 +1502,9 @@ export type CredentialRead = {
   policySeq: string | number | null;
   answer?: unknown;
   settings?: string | null;
+  /** The passkey it names and whether its person holds one, when the read had them (`credentialRow`); not `app_read`'s, nor the vault's. */
+  passkey?: PasskeyRow | null;
+  passkeyHeld?: boolean;
 };
 
 // Every request's credential, by its token's hash: built once (`prepared`).
@@ -2250,7 +2323,7 @@ export async function findConnection(
   db: Queryable,
   chainKey: Buffer,
   by: { id: string } | { codeHash: Buffer } | { refreshHash: Buffer },
-): Promise<(ConnectionRow & { previous: boolean; now: Date }) | null> {
+): Promise<(ConnectionRow & { previous: boolean; now: Date; passkeyRead: PasskeyRead }) | null> {
   const { mcpConnections } = tablesOf(db);
   const where =
     'id' in by
@@ -2258,11 +2331,21 @@ export async function findConnection(
       : 'codeHash' in by
         ? eq(mcpConnections.codeHash, by.codeHash)
         : or(eq(mcpConnections.refreshHash, by.refreshHash), eq(mcpConnections.refreshPreviousHash, by.refreshHash));
-  const [row] = await db.select({ connection: mcpConnections, now: clockMillis(db) }).from(mcpConnections).where(where).limit(1);
+  const { passkeys } = tablesOf(db);
+  const [row] = await db
+    .select({
+      connection: mcpConnections, now: clockMillis(db),
+      // What stands behind it, as for a credential (`credentialRow`): every use through it holds it (section 6.2).
+      passkey: passkeys, passkeyHeld: heldSql(sql`${mcpConnections.principal}`, sql`${mcpConnections.generation}`),
+    })
+    .from(mcpConnections)
+    .leftJoin(passkeys, eq(passkeys.id, mcpConnections.passkeyId))
+    .where(where)
+    .limit(1);
   if (row === undefined) return null;
   verifyAuthRow(chainKey, 'mcp_connections', row.connection);
   const previous = 'refreshHash' in by && row.connection.refreshHash?.equals(by.refreshHash) !== true;
-  return { ...row.connection, previous, now: new Date(row.now) };
+  return { ...row.connection, previous, now: new Date(row.now), passkeyRead: passkeyOf(row)! };
 }
 
 /**

@@ -59,8 +59,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   built: [`formal/Routing.tla`](../formal/Routing.tla), where a key may go
   when its route is a row an Owner edits ([below](#routingtla)).
 - One holds 0.16's passkeys: [`formal/Factor.tla`](../formal/Factor.tla),
-  a person's factor lock, which every issue of theirs and every change to
-  their passkeys takes ([below](#factortla)).
+  a person's factor lock, which the vault's issues and every change to
+  their passkeys take, the log's head, which orders the app's own issues
+  against a change, and the check of every request ([below](#factortla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -2694,10 +2695,24 @@ wait, READ COMMITTED:
 - `old`, the previous release's vault during a rollout, calling the same
   statement through its old signature, which carries no passkey: `h2`;
 - `chg`, a change to Ada's passkeys, the app's transaction (PR 4): the
-  factor lock, the read of her live credentials, then for each one it ends
-  the member's row exclusive and the credential's, and the new session it
-  issues to the browser that touched, `n`. Her first passkey when she had
-  none, a removal of `pa` keeping `pb`, or an Owner's reset.
+  factor lock, the log's head (`audited`), the read of her live
+  credentials, then for each one it ends the member's row exclusive and the
+  credential's, and the new session it issues to the browser that touched,
+  `n`. Her first passkey when she had none, a removal of `pa` keeping `pb`,
+  or an Owner's reset.
+
+`FactorApp` (PR 4a) puts the app's side beside the change instead:
+
+- `app`, the app's own issue on `cA` (an MCP connection, a token the vault
+  leaves to the app), carrying its passkey: the log's head, as every
+  `audited` transaction takes it first, and no factor lock; under the head,
+  `cA` checked live and backed (the passkey it names live, or none while
+  Ada holds none), then the insert of `s`;
+- `prev`, the previous release's app signing Ada in during a rollout, or
+  any app while the policy is `off`: the head, and `o`, naming no passkey,
+  with no rule;
+- `req`, a request with `s` or `o`, its one statement reading the row, the
+  passkey it names and whether Ada holds a live one.
 
 | Protection | Turned off, TLC finds |
 |---|---|
@@ -2705,29 +2720,45 @@ wait, READ COMMITTED:
 | A change takes it before it reads what to end (`ChangeTakesFactor`) | `ChangeEndsAll`, the same interleaving from the other side |
 | `issue_token` takes it first, before the members' rows (`FactorFirst`) | `NoWaitCycle`: the issue holds Ada's member row shared and waits for the factor lock, which the change holds while it waits for her member row exclusive |
 | `issue_token` goes ahead only while `cA` names the passkey the issue carries (`IssueChecksPasskey`) | `NamesItsSource`: the previous release's vault issues `h2` naming no passkey from a session `pa` confirmed |
+| A change takes the log's head before it reads what to end (`ChangeTakesHead`; `FactorApp`) | `ChangeEndsAll`: the first passkey's change reads Ada's credentials, `prev` takes the head and commits `o`, the change commits with `o` live |
+| The app's issue checks its source and the passkey rule under the head (`AppIssueChecks`; `FactorApp`) | `IssuedBacked`: `s` committed naming none after Ada's first passkey; and `LiveFromLive`: `s` issued from `cA` after a removal revoked it |
+| Every request holds its credential to a live passkey, or to none while its person holds none (`RequestChecks`; `FactorApp`) | `ServedBacked`: a request served on `o`, which the previous release issued after Ada's first passkey |
 
 **The invariants.** `ChangeEndsAll`: once a change commits, every
 credential of Ada's its rule names is revoked but the session it issued.
 `LiveFromLive`: no credential stays live once the one it was issued on is
 ended. `NamesItsSource`: what either vault issues names `cA`'s passkey.
 `NoWaitCycle`: no two or three processes wait on each other in a circle,
-which Postgres would end with a deadlock.
+which Postgres would end with a deadlock. `IssuedBacked`: every live
+credential the new release issued has a live passkey behind it, or names
+none while Ada holds none; only the previous release's `o` is exempt.
+`ServedBacked`: no request is served on a credential no live passkey stands
+behind, whoever issued it.
+
+No app issue takes the factor lock, and no invariant needs it to: the head
+orders it against a change, which takes the head right after the factor
+lock, and the vault's issue, which takes no head, is what the factor lock
+is for. So the app adds no lock order: the change's factor-then-head is
+the only one that names both, and nothing takes them the other way.
 
 | Scenario | What | Distinct states |
 |---|---|---|
-| `Factor` | the vault issues Ada a handle, and the previous release's vault another, while her first passkey is added, one removed or all reset | 368 |
+| `Factor` | the vault issues Ada a handle, and the previous release's vault another, while her first passkey is added, one removed or all reset | 395 |
+| `FactorApp` | the app issues on Ada's session, and the previous release's app signs her in, while a change to her passkeys runs; a request asks with either | 1,536 |
 
 **What it does not cover.** The checks `issue_token` made before (the
 issuer and account's standing, the policy, `via`'s seal and end), which
 Lifecycle.tla and Issuing.tla hold. The passkey's own liveness, which the
 statement checks too but which a removal makes moot by revoking `cA` under
-the lock. The app's own issues (a browser session at sign-in, a CLI session
-at its poll, an MCP connection, a device decision), which take the same
-lock in PR 4 and are held there by tests on both engines. SQLite, whose one
-writer serializes the change and the issue whole, so the interleaving
-cannot happen. The per-request check (section 6.2), which refuses a
-credential no passkey confirmed once its person has one, whatever this
-lock did.
+the lock. Each of the app's issues as a process of its own: `app` stands
+for them all (a browser session at sign-in, a CLI session at its poll, an
+MCP connection, a device decision), whose checks under the head are held
+by tests on both engines (`passkey-check.test.ts`, `mcp-oauth.test.ts`).
+The requests whose credential the vault reads in its own call (a use by
+name, a key write, an add), which run the check as a statement of their
+own (passkeys.md, section 6.2): `req` is one statement either way. SQLite,
+whose one writer serializes the change and every issue whole, so the
+interleavings cannot happen.
 
 ## TLC
 

@@ -49,6 +49,8 @@ export type ApiContext = {
   sourceIp: string | null;
   /** The coffre credential that authenticated this request, in signin mode. */
   credentialId: string | null;
+  /** The passkey that credential names (`AuthenticatedIdentity.passkeyId`), which what the request issues carries; null for none. */
+  passkeyId: string | null;
   /** The Cloudflare service binding a call came through, which stands in for a credential (`AuthenticatedIdentity.bindingId`). */
   bindingId?: string | null;
   /** Signed in by Cloudflare Access, with no row of coffre's (`AuthenticatedIdentity.access`). */

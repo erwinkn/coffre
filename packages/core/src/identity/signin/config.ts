@@ -74,7 +74,22 @@ export type SigninConfig = {
   workloads: WorkloadsConfig | null;
   /** MCP clients acting as the people who connect them, when on (docs/design/mcp.md). */
   mcp: McpConfig | null;
+  /** Passkeys, a second factor after the provider (docs/design/passkeys.md): the policy, `optional` unless set. */
+  passkeys: PasskeysConfig;
 };
+
+/**
+ * Whether people need a passkey on top of the provider (docs/design/passkeys.md, section 2):
+ *
+ * - `off`: the provider alone, as before passkeys; the rows stay, and turning them back on restores everyone's.
+ * - `optional`: the provider, then a passkey for whoever has one; the risky acts need one.
+ * - `required`: the provider, then a passkey, for everyone.
+ */
+export type PasskeyPolicy = 'off' | 'optional' | 'required';
+
+export const PASSKEY_POLICIES: readonly PasskeyPolicy[] = ['off', 'optional', 'required'];
+
+export type PasskeysConfig = { policy: PasskeyPolicy };
 
 /**
  * Workload identity: CI runs that sign in as a service with the ID token
@@ -380,6 +395,8 @@ export function defineSignin(options: {
   cliSessionDays?: number;
   workloads?: WorkloadsOptions;
   mcp?: McpOptions;
+  /** The passkey policy, `optional` unless set (section 2 of docs/design/passkeys.md). */
+  passkeys?: PasskeyPolicy;
 }): SigninConfig {
   if (options.providers.length === 0) {
     throw new Error('sign-in needs at least one provider');
@@ -401,7 +418,14 @@ export function defineSignin(options: {
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
     workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads, publicOrigin(options.publicUrl)),
     mcp: options.mcp === undefined ? null : mcpConfig(options.mcp, publicOrigin(options.publicUrl)),
+    passkeys: { policy: passkeyPolicy(options.passkeys) },
   };
+}
+
+function passkeyPolicy(value: PasskeyPolicy | undefined): PasskeyPolicy {
+  if (value === undefined) return 'optional';
+  if (!PASSKEY_POLICIES.includes(value)) throw new Error(`passkeys is one of ${PASSKEY_POLICIES.map((policy) => `'${policy}'`).join(', ')}`);
+  return value;
 }
 
 /** MCP, checked: its three limits given, each one a limiter; loopback clients only on a loopback instance. */

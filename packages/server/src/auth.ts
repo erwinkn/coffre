@@ -9,9 +9,10 @@ import { ApiError } from './api/errors.ts';
 import type { McpVia } from './api/context.ts';
 import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken, type Touch } from './api/signin.ts';
 import { answerShown, policySeqAndSettings, shownActive, type Shows } from './db/answers.ts';
-import type { CredentialRead } from './db/queries.ts';
+import type { CredentialRead, PasskeyRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
+import { passkeyRequired, PasskeyRequired } from './passkey-check.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { dpopToken, SessionRefused, sessionScope, standingSession, type StandingSession } from './workload-sessions.ts';
 
@@ -26,6 +27,11 @@ export type AuthenticatedIdentity = {
   credentialId: string | null;
   /** When that credential ends, ISO 8601; null without one. */
   credentialExpiresAt: string | null;
+  /**
+   * The passkey that credential names, which the check of every request held live (docs/design/passkeys.md, section
+   * 6.2): what the request issues carries it (section 6.3). Null for none, and for anything but a person's credential.
+   */
+  passkeyId: string | null;
   /** That credential, when a trust binding issued it for a CI run, or it is a personal token: every entry the request writes names it. */
   provenance: string | null;
   /** The personal token the request came in on, which acts as its person within its scope; null for anything else. */
@@ -188,7 +194,11 @@ export async function authenticateRequest(
    * `standing`: the caller as the vault's named use decided them (`Vault.useNamed`, T145): nothing asked or kept.
    * `at`: the instant that use was asked at, at which its credential's expiry is judged, as the vault judged it (one clock).
    */
-  options: { handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number; touch?: (touched: Touch) => void } = {},
+  options: {
+    handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number; touch?: (touched: Touch) => void;
+    /** What stands behind the credential, read on its own before the vault's call that read it (`passkeyByToken`): a named use's, a key write's. */
+    passkey?: PasskeyRead | null;
+  } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
   const kind = tokenKind(token);
@@ -213,11 +223,13 @@ export async function authenticateRequest(
   // The newest policy change before the vault is asked: the policy it answers with is this one or newer (`policyStill`).
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
+  let passkeyId: string | null = null;
   try {
     const asked = {
       sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }),
       ...(options.at === undefined ? {} : { at: options.at }),
       ...(options.touch === undefined ? {} : { touch: options.touch }),
+      ...(options.passkey === undefined ? {} : { passkey: options.passkey }),
     };
     // Only coffre's own credentials are read ahead: Access's verifier reads none.
     const verifying = options.ahead !== undefined && runtime.verifier instanceof SigninService
@@ -236,12 +248,15 @@ export async function authenticateRequest(
       handlePlaces?: readonly HandlePlace[] | null;
       expiresAt?: string;
       policySeq?: bigint | null;
+      passkeyId?: string | null;
     };
-    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, recalled = null, unchecked, settings, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, ...principal } = verified);
+    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, recalled = null, unchecked, settings, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, passkeyId = null, ...principal } = verified);
   } catch (error) {
     // The vault on another release, for a deploy's seconds: nothing was checked, and nobody is signed out.
     const deploying = deployingIn(error);
     if (deploying !== null) return errorResponse(deploying);
+    // Live, but no live passkey stands behind it (section 6.2 of passkeys.md): 401, to touch one, not a sign-out's.
+    if (error instanceof PasskeyRequired) return passkeyRequired(error, requestId);
     // Only a credential checked and refused is a sign-out; one that could not be checked is an outage.
     if (error instanceof CredentialUncheckable) {
       // Logged with what failed, the database or the vault, as below.
@@ -284,6 +299,7 @@ export async function authenticateRequest(
       sourceIp,
       credentialId,
       credentialExpiresAt,
+      passkeyId,
       provenance: exchanged || personalToken !== null || handle ? credentialId : null,
       personalToken,
       handlePlaces,
@@ -342,6 +358,7 @@ async function authenticateWorkload(
       sourceIp,
       credentialId: row.id,
       credentialExpiresAt: row.expiresAt.toISOString(),
+      passkeyId: null,
       provenance: row.id,
       personalToken: null,
       handlePlaces: null,

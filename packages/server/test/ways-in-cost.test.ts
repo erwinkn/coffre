@@ -140,7 +140,7 @@ async function asDev(runtime: CoffreRuntime, way: Pick<AuthenticatedIdentity, 'v
   const caller = callerFrom(principal, await vault.access(`user:${DEV}`), await newestPolicySeq(runtime.db));
   return async () => ({
     principal: { ...principal, email: DEV, subject: DEV }, registered: true, caller, requestId: randomUUID(), sourceIp: null,
-    credentialId: null, credentialExpiresAt: null, personalToken: null, handlePlaces: null, ...way,
+    credentialId: null, credentialExpiresAt: null, passkeyId: null, personalToken: null, handlePlaces: null, ...way,
   });
 }
 
