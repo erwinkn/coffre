@@ -154,6 +154,8 @@ export type SavedAuthenticator = {
   userHandle: string | null;
   privateKey: string;
   publicKey: string;
+  /** The counter it last signed with, which the next signature moves past: a copy elsewhere (a browser's) carries it on. */
+  signCount?: number;
 };
 
 export class SoftAuthenticator {
@@ -195,6 +197,7 @@ export class SoftAuthenticator {
       userHandle: this.userHandle === null ? null : toBase64url(this.userHandle),
       privateKey: toBase64url(new Uint8Array(await crypto.subtle.exportKey('pkcs8', this.keys.privateKey))),
       publicKey: toBase64url(new Uint8Array(await crypto.subtle.exportKey('spki', this.keys.publicKey))),
+      signCount: this.#count,
     };
   }
 
@@ -210,6 +213,7 @@ export class SoftAuthenticator {
     } as CryptoKeyPair;
     const restored = new SoftAuthenticator(saved.algorithm, keys, { synced: saved.synced, aaguid: bytes(saved.aaguid), credentialId: bytes(saved.credentialId) });
     restored.userHandle = saved.userHandle === null ? null : bytes(saved.userHandle);
+    restored.#count = saved.signCount ?? 0;
     return restored;
   }
 

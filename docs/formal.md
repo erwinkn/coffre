@@ -61,7 +61,8 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
 - One holds 0.16's passkeys: [`formal/Factor.tla`](../formal/Factor.tla),
   a person's factor lock, which the vault's issues and every change to
   their passkeys take, the log's head, which orders the app's own issues
-  against a change, and the check of every request ([below](#factortla)).
+  against a change, the check of every request, and the sign-in's decision
+  whether a person adds a passkey first ([below](#factortla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -2736,6 +2737,19 @@ wait, READ COMMITTED:
 - `req`, a request with `s` or `o`, its one statement reading the row, the
   passkey it names and whether Ada holds a live one.
 
+`FactorSignin` (PR 4b, review r1 of #500) is the callback's decision whether
+a person adds a passkey before any session, under `optional`, for Ada, a
+Developer with no passkey:
+
+- `sgn`, the sign-in: one read of her access's sequence (`signinMembers`),
+  then the vault's answer, which decides (an Owner of the whole instance
+  adds a passkey first, and no session is made); else the head, and under
+  it the sequence read again (`#stillMember`), which, moved, sends the
+  sign-in back to decide again from the reads; then a session the provider
+  alone signed in;
+- `pro`, an Owner promoting her: the vault's change under the head, which
+  moves her sequence.
+
 | Protection | Turned off, TLC finds |
 |---|---|
 | `issue_token` takes the issuer's factor lock (`IssueTakesFactor`) | `ChangeEndsAll`: the removal reads `cA` alone, `h1` commits, the removal revokes `cA` and commits with `h1` live; and `LiveFromLive` |
@@ -2745,6 +2759,7 @@ wait, READ COMMITTED:
 | A change takes the log's head before it reads what to end (`ChangeTakesHead`; `FactorApp`) | `ChangeEndsAll`: the first passkey's change reads Ada's credentials, `prev` takes the head and commits `o`, the change commits with `o` live |
 | The app's issue checks its source and the passkey rule under the head (`AppIssueChecks`; `FactorApp`) | `IssuedBacked`: `s` committed naming none after Ada's first passkey; and `LiveFromLive`: `s` issued from `cA` after a removal revoked it |
 | Every request holds its credential to a live passkey, or to none while its person holds none (`RequestChecks`; `FactorApp`) | `ServedBacked`: a request served on `o`, which the previous release issued after Ada's first passkey |
+| The sign-in holds the vault's answer to the access sequence it read, under the head (`SigninHoldsAccess`; `FactorSignin`) | `OwnersEnroll`: the vault answers that Ada is a Developer, `pro` promotes her and commits, `sgn` takes the head and commits a session the provider alone signed in, for an Owner |
 
 **The invariants.** `ChangeEndsAll`: once a change commits, every
 credential of Ada's its rule names is revoked but the session it issued.
@@ -2755,7 +2770,9 @@ which Postgres would end with a deadlock. `IssuedBacked`: every live
 credential the new release issued has a live passkey behind it, or names
 none while Ada holds none; only the previous release's `o` is exempt.
 `ServedBacked`: no request is served on a credential no live passkey stands
-behind, whoever issued it.
+behind, whoever issued it. `OwnersEnroll`: no session the provider alone
+signed in is committed for someone who is an Owner of the whole instance
+when it commits, whatever role they held when the callback read them.
 
 No app issue takes the factor lock, and no invariant needs it to: the head
 orders it against a change, which takes the head right after the factor
@@ -2767,6 +2784,7 @@ the only one that names both, and nothing takes them the other way.
 |---|---|---|
 | `Factor` | the vault issues Ada a handle, and the previous release's vault another, while her first passkey is added, one removed or all reset | 395 |
 | `FactorApp` | the app issues on Ada's session, and the previous release's app signs her in, while a change to her passkeys runs; a request asks with either | 1,536 |
+| `FactorSignin` | Ada, a Developer with no passkey, signs in at the callback under `optional` while an Owner promotes her | 34 |
 
 **What it does not cover.** The checks `issue_token` made before (the
 issuer and account's standing, the policy, `via`'s seal and end), which

@@ -7,6 +7,7 @@ import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import type { SignedInAccount, SigninResult } from './api/signin.ts';
 import { CEREMONY_TTL_SECONDS } from './api/ceremony.ts';
+import { API_BODY_BYTES } from './api/router.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
   accessTokenForRequest,
@@ -464,27 +465,32 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
     return step === null ? nothing() : jsonResponse(step, 200, { 'cache-control': 'no-store' });
   }
 
+  // Who may be answering, before a byte of the body is read: a browser holding a session, for a step-up, or one whose
+  // passkey cookie opens, which only a person the provider vouched for within five minutes holds (section 3.1).
+  const token = readCookie(request, sessionCookieName(auth));
+  const state = signin.ceremonies.open(readCookie(request, passkeyCookieName(auth)), ['signin', 'enroll']);
+  const clear = clearCookieHeader(auth, passkeyCookieName(auth));
+  const meta = { requestId: crypto.randomUUID(), sourceIp, label: describeUserAgent(request.headers.get('user-agent')) };
+  const refused = (reason: string, cookies: string[] = []) => withCookies(jsonResponse({ error: reason }, PASSKEY_REFUSED[reason] ?? 400), cookies);
+  if (state === null && token === null) return refused('state_mismatch', [clear]);
+
   let body: { response: unknown; state?: string };
   try {
-    body = passkeyAnswer.parse(await readLimitedJson(request, PASSKEY_BODY_BYTES)) as typeof body;
+    // A control-plane request's body, read to the one bound the API reads every body to (R70).
+    body = passkeyAnswer.parse(await readLimitedJson(request, API_BODY_BYTES)) as typeof body;
   } catch (error) {
     return errorResponse(error);
   }
-  const meta = { requestId: crypto.randomUUID(), sourceIp, label: describeUserAgent(request.headers.get('user-agent')) };
-  const refused = (reason: string, cookies: string[] = []) => withCookies(jsonResponse({ error: reason }, PASSKEY_REFUSED[reason] ?? 400), cookies);
   const answered = async (result: SigninResult, next: string, cookies: string[]) => {
     if (result.ok !== true) return refused(result.reason, cookies);
     return withCookies(jsonResponse({ next }), [...cookies, ...(await signedInCookies(request, runtime, result, meta))]);
   };
 
   if (body.state !== undefined) {
-    const token = readCookie(request, sessionCookieName(auth));
-    const state = signin.ceremonies.open(body.state, ['step-up']);
-    if (token === null || state === null) return refused('session_ended');
-    return answered(await signin.stepUp(body.state, token, body.response, meta), state.next, []);
+    const stepUp = signin.ceremonies.open(body.state, ['step-up']);
+    if (token === null || stepUp === null) return refused('session_ended');
+    return answered(await signin.stepUp(body.state, token, body.response, meta), stepUp.next, []);
   }
-  const state = signin.ceremonies.open(readCookie(request, passkeyCookieName(auth)), ['signin', 'enroll']);
-  const clear = clearCookieHeader(auth, passkeyCookieName(auth));
   if (state === null) return refused('state_mismatch', [clear]);
   const result = await signin.finishPasskey(state, body.response, meta);
   // A passkey that did not answer may be tried again, another one too, while the sign-in lasts; anything else starts over.
@@ -497,12 +503,6 @@ function withCookies(response: Response, cookies: readonly string[]): Response {
   return response;
 }
 
-/**
- * A passkey's answer is a few kilobytes at most: an RSA key's registration, its attestation statement included. The
- * verifier bounds each field (`@coffre/core/identity`'s WebAuthn); this, the body they come in, is sized as they are:
- * to what one request may make the server hold, which no protocol or platform sets (open under R70).
- */
-const PASSKEY_BODY_BYTES = 64 * 1024;
 /** The step-up's state is the server's own seal, which `open` checks; the body's size bounds its length. */
 const passkeyAnswer = z.object({ response: z.record(z.string(), z.unknown()), state: z.string().optional() }).strict();
 

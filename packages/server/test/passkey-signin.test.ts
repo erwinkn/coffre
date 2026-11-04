@@ -7,16 +7,17 @@
 // it came in on.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 import { SoftAuthenticator, type Tweak } from '@coffre/conformance/authenticator';
 import { defineSignin, SigninError, type PasskeysOptions, type SigninProvider } from '@coffre/core/identity';
+import type { Vault } from '@coffre/core/vault';
 import { and, eq, isNull } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, deviceAuthorizations, identities, passkeys, vaultMembers } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 
@@ -24,11 +25,14 @@ const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 /** An Owner the deployment names whom no sign-in has admitted yet. */
 const NAMED = 'named@acme.example';
+/** An Owner a later configuration names, whom no vault has declared yet. */
+const LATER = 'later@acme.example';
 const ADA = 'ada@acme.example';
 const BOB = 'bob@acme.example';
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
+let kek: Buffer;
 
 before(async () => {
   db = await openTestDatabase();
@@ -40,7 +44,9 @@ after(async () => {
 
 beforeEach(async () => {
   await resetDatabase(db.owner);
-  deps = testDeps(db.runtime, [ROOT, NAMED]);
+  // NAMED: an Owner the deployment's configuration names beside ROOT, whom the vault declares as it starts (R3).
+  kek = randomBytes(32);
+  deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], { owners: [ROOT, NAMED] }, { kek }) });
   const root = clientFor(deps, ROOT);
   await root.members.add(`user:${ADA}`, { role: 'developer' });
   await root.members.add(`user:${BOB}`, { role: 'owner' });
@@ -63,11 +69,11 @@ function provider(issuer = 'https://idp.acme.example'): SigninProvider {
 }
 
 /** The deployment under `passkeys`: its runtime, which answers coffre's own routes. */
-function deployment(passkeys: PasskeysOptions, issuer?: string) {
+function deployment(passkeys: PasskeysOptions, issuer?: string, vault: Vault = deps.vault) {
   const config = defineSignin({ publicUrl: ORIGIN, providers: [provider(issuer)], passkeys });
-  const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: config });
+  const signin = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault, signin: config });
   return {
-    db: deps.db, vault: deps.vault, chainKey: deps.chainKey, previousChainKeys: [], signin, workloads: null, mcp: null,
+    db: deps.db, vault, chainKey: deps.chainKey, previousChainKeys: [], signin, workloads: null, mcp: null,
     auth: { mode: 'signin', signin: config }, publicUrl: ORIGIN, verifier: signin, waitUntil,
     schema: { migrated: true }, appKey: { settled: true }, rotateAfterDays: 365, plugins: [],
   } as unknown as CoffreRuntime;
@@ -193,14 +199,29 @@ test('under optional, a Developer with no passkey signs in by the provider alone
 });
 
 test("an Owner the deployment names, never admitted, passes the provider and stops: the callback writes nothing, the vault's members included; the passkey's answer admits and enrolls them, and they sign in again with it (sections 3.1, 13.22, 13.27)", async () => {
-  const runtime = deployment('required');
+  // The deployment names LATER too, now: a vault of that configuration, over the same database and keys, which
+  // declares them as it starts (R3). On a cold isolate the callback reads the members beside the vault's first call,
+  // whose start lands after: here, its `about`, which settles it, answered as the configuration says without it, and
+  // the vault started by the post's own call. Held first (review r1 of #500): named, and no row of theirs.
+  const later = testVault([ROOT], { owners: [ROOT, NAMED, LATER] }, { kek });
+  const cold = new Proxy(later, {
+    get(target, key) {
+      if (key === 'about') return async () => ({ ...(await deps.vault.about()), owners: [ROOT, NAMED, LATER] });
+      return Reflect.get(target, key, target);
+    },
+  });
+  const runtime = deployment('required', undefined, cold);
+  assert.ok((await cold.about()).owners?.includes(LATER), 'the deployment names them an Owner');
+  assert.deepEqual(await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${LATER}`)), [], 'no row of theirs');
   const before = await counts();
   const browser = new Browser(runtime);
-  assert.equal(await browser.provider(NAMED), '/auth/passkey');
+  assert.equal(await browser.provider(LATER), '/auth/passkey');
+  const sealed = runtime.signin!.ceremonies.open(browser.jar.get('__Host-coffre_passkey') ?? null, ['signin', 'enroll']);
+  assert.equal(sealed?.generation, null, 'the step names no generation: none is theirs yet');
   const step = await browser.step();
   assert.equal(step.status, 200);
   assert.equal(step.body.purpose, 'enroll');
-  assert.equal(step.body.email, NAMED);
+  assert.equal(step.body.email, LATER);
   assert.equal(step.body.options.rp.id, 'secrets.acme.example');
   assert.equal(step.body.options.authenticatorSelection.userVerification, 'required');
   assert.deepEqual(step.body.options.pubKeyCredParams.map(({ alg }: { alg: number }) => alg), [-8, -7, -257]);
@@ -212,7 +233,7 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   assert.equal(browser.jar.has('__Host-coffre_passkey'), false, 'the pending cookie is cleared');
   assert.equal(await me(browser), 'ok');
   const session = await sessionRow(browser);
-  const [added] = await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${NAMED}`));
+  const [added] = await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${LATER}`));
   assert.equal(session.passkeyId, added!.id);
   assert.ok(session.confirmedAt !== null, 'a touch confirmed it');
   assert.equal(Buffer.from(added!.userHandle).toString('base64url'), step.body.options.user.id, 'the handle create() was given is the row\'s');
@@ -220,7 +241,7 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   for (const action of ['account.link', 'passkey.add', 'sign_in']) assert.ok(actions.includes(action), action);
 
   // Again, with the passkey added there.
-  const again = await touch(runtime, NAMED, key);
+  const again = await touch(runtime, LATER, key);
   assert.equal(await me(again), 'ok');
   assert.equal((await sessionRow(again)).passkeyId, added!.id);
 });
@@ -372,4 +393,48 @@ test('nothing to ask: no pending sign-in, or a step-up for a session whose perso
   assert.deepEqual(await browser.step('?step-up=1'), { status: 404, body: { error: 'state_mismatch', message: 'this sign-in expired or was finished elsewhere: sign in again' } });
   const cross = await coffreRoute(new Request(`${ORIGIN}/api/auth/passkey`, { method: 'POST', headers: { origin: 'https://evil.example', 'content-type': 'application/json' }, body: '{"response":{}}' }), runtime, null);
   assert.equal(cross!.status, 403, 'an answer comes from coffre\'s own page');
+});
+
+test("a person promoted to an Owner of the whole instance between the callback's answer and its sign-in is asked for a first passkey, not signed in by the provider alone (section 2; review r1 of #500)", async () => {
+  const root = clientFor(deps, ROOT);
+  // The vault answers about Ada, a Developer, then she is promoted, before the sign-in's transaction.
+  let promoted = false;
+  const racing = new Proxy(deps.vault, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'access') return value;
+      return async (principal: string) => {
+        const answer = await (value as Vault['access']).call(target, principal);
+        if (principal === `user:${ADA}` && !promoted) {
+          promoted = true;
+          await root.members.add(`user:${ADA}`, { role: 'owner' });
+        }
+        return answer;
+      };
+    },
+  });
+  const browser = new Browser(deployment('optional', undefined, racing));
+  assert.equal(await browser.provider(ADA), '/auth/passkey', 'decided again on the answer that is hers now');
+  assert.ok(promoted);
+  assert.equal(browser.session, undefined);
+  assert.equal((await browser.step()).body.purpose, 'enroll');
+  assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, `user:${ADA}`)), [], 'nothing issued');
+});
+
+test("a new passkey whose credential ID is another person's already is refused as a passkey that did not answer, not a database error (section 3.2; review r1 of #500)", async () => {
+  const runtime = deployment('required');
+  const key = await SoftAuthenticator.create('ES256');
+  await enroll(runtime, NAMED, key);
+  const browser = new Browser(runtime);
+  assert.equal(await browser.provider(BOB), '/auth/passkey');
+  const step = await browser.step();
+  // The same authenticator's credential, answering Bob's create(): its ID the one NAMED's passkey has.
+  const taken = await browser.answer({ response: await register(key, step.body.options) });
+  assert.deepEqual(taken, { status: 401, body: { error: 'passkey_failed' } });
+  assert.ok(browser.jar.has('__Host-coffre_passkey'), 'another passkey may be tried while the sign-in lasts');
+  assert.equal(browser.session, undefined);
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${BOB}`))).length, 0);
+  const other = await SoftAuthenticator.create('Ed25519');
+  const done = await browser.answer({ response: await register(other, (await browser.step()).body.options) });
+  assert.deepEqual(done, { status: 200, body: { next: '/projects/market' } });
 });

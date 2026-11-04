@@ -21,17 +21,24 @@ function cookiesOf(response) {
 /**
  * The software passkeys of the people this browser signs in, by email (docs/design/passkeys.md, section 7.1): kept in
  * `file` when given, so that another process signs them in again (the restore drill's two halves) and a browser's
- * virtual authenticator can take one (`dev/passkey.mjs`). Synced passkeys, whose counter stays 0, so that any copy
- * signs in. Throwaway keys, for a local stack only.
+ * virtual authenticator can take one (`dev/passkey.mjs`). Each with its counter, which every signature moves and the
+ * file keeps, read again before each use: Chrome's virtual authenticator counts up whatever it is given, so a key it
+ * also signs with goes on from Chrome's count, never back to an older one, which coffre refuses (section 7.3).
+ * Throwaway keys, for a local stack only.
  */
 function passkeyStore(file) {
-    const saved = file !== undefined && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+    let saved = {};
+    const read = () => {
+        if (file !== undefined && existsSync(file)) saved = JSON.parse(readFileSync(file, 'utf8'));
+        return saved;
+    };
     return {
         async get(email) {
-            return saved[email] === undefined ? null : SoftAuthenticator.restore(saved[email]);
+            const key = read()[email];
+            return key === undefined ? null : SoftAuthenticator.restore(key);
         },
         async put(email, key) {
-            saved[email] = await key.save();
+            read()[email] = await key.save();
             if (file === undefined) return;
             mkdirSync(dirname(file), { recursive: true });
             writeFileSync(file, `${JSON.stringify(saved, null, 2)}\n`, { mode: 0o600 });
@@ -87,13 +94,15 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
         const ceremony = { rpId: new URL(site).hostname, origin: new URL(site).origin, challenge: new Uint8Array(Buffer.from(options.challenge, 'base64url')) };
         let response;
         if (purpose === 'enroll') {
-            const key = await SoftAuthenticator.create('ES256', { synced: true });
+            const key = await SoftAuthenticator.create('ES256');
             response = await key.register({ ...ceremony, userHandle: new Uint8Array(Buffer.from(options.user.id, 'base64url')) });
             await keys.put(email, key);
         } else {
             const key = await keys.get(email);
             if (key === null) throw new Error(`${email} holds a passkey this browser does not: start the stack over, or sign in as someone else`);
             response = await key.assert(ceremony);
+            // Its counter moved: kept, for the next signature, here or in a browser.
+            await keys.put(email, key);
         }
         const answered = await fetch(`${api}/api/auth/passkey`, {
             method: 'POST',

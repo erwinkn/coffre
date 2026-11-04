@@ -262,22 +262,43 @@ cookie and says where to go (`{ next }`); a passkey that did not answer
 leaves the sign-in to try again, with another passkey too, and any other
 refusal clears the cookie. The cookie's value names its purpose, whose key
 opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
-callback's reads (`SigninService.afterProvider`) are the identity, the
-vault's answer about the person, unless the deployment names them an
-Owner (asking would admit them; their member row is read instead), and
-one statement of their passkeys, live and ever (`passkeyCounts`): a few
-reads where step 2 says one, none of them a write. The post's checks are
-in `finishPasskey`, then `completeSignin`'s transaction with the touch
-(`touchPasskey`) or the first passkey (below) in it. `passkey-signin.test.ts`
-holds the flows, on both engines, through the deployment's routes, with
-the software authenticator. The sealed cookie carries the provider's name
-whole; a profile that makes it longer than the 4,096 bytes a browser must
-keep (RFC 6265, section 6.1), which it would drop unsaid, ends the sign-in
-with `profile_too_long` instead. The bounds on the answer's fields are the
-verifier's, each from the spec or the algorithms coffre takes where one sets
-it (credential ID, user handle, signature); the body's size and the fields
-the spec leaves open (client data, authenticator data, the attestation
-object) have no such source yet, and are listed open in PR 4b's notes.
+callback's reads (`SigninService.afterProvider`) are step 2's, in one round
+trip: the identity (`findIdentity`) and, beside it, one statement of the
+members its account may be (`signinMembers`: the one its identity names and
+one per verified email, each with its status, generation, passkeys ever and
+live, and the vault's newest entry about its access, `access_seq`). The
+Owners the deployment names come with the vault's capabilities, asked once
+per isolate (`deploymentOwners`), never about a person, which would admit
+them. The vault's answer about the person is asked only where those rows
+leave the step undecided, a person with no passkey under `optional`, whose
+role decides: and that answer is the sign-in's own, which the callback
+completes with, reading and asking nothing again. Its transaction holds the
+answer to the access it was read at, as `issuerStill` holds an issue: read
+again under the head, an `access_seq` that moved (Ada promoted to Owner
+between the answer and the commit) decides the step again, from the reads,
+and Ada adds a passkey first; no count bounds that loop, each turn of which
+waits on another change of hers (R70). Against today's sign-in for the same
+Developer, `signin-cost.test.ts` holds the callback to its vault calls and its
+statements plus the one members' read. The post's checks are in
+`finishPasskey`, then `completeSignin`'s transaction with the touch
+(`touchPasskey`) or the first passkey (below) in it; a first passkey whose
+credential ID a passkey already has, anyone's, is refused as a passkey that
+did not answer (`passkey_failed`), the unique index the one place that
+decides it. `passkey-signin.test.ts` holds the flows, on both engines,
+through the deployment's routes, with the software authenticator, an
+Owner the configuration names whose row the vault's start has not written
+yet included. The sealed cookie carries the provider's name whole; a
+profile that makes it longer than the 4,096 bytes a browser must keep (RFC
+6265, section 6.1), which it would drop unsaid, ends the sign-in with
+`profile_too_long` instead. Every bound on the answer has a source (R70):
+the credential ID's and the user handle's are the spec's, the signature's
+the longest key coffre takes (RSA of 4,096 bits); the fields the spec
+leaves open, the client data, the authenticator data and the attestation
+object, have none of their own, and the request they come in is read to
+the bound the API reads every control-plane body to (`API_BODY_BYTES`),
+once the cookie it must carry has opened. Their CBOR is read with a list of
+what is open, not the call stack, so however deep it nests it costs no
+stack (RFC 8949, section 10), and needs no depth limit.
 
 ### 3.2 The first sign-in under `required`
 
@@ -1193,9 +1214,15 @@ credential", which the check above needs.
   keeps the keys it adds in a file of the stack's state, and `node
   dev/passkey.mjs <DevTools WebSocket URL>` hands the Owner's to a Chrome
   as a virtual authenticator while it runs (`agent-browser cdp-url` gives
-  one); `COFFRE_DEV_PASSKEYS=off` is the dev IdP alone. The restore drill
-  and conformance run at `localhost` too, each with its own software
-  authenticator.
+  one); `COFFRE_DEV_PASSKEYS=off` is the dev IdP alone. A key in the file
+  keeps its counter, which each signature moves: Chrome's virtual
+  authenticator counts up from the one it is given and the helper writes
+  Chrome's back after each touch (`WebAuthn.credentialAsserted`), so the
+  seed's browser, the next run of the helper and Chrome go on from one
+  count, never back to an older one, which section 7.3 refuses (a synced
+  key's counter, always 0, did, once Chrome had signed with it). The
+  restore drill and conformance run at `localhost` too, each with its own
+  software authenticator.
 
 ### 7.2 What each response must hold
 

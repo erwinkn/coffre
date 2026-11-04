@@ -34,6 +34,8 @@ import {
   findCredential,
   findDeviceAuthorizations,
   findIdentity,
+  passkeyCredentialTaken,
+  signinMembers,
   insert,
   members,
   memberOf,
@@ -69,7 +71,7 @@ import { CeremonyStates, challenge, creationOptions, requestOptions, responseCre
 import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
-import { AppChanges, COFFRE_ACTOR, connectionRevokes, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
+import { AppChanges, COFFRE_ACTOR, connectionRevokes, deploymentOwners, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
@@ -474,18 +476,24 @@ export class SigninService {
     return this.#signedIn(profile, meta, null);
   }
 
-  async #signedIn(profile: SignedInAccount, meta: ClientMeta, factor: Factor | null): Promise<SigninResult> {
+  async #signedIn(profile: SignedInAccount, meta: ClientMeta, factor: Factor | null, known?: Known): Promise<SigninResult> {
     try {
-      return await this.#completeSignin(profile, meta, factor);
+      return await this.#completeSignin(profile, meta, factor, known);
     } catch (error) {
       if (error instanceof SigninRefused) return refusal(error);
-      // Someone else bound this account first.
-      if (isUniqueViolation(error)) return this.#completeSignin(profile, meta, factor).catch(refusalOrThrow);
-      throw error;
+      if (!isUniqueViolation(error)) throw error;
+      // A new passkey whose credential ID a passkey already has, anyone's: refused as a passkey that did not answer,
+      // the unique index the one place that decides it, a race included (review r1 of #500).
+      if (factor?.kind === 'enroll' && (await passkeyCredentialTaken(this.#deps.db, factor.row.credentialId))) {
+        return passkeyRefused(meta, factor.state.principal, 'passkey_failed', 'its credential ID is a passkey\'s already');
+      }
+      // Someone else bound this account first: from the callback, decided again from what is there now.
+      if (known !== undefined) throw new AccessMoved();
+      return this.#completeSignin(profile, meta, factor).catch(refusalOrThrow);
     }
   }
 
-  async #completeSignin(profile: SignedInAccount, meta: ClientMeta, factor: Factor | null): Promise<SigninResult> {
+  async #completeSignin(profile: SignedInAccount, meta: ClientMeta, factor: Factor | null, known?: Known): Promise<SigninResult> {
     const claimed = profile.emails[0] ?? `${profile.provider}:${profile.subject}`;
     const base = {
       actorType: 'user' as const,
@@ -505,14 +513,23 @@ export class SigninService {
     const issuerHash = this.#issuerHash(profile.provider);
     if (issuerHash === null) throw new SigninRefused('not_registered');
     return withRefusals(this.#deps, async () => {
-      const previous = await findIdentity(this.#deps.db, this.#deps.chainKey, { ...profile, issuerHash });
-      const match = previous === null ? await this.#principalForEmails(profile.emails) : null;
-      if (previous === null && match === null) throw refuse('not_registered');
+      // What the callback read and resolved, when it did, not read or asked again (review r1 of #500).
+      const previous = known !== undefined ? known.previous : await findIdentity(this.#deps.db, this.#deps.chainKey, { ...profile, issuerHash });
+      const match = previous !== null ? null
+        : known === undefined ? await this.#principalForEmails(profile.emails)
+          : known.person === null ? null
+            : { ...known.person, access: await this.#standing({ type: 'user', id: known.person.id }) };
+      if (previous === null && (match === null || match.access.status === 'unknown')) throw refuse('not_registered');
       const preparedId = previous === null ? match!.id : memberOf(previous.principal).id;
       const principal = { type: 'user' as const, id: preparedId };
       const standing = match?.access ?? await this.#standing(principal);
       if (standing.status === 'tampered') throw refuse('tampered', preparedId);
       if (standing.status !== 'active') throw refuse('deactivated', preparedId);
+      // From the callback, the one thing it left to the vault's answer: an Owner of the whole instance adds a passkey
+      // before any session (section 2). The transaction holds the answer to the access it was read at, below.
+      if (known !== undefined && factor === null && ownsInstance(standing) && (previous === null || previous.generation === standing.generation)) {
+        throw new StepWanted(standing);
+      }
       // The passkey step was for this person, at this generation; an Owner the deployment names, admitted just now by
       // the vault's answer above, at the one it answered (passkeys.md, section 3.1).
       if (factor !== null && (factor.state.principal !== principalOf(principal) || (factor.state.generation ?? standing.generation) !== standing.generation)) {
@@ -536,7 +553,7 @@ export class SigninService {
         // holds a live passkey, while the policy is not `off`, and a touch only with a passkey still live (passkeys.md,
         // section 6.1); a first passkey only while it is still the first (section 3.2). Asked together, one round trip.
         const [member, backed] = await Promise.all([
-          this.#stillMember(tx, principal, standing),
+          this.#stillMember(tx, principal, standing, known?.accessSeq),
           factor?.kind === 'enroll'
             ? passkeyCounts(tx, principalOf(principal), standing.generation).then(({ ever, live }) => ever === factor.state.passkeysEver && live === 0)
             : this.#issuedBacked(tx, { principal: principalOf(principal), generation: standing.generation, passkeyId }),
@@ -675,64 +692,65 @@ export class SigninService {
    * A step is wanted, unless passkeys are `off`, from a person who holds a live passkey (`signin`); and from one who
    * holds none under `required`, or under `optional` an Owner of the whole instance or one the deployment names, who add
    * one before any session exists (`enroll`, sections 2 and 3.2).
+   *
+   * Its reads are one round trip, the identity and the members it may be with their passkeys (`signinMembers`), and
+   * the vault's answer only where they leave the step undecided: a person with no passkey under `optional`, whose
+   * role decides. That answer is the sign-in's own, which it completes with, and its transaction holds it to the
+   * access it was read at; moved meanwhile, the step is decided again (review r1 of #500).
    */
   async afterProvider(profile: SignedInAccount, meta: ClientMeta, next: string): Promise<SigninResult | { ok: 'passkey'; state: PendingFactor }> {
     const policy = this.config.passkeys.policy;
     const issuerHash = this.#issuerHash(profile.provider);
     if (policy === 'off' || issuerHash === null) return this.completeSignin(profile, meta);
-    const owners = new Set((await this.#deps.vault.about()).owners ?? []);
-    const bound = await findIdentity(this.#deps.db, this.#deps.chainKey, { ...profile, issuerHash });
-    let person: { id: string; email: string | null; access: Access | null } | null = null;
-    if (bound !== null) {
-      person = { id: memberOf(bound.principal).id, email: profile.emails[0] ?? null, access: null };
-    } else {
-      // The emails in the order `#principalForEmails` tries them, asking the vault of none it would admit.
-      for (const email of profile.emails) {
-        if (owners.has(email)) {
-          person = { id: email, email, access: null };
-          break;
-        }
-        const access = await this.#standing({ type: 'user', id: email });
-        if (access.status !== 'unknown') {
-          person = { id: email, email, access };
-          break;
-        }
+    // Again, each time the person's access moved between the reads and the transaction: another change of theirs
+    // committed meanwhile, so it ends when those do, with no count of its own (R70).
+    for (;;) {
+      try {
+        return await this.#afterProvider(profile, meta, next, policy, issuerHash);
+      } catch (error) {
+        if (!(error instanceof AccessMoved)) throw error;
       }
     }
-    // Nobody, or nobody active: today's sign-in says why, as it does without passkeys.
-    if (person === null) return this.completeSignin(profile, meta);
-    const principal = principalOf({ type: 'user', id: person.id });
-    const named = owners.has(person.id);
-    let generation: number | null;
-    let ownsAll: boolean;
-    if (named) {
-      // Their row as the vault last committed it, if any: asking the vault would make them an Owner now.
-      const row = await memberStanding(this.#deps.db, principal);
-      generation = row?.status === 'active' ? row.generation : null;
-      ownsAll = true;
-    } else {
-      const access = person.access ?? (await this.#standing({ type: 'user', id: person.id }));
-      if (access.status !== 'active') return this.completeSignin(profile, meta);
-      generation = access.generation;
-      ownsAll = ownsInstance(access);
-    }
-    if (bound !== null && generation !== null && bound.generation !== generation) return this.completeSignin(profile, meta);
-    const { ever, live } = await passkeyCounts(this.#deps.db, principal, generation ?? -1);
-    const purpose = live > 0 ? 'signin' : policy === 'required' || ownsAll ? 'enroll' : null;
-    if (purpose === null) return this.completeSignin(profile, meta);
-    return {
-      ok: 'passkey',
+  }
+
+  async #afterProvider(profile: SignedInAccount, meta: ClientMeta, next: string, policy: 'optional' | 'required', issuerHash: string): Promise<SigninResult | { ok: 'passkey'; state: PendingFactor }> {
+    const account = { ...profile, issuerHash };
+    const [owners, previous, members] = await Promise.all([
+      deploymentOwners(this.#deps.vault).then((named) => new Set(named)),
+      findIdentity(this.#deps.db, this.#deps.chainKey, account),
+      signinMembers(this.#deps.db, account, profile.emails),
+    ]);
+    // The person: the live identity's, or the first verified email that the deployment names an Owner or the vault
+    // holds a row of, in the order `#principalForEmails` asks the vault about them. Nobody: today's sign-in says why.
+    const id = previous !== null ? memberOf(previous.principal).id : profile.emails.find((email) => owners.has(email) || members.has(`user:${email}`)) ?? null;
+    if (id === null) return this.#signedIn(profile, meta, null, { previous, person: null, accessSeq: null });
+    const principal = principalOf({ type: 'user', id });
+    const row = members.get(principal);
+    const active = row?.status === 'active' && (previous === null || previous.generation === row.generation) ? row : null;
+    const step = (purpose: 'signin' | 'enroll', generation: number | null) => ({
+      ok: 'passkey' as const,
       state: {
         purpose,
-        account: { provider: profile.provider, issuerHash, subject: profile.subject, email: person.email, name: profile.name ?? null },
+        account: { provider: profile.provider, issuerHash, subject: profile.subject, email: previous === null ? id : (profile.emails[0] ?? null), name: profile.name ?? null },
         principal,
         generation,
         next,
         ...challenge(),
         userHandle: purpose === 'enroll' ? userHandle() : null,
-        passkeysEver: purpose === 'enroll' ? ever : null,
+        // Removed ones included, every generation's (`passkeyCounts`): the post adds the first only while it is still this.
+        passkeysEver: purpose === 'enroll' ? (row?.ever ?? 0) : null,
       },
-    };
+    });
+    if (active !== null && active.live > 0) return step('signin', active.generation);
+    // An Owner the deployment names, admitted or not: their row as the vault last committed it, if any.
+    if (owners.has(id)) return step('enroll', active?.generation ?? null);
+    if (active !== null && policy === 'required') return step('enroll', active.generation);
+    try {
+      return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null, accessSeq: row?.accessSeq ?? null });
+    } catch (error) {
+      if (error instanceof StepWanted) return step('enroll', error.access.generation);
+      throw error;
+    }
   }
 
   /**
@@ -969,10 +987,15 @@ export class SigninService {
    * one under way waits for this transaction. What is issued carries the
    * generation it was issued under; a later removal moves past it, and it
    * stops working, whatever its own row says.
+   *
+   * With `accessSeq`, the vault's newest entry about their access as the callback read it, before the vault answered:
+   * moved since (a role, a grant, a scope), the callback's decision whether to ask for a passkey first was made on an
+   * answer no longer theirs, and it decides again (`AccessMoved`; review r1 of #500), as `issuerStill` holds an issue.
    */
-  async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access): Promise<boolean> {
+  async #stillMember(tx: Transaction, principal: PrincipalRef, standing: Access, accessSeq?: bigint | null): Promise<boolean> {
     if (standing.status !== 'active') return false;
     const row = await memberStanding(tx, principalOf(principal));
+    if (accessSeq !== undefined && (row?.accessSeq ?? null) !== accessSeq) throw new AccessMoved();
     return row !== null && row.generation === standing.generation && row.status === 'active';
   }
 
@@ -1992,6 +2015,31 @@ type Factor =
 export type PasskeyStep =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestOptionsJSON }
   | { purpose: 'enroll'; email: string; options: CreationOptionsJSON };
+
+/** What the callback read and resolved, for the sign-in it completes (`#afterProvider`). */
+type Known = {
+  previous: Awaited<ReturnType<typeof findIdentity>>;
+  /** The member a first sign-in binds, by the verified email that matched: the vault is asked about them alone. */
+  person: { id: string; email: string } | null;
+  /** The vault's newest entry about their access, read before it answered (`signinMembers`); null for no row. */
+  accessSeq: bigint | null;
+};
+
+/** The person's access moved between the callback's reads and its transaction: decided again, from the reads. */
+class AccessMoved extends Error {
+  constructor() {
+    super("the person's access changed while they signed in");
+  }
+}
+
+/** The vault's answer, asked once, says an Owner of the whole instance: they add a passkey first. Thrown before any write. */
+class StepWanted extends Error {
+  readonly access: Access;
+  constructor(access: Access) {
+    super('a passkey is wanted first');
+    this.access = access;
+  }
+}
 
 /**
  * A passkey step refused with no entry (section 11): whoever answered passed the provider but not the factor, and wrote

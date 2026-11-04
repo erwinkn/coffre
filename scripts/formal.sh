@@ -158,6 +158,8 @@ REMOVALS=(
   "FactorApp AppIssueChecks IssuedBacked"
   "FactorApp AppIssueChecks LiveFromLive"
   "FactorApp RequestChecks ServedBacked"
+  # A sign-in at the callback (T176 PR 4b, review r1 of #500): its transaction holds the vault's answer to the access it read, or a promotion meanwhile signs an Owner in by the provider alone.
+  "FactorSignin SigninHoldsAccess OwnersEnroll"
   "Bulk BulkRecountUnderHead CapHolds"
   "Bulk CountsTheRequest CapHolds"
   "Bulk PerPrincipal CapHolds"

@@ -26,4 +26,11 @@ FactorAppOps == [p \in FactorAppProcs |->
       [] p = "req" -> {[kind |-> "use", cred |-> "s"], [kind |-> "use", cred |-> "o"]}
       [] OTHER -> {Op("issue")}]
 
+-----------------------------------------------------------------------------
+(* FactorSignin: Ada, a Developer with no passkey, signs in under `optional`
+   while an Owner promotes her to one (T176 PR 4b, review r1 of #500). *)
+
+FactorSigninProcs == {"sgn", "pro"}
+FactorSigninOps == [p \in FactorSigninProcs |-> IF p = "sgn" THEN {Op("signin")} ELSE {Op("promote")}]
+
 =============================================================================

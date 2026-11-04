@@ -228,7 +228,8 @@ const SHARED: Case[] = [
   ['clientDataJSON not JSON', { clientDataJSON: (text) => text.slice(1) }, {}, 'malformed'],
   ['clientDataJSON an array', { clientDataJSON: (text) => `[${text}]` }, {}, 'malformed'],
   ['clientDataJSON not UTF-8', { response: inner((r) => void (r.clientDataJSON = toBase64url(Uint8Array.of(0x7b, 0xff, 0x7d)))) }, {}, 'malformed'],
-  ['clientDataJSON past 4 KiB', { clientData: { padding: 'x'.repeat(4096) } }, {}, 'malformed'],
+  // No size of its own: the spec lets a browser add members (R70; the request's body bound is the server's).
+  ['clientDataJSON of 64 KiB, an unknown member its bulk', { clientData: { padding: 'x'.repeat(64 * 1024) } }, {}, 'ok'],
   ['ED set with nothing after', { flags: FLAGS.UP | FLAGS.UV | FLAGS.ED }, {}, 'malformed'],
   ['extensions that are no map', { extensions: encodeCbor([1, 2]) }, {}, 'malformed'],
   ['extensions keyed by an integer, not a name', { extensions: encodeCbor(new Map<CborValue, CborValue>([[1, true]])) }, {}, 'malformed'],
@@ -481,7 +482,22 @@ test('CBOR reads the subset WebAuthn writes and refuses the rest', () => {
   malformed([0x98, 0x01, 0x00]); // an array's
   malformed([0xb8, 0x01, 0x01, 0x01]); // a map's
   malformed([]);
-  malformed(Array.from({ length: 20 }, () => 0x81).concat([0])); // twenty arrays deep
+  // However deep it nests, the reader keeps its open arrays and maps in a list, not on the stack (RFC 8949, section 10):
+  // a million of each reads, and a million left open is refused, each without a stack overflow.
+  const deep = (head: number[], depth: number) => {
+    const bytes = new Uint8Array(head.length * depth + 1);
+    for (let i = 0; i < depth; i++) bytes.set(head, i * head.length);
+    return bytes;
+  };
+  for (const head of [[0x81], [0xa1, 0x01]]) {
+    const bytes = deep(head, 1_000_000);
+    const [value, end] = readCbor(bytes);
+    assert.equal(end, bytes.length);
+    let depth = 0;
+    for (let at: unknown = value; Array.isArray(at) || at instanceof Map; depth++) at = Array.isArray(at) ? at[0] : at.get(1);
+    assert.equal(depth, 1_000_000);
+    assert.throws(() => readCbor(bytes.subarray(0, -1)), { message: /CBOR (ends early|array longer|map longer)/ });
+  }
   // A byte order mark is a character of the text, kept: two keys that differ by one are two keys.
   assert.deepEqual(readCbor(encodeCbor('\uFEFFhello'))[0], '\uFEFFhello');
   assert.equal((readCbor(encodeCbor(new Map<CborValue, CborValue>([['x', 1], ['\uFEFFx', 2]])))[0] as Map<string, unknown>).size, 2);

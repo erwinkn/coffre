@@ -13,7 +13,7 @@
 // The email is admin@acme.example unless given. The key file is the one
 // dev/start.sh names (COFFRE_DEV_PASSKEY_FILE). Throwaway keys, for a local
 // stack only.
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 const [url, email = 'admin@acme.example'] = process.argv.slice(2);
 const file = process.env.COFFRE_DEV_PASSKEY_FILE ?? new URL('./.wrangler/state/passkeys.json', import.meta.url).pathname;
@@ -38,12 +38,23 @@ let next = 0;
 const waiting = new Map();
 socket.addEventListener('message', ({ data }) => {
     const message = JSON.parse(data);
+    if (message.method === 'WebAuthn.credentialAsserted') return kept(message.params.credential.signCount);
     const call = waiting.get(message.id);
     if (call === undefined) return;
     waiting.delete(message.id);
     if (message.error) call.reject(new Error(`${call.method}: ${message.error.message}`));
     else call.resolve(message.result);
 });
+/**
+ * Chrome's count, after each of its signatures, into the file: the seed's browser and the next run of this go on from
+ * it (dev/browser.mjs), as coffre wants a counter that moves (docs/design/passkeys.md, section 7.3).
+ */
+function kept(signCount) {
+    const keys = JSON.parse(readFileSync(file, 'utf8'));
+    if (keys[email] === undefined || (keys[email].signCount ?? 0) >= signCount) return;
+    keys[email].signCount = signCount;
+    writeFileSync(file, `${JSON.stringify(keys, null, 2)}\n`, { mode: 0o600 });
+}
 function send(method, params = {}, sessionId) {
     const id = ++next;
     socket.send(JSON.stringify({ id, method, params, ...(sessionId === undefined ? {} : { sessionId }) }));
@@ -68,7 +79,8 @@ await send('WebAuthn.addCredential', {
         rpId,
         privateKey: base64(saved.privateKey),
         userHandle: base64(saved.userHandle),
-        signCount: 0,
+        // The key's own counter, as the seed and earlier runs left it: Chrome counts up from it.
+        signCount: saved.signCount ?? 0,
     },
 }, sessionId);
 // The authenticator lasts as long as the session that added it: this process, until Ctrl-C or the browser closes.

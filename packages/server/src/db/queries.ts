@@ -881,10 +881,10 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
  * the log's head, any change the vault is making waits for it, so what this
  * reads holds until it commits.
  */
-export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number } | null> {
+export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number; accessSeq: bigint } | null> {
   const { vaultMembers } = tablesOf(db);
   const [row] = await db
-    .select({ status: vaultMembers.status, generation: vaultMembers.generation })
+    .select({ status: vaultMembers.status, generation: vaultMembers.generation, accessSeq: vaultMembers.accessSeq })
     .from(vaultMembers)
     .where(eq(vaultMembers.principal, principal));
   return row ?? null;
@@ -1596,6 +1596,52 @@ export async function passkeyCounts(db: Queryable, principal: string, generation
     .from(passkeys)
     .where(eq(passkeys.principal, principal));
   return { ever: Number(row?.ever ?? 0), live: Number(row?.live ?? 0) };
+}
+
+/** A member as a sign-in's callback weighs them (`signinMembers`). */
+export type SigninMember = { principal: string; status: string; generation: number; accessSeq: bigint; ever: number; live: number };
+
+/**
+ * What a sign-in's callback decides on (passkeys.md, section 3.1), beside the identity it reads in the same round trip
+ * (`findIdentity`): the members its account may be, the one its live identity names and one per verified email, each
+ * with its status and generation, the vault's newest entry about its access (`access_seq`, which the sign-in's
+ * transaction holds it to under the head, as `issuerStill` does), and its passkeys, ever and live at that generation.
+ * One statement, with the database clock, so that Hyperdrive never answers it from its cache: a cached sequence
+ * would read as moved under the head on every try. Rows of the vault's, unchecked: what they decide is only whether to
+ * ask for a passkey first, and the sign-in checks the vault's own answer before it issues anything.
+ */
+export async function signinMembers(
+  db: Queryable,
+  account: { provider: string; issuerHash: string; subject: string },
+  emails: readonly string[],
+): Promise<Map<string, SigninMember>> {
+  const { vaultMembers, identities } = tablesOf(db);
+  const bound = db
+    .select({ principal: identities.principal })
+    .from(identities)
+    .where(and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject), isNull(identities.revokedAt)));
+  const candidates = emails.map((email) => `user:${email}`);
+  const rows = await db
+    .select({
+      principal: vaultMembers.principal,
+      status: vaultMembers.status,
+      generation: vaultMembers.generation,
+      accessSeq: vaultMembers.accessSeq,
+      // Named in full: drizzle writes a column of the one table it selects from unqualified, which the subquery would read as its own.
+      ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = vault_members.principal)`,
+      live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = vault_members.principal AND live.generation = vault_members.generation AND live.removed_at IS NULL)`,
+      now: clock(db),
+    })
+    .from(vaultMembers)
+    .where(candidates.length === 0 ? inArray(vaultMembers.principal, bound) : or(inArray(vaultMembers.principal, candidates), inArray(vaultMembers.principal, bound)));
+  return new Map(rows.map(({ now: _, ever, live, ...row }) => [row.principal, { ...row, ever: Number(ever), live: Number(live) }]));
+}
+
+/** Whether a passkey row, anyone's, live or not, has this credential ID: what a first passkey's unique violation was. */
+export async function passkeyCredentialTaken(db: Queryable, credentialId: Buffer): Promise<boolean> {
+  const { passkeys } = tablesOf(db);
+  const rows = await db.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.credentialId, credentialId)).limit(1);
+  return rows.length > 0;
 }
 
 /** The passkey a response's credential ID names, whoever's, live or not; null for none. Its MAC is checked: a row that fails it throws (`verifyAuthRow`). */
