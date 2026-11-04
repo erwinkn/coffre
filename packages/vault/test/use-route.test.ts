@@ -456,6 +456,16 @@ test("T205: the route's named call at a reading of the URL the map picked wrong 
   // The stable reading, `/use/openai/…`, at the handle's one place: read, unless that is the place the URL names.
   assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/dev`] }), { state: 'reread', read: null });
   assert.deepEqual(await state({ handle: true, unless: [`${w.slug}/other`] }), { state: 'moved', read: { keyed: true, made: false, place: w.dev } });
+  // The levels and editor it reads are `use_route`'s, field for field: a copy of its SQL left behind would read `stale`
+  // only through `chainFault` or `editorOf` (Fable's review of #507).
+  const { route: read } = await named(hot, call({ project: w.slug, environment: 'dev', unless: [w.slug] }));
+  const routed = await (ENGINE === 'postgres' ? postgresRoute : sqliteRoute)(hot, {
+    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [] }, project: w.slug, environment: 'dev', named: 'openai', stable: w.slug, reading: 1,
+    credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
+    mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: false, light: false,
+  });
+  assert.equal(routed.levels.length, 1);
+  assert.deepEqual([read?.levels, read?.editor, read?.keys], [routed.levels, routed.editor, routed.keys]);
   assert.equal(await count('log_uses'), 0);
 });
 
@@ -602,6 +612,52 @@ test("T205: a route of one key given a second while the map holds the one: the r
   const { row, route: read } = await (ENGINE === 'postgres' ? postgresNamed : sqliteNamed)(hot, call);
   assert.deepEqual([row.state, row.n_secret, read?.keyed, read?.made, read?.keys], ['moved', null, false, false, [first, second]]);
   assert.equal(await count('log_uses'), after, 'nothing used');
+});
+
+test("T205: a route of one key given a second, then edited again under the use: served in three attempts, the named call's own handing the second key's read to `use_route` at once (Fable's review of #507)", { skip: ENGINE !== 'postgres' ? 'an edit injected after the hot pool\'s statement' : false }, async () => {
+  const w = await routeWorld(db);
+  const made = [await w.key('one'), await w.key('two'), await w.key('three')];
+  const [first, second, third] = await Promise.all(made.map((id) => w.nameOf(id)));
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ pair: { definition: route('pair', [first!]), editor: ada } });
+  // An isolate whose hot pool points the route's second key at a third right after the use's first `use_route`.
+  let armed = false;
+  let routed = 0;
+  const client = postgresClient(HOT_URL, { max: 2 });
+  const pool = new Proxy(client, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== 'unsafe') return value;
+      return (...args: unknown[]) => {
+        const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        if (!armed || !String(args[0]).includes('use_route')) return sent;
+        // A first round's statement only: a key new to the cap's set (third) takes one more, under the principal's lock,
+        // `p_lock`, the third parameter from the end (0060).
+        const params = args[1] as unknown[];
+        if (params[params.length - 3] !== null) return sent;
+        routed += 1;
+        if (routed > 1) return sent;
+        return Promise.resolve(sent).then(async (result) => {
+          await w.save({ pair: { definition: route('pair', [first!, third!]), editor: ada } });
+          return result;
+        });
+      };
+    },
+  });
+  try {
+    const prepared = await prepareVault(CONFIG, { ...LOG_015 });
+    const vault = openVault(db.vault, prepared, createDatabase(pool));
+    for (let i = 0; i < 2; i += 1) assert.deepEqual(values(await vault.useRoute(w.askRoute('pair'))), { [first!]: 'one' });
+    await w.save({ pair: { definition: route('pair', [first!, second!]), editor: ada } });
+    armed = true;
+    // Attempt 1: the named call (two keys: none resolved), then `use_route` by none, the edit after it; attempt 2, by
+    // first and second, `moved`; attempt 3, by first and third, made. Were the named call an attempt of its own, the
+    // third would be by first and second, and the use `late`.
+    assert.deepEqual(values(await vault.useRoute(w.askRoute('pair'))), { [first!]: 'one', [third!]: 'three' });
+    assert.equal(routed, 3);
+  } finally {
+    await client.end();
+  }
 });
 
 test("a later statement's fresh ids reach the map: an edit between a use's statements costs it one attempt, not two (Fable's review of #464)", { skip: ENGINE !== 'postgres' ? 'an edit injected between the hot pool\'s statements' : false }, async () => {

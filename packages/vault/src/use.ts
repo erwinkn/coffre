@@ -308,7 +308,8 @@ export type RouteRows = {
 /**
  * What a route's named call (T205, 0071) read of its route, beside its key's row: its place and project, the levels and
  * editor `use_route` reads, the keys its item names, whether the call made the use by the isolate's ids (`made`: they are
- * the one key's the item names now), and whether it resolved a key at all (`keyed`: the item names one, so the row is
+ * the one key's the item names now, a null id included where that name resolves to no key, a use of none, `missing`,
+ * as `use_route`'s), and whether it resolved a key at all (`keyed`: the item names one, so the row is
  * that key's; else the row is the caller's use of no key at the place, as a gate's). None: the call read no route.
  */
 export type RouteRead = { place: string; project: string; levels: RouteLevelRow[]; editor: EditorRow | null; keys: string[]; made: boolean; keyed: boolean };
@@ -323,7 +324,8 @@ export type RouteNamedRows = { row: UseRow; route: RouteRead | null };
 /**
  * What a named call names (0045): its token's hash, its place by slugs, or the handle's own (`handle`), and its key.
  * `unless`, a handle's: the places, `project/environment`, its request does not mean, which the call judges against the
- * slugs it reads (never the map's), answering them as none, the app's.
+ * slugs it reads (never the map's), answering them as none, the app's. A route's named call at the place reading (T205)
+ * puts the URL's stable route there instead: a flag that the URL has a second reading, which the call only counts.
  */
 export type Names = {
   tokenHash: Buffer; project: string | null; environment: string | null; key: string | null; handle: boolean; unless: readonly string[];
@@ -1729,9 +1731,10 @@ function oneCall(ask: RouteAsk, guess: RouteGuess, prepared: readonly Ready[] | 
  * the place first (StandingFirst), then reads the route's levels, its editor and the one key its item names, by that
  * name (KeyByItem), and makes that key's use by the map's ids when they are its now. Its answer is a round as
  * `use_route`'s reads: the use made, the caller's rows its key's row, as the light gate's (T200); or, the call having
- * resolved no key (no standing there, a chain cut, no item, an item of several keys), the caller's use of no key at
- * the place, as the whole gate's. Otherwise it answers the guess `use_route` is asked by instead: a reading the map
- * picked wrong (`reread`: none, `use_route` picks it), or the key's ids out of date (the ids the call read).
+ * resolved no key (no standing there, a chain cut, no item, an item of no key), the caller's use of no key at the
+ * place, as the whole gate's. Otherwise it answers the guess `use_route` is asked by instead: a reading the map picked
+ * wrong (`reread`: none, `use_route` picks it), an item of several keys now (their ids: none, `use_route` reads them),
+ * or the key's ids out of date (the ids the call read).
  *
  *   Bo's handle, `/use/openai/v1/chat/completions`, the map warm      1 call: `use_credential`, its gate, the item, Ada, the key's use
  *   the same, an Owner pointed `openai` at another key since        2 calls: the new key's ids read, then `use_route` makes the use
@@ -1773,6 +1776,9 @@ async function routeNamed(path: UsePath, ask: RouteAsk, guess: RouteGuess, made:
     };
     return { rows: { ...base, ...read, gate, stood: true, resolved: [resolved], made: true, rows: [row] }, gateForged: false, keysForged: [forged], editorForged };
   }
+  // An item of several keys now, the map's one: `use_route` reads their ids in this attempt, as a `reread` does, so that the
+  // grown route is made in two attempts, as before T205, not three (Fable's review of #507).
+  if (!route.keyed && route.keys.length > 1) return { reask: { reading, credential: row.n_credential, place: route.place, route: guess.route, keyed: undefined } };
   if (!route.keyed) return { rows: { ...base, ...read, gate: row, stood: true, resolved: [], made: false, rows: [] }, gateForged: forged, keysForged: [], editorForged };
   // The key the item names now, read, its ids not the map's: `use_route` makes the use by the ones read.
   return {

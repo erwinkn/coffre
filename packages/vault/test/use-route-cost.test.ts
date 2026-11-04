@@ -1,7 +1,8 @@
 // A route use costs one statement on a warm map, and the same however long the log grows (R44, R48; T186 PR C;
 // docs/design/proxy-ui.md, section 4): `use_route`'s buffers, counted by EXPLAIN over the function's own statements, at
 // 10k and at 1M entries of history; and its rows the same with one definition in the environment and with 256, whose
-// index grows (the buffers it adds are stated, not held flat: the index is read whole, its seal over all of it).
+// index grows (the buffers it adds are stated, not held flat: the index is read whole, its seal over all of it). A warm
+// use of a route of one key is the route's named call (T205, 0071): `use_credential` as the vault sends it, held flat too.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -37,20 +38,25 @@ after(() => db.close());
  */
 const LIGHTER = 30;
 
-/** The hot pool, each statement counted as it is sent. */
-function counting(): { pool: PostgresClient; statements: () => number } {
+/** A statement as the vault sent it: its text and its parameters. */
+type Sent = { text: string; params: unknown[] };
+
+/** The hot pool, each statement counted as it is sent, the last one kept. */
+function counting(): { pool: PostgresClient; statements: () => number; last: () => Sent | null } {
   let statements = 0;
+  let last: Sent | null = null;
   const pool = new Proxy(postgresClient(HOT_URL, { max: 2 }), {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key !== 'unsafe') return value;
       return (...args: unknown[]) => {
         statements += 1;
+        last = { text: String(args[0]), params: [...((args[1] as unknown[] | undefined) ?? [])] };
         return (value as (...a: unknown[]) => unknown).apply(target, args);
       };
     },
   });
-  return { pool, statements: () => statements };
+  return { pool, statements: () => statements, last: () => last };
 }
 
 /** History that is not this use's: other credentials' uses, other objects' changes, other principals' bulk rows. */
@@ -70,13 +76,14 @@ async function grow(total: number): Promise<void> {
   await run(db.owner, sql`VACUUM ANALYZE`);
 }
 
-test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments; its rows the same at 1 definition and at 256', { ...postgresOnly('the hot path'), timeout: 900_000 }, async () => {
+test('R48: a route use is one statement on a warm map, its buffers the same at 10k and at 1M entries and at 1k and 10k environments, the route\'s named call\'s too (T205); its rows the same at 1 definition and at 256', { ...postgresOnly('the hot path'), timeout: 900_000 }, async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
   const name = await w.nameOf(key);
   const ada = await w.member([{ environmentId: null, role: 'owner' }]);
   await w.save({ openai: { definition: route('openai', [name]), editor: ada } });
-  const { pool, statements } = counting();
+  const { pool, statements, last } = counting();
+  let named: Sent | null = null;
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
   try {
     // The key enters the set in the cold use; a period turning over before the warm one would have it write its row again (T218).
@@ -89,6 +96,8 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
     const warm = await vault.useRoute(w.askRoute('openai'));
     assert.ok(warm.served && warm.route === 'name' && warm.outcome.ok, JSON.stringify(warm));
     assert.equal(statements() - before, 1, 'a warm route use is one statement');
+    named = last();
+    assert.ok(named !== null && named.text.includes('use_credential('), 'the route\'s named call (T205)');
   } finally {
     await pool.end();
   }
@@ -129,11 +138,32 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
     }
     return { buffers: least, rows: read };
   };
-  /** Each form's work: the light gate's, the vault's on a warm map; the whole gate's; and a miss's. */
+  /**
+   * The route's named call's work (T205): the warm use's own statement, sent again as the vault sent it, its request,
+   * time and deadline new (`use_credential`'s 3rd, 4th and 8th parameters, 0071), its use made by the map's ids.
+   */
+  const measureNamed = async (): Promise<number> => {
+    const sent = named!;
+    let least = Infinity;
+    for (let i = 0; i < 6; i += 1) {
+      const fresh = () => {
+        const at = Date.now();
+        return sent.params.map((arg, k) => (k === 2 ? newRequestId() : k === 3 ? String(at) : k === 7 ? String(at + 3000) : arg)) as never[];
+      };
+      const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sent.text}`, fresh());
+      const node = (plan as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] })['QUERY PLAN'][0]!.Plan;
+      least = Math.min(least, node['Shared Hit Blocks'] + node['Shared Read Blocks']);
+      const [answer] = await client.unsafe(sent.text, fresh()) as unknown as { use: string }[];
+      const parsed = JSON.parse(answer!.use) as { route: { made: boolean; keyed: boolean; levels: unknown[] } | null };
+      assert.deepEqual([parsed.route?.made, parsed.route?.keyed, parsed.route?.levels.length], [true, true, 1], 'made by the map\'s ids, its route read');
+    }
+    return least;
+  };
+  /** Each form's work: the light gate's, the vault's on a warm map; the whole gate's; a miss's; and the route's named call's. */
   const measured = async () => {
     // The light and the whole gate are held to each other, so both read the key's row in one period: a period turning over between them has the first write the row and the other not (T218).
     await inBulkPeriod(PERIOD_ROOM_MS);
-    return { ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers };
+    return { ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers, named: await measureNamed() };
   };
   await grow(10_000);
   const small = await measured();
@@ -159,7 +189,7 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
   const crowded = await measured();
   await client.end();
   console.log(JSON.stringify({ small, large, wide, few, crowded }));
-  for (const form of ['buffers', 'whole', 'miss'] as const) {
+  for (const form of ['buffers', 'whole', 'miss', 'named'] as const) {
     assert.ok(crowded[form] - few[form] <= 2, `${form}: ${few[form]} buffers at 1k environments, ${crowded[form]} at 10k`);
     // Flat: no statement reads history, only probes it by index (the uses' own index may grow a level: its insert, a buffer).
     assert.ok(large[form] - small[form] <= 2, `${form}: ${small[form]} buffers at 10k, ${large[form]} at 1M`);
