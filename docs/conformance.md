@@ -184,8 +184,32 @@ The suites cover races during sign-in and late callbacks as well. Those
 checks use controlled pauses inside requests; conformance cites their
 evidence rather than booting a second app and vault pair.
 
-A check that fails prints what it saw. The ones that need its result are
-skipped, and the run ends with the processes' output.
+A check that fails prints what it saw: its error, and what the processes
+wrote while it ran, whole, but for the server's lines (wrangler's or
+srvx's) for requests answered below 500. The ones that need its result are
+skipped. Once the processes have stopped, the run ends with all they wrote,
+filtered alike, so that a line written late is there however much came
+after it (wrangler logs a dropped connection a moment after the request it
+failed); then, for each failed check, every answer of 500 or over to the
+requests it sent, however it sent them, with its whole body, which a client
+error drops when it is not coffre's own JSON, and the requests that got no
+answer, and why. Every request a check sends goes to those processes, so
+each has ended by then, one the check left running included: the report
+waits on no timer of its own.
+
+One such failure is wrangler's, not coffre's. Under `wrangler dev`, a
+request that is neither a GET nor a HEAD, sent on a connection that has
+been idle about five seconds, can meet wrangler's own proxy dropping that
+connection to the Worker: the request gets a 500 whose body is
+`Error: Network connection lost.`, and wrangler prints
+`✘ [ERROR] Error inside ProxyWorker (the affected request failed; the dev
+server continues): <method> <path> (failed after 1 attempt): Network
+connection lost.` A GET or a HEAD is sent again, unseen. A deployed Worker
+has no such proxy. It is upstream's to fix
+([cloudflare/workers-sdk#16348](https://github.com/cloudflare/workers-sdk/issues/16348),
+[#14641](https://github.com/cloudflare/workers-sdk/issues/14641)); a run
+that fails with both is rerun once, its job alone, and the checks are left
+as they are.
 
 ## What it does not show
 

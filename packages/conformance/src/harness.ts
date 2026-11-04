@@ -66,6 +66,8 @@ export type Deployment = {
   clientDir: string;
   /** The processes' output: all of it, or the last `tail` characters of each. */
   output(tail?: number): string;
+  /** A mark in the processes' output; called, it answers what each has written since, whole. */
+  mark(): () => string;
   stop(): Promise<void>;
 };
 
@@ -125,6 +127,15 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
   const output = (tail = Infinity) =>
     children.map((entry) => `--- ${entry.name}\n${Buffer.concat(entry.output).toString('utf8').slice(-tail)}`).join('\n');
   const logs = () => output(4000);
+  const mark = () => {
+    const at = new Map(children.map((entry) => [entry, entry.output.length]));
+    return () =>
+      children
+        .map((entry) => ({ name: entry.name, since: entry.output.slice(at.get(entry) ?? 0) }))
+        .filter(({ since }) => since.length > 0)
+        .map(({ name, since }) => `--- ${name}\n${Buffer.concat(since).toString('utf8')}`)
+        .join('\n');
+  };
   const alive = () => !children.some((entry) => entry.daemon && entry.exited);
 
   function start(name: string, command: string, args: string[], env: Record<string, string>, daemon = true, input?: string): Child {
@@ -293,6 +304,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       databaseFile: null,
       clientDir: join(dir, 'app/dist/client'),
       output,
+      mark,
       stop,
     };
   }
@@ -363,6 +375,7 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
       databaseFile: database,
       clientDir: join(dir, 'app/dist/client'),
       output,
+      mark,
       stop,
     };
   }
