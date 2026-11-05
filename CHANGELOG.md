@@ -95,7 +95,13 @@
   user handle of its own, so a second tab or a reload never replaces a
   passkey coffre stored; an interrupted attempt may leave an unused
   passkey on the device, which coffre never offers, and locks nobody
-  out. To come: fresh checks
+  out. Approving a terminal, connecting an MCP client and approving an
+  MCP client's change each take a touch of their own, for that act alone,
+  from anyone a passkey stands behind (PR 5a): Approve without one is
+  refused `403 touch_required`, whose `touch` carries what to ask the
+  authenticator, and the page asks it and sends Approve again; a touch
+  that does not check is `403 touch_failed`. A terminal approved so starts
+  inside its approval's five minutes. To come: fresh checks
   for risky acts, Account → Passkeys and the Owner's reset
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.

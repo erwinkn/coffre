@@ -21,6 +21,7 @@ import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, deviceAuthorizations, passkeys } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
+import { touching } from './passkey-rows.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -176,7 +177,7 @@ test('what a request issues names its passkey: a device approval, the CLI sessio
   const approving = bearer(await confirmedSession(key));
 
   const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
-  await approving.deviceLogins.decide(started.userCode, true);
+  await touching(key, (touch) => approving.deviceLogins.decide(started.userCode, true, touch));
   const [approval] = await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.userCode, started.userCode));
   assert.equal(approval!.passkeyId, key);
 
@@ -185,7 +186,7 @@ test('what a request issues names its passkey: a device approval, the CLI sessio
   const cli = (polled as Extract<typeof polled, { status: 'approved' }>).credential;
   const [session] = await db.owner.select().from(credentials).where(eq(credentials.id, cli.id));
   assert.equal(session!.passkeyId, key);
-  assert.equal(session!.confirmedAt, null, 'copied from the approving session, not touched: not fresh');
+  assert.deepEqual(session!.confirmedAt, approval!.decidedAt, "the approval's touch confirmed it, when it was decided");
 
   const terminal = bearer(cli.token);
   const personal = await terminal.tokens.issue(`user:${ADA}`, { label: 'script', expiresInMinutes: 60, scope: { 'market/dev': 'viewer' } });
@@ -207,7 +208,8 @@ test('a device approval whose passkey no longer stands behind it by the poll red
   // Its passkey removed between the approval and the poll.
   const key = await addPasskey(ADA);
   const first = await signin.startDevice({ clientLabel: null, sourceIp: null });
-  await bearer(await confirmedSession(key)).deviceLogins.decide(first.userCode, true);
+  const approving = bearer(await confirmedSession(key));
+  await touching(key, (touch) => approving.deviceLogins.decide(first.userCode, true, touch));
   await removePasskey(key);
   assert.deepEqual(await signin.pollDevice(first.deviceCode, meta()), { status: 'denied' });
 

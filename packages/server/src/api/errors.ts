@@ -20,6 +20,9 @@ import { Superseded } from '../watch.ts';
  *   403 vault_refused      the vault said no; `reason` is its code (`no_grant`, `removed`, ...)
  *   403 bulk_limit         the vault said no: too many secrets read in too short a time
  *   403 insufficient_scope a request through MCP whose connection lacks the scope the route needs
+ *   403 touch_required     an act that takes a touch of the caller's passkey of its own (passkeys.md, section 4.2): `touch`
+ *                          carries what to ask the authenticator, for this act and this session alone; send the act again with its answer
+ *   403 touch_failed       that touch did not check: no live passkey of the caller's, a signature or flag that fails, or a replay
  *   404 not_found          no such project, environment, secret or member
  *   404 not_available      a key a request named, by name, that it may not have: none such, or no access to it, alike (D153)
  *   405 method_not_allowed
@@ -44,6 +47,8 @@ export const ERROR_STATUS = {
   vault_refused: 403,
   bulk_limit: 403,
   insufficient_scope: 403,
+  touch_required: 403,
+  touch_failed: 403,
   not_found: 404,
   not_available: 404,
   method_not_allowed: 405,
@@ -60,7 +65,10 @@ export const ERROR_STATUS = {
 
 export type ErrorCode = keyof typeof ERROR_STATUS;
 
-export type ErrorBody = { error: ErrorCode; message: string; reason?: string };
+export type ErrorBody = { error: ErrorCode; message: string; reason?: string; touch?: TouchAsked };
+
+/** What a `403 touch_required` asks: `get()`'s options, in WebAuthn's JSON form, and the sealed state to send back with its answer. */
+export type TouchAsked = { options: unknown; state: string };
 
 export class ApiError extends Error {
   readonly code: ErrorCode;
@@ -79,6 +87,17 @@ export class ApiError extends Error {
 
   get status(): number {
     return ERROR_STATUS[this.code];
+  }
+}
+
+/** An act refused until it carries a touch of its own (passkeys.md, section 4.2): a prompt, which writes no entry. */
+export class TouchRequired extends ApiError {
+  readonly touch: TouchAsked;
+
+  constructor(message: string, touch: TouchAsked) {
+    super('touch_required', message);
+    this.name = 'TouchRequired';
+    this.touch = touch;
   }
 }
 
@@ -177,6 +196,7 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
   if (error instanceof ApiError) {
     const body: ErrorBody = { error: error.code, message: error.message };
     if (error.reason !== undefined) body.reason = error.reason;
+    if (error instanceof TouchRequired) body.touch = error.touch;
     return { status: error.status, body };
   }
   // An instance still under a key the log moved on from, as for the seconds a deploy takes: refused, not a bug.

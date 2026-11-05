@@ -229,6 +229,13 @@ function mcp(ctx: ApiContext) {
 }
 
 /** An OAuth authorization request's parameters, as the consent page carries them: each optional here, checked by the service. */
+/**
+ * A touch an act carries (passkeys.md, section 4.2): the sealed state its `403 touch_required` asked with, which only
+ * the server's key opens, and `navigator.credentials.get()`'s answer in WebAuthn's JSON form, which the verifier reads;
+ * the body's own bounds hold both.
+ */
+const touchAnswer = z.object({ state: z.string().min(1), response: z.record(z.string(), z.unknown()) }).strict();
+
 const authorizationRequest = z.object({
   client_id: z.string().max(2048).optional(),
   redirect_uri: z.string().max(2048).optional(),
@@ -710,8 +717,10 @@ export const routes = {
     }),
   }),
   ...route('POST /device-logins/:code', {
-    input: z.object({ approve: z.boolean() }).strict(),
-    run: (ctx, { params, input }) => signin(ctx).decideDevice(ctx, params.code, input.approve),
+    // Approving takes a touch of the person's passkey for this code (passkeys.md, section 3.5): `touch` answers the
+    // `403 touch_required` the approval without one was refused with.
+    input: z.object({ approve: z.boolean(), touch: touchAnswer.optional() }).strict(),
+    run: (ctx, { params, input }) => signin(ctx).decideDevice(ctx, params.code, input.approve, input.touch),
   }),
 
   // Connecting an MCP client: what the consent page shows, and the person's answer.
@@ -724,8 +733,10 @@ export const routes = {
       request: authorizationRequest,
       approve: z.boolean(),
       scopes: z.array(z.string().max(32)).max(16).default([]),
+      // A touch for this connection, with these scopes (passkeys.md, section 4.4), as for a device approval.
+      touch: touchAnswer.optional(),
     }).strict(),
-    run: (ctx, { input }) => mcp(ctx).decide(ctx, input.request, { approve: input.approve, scopes: input.scopes }),
+    run: (ctx, { input }) => mcp(ctx).decide(ctx, input.request, { approve: input.approve, scopes: input.scopes, touch: input.touch }, signin(ctx)),
   }),
 
   // A change an MCP client asked for, on the page where its person decides it.
@@ -741,8 +752,10 @@ export const routes = {
       basis: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional(),
       // What the person typed, for a change that asks for a value.
       value: secretValue.optional(),
+      // A touch for this change, as the page showed it (passkeys.md, section 4.4), as for a device approval.
+      touch: touchAnswer.optional(),
     }).strict(),
-    run: (ctx, { params, input }) => mcp(ctx).approvals.decide(ctx, params.id, input),
+    run: (ctx, { params, input }) => mcp(ctx).approvals.decide(ctx, params.id, input, signin(ctx)),
   }),
 
   // The MCP clients you connected: Connected apps.

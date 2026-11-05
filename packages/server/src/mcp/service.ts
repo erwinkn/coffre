@@ -23,6 +23,8 @@ import { callerFrom, newestPolicySeq, type Caller } from '../api/caller.ts';
 import { allowed, audited, denied, Refusal, requireInstance, type ApiContext } from '../api/context.ts';
 import { AppChanges, connectionChange, connectionRevokes, retrying } from '../api/changes.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
+import { answerDigest } from '../api/ceremony.ts';
+import type { SigninService, TouchAnswer } from '../api/signin.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import {
@@ -227,7 +229,12 @@ export class McpService {
    * refusal logged, and the redirect that says so. Every parameter is
    * checked again: nothing is kept between the page and this.
    */
-  async decide(asker: Asker, request: AuthorizationRequest, answer: { approve: boolean; scopes: string[] }): Promise<{ redirect: string }> {
+  async decide(
+    asker: Asker,
+    request: AuthorizationRequest,
+    answer: { approve: boolean; scopes: string[]; touch?: TouchAnswer },
+    touches: Pick<SigninService, 'touchFor' | 'touched'>,
+  ): Promise<{ redirect: string }> {
     const { principal } = asker.caller;
     // A personal token connecting one would make a connection with all its person holds.
     if (principal.type !== 'user' || asker.caller.credentialScope !== null) throw forbidden('only people connect apps, signed in as themselves');
@@ -246,6 +253,9 @@ export class McpService {
     }
 
     const scopes = grantedScopes(answer.scopes);
+    // A touch for this connection (passkeys.md, section 4.4): the one control an agent driving its person's browser
+    // cannot pass, so one touch connects one client, with the scopes chosen, whatever window the session is in.
+    const touch = await touches.touchFor(asker, { kind: 'connect', answer: answerDigest([request, scopeString(scopes)]) }, answer.touch);
     const member = `user:${principal.id}`;
     const code = secret();
     const id = randomUUID();
@@ -269,6 +279,7 @@ export class McpService {
           denied(asker, 'mcp.connect', 'too_many_connections', { metadata: shown }),
         );
       }
+      if (touch !== null) await touches.touched(tx, log, asker, touch);
       await insertConnection(tx, this.#deps.chainKey, {
         id,
         principal: member,
@@ -283,8 +294,8 @@ export class McpService {
         codeChallenge: request.code_challenge!,
         codeExpiresAt: new Date(now.getTime() + CODE_SECONDS * 1000),
         expiresAt,
-        // The passkey of the session that connected it, which every call through it holds live (section 5.2).
-        passkeyId: asker.passkeyId,
+        // The passkey touched to connect it, else the session's, which every call through it holds live (section 5.2).
+        passkeyId: touch?.passkeyId ?? asker.passkeyId,
       });
       log.push(allowed(asker, 'mcp.connect', { metadata: { connectionId: id, ...shown, asked: scopeString(asked), scopes: scopeString(scopes) } }));
     }, changes);

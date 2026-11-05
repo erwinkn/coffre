@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { AuthorizationView, RouteInput } from '@coffre/client';
 import { MCP_SCOPE_INFO, MCP_SCOPES, supersedes, type McpScope } from '@coffre/core/mcp';
 
@@ -7,6 +7,7 @@ import { ClosedDoor } from '../components/page';
 import { ErrorLine, Notice, Spinner } from '../components/ui';
 import { ArrowRight, Link as LinkIcon, SlashCircle } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
+import { pressTouch, touchMessage, type HeldTouch } from '../lib/touch';
 import type { oauthAuthorize } from '../options';
 
 const Route = pageRoute<typeof oauthAuthorize>();
@@ -103,20 +104,29 @@ function Approve({
   const replaced = view.connections.filter((held) => supersedes(granted, held)).length;
   const kept = view.connections.length - replaced;
 
+  // Connecting takes a touch of your passkey for this app and these scopes, if you hold one (docs/design/passkeys.md,
+  // section 4.4): choosing others forgets an ask held for the last ones.
+  const held = useRef<HeldTouch>({ asked: null });
+
   async function decide(approve: boolean) {
     setPending(approve ? 'approve' : 'deny');
+    const scopes = [...chosen];
     try {
-      const { redirect } = await coffre.oauth.decide({ request, approve, scopes: [...chosen] });
+      const { redirect } = approve
+        ? await pressTouch(held.current, (touch) => coffre.oauth.decide({ request, approve, scopes, ...(touch === undefined ? {} : { touch }) }))
+        : await coffre.oauth.decide({ request, approve, scopes });
       onLeave(redirect);
     } catch (error) {
       setError(
-        statusOf(error) === undefined ? 'The answer could not be sent. Nothing was approved.' : failureMessage(error),
+        touchMessage(error, held.current.asked?.options.rpId)
+          ?? (statusOf(error) === undefined ? 'The answer could not be sent. Nothing was approved.' : failureMessage(error)),
       );
       setPending(null);
     }
   }
 
   function toggle(scope: McpScope, on: boolean) {
+    held.current.asked = null;
     const next = new Set(chosen);
     if (on) next.add(scope);
     else next.delete(scope);

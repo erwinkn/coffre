@@ -19,7 +19,7 @@ import type { CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
 import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, waitUntil, type FixtureDeps } from './api-fixture.ts';
 import { auditLog, credentials, logChanges, mcpConnections, oauthClients } from './db/tables.ts';
-import { addPasskey, confirmedSession, removePasskey } from './passkey-rows.ts';
+import { addPasskey, confirmedSession, removePasskey, touchFor, type Touch } from './passkey-rows.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const RESOURCE = `${ORIGIN}/mcp`;
@@ -117,12 +117,18 @@ async function describe(token: string, ask: Ask) {
   return response.json() as Promise<Record<string, unknown>>;
 }
 
-async function decide(token: string, ask: Ask, answer: { approve: boolean; scopes?: string[] }): Promise<URL> {
-  const response = await route('/api/oauth/authorizations', {
+/** The person's answer; `touch`, the passkey that touches for it when coffre asks one (passkeys.md, section 4.4). */
+async function decide(token: string, ask: Ask, answer: { approve: boolean; scopes?: string[]; touch?: string }): Promise<URL> {
+  const send = (touch?: Touch) => route('/api/oauth/authorizations', {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ request: ask, approve: answer.approve, scopes: answer.scopes ?? [] }),
+    body: JSON.stringify({ request: ask, approve: answer.approve, scopes: answer.scopes ?? [], ...(touch === undefined ? {} : { touch }) }),
   });
+  let response = await send();
+  const refused = response.status === 403 ? ((await response.clone().json()) as { error: string; touch?: { options: unknown; state: string } }) : null;
+  if (refused?.error === 'touch_required' && answer.touch !== undefined) {
+    response = await send({ state: refused.touch!.state, response: await touchFor(answer.touch, refused.touch!.options) });
+  }
   assert.equal(response.status, 200, await response.clone().text());
   return new URL(((await response.json()) as { redirect: string }).redirect);
 }
@@ -668,7 +674,7 @@ test('a connection names the passkey that confirmed the session that made it, an
   const key = await addPasskey(db.owner, deps.chainKey, DEV);
   const { verifier, challenge } = pkce();
   const redirect = 'http://localhost:51234/callback';
-  const back = await decide(await confirmedSession(db.owner, deps.chainKey, DEV, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read' }), { approve: true, scopes: ['read'] });
+  const back = await decide(await confirmedSession(db.owner, deps.chainKey, DEV, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read' }), { approve: true, scopes: ['read'], touch: key });
   const [row] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${DEV}`));
   assert.equal(row!.passkeyId, key);
   const redeemed = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE, resource: RESOURCE }));
@@ -709,7 +715,7 @@ test("a token issued through a connection names the connection's passkey, and no
   const key = await addPasskey(db.owner, deps.chainKey, ROOT);
   const { verifier, challenge } = pkce();
   const redirect = 'http://localhost:51234/callback';
-  const back = await decide(await confirmedSession(db.owner, deps.chainKey, ROOT, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read manage-access' }), { approve: true, scopes: ['read', 'manage-access'] });
+  const back = await decide(await confirmedSession(db.owner, deps.chainKey, ROOT, key), request(CLAUDE_CODE, redirect, challenge, { scope: 'read manage-access' }), { approve: true, scopes: ['read', 'manage-access'], touch: key });
   const redeemed = await route('/api/oauth/token', tokenRequest({ grant_type: 'authorization_code', code: back.searchParams.get('code')!, code_verifier: verifier, redirect_uri: redirect, client_id: CLAUDE_CODE, resource: RESOURCE }));
   assert.equal(redeemed.status, 200, await redeemed.clone().text());
   const [connection] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.principal, `user:${ROOT}`));

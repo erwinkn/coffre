@@ -1071,6 +1071,12 @@ export type Api = {
   "POST /device-logins/:code": {
     input: {
       approve: boolean;
+      touch?: {
+        state: string;
+        response: {
+          [key: string]: unknown;
+        };
+      };
     };
     output: {
       decided: true;
@@ -1123,6 +1129,12 @@ export type Api = {
       };
       approve: boolean;
       scopes?: string[];
+      touch?: {
+        state: string;
+        response: {
+          [key: string]: unknown;
+        };
+      };
     };
     output: {
       redirect: string;
@@ -1310,6 +1322,12 @@ export type Api = {
       digest: string;
       basis?: string | null;
       value?: string;
+      touch?: {
+        state: string;
+        response: {
+          [key: string]: unknown;
+        };
+      };
     };
     output: {
       status: "approved" | "cancelled" | "denied" | "expired" | "failed" | "pending";

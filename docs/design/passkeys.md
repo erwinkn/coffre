@@ -39,11 +39,14 @@ Erwin's decisions, from a team request on 2026-10-31:
 
 Three rules carry it:
 
-1. **A touch issues a new session.** Every passkey touch in a browser (at
-   sign-in, at a fresh check, at a step-up, approving a terminal or an MCP
-   change) issues
-   a new session to the browser that touched, and ends the one it came in on. A copy of the old
-   cookie, wherever it went, stops working.
+1. **A touch that opens a window issues a new session.** A passkey touch
+   in a browser at sign-in, at a step-up or at a fresh check issues a new
+   session to the browser that touched, and ends the one it came in on. A
+   copy of the old cookie, wherever it went, stops working. A touch for
+   one act (approving a terminal, connecting an MCP client, approving its
+   change) approves that act alone and opens no window, so it leaves the
+   session as it was: nothing it made is there for a copy to ride (as
+   built in PR 5a, section 4.2).
 2. **Changes to a person's passkeys end credentials by revoking them,
    under one per-person lock that every issue takes too, and every request
    checks that its credential still has a live passkey behind it** (section
@@ -63,9 +66,10 @@ The pieces:
   callback and the session. Until the passkey answers, coffre writes
   nothing: what the provider vouched for waits in a small sealed cookie,
   as `PendingSignin` does today.
-- **API routes**: `POST /api/passkeys/challenges`, `POST
-  /api/passkeys/checks`, and `GET`, `POST`, `PATCH` and `DELETE
-  /api/members/:member/passkeys[/:id]`.
+- **API routes**: `GET`, `POST`, `PATCH` and `DELETE
+  /api/members/:member/passkeys[/:id]`. A touch for one act rides the
+  act's own route (`403 touch_required`, section 4.2), and a fresh check
+  is the step-up's door (section 6.5), so neither has a route of its own.
 - **A table typed over the route table**, `FRESH_ROUTES`, like
   `PERSONAL_TOKEN_ROUTES`: every route says whether it needs a fresh check,
   so a new route fails the typecheck until it says. The sign-in routes
@@ -519,15 +523,15 @@ most.
 **Approving a terminal.** `coffre login` stays a device login. Approving it
 takes a touch for that terminal, not the browser's window: the terminal gets
 a credential that lasts 30 days, and the touch is the moment Ada says yes to
-this code. So the approval page asks `POST /api/passkeys/challenges {
-purpose: 'device', code: 'QJXM-4WTP' }`, whose sealed state names that
-device authorization and the approving session, and Approve sends `POST
-/api/device-logins/QJXM-4WTP { approve: true, state, assertion }`. The
-decision's transaction checks the assertion, moves the replay mark, records
-the passkey (`device_authorizations.passkey_id`) with the decision, and, as
-every touch in a browser does, replaces the approving browser's session
-(rule 1) and sets its new cookie. A fresh browser session alone approves
-nothing; one touch approves one code.
+this code. So Approve, `POST /api/device-logins/QJXM-4WTP { approve: true
+}`, is refused `403 touch_required`, whose `touch` carries the options of a
+touch and a sealed state naming that code and the approving session; the
+page asks the authenticator and sends Approve again with `touch: { state,
+response }` (section 4.2, as built). The decision's transaction checks the
+assertion, moves the replay mark and records the passkey
+(`device_authorizations.passkey_id`) with the decision. The touch opens no
+window (rule 1): the approving browser's session stays as it was. A fresh
+browser session alone approves nothing; one touch approves one code.
 
 The poll that redeems the code issues the CLI session with that
 `passkey_id`, and the approval's `decided_at` as its `confirmed_at`. Its
@@ -700,6 +704,61 @@ access today, needs a fresh session like any other.
 | `POST /api/members/user:<self>/passkeys`, a second one onward | holder | a new factor |
 | `DELETE /api/members/user:<self>/passkeys/:id` | ceremony | removing a factor: a touch of a passkey kept, or of the last one (section 3.6) |
 
+**As built (PR 5a): a touch for one act.** A **ceremony** asks its touch
+in its own refusal, so it needs no route of its own and no page needs to
+know beforehand who holds a passkey. Ada presses Approve on `QJXM-4WTP`:
+
+1. `POST /api/device-logins/QJXM-4WTP { approve: true }` is refused `403
+   touch_required`, with `touch: { options, state }`: `get()`'s options,
+   offering Ada's live passkeys, and a state sealed under a key of its
+   own (`passkey-state/act/v1`) that names the act (`device`, that code),
+   her session and her membership's generation. A prompt: nothing is
+   decided and no entry written.
+2. The page asks the authenticator at once, and sends Approve again with
+   `touch: { state, response }` (`pressTouch`, `@coffre/ui`'s `touch.ts`).
+   A browser that wants the touch closer to the click than a round trip
+   (Safari's user activation) throws; the page keeps the ask, and the next
+   press asks it first, before it sends anything, while its options last:
+   the authenticator gets what is left of their five minutes, and a press
+   after them drops the ask and starts over, so Ada is never asked to touch
+   a challenge coffre would only answer with another `touch_required`
+   (review r1 of PR 5a).
+3. The route opens the state, holds it to the act and the session, finds
+   the passkey the assertion names among Ada's live ones, and verifies it
+   (`SigninService.touchFor`), before any transaction. A state that does
+   not open as this act's, for this session (expired, or asked for another
+   code), is answered with a new `touch_required`; an assertion that does
+   not check, `403 touch_failed`, a `passkey.check` entry denied.
+4. The act's own transaction, under the log's head, moves the passkey's
+   replay mark past the challenge, on a passkey still live and Ada's at
+   that generation (`touched`), and writes `passkey.check` allowed with
+   the act's own entry, which names the passkey. A mark that does not move
+   (the same answer sent again, the passkey removed meanwhile) refuses the
+   act, `touch_failed`, and rolls it back.
+
+An MCP client's change binds its touch to what the page showed: the
+change's digest, the basis and the value typed, as a digest (a value never
+rides in the state). A connection binds the request and the scopes chosen:
+another choice asks again. The person's answer is the act; the touch is
+asked only of a caller a passkey stands behind, under any policy but
+`off`. A person who holds none under `optional` is asked nothing (section
+4.4). The terminal an approval redeems names the passkey touched and is
+confirmed when the approval was decided: an approval names a passkey only
+with its touch, since 0.16.0 has no release without one.
+
+The touch opens no window and replaces no session (rule 1). Every touch
+that opens a window issues a new session so that a copy of the old cookie
+cannot ride it; a touch for one act leaves nothing to ride, and the act it
+approved cannot be approved twice. Replacing the session here would have
+needed an API route to set cookies, and `#decide` to rebuild its context
+around the new credential, for nothing the act needs. What it gives up:
+a copy of Ada's cookie taken at 12:00 still reads at 12:02, after her
+touch at 12:01, until the session expires or is revoked, where a
+replacement would have ended it at 12:01. That copy could read at 11:59
+as well, and approves nothing without a touch of its own; ending it is
+signing out or removing the session (section 6.1), not a side effect an
+attacker can count on Ada's approving a terminal to bring.
+
 ### 4.3 Reads
 
 `POST /api/reveals` and every other read are **never**: a reveal takes no
@@ -742,13 +801,14 @@ phase.
   `#decide` commits the approval before it makes the change and records
   `failed` if the change throws, so the ceremony and the change's own
   `FRESH_ROUTES` answer are checked before the approval is decided; a
-  refusal leaves it pending. The touch replaces the approving browser's
-  session, as every touch does (rule 1), so the change then runs as the new
-  session: `#decide` rebuilds its context from the credential the ceremony
-  issued (fresh, naming the passkey touched), with the same connection
-  (`via`), scopes and provenance, for the router's check and for the
-  change's own calls. A change that issues a service token would otherwise
-  name the session the touch just ended and fail. Open question 9.
+  refusal leaves it pending. The touch opens no window and replaces no
+  session (rule 1): the change runs as the approving session, through the
+  connection (`via`), as it does today, and the touch stands for it at the
+  router's check (PR 5b). An earlier draft replaced the session at the
+  touch and rebuilt `#decide`'s context from the new credential, so that a
+  change issuing a service token would not name a session the touch had
+  just ended; a touch that ends nothing needs neither (PR 5a). Open
+  question 9.
 - **Handles and `/use`**: never.
 
 ### 4.5 In code, and the routes outside the table
@@ -878,7 +938,9 @@ confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
 // device_authorizations: the passkey that approved this terminal; its decided_at is when.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 
-// mcp_connections: the passkey that confirmed the session that connected it.
+// mcp_connections: the passkey touched to connect it (section 4.2), which may be another of the person's than
+// the one behind the session; under `off`, where no touch is asked, the session's own. Device approvals write
+// none under `off` instead: `off` checks neither, so the two differ in what they record, not in what they allow.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 ```
 
@@ -1227,9 +1289,9 @@ the check, through `accepts`, as `named-use.ts` asks of any new check, with
 ### 6.5 Fresh, and replacing a session
 
 **Fresh** is `confirmed_at` within five minutes. Only a touch sets it, on a
-credential that touch issued: a browser session at sign-in, at a step-up, a
-fresh check, or a device or MCP approval; a CLI session from its device
-approval.
+credential that touch issued: a browser session at sign-in, at a step-up or
+a fresh check; a CLI session from its device approval (as built, PR 5a:
+confirmed when the approval was decided, by the act's own touch).
 
 **A touch replaces the session it came in on, once.** The transaction that
 issues the new session first ends the old one, conditionally (`revoked_at
@@ -1716,7 +1778,7 @@ running `passkeys: 'required'`:
 33. A deployment whose `publicUrl` is an IP address, with passkeys not
     `off`, does not start.
 34. An MCP-approved service token issues, with its approval's touch, and
-    the browser session the touch replaced is `401` after.
+    the same touch approves nothing else after.
 35. A handle issued while a removal of its person's passkey runs is
     revoked with everything else, or refused, never live after; on the
     previous release's vault during a rollout too, whose issue takes the
@@ -1746,10 +1808,12 @@ running `passkeys: 'required'`:
    callback. Built in two: 4a (#497), the server's side, every check and
    the model's app side; 4b, the ceremonies, the startup check and the
    dev stack.
-5. **Fresh checks**: `FRESH_ROUTES` and its `handler` answer, the
-   challenges and checks routes, the dialog, the device, MCP approval and
-   consent ceremonies, the CLI's step-up through the device flow, the link
-   checks.
+5. **Fresh checks**, built in two. 5a, the ceremonies: a touch for one act
+   (approving a terminal, connecting an MCP client, approving its change),
+   asked by the act's own `403 touch_required`, on its own page, and the
+   terminal it approves confirmed when it was. 5b: `FRESH_ROUTES` and its
+   `handler` answer, the dialog over the step-up's door, the CLI's step-up
+   through 5a's device approval, the link checks.
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
