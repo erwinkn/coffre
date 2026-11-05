@@ -10,6 +10,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { SoftAuthenticator } from '@coffre/conformance/authenticator';
 import { eq } from 'drizzle-orm';
 
+import { FRESH_MS } from '../src/api/fresh-routes.ts';
 import { clientFor } from './api-fixture.ts';
 import { credentials, deviceAuthorizations, mcpApprovals, mcpConnections } from './db/tables.ts';
 import { browserFor, callRaw, CLAUDE_CODE, db, deps, DEV, entries, fromPage, ORIGIN, RESOURCE, route, runtime, useMcp } from './mcp-fixture.ts';
@@ -26,7 +27,7 @@ useMcp(async () => {
   await root.access.set(`user:${DEV}`, { market: 'maintainer' });
 });
 
-type Refused = { error: string; touch?: { options: { challenge: string; rpId: string; allowCredentials: { id: string }[] }; state: string } };
+type Refused = { error: string; reason?: string; touch?: { options: { challenge: string; rpId: string; allowCredentials: { id: string }[] }; state: string } };
 
 /**
  * DEV's browser session, a passkey's: signed in with the provider before it was added, then stepped up with a touch
@@ -131,12 +132,16 @@ test('connecting an app takes a touch of its own, for the scopes chosen, and one
   assert.deepEqual((await entries('passkey.check')).filter((entry) => entry.decision === 'deny').map((entry) => [entry.metadata.purpose, entry.metadata.reason]), [['connect', 'replay']]);
 });
 
-/** DEV connects Claude Code from `session`, with a touch: its access token. */
-async function connectTouched(session: string, passkey: string): Promise<string> {
+/** DEV connects Claude Code from `session`, with a touch of `passkey`, or with none for a person who holds none: its access token. */
+async function connectTouched(session: string, passkey: string | null, scopes = ['read', 'write']): Promise<string> {
   const verifier = randomBytes(32).toString('base64url');
-  const request = { ...consent('read write'), code_challenge: createHash('sha256').update(verifier).digest('base64url') };
-  const asked = await refusal(await post(session, '/api/oauth/authorizations', { request, approve: true, scopes: ['read', 'write'] }));
-  const decided = await post(session, '/api/oauth/authorizations', { request, approve: true, scopes: ['read', 'write'], touch: { state: asked.touch!.state, response: await touchFor(passkey, asked.touch!.options) } });
+  const request = { ...consent(scopes.join(' ')), code_challenge: createHash('sha256').update(verifier).digest('base64url') };
+  let decided: Response;
+  if (passkey === null) decided = await post(session, '/api/oauth/authorizations', { request, approve: true, scopes });
+  else {
+    const asked = await refusal(await post(session, '/api/oauth/authorizations', { request, approve: true, scopes }));
+    decided = await post(session, '/api/oauth/authorizations', { request, approve: true, scopes, touch: { state: asked.touch!.state, response: await touchFor(passkey, asked.touch!.options) } });
+  }
   const code = new URL(((await decided.json()) as { redirect: string }).redirect).searchParams.get('code')!;
   const tokens = await route('/api/oauth/token', {
     method: 'POST',
@@ -224,4 +229,40 @@ test("a touch is its session's: another of the person's sessions sending it is a
   assert.ok(await undecided());
   assert.equal((await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch })).status, 200);
   assert.equal(await undecided(), false);
+});
+
+test("an MCP client's change that takes a fresh check: the approval's own touch stands for it, the window long closed; with no passkey yet, the person adds one first and the approval waits", async (t) => {
+  const root = clientFor(deps, 'admin@acme.example');
+  await root.members.add(`user:${DEV}`, { role: 'admin' });
+  await root.members.add('user:carol@acme.example');
+  const held = async () => (await root.members.access('user:carol@acme.example')).grants.length;
+  const grant = { member: 'user:carol@acme.example', changes: { market: 'viewer' } };
+
+  // No passkey: connected with no touch, and a change that widens someone's reach asks her to add one, deciding nothing.
+  const plain = await browserFor(DEV);
+  const untouched = await asked(await connectTouched(plain, null, ['read', 'manage-access']), plain, 'set_access', grant);
+  const add = await refusal(await post(plain, `/api/approvals/${untouched.id}`, { approve: true, digest: untouched.shown.digest, basis: untouched.shown.basis }));
+  assert.deepEqual([add.error, add.reason], ['fresh_check_required', 'add_passkey']);
+  assert.equal(await untouched.status(), 'pending');
+  assert.equal(await held(), 0);
+
+  // With one, ten minutes after the touch that confirmed her session: the approval's touch is for this change, now.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const { session, passkey } = await confirmedBrowser();
+  t.mock.timers.tick(2 * FRESH_MS);
+  const token = await connectTouched(session, passkey, ['read', 'manage-access']);
+  // Time goes on between touches, as it does: a touch's challenge must come after the last one its replay mark took.
+  t.mock.timers.tick(1);
+  const change = await asked(token, session, 'set_access', grant);
+  const prompt = await refusal(await post(session, `/api/approvals/${change.id}`, { approve: true, digest: change.shown.digest, basis: change.shown.basis }));
+  assert.equal(prompt.error, 'touch_required');
+  const approved = await post(session, `/api/approvals/${change.id}`, {
+    approve: true, digest: change.shown.digest, basis: change.shown.basis, touch: { state: prompt.touch!.state, response: await touchFor(passkey, prompt.touch!.options) },
+  });
+  assert.equal(approved.status, 200, await approved.clone().text());
+  assert.equal(((await approved.json()) as { status: string }).status, 'approved');
+  assert.equal(await held(), 1);
+  // The grant's entry names what confirmed it: the approval's touch, not the session's older one (section 11).
+  const granted = (await entries('access.grant')).at(-1)!;
+  assert.deepEqual([granted.metadata.confirmedBy, granted.metadata.confirmedAt], [passkey, new Date().toISOString()]);
 });

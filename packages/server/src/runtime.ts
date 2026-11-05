@@ -1,6 +1,6 @@
 import { proxyCodeOf } from './proxy-code.ts';
 import { AccessIdentityVerifier, type AccessVerifierConfig, type IdentityVerifier } from '@coffre/core/identity';
-import type { Vault } from '@coffre/core/vault';
+import type { Confirmation, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 
 import { Accesses } from './accesses.ts';
@@ -153,16 +153,17 @@ function knownOf(config: ResolvedConfig): Known {
 /**
  * The deployment's audit watch (plugins/audit-watch.ts), if it added one:
  * its hooks, and a context for them over this runtime, in `actor`'s name
- * when given, the scheduler's otherwise.
+ * when given, the scheduler's otherwise, its entries naming what `confirmed`
+ * the request.
  */
-export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (actor?: WatchActor) => WatchContext } | null {
+export function watchOf(runtime: CoffreRuntime): { hooks: Watcher; context: (actor?: WatchActor, confirmed?: Confirmation | null) => WatchContext } | null {
   const hooks = runtime.plugins.map(watcherOf).find((found) => found !== undefined);
   if (hooks === undefined) return null;
   const alert = auditAlerter(runtime);
   return {
     hooks,
-    context: (actor) =>
-      watchContext({ db: runtime.db, chainKey: runtime.chainKey, previousChainKeys: runtime.previousChainKeys, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor }),
+    context: (actor, confirmed) =>
+      watchContext({ db: runtime.db, chainKey: runtime.chainKey, previousChainKeys: runtime.previousChainKeys, vault: runtime.vault, alert: (text) => alert(text, actor && actorOf(actor.actorType, actor.actorId)), actor, confirmed }),
   };
 }
 
@@ -171,7 +172,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
   const watch = watchOf(runtime);
   const actor: WatchActor = { actorType: identity.caller.principal.type, actorId: identity.caller.principal.id, requestId: identity.requestId, sourceIp: identity.sourceIp };
   return {
-    watch: watch === null ? null : { hooks: watch.hooks, context: (asCaller) => watch.context(asCaller ? actor : undefined) },
+    watch: watch === null ? null : { hooks: watch.hooks, context: (asCaller, confirmed) => (asCaller ? watch.context(actor, confirmed) : watch.context()) },
     db: runtime.db,
     chainKey: runtime.chainKey,
     previousChainKeys: runtime.previousChainKeys,
@@ -185,6 +186,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     sourceIp: identity.sourceIp,
     credentialId: identity.credentialId,
     passkeyId: identity.passkeyId,
+    session: identity.session ?? null,
     bindingId: identity.bindingId ?? null,
     access: identity.access === true,
     provenance: identity.provenance,

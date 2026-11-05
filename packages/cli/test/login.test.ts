@@ -521,3 +521,143 @@ test("a repository's coffre.json names its instance for a fresh clone, which sig
   writeFileSync(join(home, 'coffre.json'), JSON.stringify({ url: a.origin }));
   assert.equal(await first('code/other', ['whoami']), `service:deploy (service account) on ${b.origin} (the default), via a bearer token, from coffre login --token`);
 });
+
+/**
+ * A coffre whose member add takes a fresh check (docs/design/passkeys.md, section 3.5): refused `fresh_check_required`
+ * on Ada's saved session, `coffre_cli_old`, and taken on the one her browser's approval of a device code redeems,
+ * `coffre_cli_new`. It keeps every request. `add`: Ada holds no passkey yet, whom the refusal asks to add one.
+ */
+type FreshFake = {
+  add?: boolean;
+  /** Whose browser approves the code. */
+  approver?: string;
+  /** What ending a session answers. */
+  logout?: number;
+  /** Run as the device code is redeemed: another login, say, saving a session of its own meanwhile. */
+  meanwhile?: (home: string) => void;
+  /** Another instance, the default, beside this one. */
+  elsewhere?: boolean;
+};
+
+async function freshInstance(t: test.TestContext, { add = false, approver = 'ada@acme.example', logout = 200, meanwhile, elsewhere = false }: FreshFake = {}) {
+  const seen: { method: string; url: string; authorization: string | undefined; caller: string | undefined; body: string }[] = [];
+  let home = '';
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += String(chunk);
+    seen.push({ method: req.method!, url: req.url!, authorization: req.headers.authorization, caller: req.headers['coffre-caller'] as string | undefined, body });
+    const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/api/me' && req.headers.authorization === 'Bearer coffre_cli_old') return send(200, { principal: { type: 'user', id: 'ada@acme.example' }, credentialId: 'cred_old' });
+    if (req.url === '/api/auth/device') return send(200, { device_code: 'device', user_code: 'BCDF-GHJK', verification_uri_complete: 'http://127.0.0.1/auth/device?code=BCDF-GHJK', interval: 1, expires_in: 60 });
+    if (req.url === '/api/auth/device/token') {
+      meanwhile?.(home);
+      return send(200, { access_token: 'coffre_cli_new', expires_at: '2099-02-01T00:00:00Z', principal: { type: 'user', id: approver } });
+    }
+    if (req.url === '/api/auth/logout') return logout === 200 ? send(200, { signedOut: true }) : send(logout, { error: 'unavailable', message: 'try again' });
+    if (req.method === 'PUT' && req.url === '/api/members/user%3Abob%40acme.example') {
+      if (req.headers.authorization === 'Bearer coffre_cli_new') return send(200, { member: 'user:bob@acme.example', created: true, instanceRole: 'member', scope: null });
+      return send(403, { error: 'fresh_check_required', message: 'this takes a fresh touch of your passkey', caller: 'user:ada-id', ...(add ? { reason: 'add_passkey' } : {}) });
+    }
+    send(401, { error: 'unauthenticated', message: `unexpected ${req.method} ${req.url}` });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const origin = `http://127.0.0.1:${address.port}`;
+  home = mkdtempSync(join(tmpdir(), 'coffre-fresh-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, '.coffre'), { mode: 0o700 });
+  const ada = { mode: 'signin', token: 'coffre_cli_old', principal: { type: 'user', id: 'ada@acme.example' }, expiresAt: '2099-01-01T00:00:00Z', obtainedAt: '2026-10-01T00:00:00Z' };
+  const other = 'https://coffre.other.example';
+  const instances = { [origin]: ada, ...(elsewhere ? { [other]: { ...ada, token: 'coffre_cli_other' } } : {}) };
+  writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: elsewhere ? other : origin, instances }), { mode: 0o600 });
+  const store = () => JSON.parse(readFileSync(join(home, '.coffre', 'credentials.json'), 'utf8')) as { current: string | null; instances: Record<string, typeof ada> };
+  const saved = () => store().instances[origin]!;
+  return { origin, other, home, seen, saved, store };
+}
+
+test('a command a fresh check refuses asks for a device code of its own, approved with a touch, swaps its session in and goes again, once', async (t) => {
+  const { home, seen, saved } = await freshInstance(t);
+  const ran = await cli(home, ['admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 0, `${ran.stderr}${JSON.stringify(seen.map((request) => `${request.method} ${request.url} ${request.authorization}`))}`);
+  assert.match(ran.stderr, /This takes a touch of your passkey\. Approve it in your browser: open\n\n {4}http:\/\/127\.0\.0\.1\/auth\/device\?code=BCDF-GHJK/);
+  assert.match(ran.stdout, /admitted user:bob@acme\.example/);
+  const adds = seen.filter((request) => request.method === 'PUT');
+  assert.deepEqual(adds.map((request) => request.authorization), ['Bearer coffre_cli_old', 'Bearer coffre_cli_new'], 'refused, then sent again on the new session, once');
+  assert.equal(adds[0]!.body, adds[1]!.body, 'the same request');
+  assert.deepEqual(adds.map((request) => request.caller), [undefined, 'user:ada-id'], 'sent again saying who sent it first, as the refusal named her');
+  // Its code names the command, which the approval page shows: no secret is ever an argument.
+  const started = seen.find((request) => request.url === '/api/auth/device')!;
+  assert.deepEqual(JSON.parse(started.body), { client_label: 'coffre CLI: admit bob@acme.example' });
+  // The new session is saved, and the old one signed out.
+  assert.equal(saved().token, 'coffre_cli_new');
+  assert.equal(saved().expiresAt, '2099-02-01T00:00:00Z');
+  assert.deepEqual(seen.filter((request) => request.url === '/api/auth/logout').map((request) => request.authorization), ['Bearer coffre_cli_old']);
+});
+
+test('a fresh check approved in another person\'s browser goes unused: their session is ended, the command is not sent again', async (t) => {
+  const { home, seen, saved } = await freshInstance(t, { approver: 'bob@acme.example' });
+  const ran = await cli(home, ['admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stderr.split('\n').at(-2), 'coffre: that was approved as bob@acme.example, not ada@acme.example: nothing was changed');
+  assert.equal(seen.filter((request) => request.method === 'PUT').length, 1, 'sent once, refused');
+  assert.equal(saved().token, 'coffre_cli_old');
+  assert.deepEqual(seen.filter((request) => request.url === '/api/auth/logout').map((request) => request.authorization), ['Bearer coffre_cli_new']);
+});
+
+test('a fresh check holds the approval to the person the instance says the session is, whatever another login saved meanwhile, and replaces no session it did not start on', async (t) => {
+  // Another login saves Bob's session while the command waits, and Bob approves the code: the saved file now
+  // agrees with him, the instance's answer before the code does not.
+  const bob = { mode: 'signin', token: 'coffre_cli_bob', principal: { type: 'user', id: 'bob@acme.example' }, expiresAt: '2099-01-01T00:00:00Z', obtainedAt: '2026-10-02T00:00:00Z' };
+  const meanwhile = (home: string) => {
+    const path = join(home, '.coffre', 'credentials.json');
+    const store = JSON.parse(readFileSync(path, 'utf8')) as { instances: Record<string, unknown> };
+    for (const origin of Object.keys(store.instances)) store.instances[origin] = bob;
+    writeFileSync(path, JSON.stringify(store), { mode: 0o600 });
+  };
+  const approvedByBob = await freshInstance(t, { approver: 'bob@acme.example', meanwhile });
+  const ran = await cli(approvedByBob.home, ['admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 1);
+  assert.match(ran.stderr, /that was approved as bob@acme\.example, not ada@acme\.example: nothing was changed/);
+  assert.equal(approvedByBob.seen.filter((request) => request.method === 'PUT').length, 1);
+  assert.equal(approvedByBob.saved().token, 'coffre_cli_bob', 'Bob\'s own login stands');
+
+  // Ada approves, but the saved session is no longer the one the command started on: it is left as it is.
+  const approvedByAda = await freshInstance(t, { meanwhile });
+  const again = await cli(approvedByAda.home, ['admit', 'bob@acme.example'], '');
+  assert.equal(again.status, 1);
+  assert.match(again.stderr, /the session saved for http:\/\/127\.0\.0\.1:\d+ changed while this waited: nothing was changed, run this again/);
+  assert.equal(approvedByAda.seen.filter((request) => request.method === 'PUT').length, 1);
+  assert.equal(approvedByAda.saved().token, 'coffre_cli_bob');
+  assert.deepEqual(approvedByAda.seen.filter((request) => request.url === '/api/auth/logout').map((request) => request.authorization), ['Bearer coffre_cli_new']);
+});
+
+test('a fresh check on an instance named by --url replaces its session and leaves the default where it was', async (t) => {
+  const { origin, other, home, store } = await freshInstance(t, { elsewhere: true });
+  const ran = await cli(home, ['--url', origin, 'admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.equal(store().current, other);
+  assert.equal(store().instances[origin]!.token, 'coffre_cli_new');
+  assert.equal(store().instances[other]!.token, 'coffre_cli_other');
+});
+
+test('a fresh check whose old session could not be ended says so, and how to end it, on its own instance', async (t) => {
+  // The default is another instance: the command it suggests names this one, or it would revoke there.
+  const { origin, home, saved } = await freshInstance(t, { logout: 503, elsewhere: true });
+  const ran = await cli(home, ['--url', origin, 'admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.match(ran.stdout, /admitted user:bob@acme\.example/);
+  assert.ok(ran.stderr.includes(`Approved.\nThe session this replaces could not be ended (status 503): it works until it expires, or until \`coffre --url ${origin} sessions revoke cred_old --apply\` ends it.\n`), ran.stderr);
+  assert.equal(saved().token, 'coffre_cli_new');
+});
+
+test('a command a person with no passkey yet is refused for says to add one in the browser, and asks for no code', async (t) => {
+  const { origin, home, seen, saved } = await freshInstance(t, { add: true });
+  const ran = await cli(home, ['admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stderr, `coffre: this takes a passkey, and you have none yet: sign in to ${origin} in your browser, add one when coffre asks, then run this again\n`);
+  assert.equal(seen.some((request) => request.url === '/api/auth/device'), false);
+  assert.equal(saved().token, 'coffre_cli_old');
+});

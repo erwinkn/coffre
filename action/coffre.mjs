@@ -17104,8 +17104,17 @@ function enduringClient(to) {
 /** One request; every way it can fail is explained in terms of what to do next. */
 async function send(request, to, hint, handled = [], ask = once) {
 	let response;
+	const again = steppingUp(to) ? request.clone() : null;
 	try {
 		response = await ask(request);
+		const refused = again !== null && response.status === 403 ? await freshRefusal(response) : null;
+		if (refused !== null) {
+			await freshened(to, refused);
+			const headers = new Headers(again.headers);
+			for (const [name, value] of Object.entries(await headersFor(to))) headers.set(name, value);
+			if (refused.caller !== null) headers.set("coffre-caller", refused.caller);
+			response = await ask(new Request(again, { headers }));
+		}
 	} catch (error) {
 		fail(unreachable(to.origin, error));
 	}
@@ -17132,6 +17141,114 @@ async function send(request, to, hint, handled = [], ask = once) {
 	}
 	if (!json) fail("request returned a non-JSON response");
 	return response;
+}
+/** Whether `to`'s credential is a person's session `coffre login` saved, which a fresh check can confirm anew. */
+function steppingUp(to) {
+	return to.mode === "signin" && to.by === "person" && to.credential.kind === "token";
+}
+/**
+* Whether an answer is a fresh check's refusal (docs/design/passkeys.md, section 3.5): of a person with no passkey yet
+* (`add`), and who it says sent the command (`caller`, null from an instance that names none).
+*/
+async function freshRefusal(response) {
+	const body = await response.clone().json().catch(() => null);
+	if (body?.error !== "fresh_check_required") return null;
+	return {
+		add: body.reason === "add_passkey",
+		caller: typeof body.caller === "string" ? body.caller : null
+	};
+}
+/**
+* A fresh check for a command (docs/design/passkeys.md, section 3.5): a device login of its own, labelled with the
+* command, approved in the person's signed-in browser with a touch of their passkey, whose new session, confirmed then,
+* the CLI swaps in, signing the old one out, for the command to go again, once. The second command inside the five
+* minutes asks nothing. A person with no passkey yet adds one in the browser first.
+*
+* The new session must be the old one's person's, as the instance says the old one is before the code is asked
+* for: whoever approves it, and whatever another login saved meanwhile. It replaces the saved session only if that
+* is still the one this command started on, and leaves which instance is the default alone.
+*/
+async function freshened(to, refused) {
+	if (refused.add) fail(`this takes a passkey, and you have none yet: sign in to ${to.origin} in your browser, add one when coffre asks, then run this again`);
+	const old = to.credential.token;
+	const was = await whoseSession(to.origin, old);
+	const said = `coffre CLI: ${[command ?? "", ...rest].join(" ").trim()}`;
+	const session = await approvedInBrowser(to.origin, said, "This takes a touch of your passkey. Approve it in your browser: open", false);
+	if (session.principal.type !== "user" || session.principal.id !== was.principal.id) {
+		const ended = await endSession(to.origin, session.access_token);
+		fail(`that was approved as ${session.principal.id}, not ${was.principal.id}: nothing was changed${ended === null ? "" : `, and the session it made could not be ended (${ended}): ${session.principal.id} can end it in their browser, under Account, Sessions`}`);
+	}
+	const store = readStore();
+	const saved = store.instances[to.origin];
+	if (saved === void 0 || saved.mode !== "signin" || saved.kind !== void 0 || saved.token !== old) {
+		const ended = await endSession(to.origin, session.access_token);
+		fail(`the session saved for ${to.origin} changed while this waited: nothing was changed, run this again${ended === null ? "" : ` (the session just approved could not be ended, ${ended}: \`coffre sessions\` lists it)`}`);
+	}
+	writeStore({
+		...store,
+		instances: {
+			...store.instances,
+			[to.origin]: {
+				...saved,
+				token: session.access_token,
+				expiresAt: session.expires_at,
+				obtainedAt: (/* @__PURE__ */ new Date()).toISOString()
+			}
+		}
+	});
+	to.credential = {
+		kind: "token",
+		token: session.access_token
+	};
+	const ended = await endSession(to.origin, old);
+	process.stderr.write("Approved.\n");
+	if (ended !== null) {
+		const id = was.credentialId === null ? "" : ` ${was.credentialId}`;
+		process.stderr.write(`The session this replaces could not be ended (${ended}): it works until it expires, or until \`coffre --url ${to.origin} sessions revoke${id === "" ? " <id>" : id} --apply\` ends it.\n`);
+	}
+}
+/** Whose a saved session is, as the instance says, and its id there: what its fresh check's approval must match. */
+async function whoseSession(origin, token) {
+	let response;
+	try {
+		response = await http(`${origin}/api/me`, {
+			redirect: "manual",
+			headers: {
+				authorization: `Bearer ${token}`,
+				accept: "application/json"
+			}
+		});
+	} catch (error) {
+		fail(unreachable(origin, error));
+	}
+	const me = response.ok && isJsonContentType(response.headers.get("content-type")) ? await response.json().catch(() => null) : null;
+	if (me?.principal?.type !== "user" || typeof me.principal.id !== "string") fail(`${origin} did not say whose the session saved here is (status ${response.status}): nothing was changed`);
+	return {
+		principal: {
+			type: "user",
+			id: me.principal.id
+		},
+		credentialId: typeof me.credentialId === "string" ? me.credentialId : null
+	};
+}
+/**
+* A session ended, at the instance: null once it has, or had already (401), or why it could not be, as `logout`
+* tells them apart.
+*/
+async function endSession(origin, token) {
+	try {
+		const response = await http(`${origin}/api/auth/logout`, {
+			method: "POST",
+			redirect: "manual",
+			headers: {
+				authorization: `Bearer ${token}`,
+				"content-type": "application/json"
+			}
+		});
+		return response.ok || response.status === 401 ? null : `status ${response.status}`;
+	} catch (error) {
+		return unreachable(origin, error);
+	}
 }
 /**
 * Why the instance turned the credential away, by whose it is. The server
@@ -17298,24 +17415,7 @@ function expiresIn(seconds) {
 }
 /** A device login: a code shown here, approved in a browser signed in to coffre. */
 async function deviceLogin(origin, noBrowser) {
-	let started;
-	try {
-		started = await http(`${origin}/api/auth/device`, {
-			method: "POST",
-			redirect: "manual",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ client_label: `coffre CLI on ${hostname()}` })
-		});
-	} catch (error) {
-		fail(unreachable(origin, error));
-	}
-	if (started.status === 429) fail("too many sign-in attempts from this address; wait a minute and retry");
-	if (!started.ok || !isJsonContentType(started.headers.get("content-type"))) fail(`${origin} did not start a sign-in (status ${started.status})`);
-	const device = await started.json();
-	process.stderr.write(`\nTo sign in, open\n\n    ${device.verification_uri_complete}\n\nand check that it shows the code  ${device.user_code}\n\n`);
-	if (!noBrowser && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
-	process.stderr.write(`Waiting for you to approve it; the code expires in ${expiresIn(device.expires_in)}…\n`);
-	const session = await pollDevice(origin, device.device_code, device.interval, device.expires_in);
+	const session = await approvedInBrowser(origin, `coffre CLI on ${hostname()}`, "To sign in, open", noBrowser);
 	const me = await client({
 		origin,
 		mode: "signin",
@@ -17334,6 +17434,27 @@ async function deviceLogin(origin, noBrowser) {
 	}));
 	process.stdout.write(`Signed in to ${origin} as ${me.principal.id}\n`);
 	printMe(me);
+}
+/** A device code started, labelled `label`, shown here under `intro`, and the session its approval in a browser redeems. */
+async function approvedInBrowser(origin, label, intro, noBrowser) {
+	let started;
+	try {
+		started = await http(`${origin}/api/auth/device`, {
+			method: "POST",
+			redirect: "manual",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ client_label: label.slice(0, 120) })
+		});
+	} catch (error) {
+		fail(unreachable(origin, error));
+	}
+	if (started.status === 429) fail("too many sign-in attempts from this address; wait a minute and retry");
+	if (!started.ok || !isJsonContentType(started.headers.get("content-type"))) fail(`${origin} did not start a sign-in (status ${started.status})`);
+	const device = await started.json();
+	process.stderr.write(`\n${intro}\n\n    ${device.verification_uri_complete}\n\nand check that it shows the code  ${device.user_code}\n\n`);
+	if (!noBrowser && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
+	process.stderr.write(`Waiting for you to approve it; the code expires in ${expiresIn(device.expires_in)}…\n`);
+	return pollDevice(origin, device.device_code, device.interval, device.expires_in);
 }
 /** Ask the instance how it signs people in. */
 async function askMode(origin) {

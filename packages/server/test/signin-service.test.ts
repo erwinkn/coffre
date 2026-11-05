@@ -344,6 +344,7 @@ test('a first sign-in with an invited email binds the account and opens a browse
     expiresAt: result.credential.expiresAt,
     // A session the provider alone signed in, or a service's token: no passkey stands behind it.
     passkeyId: null,
+    session: { kind: 'browser', confirmedAt: null },
   });
   // What the vault said of them, which the request's caller is: no second call.
   assert.deepEqual([access.principal, access.status, access.generation], [`user:${DEV}`, 'active', 0]);
@@ -830,6 +831,7 @@ test('owners issue service tokens that verify as the service', async () => {
     expiresAt: issued.expiresAt,
     // A session the provider alone signed in, or a service's token: no passkey stands behind it.
     passkeyId: null,
+    session: null,
   });
   assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
 
@@ -1016,6 +1018,7 @@ test('device flow: start, describe, approve, then one poll gets a CLI session', 
     expiresAt: approved.credential.expiresAt,
     // A session the provider alone signed in, or a service's token: no passkey stands behind it.
     passkeyId: null,
+    session: { kind: 'cli', confirmedAt: null },
   });
   assert.deepEqual([access.principal, access.status], [`user:${DEV}`, 'active']);
 

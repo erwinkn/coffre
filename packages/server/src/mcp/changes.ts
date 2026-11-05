@@ -48,6 +48,14 @@ export type Ask = { value: { label: string; note: string } };
 export type Change<I extends z.ZodObject = z.ZodObject> = {
   /** What it does, in a phrase from its arguments alone: the client's prompt and the page's title. */
   summary: (args: z.infer<I>) => string;
+  /**
+   * What the route it makes its change through answers for a fresh check (`FRESH_ROUTES`, passkeys.md, section 4.4):
+   * `always` for a change that widens someone's reach or mints a credential. Approve's touch stands for it; a person who
+   * holds no passkey, under `optional`, is asked to add one before the approval is decided, which leaves it pending.
+   * The route's own check, as the change runs, still holds it (`McpVia.touched`). A copy of the route's answer, which
+   * `mcp-change-fresh.test.ts` holds to the route each tool's change calls.
+   */
+  fresh: 'always' | 'never';
   /** Before asking, as the connection: a call the person could not make fails here, not on the page. */
   check?: (ctx: ToolContext, args: z.infer<I>) => Promise<void>;
   /**
@@ -319,6 +327,7 @@ function archiving(archived: boolean): Tool {
     destructive: archived,
     input: z.object({ secret }).strict(),
     change: {
+      fresh: 'never',
       summary: ({ secret }) => `${archived ? 'archive' : 'unarchive'} ${secret}`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.archive'),
       preview: async (api, { secret }) => [
@@ -409,6 +418,7 @@ export const SHOW_VALUE: Tool = changeTool({
   input: z.object({ secret }).strict(),
   names: ({ secret }) => [secret],
   change: {
+    fresh: 'never',
     summary: ({ secret }) => `show you the value of ${secret}`,
     check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.read'),
     preview: async (api, { secret }) => [{ label: 'Secret', value: secret, kind: 'mono' }, ...(await current(api, secret)).details],
@@ -433,6 +443,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     destructive: true,
     input: z.object({ secret, note: z.string().trim().min(1).max(500).optional().describe('What the value is for, shown to the person on the page') }).strict(),
     change: {
+      fresh: 'never',
       summary: ({ secret }) => `set ${secret} to a value you type on coffre`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
       replaces: async (api, { secret }) => current(api, secret),
@@ -467,6 +478,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       })
       .strict(),
     change: {
+      fresh: 'never',
       summary: ({ secret }) => `set ${secret} to a new random value`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
       replaces: async (api, { secret }) => current(api, secret),
@@ -496,6 +508,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     destructive: true,
     input: z.object({ secret, newKey: secretKey.describe('The new key: letters, digits and underscores') }).strict(),
     change: {
+      fresh: 'never',
       summary: ({ secret, newKey }) => `rename ${secret} to ${newKey}`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
       preview: async (api, { secret, newKey }) => [
@@ -521,6 +534,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     destructive: true,
     input: z.object({ secret, version: z.number().int().positive() }).strict(),
     change: {
+      fresh: 'never',
       summary: ({ secret, version }) => `restore ${secret} to version ${version}`,
       check: async ({ api }, { secret }) => needs(api, splitSecret(secret).environment, 'secret.write'),
       replaces: async (api, { secret }) => current(api, secret),
@@ -554,6 +568,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     input: z.object({ project: slug.describe('The project slug: market'), name }).strict(),
     names: ({ project }) => [project],
     change: {
+      fresh: 'never',
       summary: ({ project }) => `create the project ${project}`,
       check: projectMakers,
       preview: async (_api, { project }) => [{ label: 'Project', value: project, kind: 'mono' }],
@@ -581,6 +596,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     }).strict(),
     names: ({ environment, inherits }) => [environment, ...(inherits === undefined ? [] : [`${splitEnvironment(environment).project}/${inherits}`])],
     change: {
+      fresh: 'never',
       summary: ({ environment, inherits }) => `create the environment ${environment}${inherits === undefined ? '' : `, inheriting ${splitEnvironment(environment).project}/${inherits}`}`,
       check: async ({ api }, { environment }) => needsOn(api, [splitEnvironment(environment).project], 'environment.manage'),
       preview: async (_api, { environment, inherits }) => [
@@ -621,6 +637,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       .strict(),
     names: ({ member, changes }) => [apiMember(member), ...Object.keys(changes)],
     change: {
+      fresh: 'always',
       summary: ({ member, changes }) => {
         const places = Object.keys(changes);
         return `change ${shownMember(apiMember(member))}'s access at ${places.length === 1 ? places[0] : `${places.length} places`}`;
@@ -666,6 +683,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     }).strict(),
     names: ({ member, access }) => [apiMember(member), ...Object.keys(access ?? {})],
     change: {
+      fresh: 'always',
       summary: ({ member, role, scope, access }) =>
         `admit ${shownMember(apiMember(member))}${role === undefined ? '' : ` as ${role}, ${scopeInWords(fullScope(scope))}`}${access === undefined ? '' : `, with access at ${Object.keys(access).join(', ')}`}`,
       // The grants are the API's to decide on Approve, as set_access's for a service account are.
@@ -716,6 +734,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     input: z.object({ member }).strict(),
     names: ({ member }) => [apiMember(member)],
     change: {
+      fresh: 'always',
       summary: ({ member }) => `offboard ${shownMember(apiMember(member))}`,
       check: async (ctx, { member }) => (apiMember(member).startsWith('token:') && !runsInstance(ctx.connection.caller) ? manages(ctx.api, apiMember(member)) : instanceOnly(ctx)),
       preview: async (api, { member }) => {
@@ -760,6 +779,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     input: z.object({ service, label: z.string().trim().min(1).max(CREDENTIAL_LABEL_MAX).optional(), expiresInDays: z.number().int().min(1).max(MAX_SERVICE_TOKEN_DAYS), scope: credentialScope }).strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
+      fresh: 'always',
       summary: ({ service, expiresInDays }) => `issue a token for ${shownService(service)}, good for ${expiresInDays} days`,
       // A scope it names is checked as issuing it would be, before anyone is asked to approve it.
       check: async (ctx, { service, label, expiresInDays, scope }) => {
@@ -797,6 +817,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     input: z.object({ service, id: z.string().uuid() }).strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
+      fresh: 'never',
       summary: ({ service }) => `revoke a token of ${shownService(service)}`,
       check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
       preview: async (api, { service, id }) => {
@@ -835,6 +856,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       .strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
+      fresh: 'always',
       summary: ({ service, profile }) => `let ${profile} CI runs sign in as ${shownService(service)}`,
       // The binding is checked, and its issuer asked where its keys are, before anyone is asked to approve it.
       check: async ({ api }, { service, profile, issuer, claims, scope, label }) =>
@@ -879,6 +901,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
     input: z.object({ service, id: z.string().uuid() }).strict(),
     names: ({ service }) => [serviceMember(service)],
     change: {
+      fresh: 'never',
       summary: ({ service }) => `stop trusting a CI workload as ${shownService(service)}`,
       check: (ctx, { service }) => manages(ctx.api, serviceMember(service)),
       preview: async (api, { service, id }) => {

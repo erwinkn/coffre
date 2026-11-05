@@ -1,12 +1,14 @@
 import { CREDENTIAL_LABEL_MAX } from '@coffre/core/access';
 import { EXCHANGE_SKEW_SECONDS, SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
+import type { Confirmation } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import type { SignedInAccount, SigninResult } from './api/signin.ts';
 import { CEREMONY_TTL_SECONDS } from './api/ceremony.ts';
+import { freshEnough, freshPass } from './api/fresh-routes.ts';
 import { API_BODY_BYTES } from './api/router.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
@@ -52,6 +54,29 @@ async function browserIdentity(
   if (token === null) return null;
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp);
   return identity instanceof Response ? null : identity;
+}
+
+/** Where a link to a provider's account starts: the one place a step-up may go on to that is not a page (`stepUpNext`). */
+function linkStart(provider: string): string {
+  return `/auth/signin/${encodeURIComponent(provider)}?link=1`;
+}
+
+/**
+ * Whether the browser's session may link another account: `holder`, fresh if its person holds a passkey
+ * (`FRESH_ROUTES`); and if so, what confirmed it, which the link's entry names (passkeys.md, section 11). Null if not.
+ */
+function linksFresh(runtime: CoffreRuntime, identity: AuthenticatedIdentity): { confirmed: Confirmation | null } | null {
+  const { stands, confirmed } = freshPass({ signin: runtime.signin, ...identity }, 'holder');
+  return freshEnough('holder', stands) ? { confirmed } : null;
+}
+
+/**
+ * Where a step-up goes on to: a page of coffre's (`safeNext`), or the start of a link to one of the deployment's
+ * providers, which its holder check sent there (`startSignin`), exactly as it sent it.
+ */
+function stepUpNext(raw: string | null, config: { providers: readonly { id: string }[]; publicUrl: string }): string {
+  if (raw !== null && config.providers.some((provider) => raw === linkStart(provider.id))) return raw;
+  return safeNext(raw, config.publicUrl);
 }
 
 /** A device-login body carries a short label or a device code, nothing more: it is read in at most this many bytes, as anyone may call it. */
@@ -325,6 +350,11 @@ export async function startSignin(
     if (identity?.principal.type !== 'user' || !identity.registered) {
       return redirectResponse('/login?next=/account');
     }
+    // Another account that signs in as them (passkeys.md, section 4.5): a fresh session if they hold a passkey, before
+    // leaving for the provider. The step-up confirms it, and comes back here.
+    if (linksFresh(runtime, identity) === null) {
+      return redirectResponse(`/auth/passkey?${new URLSearchParams({ 'step-up': '1', next: linkStart(config.id) })}`);
+    }
     link = identity.principal.id;
   }
 
@@ -343,6 +373,8 @@ export async function startSignin(
     provider: config.id,
     next: linking ? '/account' : safeNext(url.searchParams.get('next'), signin.config.publicUrl),
     link,
+    // `?passkey=add`: to add a passkey as they sign in, which an act that takes one asked them to (`afterProvider`).
+    ...(!linking && url.searchParams.get('passkey') === 'add' ? { addPasskey: true as const } : {}),
   });
   return redirectResponse(started.url.href, [
     cookieHeader(runtime.auth, pendingCookieName(runtime.auth), sealed.value, sealed.maxAge),
@@ -397,11 +429,14 @@ export async function finishSignin(
     if (identity === null || !identity.registered || identity.principal.id !== pending.link) {
       return fail('link_session');
     }
-    const linked = await signin.linkIdentity(identity, profile);
+    // Fresh still: a window that ran out at the provider links nothing, and the page says to link again.
+    const fresh = linksFresh(runtime, identity);
+    if (fresh === null) return fail('link_stale');
+    const linked = await signin.linkIdentity({ ...identity, confirmed: fresh.confirmed }, profile);
     return linked.ok ? redirectResponse(`/account?linked=${config.id}`, [clearPending]) : fail(linked.reason);
   }
 
-  const result = await signin.afterProvider(profile, { ...meta, label: describeUserAgent(request.headers.get('user-agent')) }, pending.next);
+  const result = await signin.afterProvider(profile, { ...meta, label: describeUserAgent(request.headers.get('user-agent')) }, pending.next, { addPasskey: pending.addPasskey === true });
   // A passkey to touch, or to add, before any session exists (passkeys.md, section 3.1): what the provider vouched for
   // waits in a sealed cookie of its own, and nothing is written until the passkey answers.
   if (result.ok === 'passkey') {
@@ -459,7 +494,7 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
   if (request.method !== 'POST') {
     if (url.searchParams.get('step-up') === '1') {
       const token = readCookie(request, sessionCookieName(auth));
-      const step = token === null ? null : await signin.stepUpStep(token, safeNext(url.searchParams.get('next'), signin.config.publicUrl));
+      const step = token === null ? null : await signin.stepUpStep(token, stepUpNext(url.searchParams.get('next'), signin.config));
       return step === null ? nothing() : jsonResponse(step, 200, { 'cache-control': 'no-store' });
     }
     const state = signin.ceremonies.open(readCookie(request, passkeyCookieName(auth)), ['signin', 'enroll']);

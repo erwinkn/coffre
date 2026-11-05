@@ -272,7 +272,7 @@ test('an unregistered identity is marked for the closed-door boundary', async ()
     requestId: 'unregistered-request',
     sourceIp: null,
     credentialId: null,
-    credentialExpiresAt: null, passkeyId: null, provenance: null, personalToken: null, handlePlaces: null, via: null, workload: null, access: true,
+    credentialExpiresAt: null, passkeyId: null, session: null, provenance: null, personalToken: null, handlePlaces: null, via: null, workload: null, access: true,
   });
 });
 
@@ -340,7 +340,7 @@ test('an active registered identity receives an auditable request context', asyn
       requestId: 'registered-request',
       sourceIp: null,
       credentialId: null,
-      credentialExpiresAt: null, passkeyId: null, provenance: null, personalToken: null, handlePlaces: null, via: null, workload: null,
+      credentialExpiresAt: null, passkeyId: null, session: null, provenance: null, personalToken: null, handlePlaces: null, via: null, workload: null,
     });
   }
 });

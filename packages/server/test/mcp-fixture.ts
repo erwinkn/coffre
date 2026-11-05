@@ -5,7 +5,7 @@ import { after, before, beforeEach } from 'node:test';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { github, signin, type RateLimiter } from '@coffre/core/identity';
+import { github, signin, type PasskeyPolicy, type RateLimiter } from '@coffre/core/identity';
 import { eq } from 'drizzle-orm';
 
 import { SigninService } from '../src/api/signin.ts';
@@ -46,9 +46,10 @@ const limiter = (which: 'other' | 'connection'): RateLimiter => ({
     return { success: which === 'other' || calls.open === true };
   },
 });
-const auth = signin({
+const deployment = (passkeys?: PasskeyPolicy) => signin({
   providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
   mcp: { limits: { perSource: limiter('other'), perConnection: limiter('connection'), total: limiter('other') } },
+  ...(passkeys === undefined ? {} : { passkeys }),
 }).resolve(ORIGIN);
 
 export let db: Awaited<ReturnType<typeof openTestDatabase>>;
@@ -60,10 +61,11 @@ export let runtime: CoffreRuntime;
  * test, which `seed` then fills. `approvalWaitMs` is how long a call waits
  * on its approval before saying it still waits.
  */
-export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: number } = {}): void {
+export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: number; passkeys?: PasskeyPolicy } = {}): void {
   before(async () => {
     db = await openTestDatabase();
     deps = testDeps(db.runtime, [ROOT]);
+    const auth = deployment(options.passkeys);
     if (auth.mode !== 'signin') throw new Error('unreachable');
     const service = new SigninService({ ...deps, signin: auth.signin });
     const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport, approvalWaitMs: options.approvalWaitMs });

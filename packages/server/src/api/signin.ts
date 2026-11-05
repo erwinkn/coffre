@@ -74,7 +74,7 @@ import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '..
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, COFFRE_ACTOR, connectionRevokes, deploymentOwners, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
-import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext } from './context.ts';
+import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext, type SessionOf } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
 import { ApiError, badRequest, forbidden, notFound, TouchRequired } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
@@ -112,7 +112,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance'>>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance' | 'confirmed'>>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -179,6 +179,12 @@ export type PendingState = PendingSignin & {
   next: string;
   /** Linking: the principal who asked to add this account. */
   link: string | null;
+  /**
+   * Signing in to add a passkey (`/auth/signin/:provider?passkey=add`): a member who holds none, under `optional`, is
+   * asked to add one as they sign in, as an Owner is (passkeys.md, section 3.3). What a page asks for when an act the
+   * person may do takes a passkey they do not have yet (`fresh_check_required`, `add_passkey`). Sealed by 0.16.0 and on.
+   */
+  addPasskey?: true;
 };
 
 const PENDING_TTL_SECONDS = 10 * 60;
@@ -266,6 +272,8 @@ export type CredentialPrincipal = Principal & {
   expiresAt: string;
   /** The passkey it names, which the check held live (`passkeyStands`); null for none. */
   passkeyId: string | null;
+  /** A person's browser or terminal session, and when a touch confirmed it; null for any other credential. */
+  session?: SessionOf | null;
 };
 
 export type ClientMeta = {
@@ -736,7 +744,7 @@ export class SigninService {
    * role decides. That answer is the sign-in's own, which it completes with, and its transaction holds it to the
    * access it was read at; moved meanwhile, the step is decided again (review r1 of #500).
    */
-  async afterProvider(profile: SignedInAccount, meta: ClientMeta, next: string): Promise<SigninResult | { ok: 'passkey'; state: PendingFactor }> {
+  async afterProvider(profile: SignedInAccount, meta: ClientMeta, next: string, wants: { addPasskey?: boolean } = {}): Promise<SigninResult | { ok: 'passkey'; state: PendingFactor }> {
     const policy = this.config.passkeys.policy;
     const issuerHash = this.#issuerHash(profile.provider);
     if (policy === 'off' || issuerHash === null) return this.completeSignin(profile, meta);
@@ -748,7 +756,7 @@ export class SigninService {
     let rebound = false;
     for (;;) {
       try {
-        return await this.#afterProvider(profile, meta, next, policy, issuerHash);
+        return await this.#afterProvider(profile, meta, next, policy, issuerHash, wants.addPasskey === true);
       } catch (error) {
         if (!(error instanceof AccessMoved)) throw error;
         if (error.violation !== undefined) {
@@ -759,7 +767,7 @@ export class SigninService {
     }
   }
 
-  async #afterProvider(profile: SignedInAccount, meta: ClientMeta, next: string, policy: 'optional' | 'required', issuerHash: string): Promise<SigninResult | { ok: 'passkey'; state: PendingFactor }> {
+  async #afterProvider(profile: SignedInAccount, meta: ClientMeta, next: string, policy: 'optional' | 'required', issuerHash: string, addPasskey: boolean): Promise<SigninResult | { ok: 'passkey'; state: PendingFactor }> {
     const account = { ...profile, issuerHash };
     const [owners, previous, members] = await Promise.all([
       deploymentOwners(this.#deps.vault).then((named) => new Set(named)),
@@ -790,7 +798,8 @@ export class SigninService {
     // An Owner the deployment names, admitted or not: at their row's generation, whatever its status, and with no row,
     // at a first admission's, 0 (review r3 of #500).
     if (owners.has(id)) return step('enroll', row?.generation ?? 0);
-    if (active !== null && policy === 'required') return step('enroll', active.generation);
+    // Under `required`, a member who holds none adds one; under `optional`, one who asked to (`PendingState.addPasskey`).
+    if (active !== null && (policy === 'required' || addPasskey)) return step('enroll', active.generation);
     try {
       return await this.#signedIn(profile, meta, null, { previous, person: previous === null ? { id, email: id } : null, accessSeq: row?.accessSeq ?? null });
     } catch (error) {
@@ -1188,6 +1197,7 @@ export class SigninService {
       actor: formatMember(ctx.caller.principal),
       via: ctx.credentialId,
       trace: traceOf(ctx),
+      ...(ctx.confirmed == null ? {} : { confirmed: ctx.confirmed }),
       principal: principalOf(principal),
       generation: options.generation,
       actorAccess: held.accessSeq?.toString() ?? null,
@@ -1371,6 +1381,7 @@ export class SigninService {
           handlePlaces: null,
           expiresAt: row.expiresAt.toISOString(),
           passkeyId: null,
+          session: null,
         }
       : {
           type: 'user',
@@ -1391,6 +1402,8 @@ export class SigninService {
           handlePlaces: row.kind === 'handle' ? readPlaces(row.places) : null,
           expiresAt: row.expiresAt.toISOString(),
           passkeyId: row.passkeyId,
+          // A browser's or a terminal's, with when a touch confirmed it, for the fresh check (`freshness`).
+          session: row.kind === 'browser' || row.kind === 'cli' ? { kind: row.kind, confirmedAt: row.confirmedAt } : null,
         };
   }
 

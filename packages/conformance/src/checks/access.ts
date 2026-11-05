@@ -3,7 +3,7 @@
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
-import { BULK, canary, DEV, PROD, PROJECT, signIn, touching, valuesIn, type Canaries, type People } from './people.ts';
+import { BULK, canary, DEV, PROD, PROJECT, signIn, touching, valuesIn, withPasskey, type Canaries, type People } from './people.ts';
 import { connectedApp, discovers } from './mcp.ts';
 import { pollDevice, startDevice } from './signin.ts';
 import { listed } from './audit.ts';
@@ -162,8 +162,11 @@ export async function instanceRoles(deployment: Deployment, { admin, reader }: P
   await refused('a Developer scoped to dev read a prod made later', reader.api.secrets.reveal(`${later}/prod`));
   await refused('a Developer scoped to dev read prod', reader.api.secrets.reveal(PROD));
 
-  // An admin scoped to one environment manages it alone.
+  // An admin scoped to one environment manages it alone. Granting takes a passkey of one who is not an Owner (a fresh
+  // check, docs/design/passkeys.md, section 4.1): the reader adds one first, so that what refuses each act below is
+  // the act's own rule, not the prompt.
   await admin.api.members.add(reader.member, { role: 'admin', scope: { projects: { only: [PROJECT] }, environments: { only: ['dev'] } } });
+  await withPasskey(deployment, reader);
   await reader.api.access.set(scoped, { [DEV]: 'viewer' });
   await refused('a scoped admin granted outside its scope', reader.api.access.set(scoped, { [PROD]: 'viewer' }));
   await refused('a scoped admin granted on the project around its scope', reader.api.access.set(scoped, { [PROJECT]: 'viewer' }));

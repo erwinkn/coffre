@@ -10,7 +10,8 @@ import { appendAudit, CHAIN_WALK, type AuditEntry } from '../src/db/audit.ts';
 import { auditReadiness, writeAuditHeartbeat } from './watch-fixture.ts';
 import { postgresOnly, withLogUnlocked } from './db/engine.ts';
 import { auditChainHead, auditLog } from './db/tables.ts';
-import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
+import { acceptAuditLoss } from '../src/api/audit.ts';
+import { clientFor, contextFor, LOG, openTestDatabase, resetDatabase, testDeps, testVault } from './api-fixture.ts';
 
 const db = await openTestDatabase();
 const deps = testDeps(db.runtime, ['root@acme.example']);
@@ -334,10 +335,15 @@ test('only an Owner of the whole instance, as a person, accepts lost entries thr
   assert.deepEqual([missed.status, /do not hold entry/.test(missed.message ?? '')], [400, true]);
   assert.equal((await deps.anchor.read())!.finding?.seq, checkpoint!.seq, 'a refusal moved the anchor');
 
-  // Nothing past the range: the walk goes on from the entry before it.
-  assert.deepEqual(await owner.audit.acceptLoss({ from: Number(cut), to: checkpoint!.seq }), { resumes: Number(admitted) });
+  // Nothing past the range: the walk goes on from the entry before it. Let through by a fresh check's touch (the
+  // router's, `FRESH_ROUTES`), its entry names what confirmed it (passkeys.md, section 11).
+  const ctx = await contextFor(restarted, 'root@acme.example');
+  ctx.confirmed = { by: randomUUID(), at: new Date().toISOString() };
+  assert.deepEqual(await acceptAuditLoss(ctx, { from: Number(cut), to: checkpoint!.seq }), { resumes: Number(admitted) });
   const [logged] = await db.owner.select().from(auditLog).where(eq(auditLog.action, 'audit.loss_accepted'));
   assert.equal(logged!.actor, 'user:root@acme.example');
+  const metadata = JSON.parse(logged!.metadata) as { confirmedBy?: string; confirmedAt?: string };
+  assert.deepEqual([metadata.confirmedBy, metadata.confirmedAt], [ctx.confirmed.by, ctx.confirmed.at]);
   assert.equal(await after(), true);
   assert.equal((await auditReadiness(db.runtime, restarted.vault, restarted.chainKey, deps.anchor)).ok, true);
 });

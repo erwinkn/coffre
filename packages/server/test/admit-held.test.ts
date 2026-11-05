@@ -25,6 +25,7 @@ import { localVault, spoken } from '@coffre/vault/node';
 import { REFUSAL_UNSEALED_MESSAGE } from '../src/api/errors.ts';
 import { clientFor, entryOf, hotDatabaseUrl, LOG, nothingHeld, numbersFrom, openTestDatabase, resetDatabase, sealedNow, stallingSeal, testDeps, testVault } from './api-fixture.ts';
 import { openVaultDatabase, TEST_ENGINE } from './db/engine.ts';
+import { steppedUp } from './passkey-rows.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
@@ -82,10 +83,12 @@ async function world({ fast = true, past = 0n, sealThrough = sealedNow }: { fast
     hooked,
     { json: async (url) => { throw new Error(`no fetch in this test: ${url.href}`); } },
   );
+  // A browser session as a member who adds others holds one: a passkey of theirs touched a moment ago, which a member's
+  // add takes (a fresh check, passkeys.md, section 4.1).
   const session = async (subject: string, email: string) => {
     const signed = await runtime.signin!.completeSignin({ provider: 'github', subject, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
     if (!('credential' in signed)) throw new Error(`${email} was not signed in`);
-    return { token: signed.credential.token, id: signed.credential.id };
+    return steppedUp(runtime.signin!, db.owner, deps.chainKey, email, signed.credential.token);
   };
   const bob = await session('bob', BOB);
   /** Bob's PUT of a member, as his browser sends it: its status, body and Retry-After. */

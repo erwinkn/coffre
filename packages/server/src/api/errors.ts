@@ -23,10 +23,14 @@ import { Superseded } from '../watch.ts';
  *   403 touch_required     an act that takes a touch of the caller's passkey of its own (passkeys.md, section 4.2): `touch`
  *                          carries what to ask the authenticator, for this act and this session alone; send the act again with its answer
  *   403 touch_failed       that touch did not check: no live passkey of the caller's, a signature or flag that fails, or a replay
+ *   403 fresh_check_required  an act that takes a session a passkey touch confirmed in the last five minutes (passkeys.md,
+ *                          section 4): confirm at the step-up and send it again, with `caller` as its `coffre-caller`
+ *                          header; `reason: 'add_passkey'` when the person holds none yet, who adds one first
  *   404 not_found          no such project, environment, secret or member
  *   404 not_available      a key a request named, by name, that it may not have: none such, or no access to it, alike (D153)
  *   405 method_not_allowed
- *   409 conflict           the request is valid but the current state refuses it
+ *   409 conflict           the request is valid but the current state refuses it; `reason: 'caller_changed'`: an act
+ *                          sent again after its fresh check, by another person than the one who sent it first
  *   429 too_many_requests  too many sign-ins waiting; try again later
  *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
@@ -49,6 +53,7 @@ export const ERROR_STATUS = {
   insufficient_scope: 403,
   touch_required: 403,
   touch_failed: 403,
+  fresh_check_required: 403,
   not_found: 404,
   not_available: 404,
   method_not_allowed: 405,
@@ -65,7 +70,7 @@ export const ERROR_STATUS = {
 
 export type ErrorCode = keyof typeof ERROR_STATUS;
 
-export type ErrorBody = { error: ErrorCode; message: string; reason?: string; touch?: TouchAsked };
+export type ErrorBody = { error: ErrorCode; message: string; reason?: string; touch?: TouchAsked; caller?: string };
 
 /** What a `403 touch_required` asks: `get()`'s options, in WebAuthn's JSON form, and the sealed state to send back with its answer. */
 export type TouchAsked = { options: unknown; state: string };
@@ -99,6 +104,39 @@ export class TouchRequired extends ApiError {
     this.name = 'TouchRequired';
     this.touch = touch;
   }
+}
+
+/**
+ * An act refused for a fresh check (passkeys.md, section 4.5), before anything is written: a prompt, which writes no
+ * entry, only a line in the process log (`requireFresh`). `caller` names who sent it, opaquely (`user:<id>`): a browser sends the act again, after the touch, saying
+ * so (`coffre-caller`), and the act goes only if the same person sends it (`CALLER_HEADER`, `serveApi`).
+ */
+export class FreshCheckRequired extends ApiError {
+  readonly caller: string;
+
+  constructor(stands: 'stale' | 'none', caller: string) {
+    super(
+      'fresh_check_required',
+      stands === 'none'
+        ? 'this takes a passkey: add one, then try again'
+        : 'this takes a fresh touch of your passkey: confirm it is you, then try again',
+      stands === 'none' ? 'add_passkey' : undefined,
+    );
+    this.name = 'FreshCheckRequired';
+    this.caller = caller;
+  }
+}
+
+/**
+ * The header an act sent again after its fresh check carries: the `caller` its refusal named. Another person's session
+ * since (another tab signed in as them) refuses it, `409 caller_changed`, before anything is read or written: the touch
+ * confirmed their session, and the act was asked by someone else.
+ */
+export const CALLER_HEADER = 'coffre-caller';
+
+/** Who a request's caller is, as a fresh check's refusal names them and its act's second sending says. */
+export function callerName(principal: { type: string; id: string }): string {
+  return `${principal.type}:${principal.id}`;
 }
 
 /**
@@ -197,6 +235,7 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
     const body: ErrorBody = { error: error.code, message: error.message };
     if (error.reason !== undefined) body.reason = error.reason;
     if (error instanceof TouchRequired) body.touch = error.touch;
+    if (error instanceof FreshCheckRequired) body.caller = error.caller;
     return { status: error.status, body };
   }
   // An instance still under a key the log moved on from, as for the seconds a deploy takes: refused, not a bug.

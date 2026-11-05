@@ -55,6 +55,11 @@ export type Api = {
       };
       credentialExpiresAt: string | null;
       credentialId: string | null;
+      passkeys: null | {
+        policy: "off" | "optional" | "required";
+        enrolled: boolean;
+        confirmedUntil: string | null;
+      };
       environments: {
         project: string;
         environment: string;
@@ -2674,6 +2679,11 @@ export type Me = {
   };
   credentialExpiresAt: string | null;
   credentialId: string | null;
+  passkeys: null | {
+    policy: "off" | "optional" | "required";
+    enrolled: boolean;
+    confirmedUntil: string | null;
+  };
   environments: {
     project: string;
     environment: string;

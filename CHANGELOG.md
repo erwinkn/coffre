@@ -101,8 +101,39 @@
   refused `403 touch_required`, whose `touch` carries what to ask the
   authenticator, and the page asks it and sends Approve again; a touch
   that does not check is `403 touch_failed`. A terminal approved so starts
-  inside its approval's five minutes. To come: fresh checks
-  for risky acts, Account → Passkeys and the Owner's reset
+  inside its approval's five minutes. What widens someone's reach, mints
+  a credential or cannot be undone takes a session a touch confirmed in
+  the last five minutes (PR 5b): adding, removing or changing a member's
+  access, role edits, the settings, a service's token, trust bindings and
+  enrollment codes, lifting a freeze, unprotecting an environment, making
+  a sensitive value a secret in place, erasing for good and accepting
+  lost log entries; a person's own token from a browser, and linking
+  another sign-in account, when they hold a passkey. Every route says
+  which in a table typed over the routes (`FRESH_ROUTES`). Otherwise
+  `403 fresh_check_required`, which writes nothing: the page opens
+  "Confirm it's you", a touch at the step-up gives the browser a new
+  session and ends the old one, and the act goes again, only as the
+  person who sent it (`coffre-caller`; another's session since refuses
+  it, `409 caller_changed`); the CLI starts a
+  device login named after the command, approved in the browser with a
+  touch, swaps the new session in and runs the command again: only if
+  the approval is the same person's as the session it replaces, as the
+  instance says before the code is asked for, and that session is still
+  the one saved, and it keeps the default instance; an old session the
+  instance could not end is named, with `coffre --url <instance> sessions revoke` to end
+  it. Each act a check let through names, in its entries, the app's and
+  the vault's (a first add's and a token's sealed changes, an accepted
+  loss of entries and an account link included), the
+  passkey and the time that confirmed it (`confirmedBy`, `confirmedAt`):
+  the session's touch, or the one that approved an MCP client's change.
+  A person
+  with no passkey yet, under `optional`, is refused with `reason:
+  'add_passkey'` and asked to sign in again and add one
+  (`/auth/signin/<provider>?passkey=add`). A touch for one act opens no
+  window: approving a terminal leaves the browser's own five minutes as
+  they were. `GET /api/me` says `passkeys: { policy, enrolled,
+  confirmedUntil }`. Under `off`, and for services, nothing is asked. To
+  come: Account → Passkeys and the Owner's reset
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.
 

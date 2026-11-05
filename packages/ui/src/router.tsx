@@ -1,7 +1,8 @@
-import { createClient, type CoffreClient } from '@coffre/client';
+import { createClient, Unreachable, type CoffreClient } from '@coffre/client';
 import { createRouter as createTanStackRouter, type AnyRoute } from '@tanstack/react-router';
 import { setupRouterSsrQueryIntegration } from '@tanstack/react-router-ssr-query';
 import { NotFound, RouteError } from './components/route-states';
+import { freshTransport } from './lib/fresh';
 import { createQueryClient } from './lib/queries';
 import { DEFAULT_PREFERENCES, requestPage } from './lib/page-context';
 import { browserPreferences, type Preferences } from './lib/preferences';
@@ -57,9 +58,21 @@ export type RouterContext = CoffreContext & { preferences: Preferences };
 /**
  * The API as this visitor in the browser, which every loader reads through
  * (`context.coffre.secrets.list('market/dev')`): plain `fetch` to `/api`,
- * which sends the session cookie itself. On the server, coffre's
- * middleware builds it per request; outside one, nothing calls it.
+ * which sends the session cookie itself. An act refused for a fresh check
+ * asks the person to confirm, and goes again (`freshTransport`). On the
+ * server, coffre's middleware builds it per request; outside one, nothing
+ * calls it.
  */
 function browserClient(): CoffreClient {
-  return createClient({ url: typeof window === 'undefined' ? 'http://coffre.invalid' : window.location.origin });
+  const url = typeof window === 'undefined' ? 'http://coffre.invalid' : window.location.origin;
+  return createClient({
+    url,
+    transport: freshTransport(async (request) => {
+      try {
+        return await fetch(request);
+      } catch (error) {
+        throw new Unreachable(url, error);
+      }
+    }),
+  });
 }

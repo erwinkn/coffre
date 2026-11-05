@@ -47,6 +47,7 @@ import { allowed, asking, audited, denied, fenced, need, recorded, refuse, Refus
 import { appendAudit, appLogKey, type AuditEntry } from '../db/audit.ts';
 import type { Written, WriteTry } from '../write-ahead.ts';
 import { readAhead, type ReadAhead } from '../db/read-ahead.ts';
+import { requireFresh } from './fresh-routes.ts';
 import { ApiError, badRequest, conflict, forbidden, notAvailable, notFound, UnloggedRefusal, vaultRefused } from './errors.ts';
 import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.ts';
 import { personalName, resolveRead } from './personal.ts';
@@ -1205,6 +1206,9 @@ async function marking(
       const loosening = was === 'sensitive' && to === 'secret';
       if (loosening && !loosens(ctx.caller, place)) throw refused(key, looserProblem(key, was, to, place.project.slug), 'not_owner', { from: was, to }, 'secret.loosen');
       if (!loosening) throw refused(key, looserProblem(key, was!, to, place.project.slug), 'looser', { sensitivity: to, was });
+      // A value no person could read becomes one people can: the route's fresh check, decided here, where the key's
+      // level is read, before anything is written (`FRESH_ROUTES`, passkeys.md, section 4.1).
+      requireFresh(ctx, 'always', 'PATCH /secrets/:project/:environment');
     }
     return true;
   });

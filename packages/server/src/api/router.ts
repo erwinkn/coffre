@@ -7,11 +7,12 @@ import type { ResolvedPath } from '../db/queries.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
-import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
+import { ApiError, badRequest, CALLER_HEADER, callerName, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
 import { makePersonal, ownerOf, resolveRead } from './personal.ts';
 import { placeAt } from './render.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
+import { freshAnswer, requireFresh } from './fresh-routes.ts';
 import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
 import { ISSUING_ROUTES, WORKLOAD_ROUTES } from './workload-routes.ts';
 import { routes, type Check, type Route } from './routes.ts';
@@ -178,7 +179,9 @@ export function routeParts(pathname: string): string[] {
  *      and any flags in the query string)
  *   3. resolve the path in one query; a missing place is 404, not logged
  *   4. check the route's permissions against the caller; a refusal is logged
- *   5. run the handler
+ *   5. check that what the route guards comes from a session a passkey confirmed lately (`FRESH_ROUTES`); a refusal
+ *      is a prompt, not logged
+ *   6. run the handler
  */
 export async function serveApi(request: Request, ctx: ApiContext): Promise<Response> {
   try {
@@ -198,6 +201,12 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     }
     const { route } = found;
     const { def } = route;
+    // An act sent again after its fresh check goes only for the person who sent it first: a session another tab signed
+    // in since, as someone else, would do it as them (passkeys.md, section 4.5). Before anything is read or written.
+    const sentBy = request.headers.get(CALLER_HEADER);
+    if (sentBy !== null && sentBy !== callerName(ctx.caller.principal)) {
+      throw new ApiError('conflict', 'you are signed in as someone else now than when you asked this: nothing was done. Check who you are signed in as, then ask again', 'caller_changed');
+    }
     // A caller the app read from the vault's rows, unchecked, is only shown (`SHOWING`, fetch-api.ts): no route but that decides on one.
     if (ctx.caller.unchecked === true && `${route.method} ${route.shape}` !== 'GET /me') throw new Error(`a caller the vault has not checked reached ${route.method} ${route.shape}`);
     if (ctx.via !== null) {
@@ -270,6 +279,10 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
         ),
       );
     }
+
+    // After the permissions, so that a caller who may not do it is refused for that, and before the handler, which writes:
+    // what the route guards takes a session a touch confirmed in the last five minutes (passkeys.md, section 4.5).
+    requireFresh(ctx, freshAnswer(key, { params: found.params, input, query } as never, ctx), key);
 
     return jsonResponse(await def.run(ctx, { params: found.params, place, input, query } as never));
   } catch (error) {

@@ -5,7 +5,7 @@ import { USE_DEADLINE_MS, type ProxyDefinition, type ProxyView, type Refusal as 
 
 import type { ResolvedPath } from '../db/queries.ts';
 import { can, placeOf } from './caller.ts';
-import { denied, Refusal, through, vaultCredential, withRefusals, type ApiContext } from './context.ts';
+import { denied, Refusal, through, correlated, withRefusals, type ApiContext } from './context.ts';
 import { ApiError, badRequest, conflict, forbidden, vaultRefused } from './errors.ts';
 import { formatMember } from './paths.ts';
 import { DEFAULT_CACHE_SECONDS, type ProxyCodeItem } from '../proxy-code.ts';
@@ -133,7 +133,7 @@ export async function saveProxy(ctx: ApiContext, place: ResolvedPath, input: Pro
       insecureUpstreams: code.insecureUpstreams,
       requestId: ctx.requestId,
       operationId: randomUUID(),
-      credentialId: vaultCredential(ctx),
+      ...correlated(ctx),
       ...through(ctx.caller),
     });
     if (!saved.ok) throw proxyRefused(saved.refusal);
@@ -160,7 +160,7 @@ export async function releaseReserved(ctx: ApiContext, input: { release: string 
       name: input.release,
       requestId: ctx.requestId,
       operationId: randomUUID(),
-      credentialId: vaultCredential(ctx),
+      ...correlated(ctx),
       ...through(ctx.caller),
     });
     if (!released.ok) throw proxyRefused(released.refusal);

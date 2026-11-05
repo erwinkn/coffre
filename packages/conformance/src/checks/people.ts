@@ -50,8 +50,9 @@ export async function signIn(
   deployment: Deployment,
   browser: Browser,
   email: string,
+  start = '/auth/signin/github',
 ): Promise<{ ok: true } | { ok: false; error: string; location: string }> {
-  const leave = await browser.fetch('/auth/signin/github');
+  const leave = await browser.fetch(start);
   const authorize = new URL(leave.headers.get('location') ?? '', deployment.origin);
   expect(
     leave.status === 302 && authorize.origin === deployment.idp.origin,
@@ -126,10 +127,37 @@ async function passkeyStep(deployment: Deployment, browser: Browser, email: stri
   const answered = await browser.send('POST', '/api/auth/passkey', { response, ...(state === undefined ? {} : { state }) });
   if (answered.ok) {
     holders.set(browser, email);
+    browser.confirm = () => stepUp(deployment, browser, email);
     return { ok: true };
   }
   const { error } = (await answered.json()) as { error: string };
   return { ok: false, error, location: '/auth/passkey' };
+}
+
+/**
+ * `person` signed in again to add a first passkey, as coffre's dialog sends someone who holds none (`?passkey=add`,
+ * docs/design/passkeys.md, section 3.4): what an act a fresh check guards takes of a person who is not an Owner, under
+ * `optional`. It ends every other credential of theirs no passkey confirmed (section 3.3).
+ */
+export async function withPasskey(deployment: Deployment, person: Person): Promise<void> {
+  const signed = await signIn(deployment, person.browser, person.email, '/auth/signin/github?passkey=add');
+  expect(signed.ok, `${person.email} could not add a passkey: ${'error' in signed ? signed.error : ''}`);
+  expect(passkeys.has(person.email), `${person.email} signed in again and was asked for no new passkey`);
+}
+
+/**
+ * A fresh check, as coffre's dialog asks it (docs/design/passkeys.md, section 3.4): a touch of `email`'s passkey at the
+ * step-up's door, whose answer replaces the browser's session with one confirmed now.
+ */
+async function stepUp(deployment: Deployment, browser: Browser, email: string): Promise<void> {
+  const asked = await browser.fetch('/api/auth/passkey?step-up=1&next=/projects');
+  expect(asked.ok, 'the step-up had nothing to ask', await asked.clone().text());
+  const { options, state } = (await asked.json()) as { options: { challenge: string }; state: string };
+  const key = passkeys.get(email);
+  expect(key !== undefined, `${email} holds a passkey conformance never added`);
+  const response = await key!.assert({ rpId: new URL(deployment.origin).hostname, origin: deployment.origin, challenge: new Uint8Array(Buffer.from(options.challenge, 'base64url')) });
+  const answered = await browser.send('POST', '/api/auth/passkey', { state, response });
+  expect(answered.ok, 'the step-up refused the touch', await answered.clone().text());
 }
 
 export async function signInAdmin(deployment: Deployment) {

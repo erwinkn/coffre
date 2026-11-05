@@ -46,7 +46,9 @@ Three rules carry it:
    one act (approving a terminal, connecting an MCP client, approving its
    change) approves that act alone and opens no window, so it leaves the
    session as it was: nothing it made is there for a copy to ride (as
-   built in PR 5a, section 4.2).
+   built in PR 5a, section 4.2). Nor does it refresh the browser's own
+   window: approving a terminal at 12:01 leaves a window that closed at
+   12:00 closed, and the next risky act asks a touch of its own (PR 5b).
 2. **Changes to a person's passkeys end credentials by revoking them,
    under one per-person lock that every issue takes too, and every request
    checks that its credential still has a live passkey behind it** (section
@@ -518,6 +520,36 @@ A fresh check is a session issue, so it costs what a sign-in's issue costs
 (section 10). Risky acts are rare; a window means one per five minutes at
 most.
 
+**As built (PR 5b).** The page does not decide beforehand. The browser's
+API client hears `403 fresh_check_required` in its transport, for every
+page at once (`freshTransport`, `@coffre/ui`'s `lib/fresh.ts`), and opens
+"Confirm it's you" over the page that sent the act (`FreshCheck`, mounted
+by `CoffreProvider`). The dialog asks the step-up's door for its options
+as it opens, so the press reaches the authenticator at once; the touch
+answers there (section 6.5), the response sets the new session's cookie,
+and the act goes again, once, as it was sent, but for one header: the
+refusal names its caller, opaquely (`caller: 'user:<id>'`), and the act
+sent again says it (`coffre-caller`). The router refuses an act whose
+header names someone else than its caller, `409 conflict` with `reason:
+'caller_changed'`, before anything is read or written: Ada's Save,
+refused; another tab signs in as Bob meanwhile; the dialog's touch
+confirms Bob's session; Ada's change, sent again on Bob's cookie, is
+refused rather than made as Bob. A step-up that only rotates Ada's own
+session leaves her the same caller. Acts refused together share
+one dialog and one touch. Cancelled, the refusal goes on to the page,
+which says nothing was changed. Ada's promotion is then: Save, refused,
+the dialog, a touch, the change made; one round trip more than knowing
+beforehand, which writes nothing. `GET /api/me` answers `passkeys`, and
+no page reads it yet; the header's chip is not built.
+
+A person with no passkey under `optional` is refused with `reason:
+'add_passkey'`, and the dialog says "Add a passkey first": a button per
+provider signs in again with `?passkey=add` (`/auth/signin/<provider>?passkey=add&next=<page>`),
+whose sign-in asks to add one as an Owner's does (`PendingState.addPasskey`),
+and comes back to the page. The ten-minute rule of section 3.3 holds by
+construction: the provider vouched for the person a moment before. Adding
+one from the session, in Account → Passkeys, is PR 6's.
+
 ### 3.5 The CLI
 
 **Approving a terminal.** `coffre login` stays a device login. Approving it
@@ -567,6 +599,23 @@ command runs inside the new window without asking.
 This reuses the device flow whole: its table, its page, its rate limits,
 its audit entries. The cost is a new CLI credential per step-up, which is a
 row and a `sign_in`-like entry; risky commands are rare.
+
+**As built (PR 5b).** Only a session `coffre login` saved steps up this
+way (`steppingUp`, `packages/cli/src/main.ts`); a token or a CI run's
+credential answers the refusal as any other. The device login's label is
+`coffre CLI: <the command>`; a secret is never an argument, so the label
+shows none. The approval's touch is PR 5a's, and its terminal starts
+confirmed when it was decided. Before it asks for the code, the CLI asks
+the instance whose the saved session is (`GET /api/me`, `whoseSession`):
+a session approved as anyone else, whatever another `coffre login` saved
+meanwhile, is signed out and the command refused. The new session
+replaces the saved one only if that is still the session the command
+started on (another login's is left as it is, and the command refused),
+and leaves the default instance where it was, for `--url`. The old
+session is then signed out; one the instance could not end (a 503, no
+answer) is said, with `coffre --url <instance> sessions revoke <id> --apply` to end it,
+its id the instance's answer named. With `reason: 'add_passkey'` no code
+is started: the CLI says to sign in in the browser and add one there.
 
 **What the CLI never needs.** `coffre run`, `export`, `set`, handles and
 personal tokens. A personal token made from the CLI needs no check: it holds
@@ -692,6 +741,16 @@ input and query. A route that takes no `dryRun` is checked whatever its
 query string says; `PATCH /api/access/:member?dryRun=1`, which changes
 access today, needs a fresh session like any other.
 
+**As built (PR 5b): loosening a key.** The one write that makes a value
+people could not read readable is the mark of R30, a sensitive value made
+a secret in place by an Owner of its project, and that is what the
+`handler` answer guards: `marking` reads each key's level, and refuses
+before anything is written. A write of a value with a looser level
+(`{ value, sensitivity: 'plain' }` over a secret) needs nothing: its value
+is new, written by whoever sends it, and every older version keeps the
+level it had, so nobody reads anything they could not read before. A mark
+looser by any other step is refused already (`looser`).
+
 ### 4.2 holder and ceremony
 
 | Route | Answer | Why |
@@ -808,7 +867,16 @@ phase.
   touch and rebuilt `#decide`'s context from the new credential, so that a
   change issuing a service token would not name a session the touch had
   just ended; a touch that ends nothing needs neither (PR 5a). Open
-  question 9.
+  question 9. As built (PR 5b): each change says what its route answers
+  (`Change.fresh`, `always` for granting, admitting, removing, issuing a
+  service's token and trusting a workload), which `#decide` holds the
+  person to before it decides, with no touch: under `optional`, a person
+  with no passkey is refused `fresh_check_required`, `add_passkey`, and
+  the approval stays pending. The change then runs through the router,
+  whose check finds the approval's touch on its connection (`McpVia.touched`)
+  and takes it for the window; a change approved with none is checked as
+  the session is, so a `fresh` that says `never` of a route that is
+  `always` fails the change, not open.
 - **Handles and `/use`**: never.
 
 ### 4.5 In code, and the routes outside the table
@@ -838,11 +906,23 @@ the request's credential, which it read already. MCP approvals ask the same
 function about the change they would make, with the change's own
 `params`, `input` and `query`. A **ceremony** route
 checks its assertion in its own handler, inside the transaction that makes
-its change. A refusal is `403 fresh_check_required`, with `{ add: true }`
-when the caller has no passkey yet. It writes no entry: it is a prompt.
-Since pages ask `GET /api/me` before they send, one is rare from a page and
-common from a script on a stolen cookie, so it goes to the process log, one
-line with the principal, the route and the credential.
+its change. A refusal is `403 fresh_check_required`, with `reason:
+'add_passkey'` when the caller has no passkey yet (as built: the error's
+own `reason`, which every client reads already). It writes no entry: it is a prompt.
+A page meets one once a window has run out, and a script on a stolen
+cookie meets one every time, so it goes to the process log, one line with
+the principal, the route and the credential.
+
+As built (PR 5b), the router asks after the route's own `needs` and before
+the handler (`requireFresh`, `api/fresh-routes.ts`). A route whose handler
+checks its permissions itself (a member's add, say) prompts first: a
+Developer who may not add members, on a session past its window, is asked
+to touch, then refused. Nothing is written either way. Only a refusal
+after the prompt is logged, so from a session outside its window, an
+attempt the person may not make goes to the process log, not the audit
+log. On the fast paths that read ahead (a member's add, `admitAhead`), the
+vault's read is made and its ticket expires unused, as for the passkey
+check's refusal (section 6.4).
 
 The sign-in routes are protocols beside the table (`auth-routes.ts`), so
 they check for themselves:
@@ -858,6 +938,18 @@ they check for themselves:
 
 Conformance checks the link and the poll (section 13), since no type holds
 them.
+
+**As built (PR 5b): the link.** The start, outside the window, sends the
+browser to the step-up, `/auth/passkey?step-up=1&next=/auth/signin/<provider>?link=1`,
+whose touch comes back to the start: the one place a step-up goes on to
+that is not a page, and only exactly so, for a provider the deployment
+has (`stepUpNext`). The callback, outside it, links nothing and lands on
+`/account?error=link_stale`, "link again". It holds the browser's session
+to the person the link started for, as before, not to the very session:
+a step-up between the two replaces it, and the window, checked again, is
+what the session must still have. The link's entry names what
+confirmed the session at the callback (section 11), as the router's
+check does for an API route (`freshPass`).
 
 ## 5. Storage
 
@@ -1308,7 +1400,11 @@ provider sign-in starts a new one. Touching a passkey every few minutes
 never puts off signing in to GitHub again.
 
 `GET /api/me` answers `passkeys: { policy, enrolled, confirmedUntil }`, which
-the pages read to decide when to open the dialog before sending.
+the pages read to decide when to open the dialog before sending. As built
+(PR 5b), it answers it, and the pages leave it unread: the dialog opens on
+the refusal (section 3.4). `enrolled` is whether the credential names a
+passkey, which the request's own check holds to the person's holding one;
+`confirmedUntil` is set inside a browser's or terminal's window alone.
 
 **As built (PR 4b): the step-up.** A page whose `GET /api/me` answers `401
 passkey_required` goes to `/auth/passkey?step-up=1&next=…` (the shell's
@@ -1687,6 +1783,21 @@ Changed:
 - Every **always** act names, in its own entry, the passkey and time that
   confirmed the session (`confirmedBy`, `confirmedAt`).
 
+  As built (PR 5b): the router's check, let through on a touch, records
+  what confirmed the request (`ApiContext.confirmed`): the session's
+  passkey and its `confirmedAt`, or, for an MCP client's change, the
+  touch that approved it (`McpVia.touched`). The app's entries take it
+  in `allowed`, beside `credentialId`; every vault call carries it in
+  its correlation (`correlated`), which the vault copies into the
+  entries it writes, as it copies `credentialId`, and a first add's
+  change and a token's issue keep it in their payloads, under the
+  vault's MAC, for the audit page (`confirmed`); accepting lost
+  entries hands it to the audit watch, whose `audit.loss_accepted`
+  names it, and a link hands it to its `account.link`. Recorded, never
+  weighed. A **holder** act let through on a fresh session names it
+  too; one let through because the person holds no passkey names
+  nothing, as does every act the check does not guard.
+
 A `403 fresh_check_required` or `401 passkey_required` writes no entry; it
 goes to the process log (section 4.5).
 
@@ -1811,9 +1922,11 @@ running `passkeys: 'required'`:
 5. **Fresh checks**, built in two. 5a, the ceremonies: a touch for one act
    (approving a terminal, connecting an MCP client, approving its change),
    asked by the act's own `403 touch_required`, on its own page, and the
-   terminal it approves confirmed when it was. 5b: `FRESH_ROUTES` and its
-   `handler` answer, the dialog over the step-up's door, the CLI's step-up
-   through 5a's device approval, the link checks.
+   terminal it approves confirmed when it was. 5b (built): `FRESH_ROUTES`
+   and its `handler` answer, the dialog over the step-up's door, the CLI's
+   step-up through 5a's device approval, the link checks, and signing in
+   to add a first passkey (`?passkey=add`), which an act asks of a person
+   with none under `optional` until Account → Passkeys adds one in place.
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover

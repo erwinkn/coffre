@@ -284,15 +284,18 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
     assert.ok(session.ok);
     return bearer(session.credential.token);
   });
-  // Taken while they hold no passkey.
+  // Taken while they hold no passkey; but a member's add takes one, which Bob, an Admin with none, is asked to add first
+  // (a fresh check, passkeys.md, section 4.1): the fast path's read served it all the same, and its ticket expires unused.
   assert.equal(await answer(ada!.secrets.set('market/dev', { API_KEY: 'ada-1' })), 'ok');
-  assert.equal(await answer(bob!.members.add('user:carol@acme.example', { role: 'developer' })), 'ok');
-  // Ada, a Developer, may not add a member: refused, and on the fast path the vault records the refusal.
-  assert.equal(await answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })), 'forbidden');
+  assert.equal(await answer(bob!.members.add('user:carol@acme.example', { role: 'developer' })), 'fresh_check_required');
+  await root.members.add('user:carol@acme.example', { role: 'developer' });
+  // Ada, a Developer, may not add a member, which the handler decides; but first the router asks her for a passkey she
+  // does not hold (section 4.5): a prompt, which writes nothing and records no refusal of the vault's.
+  assert.equal(await answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })), 'fresh_check_required');
   // The fast paths are Postgres's, under 0.15's log (`admit-held.test.ts`); elsewhere both go today's way.
   const fast = process.env.COFFRE_TEST_ENGINE !== 'sqlite' && LOG === '0.15' ? { writes: 1, adds: 1 } : { writes: 0, adds: 0 };
   assert.deepEqual(served, fast, "the fast path served each on Postgres, under 0.15's log");
-  assert.equal(recorded, fast.adds, "the fast path's refusal was the vault's to record");
+  assert.equal(recorded, 0, 'a prompt records no refusal');
   const keyNow = async () => {
     const { values, version } = await root.secrets.reveal('market/dev', ['API_KEY']);
     return { values, version };
@@ -315,7 +318,7 @@ test('a key write or a member\'s add by a credential the check refuses is refuse
     answer(ada!.members.add('user:erin@acme.example', { role: 'developer' })),
   ]);
   assert.deepEqual(answers, ['passkey_required', 'passkey_required', 'passkey_required', 'passkey_required']);
-  assert.equal(recorded, fast.adds, 'no refusal recorded for a credential the check refuses');
+  assert.equal(recorded, 0, 'no refusal recorded for a credential the check refuses');
   assert.deepEqual(served, { writes: 2 * fast.writes, adds: 2 * fast.adds }, 'where it serves them, the vault served the refused write and add too');
   assert.deepEqual(await keyNow(), before, 'the key is as it was');
   assert.deepEqual(await membersNow(), members, 'nobody was added');

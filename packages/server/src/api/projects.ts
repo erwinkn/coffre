@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
+import type { PasskeyPolicy } from '@coffre/core/identity';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
 import { deletedWithProject, isTombstone, tombstoneOf } from '@coffre/core/schemas';
@@ -35,8 +36,9 @@ import { COFFRE_VERSION } from '../version.ts';
 import { can, canAnywhere, lists, permissionsAt, placeOf, projectsReached, seesProject, type Caller } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, environmentChange, madeEnvironment, madeProtection, ObjectMoved, retrying, sameIds, secretChange } from './changes.ts';
-import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, vaultCredential, withRefusals } from './context.ts';
+import { allowed, type ApiContext, audited, denied, missing, Refusal, requireInstance, requireProjectMaker, through, correlated, withRefusals } from './context.ts';
 import { ApiError, conflict, forbidden, notFound, vaultRefused } from './errors.ts';
+import { FRESH_MS, freshness } from './fresh-routes.ts';
 import { scopeView } from './members.ts';
 import { scopeByPath, serviceSettingShown, setsUp, type ScopeByPath } from './services.ts';
 import { formatMember } from './paths.ts';
@@ -93,6 +95,13 @@ export type Me = {
    * read by (T166). Null where `credentialExpiresAt` is.
    */
   credentialId: string | null;
+  /**
+   * Passkeys, as the request stands (docs/design/passkeys.md, section 6.5): the deployment's policy, whether the
+   * credential names a passkey (`enrolled`: the person holds one, as the request's own check holds it), and, for a
+   * browser or terminal session a touch confirmed in the last five minutes, when that window closes, ISO 8601, which a
+   * page reads to ask for a touch before it sends what a fresh check guards. Null behind Cloudflare Access.
+   */
+  passkeys: { policy: PasskeyPolicy; enrolled: boolean; confirmedUntil: string | null } | null;
   /** Every live environment the caller holds something in, and what. */
   environments: { project: string; environment: string; permissions: Permission[] }[];
 };
@@ -181,6 +190,11 @@ export async function me(ctx: ApiContext): Promise<Me> {
     personalToken: ctx.personalToken === null ? null : { ...ctx.personalToken, scope: scopeByPath(caller.credentialScope ?? [], known)! },
     credentialExpiresAt: ctx.credentialExpiresAt,
     credentialId: ctx.credentialExpiresAt === null ? null : ctx.credentialId,
+    passkeys: ctx.signin === null ? null : {
+      policy: ctx.signin.config.passkeys.policy,
+      enrolled: ctx.passkeyId !== null,
+      confirmedUntil: freshness(ctx) === 'fresh' && ctx.session?.confirmedAt != null ? new Date(ctx.session.confirmedAt.getTime() + FRESH_MS).toISOString() : null,
+    },
     environments: reachable,
   };
 }
@@ -876,7 +890,7 @@ export async function deletePlace(ctx: ApiContext, place: ResolvedPath, { dryRun
         principal,
         requestId: ctx.requestId,
         operationId,
-        credentialId: vaultCredential(ctx),
+        ...correlated(ctx),
         ...through(ctx.caller),
         changes: grants.map((grant) => ({ projectId: grant.projectId, environmentId: grant.environmentId, role: null, expiresAt: null })),
       });
