@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { passkeyAnswer, sendPasskey, type Unsent } from '../lib/passkey-answer';
+import { browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -59,9 +59,13 @@ export function PasskeyPage() {
     let current = true;
     setStep(null);
     setUnanswered(false);
-    unsent.current = { body: null, asked: false };
+    const fresh: Unsent = { body: null, asked: false };
+    unsent.current = fresh;
+    const sent = readClock(browserClock);
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
       if (!current) return;
+      // The options lapse with the step, five minutes from its challenge: a press after asks the authenticator nothing.
+      if (answer.kind === 'ok') fresh.ends = deadlineOf(sent, answer.value.options.timeout);
       setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
     });
     return () => {
@@ -125,16 +129,26 @@ export function PasskeyPage() {
     try {
       const answer = await sendPasskey<{ next?: unknown }>(
         unsent.current,
-        async () => {
+        async (left) => {
+          // What is left of the step, not the five minutes the GET was answered with: the authenticator's timeout starts
+          // at the call.
+          const timeout = Math.min(left, current.options.timeout);
           const credential = current.purpose === 'enroll'
-            ? await navigator.credentials.create({ publicKey: creationOptions(current.options) })
-            : await navigator.credentials.get({ publicKey: requestOptions(current.options) });
+            ? await navigator.credentials.create({ publicKey: creationOptions({ ...current.options, timeout }) })
+            : await navigator.credentials.get({ publicKey: requestOptions({ ...current.options, timeout }) });
           if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
           return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...(current.state === undefined ? {} : { state: current.state }) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
-        current.purpose === 'enroll',
+        { once: current.purpose === 'enroll' },
       );
+      if (answer.kind === 'expired') {
+        // The page sat open past the step's five minutes: ask coffre again, which has new options while the sign-in
+        // waits, and says to sign in again once it does not.
+        setError('This passkey request lapsed while the page was open. Press again for a new one.');
+        setAttempt((n) => n + 1);
+        return;
+      }
       if (answer.kind === 'stale') {
         // Not reached: a refused new passkey asks for new options at once, below. Asked anyway, new options.
         setAttempt((n) => n + 1);

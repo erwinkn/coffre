@@ -30,10 +30,40 @@ export async function passkeyAnswer<T>(request: Promise<Response>): Promise<Pass
 }
 
 /**
- * A step's press, in the page's own memory: the answer the server did not answer, for the next press, and whether
- * the step's options were asked of the authenticator already. Each GET's step starts with neither.
+ * Two clocks, read together: the wall's (`Date.now`), and the time elapsed since the page opened
+ * (`performance.now`), which no clock correction moves. A step's deadline is past once either says so: a wall
+ * clock set forward ends it early, which only asks coffre for new options, and one set back cannot keep it.
  */
-export type Unsent = { body: string | null; asked?: boolean };
+export type Clock = { wall(): number; elapsed(): number };
+export const browserClock: Clock = { wall: () => Date.now(), elapsed: () => performance.now() };
+
+/** When a step's options lapse, by each clock. */
+export type Deadline = { wall: number; elapsed: number };
+
+/**
+ * The deadline of a step whose GET was sent at `sent`, by `clock`, and whose options' `timeout` says what was left of
+ * its five minutes when the server answered (`remainingMs`). Dated from the send, not the answer: the server's five
+ * minutes began after it, so the page's deadline never falls after the server's.
+ */
+export function deadlineOf(sent: { wall: number; elapsed: number }, timeout: number): Deadline {
+  return { wall: sent.wall + timeout, elapsed: sent.elapsed + timeout };
+}
+
+export function readClock(clock: Clock): { wall: number; elapsed: number } {
+  return { wall: clock.wall(), elapsed: clock.elapsed() };
+}
+
+/** What is left of `ends` now, by the clock that says less; 0 once past. */
+export function leftOf(ends: Deadline, clock: Clock): number {
+  return Math.max(0, Math.min(ends.wall - clock.wall(), ends.elapsed - clock.elapsed()));
+}
+
+/**
+ * A step's press, in the page's own memory: the answer the server did not answer, for the next press, whether the
+ * step's options were asked of the authenticator already, and when they lapse. Each GET's step starts with neither
+ * answer nor ask.
+ */
+export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
 
 /**
  * One press of the passkey page's button: the authenticator's answer, sent. An answer the server did not answer
@@ -53,15 +83,25 @@ export type Unsent = { body: string | null; asked?: boolean };
  * B's sign-in replaces the pending cookie, and A's answer, sent again, fails B's challenge (`passkey_failed`); a
  * second `create()` with A's options would name the handle coffre now holds, and could replace that passkey on the
  * authenticator (review r13 of #500).
+ *
+ * `ends`: a press past it answers `expired`, asking nothing either. A page left open past its five minutes would
+ * otherwise hand the authenticator options the server no longer takes, and the person a passkey coffre refuses (the
+ * `timeout` the options carry starts when the authenticator is called, not at the GET). Before it, `ask` is given what
+ * is left, the `timeout` to call the authenticator with (review r14 of #500).
  */
 export async function sendPasskey<T>(
   unsent: Unsent,
-  ask: () => Promise<string>,
+  ask: (left: number) => Promise<string>,
   send: (body: string) => Promise<Response>,
-  once = false,
-): Promise<PasskeyAnswer<T> | { kind: 'stale' }> {
+  { once = false, clock = browserClock }: { once?: boolean; clock?: Clock } = {},
+): Promise<PasskeyAnswer<T> | { kind: 'stale' } | { kind: 'expired' }> {
   if (unsent.body === null && once && unsent.asked === true) return { kind: 'stale' };
-  const body = unsent.body ?? (await ask());
+  let body = unsent.body;
+  if (body === null) {
+    const left = unsent.ends === undefined ? undefined : leftOf(unsent.ends, clock);
+    if (left === 0) return { kind: 'expired' };
+    body = await ask(left ?? Number.POSITIVE_INFINITY);
+  }
   unsent.body = body;
   unsent.asked = true;
   const answer = await passkeyAnswer<T>(send(body));

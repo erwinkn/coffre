@@ -301,7 +301,17 @@ across tabs in `localStorage` instead, and each round found another path
 to a second `create()` with it. The step ends five minutes after its
 challenge (`issuedAt`, from which the sealed state's expiry is dated), and
 its options' `timeout` is what is left of those when the GET is answered
-(`remainingMs`, review r9). A touch keeps its answer in the page too: a
+(`remainingMs`, review r9). That `timeout` starts when the authenticator is
+called, not at the GET, so the page keeps the step's deadline itself,
+dated from when it sent the GET, by the wall clock and by the time elapsed
+since the page opened (`performance.now`), past once either says so: a
+press after it asks the authenticator nothing and asks coffre for the step
+again (new options while the sign-in waits, "Sign in again" once it does
+not), and a press before it calls the authenticator with what is left
+(`sendPasskey`'s `ends`, review r14). Without it, a page left open past
+five minutes made a passkey the server then refused. An answer already
+made is still sent again past the deadline: its first POST may have
+committed, and the server says which. A touch keeps its answer in the page too: a
 second `get()` replaces nothing. A HEAD of the route answers as its GET,
 never as its POST (review r8).
 The cookie's value names its purpose, whose key

@@ -669,7 +669,7 @@ test("a session no passkey stands behind is taken under optional only while its 
   assert.equal(await me(browser), 'ok', 'removed by the app, its person holds none');
 });
 
-test("a step's options say what is left of its five minutes, from its challenge, which its sealed state lasts as long as: the page asks nothing past it (review r9 of #500)", () => {
+test("a step's options say what is left of its five minutes, from its challenge, which its sealed state lasts as long as (review r9 of #500); the page's own deadline is passkey-answer.test.ts's (r14)", () => {
   const TTL = CEREMONY_TTL_SECONDS * 1000;
   assert.equal(remainingMs({ issuedAt: 1_000 }, 1_000), TTL);
   assert.equal(remainingMs({ issuedAt: 1_000 }, 61_000), TTL - 60_000);

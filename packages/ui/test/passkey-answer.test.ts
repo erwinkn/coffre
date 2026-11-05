@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { passkeyAnswer, sendPasskey } from '../src/lib/passkey-answer.ts';
+import { deadlineOf, passkeyAnswer, readClock, sendPasskey, type Clock } from '../src/lib/passkey-answer.ts';
 
 const json = (body: unknown, status: number) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 
@@ -103,15 +103,80 @@ test("a new passkey's options are asked of the authenticator once: refused after
     return answers[sent.length - 1]!();
   };
   const page = { body: null, asked: false };
-  assert.deepEqual(await sendPasskey(page, ask, send, true), { kind: 'unavailable' });
-  assert.deepEqual(await sendPasskey(page, ask, send, true), { kind: 'refused', code: 'passkey_failed' });
+  assert.deepEqual(await sendPasskey(page, ask, send, { once: true }), { kind: 'unavailable' });
+  assert.deepEqual(await sendPasskey(page, ask, send, { once: true }), { kind: 'refused', code: 'passkey_failed' });
   // A second create() would name the handle coffre now holds: the press asks nothing and sends nothing.
-  assert.deepEqual(await sendPasskey(page, ask, send, true), { kind: 'stale' });
+  assert.deepEqual(await sendPasskey(page, ask, send, { once: true }), { kind: 'stale' });
   assert.equal(asked, 1);
   assert.equal(sent.length, 2);
   // New options, a new step: one create() of their own.
   const fresh = { body: null, asked: false };
   answers.push(() => json({ next: '/projects' }, 200));
-  assert.deepEqual(await sendPasskey(fresh, ask, send, true), { kind: 'ok', value: { next: '/projects' } });
+  assert.deepEqual(await sendPasskey(fresh, ask, send, { once: true }), { kind: 'ok', value: { next: '/projects' } });
   assert.equal(asked, 2);
+});
+
+test("a press after the step's five minutes asks the authenticator nothing, by either clock; before them, the authenticator is given what is left (review r14 of #500)", async () => {
+  const FIVE_MINUTES = 5 * 60_000;
+  let wall = 1_000_000;
+  let elapsed = 50;
+  const clock: Clock = { wall: () => wall, elapsed: () => elapsed };
+  const lefts: number[] = [];
+  const ask = async (left: number) => {
+    lefts.push(left);
+    return `{"response":"passkey ${lefts.length}"}`;
+  };
+  const sent: string[] = [];
+  const send = (body: string) => {
+    sent.push(body);
+    return json({ next: '/projects' }, 200);
+  };
+  // The GET was sent at (wall, elapsed); the server answered with its five minutes.
+  const step = () => ({ body: null, asked: false, ends: deadlineOf(readClock(clock), FIVE_MINUTES) });
+
+  // Pressed a minute later: the authenticator has four minutes, not the five the GET said.
+  const early = step();
+  wall += 60_000;
+  elapsed += 60_000;
+  assert.deepEqual(await sendPasskey(early, ask, send, { once: true, clock }), { kind: 'ok', value: { next: '/projects' } });
+  assert.deepEqual(lefts, [4 * 60_000]);
+
+  // Left open past five minutes, by both clocks: nothing asked, nothing sent.
+  const late = step();
+  wall += FIVE_MINUTES + 1;
+  elapsed += FIVE_MINUTES + 1;
+  assert.deepEqual(await sendPasskey(late, ask, send, { once: true, clock }), { kind: 'expired' });
+
+  // The wall clock set back an hour while the page sat open: the elapsed clock still ends the step.
+  const setBack = step();
+  wall -= 60 * 60_000;
+  elapsed += FIVE_MINUTES;
+  assert.deepEqual(await sendPasskey(setBack, ask, send, { clock }), { kind: 'expired' });
+
+  // Elapsed time that stood still while the machine slept: the wall clock ends it.
+  const slept = step();
+  wall += FIVE_MINUTES;
+  assert.deepEqual(await sendPasskey(slept, ask, send, { clock }), { kind: 'expired' });
+
+  assert.equal(lefts.length, 1);
+  assert.equal(sent.length, 1);
+});
+
+test("an answer coffre did not answer is still sent again past the deadline: the server, not the page, says the step ended", async () => {
+  let wall = 0;
+  const clock: Clock = { wall: () => wall, elapsed: () => wall };
+  let asked = 0;
+  const answers = [() => Promise.reject(new TypeError('Failed to fetch')), () => json({ error: 'state_mismatch' }, 404)];
+  const sent: string[] = [];
+  const send = (body: string) => {
+    sent.push(body);
+    return answers[sent.length - 1]!();
+  };
+  const page = { body: null, asked: false, ends: deadlineOf(readClock(clock), 60_000) };
+  assert.deepEqual(await sendPasskey(page, async () => `{"response":"passkey ${++asked}"}`, send, { once: true, clock }), { kind: 'unavailable' });
+  wall += 120_000;
+  // Its first POST may have committed: the same answer again lets the server end the step, `passkey_exists` or this.
+  assert.deepEqual(await sendPasskey(page, async () => `{"response":"passkey ${++asked}"}`, send, { once: true, clock }), { kind: 'refused', code: 'state_mismatch' });
+  assert.equal(asked, 1);
+  assert.deepEqual(sent, ['{"response":"passkey 1"}', '{"response":"passkey 1"}']);
 });
