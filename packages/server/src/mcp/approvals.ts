@@ -15,6 +15,7 @@ import { mcpApprovals } from '@coffre/db/schema';
 
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext, type McpVia } from '../api/context.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
+import { requireFresh } from '../api/fresh-routes.ts';
 import { serveApi } from '../api/router.ts';
 import { answerDigest } from '../api/ceremony.ts';
 import type { SigninService, TouchAnswer } from '../api/signin.ts';
@@ -312,6 +313,9 @@ export class McpApprovals {
     const touch = input.approve
       ? await touches.touchFor(ctx, { kind: 'approval', id: row.id, answer: answerDigest([digest, input.basis ?? null, input.value ?? null]) }, input.touch)
       : null;
+    // The change's own fresh check (passkeys.md, section 4.4), before the approval is decided, so that a refusal leaves
+    // it pending: the touch stands for it; with none, a person who holds no passkey, under `optional`, adds one first.
+    if (input.approve && touch === null && tool.change!.fresh === 'always') requireFresh(ctx, 'always', `mcp ${tool.name}`);
 
     await audited(ctx, async (tx, log) => {
       // Under the log's head, the approval and its connection as they are now: one that expired, or a disconnect, since they were read refuses it.
@@ -335,7 +339,8 @@ export class McpApprovals {
     // The change, after the decision committed and outside any transaction: the API makes it as it would for the person.
     // A reveal reads the value for the page alone, so its call may reach Reveal values' route whatever the connection holds.
     const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['reveal'] as const) : [])];
-    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id };
+    // Approved with a touch, which the router's fresh check of the change takes for its own (`freshness`).
+    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id, touched: touch !== null };
     let applied: Applied;
     try {
       applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value, replaced });

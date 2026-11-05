@@ -185,6 +185,7 @@ export function apiContext(runtime: CoffreRuntime, identity: AuthenticatedIdenti
     sourceIp: identity.sourceIp,
     credentialId: identity.credentialId,
     passkeyId: identity.passkeyId,
+    session: identity.session ?? null,
     bindingId: identity.bindingId ?? null,
     access: identity.access === true,
     provenance: identity.provenance,

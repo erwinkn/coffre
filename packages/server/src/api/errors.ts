@@ -23,6 +23,9 @@ import { Superseded } from '../watch.ts';
  *   403 touch_required     an act that takes a touch of the caller's passkey of its own (passkeys.md, section 4.2): `touch`
  *                          carries what to ask the authenticator, for this act and this session alone; send the act again with its answer
  *   403 touch_failed       that touch did not check: no live passkey of the caller's, a signature or flag that fails, or a replay
+ *   403 fresh_check_required  an act that takes a session a passkey touch confirmed in the last five minutes (passkeys.md,
+ *                          section 4): confirm at the step-up and send it again; `reason: 'add_passkey'` when the person
+ *                          holds none yet, who adds one first
  *   404 not_found          no such project, environment, secret or member
  *   404 not_available      a key a request named, by name, that it may not have: none such, or no access to it, alike (D153)
  *   405 method_not_allowed
@@ -49,6 +52,7 @@ export const ERROR_STATUS = {
   insufficient_scope: 403,
   touch_required: 403,
   touch_failed: 403,
+  fresh_check_required: 403,
   not_found: 404,
   not_available: 404,
   method_not_allowed: 405,

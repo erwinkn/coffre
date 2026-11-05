@@ -26,7 +26,17 @@ import type { McpService } from '../mcp/service.ts';
  * the scopes its token holds; for a change its person approved on coffre's
  * page, the approval.
  */
-export type McpVia = { connectionId: string; clientId: string; clientName: string; scopes: readonly McpScope[]; approvalId?: string };
+export type McpVia = {
+  connectionId: string; clientId: string; clientName: string; scopes: readonly McpScope[]; approvalId?: string;
+  /** For a change its person approved: whether a touch of their passkey approved it, which stands for the change's fresh check (passkeys.md, section 4.4). */
+  touched?: boolean;
+};
+
+/**
+ * The person's session a request came in on, a browser's or a terminal's, and when a passkey touch confirmed it, for the
+ * fresh check (`freshness`, passkeys.md, section 6.5): only a touch sets it, on the session that touch issued.
+ */
+export type SessionOf = { kind: 'browser' | 'cli'; confirmedAt: Date | null };
 
 /** What every handler works with: the stores, and who is asking. */
 export type ApiContext = {
@@ -51,6 +61,8 @@ export type ApiContext = {
   credentialId: string | null;
   /** The passkey that credential names (`AuthenticatedIdentity.passkeyId`), which what the request issues carries; null for none. */
   passkeyId: string | null;
+  /** That credential, when it is a person's browser or terminal session (`AuthenticatedIdentity.session`); null, or left out, for any other. */
+  session?: SessionOf | null;
   /** The Cloudflare service binding a call came through, which stands in for a credential (`AuthenticatedIdentity.bindingId`). */
   bindingId?: string | null;
   /** Signed in by Cloudflare Access, with no row of coffre's (`AuthenticatedIdentity.access`). */

@@ -33,6 +33,12 @@ export function failureMessage(error: unknown): string {
   if (error.code === 'cross_origin') return 'coffre refused a change that did not come from this page. Reload, then retry.';
   // The vault's own rule, which the app could not foresee (one removed by someone else, say), in its words.
   if (error.code === 'vault_refused' && error.reason === 'not_allowed') return error.message.replace(/^the vault refused: /, '');
+  // Asked and not given (the dialog closed, `lib/fresh.ts`): nothing was changed, and the next try asks again.
+  if (error.code === 'fresh_check_required') {
+    return error.reason === 'add_passkey'
+      ? 'This takes a passkey, and you have none yet. Nothing was changed.'
+      : 'This takes a fresh touch of your passkey. Nothing was changed: try again, and confirm it’s you.';
+  }
   if (error.status === 403) {
     return 'You hold no grant that covers this. Someone with grant.manage on the project can add one.';
   }

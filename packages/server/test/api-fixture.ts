@@ -501,6 +501,9 @@ export async function contextFor(
     sourceIp: null,
     credentialId: null,
     passkeyId: null,
+    // A person signed in a moment ago, whose touch confirmed it, as anyone who acts from a page has: the fresh check
+    // takes it (`freshness`), which tests of that check hold apart (`passkey-fresh.test.ts`).
+    session: type === 'user' ? { kind: 'browser', confirmedAt: new Date() } : null,
     provenance: null,
     via: null,
     personalToken: null,

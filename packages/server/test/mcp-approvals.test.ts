@@ -30,7 +30,9 @@ useMcp(
     await root.access.set(`user:${DEV}`, { market: 'maintainer' });
     await root.access.set(`user:${OTHER}`, { 'market/prod': 'viewer' });
   },
-  { approvalWaitMs: 50 },
+  // Approvals as they are decided, with no passkey anywhere: what a touch adds to one, and a change that takes a fresh
+  // check, `passkey-touch.test.ts` and `passkey-fresh.test.ts` hold.
+  { approvalWaitMs: 50, passkeys: 'off' },
 );
 
 type View = {

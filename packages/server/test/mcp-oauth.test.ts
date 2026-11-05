@@ -90,6 +90,14 @@ function route(path: string, init: RequestInit = {}, on = runtime): Promise<Resp
   return coffreRoute(new Request(`${ORIGIN}${path}`, init), on, '203.0.113.7').then((response) => response!);
 }
 
+/**
+ * A terminal of `email`'s that a passkey touch confirmed a moment ago, the passkey added first: what a member's removal
+ * or add takes (a fresh check, passkeys.md, section 4.1).
+ */
+async function freshSession(email: string): Promise<string> {
+  return confirmedSession(db.owner, deps.chainKey, email, await addPasskey(db.owner, deps.chainKey, email));
+}
+
 /** A CLI session for `email`: how these tests stand in for the consent page's browser. */
 async function session(email: string): Promise<string> {
   const service = runtime.signin!;
@@ -483,7 +491,7 @@ test("an owner reads a person's connected apps in their report; removal disconne
   const app = await connect();
   // A consent whose code was never redeemed is no connected app, but removal ends it too.
   await decide(await session(DEV), request(CLAUDE_CODE, 'http://localhost:5000/callback', pkce().challenge), { approve: true });
-  const root = await session(ROOT);
+  const root = await freshSession(ROOT);
   const as = (method: string, path: string, token = root) => route(path, { method, headers: { authorization: `Bearer ${token}` } });
   type Report = { live: { apps: number }; apps: { name: string; host: string; scopes: string[] }[] };
   const before = (await (await as('GET', `/api/members/user:${DEV}`)).json()) as Report;
@@ -525,7 +533,7 @@ test("an app of an earlier membership, sealed live by the cutover, ends by its c
     const [still] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.id, app!.id));
     assert.equal(still!.revokedAt, null, `${sweep}: live, of the generation before`);
     if (sweep === 're-admission') {
-      const admitted = await route(`/api/members/${member}`, { method: 'PUT', headers: { authorization: `Bearer ${await session(ROOT)}` } });
+      const admitted = await route(`/api/members/${member}`, { method: 'PUT', headers: { authorization: `Bearer ${await freshSession(ROOT)}` } });
       assert.equal(admitted.status, 200, await admitted.clone().text());
     } else {
       // A sign-in that binds an account of the new membership sweeps the old one's ways in.

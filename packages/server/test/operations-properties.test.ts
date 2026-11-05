@@ -74,7 +74,8 @@ async function scenario(operations: readonly Operation[]) {
   // Under 0.15's log, a read on a credential is a use, which `reads` counts by its answers.
   const uses = LOG === '0.15' ? watchUses(vault) : null;
   const deps: FixtureDeps = { db: database.runtime, vault, chainKey: Buffer.alloc(32, 23), anchor: testAnchor() };
-  const signinConfig = defineSignin({ publicUrl: 'https://coffre.test', providers: [github({ clientId: 'property', clientSecret: 'property' })] });
+  // The model is of access, with no passkey anywhere: what a passkey adds, the passkey suites hold (`passkey-*.test.ts`).
+  const signinConfig = defineSignin({ publicUrl: 'https://coffre.test', providers: [github({ clientId: 'property', clientSecret: 'property' })], passkeys: 'off' });
   const signin = new SigninService({ ...deps, signin: signinConfig });
   deps.signin = signin;
   const runtime: CoffreRuntime = {

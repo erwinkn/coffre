@@ -4,6 +4,7 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { Outlet, useRouter } from '@tanstack/react-router';
 import { Toaster } from 'sonner';
+import { FreshCheck } from './components/fresh-check';
 import { Brand, Shell } from './components/shell';
 import { TooltipProvider } from './components/ui';
 import { ThemeToggle } from './components/theme';
@@ -40,8 +41,9 @@ function Toasts() {
  * coffre's element, drawn in the visitor's theme, its sidebar folded or not,
  * as their cookies say, from the first byte: the server and the browser
  * both render it from them, so nothing waits for a script. Tooltips, toasts
- * and the live region, which the deployment's own pages may use too. The
- * query client comes with the router (`createRouter`).
+ * and the live region, which the deployment's own pages may use too, and the
+ * dialog an act that takes a fresh check opens (`FreshCheck`). The query
+ * client comes with the router (`createRouter`).
  */
 export function CoffreProvider({ children }: { children: ReactNode }) {
   const initial = (useRouter().options.context as RouterContext).preferences;
@@ -76,6 +78,7 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
           {children}
           <Toasts />
           <LiveRegion />
+          <FreshCheck />
         </TooltipProvider>
       </div>
     </PreferencesContext.Provider>

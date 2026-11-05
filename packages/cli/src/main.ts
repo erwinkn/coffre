@@ -431,8 +431,17 @@ function enduringClient(to: Target): CoffreClient {
 /** One request; every way it can fail is explained in terms of what to do next. */
 async function send(request: Request, to: Target, hint?: Hint, handled: readonly number[] = [], ask: Ask = once): Promise<Response> {
   let response: Response;
+  // Kept, for the fresh check's one try again (`freshened`): only a saved session of a person's can be confirmed.
+  const again = steppingUp(to) ? request.clone() : null;
   try {
     response = await ask(request);
+    const refused = again !== null && response.status === 403 ? await freshRefusal(response) : null;
+    if (refused !== null) {
+      await freshened(to as Target & { credential: { kind: 'token'; token: string } }, refused);
+      const headers = new Headers(again!.headers);
+      for (const [name, value] of Object.entries(await headersFor(to))) headers.set(name, value);
+      response = await ask(new Request(again!, { headers }));
+    }
   } catch (error) {
     fail(unreachable(to.origin, error));
   }
@@ -461,6 +470,51 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
   }
   if (!json) fail('request returned a non-JSON response');
   return response;
+}
+
+/** Whether `to`'s credential is a person's session `coffre login` saved, which a fresh check can confirm anew. */
+function steppingUp(to: Target): to is Target & { credential: { kind: 'token'; token: string } } {
+  return to.mode === 'signin' && to.by === 'person' && to.credential.kind === 'token';
+}
+
+/** Whether an answer is a fresh check's refusal (docs/design/passkeys.md, section 3.5), and of a person with no passkey yet. */
+async function freshRefusal(response: Response): Promise<{ add: boolean } | null> {
+  const body = (await response.clone().json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+  return body?.error === 'fresh_check_required' ? { add: body.reason === 'add_passkey' } : null;
+}
+
+/**
+ * A fresh check for a command (docs/design/passkeys.md, section 3.5): a device login of its own, labelled with the
+ * command, approved in the person's signed-in browser with a touch of their passkey, whose new session, confirmed then,
+ * the CLI swaps in, signing the old one out, for the command to go again, once. The second command inside the five
+ * minutes asks nothing. A person with no passkey yet adds one in the browser first.
+ */
+async function freshened(to: Target & { credential: { kind: 'token'; token: string } }, refused: { add: boolean }): Promise<void> {
+  if (refused.add) {
+    fail(`this takes a passkey, and you have none yet: sign in to ${to.origin} in your browser, add one when coffre asks, then run this again`);
+  }
+  const said = `coffre CLI: ${[command ?? '', ...rest].join(' ').trim()}`;
+  const session = await approvedInBrowser(to.origin, said, 'This takes a touch of your passkey. Approve it in your browser: open', false);
+  const store = readStore();
+  const saved = store.instances[to.origin];
+  if (session.principal.type !== 'user' || (saved?.principal !== undefined && saved.principal.id !== session.principal.id)) {
+    // Approved by someone else's browser: their session is not this one's, and goes unused.
+    await signOutToken(to.origin, session.access_token);
+    fail(`that was approved as ${session.principal.id}, not ${saved?.principal?.id ?? 'you'}: nothing was changed`);
+  }
+  const old = to.credential.token;
+  if (saved !== undefined && saved.mode === 'signin' && saved.kind === undefined) {
+    writeStore(withSession(store, to.origin, { ...saved, token: session.access_token, expiresAt: session.expires_at, obtainedAt: new Date().toISOString() }));
+  }
+  // This command's every request after this goes on the new session.
+  to.credential = { kind: 'token', token: session.access_token };
+  await signOutToken(to.origin, old);
+  process.stderr.write('Approved.\n');
+}
+
+/** Best effort: a session ended, at the instance; one already ended, or an instance that does not answer, changes nothing here. */
+async function signOutToken(origin: string, token: string): Promise<void> {
+  await http(`${origin}/api/auth/logout`, { method: 'POST', redirect: 'manual', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } }).catch(() => undefined);
 }
 
 /**
@@ -656,38 +710,7 @@ function expiresIn(seconds: number): string {
 
 /** A device login: a code shown here, approved in a browser signed in to coffre. */
 async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
-  let started: Response;
-  try {
-    started = await http(`${origin}/api/auth/device`, {
-      method: 'POST',
-      redirect: 'manual',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ client_label: `coffre CLI on ${hostname()}` }),
-    });
-  } catch (error) {
-    fail(unreachable(origin, error));
-  }
-  if (started.status === 429) fail('too many sign-in attempts from this address; wait a minute and retry');
-  if (!started.ok || !isJsonContentType(started.headers.get('content-type'))) {
-    fail(`${origin} did not start a sign-in (status ${started.status})`);
-  }
-  const device = (await started.json()) as {
-    device_code: string;
-    user_code: string;
-    verification_uri: string;
-    verification_uri_complete: string;
-    expires_in: number;
-    interval: number;
-  };
-
-  process.stderr.write(
-    `\nTo sign in, open\n\n    ${device.verification_uri_complete}\n\n` +
-      `and check that it shows the code  ${device.user_code}\n\n`,
-  );
-  if (!noBrowser && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
-  process.stderr.write(`Waiting for you to approve it; the code expires in ${expiresIn(device.expires_in)}…\n`);
-
-  const session = await pollDevice(origin, device.device_code, device.interval, device.expires_in);
+  const session = await approvedInBrowser(origin, `coffre CLI on ${hostname()}`, 'To sign in, open', noBrowser);
   const me = await client({
     origin,
     mode: 'signin',
@@ -706,6 +729,42 @@ async function deviceLogin(origin: string, noBrowser: boolean): Promise<void> {
   );
   process.stdout.write(`Signed in to ${origin} as ${me.principal.id}\n`);
   printMe(me);
+}
+
+/** A device code started, labelled `label`, shown here under `intro`, and the session its approval in a browser redeems. */
+async function approvedInBrowser(origin: string, label: string, intro: string, noBrowser: boolean): Promise<DeviceToken> {
+  let started: Response;
+  try {
+    started = await http(`${origin}/api/auth/device`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_label: label.slice(0, CREDENTIAL_LABEL_MAX) }),
+    });
+  } catch (error) {
+    fail(unreachable(origin, error));
+  }
+  if (started.status === 429) fail('too many sign-in attempts from this address; wait a minute and retry');
+  if (!started.ok || !isJsonContentType(started.headers.get('content-type'))) {
+    fail(`${origin} did not start a sign-in (status ${started.status})`);
+  }
+  const device = (await started.json()) as {
+    device_code: string;
+    user_code: string;
+    verification_uri: string;
+    verification_uri_complete: string;
+    expires_in: number;
+    interval: number;
+  };
+
+  process.stderr.write(
+    `\n${intro}\n\n    ${device.verification_uri_complete}\n\n` +
+      `and check that it shows the code  ${device.user_code}\n\n`,
+  );
+  if (!noBrowser && process.stderr.isTTY) openBrowser(device.verification_uri_complete);
+  process.stderr.write(`Waiting for you to approve it; the code expires in ${expiresIn(device.expires_in)}…\n`);
+
+  return pollDevice(origin, device.device_code, device.interval, device.expires_in);
 }
 
 /** Ask the instance how it signs people in. */

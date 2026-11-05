@@ -6,7 +6,7 @@ import { accessFor, type Recalled } from './accesses.ts';
 import { callerFrom, newestPolicySeq, withRecalled, withShown, type Caller } from './api/caller.ts';
 import { formatMember } from './api/paths.ts';
 import { ApiError } from './api/errors.ts';
-import type { McpVia } from './api/context.ts';
+import type { McpVia, SessionOf } from './api/context.ts';
 import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken, type Touch } from './api/signin.ts';
 import { answerShown, policySeqAndSettings, shownActive, type Shows } from './db/answers.ts';
 import type { CredentialRead, PasskeyRead } from './db/queries.ts';
@@ -32,6 +32,8 @@ export type AuthenticatedIdentity = {
    * 6.2): what the request issues carries it (section 6.3). Null for none, and for anything but a person's credential.
    */
   passkeyId: string | null;
+  /** That credential, when it is a person's browser or terminal session, and when a touch confirmed it; null or none for any other. */
+  session?: SessionOf | null;
   /** That credential, when a trust binding issued it for a CI run, or it is a personal token: every entry the request writes names it. */
   provenance: string | null;
   /** The personal token the request came in on, which acts as its person within its scope; null for anything else. */
@@ -224,6 +226,7 @@ export async function authenticateRequest(
   // A coffre credential's verifier reads it with the credential, before it asks the vault; Access's asks nothing of the vault.
   let policySeq: bigint | null | undefined;
   let passkeyId: string | null = null;
+  let session: SessionOf | null = null;
   try {
     const asked = {
       sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }),
@@ -249,8 +252,9 @@ export async function authenticateRequest(
       expiresAt?: string;
       policySeq?: bigint | null;
       passkeyId?: string | null;
+      session?: SessionOf | null;
     };
-    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, recalled = null, unchecked, settings, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, passkeyId = null, ...principal } = verified);
+    ({ credentialId = null, expiresAt: credentialExpiresAt = null, credentialGeneration, access: checked, recalled = null, unchecked, settings, exchanged = false, credentialScope = null, personalToken = null, handlePlaces = null, policySeq, passkeyId = null, session = null, ...principal } = verified);
   } catch (error) {
     // The vault on another release, for a deploy's seconds: nothing was checked, and nobody is signed out.
     const deploying = deployingIn(error);
@@ -300,6 +304,7 @@ export async function authenticateRequest(
       credentialId,
       credentialExpiresAt,
       passkeyId,
+      session,
       provenance: exchanged || personalToken !== null || handle ? credentialId : null,
       personalToken,
       handlePlaces,

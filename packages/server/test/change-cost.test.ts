@@ -22,6 +22,7 @@ import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, sealedNow, testDeps, testVault, type FixtureDeps } from './api-fixture.ts';
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
+import { steppedUp } from './passkey-rows.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round trips");
@@ -113,12 +114,13 @@ before(async () => {
     // What a request leaves running, waited for within it: its statements are its own.
     waitUntil: (promise) => void background.push(promise),
   };
-  // The Owner's browser session, as a page's calls send it; and the Viewer's.
+  // The Owner's browser session, as a page's calls send it; and the Viewer's. Each stepped up with a touch a moment
+  // ago, as a session that changes access is (a fresh check, docs/design/passkeys.md, section 4).
   const browser = async (subject: string, email: string): Promise<CoffreClient> => {
     const session = await asRequest(async () => {
       const signed = await runtime.signin!.completeSignin({ provider: 'github', subject, emails: [email], name: null }, { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' });
       if (!('credential' in signed)) throw new Error(`${email} was not signed in`);
-      return signed.credential.token;
+      return (await steppedUp(runtime.signin!, db.owner, deps.chainKey, email, signed.credential.token)).token;
     });
     return createClient({
       url: ORIGIN,

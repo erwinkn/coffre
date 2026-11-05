@@ -12,6 +12,7 @@ import { formatPath } from './paths.ts';
 import { makePersonal, ownerOf, resolveRead } from './personal.ts';
 import { placeAt } from './render.ts';
 import { challengeScopes, ROUTE_SCOPES } from '../mcp/scopes.ts';
+import { freshAnswer, requireFresh } from './fresh-routes.ts';
 import { PERSONAL_TOKEN_ROUTES } from './personal-tokens.ts';
 import { ISSUING_ROUTES, WORKLOAD_ROUTES } from './workload-routes.ts';
 import { routes, type Check, type Route } from './routes.ts';
@@ -178,7 +179,9 @@ export function routeParts(pathname: string): string[] {
  *      and any flags in the query string)
  *   3. resolve the path in one query; a missing place is 404, not logged
  *   4. check the route's permissions against the caller; a refusal is logged
- *   5. run the handler
+ *   5. check that what the route guards comes from a session a passkey confirmed lately (`FRESH_ROUTES`); a refusal
+ *      is a prompt, not logged
+ *   6. run the handler
  */
 export async function serveApi(request: Request, ctx: ApiContext): Promise<Response> {
   try {
@@ -270,6 +273,10 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
         ),
       );
     }
+
+    // After the permissions, so that a caller who may not do it is refused for that, and before the handler, which writes:
+    // what the route guards takes a session a touch confirmed in the last five minutes (passkeys.md, section 4.5).
+    requireFresh(ctx, freshAnswer(key, { params: found.params, input, query } as never, ctx), key);
 
     return jsonResponse(await def.run(ctx, { params: found.params, place, input, query } as never));
   } catch (error) {

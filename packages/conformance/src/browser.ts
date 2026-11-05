@@ -5,6 +5,12 @@ import { createClient, type CoffreClient } from '@coffre/client';
 export class Browser {
   readonly origin: string;
   readonly #jar = new Map<string, string>();
+  /**
+   * How this browser's person confirms it is them, as coffre's dialog does (docs/design/passkeys.md, section 3.4): a
+   * touch at the step-up's door, which replaces the session in the jar. Set once they signed in with a passkey; none,
+   * and an act a fresh check refuses is the refusal.
+   */
+  confirm: (() => Promise<void>) | null = null;
 
   constructor(origin: string) {
     this.origin = origin;
@@ -53,14 +59,23 @@ export class Browser {
     });
   }
 
-  /** The API as this browser's pages call it. */
+  /**
+   * The API as this browser's pages call it: an act a fresh check refuses (`403 fresh_check_required`) confirmed with
+   * `confirm`, and sent again, once, as coffre's pages do it (`@coffre/ui`'s `lib/fresh.ts`).
+   */
   client(): CoffreClient {
     return createClient({
       url: this.origin,
-      transport: (request) => {
+      transport: async (request) => {
         request.headers.set('origin', this.origin);
         request.headers.set('sec-fetch-site', 'same-origin');
-        return this.fetch(request);
+        const again = request.clone();
+        const response = await this.fetch(request);
+        if (response.status !== 403 || this.confirm === null) return response;
+        const body = (await response.clone().json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+        if (body?.error !== 'fresh_check_required' || body.reason === 'add_passkey') return response;
+        await this.confirm();
+        return this.fetch(again);
       },
     });
   }

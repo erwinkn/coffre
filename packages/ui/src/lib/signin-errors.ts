@@ -33,6 +33,7 @@ const MESSAGES: Record<string, string> = {
     'Your provider sent more about your account than a browser keeps through the passkey step. Tell whoever runs coffre.',
   unknown_provider: 'That sign-in option is not configured here.',
   link_session: 'Your session changed while linking. Sign in again, then retry.',
+  link_stale: 'Your passkey confirmation ran out while you were away. Link the account again.',
 };
 
 /**

@@ -521,3 +521,66 @@ test("a repository's coffre.json names its instance for a fresh clone, which sig
   writeFileSync(join(home, 'coffre.json'), JSON.stringify({ url: a.origin }));
   assert.equal(await first('code/other', ['whoami']), `service:deploy (service account) on ${b.origin} (the default), via a bearer token, from coffre login --token`);
 });
+
+/**
+ * A coffre whose member add takes a fresh check (docs/design/passkeys.md, section 3.5): refused `fresh_check_required`
+ * on Ada's saved session, `coffre_cli_old`, and taken on the one her browser's approval of a device code redeems,
+ * `coffre_cli_new`. It keeps every request. `add`: Ada holds no passkey yet, whom the refusal asks to add one.
+ */
+async function freshInstance(t: test.TestContext, { add = false } = {}) {
+  const seen: { method: string; url: string; authorization: string | undefined; body: string }[] = [];
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += String(chunk);
+    seen.push({ method: req.method!, url: req.url!, authorization: req.headers.authorization, body });
+    const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/api/auth/device') return send(200, { device_code: 'device', user_code: 'BCDF-GHJK', verification_uri_complete: 'http://127.0.0.1/auth/device?code=BCDF-GHJK', interval: 1, expires_in: 60 });
+    if (req.url === '/api/auth/device/token') return send(200, { access_token: 'coffre_cli_new', expires_at: '2099-02-01T00:00:00Z', principal: { type: 'user', id: 'ada@acme.example' } });
+    if (req.url === '/api/auth/logout') return send(200, { signedOut: true });
+    if (req.method === 'PUT' && req.url === '/api/members/user%3Abob%40acme.example') {
+      if (req.headers.authorization === 'Bearer coffre_cli_new') return send(200, { member: 'user:bob@acme.example', created: true, instanceRole: 'member', scope: null });
+      return send(403, { error: 'fresh_check_required', message: 'this takes a fresh touch of your passkey', ...(add ? { reason: 'add_passkey' } : {}) });
+    }
+    send(401, { error: 'unauthenticated', message: `unexpected ${req.method} ${req.url}` });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }));
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== 'string');
+  const origin = `http://127.0.0.1:${address.port}`;
+  const home = mkdtempSync(join(tmpdir(), 'coffre-fresh-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, '.coffre'), { mode: 0o700 });
+  const ada = { mode: 'signin', token: 'coffre_cli_old', principal: { type: 'user', id: 'ada@acme.example' }, expiresAt: '2099-01-01T00:00:00Z', obtainedAt: '2026-10-01T00:00:00Z' };
+  writeFileSync(join(home, '.coffre', 'credentials.json'), JSON.stringify({ version: 2, current: origin, instances: { [origin]: ada } }), { mode: 0o600 });
+  const saved = () => JSON.parse(readFileSync(join(home, '.coffre', 'credentials.json'), 'utf8')).instances[origin] as typeof ada;
+  return { origin, home, seen, saved };
+}
+
+test('a command a fresh check refuses asks for a device code of its own, approved with a touch, swaps its session in and goes again, once', async (t) => {
+  const { home, seen, saved } = await freshInstance(t);
+  const ran = await cli(home, ['admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 0, `${ran.stderr}${JSON.stringify(seen.map((request) => `${request.method} ${request.url} ${request.authorization}`))}`);
+  assert.match(ran.stderr, /This takes a touch of your passkey\. Approve it in your browser: open\n\n {4}http:\/\/127\.0\.0\.1\/auth\/device\?code=BCDF-GHJK/);
+  assert.match(ran.stdout, /admitted user:bob@acme\.example/);
+  const adds = seen.filter((request) => request.method === 'PUT');
+  assert.deepEqual(adds.map((request) => request.authorization), ['Bearer coffre_cli_old', 'Bearer coffre_cli_new'], 'refused, then sent again on the new session, once');
+  assert.equal(adds[0]!.body, adds[1]!.body, 'the same request');
+  // Its code names the command, which the approval page shows: no secret is ever an argument.
+  const started = seen.find((request) => request.url === '/api/auth/device')!;
+  assert.deepEqual(JSON.parse(started.body), { client_label: 'coffre CLI: admit bob@acme.example' });
+  // The new session is saved, and the old one signed out.
+  assert.equal(saved().token, 'coffre_cli_new');
+  assert.equal(saved().expiresAt, '2099-02-01T00:00:00Z');
+  assert.deepEqual(seen.filter((request) => request.url === '/api/auth/logout').map((request) => request.authorization), ['Bearer coffre_cli_old']);
+});
+
+test('a command a person with no passkey yet is refused for says to add one in the browser, and asks for no code', async (t) => {
+  const { origin, home, seen, saved } = await freshInstance(t, { add: true });
+  const ran = await cli(home, ['admit', 'bob@acme.example'], '');
+  assert.equal(ran.status, 1);
+  assert.equal(ran.stderr, `coffre: this takes a passkey, and you have none yet: sign in to ${origin} in your browser, add one when coffre asks, then run this again\n`);
+  assert.equal(seen.some((request) => request.url === '/api/auth/device'), false);
+  assert.equal(saved().token, 'coffre_cli_old');
+});
