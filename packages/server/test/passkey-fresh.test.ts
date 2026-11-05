@@ -12,7 +12,8 @@ import { eq } from 'drizzle-orm';
 
 import { FRESH_MS } from '../src/api/fresh-routes.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
-import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { serveApi } from '../src/api/router.ts';
+import { clientFor, contextFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { credentials, passkeys } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, enroll, ORIGIN, register, signinDeployment } from './signin-browser.ts';
@@ -254,6 +255,31 @@ test('every act a fresh check let through names, in its own entry, the passkey a
     assert.ok(confirmation(action).some((pair) => pair[0] === confirmed[0] && pair[1] === confirmed[1]), `${action} names its confirmation: ${JSON.stringify(confirmation(action))}`);
   }
   assert.deepEqual([...new Set(confirmation('secret.write').map(String))], [String([null, null])], 'a write no check guards names none');
+});
+
+test("a personal token or an MCP connection is never the browser's window, however lately its person touched: unprotecting and a sensitive value made a secret refuse it, writing nothing", async () => {
+  const key = await SoftAuthenticator.create('ES256');
+  await enroll(runtime, BOB, key);
+  const [passkey] = await db.owner.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.principal, `user:${BOB}`));
+  await clientFor(deps, ROOT).environments.update('market/dev', { protected: true });
+  // Bob's own context, a session his passkey confirmed a moment ago: what the request came in on is all that differs.
+  const as = async (extra: Partial<Awaited<ReturnType<typeof contextFor>>>) => ({
+    ...(await contextFor(deps, BOB)), signin: runtime.signin!, passkeyId: passkey!.id, session: { kind: 'browser' as const, confirmedAt: new Date() }, ...extra,
+  });
+  const send = async (ctx: Awaited<ReturnType<typeof as>>, method: string, path: string, body: unknown) => {
+    const answer = await serveApi(new Request(`${ORIGIN}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), ctx);
+    return refused({ status: answer.status, body: (await answer.json()) as { error?: string; reason?: string } });
+  };
+  const token = { personalToken: { id: '00000000-0000-4000-8000-000000000002', label: 'agent', expiresAt: new Date(Date.now() + 3_600_000).toISOString() } };
+  const connection = { via: { connectionId: '00000000-0000-4000-8000-000000000003', clientId: 'client', clientName: 'Claude', scopes: ['read', 'write'] as const } };
+  for (const [name, extra] of [['a personal token', token], ['an MCP connection, with no approval touch', connection]] as const) {
+    assert.deepEqual(await send(await as(extra), 'PATCH', '/api/projects/market/dev', { protected: false }), [403, 'fresh_check_required', undefined], name);
+    assert.deepEqual(await send(await as(extra), 'PATCH', '/api/secrets/market/dev', { DB_PASSWORD: { sensitivity: 'secret' } }), [403, 'fresh_check_required', undefined], name);
+  }
+  assert.equal((await clientFor(deps, ROOT).projects.list()).projects[0]!.environments.find((environment) => environment.slug === 'dev')!.protected, true);
+  assert.equal((await levels()).DB_PASSWORD, 'sensitive', 'nothing written');
+  // The session itself goes.
+  assert.equal((await send(await as({}), 'PATCH', '/api/secrets/market/dev', { DB_PASSWORD: { sensitivity: 'secret' } }))[0], 200);
 });
 
 test('linking another account takes the window of a person who holds a passkey, at the start and at the callback; the step-up goes on to the link', async (t) => {

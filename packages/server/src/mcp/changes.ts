@@ -52,7 +52,8 @@ export type Change<I extends z.ZodObject = z.ZodObject> = {
    * What the route it makes its change through answers for a fresh check (`FRESH_ROUTES`, passkeys.md, section 4.4):
    * `always` for a change that widens someone's reach or mints a credential. Approve's touch stands for it; a person who
    * holds no passkey, under `optional`, is asked to add one before the approval is decided, which leaves it pending.
-   * The route's own check, as the change runs, still holds it (`McpVia.touched`).
+   * The route's own check, as the change runs, still holds it (`McpVia.touched`). A copy of the route's answer, which
+   * `mcp-change-fresh.test.ts` holds to the route each tool's change calls.
    */
   fresh: 'always' | 'never';
   /** Before asking, as the connection: a call the person could not make fails here, not on the page. */
