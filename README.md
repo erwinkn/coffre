@@ -124,7 +124,8 @@ pnpm conformance:node      # examples/node, its two processes, on SQLite
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
                        # --kind workers or --kind node selects one deployment
 pnpm test:image        # the CLI's image for amd64 and arm64, and coffre serve run in it (needs Docker)
-pnpm check:pins        # every dependency pinned exactly
+pnpm check:pins        # every dependency, action, image, download and install pinned
+pnpm check:workflows   # zizmor over every workflow and action, each pinned to its commit
 pnpm check:contrast    # every colour pair in the UI meets WCAG AA
 pnpm check:docs        # every path and script the docs name exists
 ```
@@ -595,9 +596,20 @@ database ([deploy.md](docs/deploy.md#from-a-release-before-040)). From
 0.4.0 on, each release migrates before it deploys, and serves nothing until
 its migrations have run.
 
-Install scripts are off, every dependency is pinned exactly, and a version
+No dependency's install script runs unless `pnpm-workspace.yaml` names it,
+with its reason (none does), every dependency is pinned exactly, and a version
 must be seven days old before it can be installed. That last rule blocked
 `jose@6.2.4` the first week, published six days before we tried it.
+
+The rest of what CI and the scripts fetch is pinned too: each action to its
+commit, its version in a comment beside it; each image to its index digest,
+written `name:tag@sha256:<digest>`; each tool downloaded (TLC, Lean, Go,
+Terraform, OpenTofu, zizmor, the Cursor image's Node) to its version and
+SHA-256; each install to the lockfile. `pnpm check:pins` and `pnpm
+check:workflows` (zizmor) fail on anything else, on every pull request. A
+line that cannot be pinned says why, `# unpinned: <reason>`: the Cursor
+image's apt packages, and the fresh installs of what `coffre init` writes,
+which has no lockfile yet.
 
 Two traps, both noted in `pnpm-workspace.yaml`:
 

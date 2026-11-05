@@ -32,6 +32,7 @@
     "test:terraform": "./scripts/terraform-provider.sh",
     "lint": "eslint \"packages/*/{src,test,scripts}/**/*.{ts,tsx}\"",
     "check:pins": "node scripts/check-pins.mjs",
+    "check:workflows": "./scripts/zizmor.sh",
     "build:action": "pnpm --dir packages/cli run build:action",
     "check:action": "pnpm --dir packages/cli run check:action",
     "bump": "node scripts/bump.mjs",

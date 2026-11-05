@@ -5,23 +5,35 @@
 # Cloud Agent VM (fuse-overlayfs, no containerd snapshotter, legacy iptables) so
 # the Postgres service in docker-compose.yml works. Repo dependencies are
 # installed later by the environment `install` command, after checkout.
-FROM ubuntu:24.04
+#
+# Everything it fetches is pinned: the base by its index digest, Docker's
+# signing key, nvm and Node by their SHA-256 or commit. Ubuntu's and Docker's
+# apt packages are not: an apt archive serves its current versions only, each
+# checked against the archive's signed index. Rebuilding the image takes the
+# security fixes of the day.
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tooling. git + curl are required in fully custom images; lsof is used by
 # dev/start.sh, gnupg by the Docker apt repo, sudo by the start hook.
+# unpinned: Ubuntu's archive, above.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl git gnupg lsof sudo openssh-client xz-utils procps iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
-# Docker engine + compose plugin (docker-in-docker) and fuse-overlayfs.
+# Docker engine + compose plugin (docker-in-docker) and fuse-overlayfs. The
+# archive's signing key is pinned by its SHA-256: key 9DC8 5822 9FC7 DD38 854A
+# E2D8 8D81 803C 0EBF CD88, "Docker Release (CE deb)".
 RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl --retry 3 -fsSL https://download.docker.com/linux/ubuntu/gpg \
-        | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" \
+    && curl --retry 3 -fsSL -o /tmp/docker.asc https://download.docker.com/linux/ubuntu/gpg \
+    && echo "1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570  /tmp/docker.asc" | sha256sum -c - \
+    && gpg --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.asc \
+    && rm /tmp/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.gpg
+# unpinned: Docker's apt archive, above; its index is checked against the key.
+RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu noble stable" \
         > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -54,7 +66,10 @@ USER ubuntu
 WORKDIR /home/ubuntu
 ENV NVM_DIR=/home/ubuntu/.nvm
 
-# Node 24 via nvm + pinned pnpm through corepack. The Cloud runtime injects its
+# Node 24 via nvm + pinned pnpm through corepack. nvm is its v0.40.3 commit,
+# which git checks; Node is the workspace's 24.22.1, its tarball held to the
+# SHA-256 nodejs.org's SHASUMS256.txt gives, unpacked where nvm keeps the
+# versions it installs, so that `nvm use 24` finds it. The Cloud runtime injects its
 # own Node 22 ahead of us on PATH, so we must prepend the nvm-managed Node 24
 # bin. The runtime sources ~/.bashrc even for non-interactive shells (via
 # BASH_ENV), so put the prepend ABOVE the stock interactive-guard early return,
@@ -62,10 +77,23 @@ ENV NVM_DIR=/home/ubuntu/.nvm
 # at build time from `nvm which`) avoids sourcing nvm on every command. Node 24
 # is required because the CLI, dev IdP, migrations, and test runner execute .ts
 # files directly via node (native type-stripping, Node 23.6+/24 only).
-RUN curl --retry 3 -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash \
+ARG NODE_VERSION=24.22.1
+RUN git clone --quiet https://github.com/nvm-sh/nvm.git "$NVM_DIR" \
+    && git -C "$NVM_DIR" -c advice.detachedHead=false checkout --quiet 977563e97ddc66facf3a8e31c6cff01d236f09bd \
+    && case "$(dpkg --print-architecture)" in \
+        amd64) arch=x64 digest=6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 ;; \
+        arm64) arch=arm64 digest=dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e ;; \
+        *) echo "no Node $NODE_VERSION pinned for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl --retry 3 -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$arch.tar.xz" \
+    && echo "$digest  /tmp/node.tar.xz" | sha256sum -c - \
+    && mkdir -p "$NVM_DIR/versions/node/v$NODE_VERSION" \
+    && tar -xJf /tmp/node.tar.xz -C "$NVM_DIR/versions/node/v$NODE_VERSION" --strip-components=1 \
+    && rm /tmp/node.tar.xz \
+    && printf '%s\n' 'export NVM_DIR="$HOME/.nvm"' '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> "$HOME/.bashrc" \
     && . "$NVM_DIR/nvm.sh" \
-    && nvm install 24 \
-    && nvm alias default 24 \
+    && nvm alias default "$NODE_VERSION" \
+    && nvm use default \
     && corepack enable \
     && corepack prepare pnpm@11.8.0 --activate \
     && NODE_BIN="$(dirname "$(nvm which default)")" \

@@ -13,7 +13,8 @@ function checkout(t) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-action-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const files = ['package.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', '.npmrc', 'dev/package.json', 'action/action.yml', 'action/coffre.mjs', 'CHANGELOG.md',
-        'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/changelog.mjs', 'scripts/lockfile.mjs',
+        'scripts/bump.mjs', 'scripts/check-pins.mjs', 'scripts/pins.mjs', 'scripts/changelog.mjs', 'scripts/lockfile.mjs',
+        '.github/actions/prepare/action.yml', 'examples/workers/.github/workflows/deploy.yml',
         'packages/cli/src/deployment.ts', 'packages/cli/src/init.ts'];
     for (const base of ['packages', 'examples']) {
         for (const name of readdirSync(join(root, base))) files.push(`${base}/${name}/package.json`);
@@ -24,6 +25,9 @@ function checkout(t) {
         cpSync(join(root, file), join(dir, file));
     }
     symlinkSync(join(root, 'packages/cli/node_modules'), join(dir, 'packages/cli/node_modules'), 'dir');
+    // check:pins reads the files Git tracks.
+    execFileSync('git', ['init', '--quiet'], { cwd: dir });
+    execFileSync('git', ['add', '--all'], { cwd: dir });
     return dir;
 }
 

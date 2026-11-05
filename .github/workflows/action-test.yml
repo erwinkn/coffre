@@ -27,18 +27,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['runner', '20.0.0', '20', '22.23.4', '24.22.1']
-    runs-on: ubuntu-latest
+        # 20.0.0, the first Node the CLI runs on, and 20.20.2, Node 20's last.
+        node: ['runner', '20.0.0', '20.20.2', '22.23.4', '24.22.1']
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Record the runner's default Node
         id: runner
         run: |
           echo "bin=$(dirname "$(command -v node)")" >> "$GITHUB_OUTPUT"
           echo "version=$(node --version)" >> "$GITHUB_OUTPUT"
           node --version
-      - uses: ./.github/actions/prepare
+      - uses: $/.github/actions/prepare
       # The Action runs its own coffre.mjs: this revision's, or the test
       # would hold an older CLI to the checks below.
       - name: Hold the Action's CLI to this revision's sources
@@ -48,8 +51,9 @@ jobs:
         run: echo "node=$(command -v node)" >> "$GITHUB_OUTPUT"
       - name: Install this revision's packed CLI
         # For the other commands, below, on the caller's Node: the tarball
-        # npm publishes, before it is published.
-        run: |
+        # npm publishes, before it is published. It bundles all it runs and
+        # depends on nothing: npm installs this one file, and fetches no package.
+        run: | # zizmor: ignore[adhoc-packages]
           mkdir -p "$RUNNER_TEMP/coffre-action-consumer"
           pnpm --filter @coffre/cli pack --pack-destination "$RUNNER_TEMP/coffre-action-consumer"
           version=$(node -p 'JSON.parse(require("fs").readFileSync("packages/cli/package.json")).version')
@@ -103,7 +107,7 @@ jobs:
       - name: Stop on an environment that lacks its siblings' keys
         id: incomplete
         continue-on-error: true
-        uses: ./action
+        uses: $/action
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -113,7 +117,7 @@ jobs:
       - name: Stop when the workflow names no keys
         id: unnamed
         continue-on-error: true
-        uses: ./action
+        uses: $/action
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -121,7 +125,7 @@ jobs:
       - name: Stop on a key no environment holds
         id: typo
         continue-on-error: true
-        uses: ./action
+        uses: $/action
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -130,14 +134,14 @@ jobs:
       - name: Stop on a prefix that matches no key
         id: prefix
         continue-on-error: true
-        uses: ./action
+        uses: $/action
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
           environment: action-test/ci action-test/deploy
           keys: UNNAMED_SECRET NOWHERE_*
       - name: Load secrets through the Action
-        uses: ./action
+        uses: $/action
         with:
           url: ${{ env.ACTION_TEST_URL }}
           token: ${{ env.ACTION_TEST_TOKEN }}
@@ -188,6 +192,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.22.1

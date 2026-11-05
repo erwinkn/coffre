@@ -497,7 +497,7 @@ permissions:
   id-token: write
   contents: read
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
   - run: coffre --url https://secrets.acme.example --service deploy run -- ./deploy.sh
 ```
 

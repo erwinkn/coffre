@@ -2,19 +2,25 @@
 // Fail if any dependency is specified as a range rather than an exact version,
 // or if coffre's own packages drift apart: they move in lockstep, one version
 // for all, each depending on the others through the workspace, and the
-// examples pinning exactly that version, as `coffre init` writes them.
+// examples pinning exactly that version, as `coffre init` writes them. Then
+// hold every tracked workflow, Dockerfile, compose file, script and pnpm
+// setting to what it fetches being pinned (scripts/pins.mjs).
 //
 // This exists because pnpm's savePrefix setting is read but not honoured on
 // `pnpm add`, so the policy cannot be enforced by configuration alone. A
 // control that silently does nothing is worse than no control, which is the
 // whole reason this project exists.
 
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { kindOf, problemsIn } from './pins.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies'];
+const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
+// What pnpm runs of a workspace project's own on install: nothing, as of its dependencies'.
+const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'];
 
 const manifests = ['package.json', 'dev/package.json'];
 for (const dir of ['packages', 'examples']) {
@@ -42,6 +48,9 @@ for (const manifest of manifests) {
     const inWorkspace = !manifest.startsWith('examples/');
     if (!inWorkspace && pkg.packageManager !== pnpm) {
         problems.push(`${manifest}: packageManager ${pkg.packageManager ?? 'missing'} is not ${pnpm}, the workspace's`);
+    }
+    for (const script of INSTALL_SCRIPTS) {
+        if (pkg.scripts?.[script] !== undefined) problems.push(`${manifest}: scripts.${script} runs on install`);
     }
     if (manifest.startsWith('packages/') && pkg.version !== version) {
         problems.push(`${manifest}: version ${pkg.version} is not ${version}, the other packages'`);
@@ -99,11 +108,27 @@ const libsql = read('packages/db/package.json').dependencies['@libsql/client'];
 const nodeDriver = read('examples/node/package.json').dependencies?.['@libsql/client'];
 if (nodeDriver !== libsql) problems.push(`examples/node/package.json: @libsql/client is ${nodeDriver ?? 'missing'}, and @coffre/db's is ${libsql}`);
 
+// The Node a deployment's workflow runs is the workspace's, which CI runs.
+const node = (path) => readFileSync(join(root, path), 'utf8').match(/node-version: (\S+)/)?.[1];
+const workspaceNode = node('.github/actions/prepare/action.yml');
+const deployNode = node('examples/workers/.github/workflows/deploy.yml');
+if (deployNode !== workspaceNode) problems.push(`examples/workers/.github/workflows/deploy.yml: node-version ${deployNode}, and CI's is ${workspaceNode}`);
+
+const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
+let files = 0;
+for (const path of tracked) {
+    if (kindOf(path) === null || !existsSync(join(root, path))) continue;
+    files++;
+    problems.push(...problemsIn(path, readFileSync(join(root, path), 'utf8'), { root: path === 'pnpm-workspace.yaml' }));
+}
+
 if (problems.length > 0) {
     console.error('Dependency pinning check FAILED:\n');
     for (const problem of problems) console.error(`  ${problem}`);
     console.error('\nUse: pnpm run add:dep <pkg>@<version>, and `pnpm bump <version>` to move every package.');
+    console.error('Pin an action as owner/repo@<commit SHA> # v<version>, an image as name:tag@sha256:<index digest>, a download by its SHA-256;');
+    console.error('a line that cannot be pinned says why: `# unpinned: <reason>`.');
     process.exit(1);
 }
 
-console.log(`Dependency pinning check passed (${manifests.length} manifests, all exact; coffre ${version} throughout).`);
+console.log(`Dependency pinning check passed (${manifests.length} manifests, all exact; coffre ${version} throughout; ${files} workflow, image, script and pnpm files pinned).`);

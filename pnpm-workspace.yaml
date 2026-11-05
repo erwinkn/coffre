@@ -17,8 +17,20 @@ linkWorkspacePackages: true
 # Keys are camelCase in this file even though the CLI flags are kebab-case.
 
 # The npm supply chain is the largest untrusted input to a service that holds
-# every credential we own.
-ignoreScripts: true
+# every credential we own, so no dependency's install script runs unless it is
+# named here as `true`, with the reason on the line above
+# (`scripts/check-pins.mjs` holds every `true` to one). A dependency with an
+# install script that is not named fails the install (strictDepBuilds, which
+# pnpm 11 defaults to, spelled out): its build is a decision, never a default.
+# None runs today. esbuild's and workerd's scripts check the platform binary
+# their optional dependency already brings; Koffi's (Hegel's FFI) builds an
+# addon its optional `@koromix/koffi-<platform>` package already brings
+# (docs/property-tests.md).
+allowBuilds:
+  esbuild: false
+  koffi: false
+  workerd: false
+strictDepBuilds: true
 
 # Exact pins, no caret ranges.
 #

@@ -49,14 +49,16 @@ ready() {
 
 # A reused container keeps the image it was created from: a compose file that
 # moved on (Alpine to Debian, R62) changes nothing for it, and a benchmark on
-# it would measure the old one. Say so; recreating is its owner's call.
+# it would measure the old one. Say so; recreating is its owner's call. The
+# names are compared without their digests: one made before compose pinned
+# its digest, or from a rebuild of the same tag, runs the same Postgres.
 warn_stale_image() {
     local wanted container have
     wanted="$(docker compose config --images postgres 2>/dev/null)" || return 0
     container="$(docker compose ps -aq postgres 2>/dev/null)" || return 0
     [[ -n "$wanted" && -n "$container" ]] || return 0
     have="$(docker inspect --format '{{.Config.Image}}' "$container" 2>/dev/null)" || return 0
-    if [[ -n "$have" && "$have" != "$wanted" ]]; then
+    if [[ -n "$have" && "${have%@sha256:*}" != "${wanted%@sha256:*}" ]]; then
         printf 'Postgres on :%s runs %s, but docker-compose.yml names %s; it is reused as it is. Recreate it when no checkout is using it: COMPOSE_PROJECT_NAME=%s docker compose up -d --force-recreate postgres\n' \
             "$port" "$have" "$wanted" "$COMPOSE_PROJECT_NAME" >&2
     fi

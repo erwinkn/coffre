@@ -38,6 +38,13 @@ while [[ "${1:-}" == --* ]]; do
     esac
 done
 release="${release:-$(npm view @coffre/cli version)}"
+# Releases by their exact versions: npm resolves no range here.
+for version in "$release" ${schema:+"$schema"}; do
+    if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+        echo "compat-check: $version is not an exact version" >&2
+        exit 2
+    fi
+done
 temporary=false
 if [[ -n "${1:-}" ]]; then
     work="$1"
@@ -88,6 +95,7 @@ store="$(pnpm --dir "$root" store path)"
 if [[ -n "$schema" ]]; then
     mkdir -p "$work/schema"
     echo '{ "private": true }' >"$work/schema/package.json"
+    # unpinned: a published release at its exact version, checked above; what it depends on, as npm has it today.
     quietly "installing @coffre/server@$schema" "$work/schema.log" \
         pnpm --dir "$work/schema" add --save-exact --store-dir "$store" "@coffre/server@$schema"
     migrator="'$work/schema/node_modules/.bin/coffre-server' migrate"
@@ -102,6 +110,7 @@ mkdir -p "$HOME"
 # The release's own CLI, to write its deployments.
 mkdir -p "$work/cli"
 echo '{ "private": true }' >"$work/cli/package.json"
+# unpinned: a published release at its exact version, checked above; what it depends on, as npm has it today.
 quietly "installing @coffre/cli@$release" "$work/cli.log" \
     pnpm --dir "$work/cli" add --save-exact --store-dir "$store" "@coffre/cli@$release"
 
@@ -195,6 +204,7 @@ for kind in "${kinds[@]}"; do
     echo "==> coffre $release, as init writes it (--$kind), on $against"
     rm -rf "$project"
     quietly "coffre $release init --$kind" "$work/$kind-init.log" "$work/cli/node_modules/.bin/coffre" init "--$kind" "$project"
+    # unpinned: init writes no lockfile; this installs what a new deployment's first install does, under its own minimumReleaseAge.
     quietly "installing coffre-$kind" "$work/$kind-install.log" pnpm --dir "$project" install --store-dir "$store"
     engine="$([[ "$kind" == workers ]] && echo postgres || echo sqlite)"
 

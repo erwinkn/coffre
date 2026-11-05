@@ -301,11 +301,14 @@ only the environments the credential reads.
 ## GitHub Actions
 
 Use a released tag containing the [Action](../action/action.yml), replacing
-`<version>` with that release's version:
+`<version>` with that release's version. A workflow that pins every action
+to its commit pins this one the same way, to the tag's:
+`erwinkn/coffre/action@<commit> # v<version>` (`git ls-remote
+https://github.com/erwinkn/coffre v<version>` names it).
 
 ```yaml
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
   - uses: erwinkn/coffre/action@v<version>
     with:
       url: https://secrets.acme.example
@@ -322,7 +325,7 @@ permissions:
   id-token: write
   contents: read
 steps:
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
   - uses: erwinkn/coffre/action@v<version>
     with:
       url: https://secrets.acme.example

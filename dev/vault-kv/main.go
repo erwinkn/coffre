@@ -6,7 +6,7 @@
 //
 //   docker run --rm --network host -v "$PWD":/src -w /src \
 //     -e VAULT_ADDR=http://127.0.0.1:3000 -e VAULT_TOKEN=coffre_svc_… \
-//     golang:1.25-alpine go run .
+//     golang:1.25.14-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 go run .
 package main
 
 import (

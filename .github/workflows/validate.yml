@@ -17,6 +17,7 @@ jobs:
       - name: Check out the selected revision and its base
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
           fetch-depth: 0
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -41,9 +42,35 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
       - name: Hold action/coffre.mjs to the sources
         run: pnpm check:action
+
+  # On every change, a release's bump included: nothing CI, a Dockerfile or a
+  # script fetches may move under it. Needs no install and no Postgres.
+  pins:
+    name: Pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.22.1
+      - name: Hold manifests, images, downloads, installs and pnpm's settings to their pins
+        run: node scripts/check-pins.mjs
+      - name: Hold every action to its commit, with zizmor's other audits
+        # zizmor, pinned by its checksum in the script. The token lets it ask
+        # GitHub whether each pinned commit is its repository's, and its tag's.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/zizmor.sh
 
   checks:
     needs: changes
@@ -54,7 +81,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
       - name: Checks
         run: |
           pnpm lint
@@ -72,7 +101,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           # Tests use coffre:source and generate their own Worker fixtures.
           build: 'false'
@@ -90,7 +121,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           build: 'false'
       - name: Tests on 0.14's log
@@ -129,7 +162,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           build: 'false'
       - name: Use matrices, ${{ matrix.engine }} ${{ matrix.shard }}
@@ -162,6 +197,8 @@ jobs:
           jq -e '.["matrices-shard"].result == "success"' <<< "$RESULTS"
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -183,7 +220,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           build: 'false'
       - name: Database schema
@@ -210,6 +249,8 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Pin the JVM
         # An exact Temurin build, downloaded rather than the image's: ubuntu-24.04 rolls out over days, so two jobs of
         # one run can land on images with other Java builds, and the key hashes the JVM. The plan and every shard pin
@@ -290,6 +331,8 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Pin the JVM
         # An exact Temurin build, downloaded rather than the image's: ubuntu-24.04 rolls out over days, so two jobs of
         # one run can land on images with other Java builds, and the key hashes the JVM. The plan and every shard pin
@@ -345,7 +388,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           # The differential test runs core's and the vault's sources.
           build: 'false'
@@ -362,7 +407,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
       - name: Workers conformance
         # The runner's Chrome, named: the pages check runs, rather than skips.
         run: |
@@ -377,7 +424,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
       - name: Node conformance
         run: |
           pnpm conformance:node --browser /usr/bin/google-chrome
@@ -393,7 +442,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
       - name: gofmt, vet, unit tests, and acceptance tests on Terraform and OpenTofu
         run: pnpm test:terraform
 
@@ -410,7 +461,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           # The consumer script builds before packing; keep that single build.
           build: 'false'
@@ -420,7 +473,8 @@ jobs:
       - name: Install Node.js 20
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          # Node 20's last release.
+          node-version: 20.20.2
       - name: Name Node.js 20
         run: echo "COFFRE_CLIENT_NODES=$(command -v node)" >> "$GITHUB_ENV"
       - name: Install Node.js 22
@@ -451,7 +505,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           # The schema comes from this checkout's sources; the release from npm.
           build: 'false'
@@ -467,7 +523,9 @@ jobs:
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           # The script builds the CLI and what it bundles, no more.
           build: 'false'
@@ -479,7 +537,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    needs: [changes, action, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
+    needs: [changes, action, pins, checks, tests, tests-014, matrices, schema, formal, proofs, workers, node, terraform, consumer, compat, image]
     if: always()
     steps:
       - name: Require full validation or a proven version-only bump
@@ -487,8 +545,8 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
         run: |
           jq -e '
-            .changes.result == "success" and .action.result == "success" and
+            .changes.result == "success" and .action.result == "success" and .pins.result == "success" and
             ((.changes.outputs.version_only == "true") as $fast
-              | del(.changes, .action)
+              | del(.changes, .action, .pins)
               | all(.[]; .result == (if $fast then "skipped" else "success" end)))
           ' <<< "$RESULTS"

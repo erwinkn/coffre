@@ -11,7 +11,7 @@ const script = resolve(import.meta.dirname, 'ensure-postgres.sh');
 // route: where the fixture's `ip` sends the container's address: its own bridge,
 // Cloudflare WARP's device, a host without that bridge (Docker Desktop), or
 // an `ip` that cannot answer. upSays is what compose says of the container.
-async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false, exited = false, exitedOnce = false, downFails = false } = {}) {
+async function fixture(t, mode, callers = 1, route = 'bridge', { upSays = 'Started', inspectFails = false, exited = false, exitedOnce = false, downFails = false, wanted = 'postgres:16.14', running = 'postgres:16.14-alpine' } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-postgres-bootstrap-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const project = 'fixture_' + dir.split('-').at(-1);
@@ -34,8 +34,8 @@ const args = process.argv.slice(2);
 const mode = ${JSON.stringify(mode)};
 appendFileSync(dir + '/calls', JSON.stringify(args) + '\\n');
 appendFileSync(dir + '/compose-files', (process.env.COMPOSE_FILE ?? '') + '\\n');
-if (mode === 'stale' && args.includes('config')) { console.log('postgres:16.14'); process.exit(0); }
-if (mode === 'stale' && args[0] === 'inspect') { console.log('postgres:16.14-alpine'); process.exit(0); }
+if (mode === 'stale' && args.includes('config')) { console.log(${JSON.stringify(wanted)}); process.exit(0); }
+if (mode === 'stale' && args[0] === 'inspect') { console.log(${JSON.stringify(running)}); process.exit(0); }
 if (args.includes('port')) {
     if (mode === 'healthy' || mode === 'stale' || mode === 'existing' || existsSync(dir + '/created')) console.log('0.0.0.0:${port}');
     // Before creation, allow the mocked internal probe to reach its barrier.
@@ -166,6 +166,19 @@ test('a reused Postgres on another image than compose names is said so, and kept
     assert.equal(ran.code, 0, ran.output);
     assert.match(ran.output, /runs postgres:16\.14-alpine, but docker-compose\.yml names postgres:16\.14; it is reused as it is/);
     assert.ok(f.calls().every((args) => !args.includes('up')), 'a stale image is reported, never recreated');
+});
+
+test("a reused Postgres made from compose's tag before its digest was pinned is the same image, and nothing is said", async (t) => {
+    const digest = 'sha256:' + 'a'.repeat(64);
+    for (const running of ['postgres:16.14', `postgres:16.14@sha256:${'b'.repeat(64)}`]) {
+        const f = await fixture(t, 'stale', 1, 'bridge', { wanted: `postgres:16.14@${digest}`, running });
+        const ran = await f.run();
+        assert.equal(ran.code, 0, ran.output);
+        assert.doesNotMatch(ran.output, /docker-compose\.yml names/, running);
+    }
+    const f = await fixture(t, 'stale', 1, 'bridge', { wanted: `postgres:16.14@${digest}` });
+    const ran = await f.run();
+    assert.match(ran.output, new RegExp(`runs postgres:16\\.14-alpine, but docker-compose\\.yml names postgres:16\\.14@${digest}; it is reused as it is`));
 });
 
 test("a project's Postgres on another port than the one asked for is refused, not used", async (t) => {

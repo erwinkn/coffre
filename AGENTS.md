@@ -330,8 +330,20 @@ unsupported diff select full validation.
   SHA-256 and downloaded once. A change to a route the provider calls (the
   secrets list and write, `POST /api/auth/oidc`) runs it in the same pull
   request.
-- `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
-  (every path, script and link the docs name exists) do not need Postgres.
+- `pnpm lint`, `pnpm check:pins`, `pnpm check:workflows`, `pnpm check:contrast`
+  and `pnpm check:docs` (every path, script and link the docs name exists) do
+  not need Postgres. `check:pins` holds, beside the manifests, every tracked
+  workflow, Dockerfile, compose file, shell script and pnpm setting to what it
+  fetches being pinned (`scripts/pins.mjs`): an action by its commit, `owner/repo@<sha>
+  # vX.Y.Z`, the same repository's through `$/`; an image as
+  `name:tag@sha256:<index digest>`; a download by its SHA-256, never piped; a
+  toolchain an action installs at an exact version; an install by the
+  lockfile. A line that cannot be pinned carries `# unpinned: <reason>`, on
+  itself or right above it. `check:workflows` runs zizmor
+  (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
+  against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
+  GitHub whether each pinned commit is its repository's. Validate runs both
+  on every change, a release's bump included (`Pins`).
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
   stack with `coffre backup`, restores it with `coffre restore --keys`, and
   checks it came back, then the wrong-key cases, on ports 3400 to 3402 and 8481
@@ -348,8 +360,11 @@ unsupported diff select full validation.
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.
 
-**Dependencies.** `pnpm install` enforces exact pins, `ignore-scripts`, and a 7-day
-`minimumReleaseAge` (`pnpm-workspace.yaml`). Add deps with `pnpm run add:dep`
+**Dependencies.** `pnpm install` enforces exact pins, no install script but
+those `allowBuilds` names `true` with its reason (none: esbuild, Koffi and
+workerd are named `false`, and `strictDepBuilds` fails an install on one
+nobody named), and a 7-day `minimumReleaseAge` (`pnpm-workspace.yaml`), which
+`check:pins` refuses to shorten. Add deps with `pnpm run add:dep`
 (`--save-exact`), never a bare `pnpm add` (it writes caret ranges).
 The examples pin `@coffre/*` at the packages' version, and `linkWorkspacePackages` links
 them to the workspace; `pnpm bump` keeps them in step. `@coffre/ui`'s peers (React, react-dom,

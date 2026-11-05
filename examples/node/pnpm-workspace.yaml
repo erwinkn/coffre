@@ -1,3 +1,8 @@
+# No dependency's install script runs unless it is named under allowBuilds as
+# `true`, and one nobody named fails the install (pnpm 11's default, spelled
+# out). None needs to run.
+strictDepBuilds: true
+
 # Do not install a version published in the last 7 days: most malicious
 # releases are yanked within hours, and a service that holds every credential
 # can wait a week. Coffre's own packages are exempt, so a fix to them lands
