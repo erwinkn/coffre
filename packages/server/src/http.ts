@@ -73,8 +73,10 @@ export async function readLimitedBytes(request: Request, max: number): Promise<U
  * validated: well above the largest real one (a 1000-key bulk write of
  * generated values is about 11k), and far below what a megabyte of tiny
  * entries or array elements would reach, which cost seconds of CPU (R27).
+ * The CBOR a passkey's response carries in its strings decodes under the
+ * same count, on its own (`CeremonyExpectation.values`).
  */
-const MAX_BODY_NODES = 20000;
+export const MAX_BODY_NODES = 20000;
 
 /**
  * Parse a JSON body, then walk it once under a node cap, refusing a

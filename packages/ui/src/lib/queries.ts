@@ -1,4 +1,4 @@
-import type { AuthInfo, CoffreClient, Member } from '@coffre/client';
+import { CoffreError, type AuthInfo, type CoffreClient, type Member } from '@coffre/client';
 import { EVERYWHERE, INSTANCE_ROLES } from '@coffre/core/access';
 import { QueryClient, queryOptions, type FetchQueryOptions, type QueryKey } from '@tanstack/react-query';
 
@@ -137,14 +137,19 @@ export type SettingsSearch = { tab?: SettingsTab; roles?: 'global' };
 export const AUDIT_PAGE_SIZE = 200;
 
 export const queries = {
-  /** Who is looking; null when nobody is signed in. */
+  /**
+   * Who is looking; null when nobody is signed in; `passkey_required` for a
+   * session a person's passkey no longer stands behind, which a touch steps
+   * up (docs/design/passkeys.md, section 6.2).
+   */
   me: (client: CoffreClient) =>
     queryOptions({
       queryKey: keys.me,
-      queryFn: async (): Promise<Me | null> => {
+      queryFn: async (): Promise<Me | null | 'passkey_required'> => {
         try {
           return await client.me();
         } catch (error) {
+          if (error instanceof CoffreError && error.status === 401 && error.code === 'passkey_required') return 'passkey_required';
           if (statusOf(error) === 401) return null;
           throw error;
         }
@@ -513,9 +518,10 @@ export type ChainResult = Awaited<ReturnType<typeof verifyChain>>;
  */
 export function shellOf(
   auth: AuthInfo,
-  me: Me | null,
+  asked: Me | null | 'passkey_required',
   projects: ProjectsResult,
 ) {
+  const me = asked === 'passkey_required' ? null : asked;
   const listed = projects.ok ? projects.projects : [];
   const member: Me | null = me?.registered === true ? me : null;
   return {
@@ -527,6 +533,8 @@ export function shellOf(
     projects: listed,
     capabilities: deriveUiCapabilities(member, listed),
     registrationRequired: me !== null && !me.registered,
+    /** A session refused for its passkey: a touch steps it up (`/auth/passkey?step-up=1`). */
+    passkeyRequired: asked === 'passkey_required',
     /** A member the vault refuses: their record failed its integrity check. */
     accessTampered: me?.tampered === true,
     /** What the deployment's configuration turns on: MCP clients, as their endpoint's URL, and CI runs signing in by their ID tokens. */

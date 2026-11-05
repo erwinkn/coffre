@@ -14,6 +14,8 @@ export type Env = {
   HYPERDRIVE: { connectionString: string };
   VAULT: VaultEntry;
   COFFRE_PUBLIC_URL: string;
+  /** The passkey policy: `optional`, as deployments run it, unless `COFFRE_DEV_PASSKEYS` says otherwise (dev/start.sh). */
+  COFFRE_DEV_PASSKEYS: 'off' | 'optional' | 'required';
   /** The dev IdP on loopback, which this Worker calls. */
   COFFRE_DEV_IDP_URL: string;
   /** The dev IdP as a browser reaches it; the same unless a tunnel is in front (dev/start.sh). */
@@ -81,6 +83,7 @@ export const coffre = createCoffre((env: Env) => {
         oidc({ ...local, id: 'local', label: 'Dev IdP', issuer: idp }),
       ],
       note: 'Local development. Both buttons lead to the dev IdP.',
+      passkeys: env.COFFRE_DEV_PASSKEYS,
       // CI runs signing in as services; the dev IdP is plain HTTP on loopback.
       workloads: {
         limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },

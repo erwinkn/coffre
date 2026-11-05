@@ -104,7 +104,9 @@ function deploymentCli(dir: string): string {
 export async function boot(kind: Kind, at: string, options: HarnessOptions): Promise<Deployment> {
   const { port } = options;
   const dir = resolve(at);
-  const origin = `http://127.0.0.1:${port}`;
+  // localhost, not 127.0.0.1: browsers make passkeys for a name, never an IP address, and a deployment with passkeys on
+  // does not start at one (docs/design/passkeys.md, section 7.1). It listens on 127.0.0.1, which localhost reaches.
+  const origin = `http://localhost:${port}`;
   for (const taken of [port, port + 1, port + 2]) {
     const busy = await fetch(`http://127.0.0.1:${taken}/`).then(
       () => true,

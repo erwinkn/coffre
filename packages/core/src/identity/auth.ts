@@ -1,4 +1,4 @@
-import { defineSignin, type McpOptions, type PasskeyPolicy, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
+import { checkPasskeysOption, defineSignin, type McpOptions, type PasskeysOptions, type SigninConfig, type WorkloadsOptions } from './signin/config.ts';
 import type { SigninProvider } from './signin/types.ts';
 import type { AccessVerifierConfig } from './types.ts';
 
@@ -103,8 +103,12 @@ export type SigninOptions = {
   workloads?: WorkloadsOptions;
   /** Lets MCP clients, Claude among them, act as the people who connect them (docs/mcp.md). */
   mcp?: McpOptions;
-  /** Whether people need a passkey after the provider: `'off'`, `'optional'` (unless set) or `'required'` (docs/design/passkeys.md, section 2). */
-  passkeys?: PasskeyPolicy;
+  /**
+   * Whether people need a passkey after the provider: `'off'`, `'optional'` (unless set) or `'required'`, or
+   * `{ policy, rpId }` to name a parent of the public URL's host as the relying party (docs/design/passkeys.md,
+   * sections 2 and 7.1). Not `off`, the public URL's host must be a name: `http://localhost:3000`, not `127.0.0.1`.
+   */
+  passkeys?: PasskeysOptions;
 };
 
 /**
@@ -116,7 +120,9 @@ export function signin(options: SigninOptions): Auth {
   // Checked now, where the deployment wrote it, and again with the URL. Now on
   // a loopback stand-in: what turns on the URL, such as loopback issuers, is
   // decided with the real one.
-  defineSignin({ ...toSignin(options), publicUrl: 'http://127.0.0.1' });
+  // Passkeys are checked against the URL then; here, their option's shape alone.
+  checkPasskeysOption(options.passkeys);
+  defineSignin({ ...toSignin(options), passkeys: 'off', publicUrl: 'http://127.0.0.1' });
   return {
     resolve: (publicUrl) => ({ mode: 'signin', signin: defineSignin({ ...toSignin(options), publicUrl }) }),
   };

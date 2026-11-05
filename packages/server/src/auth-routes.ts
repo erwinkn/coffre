@@ -5,7 +5,9 @@ import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
-import type { SignedInAccount } from './api/signin.ts';
+import type { SignedInAccount, SigninResult } from './api/signin.ts';
+import { CEREMONY_TTL_SECONDS } from './api/ceremony.ts';
+import { API_BODY_BYTES } from './api/router.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
   accessTokenForRequest,
@@ -23,8 +25,10 @@ import type { CoffreRuntime } from './runtime.ts';
 import {
   callbackUrl,
   clearCookieHeader,
+  COOKIE_BYTES,
   cookieHeader,
   describeUserAgent,
+  passkeyCookieName,
   pendingCookieName,
   redirectResponse,
   safeNext,
@@ -397,28 +401,113 @@ export async function finishSignin(
     return linked.ok ? redirectResponse(`/account?linked=${config.id}`, [clearPending]) : fail(linked.reason);
   }
 
-  const result = await signin.completeSignin(profile, {
-    ...meta,
-    label: describeUserAgent(request.headers.get('user-agent')),
-  });
+  const result = await signin.afterProvider(profile, { ...meta, label: describeUserAgent(request.headers.get('user-agent')) }, pending.next);
+  // A passkey to touch, or to add, before any session exists (passkeys.md, section 3.1): what the provider vouched for
+  // waits in a sealed cookie of its own, and nothing is written until the passkey answers.
+  if (result.ok === 'passkey') {
+    const waiting = cookieHeader(auth, passkeyCookieName(auth), signin.ceremonies.seal(result.state), CEREMONY_TTL_SECONDS);
+    // ASCII throughout (the seal is base64url), so its length is its bytes; a browser would drop it unsaid.
+    if (waiting.length > COOKIE_BYTES) return fail('profile_too_long');
+    return redirectResponse('/auth/passkey', [clearPending, waiting]);
+  }
   if (!result.ok) {
     // Which providers the email already signs in with, and the one just tried, for the page to name.
     const which: Record<string, string> = result.providers === undefined ? {} : { with: result.providers.join(','), via: config.id };
     return fail(result.reason === 'not_registered' && profile.emails.length === 0 ? 'no_verified_email' : result.reason, which);
   }
-
-  // Signing in again on the same browser replaces the session rather than
-  // leaving the old one alive until it expires.
-  const sessionName = sessionCookieName(auth);
-  const previous = readCookie(request, sessionName);
-  if (previous !== null) await signin.signOut(previous, meta).catch(() => {});
-
-  const maxAge = (Date.parse(result.credential.expiresAt) - Date.now()) / 1000;
-  return redirectResponse(pending.next, [
-    clearPending,
-    cookieHeader(auth, sessionName, result.credential.token, maxAge),
-  ]);
+  return redirectResponse(pending.next, [clearPending, ...(await signedInCookies(request, runtime, result, meta))]);
 }
+
+/**
+ * A browser's new session: its cookie, set, and the session it signed in on before, if any, signed out, rather than
+ * left alive until it expires: here, after the new one, unless the sign-in's own transaction ended it (`replaced`, a
+ * touch's, passkeys.md, section 6.5).
+ */
+async function signedInCookies(
+  request: Request,
+  runtime: CoffreRuntime,
+  result: Extract<SigninResult, { ok: true }>,
+  meta: { requestId: string; sourceIp: string | null },
+): Promise<string[]> {
+  const sessionName = sessionCookieName(runtime.auth);
+  const previous = readCookie(request, sessionName);
+  if (previous !== null && result.replaced !== true) await runtime.signin!.signOut(previous, meta).catch(() => {});
+  const maxAge = (Date.parse(result.credential.expiresAt) - Date.now()) / 1000;
+  return [cookieHeader(runtime.auth, sessionName, result.credential.token, maxAge)];
+}
+
+/** What the passkey step answers a refusal with: a code the page says in words (`signinErrorMessage`). */
+const PASSKEY_REFUSED: Partial<Record<string, number>> = { passkey_failed: 401, session_ended: 401, passkey_required: 401 };
+
+/**
+ * GET /api/auth/passkey: what the passkey page asks the browser for (passkeys.md, section 3.1), `{ purpose, email,
+ * options }`, `options` in WebAuthn's JSON form: a touch for the sign-in waiting in this browser's passkey cookie, or a
+ * new passkey for it, with its sealed `state`, the user handle this GET drew. `?step-up=1`: a touch for the browser's session, which a person's passkey no longer stands behind
+ * (section 6.2), with its sealed `state` too. 404 `state_mismatch` when there is nothing to ask: the sign-in expired,
+ * or the session is no step-up's, and signing in again is the way.
+ *
+ * POST /api/auth/passkey: the browser's answer, `{ response }` (or `{ state, response }` for a new passkey or a step-up), from coffre's
+ * own page: on success the session cookie, and `{ next }`, where to go.
+ */
+export async function passkeyStep(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
+  const signin = runtime.signin;
+  if (signin === null) return errorResponse(notFound('passkeys need signin mode'));
+  const auth = runtime.auth;
+  const url = new URL(request.url);
+  const nothing = () => jsonResponse({ error: 'state_mismatch', message: 'this sign-in expired or was finished elsewhere: sign in again' }, 404);
+  // GET, or HEAD, which `coffreRoute` lets in as GET and hands on as itself (review r8 of #500): only a POST answers.
+  if (request.method !== 'POST') {
+    if (url.searchParams.get('step-up') === '1') {
+      const token = readCookie(request, sessionCookieName(auth));
+      const step = token === null ? null : await signin.stepUpStep(token, safeNext(url.searchParams.get('next'), signin.config.publicUrl));
+      return step === null ? nothing() : jsonResponse(step, 200, { 'cache-control': 'no-store' });
+    }
+    const state = signin.ceremonies.open(readCookie(request, passkeyCookieName(auth)), ['signin', 'enroll']);
+    const step = state === null ? null : await signin.passkeyStep(state);
+    return step === null ? nothing() : jsonResponse(step, 200, { 'cache-control': 'no-store' });
+  }
+
+  // Who may be answering, before a byte of the body is read: a browser holding a session, for a step-up, or one whose
+  // passkey cookie opens, which only a person the provider vouched for within five minutes holds (section 3.1).
+  const token = readCookie(request, sessionCookieName(auth));
+  const state = signin.ceremonies.open(readCookie(request, passkeyCookieName(auth)), ['signin', 'enroll']);
+  const clear = clearCookieHeader(auth, passkeyCookieName(auth));
+  const meta = { requestId: crypto.randomUUID(), sourceIp, label: describeUserAgent(request.headers.get('user-agent')) };
+  const refused = (reason: string, cookies: string[] = []) => withCookies(jsonResponse({ error: reason }, PASSKEY_REFUSED[reason] ?? 400), cookies);
+  if (state === null && token === null) return refused('state_mismatch', [clear]);
+
+  let body: { response: unknown; state?: string };
+  try {
+    // A control-plane request's body, read to the one bound the API reads every body to (R70).
+    body = passkeyAnswer.parse(await readLimitedJson(request, API_BODY_BYTES)) as typeof body;
+  } catch (error) {
+    return errorResponse(error);
+  }
+  const answered = async (result: SigninResult, next: string, cookies: string[]) => {
+    if (result.ok !== true) return refused(result.reason, cookies);
+    return withCookies(jsonResponse({ next }), [...cookies, ...(await signedInCookies(request, runtime, result, meta))]);
+  };
+
+  // A `state` is a step-up's, or, for an enrollment, the user handle its `create()` was given (`CreateState`).
+  const stepUp = body.state === undefined ? null : signin.ceremonies.open(body.state, ['step-up']);
+  if (stepUp !== null || (body.state !== undefined && state?.purpose !== 'enroll')) {
+    if (token === null || stepUp === null) return refused('session_ended');
+    return answered(await signin.stepUp(body.state!, token, body.response, meta), stepUp.next, []);
+  }
+  if (state === null) return refused('state_mismatch', [clear]);
+  const result = await signin.finishPasskey(state, body.response, meta, token, body.state ?? null);
+  // A passkey that did not answer may be tried again, another one too, while the sign-in lasts; anything else starts over.
+  return answered(result, state.next, result.ok !== true && result.reason === 'passkey_failed' ? [] : [clear]);
+}
+
+/** A response with these cookies set: `jsonResponse` takes its headers as a record, which holds one `set-cookie`. */
+function withCookies(response: Response, cookies: readonly string[]): Response {
+  for (const cookie of cookies) response.headers.append('set-cookie', cookie);
+  return response;
+}
+
+/** A step-up's or a new passkey's state is the server's own seal, which `open` checks; the body's size bounds its length. */
+const passkeyAnswer = z.object({ response: z.record(z.string(), z.unknown()), state: z.string().optional() }).strict();
 
 /**
  * What the provider vouched for, under the id coffre knows it by: a provider

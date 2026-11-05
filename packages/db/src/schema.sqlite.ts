@@ -594,6 +594,9 @@ export const passkeys = sqliteTable(
       foreignColumns: [vaultMembers.principal],
     }).onDelete('restrict'),
     index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+    // Every passkey a person has had, removed ones included: the callback's count of them, and what the first passkey and
+    // a sign-in the provider alone answers read under the head, each row held to its MAC (`passkeyHistory`).
+    index('passkeys_principal_idx').on(table.principal),
   ],
 );
 

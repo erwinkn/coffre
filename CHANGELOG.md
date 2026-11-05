@@ -76,17 +76,29 @@
   both logs. The vault decides each read on its own, so the hint never
   let a value through.
 
-- **Passkeys, the server's side (T176, PR 4a; in progress).**
-  `signin({ passkeys })` takes the policy, `'off'`, `'optional'` (the
-  default) or `'required'`, and every request on a person's session, CLI
-  session, personal token or MCP connection is held to it: under
-  `optional`, once a person holds a live passkey, a credential that names
-  none answers `401 passkey_required`; under `required`, every one that
-  names none does. What a credential issues names its passkey, so removing
-  that passkey ends it too. Until the sign-in ceremony lands (PR 4b),
-  nothing confirms a session with a passkey: leave the policy at
-  `optional`, where a person with no passkey signs in as before, since
-  `required` lets no one sign in.
+- **Passkeys at sign-in (T176, PR 4; in progress).** `signin({ passkeys
+  })` takes the policy, `'off'`, `'optional'` (the default) or
+  `'required'`, or `{ policy, rpId }` to make a parent of the public URL's
+  host the relying party. Not `off`, the public URL's host must be a name:
+  a deployment at `http://127.0.0.1` does not start, as browsers make no
+  passkey there (`http://localhost` is fine). After the provider, a person
+  who holds a passkey touches it ("Confirm it's you", `/auth/passkey`);
+  under `required` everyone else, and under `optional` an Owner of the
+  whole instance or one the deployment names, adds one before any
+  session exists, which ends every session, terminal, token and app of
+  theirs no passkey stood behind. Until the passkey answers, coffre
+  writes nothing. Every request on a person's session, CLI session,
+  personal token or MCP connection is held to the policy: once they hold
+  a passkey, one that names none answers `401 passkey_required`, and a
+  browser steps it up with a touch. What a credential issues names its
+  passkey, so removing that passkey ends it too. Each `create()` gets a
+  user handle of its own, so a second tab or a reload never replaces a
+  passkey coffre stored; an interrupted attempt may leave an unused
+  passkey on the device, which coffre never offers, and locks nobody
+  out. To come: fresh checks
+  for risky acts, Account → Passkeys and the Owner's reset
+  ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
+  serves at `http://localhost:3000` now.
 
 - **A Terraform provider that writes and never reads (T108).**
   `terraform-provider/` is a Go provider for Terraform and OpenTofu 1.11

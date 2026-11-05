@@ -75,6 +75,8 @@ export const ROUTE_FILES: Record<string, string> = {
   // An environment's Proxy tab, beside its Secrets: the credential proxy's definitions written in the UI.
   // and the credential proxy's own route, `/use`, which `coffre init` writes from 0.16 (`credentialProxy({ editable: true })`).
   ...since('0.16.0', ['_coffre/projects.$project_.$environment_.proxy.tsx', 'use.$.ts']),
+  // The passkey a sign-in waits for, or a step-up's (docs/design/passkeys.md, section 3.1).
+  ...since('0.16.0', ['_solo/auth.passkey.tsx']),
 };
 
 /** Route files, under `app/src/routes/`, that `release` first wrote. */

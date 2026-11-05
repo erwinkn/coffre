@@ -15,6 +15,7 @@ import type { PostgresClient } from '@coffre/db/connect';
 import { localVault, spoken, type SpokenVault } from '@coffre/vault/node';
 import { sql } from 'drizzle-orm';
 
+import type { SignedInAccount } from '../src/api/signin.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
@@ -29,6 +30,7 @@ const POSTGRES = postgresOnly("counts the app's and the vault's Postgres stateme
 const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const SERVICE = 'ci-web';
+const DEVELOPER = 'dev@acme.example';
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const KEYS = `${ISSUER}/.well-known/jwks`;
 const CLAIMS = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/market/.github/workflows/build.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
@@ -282,4 +284,30 @@ test("an issue's write reads as many rows and pages however long the logs and th
   const grown = await measure();
   assert.equal(grown.rows, before.rows);
   assert.ok(grown.pages <= 2 * before.pages + 16, `issue_token read ${grown.pages} pages once the instance grew, ${before.pages} before`);
+});
+
+/** A person's sign-in through the provider, as `run` makes it: its statements by pool and its vault calls, one run before. */
+async function browserStatements(run: (profile: SignedInAccount) => Promise<unknown>): Promise<{ app: Statement[]; vault: Statement[]; vaultCalls: number }> {
+  const profile: SignedInAccount = { provider: 'github', subject: 'dev-4401', emails: [DEVELOPER], name: 'Dev' };
+  await run(profile);
+  for (const pool of [app, vaultPool]) pool.recording = [];
+  vaultCalls = 0;
+  const result = await run(profile);
+  assert.equal((result as { ok: unknown }).ok, true, JSON.stringify(result));
+  const ran = { app: app.recording!, vault: vaultPool.recording!, vaultCalls };
+  for (const pool of [app, vaultPool]) pool.recording = null;
+  return ran;
+}
+
+test("a person's sign-in at the callback, with passkeys optional and none of theirs, asks the vault once and reads one statement more than today's, beside the identity: the members it may be with their passkeys (passkeys.md, section 10; review r1 of #500)", POSTGRES, async () => {
+  await clientFor(deps, ROOT).members.add(`user:${DEVELOPER}`, { role: 'developer' });
+  const meta = { requestId: randomUUID(), sourceIp: null, label: 'Firefox on macOS' };
+  const today = await browserStatements((profile) => runtime.signin!.completeSignin(profile, meta));
+  const callback = await browserStatements((profile) => runtime.signin!.afterProvider(profile, meta, '/projects'));
+  // The same vault calls: the callback's answer is the sign-in's, not asked again.
+  assert.equal(callback.vaultCalls, today.vaultCalls);
+  assert.deepEqual(shown(callback.vault), shown(today.vault));
+  // Today's statements, and the members' read beside the identity's, which the callback starts together: one round trip.
+  assert.equal(callback.app.length, today.app.length + 1);
+  assert.deepEqual(shown(callback.app).filter((text) => !text.startsWith('select "principal", "status"')), shown(today.app));
 });

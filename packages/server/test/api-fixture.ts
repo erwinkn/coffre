@@ -331,7 +331,8 @@ export function entryOf(vault: Vault): VaultEntry {
 
 export function testVault(
   owners: readonly string[],
-  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey'>> & { hotDatabase?: string } = {},
+  /** `owners`: the emails the configuration names, the first of `owners` unless given; one named here alone is never admitted until it signs in. */
+  config: Partial<Pick<VaultConfig, 'bulkLimit' | 'kek' | 'signingKey' | 'owners'>> & { hotDatabase?: string } = {},
   keys: { kek: Buffer } = { kek: randomBytes(32) },
   walks: VaultOptions['walks'] = {},
   /** `cutover: 'app'`: a 0.15 vault left for the app's door to cut over (cutover.test.ts), not cut over as it opens. */

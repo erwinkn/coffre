@@ -38,7 +38,7 @@ import { ApiError, vaultRefused } from './errors.ts';
 /** The actor of the app's own changes, made for no one's request: a key rotation's revokes, an unknown token signed out. */
 export const COFFRE_ACTOR = 'coffre';
 
-type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean; admits: boolean };
+type Kept = { log: boolean; uses: boolean; batches: boolean; namedBatches: boolean; sealing: boolean; credentials: boolean; issues: boolean; binds: boolean; writes: boolean; admits: boolean; owners: readonly string[] };
 
 /**
  * What the vault keeps of 0.15, as it says (`about()`): asked once per vault (asked-once.ts), then kept, settled. An
@@ -67,6 +67,8 @@ async function asked015(vault: Vault): Promise<Kept> {
     binds: log && about.binds === true && vault.changeBindings !== undefined,
     writes: log && about.writes === true && vault.writeKeys !== undefined,
     admits: log && about.admits === true && vault.admitRead !== undefined && vault.admitWrite !== undefined,
+    // The deployment's configuration, which a vault re-applies at its start and an isolate never sees change (R3).
+    owners: about.owners ?? [],
   };
   return kept;
 }
@@ -77,6 +79,11 @@ export async function keeps015(vault: Vault): Promise<boolean> {
 }
 
 /** Whether the vault says whether its checkpointer seals (`sealing`; T169): what `/readyz` asks under 0.15's log. */
+/** The Owners the deployment names (`owners`, R3), as the vault said once for the isolate. */
+export async function deploymentOwners(vault: Vault): Promise<readonly string[]> {
+  return (await about015(vault)).owners;
+}
+
 export async function vaultSaysSealing(vault: Vault): Promise<boolean> {
   return (await about015(vault)).sealing;
 }

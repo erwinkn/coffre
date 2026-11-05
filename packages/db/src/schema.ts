@@ -618,7 +618,7 @@ export const passkeys = pgTable(
     // Whose: the member and the generation it was added in, as identities are bound.
     principal: text().notNull(),
     generation: integer().notNull(),
-    // The WebAuthn user handle: 16 random bytes, the same on every passkey of the person's (section 3.2).
+    // The WebAuthn user handle: 16 random bytes, drawn for the create() that made this passkey (section 3.2).
     userHandle: bytea('user_handle').notNull(),
     // The authenticator's credential ID, raw (WebAuthn caps it at 1023 bytes), unique across the instance.
     credentialId: bytea('credential_id').notNull(),
@@ -661,6 +661,9 @@ export const passkeys = pgTable(
     }).onDelete('restrict'),
     // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
     index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+    // Every passkey a person has had, removed ones included: the callback's count of them, and what the first passkey and
+    // a sign-in the provider alone answers read under the head, each row held to its MAC (`passkeyHistory`).
+    index('passkeys_principal_idx').on(table.principal),
   ],
 );
 

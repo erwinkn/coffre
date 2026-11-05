@@ -69,7 +69,8 @@ test('auth constructors refuse what cannot be right', () => {
   // Loopback is the one place plain HTTP is fine.
   const local = resolveConfig({
     ...base,
-    publicUrl: 'http://127.0.0.1:3080',
+    // localhost: an IP address is no relying party for passkeys, which are on by default (docs/design/passkeys.md, section 7.1).
+    publicUrl: 'http://localhost:3080',
     auth: signin({ providers: [github({ clientId: 'id', clientSecret: 'secret' })] }),
   });
   assert.equal(local.auth.mode, 'signin');

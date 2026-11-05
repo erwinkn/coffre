@@ -6,6 +6,8 @@
 // and audit code path the CLI and UI use. It signs in first, as the Owner the
 // vault bootstraps, the way a browser does, through the dev IdP's stand-in GitHub.
 
+import { rmSync } from 'node:fs';
+
 import { browser } from './browser.mjs';
 import {
     loadLocalSeedConfig,
@@ -24,7 +26,10 @@ const pool = postgresClient(local.databaseUrl, { max: 1 });
 // Behind a tunnel (dev/start.sh), the stack's own URLs are its public ones.
 const tunnel = { api: process.env.COFFRE_DEV_PUBLIC_URL, idp: process.env.COFFRE_DEV_IDP_PUBLIC_URL };
 
-const { signIn, send, call } = browser(API, IDP, tunnel);
+// The passkeys its personas add, kept for dev/passkey.mjs: the data starts over, and they with it.
+const passkeys = process.env.COFFRE_DEV_PASSKEY_FILE;
+if (passkeys !== undefined) rmSync(passkeys, { force: true });
+const { signIn, send, call } = browser(API, IDP, tunnel, { passkeys });
 
 const put = (session, path, body) => call(session, 'PUT', path, body);
 const patch = (session, path, body) => call(session, 'PATCH', path, body);

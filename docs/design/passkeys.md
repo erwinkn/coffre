@@ -196,7 +196,6 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
      next: string;                  // where to land, a path of at most 512 characters, or '/projects'
      challenge: string;             // 32 random bytes, base64url
      issuedAt: number;              // ms; also the replay guard (section 7.3)
-     userHandle: string | null;     // enroll: the user.id handed to create(), base64url, which the POST stores
      passkeysEver: number | null;   // enroll: how many passkey rows the person had, removed ones included (section 3.2)
    };
    ```
@@ -244,13 +243,128 @@ yet, on an empty instance too. Under passkeys the callback only reads: it
 matches the email against the members' rows and the deployment's `owners`
 (`vault.about().owners`; the settling `about()` can do on a cold vault is
 the door's, which ran before the callback, below). An Owner named in config with no
-member row yet gets an `enroll` cookie with `generation: null`; the `POST`
-admits them through `vault.access`, as today, once the attestation has
-verified, then enrolls at the generation that answered. Conformance runs
+member row yet gets an `enroll` cookie with `generation: 0`, a first
+admission's; the `POST` admits them through `vault.access`, as today, once
+the attestation has verified, and enrolls only if the vault answered that
+generation. A cookie names a membership, never "whichever comes": one
+whose person the vault admitted, removed and admitted again within its
+five minutes is at generation 1 by then (a removal moves the generation, a
+readmission keeps it), and refuses, `state_mismatch` (review r3 of #500). Conformance runs
 `required` on an empty database and on a cold vault (section 13).
 
 The page also says what to do without the passkey: "Lost your passkeys? An
 Owner can reset them" (section 3.7). There is no fallback that skips it.
+
+**As built (PR 4b).** The page is `/auth/passkey`, a page of the
+deployment's Start app (`@coffre/ui/pages/passkey`), so what it asks and
+its answer are `GET` and `POST /api/auth/passkey` (`passkeyStep` in
+`packages/server/src/auth-routes.ts`): the page reads the question in the
+browser, which alone can answer it, and its button asks the browser at
+once, as a touch must follow the click. The answer sets the session
+cookie and says where to go (`{ next }`); a passkey that did not answer
+leaves the sign-in to try again, with another passkey too, and any other
+refusal clears the cookie. An answer that is no refusal (no response, a
+5xx such as `503 unavailable` or `migrating`, a 408 or 429, a body that
+does not parse, or a `409 changed`, another change having come between
+each of the transaction's tries, review r6; a 401 or 409 whose body did not
+arrive whole, as those are the statuses whose refusals may keep the step,
+review r7) clears nothing, so the page says coffre did not answer and
+asks again rather than send the person back to their provider
+(`passkeyAnswer`, `packages/ui/src/lib/passkey-answer.ts`). Asking again
+sends the same answer, never a second `create()` or `get()` from the same
+page (`sendPasskey`, review r7): the page's options name one user handle,
+and a second `create()` with it can replace, on a discoverable
+authenticator, the passkey the first POST added though its answer was
+lost (Chrome's virtual authenticator does), which the server would refuse
+as `passkey_exists`, leaving the person a key coffre does not hold. Sent
+again, the first passkey completes the step, or, its enrollment having
+committed, ends it with `passkey_exists`, and they sign in again with the
+key their device holds. Every GET of an enrollment's options draws a user
+handle of its own (D173; section 3.2): sealed in the GET's `state`
+(`CreateState`), which the POST sends back and whose handle the row
+stores. Two tabs of one sign-in, or the page reloaded, never hand
+`create()` the same handle, so neither replaces the passkey the other
+added. A page asks the authenticator to `create()` once per options:
+after `passkey_failed`, which keeps the step, it asks coffre for new
+options before the next press (`sendPasskey`'s `once`, review r13). The
+refusal says nothing of the answers sent before it: tab A's POST commits
+and its answer is lost, tab B's sign-in replaces the pending cookie, and
+A's answer, sent again, fails B's challenge; a second `create()` from A's
+options would name the handle coffre now holds. What an interrupted attempt can leave is a passkey on the device
+that coffre never stored: a second tab's `create()` after the first's
+enrollment committed (`passkey_exists`), or one made after the step ended
+(`state_mismatch`). Coffre never offers it: a touch names only the
+passkeys coffre holds (`allowCredentials`), so the browser does not show
+it, and nobody is locked out; the person may delete it from their device.
+Reviews r8 to r12 kept one handle per enrollment and shared its step
+across tabs in `localStorage` instead, and each round found another path
+to a second `create()` with it. The step ends five minutes after its
+challenge (`issuedAt`, from which the sealed state's expiry is dated), and
+its options' `timeout` is what is left of those when the GET is answered
+(`remainingMs`, review r9). That `timeout` starts when the authenticator is
+called, not at the GET, so the page keeps the step's deadline itself,
+dated from when it sent the GET, by the wall clock and by the time elapsed
+since the page opened (`performance.now`), past once either says so: a
+press after it asks the authenticator nothing and asks coffre for the step
+again (new options while the sign-in waits, "Sign in again" once it does
+not), and a press before it calls the authenticator with what is left
+(`sendPasskey`'s `ends`, review r14). Without it, a page left open past
+five minutes made a passkey the server then refused. An answer already
+made is still sent again past the deadline: its first POST may have
+committed, and the server says which. A touch keeps its answer in the page too: a
+second `get()` replaces nothing. A HEAD of the route answers as its GET,
+never as its POST (review r8).
+The cookie's value names its purpose, whose key
+opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
+callback's reads (`SigninService.afterProvider`) are step 2's, in one round
+trip: the identity (`findIdentity`) and, beside it, one statement of the
+members its account may be (`signinMembers`: the one its identity names and
+one per verified email, each with its status, generation, passkeys ever and
+live, and the vault's newest entry about its access, `access_seq`). The
+Owners the deployment names come with the vault's capabilities, asked once
+per isolate (`deploymentOwners`), never about a person, which would admit
+them. The vault's answer about the person is asked only where those rows
+leave the step undecided, a person with no passkey under `optional`, whose
+role decides: and that answer is the sign-in's own, which the callback
+completes with, reading and asking nothing again. Its transaction holds the
+answer to the access it was read at, as `issuerStill` holds an issue: read
+again under the head, an `access_seq` that moved (Ada promoted to Owner
+between the answer and the commit) decides the step again, from the reads,
+and Ada adds a passkey first; no count bounds that loop, each turn of which
+waits on another change of hers (R70). Against today's sign-in for the same
+Developer, `signin-cost.test.ts` holds the callback to its vault calls and its
+statements plus the one members' read. The post's checks are in
+`finishPasskey`, then `completeSignin`'s transaction with the touch
+(`touchPasskey`) or the first passkey (below) in it; a first passkey whose
+credential ID a passkey already has, anyone's, is refused as a passkey that
+did not answer (`passkey_failed`), the unique index the one place that
+decides it. `passkey-signin.test.ts` holds the flows, on both engines,
+through the deployment's routes, with the software authenticator, an
+Owner the configuration names whose row the vault's start has not written
+yet included. The sealed cookie carries the provider's name whole; a
+profile that makes it longer than the 4,096 bytes a browser must keep (RFC
+6265, section 6.1), which it would drop unsaid, ends the sign-in with
+`profile_too_long` instead. Every bound on the answer has a source (R70):
+the credential ID's and the user handle's are the spec's, the signature's
+the longest key coffre takes (RSA of 4,096 bits); the fields the spec
+leaves open, the client data, the authenticator data and the attestation
+object, have none of their own, and the request they come in is read to
+the bound the API reads every control-plane body to (`API_BODY_BYTES`),
+once the cookie it must carry has opened. Their CBOR is read with a list of
+what is open, not the call stack, so however deep it nests it costs no
+stack (RFC 8949, section 10), and needs no depth limit. What it decodes to
+is counted, though: every item and map key of the attestation object, the
+authenticator data's CBOR and the COSE key, and every value of the decoded
+client data's JSON, whose unknown members are ignored (5.8.1), together, is
+held to the count
+the API holds a body's JSON values to (`MAX_BODY_NODES`, 20,000, R27's CPU
+budget), counted again on what the body's strings decode to, so a response
+costs at most twice what a body's JSON may (Fable review). Without it, a megabyte of maps
+nested one byte apiece, in an attestation statement the verifier ignores,
+built about 150 MiB of them before anything refused it, past the 128 MB a
+Worker's isolate has (review r2 of #500). Client data counted only by its
+bytes let 54 KB of an ignored array of 20,001 elements past the count
+(review r12).
 
 ### 3.2 The first sign-in under `required`
 
@@ -296,19 +410,47 @@ unless the count is still that. Rows are never deleted, so every enrollment
 moves the count for good, and no reset moves it back. The add's sealed
 state from Account carries the same count.
 
-`user.id` is 16 random bytes, made at a person's first passkey and kept on
-each of their passkey rows (`passkeys.user_handle`), copied from the
-others when they add one. The registration response does not echo it, so
-the sealed state that goes with `create()` carries it (`userHandle` of the
-`enroll` cookie, or of the add's sealed state), and the `POST` stores that
-exact value. WebAuthn asks that it reveal nothing about the
+`user.id` is 16 random bytes, drawn for each GET of an enrollment's
+options and stored on the passkey row its `create()` makes
+(`passkeys.user_handle`). The registration response does not echo it, so
+the GET seals it in the step's `state` (`CreateState`, bound to the
+enrollment's challenge, `packages/server/src/api/ceremony.ts`), the `POST`
+sends it back, and the row stores that exact value; the add from Account
+(PR 5) does the same. WebAuthn asks that it reveal nothing about the
 person, and a hash of the email, even keyed, can be tested against
 guesses by anyone who learns the key; random bytes cannot, and survive an
-`APP_KEY` rotation. It stays the same across a person's passkeys, so a
-keychain that already holds one for Bob replaces it instead of keeping two,
-and the `userHandle` an assertion returns is checked against the row of the
+`APP_KEY` rotation. Each `create()` gets one of its own (D173): an
+authenticator keeps one discoverable credential per RP ID and user
+handle, and replaces it on a second `create()` with the same one, so a
+handle shared by two tabs of one enrollment, a reload, or a page whose
+answer was lost could replace the passkey coffre had stored with one it
+refuses, and lock its person out (reviews r7 to r12 of #500). A person's
+passkeys therefore have handles of their own, and a keychain that holds
+two of them shows two entries; an interrupted attempt may leave a third
+that coffre never stored and never offers (section 3.1, as built). The
+`userHandle` an assertion returns is checked against the row of the
 passkey it names (7.2). A configured Owner not yet admitted gets one at
 registration, as anyone does; nothing about it depends on the generation.
+
+**As built (PR 4b).** The enrollment's transaction takes the person's
+factor lock first (`audited`'s `factor`, `lockFactor`), then the head; it
+reads every passkey row of theirs, removed ones included, by
+`passkeys_principal_idx`, holds each to its MAC, and checks their number
+and that none is live, in one statement (`passkeyHistory`), adds the
+passkey, ends
+what no passkey stands behind (section 6.1: credentials and MCP
+connections of this membership naming none, through their prepared
+changes, and approved device codes not yet redeemed that name none,
+denied), and issues the session, with `account.link`, `passkey.add` and
+`sign_in` entries. A configured Owner the vault has not admitted is
+admitted at the post, by `completeSignin`'s question to the vault, once
+the attestation has verified. The passkey's name is "Passkey <n>" until
+Account → Passkeys (PR 6) names them by their AAGUID. It reads the rows,
+not a count, for their MACs: a removal written in the database alone
+(`removed_at` set, the MAC as the app signed the live row) refuses the
+sign-in, `tampered`, where a count read it as no passkey and let another
+be the first (R64; review r2 of #500). A sign-in the provider alone
+answers under `optional` reads the same, for the same reason.
 
 ### 3.3 `optional`: the prompt
 
@@ -668,7 +810,7 @@ export const passkeys = pgTable('passkeys', {
   // Whose: the member and the generation it was added in, as identities are bound.
   principal: text().notNull(),
   generation: integer().notNull(),
-  // The WebAuthn user handle: 16 random bytes, the same on every passkey of the person's (section 3.2).
+  // The WebAuthn user handle: 16 random bytes, drawn for the create() that made this passkey (section 3.2).
   userHandle: bytea('user_handle').notNull(),
   // The authenticator's credential ID, raw (WebAuthn caps it at 1023 bytes), unique across the instance.
   credentialId: bytea('credential_id').notNull(),
@@ -700,6 +842,8 @@ export const passkeys = pgTable('passkeys', {
   foreignKey({ name: 'passkeys_principal_fkey', columns: [table.principal], foreignColumns: [vaultMembers.principal] }).onDelete('restrict'),
   // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
   index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
+  // Every passkey a person has had (PR 4b, migration 0072): the callback's count, and the first passkey's checked read.
+  index('passkeys_principal_idx').on(table.principal),
 ]);
 ```
 
@@ -860,6 +1004,11 @@ entries for what it ends are prepared before the transaction
 call, and the transaction re-reads under the lock what to end, and retries
 if that is not what it prepared. Within it the factor lock comes first,
 then the log's head (`audited` takes it before any row), then the rows.
+Asked together, under one Sync, a factor lock that fails (a
+`lock_timeout`, a cancel) fails the head's statement behind it (25P02);
+`audited` hears both at once and answers the factor lock's error, so the
+head's rejection is never left unhandled, which on Node would end the
+process (review r13).
 
 **The app's own issues take the head, not the factor lock** (PR 4a). Every
 app transaction takes the log's head first, a sign-in's, a poll's, an MCP
@@ -925,7 +1074,25 @@ is the table above, for browser and CLI sessions and personal tokens
 are not checked. The statement that reads the credential
 (`credentialRow`, every variant: a request's, `GET /api/me`'s with the
 vault's rows, a page's) joins the passkey it names by its primary key and
-asks `EXISTS` of `passkeys_live_idx`. The passkey's MAC is checked by
+asks of `passkeys_live_idx`, then of `passkeys_principal_idx`, whether its
+person holds a live passkey at the credential's generation, rows but none
+live at it (removed, or of another generation), or none ever. Rows but none
+live, for a credential that names none, reads them all, one statement
+more, and holds each to its MAC: a removal or a generation written in the
+database alone would otherwise pass a session made while the passkey was
+live, under `off` or by the previous release, and fails as a tampered row
+does (R64; reviews r3 and r5 of #500, PR 4b). What no MAC answers is a
+row that is gone from the person: deleted, or moved to another principal
+(review r6 of #500). Both are writes `coffre_app` cannot make (no `DELETE`,
+no `UPDATE` of `principal` or `generation`, `schema-guarantees.sql`, check
+22), only a login above it, and a person with no row reads as one who never
+had a passkey, whatever the other rows' MACs say. R64 leaves that writer's
+state undesigned for; telling "never had one" apart from "had one" would
+take a mark of the person's own, signed and outside the rows that writer
+can delete, a later change if one is wanted. A removal, which `coffre_app`
+can write (`removed_at`), is what the MACs above cover. A person readmitted after
+holding passkeys, and holding none since, pays that statement on each
+request of a session no passkey stands behind. The passkey's MAC is checked by
 `passkeyStands`, on the one branch whose answer reads the row, so a row
 changed around the app refuses the credential it backs as any tampered row
 does (`401 unauthenticated`), and refuses nothing the check exempts: a
@@ -1081,6 +1248,33 @@ never puts off signing in to GitHub again.
 `GET /api/me` answers `passkeys: { policy, enrolled, confirmedUntil }`, which
 the pages read to decide when to open the dialog before sending.
 
+**As built (PR 4b): the step-up.** A page whose `GET /api/me` answers `401
+passkey_required` goes to `/auth/passkey?step-up=1&next=…` (the shell's
+loader). `GET /api/auth/passkey?step-up=1` reads the browser's session
+whatever its passkey (live, of a member at its generation), and answers a
+touch of its person's live passkeys with a sealed state bound to it; none
+live, it answers 404 and the page sends the person to sign in again,
+which, under `required`, adds one. `POST /api/auth/passkey { state,
+response }` checks the touch (`SigninService.stepUp`), then in one
+transaction ends the session it came in on, conditionally, moves the
+replay mark and issues the new session, confirmed, with the old one's
+account and end; `passkey.check` entries, allowed or denied. A touch whose
+challenge cannot move the replay mark, since a newer one signed in with
+the same passkey meanwhile, ends the step-up (`state_mismatch`), its
+transaction rolled back so the old session stands: a step-up, like a
+sign-in, never offers another touch on a challenge no touch can answer
+(review r12 of #500); the page's next step-up asks a fresh one. PR 5's fresh
+check is the same transaction from another door.
+
+A touch at sign-in does the same with the session cookie the browser
+answered with, when it is the person's: the transaction that moves the
+replay mark and issues the new session ends it too, and a cookie already
+ended is no refusal there, since a sign-in needs no session. The route's
+sign-out after a sign-in, which swallows its failures, is left for
+another person's cookie: before, a vault or database failure, or a crash,
+between the new session and that sign-out left a copy of the old cookie
+alive (review r3 of #500).
+
 **Why a new session per touch, not a column updated in place.** Updating
 the session's `confirmed_at` would refresh every copy of its token: a
 cookie stolen at 09:00 would wait for Ada's touch at 10:02 and promote
@@ -1100,7 +1294,15 @@ credential", which the check above needs.
 - `rpId` is `publicUrl`'s host, `secrets.acme.example`, unless the config
   names a parent of it, `acme.example`. Checked at startup: the host itself
   or a suffix on a label boundary with at least two labels. Browsers apply
-  the public suffix list themselves. A `publicUrl` whose host is no valid
+  the public suffix list themselves: `co.uk` for `coffre.acme.co.uk`, or
+  `workers.dev` for `coffre.workers.dev`, passes startup and the browser
+  refuses it (`SecurityError`). coffre does not ship the list (weekly
+  releases, 130 KB minified in every isolate, and a copy older or newer
+  than the browser's refuses what the browser takes, or the reverse); the
+  first passkey asked for, the Owner's as the deployment is set up, fails,
+  and the page says `passkeys.rpId` must be the host or a registrable parent.
+  Nothing is stored under the refused RP ID, so fixing the config loses
+  nothing. A `publicUrl` whose host is no valid
   RP ID (an IP address, `127.0.0.1`) with a policy other than `off` fails
   at startup: no browser would make a passkey there, and every risky act
   would be out of reach.
@@ -1131,6 +1333,24 @@ credential", which the check above needs.
   it signs in adds a passkey at its first risky act, and touches it at
   each check. The dev stack keeps the policy people will run, and the seed
   exercises the passkey path every time it runs.
+- **As built (PR 4b).** The dev stack serves at `http://localhost:3000`
+  (`dev/start.sh`, its `wrangler.jsonc`), and `COFFRE_DEV_PASSKEYS` sets
+  its policy, `optional` unless said. Under it the Owner,
+  `admin@acme.example`, adds a passkey at the seed's sign-in (section 2's
+  rule for Owners, which this section predates), so a person or an agent
+  signing in as the Owner by hand needs that passkey: the seed's browser
+  keeps the keys it adds in a file of the stack's state, and `node
+  dev/passkey.mjs <DevTools WebSocket URL>` hands the Owner's to a Chrome
+  as a virtual authenticator while it runs (`agent-browser cdp-url` gives
+  one); `COFFRE_DEV_PASSKEYS=off` is the dev IdP alone. A key in the file
+  keeps its counter, which each signature moves: Chrome's virtual
+  authenticator counts up from the one it is given and the helper writes
+  Chrome's back after each touch (`WebAuthn.credentialAsserted`), so the
+  seed's browser, the next run of the helper and Chrome go on from one
+  count, never back to an older one, which section 7.3 refuses (a synced
+  key's counter, always 0, did, once Chrome had signed with it). The
+  restore drill and conformance run at `localhost` too, each with its own
+  software authenticator.
 
 ### 7.2 What each response must hold
 
@@ -1167,6 +1387,12 @@ For an assertion:
    with the stored key and algorithm. ES256 signatures arrive DER-encoded
    and are turned into the raw form WebCrypto takes.
 8. The counter and the replay mark move, in one statement (7.3).
+   Under the head, a mark that does not move means this challenge is spent
+   for that passkey (a sign-in that committed though its answer was lost,
+   or a newer one's), or its counter stood still: no touch of it can
+   answer the challenge again, so the sign-in ends (`state_mismatch`, its
+   cookie cleared) and the page sends the person to sign in again, rather
+   than ask for touches that cannot pass (review r5 of #500).
 
 For a registration, steps 1, 2 and 5 (with `webauthn.create`), then:
 `authenticatorData` with AT set, UP and UV set, BS only with BE; the
@@ -1517,7 +1743,9 @@ running `passkeys: 'required'`:
    6.1, the per-request check, the check before named reveals, the step-up,
    the seed's authenticator, and AGENTS.md's sign-in URL
    moved to `localhost`. Waits for #436 and T171, which touch the
-   callback.
+   callback. Built in two: 4a (#497), the server's side, every check and
+   the model's app side; 4b, the ceremonies, the startup check and the
+   dev stack.
 5. **Fresh checks**: `FRESH_ROUTES` and its `handler` answer, the
    challenges and checks routes, the dialog, the device, MCP approval and
    consent ceremonies, the CLI's step-up through the device flow, the link

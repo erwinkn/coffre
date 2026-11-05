@@ -145,6 +145,19 @@ async function coseKey(algorithm: SoftAlgorithm, publicKey: CryptoKey): Promise<
   return encodeCbor(new Map<CborValue, CborValue>([[1, 3], [3, -257], [-1, b(jwk.n)], [-2, b(jwk.e)]]));
 }
 
+/** A `SoftAuthenticator` as JSON (`save`): every byte base64url, its private key PKCS#8, its public key SPKI. */
+export type SavedAuthenticator = {
+  algorithm: SoftAlgorithm;
+  credentialId: string;
+  aaguid: string;
+  synced: boolean;
+  userHandle: string | null;
+  privateKey: string;
+  publicKey: string;
+  /** The counter it last signed with, which the next signature moves past: a copy elsewhere (a browser's) carries it on. */
+  signCount?: number;
+};
+
 export class SoftAuthenticator {
   /** How many times it has signed: the counter it writes, unless it syncs (then always 0, as synced passkeys do). */
   #count = 0;
@@ -168,6 +181,40 @@ export class SoftAuthenticator {
 
   static async create(algorithm: SoftAlgorithm = 'ES256', options: { synced?: boolean; aaguid?: Uint8Array; credentialId?: Uint8Array } = {}): Promise<SoftAuthenticator> {
     return new SoftAuthenticator(algorithm, await generate(algorithm), options);
+  }
+
+  /**
+   * The authenticator as JSON, its private key included, for a dev tool that signs in again in another process (the
+   * seed's personas, the restore drill), or hands the key to a browser's virtual authenticator (`dev/passkey.mjs`). Its
+   * private key is PKCS#8, as Chrome's `WebAuthn.addCredential` takes it. Throwaway keys only.
+   */
+  async save(): Promise<SavedAuthenticator> {
+    return {
+      algorithm: this.algorithm,
+      credentialId: toBase64url(this.credentialId),
+      aaguid: toBase64url(this.aaguid),
+      synced: this.synced,
+      userHandle: this.userHandle === null ? null : toBase64url(this.userHandle),
+      privateKey: toBase64url(new Uint8Array(await crypto.subtle.exportKey('pkcs8', this.keys.privateKey))),
+      publicKey: toBase64url(new Uint8Array(await crypto.subtle.exportKey('spki', this.keys.publicKey))),
+      signCount: this.#count,
+    };
+  }
+
+  /** One `save` wrote, again. */
+  static async restore(saved: SavedAuthenticator): Promise<SoftAuthenticator> {
+    const params = saved.algorithm === 'Ed25519' ? { name: 'Ed25519' }
+      : saved.algorithm === 'ES256' ? { name: 'ECDSA', namedCurve: 'P-256' }
+        : { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+    const bytes = (text: string) => new Uint8Array(Buffer.from(text, 'base64url'));
+    const keys = {
+      privateKey: await crypto.subtle.importKey('pkcs8', bytes(saved.privateKey), params, true, ['sign']),
+      publicKey: await crypto.subtle.importKey('spki', bytes(saved.publicKey), params, true, ['verify']),
+    } as CryptoKeyPair;
+    const restored = new SoftAuthenticator(saved.algorithm, keys, { synced: saved.synced, aaguid: bytes(saved.aaguid), credentialId: bytes(saved.credentialId) });
+    restored.userHandle = saved.userHandle === null ? null : bytes(saved.userHandle);
+    restored.#count = saved.signCount ?? 0;
+    return restored;
   }
 
   /** The COSE key this authenticator registers: what a relying party stores. */

@@ -484,6 +484,13 @@
       "when": 1793796944777,
       "tag": "0071_route_named",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1793810000000,
+      "tag": "0072_passkeys_principal",
+      "breakpoints": true
     }
   ]
 }

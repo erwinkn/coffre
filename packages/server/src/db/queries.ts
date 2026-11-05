@@ -15,7 +15,7 @@ import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getT
 
 import { answerQuery, settingsQuery } from './answers.ts';
 import { readsBy } from './reads.ts';
-import { authMac, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
+import { authMac, AuthRowTampered, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads returning all
@@ -881,10 +881,10 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
  * the log's head, any change the vault is making waits for it, so what this
  * reads holds until it commits.
  */
-export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number } | null> {
+export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number; accessSeq: bigint } | null> {
   const { vaultMembers } = tablesOf(db);
   const [row] = await db
-    .select({ status: vaultMembers.status, generation: vaultMembers.generation })
+    .select({ status: vaultMembers.status, generation: vaultMembers.generation, accessSeq: vaultMembers.accessSeq })
     .from(vaultMembers)
     .where(eq(vaultMembers.principal, principal));
   return row ?? null;
@@ -1465,7 +1465,7 @@ export async function findCredential(
   return {
     ...row.credential,
     /** What stands behind it, read with it (`passkeyOf`): undefined when the row came from a read that did not (`app_read`, the vault's). */
-    passkeyRead: passkeyOf(row),
+    passkeyRead: await passkeyOf(db, chainKey, row.credential, row),
     /** For a credential a trust binding issued: whether that binding still stands. Null for any other. */
     bindingStands: binding === null ? null : stands !== null,
     /** Its scope, as stored: its own, or for one a binding issued, the binding's. */
@@ -1502,13 +1502,22 @@ function credentialRow(db: Queryable, by: (credentials: Tables['credentials']) =
     .where(by(credentials));
 }
 
+/** What `heldSql` answers: a live passkey at the generation, or only rows that are not (removed, or of another generation); null for none ever. */
+const HELD = { live: 2, removed: 1 } as const;
+
 /**
- * Whether a person holds a live passkey at a generation: one probe of `passkeys_live_idx`, which most often finds none.
- * Written out, not through drizzle's table, so that a statement that also joins `passkeys` (`credentialRow`) keeps the two
- * apart.
+ * Whether a person holds a live passkey at a generation (`HELD.live`), has rows but none live at it (`HELD.removed`:
+ * removed, or of another generation), or never had one (null): one probe of `passkeys_live_idx`, which most often finds
+ * none, and, finding none, one of `passkeys_principal_idx`, at any generation. Those rows apart, because what reads them
+ * as not live holds them to their MACs first (`passkeyOf`): a row whose `removed_at` or `generation` was changed in the
+ * database, the MAC left as it was, fails there (review r5 of #500). Written out, not through drizzle's table, so that a
+ * statement that also joins `passkeys` (`credentialRow`) keeps the two apart.
  */
-function heldSql(principal: SQL, generation: SQL): SQL<boolean> {
-  return truth(sql`EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal} AND held.generation = ${generation} AND held.removed_at IS NULL)`);
+function heldSql(principal: SQL, generation: SQL): SQL<number | null> {
+  return sql<number | null>`(CASE
+    WHEN EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal} AND held.generation = ${generation} AND held.removed_at IS NULL) THEN ${sql.raw(String(HELD.live))}
+    WHEN EXISTS (SELECT 1 FROM passkeys held WHERE held.principal = ${principal}) THEN ${sql.raw(String(HELD.removed))}
+  END)`.mapWith(Number);
 }
 
 /**
@@ -1516,29 +1525,50 @@ function heldSql(principal: SQL, generation: SQL): SQL<boolean> {
  * request's check reads its own (`credentialRow`): the passkey it would name, by id (its MAC the check's), and whether
  * `principal` holds a live passkey at `generation`. One statement.
  */
-export async function passkeyBehind(db: Queryable, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<PasskeyRead> {
+export async function passkeyBehind(db: Queryable, chainKey: Buffer, holder: { principal: string; generation: number; passkeyId: string | null }): Promise<PasskeyRead> {
   const { passkeys } = tablesOf(db);
   const [row] = await db
     .select({ passkey: passkeys, passkeyHeld: heldSql(sql`${holder.principal}`, sql`${holder.generation}`), now: clock(db) })
     .from(sql`(SELECT 1) one`)
     .leftJoin(passkeys, holder.passkeyId === null ? sql`1 = 0` : eq(passkeys.id, holder.passkeyId));
-  return passkeyOf(row!)!;
+  return (await passkeyOf(db, chainKey, holder, row!))!;
 }
 
 export type PasskeyRow = Tables['passkeys']['$inferSelect'];
 
 /**
  * What a credential or MCP connection needs behind it (docs/design/passkeys.md, section 6.2), read in the statement that
- * reads it: the passkey it names, null for none; and whether its person holds a live passkey. The passkey's MAC is not
- * checked here but by the check, where its answer depends on the row (`passkeyStands`): a credential the check passes
- * over (a service's, a handle, any under `off`) never fails on a passkey it does not need (review r1 of #497).
+ * reads it: the passkey it names, null for none; and whether its person holds a live passkey, `'tampered'` when that
+ * rests on a removal whose row fails its MAC. Neither is checked against its MAC here but by the check, where its answer
+ * depends on it (`passkeyStands`): a credential the check passes over (a service's, a handle, any under `off`) never
+ * fails on a passkey it does not need (review r1 of #497).
  */
-export type PasskeyRead = { passkey: PasskeyRow | null; held: boolean };
+export type PasskeyRead = { passkey: PasskeyRow | null; held: boolean | 'tampered' };
 
-/** The passkey read with a row (`credentialRow`, `findConnection`), unchecked (`PasskeyRead`); undefined for a row read without it. */
-function passkeyOf(row: { passkey?: PasskeyRow | null; passkeyHeld?: boolean }): PasskeyRead | undefined {
+/**
+ * The passkey read with a row (`credentialRow`, `findConnection`), unchecked (`PasskeyRead`); undefined for a row read
+ * without it. For what names no passkey, of a person who has passkey rows but none live at its generation: those rows,
+ * each held to its MAC, one statement more (`passkeyHistory`), since a removal or a generation forged in the database
+ * (`removed_at` set or `generation` moved, the MAC left as it was) would otherwise read as a person holding none, and pass
+ * a session made while one was live, under `off` or by the previous release (R64; reviews r3 and r5 of #500). Only then:
+ * anyone else's read is the one statement.
+ */
+async function passkeyOf(
+  db: Queryable,
+  chainKey: Buffer,
+  holder: { principal: string; generation: number; passkeyId: string | null },
+  row: { passkey?: PasskeyRow | null; passkeyHeld?: number | null },
+): Promise<PasskeyRead | undefined> {
   if (row.passkeyHeld === undefined) return undefined;
-  return { passkey: row.passkey ?? null, held: row.passkeyHeld };
+  const read = { passkey: row.passkey ?? null, held: row.passkeyHeld === HELD.live };
+  if (row.passkeyHeld !== HELD.removed || holder.passkeyId !== null) return read;
+  try {
+    const { live } = await passkeyHistory(db, chainKey, holder.principal, holder.generation);
+    return { ...read, held: live > 0 };
+  } catch (error) {
+    if (error instanceof AuthRowTampered) return { ...read, held: 'tampered' };
+    throw error;
+  }
 }
 
 /**
@@ -1547,9 +1577,9 @@ function passkeyOf(row: { passkey?: PasskeyRow | null; passkeyHeld?: boolean }):
  * passkey and the person's, nothing about what the request asks for, so that what it answers says nothing of that. Null
  * for no such credential.
  */
-export async function passkeyByToken(db: Queryable, tokenHash: Buffer): Promise<(PasskeyRead & { holder: PasskeyHolder }) | null> {
+export async function passkeyByToken(db: Queryable, chainKey: Buffer, tokenHash: Buffer): Promise<(PasskeyRead & { holder: PasskeyHolder }) | null> {
   const [row] = await passkeyStatement(db, { tokenHash });
-  return row === undefined ? null : { ...passkeyOf(row)!, holder: row.holder };
+  return row === undefined ? null : { ...(await passkeyOf(db, chainKey, row.holder, row))!, holder: row.holder };
 }
 
 /** Whose credential `passkeyByToken` read: what the check decides on (`passkeyStands`). Its MAC is the vault's call's to answer, and the app's to check after. */
@@ -1567,6 +1597,162 @@ const passkeyStatement = prepared((db) => {
     .where(eq(credentials.tokenHash, sql.placeholder('tokenHash')));
 });
 
+// --- passkeys: the ceremonies' reads and writes (docs/design/passkeys.md, sections 3 and 7) --------------------------
+
+/**
+ * A person's live passkeys at a generation, oldest first, each its MAC the app's (a row that fails it is reported and
+ * passed over, as no passkey): what a ceremony offers (`allowCredentials`) and an add excludes.
+ */
+export async function livePasskeys(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<PasskeyRow[]> {
+  const { passkeys } = tablesOf(db);
+  const rows = await db.select().from(passkeys)
+    .where(and(eq(passkeys.principal, principal), eq(passkeys.generation, generation), isNull(passkeys.removedAt)))
+    .orderBy(asc(passkeys.createdAt));
+  return rows.filter((row) => checkAuthRow(chainKey, 'passkeys', row));
+}
+
+/**
+ * Every passkey row a person has had, at any generation, removed ones included, each held to its MAC (a row that fails
+ * it throws, `verifyAuthRow`): how many there are, an enrollment's `passkeysEver` (section 3.2; rows are never deleted,
+ * so every add moves it for good, and a sealed state that names the old count enrolls nothing again), and how many are
+ * live at `generation`. Read under the head by what decides on a person holding none: their first passkey, and a sign-in
+ * the provider alone answers. It reads the rows rather than count them for their MACs: a removal forged in the database
+ * (`removed_at` set, the MAC left as it was) refuses, where a count read it as no passkey and let another be the first
+ * (R64; review r2 of #500). By `passkeys_principal_idx`.
+ */
+export async function passkeyHistory(db: Queryable, chainKey: Buffer, principal: string, generation: number): Promise<{ ever: number; live: number }> {
+  const { passkeys } = tablesOf(db);
+  const rows = await db.select().from(passkeys).where(eq(passkeys.principal, principal));
+  for (const row of rows) verifyAuthRow(chainKey, 'passkeys', row);
+  return { ever: rows.length, live: rows.filter((row) => row.generation === generation && row.removedAt === null).length };
+}
+
+/** A member as a sign-in's callback weighs them (`signinMembers`). */
+export type SigninMember = { principal: string; status: string; generation: number; accessSeq: bigint; ever: number; live: number };
+
+/**
+ * What a sign-in's callback decides on (passkeys.md, section 3.1), beside the identity it reads in the same round trip
+ * (`findIdentity`): the members its account may be, the one its live identity names and one per verified email, each
+ * with its status and generation, the vault's newest entry about its access (`access_seq`, which the sign-in's
+ * transaction holds it to under the head, as `issuerStill` does), and its passkeys, ever and live at that generation.
+ * One statement, with the database clock, so that Hyperdrive never answers it from its cache: a cached sequence
+ * would read as moved under the head on every try. Rows of the vault's, unchecked: what they decide is only whether to
+ * ask for a passkey first, and the sign-in checks the vault's own answer before it issues anything.
+ */
+export async function signinMembers(
+  db: Queryable,
+  account: { provider: string; issuerHash: string; subject: string },
+  emails: readonly string[],
+): Promise<Map<string, SigninMember>> {
+  const { vaultMembers, identities } = tablesOf(db);
+  const bound = db
+    .select({ principal: identities.principal })
+    .from(identities)
+    .where(and(eq(identities.provider, account.provider), eq(identities.issuerHash, account.issuerHash), eq(identities.subject, account.subject), isNull(identities.revokedAt)));
+  const candidates = emails.map((email) => `user:${email}`);
+  const rows = await db
+    .select({
+      principal: vaultMembers.principal,
+      status: vaultMembers.status,
+      generation: vaultMembers.generation,
+      accessSeq: vaultMembers.accessSeq,
+      // Named in full: drizzle writes a column of the one table it selects from unqualified, which the subquery would read as its own.
+      ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = vault_members.principal)`,
+      live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = vault_members.principal AND live.generation = vault_members.generation AND live.removed_at IS NULL)`,
+      now: clock(db),
+    })
+    .from(vaultMembers)
+    .where(candidates.length === 0 ? inArray(vaultMembers.principal, bound) : or(inArray(vaultMembers.principal, candidates), inArray(vaultMembers.principal, bound)));
+  return new Map(rows.map(({ now: _, ever, live, ...row }) => [row.principal, { ...row, ever: Number(ever), live: Number(live) }]));
+}
+
+/** Whether a passkey row, anyone's, live or not, has this credential ID: what a first passkey's unique violation was. */
+export async function passkeyCredentialTaken(db: Queryable, credentialId: Buffer): Promise<boolean> {
+  const { passkeys } = tablesOf(db);
+  const rows = await db.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.credentialId, credentialId)).limit(1);
+  return rows.length > 0;
+}
+
+/** The passkey a response's credential ID names, whoever's, live or not; null for none. Its MAC is checked: a row that fails it throws (`verifyAuthRow`). */
+export async function passkeyByCredentialId(db: Queryable, chainKey: Buffer, credentialId: Buffer): Promise<PasskeyRow | null> {
+  const { passkeys } = tablesOf(db);
+  const [row] = await db.select().from(passkeys).where(eq(passkeys.credentialId, credentialId)).limit(1);
+  if (row === undefined) return null;
+  verifyAuthRow(chainKey, 'passkeys', row);
+  return row;
+}
+
+/**
+ * An assertion taken (section 7.3): its passkey's replay mark and counter moved forward, in one statement, inside the
+ * transaction that makes what the touch is for. 0 when it did not move: replayed, overtaken by a newer challenge, a
+ * counter that did not move, or a passkey removed, or no longer the person's at that generation, meanwhile.
+ */
+export async function touchPasskey(
+  tx: Queryable,
+  touch: { id: string; principal: string; generation: number; issuedAt: Date; signCount: number },
+): Promise<number> {
+  const { passkeys } = tablesOf(tx);
+  return changedRows(
+    await tx
+      .update(passkeys)
+      .set({ lastChallengeAt: touch.issuedAt, signCount: touch.signCount, lastUsedAt: new Date() })
+      .where(and(
+        eq(passkeys.id, touch.id),
+        eq(passkeys.principal, touch.principal),
+        eq(passkeys.generation, touch.generation),
+        isNull(passkeys.removedAt),
+        or(isNull(passkeys.lastChallengeAt), lt(passkeys.lastChallengeAt, touch.issuedAt)),
+        // A counter that moves, or one that never does: synced passkeys keep 0.
+        touch.signCount === 0 ? eq(passkeys.signCount, 0) : lt(passkeys.signCount, touch.signCount),
+      )),
+  );
+}
+
+/** A passkey added, signed as the app signs one (section 5.1). */
+export async function insertPasskey(
+  tx: Queryable,
+  chainKey: Buffer,
+  row: Omit<NewRow<Tables['passkeys']>, 'authMac'> & {
+    id: string; principal: string; generation: number; userHandle: Buffer; credentialId: Buffer; publicKey: Buffer; algorithm: number;
+  },
+): Promise<void> {
+  const signed = { ...row, removedAt: null };
+  await insert(tx, tablesOf(tx).passkeys, { ...signed, authMac: authMac(chainKey, 'passkeys', signed) });
+}
+
+/**
+ * The person's factor lock (section 6.1), which every change to their passkeys takes first, before the log's head, and
+ * the vault's issue of their tokens takes too (migration 0064): `pg_advisory_xact_lock(1717658484, hashtext(<principal>))`,
+ * started now, not once awaited, so that it goes ahead of the head in the transaction's first Sync. SQLite's one writer
+ * is the lock.
+ */
+export function lockFactor(tx: Transaction, principal: string): Promise<unknown> {
+  if (dialect.engineOf(tx) !== 'postgres') return Promise.resolve();
+  return dialect.rowsNow(tx, sql`SELECT pg_advisory_xact_lock(1717658484, hashtext(${principal}))::text AS locked`);
+}
+
+/**
+ * A person's approved device codes that no CLI has redeemed yet and that name no passkey: what a first passkey denies
+ * (section 6.1), each a compare-and-set on its MAC, and a denial names nobody (`device_authorizations_approval_names_principal`).
+ * The ids it denied.
+ */
+export async function denyUnbackedApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<string[]> {
+  const { deviceAuthorizations } = tablesOf(tx);
+  const rows = await tx.select().from(deviceAuthorizations).where(and(
+    eq(deviceAuthorizations.principal, principal),
+    eq(deviceAuthorizations.decision, 'approved'),
+    isNull(deviceAuthorizations.consumedAt),
+    isNull(deviceAuthorizations.passkeyId),
+    gt(deviceAuthorizations.expiresAt, at),
+  ));
+  const denied: string[] = [];
+  for (const row of rows) {
+    if (!checkAuthRow(chainKey, 'device_authorizations', row)) continue;
+    if ((await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0 })) > 0) denied.push(row.id);
+  }
+  return denied;
+}
+
 /** A credential as `findCredential` reads it: its row, its sign-in account's, the database's clock, and the newest policy change. */
 export type CredentialRead = {
   credential: Tables['credentials']['$inferSelect'];
@@ -1577,7 +1763,7 @@ export type CredentialRead = {
   settings?: string | null;
   /** The passkey it names and whether its person holds one, when the read had them (`credentialRow`); not `app_read`'s, nor the vault's. */
   passkey?: PasskeyRow | null;
-  passkeyHeld?: boolean;
+  passkeyHeld?: number | null;
 };
 
 // Every request's credential, by its token's hash: built once (`prepared`).
@@ -2270,6 +2456,11 @@ export async function priorConnections(db: Queryable, chainKey: Buffer, principa
   return rows.filter((row) => checkAuthRow(chainKey, 'mcp_connections', row));
 }
 
+/** A person's credentials of this membership, live at `at`, that name no passkey: what a first passkey ends (passkeys.md, section 6.1). */
+export function unbackedCredentials(principal: { type: string; id: string }, generation: number, at: Date): CredentialsWhere {
+  return (credentials) => and(eq(credentials.principal, principalOf(principal)), eq(credentials.generation, generation), isNull(credentials.passkeyId), gt(credentials.expiresAt, at));
+}
+
 /** A member's credentials of a membership before `generation`, live at `at`: expired ones are dead already, and a CI service leaves one behind each run. */
 export function priorCredentials(principal: { type: string; id: string }, generation: number, at: Date): CredentialsWhere {
   return (credentials) => and(eq(credentials.principal, principalOf(principal)), lt(credentials.generation, generation), gt(credentials.expiresAt, at));
@@ -2288,6 +2479,9 @@ export const credentialsBy = {
   tokenHash: (tokenHash: Buffer): CredentialsWhere => (credentials) => eq(credentials.tokenHash, tokenHash),
   identity: (identityId: string): CredentialsWhere => (credentials) => eq(credentials.identityId, identityId),
   ids: (ids: readonly string[]): CredentialsWhere => (credentials) => inArray(credentials.id, [...ids]),
+  /** The browser session a cookie's token is, if it is this principal's: what a touch replaces (passkeys.md, section 6.5). */
+  session: (tokenHash: Buffer, principal: string): CredentialsWhere => (credentials) =>
+    and(eq(credentials.tokenHash, tokenHash), eq(credentials.principal, principal), eq(credentials.kind, 'browser')),
 };
 
 /**
@@ -2418,7 +2612,7 @@ export async function findConnection(
   if (row === undefined) return null;
   verifyAuthRow(chainKey, 'mcp_connections', row.connection);
   const previous = 'refreshHash' in by && row.connection.refreshHash?.equals(by.refreshHash) !== true;
-  return { ...row.connection, previous, now: new Date(row.now), passkeyRead: passkeyOf(row)! };
+  return { ...row.connection, previous, now: new Date(row.now), passkeyRead: (await passkeyOf(db, chainKey, row.connection, row))! };
 }
 
 /**

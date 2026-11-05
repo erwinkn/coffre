@@ -123,6 +123,8 @@ export const DETAIL_ACTIONS = [
   'mcp.read',
   'account.link',
   'account.unlink',
+  // A touch that stepped a session up (docs/design/passkeys.md, section 6.2): one per five minutes at most, in PR 5.
+  'passkey.check',
   'key.wrap',
   'key.rewrap',
   // The vault's seal of a reference: the app's `secret.reference` says it in words.

@@ -23,12 +23,12 @@ before(async () => {
 });
 
 const label = gs.fromRegex('[a-z][a-z0-9-]{0,14}[a-z0-9]', { fullmatch: true });
-type Site = { rpId: string; origin: string };
+type Site = { rpId: string; origin: string; values: number };
 /** A deployment: its RP ID, and the origin it answers on, the RP ID's host itself or a host under it. */
 const site = gs.composite((tc): Site => {
   const rpId = tc.draw(gs.arrays(label, { minSize: 2, maxSize: 4 })).join('.');
   const host = tc.draw(gs.booleans()) ? rpId : `${tc.draw(label)}.${rpId}`;
-  return { rpId, origin: `https://${host}` };
+  return { rpId, origin: `https://${host}`, values: 20_000 };
 });
 const challenge = gs.binary({ minSize: 16, maxSize: 64 });
 const handle = gs.binary({ minSize: 1, maxSize: 64 });
@@ -117,7 +117,7 @@ const anyJson: gs.Generator<unknown> = gs.composite((tc): unknown => {
 
 const junk = propertySettings(200);
 test(`any JSON, or an honest envelope around any bytes, is refused with a reason and never throws, seed ${junk.seed}`, () => hegel.testAsync(async (tc) => {
-  const where = { rpId: 'secrets.acme.example', origin: 'https://secrets.acme.example' };
+  const where = { rpId: 'secrets.acme.example', origin: 'https://secrets.acme.example', values: 20_000 };
   const asked = new Uint8Array(32);
   const key = POOL['ES256/false'];
   const passkey = await stored(key, new Uint8Array(16));

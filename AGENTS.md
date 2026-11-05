@@ -121,10 +121,16 @@ Postgres database, through its own login and Hyperdrive binding, and the
 seed starts them over with everything else. `COFFRE_DEV_PORT`, `COFFRE_DEV_IDP_PORT` and `COFFRE_DEV_DATABASE` run a
 second stack beside the first, and `COFFRE_DEV_PUBLIC_URL` and `COFFRE_DEV_IDP_PUBLIC_URL`
 sign in to it through a tunnel (see `dev/start.sh`). Sign in at
-`http://127.0.0.1:3000/login`, through either button (the dev IdP plays GitHub and
+`http://localhost:3000/login` (localhost, not 127.0.0.1: browsers make passkeys
+for a name only), through either button (the dev IdP plays GitHub and
 an OIDC provider), as `admin@acme.example` (the Owner) or any of the seeded
-personas; the seed signs in the same way. CLI: `pnpm coffre <cmd>` from the root;
-`pnpm coffre login http://127.0.0.1:3000` once, a device login approved in the
+personas; the seed signs in the same way. Passkeys are `optional`, as
+deployments run them (`COFFRE_DEV_PASSKEYS`), so Owners sign in with one, and
+the seed added `admin@acme.example`'s, a software key: `node dev/passkey.mjs
+<DevTools WebSocket URL>` puts it in a Chrome you drive (`agent-browser
+cdp-url` gives one) while it runs, or `COFFRE_DEV_PASSKEYS=off pnpm dev` signs
+everyone in with the dev IdP alone. CLI: `pnpm coffre <cmd>` from the root;
+`pnpm coffre login http://localhost:3000` once, a device login approved in the
 browser, and its session is the default after.
 
 **Config is code.** The packages read no environment variable of their own; a

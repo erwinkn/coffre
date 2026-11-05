@@ -82,6 +82,16 @@ export type CeremonyExpectation = {
   origin: string;
   /** `publicUrl`'s host, or the parent of it the deployment names. */
   rpId: string;
+  /**
+   * The most values the response's client data JSON, attestation object,
+   * authenticator data and COSE key may decode to, all together: the same bound
+   * the caller holds a request's values to (coffre's server: its body's,
+   * `MAX_BODY_NODES`), counted again on what the body's strings decode to, so a
+   * response costs at most twice it; not one of the verifier's own. Neither WebAuthn nor CBOR bounds them, and
+   * each costs memory and work as it is built: a megabyte of maps nested a
+   * byte apiece built about 150 MiB of them.
+   */
+  values: number;
 };
 
 export type RegistrationExpectation = CeremonyExpectation & {
@@ -132,18 +142,30 @@ const fail = (reason: PasskeyReason, message: string): never => {
   throw new Refused(reason, message);
 };
 
-// Bounds on what a browser may send, decoded: a credential ID's 1,023 bytes
-// by spec; attestation statements carry certificate chains, a TPM's the
-// longest at a few KiB.
-const MAX_CREDENTIAL_ID = 1023;
+// Bounds on what a browser may send, decoded, each from a source. From the
+// spec: a credential ID is 16 to 1,023 bytes (WebAuthn L3, "Credential ID"),
+// a user handle 64 at most (5.4.3). From the algorithms coffre takes: an RSA
+// key of 2,048 to 4,096 bits (docs/design/passkeys.md, section 7.2), whose
+// signature is as long as its modulus, the longest of the three (Ed25519's
+// is 64 bytes, ES256's DER at most 72). The rest, the client data, the
+// authenticator data and the attestation object, the spec leaves open
+// (unknown client data members, extensions, an attestation statement's
+// certificate chain): what bounds them is the request they come in, which
+// its server reads under the bounds it reads every API body to (R70): its
+// bytes, and its values, which the CBOR it carries decodes to as well
+// (`CeremonyExpectation.values`).
+export const MAX_CREDENTIAL_ID = 1023;
 const MIN_CREDENTIAL_ID = 16;
-const MAX_CLIENT_DATA = 4096;
-const MAX_AUTHENTICATOR_DATA = 4096;
-const MAX_ATTESTATION_OBJECT = 32768;
-const MAX_SIGNATURE = 1024;
+const MIN_RSA_BITS = 2048;
+const MAX_RSA_BITS = 4096;
+const MAX_SIGNATURE = MAX_RSA_BITS / 8;
 const MAX_USER_HANDLE = 64;
-const MAX_TRANSPORTS = 8;
-const MAX_CBOR_DEPTH = 16;
+
+/** The transports WebAuthn L3 names (5.8.4), the ones a browser acts on when handed back. */
+const TRANSPORTS: ReadonlySet<string> = new Set(['ble', 'hybrid', 'internal', 'nfc', 'smart-card', 'usb']);
+
+/** How long a base64url text of `bytes` bytes is, unpadded. */
+export const base64urlLength = (bytes: number): number => Math.ceil((bytes * 4) / 3);
 
 // clientDataJSON is decoded as WebAuthn says, UTF-8 decode, which drops a
 // leading byte order mark; CBOR text keeps every character it holds
@@ -157,14 +179,61 @@ const ENCODER = new TextEncoder();
 /** A CBOR value: safe integers (-2^53 to 2^53 - 1), byte and text strings, arrays, maps keyed by integers or text, and true, false and null. */
 export type Cbor = number | string | boolean | null | Uint8Array | Cbor[] | Map<number | string, Cbor>;
 
+/** How many more values a response's CBOR may decode to (`CeremonyExpectation.values`), counted down by every read of it. */
+type Budget = { left: number };
+
+/** An array or map being read: what it holds so far, and how many items (a map's keys and values both) are left. */
+type Open = { items: Cbor[]; left: number } | { map: Map<number | string, Cbor>; key: number | string | undefined; left: number };
+
 /**
  * Reads one CBOR item at `offset` and answers it with where it ends.
  * Definite lengths only, each in its shortest head; no tags, floats or
  * `undefined`; no duplicate map keys; text that is UTF-8. A length longer than what is left is refused
- * before anything is allocated for it.
+ * before anything is allocated for it. The arrays and maps still open are a
+ * list, not the call stack: however deep the input nests, which neither
+ * WebAuthn nor CBOR bounds (RFC 8949, section 10), it costs the reader at
+ * most a list as long as its values, never a stack overflow. `budget` counts
+ * the values read, each item and each map key, and refuses the one past it;
+ * a caller that reads its own bytes passes none.
  */
-export function readCbor(bytes: Uint8Array, offset = 0, depth = 0): [Cbor, number] {
-  if (depth > MAX_CBOR_DEPTH) fail('malformed', 'CBOR nested too deep');
+export function readCbor(bytes: Uint8Array, offset = 0, budget: Budget = { left: Infinity }): [Cbor, number] {
+  const open: Open[] = [];
+  let at = offset;
+  for (;;) {
+    if (--budget.left < 0) fail('malformed', 'the response decodes to more CBOR values than a request may hold');
+    const [read, end] = readHead(bytes, at, open);
+    at = end;
+    if (read === OPENED) continue;
+    let item: Cbor = read;
+    // The item goes into the array or map it closes, and each that it fills goes into its own, out to the top.
+    for (;;) {
+      const parent = open.at(-1);
+      if (parent === undefined) return [item, at];
+      if ('items' in parent) {
+        parent.items.push(item);
+        if (--parent.left > 0) break;
+        item = parent.items;
+      } else if (parent.key === undefined) {
+        if (typeof item !== 'number' && typeof item !== 'string') return fail('malformed', 'CBOR map key is neither an integer nor text');
+        if (parent.map.has(item)) return fail('malformed', 'CBOR map repeats a key');
+        parent.key = item;
+        break;
+      } else {
+        parent.map.set(parent.key, item);
+        parent.key = undefined;
+        if ((parent.left -= 2) > 0) break;
+        item = parent.map;
+      }
+      open.pop();
+    }
+  }
+}
+
+/** What `readHead` answers for an array or map with items to come: pushed on `open`, filled by the items after it. */
+const OPENED: unique symbol = Symbol('opened');
+
+/** One head at `at` and, for a string, its bytes: a value, or an array or map, empty or `OPENED`. */
+function readHead(bytes: Uint8Array, offset: number, open: Open[]): [Cbor | typeof OPENED, number] {
   if (offset >= bytes.length) fail('malformed', 'CBOR ends early');
   const head = bytes[offset];
   const major = head >> 5;
@@ -205,27 +274,17 @@ export function readCbor(bytes: Uint8Array, offset = 0, depth = 0): [Cbor, numbe
       }
     }
     case 4: {
+      // Each item is a byte at least.
       if (argument > bytes.length - at) fail('malformed', 'CBOR array longer than its input');
-      const items: Cbor[] = [];
-      for (let i = 0; i < argument; i++) {
-        const [item, end] = readCbor(bytes, at, depth + 1);
-        items.push(item);
-        at = end;
-      }
-      return [items, at];
+      if (argument === 0) return [[], at];
+      open.push({ items: [], left: argument });
+      return [OPENED, at];
     }
     case 5: {
       if (argument * 2 > bytes.length - at) fail('malformed', 'CBOR map longer than its input');
-      const map = new Map<number | string, Cbor>();
-      for (let i = 0; i < argument; i++) {
-        const [key, afterKey] = readCbor(bytes, at, depth + 1);
-        if (typeof key !== 'number' && typeof key !== 'string') fail('malformed', 'CBOR map key is neither an integer nor text');
-        if (map.has(key as number | string)) fail('malformed', 'CBOR map repeats a key');
-        const [value, end] = readCbor(bytes, afterKey, depth + 1);
-        map.set(key as number | string, value);
-        at = end;
-      }
-      return [map, at];
+      if (argument === 0) return [new Map(), at];
+      open.push({ map: new Map(), key: undefined, left: argument * 2 });
+      return [OPENED, at];
     }
     default:
       return fail('malformed', 'CBOR tags are not taken');
@@ -233,8 +292,8 @@ export function readCbor(bytes: Uint8Array, offset = 0, depth = 0): [Cbor, numbe
 }
 
 /** Exactly one CBOR item, nothing after it. */
-function cborWhole(bytes: Uint8Array): Cbor {
-  const [value, end] = readCbor(bytes);
+function cborWhole(bytes: Uint8Array, budget: Budget): Cbor {
+  const [value, end] = readCbor(bytes, 0, budget);
   if (end !== bytes.length) fail('malformed', 'bytes trail the CBOR');
   return value;
 }
@@ -244,13 +303,14 @@ function cborWhole(bytes: Uint8Array): Cbor {
 type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
 
-/** A field that must be canonical base64url of 1 to `max` bytes. */
-function bytesOf(record: Json, field: string, max: number): Uint8Array {
+/** A field that must be canonical base64url of at least 1 byte, and at most `max` where a source sets one. */
+function bytesOf(record: Json, field: string, max = Infinity): Uint8Array {
   const text = record[field];
   // Four characters for three bytes: a longer string cannot decode within `max`.
-  if (typeof text !== 'string' || text.length === 0 || text.length > Math.ceil((max * 4) / 3)) return fail('malformed', `${field} is not base64url within ${max} bytes`);
+  const within = max === Infinity ? '' : ` within ${max} bytes`;
+  if (typeof text !== 'string' || text.length === 0 || text.length > base64urlLength(max)) return fail('malformed', `${field} is not base64url${within}`);
   const bytes = fromBase64url(text);
-  if (bytes === null || bytes.length > max) return fail('malformed', `${field} is not canonical base64url within ${max} bytes`);
+  if (bytes === null || bytes.length > max) return fail('malformed', `${field} is not canonical base64url${within}`);
   return bytes;
 }
 
@@ -277,16 +337,38 @@ const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every
  */
 function checkExpectation(expected: CeremonyExpectation): void {
   if (!(expected.challenge instanceof Uint8Array) || expected.challenge.length < 16) throw new Error('a ceremony challenge is at least 16 bytes');
+  if (!(expected.values >= 1)) throw new Error('a ceremony reads at least one CBOR value');
+}
+
+/**
+ * Counts decoded client data's values against the same budget as the CBOR
+ * (`CeremonyExpectation.values`): WebAuthn lets a browser add members that
+ * are ignored (5.8.1), and their JSON, a parse of the decoded bytes, is
+ * otherwise held only by the body's bytes. As `parseJsonBody` walks a body:
+ * a list, never the call stack, and each array's or object's children pushed
+ * only once they are counted.
+ */
+function countJson(value: unknown, budget: Budget): void {
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const next = stack.pop();
+    if (--budget.left < 0) fail('malformed', 'the response decodes to more values than a request may hold');
+    if (next === null || typeof next !== 'object') continue;
+    const children = Array.isArray(next) ? next : Object.values(next);
+    if (budget.left - children.length < 0) fail('malformed', 'the response decodes to more values than a request may hold');
+    for (const child of children) stack.push(child);
+  }
 }
 
 /** Step 2: what the browser says it signed for. */
-function checkClientData(bytes: Uint8Array, type: 'webauthn.create' | 'webauthn.get', expected: CeremonyExpectation): void {
+function checkClientData(bytes: Uint8Array, type: 'webauthn.create' | 'webauthn.get', expected: CeremonyExpectation, budget: Budget): void {
   let data: unknown;
   try {
     data = JSON.parse(UTF8.decode(bytes));
   } catch {
     return fail('malformed', 'clientDataJSON is not UTF-8 JSON');
   }
+  countJson(data, budget);
   if (!isObject(data)) return fail('malformed', 'clientDataJSON is not an object');
   if (data.type !== type) return fail('type', `clientDataJSON's type is not ${type}`);
   if (data.challenge !== base64url(expected.challenge)) return fail('challenge', 'the challenge is not the one sent');
@@ -306,7 +388,7 @@ const ED = 0x80;
 type AuthenticatorData = PasskeyFlags & { userVerified: boolean; signCount: number; attested: { aaguid: Uint8Array; credentialId: Uint8Array; publicKey: Uint8Array } | null };
 
 /** Step 3: the RP ID's hash, the flags, and for a registration the attested credential. */
-async function readAuthenticatorData(bytes: Uint8Array, attested: boolean, expected: CeremonyExpectation): Promise<AuthenticatorData> {
+async function readAuthenticatorData(bytes: Uint8Array, attested: boolean, expected: CeremonyExpectation, budget: Budget): Promise<AuthenticatorData> {
   if (bytes.length < 37) return fail('malformed', 'authenticatorData is shorter than 37 bytes');
   if (!equal(bytes.subarray(0, 32), await sha256(ENCODER.encode(expected.rpId)))) return fail('rp_id', `the RP ID is not ${expected.rpId}`);
   const flags = bytes[32];
@@ -325,12 +407,12 @@ async function readAuthenticatorData(bytes: Uint8Array, attested: boolean, expec
     if (bytes.length < at + length) return fail('malformed', 'the credential ID ends early');
     const credentialId = bytes.slice(at, at + length);
     at += length;
-    const [, end] = readCbor(bytes, at);
+    const [, end] = readCbor(bytes, at, budget);
     credential = { aaguid, credentialId, publicKey: bytes.slice(at, end) };
     at = end;
   }
   if (flags & ED) {
-    const [extensions, end] = readCbor(bytes, at);
+    const [extensions, end] = readCbor(bytes, at, budget);
     if (!(extensions instanceof Map) || ![...extensions.keys()].every((key) => typeof key === 'string')) return fail('malformed', 'extensions are not a map keyed by name');
     at = end;
   }
@@ -361,8 +443,8 @@ function byteParam(key: Map<number | string, Cbor>, label: number, length?: numb
 }
 
 /** A COSE key as WebCrypto's, held to the algorithm its `alg` names and its type allows. */
-async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorithm[]): Promise<{ algorithm: PasskeyAlgorithm; key: CryptoKey }> {
-  const key = cborWhole(cose);
+async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorithm[], budget: Budget): Promise<{ algorithm: PasskeyAlgorithm; key: CryptoKey }> {
+  const key = cborWhole(cose, budget);
   if (!(key instanceof Map)) return fail('key', 'the public key is not a COSE map');
   const alg = key.get(ALG);
   if (!(allowed as readonly unknown[]).includes(alg)) return fail('algorithm', `algorithm ${typeof alg === 'number' ? alg : typeof alg} was not asked for`);
@@ -390,7 +472,7 @@ async function importCoseKey(cose: Uint8Array, allowed: readonly PasskeyAlgorith
     const e = unsigned(byteParam(key, -2));
     // Whole bytes, less the leading zero bits of the first: clz32 counts 24 more on a byte.
     const bits = n.length === 0 ? 0 : n.length * 8 - (Math.clz32(n[0]) - 24);
-    if (bits < 2048 || bits > 4096) return fail('key', `RSA modulus of ${bits} bits, not 2048 to 4096`);
+    if (bits < MIN_RSA_BITS || bits > MAX_RSA_BITS) return fail('key', `RSA modulus of ${bits} bits, not ${MIN_RSA_BITS} to ${MAX_RSA_BITS}`);
     if (e.length === 0 || e.length > 4 || !(e[e.length - 1] & 1) || (e.length === 1 && e[0] < 3)) return fail('key', 'RSA exponent is not an odd number from 3 to 2^32');
     const jwk = { kty: 'RSA', n: base64url(n), e: base64url(e), alg: 'RS256', ext: true };
     return { algorithm, key: await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']) };
@@ -455,34 +537,36 @@ async function answer<T>(run: () => Promise<T>): Promise<T | PasskeyRefusal> {
   }
 }
 
-/** The transports the browser listed: short lowercase names, display only, unknown ones kept. */
+/**
+ * The transports the browser listed that WebAuthn names, once each: a hint handed back to `get()`, whose browser
+ * ignores any other (5.8.4), so one it does not know hints nothing and is dropped, not refused.
+ */
 function transportsOf(response: Json): string[] {
   const list = response.transports;
   if (list === undefined) return [];
-  if (!Array.isArray(list) || list.length > MAX_TRANSPORTS || !list.every((item) => typeof item === 'string' && /^[a-z-]{1,32}$/.test(item))) {
-    return fail('malformed', 'transports is not a short list of names');
-  }
-  return [...new Set(list as string[])];
+  if (!Array.isArray(list)) return fail('malformed', 'transports is not a list');
+  return [...TRANSPORTS].filter((transport) => list.includes(transport));
 }
 
 /** A `create()` response, `credential.toJSON()`, held to section 7.2's registration checks. */
 export function verifyRegistration(input: unknown, expected: RegistrationExpectation): Promise<VerifiedRegistration | PasskeyRefusal> {
   return answer(async () => {
     checkExpectation(expected);
+    const budget: Budget = { left: expected.values };
     const { id, response } = envelope(input);
-    const clientData = bytesOf(response, 'clientDataJSON', MAX_CLIENT_DATA);
-    const attestation = cborWhole(bytesOf(response, 'attestationObject', MAX_ATTESTATION_OBJECT));
+    const clientData = bytesOf(response, 'clientDataJSON');
+    const attestation = cborWhole(bytesOf(response, 'attestationObject'), budget);
     const transports = transportsOf(response);
     if (!(attestation instanceof Map) || attestation.size !== 3) return fail('malformed', 'the attestation object is not fmt, attStmt and authData');
     const authData = attestation.get('authData');
     if (typeof attestation.get('fmt') !== 'string' || !(attestation.get('attStmt') instanceof Map) || !(authData instanceof Uint8Array)) {
       return fail('malformed', 'the attestation object is not fmt, attStmt and authData');
     }
-    checkClientData(clientData, 'webauthn.create', expected);
-    const data = await readAuthenticatorData(authData, true, expected);
+    checkClientData(clientData, 'webauthn.create', expected, budget);
+    const data = await readAuthenticatorData(authData, true, expected, budget);
     const credential = data.attested!;
     if (!equal(credential.credentialId, id)) return fail('credential', "the attested credential is not the response's id");
-    const { algorithm } = await importCoseKey(credential.publicKey, expected.algorithms ?? PASSKEY_ALGORITHMS);
+    const { algorithm } = await importCoseKey(credential.publicKey, expected.algorithms ?? PASSKEY_ALGORITHMS, budget);
     checkVerified(data);
     return {
       ok: true as const,
@@ -514,17 +598,19 @@ export function verifyAssertion(input: unknown, expected: AssertionExpectation):
   return answer(async () => {
     checkExpectation(expected);
     const { id, response } = envelope(input);
-    const clientData = bytesOf(response, 'clientDataJSON', MAX_CLIENT_DATA);
-    const authData = bytesOf(response, 'authenticatorData', MAX_AUTHENTICATOR_DATA);
+    const clientData = bytesOf(response, 'clientDataJSON');
+    const authData = bytesOf(response, 'authenticatorData');
     const signature = bytesOf(response, 'signature', MAX_SIGNATURE);
     // Absent or null: the authenticator kept no handle (a security key's non-discoverable credential). Present, it is compared.
     const handle = response.userHandle === undefined || response.userHandle === null ? null : handleOf(response.userHandle);
     const { passkey } = expected;
     if (!equal(id, passkey.credentialId)) return fail('credential', 'the assertion is by another credential');
     if (handle !== null && !equal(handle, passkey.userHandle)) return fail('user_handle', "the user handle is not the passkey's");
-    checkClientData(clientData, 'webauthn.get', expected);
-    const data = await readAuthenticatorData(authData, false, expected);
-    const { key } = await importCoseKey(passkey.publicKey, [passkey.algorithm]);
+    const budget: Budget = { left: expected.values };
+    checkClientData(clientData, 'webauthn.get', expected, budget);
+    const data = await readAuthenticatorData(authData, false, expected, budget);
+    // The key is the row's, which the app signed: its values count all the same, as it decodes.
+    const { key } = await importCoseKey(passkey.publicKey, [passkey.algorithm], budget);
     const signed = new Uint8Array(authData.length + 32);
     signed.set(authData);
     signed.set(await sha256(clientData), authData.length);

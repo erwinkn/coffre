@@ -44,3 +44,41 @@ test("a work whose first statement is a `later` write to a protected environment
   const [now] = await db.owner.select({ slug: environments.slug }).from(environments).where(eq(environments.id, prod!.id));
   assert.equal(now?.slug, 'renamed');
 });
+
+test("a factor lock that fails fails the work with its own error, the head's queued behind it heard too: no unhandled rejection (review r13 of #500)", POSTGRES, async () => {
+  const ctx = await contextFor(deps, ROOT);
+  const unhandled: unknown[] = [];
+  const hear = (reason: unknown) => void unhandled.push(reason);
+  process.on('unhandledRejection', hear);
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let held!: () => void;
+  const holding = new Promise<void>((resolve) => (held = resolve));
+  // Another transaction holds the person's factor lock (`lockFactor`'s key).
+  const holder = db.owner.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(1717658484, hashtext(${ROOT}))`);
+    held();
+    await released;
+  });
+  try {
+    await holding;
+    const work = audited(ctx, async () => 'done', null, ROOT);
+    // The work's factor lock waits; cancelled, as a `lock_timeout` ends it, the head's statement behind it fails 25P02.
+    let waiter: string | undefined;
+    for (let i = 0; i < 200 && waiter === undefined; i++) {
+      const rows = await db.owner.execute<{ pid: number }>(sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = 1717658484`);
+      waiter = (rows as unknown as { pid: number }[])[0]?.pid?.toString();
+      if (waiter === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(waiter !== undefined, 'the work waits on the factor lock');
+    await db.owner.execute(sql`SELECT pg_cancel_backend(${Number(waiter)})`);
+    // The factor lock's own error, 57014, not the head's 25P02.
+    await assert.rejects(work, (error: unknown) => (error as { cause?: { code?: unknown } }).cause?.code === '57014');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    release();
+    await holder;
+    process.off('unhandledRejection', hear);
+  }
+});

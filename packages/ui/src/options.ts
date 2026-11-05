@@ -71,6 +71,7 @@ export const shell = {
     const { coffre, queryClient } = coffreOf(context);
     const shell = await loadShell(queryClient, coffre);
     if (shell.registrationRequired) throw redirect({ to: '/unregistered' });
+    if (shell.passkeyRequired) throw redirect({ to: '/auth/passkey', search: { 'step-up': '1', next: location.href } });
     if (shell.principal === null) throw redirect({ to: '/login', search: { next: location.href } });
   },
   component: ShellLayout,
@@ -402,6 +403,20 @@ export const unregistered = {
     if (shell.principal === null) throw redirect({ to: '/login', search: { next: location.href } });
     throw redirect({ to: '/projects' });
   },
+};
+
+/**
+ * `/auth/passkey`: the passkey a sign-in waits for after the provider, or a
+ * step-up's for a session no passkey stands behind (`?step-up=1`,
+ * docs/design/passkeys.md, sections 3.1 and 6.2). Its question is the
+ * browser's to read, from the sign-in's own cookie: the page asks it there.
+ */
+export const passkey = {
+  validateSearch: (search: Record<string, unknown>): { 'step-up'?: '1'; next?: string } => ({
+    ...(search['step-up'] === '1' || search['step-up'] === 1 ? { 'step-up': '1' as const } : {}),
+    // The server holds `next` to its own origin (safeNext); the page only passes it on.
+    ...(typeof search.next === 'string' ? { next: search.next } : {}),
+  }),
 };
 
 /** `/auth/device`. */
