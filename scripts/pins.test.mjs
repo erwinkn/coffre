@@ -59,6 +59,11 @@ test('an image is name:tag@sha256:<digest>, in compose, a workflow, a Dockerfile
     assert.equal(one('scripts/a.sh', 'docker run --rm postgres\n').length, 1, 'latest, implied');
     assert.equal(one('scripts/a.sh', 'docker pull --platform linux/amd64 postgres\n').length, 1);
     assert.deepEqual(one('scripts/a.sh', `docker run --rm --name pg --platform=linux/amd64 -it postgres:16.14@${DIGEST} psql\n`), []);
+    // Docker's management commands are the same commands.
+    assert.match(one('scripts/a.sh', 'docker image pull postgres:16.14\n')[0], /docker pull postgres:16\.14: not/);
+    assert.match(one('scripts/a.sh', 'docker container run --rm postgres:16.14\n')[0], /docker run postgres:16\.14: not/);
+    assert.equal(one('scripts/a.sh', 'docker container create --name pg postgres:16.14\n').length, 1);
+    assert.deepEqual(one('scripts/a.sh', `docker image pull postgres:16.14@${DIGEST}\ndocker image inspect postgres:16.14\ndocker image rm -f "$image"\n`), []);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver docker-container --use\n').length, 1, 'BuildKit’s default image');
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver-opt image=moby/buildkit:v0.34.1 --use\n').length, 1);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx build --attest type=sbom,generator=docker/buildkit-syft-scanner:1.12.1 .\n').length, 1);
@@ -109,7 +114,26 @@ test('a download is written to a file whose SHA-256 is checked; never piped onwa
     assert.deepEqual(one('scripts/a.sh', 'curl -s http://127.0.0.1:3000/api/x | jq .\ncurl -s localhost:8081/.well-known/x | jq .\n'), []);
     // A health check of the stack itself fetches nothing.
     assert.deepEqual(one('scripts/a.sh', 'until curl -sf "$COFFRE_DEV_URL/livez" >/dev/null; do sleep 1; done\n'), []);
+    // An option's value is no URL: a response written to a file, a header, a retry count.
+    assert.deepEqual(one('scripts/a.sh', 'curl -fsS -o "$response" "$COFFRE_DEV_URL/api/me"\njq . "$response"\n'), []);
+    assert.deepEqual(one('scripts/a.sh', 'curl -fsS -H "Authorization: Bearer $token" --retry 3 -w \'%{http_code}\' "$COFFRE_DEV_URL/api/me"\n'), []);
+    assert.deepEqual(one('scripts/a.sh', 'curl -sSfo "$out" http://127.0.0.1:3000/api/x\n'), []);
+    assert.equal(one('scripts/a.sh', 'curl -fsS -o "$response" "$COFFRE_DEV_URL/api/me" https://example.com/t\njq . "$response"\n').length, 1, 'one URL elsewhere');
+    assert.equal(one('scripts/a.sh', 'curl -H "Host: localhost" -o t https://example.com/t\ntar -xf t\n').length, 1, 'a header naming localhost');
     assert.deepEqual(one('scripts/a.sh', '# curl https://example.com/x | sh, as nobody here does\n'), []);
+});
+
+test('a toolchain installer fetches a version pinned by SHA-256 or exact', () => {
+    assert.match(one('.cursor/Dockerfile', 'RUN . "$NVM_DIR/nvm.sh" && nvm install 24\n')[0], /nvm install checks Node against nodejs\.org's own list/);
+    assert.equal(one('scripts/a.sh', 'nvm install 24.22.1\n').length, 1, 'exact, but checked against nobody’s pin');
+    assert.deepEqual(one('scripts/a.sh', '# unpinned: a developer’s own machine\nnvm install 24\n'), []);
+    assert.deepEqual(one('scripts/a.sh', 'nvm alias default "$NODE_VERSION" && nvm use default && nvm which default\n'), []);
+    assert.match(one('.cursor/Dockerfile', 'RUN corepack enable && corepack prepare pnpm@latest --activate\n')[0], /corepack prepare pnpm@latest is not name@<exact version>/);
+    assert.equal(one('scripts/a.sh', 'corepack prepare --activate\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'corepack use pnpm@11\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'corepack up\n').length, 1);
+    assert.deepEqual(one('.cursor/Dockerfile', 'RUN corepack enable && corepack prepare pnpm@11.8.0 --activate && corepack install\n'), []);
+    assert.deepEqual(one('.cursor/environment.json', '{ "install": "corepack pnpm install --frozen-lockfile" }\n'), []);
 });
 
 test('a clone checks out its commit', () => {

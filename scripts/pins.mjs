@@ -322,7 +322,8 @@ export function commands(text) {
             i += wrapper.operands ?? 0;
         }
         command.argv = words.slice(i);
-        if (command.argv[0] === 'corepack') command.argv = command.argv.slice(1);
+        // `corepack pnpm …` runs pnpm; `corepack prepare …` is corepack's own.
+        if (command.argv[0] === 'corepack' && ['pnpm', 'pnpx', 'yarn', 'npm', 'npx'].includes(command.argv[1])) command.argv = command.argv.slice(1);
     }
     return out;
 }
@@ -476,13 +477,15 @@ function shell(list, report) {
         }
         if (program === 'curl' || program === 'wget') download(list, at, program, args, say);
         if (program === 'git' && operand(args, new Set(['-C', '-c']))?.value === 'clone') clone(list, at, args, say);
-        if (program === 'docker' && ['run', 'create', 'pull'].includes(args[0])) {
-            const image = operand(args.slice(1), DOCKER_VALUE)?.value;
+        // `docker image pull` and `docker container run|create` are the same commands.
+        const docker = program === 'docker' && ((args[0] === 'image' && args[1] === 'pull') || (args[0] === 'container' && ['run', 'create'].includes(args[1]))) ? args.slice(1) : args;
+        if (program === 'docker' && ['run', 'create', 'pull'].includes(docker[0])) {
+            const image = operand(docker.slice(1), DOCKER_VALUE)?.value;
             const variable = image?.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
             // An image a variable names: a pinned one, or compose's, which is pinned.
             const value = variable ? assigned.get(variable[1]) : image;
             const pinned = value !== undefined && (IMAGE.test(value) || (variable && /docker compose config/.test(value)));
-            if (!pinned) say(`docker ${args[0]} ${image ?? 'with no image'}: not name:tag@sha256:<index digest>`);
+            if (!pinned) say(`docker ${docker[0]} ${image ?? 'with no image'}: not name:tag@sha256:<index digest>`);
         }
         if (program === 'pnpm') {
             const sub = operand(args, PNPM_VALUE);
@@ -508,6 +511,19 @@ function shell(list, report) {
             if (named.length === 0 || !named.every(local)) say('npm install outside a lockfile');
         }
         if ((program === 'apt-get' || program === 'apt') && args.includes('install')) say("apt-get install takes the archive's current versions");
+        // nvm checks what it downloads against the same server's SHASUMS256.txt, pinned by nobody.
+        if (program === 'nvm' && ['install', 'reinstall-packages', 'install-latest-npm'].includes(args[0])) {
+            say(`nvm ${args[0]} checks Node against nodejs.org's own list: download the tarball and check its pinned SHA-256`);
+        }
+        // Corepack fetches the version it is named, or packageManager's, which check:pins holds exact.
+        if (program === 'corepack' && ['prepare', 'install', 'use', 'up'].includes(args[0])) {
+            const specs = args.slice(1).filter((arg) => !arg.startsWith('-'));
+            if (args[0] === 'up') say('corepack up moves packageManager to the newest version');
+            for (const spec of specs) {
+                if (!EXACT_VERSION.test(spec.slice(spec.lastIndexOf('@') + 1)) || spec.lastIndexOf('@') <= 0) say(`corepack ${args[0]} ${spec} is not name@<exact version>`);
+            }
+            if (args[0] === 'prepare' && specs.length === 0) say('corepack prepare without name@<exact version>');
+        }
     });
 }
 
@@ -525,33 +541,59 @@ function runner(name, args, say) {
     }
 }
 
+// The options of curl and wget that take a value: their value is no URL.
+const CURL_OPTIONS = {
+    short: 'AbcCdDeEFhHKmoQrtTuUwxXYyz',
+    long: new Set(['--output', '--header', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--json', '--form', '--request', '--user', '--user-agent', '--referer', '--write-out', '--max-time', '--connect-timeout', '--retry', '--retry-delay', '--retry-max-time', '--cacert', '--capath', '--cert', '--key', '--config', '--cookie', '--cookie-jar', '--dump-header', '--upload-file', '--proxy', '--resolve', '--connect-to', '--range', '--limit-rate', '--max-filesize', '--unix-socket', '--interface', '--stderr', '--trace', '--trace-ascii', '--oauth2-bearer', '--output-dir']),
+};
+const WGET_OPTIONS = {
+    short: 'aABdDeiIlOoPQRtTUwX',
+    long: new Set(['--output-document', '--output-file', '--append-output', '--header', '--user-agent', '--user', '--password', '--tries', '--timeout', '--wait', '--directory-prefix', '--post-data', '--post-file', '--method', '--body-data', '--body-file', '--ca-certificate', '--certificate', '--private-key', '--input-file', '--referer', '--execute', '--level', '--accept', '--reject', '--domains', '--include-directories', '--exclude-directories', '--limit-rate', '--quota']),
+};
+
+// A command's words as its operands, the options it was given a value
+// (`-o f`, `-of`, `-fsSLo f`, `--output f`, `--output=f`) and its flags.
+function options(args, takes) {
+    const operands = [];
+    const values = [];
+    const flags = [];
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === '--') {
+            operands.push(...args.slice(i + 1));
+            break;
+        }
+        if (arg.startsWith('--')) {
+            const [option, value] = arg.includes('=') ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg, undefined];
+            if (value !== undefined) values.push({ option, value });
+            else if (takes.long.has(option)) values.push({ option, value: args[++i] });
+            else flags.push(option);
+        } else if (arg.startsWith('-') && arg !== '-') {
+            for (let j = 1; j < arg.length; j++) {
+                const option = `-${arg[j]}`;
+                if (!takes.short.includes(arg[j])) {
+                    flags.push(option);
+                    continue;
+                }
+                values.push({ option, value: j < arg.length - 1 ? arg.slice(j + 1) : args[++i] });
+                break;
+            }
+        } else operands.push(arg);
+    }
+    return { operands, values, flags };
+}
+
 // A download is written to a file, and the first command that names the file
 // after it checks its SHA-256 against a pinned one: never piped onward, kept
 // as a value, or read before.
 function download(list, at, program, args, say) {
     const command = list[at];
-    // The URLs, and the variables that may hold one; a health check of this machine's fetches no artifact.
-    const urls = args.filter((arg) => /^[a-z][a-z0-9+.-]*:\/\//i.test(arg) || /^(localhost|127\.0\.0\.1|\[::1\])/.test(arg) || arg.startsWith('$'));
-    if (urls.length > 0 && urls.every((url) => LOOPBACK.test(url))) return;
-    let file = null;
-    let named = false;
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        const long = arg.match(/^--(output|output-document)(?:=(.*))?$/);
-        if (long && (program === 'curl') === (long[1] === 'output')) {
-            file = long[2] ?? args[++i];
-            continue;
-        }
-        if (/^--remote-name/.test(arg)) named = true;
-        // A cluster of short options, the output's last (`-fsSLo f`, `-qO f`) or attached (`-ofile`).
-        const flag = program === 'curl' ? 'o' : 'O';
-        if (!/^-[^-]/.test(arg)) continue;
-        const cluster = arg.slice(1);
-        const where = cluster.indexOf(flag);
-        if (program === 'curl' && /O/.test(cluster) && where < 0) named = true;
-        if (where < 0) continue;
-        file = where === cluster.length - 1 ? args[++i] : cluster.slice(where + 1);
-    }
+    const { operands, values, flags } = options(args, program === 'curl' ? CURL_OPTIONS : WGET_OPTIONS);
+    // The URLs are its operands, never an option's value; a health check of this machine's fetches no artifact.
+    if (operands.length > 0 && operands.every((url) => LOOPBACK.test(url))) return;
+    const output = program === 'curl' ? values.filter((v) => ['-o', '--output'].includes(v.option)) : values.filter((v) => ['-O', '--output-document'].includes(v.option));
+    let file = output.at(-1)?.value ?? null;
+    const named = program === 'curl' && flags.some((flag) => ['-O', '--remote-name', '--remote-name-all', '-J', '--remote-header-name'].includes(flag));
     const stdout = command.redirects.find((r) => (r.fd === '1' || r.fd === 'all') && r.op.startsWith('>') && r.op !== '>&');
     if ((file === null || file === '-') && stdout) file = stdout.target;
     if (file === '/dev/null') return;

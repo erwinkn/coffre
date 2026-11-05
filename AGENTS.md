@@ -338,8 +338,9 @@ unsupported diff select full validation.
   # vX.Y.Z`, the same repository's through `$/`; an image as
   `name:tag@sha256:<index digest>`; a download by its SHA-256, checked by
   the first command that reads the file, never piped; a clone by its commit;
-  a toolchain an action installs at an exact version; an install by the
-  lockfile. It fails closed, on a fetch it cannot read as pinned and on a
+  a toolchain an action installs at an exact version, Corepack's too, and
+  Node never by `nvm install` (it checks nodejs.org's own list); an install
+  by the lockfile. It fails closed, on a fetch it cannot read as pinned and on a
   pnpm setting written in any style but block, and reads commands as people
   write them, not as they would hide them (`eval`): review covers those. A
   line that cannot be pinned carries `# unpinned: <reason>`, on itself or
