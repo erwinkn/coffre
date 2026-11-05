@@ -613,7 +613,7 @@ replaces the saved one only if that is still the session the command
 started on (another login's is left as it is, and the command refused),
 and leaves the default instance where it was, for `--url`. The old
 session is then signed out; one the instance could not end (a 503, no
-answer) is said, with `coffre sessions revoke <id> --apply` to end it,
+answer) is said, with `coffre --url <instance> sessions revoke <id> --apply` to end it,
 its id the instance's answer named. With `reason: 'add_passkey'` no code
 is started: the CLI says to sign in in the browser and add one there.
 

@@ -526,7 +526,7 @@ async function freshened(to: Target & { credential: { kind: 'token'; token: stri
   process.stderr.write('Approved.\n');
   if (ended !== null) {
     const id = was.credentialId === null ? '' : ` ${was.credentialId}`;
-    process.stderr.write(`The session this replaces could not be ended (${ended}): it works until it expires, or until \`coffre sessions revoke${id === '' ? ' <id>' : id} --apply\` ends it.\n`);
+    process.stderr.write(`The session this replaces could not be ended (${ended}): it works until it expires, or until \`coffre --url ${to.origin} sessions revoke${id === '' ? ' <id>' : id} --apply\` ends it.\n`);
   }
 }
 

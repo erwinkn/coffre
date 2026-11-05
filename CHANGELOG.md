@@ -120,7 +120,7 @@
   the approval is the same person's as the session it replaces, as the
   instance says before the code is asked for, and that session is still
   the one saved, and it keeps the default instance; an old session the
-  instance could not end is named, with `coffre sessions revoke` to end
+  instance could not end is named, with `coffre --url <instance> sessions revoke` to end
   it. Each act a check let through names, in its entries, the app's and
   the vault's (a first add's and a token's sealed changes, an accepted
   loss of entries and an account link included), the

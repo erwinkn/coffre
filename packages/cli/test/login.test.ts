@@ -643,12 +643,13 @@ test('a fresh check on an instance named by --url replaces its session and leave
   assert.equal(store().instances[other]!.token, 'coffre_cli_other');
 });
 
-test('a fresh check whose old session could not be ended says so, and how to end it', async (t) => {
-  const { home, saved } = await freshInstance(t, { logout: 503 });
-  const ran = await cli(home, ['admit', 'bob@acme.example'], '');
+test('a fresh check whose old session could not be ended says so, and how to end it, on its own instance', async (t) => {
+  // The default is another instance: the command it suggests names this one, or it would revoke there.
+  const { origin, home, saved } = await freshInstance(t, { logout: 503, elsewhere: true });
+  const ran = await cli(home, ['--url', origin, 'admit', 'bob@acme.example'], '');
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stdout, /admitted user:bob@acme\.example/);
-  assert.match(ran.stderr, /Approved\.\nThe session this replaces could not be ended \(status 503\): it works until it expires, or until `coffre sessions revoke cred_old --apply` ends it\.\n/);
+  assert.ok(ran.stderr.includes(`Approved.\nThe session this replaces could not be ended (status 503): it works until it expires, or until \`coffre --url ${origin} sessions revoke cred_old --apply\` ends it.\n`), ran.stderr);
   assert.equal(saved().token, 'coffre_cli_new');
 });
 
