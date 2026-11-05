@@ -54,13 +54,13 @@ function clock(t: TestContext) {
 }
 
 /** A change from coffre's own page, as the browser sends it: its status and body. */
-async function act(browser: Browser, method: string, path: string, body?: unknown): Promise<{ status: number; body: { error?: string; reason?: string; next?: string } }> {
+async function act(browser: Browser, method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: { error?: string; reason?: string; next?: string; caller?: string } }> {
   const response = await browser.fetch(path, {
     method,
-    headers: { 'sec-fetch-site': 'same-origin', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    headers: { 'sec-fetch-site': 'same-origin', ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  return { status: response.status, body: (await response.json()) as { error?: string; reason?: string } };
+  return { status: response.status, body: (await response.json()) as { error?: string; reason?: string; caller?: string } };
 }
 
 const refused = (answer: { status: number; body: { error?: string; reason?: string } }) => [answer.status, answer.body.error, answer.body.reason];
@@ -112,6 +112,33 @@ test('what widens reach takes a session a touch confirmed in the last five minut
   assert.equal((await act(bob, 'PATCH', `/api/access/user:${CAROL}`, { market: 'viewer' })).status, 200);
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.tokenHash, hashToken(bob.session!)));
   assert.equal(row!.confirmedAt!.getTime(), Date.now());
+});
+
+test("an act sent again after its fresh check goes only for the person who sent it: another person's session since refuses it, doing nothing", async (t) => {
+  const { later } = clock(t);
+  const root = clientFor(deps, ROOT);
+  await root.members.add('user:dana@acme.example', { role: 'owner' });
+  await root.members.add(`user:${CAROL}`, { role: 'developer' });
+  const bobKey = await SoftAuthenticator.create('ES256');
+  const bob = await enroll(runtime, BOB, bobKey);
+  later(FRESH_MS);
+  // Bob's act, refused: the refusal names him, opaquely, for the act's second sending.
+  const first = await act(bob, 'PATCH', `/api/access/user:${CAROL}`, { market: 'viewer' });
+  assert.deepEqual(refused(first), [403, 'fresh_check_required', undefined]);
+  const caller = first.body.caller!;
+  assert.match(caller, /^user:/);
+  // Meanwhile another tab of the same browser signs in as Dana, who touches her own passkey: the dialog's step-up
+  // confirms her session, and Bob's act goes again on it, saying it is Bob's. Refused, and nothing changed.
+  const dana = await enroll(runtime, 'dana@acme.example', await SoftAuthenticator.create('ES256'));
+  const his = bob.session!;
+  bob.jar.set('__Host-coffre_session', dana.session!);
+  assert.deepEqual(refused(await act(bob, 'PATCH', `/api/access/user:${CAROL}`, { market: 'viewer' }, { 'coffre-caller': caller })), [409, 'conflict', 'caller_changed']);
+  assert.deepEqual((await root.members.access(`user:${CAROL}`)).grants, []);
+  // Bob's own session, confirmed anew (a step-up rotates it): his act, saying so, goes.
+  bob.jar.set('__Host-coffre_session', his);
+  await stepUp(bob, bobKey);
+  assert.equal((await act(bob, 'PATCH', `/api/access/user:${CAROL}`, { market: 'viewer' }, { 'coffre-caller': caller })).status, 200);
+  assert.equal((await root.members.access(`user:${CAROL}`)).grants.length, 1);
 });
 
 test('a person with no passkey yet is asked to add one, and a sign-in that adds it confirms the session it makes', async () => {
@@ -250,6 +277,10 @@ test('linking another account takes the window of a person who holds a passkey, 
   await bob.fetch('/auth/signin/acme?link=1');
   const linked = await bob.fetch(`/auth/callback/acme?email=${encodeURIComponent('bob.work@acme.example')}`);
   assert.equal(linked.headers.get('location'), '/account?linked=acme');
+  // Its entry names the touch that confirmed the session (passkeys.md, section 11).
+  const [passkey] = await db.owner.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.principal, `user:${BOB}`));
+  const [link] = (await clientFor(deps, ROOT).audit.list({ actor: BOB, detail: '1', limit: 200 })).entries.filter((entry) => entry.action === 'account.link' && entry.decision === 'allow');
+  assert.deepEqual([link?.metadata.confirmedBy, link?.metadata.confirmedAt], [passkey!.id, new Date().toISOString()]);
 
   // A person with no passkey links as before: straight to the provider.
   const ada = new Browser(runtime);

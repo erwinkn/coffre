@@ -440,6 +440,8 @@ async function send(request: Request, to: Target, hint?: Hint, handled: readonly
       await freshened(to as Target & { credential: { kind: 'token'; token: string } }, refused);
       const headers = new Headers(again!.headers);
       for (const [name, value] of Object.entries(await headersFor(to))) headers.set(name, value);
+      // Who sent it first, as the refusal named them: the instance holds the command's second sending to that person.
+      if (refused.caller !== null) headers.set('coffre-caller', refused.caller);
       response = await ask(new Request(again!, { headers }));
     }
   } catch (error) {
@@ -477,10 +479,14 @@ function steppingUp(to: Target): to is Target & { credential: { kind: 'token'; t
   return to.mode === 'signin' && to.by === 'person' && to.credential.kind === 'token';
 }
 
-/** Whether an answer is a fresh check's refusal (docs/design/passkeys.md, section 3.5), and of a person with no passkey yet. */
-async function freshRefusal(response: Response): Promise<{ add: boolean } | null> {
-  const body = (await response.clone().json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
-  return body?.error === 'fresh_check_required' ? { add: body.reason === 'add_passkey' } : null;
+/**
+ * Whether an answer is a fresh check's refusal (docs/design/passkeys.md, section 3.5): of a person with no passkey yet
+ * (`add`), and who it says sent the command (`caller`, null from an instance that names none).
+ */
+async function freshRefusal(response: Response): Promise<{ add: boolean; caller: string | null } | null> {
+  const body = (await response.clone().json().catch(() => null)) as { error?: unknown; reason?: unknown; caller?: unknown } | null;
+  if (body?.error !== 'fresh_check_required') return null;
+  return { add: body.reason === 'add_passkey', caller: typeof body.caller === 'string' ? body.caller : null };
 }
 
 /**

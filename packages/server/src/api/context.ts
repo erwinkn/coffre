@@ -104,9 +104,9 @@ export type ApiContext = {
   /**
    * The deployment's audit watch, if it added one (plugins/audit-watch.ts):
    * its hooks, and a context for them, in the name of the request's caller
-   * when `asCaller`.
+   * when `asCaller`, its entries naming what `confirmed` the request.
    */
-  watch?: { hooks: Watcher; context: (asCaller?: boolean) => WatchContext } | null;
+  watch?: { hooks: Watcher; context: (asCaller?: boolean, confirmed?: Confirmation | null) => WatchContext } | null;
   /** What the deployment's code says of its credential proxy (`ProxyCode`): null, or left out, when it adds none. */
   proxy?: ProxyCode | null;
   /** The instance's public URL, as its config gives it: where `/use` answers, which the Proxy tab shows. */

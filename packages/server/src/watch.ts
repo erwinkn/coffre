@@ -9,7 +9,7 @@
 // Only coffre's own plugins carry a `Watcher`: core takes one only if
 // coffre's own code made it (`watcher`), whatever a plugin object says, so
 // a third-party plugin keeps routes and the API as a caller (R9).
-import type { Checkpoint, CheckpointKey, LogHead, Outcome, Vault } from '@coffre/core/vault';
+import type { Checkpoint, CheckpointKey, Confirmation, LogHead, Outcome, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { KeyRetired } from '@coffre/db/log';
 
@@ -141,6 +141,8 @@ export type WatchDeps = {
   warn?: (obj: unknown, msg: string) => void;
   /** In whose name it appends: the scheduler's unless an Owner's request says. */
   actor?: WatchActor;
+  /** What confirmed that request, a fresh check's touch, which its entries name (passkeys.md, section 11). */
+  confirmed?: Confirmation | null;
 };
 
 const SCHEDULER: WatchActor = { actorType: 'system', actorId: 'coffre-scheduler' };
@@ -176,8 +178,9 @@ export function watchContext(deps: WatchDeps): WatchContext {
       },
       movedOn: async () => (await movedFrom(db, [anchorKeyId(chainKey)])).size > 0,
       append: async (action, metadata) => {
+        const confirmed = deps.confirmed == null ? {} : { confirmedBy: deps.confirmed.by, confirmedAt: deps.confirmed.at };
         const appended = await db
-          .transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata }]))
+          .transaction((tx) => appendAudit(tx, chainKey, [{ ...(deps.actor ?? SCHEDULER), action, decision: 'allow', metadata: { ...metadata, ...confirmed } }]))
           .catch((error: unknown) => {
             throw error instanceof KeyRetired ? new Superseded(error.message) : error;
           });

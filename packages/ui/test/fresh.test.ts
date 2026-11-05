@@ -1,17 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { askFresh, freshTransport, onFreshAsk, type FreshAsk } from '../src/lib/fresh.ts';
+import { askFresh, CALLER_HEADER, freshTransport, onFreshAsk, type FreshAsk } from '../src/lib/fresh.ts';
 
-const refusal = (reason?: string) =>
-  new Response(JSON.stringify({ error: 'fresh_check_required', message: 'this takes a fresh touch of your passkey', ...(reason === undefined ? {} : { reason }) }), { status: 403 });
+const ADA = 'user:0190c5a4-6e4f-7a10-8b2c-3d4e5f607182';
+
+const refusal = (reason?: string, caller: string | null = ADA) =>
+  new Response(JSON.stringify({ error: 'fresh_check_required', message: 'this takes a fresh touch of your passkey', ...(reason === undefined ? {} : { reason }), ...(caller === null ? {} : { caller }) }), { status: 403 });
 
 /** The API as the server answers it: each request's body recorded, answered in turn. */
 function server(answers: (() => Response)[]) {
   const bodies: string[] = [];
+  const callers: (string | null)[] = [];
   return {
     bodies,
+    callers,
     send: async (request: Request) => {
+      callers.push(request.headers.get(CALLER_HEADER));
       bodies.push(await request.text());
       return answers.shift()!();
     },
@@ -27,6 +32,15 @@ test('an act refused for a fresh check is sent again, the same, once the person 
   assert.equal(answered.status, 200);
   assert.deepEqual(asked, [false], 'asked once, to confirm, not to add a passkey');
   assert.deepEqual(api.bodies, ['{"role":"owner"}', '{"role":"owner"}'], 'the same act, its body whole');
+  assert.deepEqual(api.callers, [null, ADA], 'sent again saying who sent it first, which the server holds it to');
+});
+
+test('a refusal that names no caller is the answer: the act is never sent again unbound to its person', async () => {
+  const api = server([() => refusal(undefined, null)]);
+  let asked = 0;
+  const answered = await freshTransport(api.send, async () => (asked++, true))(act());
+  assert.equal(answered.status, 403);
+  assert.deepEqual([asked, api.bodies.length], [0, 1]);
 });
 
 test('an act the person did not confirm gets its refusal, sent once; one of a person with no passkey asks to add one', async () => {

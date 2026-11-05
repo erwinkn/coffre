@@ -1,13 +1,14 @@
 import { CREDENTIAL_LABEL_MAX } from '@coffre/core/access';
 import { EXCHANGE_SKEW_SECONDS, SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
+import type { Confirmation } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { unknownKeyAlert } from './alerts.ts';
 import { ApiError, notFound, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 import type { SignedInAccount, SigninResult } from './api/signin.ts';
 import { CEREMONY_TTL_SECONDS } from './api/ceremony.ts';
-import { freshEnough, freshness } from './api/fresh-routes.ts';
+import { freshEnough, freshPass } from './api/fresh-routes.ts';
 import { API_BODY_BYTES } from './api/router.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
@@ -60,9 +61,13 @@ function linkStart(provider: string): string {
   return `/auth/signin/${encodeURIComponent(provider)}?link=1`;
 }
 
-/** Whether the browser's session may link another account: `holder`, fresh if its person holds a passkey (`FRESH_ROUTES`). */
-function linksFresh(runtime: CoffreRuntime, identity: AuthenticatedIdentity): boolean {
-  return freshEnough('holder', freshness({ signin: runtime.signin, ...identity }));
+/**
+ * Whether the browser's session may link another account: `holder`, fresh if its person holds a passkey
+ * (`FRESH_ROUTES`); and if so, what confirmed it, which the link's entry names (passkeys.md, section 11). Null if not.
+ */
+function linksFresh(runtime: CoffreRuntime, identity: AuthenticatedIdentity): { confirmed: Confirmation | null } | null {
+  const { stands, confirmed } = freshPass({ signin: runtime.signin, ...identity }, 'holder');
+  return freshEnough('holder', stands) ? { confirmed } : null;
 }
 
 /**
@@ -347,7 +352,7 @@ export async function startSignin(
     }
     // Another account that signs in as them (passkeys.md, section 4.5): a fresh session if they hold a passkey, before
     // leaving for the provider. The step-up confirms it, and comes back here.
-    if (!linksFresh(runtime, identity)) {
+    if (linksFresh(runtime, identity) === null) {
       return redirectResponse(`/auth/passkey?${new URLSearchParams({ 'step-up': '1', next: linkStart(config.id) })}`);
     }
     link = identity.principal.id;
@@ -425,8 +430,9 @@ export async function finishSignin(
       return fail('link_session');
     }
     // Fresh still: a window that ran out at the provider links nothing, and the page says to link again.
-    if (!linksFresh(runtime, identity)) return fail('link_stale');
-    const linked = await signin.linkIdentity(identity, profile);
+    const fresh = linksFresh(runtime, identity);
+    if (fresh === null) return fail('link_stale');
+    const linked = await signin.linkIdentity({ ...identity, confirmed: fresh.confirmed }, profile);
     return linked.ok ? redirectResponse(`/account?linked=${config.id}`, [clearPending]) : fail(linked.reason);
   }
 

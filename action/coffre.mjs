@@ -17112,6 +17112,7 @@ async function send(request, to, hint, handled = [], ask = once) {
 			await freshened(to, refused);
 			const headers = new Headers(again.headers);
 			for (const [name, value] of Object.entries(await headersFor(to))) headers.set(name, value);
+			if (refused.caller !== null) headers.set("coffre-caller", refused.caller);
 			response = await ask(new Request(again, { headers }));
 		}
 	} catch (error) {
@@ -17145,10 +17146,17 @@ async function send(request, to, hint, handled = [], ask = once) {
 function steppingUp(to) {
 	return to.mode === "signin" && to.by === "person" && to.credential.kind === "token";
 }
-/** Whether an answer is a fresh check's refusal (docs/design/passkeys.md, section 3.5), and of a person with no passkey yet. */
+/**
+* Whether an answer is a fresh check's refusal (docs/design/passkeys.md, section 3.5): of a person with no passkey yet
+* (`add`), and who it says sent the command (`caller`, null from an instance that names none).
+*/
 async function freshRefusal(response) {
 	const body = await response.clone().json().catch(() => null);
-	return body?.error === "fresh_check_required" ? { add: body.reason === "add_passkey" } : null;
+	if (body?.error !== "fresh_check_required") return null;
+	return {
+		add: body.reason === "add_passkey",
+		caller: typeof body.caller === "string" ? body.caller : null
+	};
 }
 /**
 * A fresh check for a command (docs/design/passkeys.md, section 3.5): a device login of its own, labelled with the

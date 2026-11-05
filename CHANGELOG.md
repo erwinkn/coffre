@@ -112,7 +112,9 @@
   which in a table typed over the routes (`FRESH_ROUTES`). Otherwise
   `403 fresh_check_required`, which writes nothing: the page opens
   "Confirm it's you", a touch at the step-up gives the browser a new
-  session and ends the old one, and the act goes again; the CLI starts a
+  session and ends the old one, and the act goes again, only as the
+  person who sent it (`coffre-caller`; another's session since refuses
+  it, `409 caller_changed`); the CLI starts a
   device login named after the command, approved in the browser with a
   touch, swaps the new session in and runs the command again: only if
   the approval is the same person's as the session it replaces, as the
@@ -120,7 +122,8 @@
   the one saved, and it keeps the default instance; an old session the
   instance could not end is named, with `coffre sessions revoke` to end
   it. Each act a check let through names, in its entries, the app's and
-  the vault's (a first add's and a token's sealed changes included), the
+  the vault's (a first add's and a token's sealed changes, an accepted
+  loss of entries and an account link included), the
   passkey and the time that confirmed it (`confirmedBy`, `confirmedAt`):
   the session's touch, or the one that approved an MCP client's change.
   A person

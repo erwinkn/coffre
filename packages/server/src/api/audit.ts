@@ -1337,7 +1337,8 @@ export async function acceptAuditLoss(ctx: ApiContext, range: { from: number; to
   }
   if (!ctx.watch) throw badRequest('this deployment watches no audit log: there is no anchor to move (docs/deploy.md, "The audit watch")');
   try {
-    return await ctx.watch.hooks.acceptLoss(ctx.watch.context(true), range);
+    // In the Owner's name, naming the touch that confirmed the request (`FRESH_ROUTES`, passkeys.md, section 11).
+    return await ctx.watch.hooks.acceptLoss(ctx.watch.context(true, ctx.confirmed), range);
   } catch (error) {
     if (error instanceof Refusal) throw badRequest(error.message);
     throw error;

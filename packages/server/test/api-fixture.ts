@@ -482,7 +482,8 @@ export async function contextFor(
     // The audit watch over the deps' anchor, as a deployment that added it has.
     watch: {
       hooks: watcherOf(auditWatch({ anchor: deps.anchor }))!,
-      context: (asCaller) => watchContext({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, actor: asCaller ? { actorType: type, actorId: id } : undefined }),
+      context: (asCaller, confirmed) =>
+        watchContext({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, ...(asCaller ? { actor: { actorType: type, actorId: id }, confirmed } : {}) }),
     },
     waitUntil: (promise) => {
       // A custom observer must not bypass the fixture's lifetime tracking.

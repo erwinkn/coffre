@@ -540,12 +540,12 @@ type FreshFake = {
 };
 
 async function freshInstance(t: test.TestContext, { add = false, approver = 'ada@acme.example', logout = 200, meanwhile, elsewhere = false }: FreshFake = {}) {
-  const seen: { method: string; url: string; authorization: string | undefined; body: string }[] = [];
+  const seen: { method: string; url: string; authorization: string | undefined; caller: string | undefined; body: string }[] = [];
   let home = '';
   const server = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += String(chunk);
-    seen.push({ method: req.method!, url: req.url!, authorization: req.headers.authorization, body });
+    seen.push({ method: req.method!, url: req.url!, authorization: req.headers.authorization, caller: req.headers['coffre-caller'] as string | undefined, body });
     const send = (status: number, value: unknown) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(value));
     if (req.url === '/api/me' && req.headers.authorization === 'Bearer coffre_cli_old') return send(200, { principal: { type: 'user', id: 'ada@acme.example' }, credentialId: 'cred_old' });
     if (req.url === '/api/auth/device') return send(200, { device_code: 'device', user_code: 'BCDF-GHJK', verification_uri_complete: 'http://127.0.0.1/auth/device?code=BCDF-GHJK', interval: 1, expires_in: 60 });
@@ -556,7 +556,7 @@ async function freshInstance(t: test.TestContext, { add = false, approver = 'ada
     if (req.url === '/api/auth/logout') return logout === 200 ? send(200, { signedOut: true }) : send(logout, { error: 'unavailable', message: 'try again' });
     if (req.method === 'PUT' && req.url === '/api/members/user%3Abob%40acme.example') {
       if (req.headers.authorization === 'Bearer coffre_cli_new') return send(200, { member: 'user:bob@acme.example', created: true, instanceRole: 'member', scope: null });
-      return send(403, { error: 'fresh_check_required', message: 'this takes a fresh touch of your passkey', ...(add ? { reason: 'add_passkey' } : {}) });
+      return send(403, { error: 'fresh_check_required', message: 'this takes a fresh touch of your passkey', caller: 'user:ada-id', ...(add ? { reason: 'add_passkey' } : {}) });
     }
     send(401, { error: 'unauthenticated', message: `unexpected ${req.method} ${req.url}` });
   });
@@ -587,6 +587,7 @@ test('a command a fresh check refuses asks for a device code of its own, approve
   const adds = seen.filter((request) => request.method === 'PUT');
   assert.deepEqual(adds.map((request) => request.authorization), ['Bearer coffre_cli_old', 'Bearer coffre_cli_new'], 'refused, then sent again on the new session, once');
   assert.equal(adds[0]!.body, adds[1]!.body, 'the same request');
+  assert.deepEqual(adds.map((request) => request.caller), [undefined, 'user:ada-id'], 'sent again saying who sent it first, as the refusal named her');
   // Its code names the command, which the approval page shows: no secret is ever an argument.
   const started = seen.find((request) => request.url === '/api/auth/device')!;
   assert.deepEqual(JSON.parse(started.body), { client_label: 'coffre CLI: admit bob@acme.example' });

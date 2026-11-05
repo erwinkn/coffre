@@ -7,7 +7,7 @@ import type { ResolvedPath } from '../db/queries.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
 import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
-import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
+import { ApiError, badRequest, CALLER_HEADER, callerName, forbidden, notFound } from './errors.ts';
 import { formatPath } from './paths.ts';
 import { makePersonal, ownerOf, resolveRead } from './personal.ts';
 import { placeAt } from './render.ts';
@@ -201,6 +201,12 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
     }
     const { route } = found;
     const { def } = route;
+    // An act sent again after its fresh check goes only for the person who sent it first: a session another tab signed
+    // in since, as someone else, would do it as them (passkeys.md, section 4.5). Before anything is read or written.
+    const sentBy = request.headers.get(CALLER_HEADER);
+    if (sentBy !== null && sentBy !== callerName(ctx.caller.principal)) {
+      throw new ApiError('conflict', 'you are signed in as someone else now than when you asked this: nothing was done. Check who you are signed in as, then ask again', 'caller_changed');
+    }
     // A caller the app read from the vault's rows, unchecked, is only shown (`SHOWING`, fetch-api.ts): no route but that decides on one.
     if (ctx.caller.unchecked === true && `${route.method} ${route.shape}` !== 'GET /me') throw new Error(`a caller the vault has not checked reached ${route.method} ${route.shape}`);
     if (ctx.via !== null) {

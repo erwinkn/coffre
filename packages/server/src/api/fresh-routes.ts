@@ -10,7 +10,7 @@ import type { Confirmation } from '@coffre/core/vault';
 import type { z } from 'zod';
 
 import type { ApiContext } from './context.ts';
-import { ApiError } from './errors.ts';
+import { callerName, FreshCheckRequired } from './errors.ts';
 import type { Params, RouteKey, Routes } from './routes.ts';
 
 /**
@@ -172,25 +172,6 @@ export function freshness(ctx: Pick<ApiContext, 'signin' | 'caller' | 'session' 
 }
 
 /**
- * The refusal of an act a fresh check guards, before anything is written: a prompt, so no entry (section 4.5), but a
- * line in the process log, since a page asks `GET /api/me` before it sends and a refusal is rarer from it than from a
- * script on a stolen cookie. `reason: 'add_passkey'` when the person holds none yet: the page asks them to add one, which
- * confirms the session it issues.
- */
-export class FreshCheckRequired extends ApiError {
-  constructor(stands: 'stale' | 'none') {
-    super(
-      'fresh_check_required',
-      stands === 'none'
-        ? 'this takes a passkey: add one, then try again'
-        : 'this takes a fresh touch of your passkey: confirm it is you, then try again',
-      stands === 'none' ? 'add_passkey' : undefined,
-    );
-    this.name = 'FreshCheckRequired';
-  }
-}
-
-/**
  * What confirmed a fresh request: the touch that approved its MCP change, or its session's, whose passkey the session
  * names (a touch issues the session it confirms, on the passkey touched: section 6.5).
  */
@@ -214,6 +195,19 @@ export function freshAnswer<K extends RouteKey>(key: K, asked: Asked<K>, ctx: As
 }
 
 /**
+ * Whether a request is fresh enough for an answer, and if so what confirmed it: the touch, when one let it through, or
+ * null when nothing needed to (`exempt`, or `holder` of a person with no passkey). Null for a request that is not.
+ */
+export function freshPass(
+  ctx: Pick<ApiContext, 'signin' | 'caller' | 'session' | 'via' | 'personalToken' | 'passkeyId'>,
+  fresh: Fresh,
+): { stands: Freshness; confirmed: Confirmation | null } {
+  const stands = freshness(ctx);
+  const touched = freshEnough(fresh, stands) && stands === 'fresh' && (fresh === 'always' || fresh === 'holder');
+  return { stands, confirmed: touched ? confirmation(ctx) : null };
+}
+
+/**
  * Hold a request to an answer, refusing it `fresh_check_required` if it is not fresh enough: the router's check, and a
  * `handler` route's own once it knows (`marking`). Let through on a touch, the request records what confirmed it
  * (`ApiContext.confirmed`), which every entry it writes names (section 11).
@@ -223,11 +217,11 @@ export function requireFresh(
   fresh: Fresh,
   route: string,
 ): void {
-  const stands = freshness(ctx);
+  const { stands, confirmed } = freshPass(ctx, fresh);
   if (freshEnough(fresh, stands)) {
-    if (stands === 'fresh' && (fresh === 'always' || fresh === 'holder')) ctx.confirmed = confirmation(ctx);
+    if (confirmed !== null) ctx.confirmed = confirmed;
     return;
   }
   console.warn('an act a fresh check guards was refused', { principal: `user:${ctx.caller.principal.id}`, route, credentialId: ctx.credentialId, requestId: ctx.requestId });
-  throw new FreshCheckRequired(stands as 'stale' | 'none');
+  throw new FreshCheckRequired(stands as 'stale' | 'none', callerName(ctx.caller.principal));
 }

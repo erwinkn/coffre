@@ -527,7 +527,15 @@ page at once (`freshTransport`, `@coffre/ui`'s `lib/fresh.ts`), and opens
 by `CoffreProvider`). The dialog asks the step-up's door for its options
 as it opens, so the press reaches the authenticator at once; the touch
 answers there (section 6.5), the response sets the new session's cookie,
-and the act goes again, once, as it was sent. Acts refused together share
+and the act goes again, once, as it was sent, but for one header: the
+refusal names its caller, opaquely (`caller: 'user:<id>'`), and the act
+sent again says it (`coffre-caller`). The router refuses an act whose
+header names someone else than its caller, `409 conflict` with `reason:
+'caller_changed'`, before anything is read or written: Ada's Save,
+refused; another tab signs in as Bob meanwhile; the dialog's touch
+confirms Bob's session; Ada's change, sent again on Bob's cookie, is
+refused rather than made as Bob. A step-up that only rotates Ada's own
+session leaves her the same caller. Acts refused together share
 one dialog and one touch. Cancelled, the refusal goes on to the page,
 which says nothing was changed. Ada's promotion is then: Save, refused,
 the dialog, a touch, the change made; one round trip more than knowing
@@ -939,7 +947,9 @@ has (`stepUpNext`). The callback, outside it, links nothing and lands on
 `/account?error=link_stale`, "link again". It holds the browser's session
 to the person the link started for, as before, not to the very session:
 a step-up between the two replaces it, and the window, checked again, is
-what the session must still have.
+what the session must still have. The link's entry names what
+confirmed the session at the callback (section 11), as the router's
+check does for an API route (`freshPass`).
 
 ## 5. Storage
 
@@ -1781,7 +1791,9 @@ Changed:
   its correlation (`correlated`), which the vault copies into the
   entries it writes, as it copies `credentialId`, and a first add's
   change and a token's issue keep it in their payloads, under the
-  vault's MAC, for the audit page (`confirmed`). Recorded, never
+  vault's MAC, for the audit page (`confirmed`); accepting lost
+  entries hands it to the audit watch, whose `audit.loss_accepted`
+  names it, and a link hands it to its `account.link`. Recorded, never
   weighed. A **holder** act let through on a fresh session names it
   too; one let through because the person holds no passkey names
   nothing, as does every act the check does not guard.

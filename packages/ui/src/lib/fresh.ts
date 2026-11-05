@@ -48,18 +48,30 @@ export function askFresh(add: boolean): Promise<boolean> {
   return waiting;
 }
 
-/** Whether an answer is the fresh check's refusal, and of a person with no passkey yet (`add`); null for any other. */
-export async function freshRefusal(response: Response): Promise<{ add: boolean } | null> {
+/**
+ * The header the act sent again carries: who its refusal said sent it (`caller`). The server refuses it `409
+ * caller_changed` if another person's session sends it, as after another tab signed in as someone else meanwhile: the
+ * touch then confirmed their session, and the act was asked by the first.
+ */
+export const CALLER_HEADER = 'coffre-caller';
+
+/**
+ * Whether an answer is the fresh check's refusal: of a person with no passkey yet (`add`), and who it says sent the act
+ * (`caller`); null for any other.
+ */
+export async function freshRefusal(response: Response): Promise<{ add: boolean; caller: string | null } | null> {
   if (response.status !== 403) return null;
   const body: unknown = await response.clone().json().catch(() => null);
   if (typeof body !== 'object' || body === null || (body as { error?: unknown }).error !== 'fresh_check_required') return null;
-  return { add: (body as { reason?: unknown }).reason === 'add_passkey' };
+  const caller = (body as { caller?: unknown }).caller;
+  return { add: (body as { reason?: unknown }).reason === 'add_passkey', caller: typeof caller === 'string' ? caller : null };
 }
 
 /**
  * The browser client's transport: `send`, and an act refused for a fresh check sent again, once, after the person
- * confirmed (`ask`). The request is copied before it goes, its body read once into the copy. With no one to ask (no
- * dialog mounted, as outside coffre's pages), the refusal is the answer.
+ * confirmed (`ask`), saying who sent it first (`CALLER_HEADER`). The request is copied before it goes, its body read
+ * once into the copy. With no one to ask (no dialog mounted, as outside coffre's pages), or a refusal that names no
+ * caller, the refusal is the answer.
  */
 export function freshTransport(
   send: (request: Request) => Promise<Response> = (request) => fetch(request),
@@ -69,7 +81,8 @@ export function freshTransport(
     const again = request.clone();
     const response = await send(request);
     const refused = await freshRefusal(response);
-    if (refused === null || !(await ask(refused.add))) return response;
+    if (refused === null || refused.caller === null || !(await ask(refused.add))) return response;
+    again.headers.set(CALLER_HEADER, refused.caller);
     return send(again);
   };
 }
