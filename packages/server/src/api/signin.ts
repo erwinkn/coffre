@@ -494,7 +494,7 @@ export class SigninService {
         return passkeyRefused(meta, factor.state.principal, 'passkey_failed', 'its credential ID is a passkey\'s already');
       }
       // Someone else bound this account first: from the callback, decided again from what is there now.
-      if (known !== undefined) throw new AccessMoved();
+      if (known !== undefined) throw new AccessMoved(error);
       return this.#completeSignin(profile, meta, factor).catch(refusalOrThrow);
     }
   }
@@ -741,12 +741,20 @@ export class SigninService {
     const issuerHash = this.#issuerHash(profile.provider);
     if (policy === 'off' || issuerHash === null) return this.completeSignin(profile, meta);
     // Again, each time the person's access moved between the reads and the transaction: another change of theirs
-    // committed meanwhile, so it ends when those do, with no count of its own (R70).
+    // committed meanwhile, so it ends when those do, with no count of its own (R70). A bind lost to another
+    // sign-in is decided again once: the identities' unique index is on the subject, so the next read finds
+    // the winner, and a violation that read does not resolve is no race, so it is thrown, as `#signedIn`'s own
+    // retry throws its second (Fable review of #500).
+    let rebound = false;
     for (;;) {
       try {
         return await this.#afterProvider(profile, meta, next, policy, issuerHash);
       } catch (error) {
         if (!(error instanceof AccessMoved)) throw error;
+        if (error.violation !== undefined) {
+          if (rebound) throw error.violation;
+          rebound = true;
+        }
       }
     }
   }
@@ -829,7 +837,8 @@ export class SigninService {
       return passkeyRefused(meta, state.principal, 'state_mismatch', "the provider's issuer changed since the callback");
     }
     const profile: SignedInAccount = { provider: state.account.provider, subject: state.account.subject, emails: state.account.email === null ? [] : [state.account.email], name: state.account.name };
-    // The response's CBOR held to the bound its request's JSON is (`MAX_BODY_NODES`): one count of what a body builds.
+    // What the response's strings decode to (its CBOR, its client data) held to the bound its request's JSON is
+    // (`MAX_BODY_NODES`), counted again on them: the work stays within twice the cap.
     const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, values: MAX_BODY_NODES };
     if (state.purpose === 'enroll') {
       const verified = await verifyRegistration(response, expected);
@@ -2078,8 +2087,11 @@ type Known = {
 
 /** The person's access moved between the callback's reads and its transaction: decided again, from the reads. */
 class AccessMoved extends Error {
-  constructor() {
+  /** The unique violation of a bind another sign-in won, when that is what moved. */
+  readonly violation: unknown;
+  constructor(violation?: unknown) {
     super("the person's access changed while they signed in");
+    this.violation = violation;
   }
 }
 

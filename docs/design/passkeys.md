@@ -358,7 +358,8 @@ authenticator data's CBOR and the COSE key, and every value of the decoded
 client data's JSON, whose unknown members are ignored (5.8.1), together, is
 held to the count
 the API holds a body's JSON values to (`MAX_BODY_NODES`, 20,000, R27's CPU
-budget), one count of what a body builds. Without it, a megabyte of maps
+budget), counted again on what the body's strings decode to, so a response
+costs at most twice what a body's JSON may (Fable review). Without it, a megabyte of maps
 nested one byte apiece, in an attestation statement the verifier ignores,
 built about 150 MiB of them before anything refused it, past the 128 MB a
 Worker's isolate has (review r2 of #500). Client data counted only by its

@@ -84,9 +84,10 @@ export type CeremonyExpectation = {
   rpId: string;
   /**
    * The most values the response's client data JSON, attestation object,
-   * authenticator data and COSE key may decode to, all together: the bound the caller
-   * holds a request's values to (coffre's server: its body's, `MAX_BODY_NODES`),
-   * not one of the verifier's own. Neither WebAuthn nor CBOR bounds them, and
+   * authenticator data and COSE key may decode to, all together: the same bound
+   * the caller holds a request's values to (coffre's server: its body's,
+   * `MAX_BODY_NODES`), counted again on what the body's strings decode to, so a
+   * response costs at most twice it; not one of the verifier's own. Neither WebAuthn nor CBOR bounds them, and
    * each costs memory and work as it is built: a megabyte of maps nested a
    * byte apiece built about 150 MiB of them.
    */

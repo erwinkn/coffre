@@ -282,7 +282,7 @@ test("an enrollment begun before an Owner's first admission adds nothing once th
   assert.deepEqual(await counts(), before, 'no passkey, no session, nothing bound');
 });
 
-test('a touch signs in once: the same assertion again, a key of another person, another origin, or no user verification signs nobody in (sections 7.2, 7.3, 13.1-13.6)', async () => {
+test('a touch with a key of another person, from another origin, for another RP ID, or with presence alone signs nobody in, and the sign-in can be tried again (sections 7.2, 7.3, 13.1-13.6)', async () => {
   const runtime = deployment('required');
   const key = await SoftAuthenticator.create('Ed25519');
   await enroll(runtime, NAMED, key);
@@ -603,6 +603,25 @@ test("a person promoted to an Owner of the whole instance between the callback's
   assert.equal(browser.session, undefined);
   assert.equal((await browser.step()).body.purpose, 'enroll');
   assert.deepEqual(await db.owner.select().from(credentials).where(eq(credentials.principal, `user:${ADA}`)), [], 'nothing issued');
+});
+
+test("a bind the callback lost to a unique violation its next read does not resolve is decided again once, then thrown, not retried without end (Fable review of #500)", async () => {
+  // Every transaction fails as a duplicate: no other sign-in won it, so a read finds nothing that settles it.
+  let transactions = 0;
+  const duplicate = new Proxy(deps.db, {
+    get(target, key) {
+      if (key !== 'transaction') return Reflect.get(target, key, target);
+      return async () => {
+        transactions++;
+        throw Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+      };
+    },
+  });
+  const config = defineSignin({ publicUrl: ORIGIN, providers: [provider()], passkeys: 'optional' });
+  const signin = new SigninService({ db: duplicate, chainKey: deps.chainKey, vault: deps.vault, signin: config });
+  const profile = { provider: 'acme', subject: ADA, emails: [ADA], name: 'ada' };
+  await assert.rejects(signin.afterProvider(profile, { requestId: randomUUID(), sourceIp: null, label: null }, '/projects'), { code: '23505' });
+  assert.equal(transactions, 2, 'the callback\'s sign-in, then the one decided again');
 });
 
 test("a new passkey whose credential ID is another person's already is refused as a passkey that did not answer, not a database error (section 3.2; review r1 of #500)", async () => {
