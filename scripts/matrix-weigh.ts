@@ -1,6 +1,8 @@
 // What a refusal of the use matrices reads inside the vault's hot path, weighed alike in both: the vault's,
 // `packages/vault/test/use.matrix.ts`, and the app's, `packages/server/test/named.matrix.ts` (D153, W268's
 // NoKeyBeforeStanding: a caller standing nowhere reads no key, so as many buffers whatever the key).
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import { postgresClient } from '@coffre/db/connect';
 
 /** A `use_credential` (or `use_named_batch`, or `use_route`) call as it was sent: its text and its arguments, `$1` first. */
@@ -65,6 +67,58 @@ export async function weigh(session: WeighingSession, call: HotCall): Promise<We
     least = read;
   }
   return least!;
+}
+
+/**
+ * The sessions that may still see a row deleted by a transaction older than `$1`, a transaction id: in any of the
+ * cluster's databases, one whose transaction took an id older than it, or whose snapshot's oldest is. Neither this session (`pg_backend_pid`)
+ * nor one holding neither (a session between transactions, or reading with no snapshot yet: `age(NULL)` is no age),
+ * nor any but a client's (autovacuum's snapshot holds no one's rows back, and no other kind runs a test's work).
+ * `age` compares ids as Postgres does, modulo 2³², which `pg_stat_activity`'s 32-bit ids need.
+ */
+const HOLDERS = `
+  SELECT pid, datname, state, xact_start::text AS since, backend_xid::text AS xid, backend_xmin::text AS xmin
+    FROM pg_stat_activity
+   WHERE pid <> pg_backend_pid() AND backend_type = 'client backend'
+     AND (age(backend_xid) > age($1::xid) OR age(backend_xmin) > age($1::xid))`;
+
+/**
+ * Resolves once every row deleted before it is called is dead to every session started after: once no session that
+ * might still see it (`HOLDERS`) is left, in any database of the cluster, since that is how far a new session's
+ * snapshot looks (its xmin is the oldest id still running anywhere). Until then a new session's planner, probing an
+ * end of `log_bulk_pkey` for the range its estimates use (`get_actual_variable_range`, which skips only rows known
+ * dead), takes a deleted row there for one that may still be seen and reads its heap page as a live row's; once that
+ * ends, the first session to plan reads the dead row's page and the next row's, one block more, and marks the entry
+ * dead, so that no session after it reads it. A transaction of another test's database ending between a call and its
+ * twins moved that block from one to the next: `log_bulk` 9 blocks beside 8 for a key never made, or 8 beside 9, in
+ * the rows of the window passed, which delete their principal's rows of the cap's (T225: in CI, the other matrices'
+ * work beside them on the one Postgres). Weighed after this, every call faces the index its first warm-up leaves.
+ *
+ * `watcher` must see every session's state and start, which Postgres shows only to a superuser or `pg_read_all_stats`
+ * (the owner's, in compose and CI). It waits until `signal` aborts: the test's own timeout, the only bound there is on
+ * how long a transaction elsewhere in the cluster may run, so no number of its own (R70). Aborted, it fails naming each
+ * session still in the way, on stderr as well as in its error: a test that timed out reports its timeout alone, not
+ * the error it ends with. It polls every 25 ms: how late past the last holder's end a batch is weighed, a delay of the
+ * test's alone, which bounds nothing.
+ */
+export async function deletesSettled(watcher: WeighingSession, signal: AbortSignal): Promise<void> {
+  const [{ sees }] = await watcher.unsafe(`SELECT pg_has_role('pg_read_all_stats', 'MEMBER') AS sees`) as unknown as { sees: boolean }[];
+  if (!sees) throw new Error('deletesSettled needs a login that sees every session (a superuser or pg_read_all_stats): it could not name what it waits for');
+  // One past the newest transaction to have ended (a snapshot's xmax), as `pg_stat_activity`'s 32-bit ids are: every
+  // row deleted before the call was deleted by a transaction older than this.
+  const [{ ended }] = await watcher.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
+  type Holder = { pid: number; datname: string | null; state: string | null; since: string | null; xid: string | null; xmin: string | null };
+  for (;;) {
+    const holders = await watcher.unsafe(HOLDERS, [ended]) as unknown as Holder[];
+    if (holders.length === 0) return;
+    if (signal.aborted) {
+      const named = holders.map((h) => `pid ${h.pid} (database ${h.datname}, ${h.state}, its transaction begun ${h.since}, xid ${h.xid ?? 'none'}, xmin ${h.xmin ?? 'none'})`);
+      const message = `the rows a batch deleted may still be seen when the test's time ran out: ${named.length} session(s) older than xid ${ended} still run, ${named.join('; ')}`;
+      console.error(message);
+      throw new Error(message);
+    }
+    await sleep(25, undefined, { signal }).catch(() => undefined);
+  }
 }
 
 /**
