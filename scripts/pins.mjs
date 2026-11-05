@@ -18,7 +18,8 @@
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::\d+)?\/?[a-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-const LOOPBACK = /127\.0\.0\.1|localhost|\[::1\]|\$\{?COFFRE_/;
+// A URL of this machine's, or the dev stack's own: what it answers is no artifact.
+const LOOPBACK = /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)|^\$\{?COFFRE_DEV_[A-Z_]*URL\}?(?:\/|$)/;
 
 /** The kinds of file whose contents fetch or run something. */
 export function kindOf(path) {
@@ -45,19 +46,25 @@ export function problemsIn(path, text, { root = false } = {}) {
     }
     const logical = kind === 'json' ? jsonLines(text, lines) : logicalLines(lines, kind);
     for (const { index, line, exempt } of logical) {
+        if (exempt) continue;
+        // A Dockerfile's frontend is an image BuildKit pulls.
+        const syntax = kind === 'dockerfile' && line.match(/^#\s*syntax\s*=\s*(\S+)/i);
+        if (syntax && !IMAGE.test(syntax[1])) report(index, `syntax ${syntax[1]} is not name:tag@sha256:<index digest>`);
         // Comments name commands without running them.
-        if (exempt || /^\s*#/.test(line)) continue;
+        if (/^\s*#/.test(line)) continue;
         if (kind === 'workflow') workflowLine(line, index, lines, report);
         if (kind === 'workflow' || kind === 'compose') {
-            const image = line.match(/^\s*(?:-\s+)?(?:image|container):\s*['"]?([^'"\s#]+)/);
-            if (image && !image[1].startsWith('${{') && !IMAGE.test(image[1])) report(index, `image ${image[1]} is not name:tag@sha256:<index digest>`);
-        }
-        if (kind === 'dockerfile') {
-            const from = line.match(/^\s*FROM\s+(?:--platform=\S+\s+)?(\S+)/i);
-            if (from && from[1] !== 'scratch' && !stages(lines).has(from[1].toLowerCase()) && !IMAGE.test(from[1])) {
-                report(index, `FROM ${from[1]} is not name:tag@sha256:<index digest>`);
+            const image = line.match(/^\s*(?:-\s+)?(?:image|container):\s*(.*?)\s*(?:#.*)?$/)?.[1].replace(/^(['"])(.*)\1$/, '$2');
+            // A mapping's (`container:` above its `image:`) is on the lines below;
+            // a matrix's `image:` is a value, held where it is used.
+            if (image && !inMatrix(lines, index)) {
+                const matrix = image.match(/^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/);
+                const values = matrix ? matrixValues(lines, index, matrix[1]) : [image];
+                if (values.length === 0) report(index, `image ${image}: no value this reads; name the image, or list it under the job's matrix`);
+                for (const value of values) if (!IMAGE.test(value)) report(index, `image ${value} is not name:tag@sha256:<index digest>`);
             }
         }
+        if (kind === 'dockerfile') dockerfileLine(line, index, lines, report);
         // BuildKit in a container is an image too, and its default moves.
         if (/\bbuildx\s+create\b/.test(line) && !/image=/.test(line)) report(index, 'docker buildx create without a pinned --driver-opt image=');
         for (const option of line.matchAll(/\b(?:image|generator)=([^\s,"']+)/g)) {
@@ -114,6 +121,37 @@ function exempted(lines, start, line) {
     return false;
 }
 
+// What a Dockerfile's instructions fetch besides RUN's commands: FROM's
+// image, COPY's and a mount's `--from` image, ADD's remote sources.
+function dockerfileLine(line, index, lines, report) {
+    const instruction = line.match(/^\s*([A-Za-z]+)\s+(.*)$/);
+    if (!instruction) return;
+    const name = instruction[1].toUpperCase();
+    const named = stages(lines);
+    const image = (ref, what) => {
+        if (ref === 'scratch' || /^\d+$/.test(ref) || named.has(ref.toLowerCase()) || IMAGE.test(ref)) return;
+        report(index, `${what} ${ref} is not name:tag@sha256:<index digest>`);
+    };
+    const words = instruction[2].trim().split(/\s+/);
+    const flags = words.filter((word, i) => word.startsWith('--') && words.slice(0, i).every((w) => w.startsWith('--')));
+    if (name === 'FROM') image(words.find((word) => !word.startsWith('--')) ?? '', 'FROM');
+    for (const flag of flags) {
+        const from = flag.match(/^--from=(.+)$/) ?? flag.match(/^--mount=(?:.*,)?from=([^,]+)/);
+        if (from && ['COPY', 'ADD', 'RUN'].includes(name)) image(from[1], name === 'RUN' ? 'RUN --mount from' : `${name} --from`);
+    }
+    if (name !== 'ADD') return;
+    let sources = words.slice(flags.length);
+    if (sources[0]?.startsWith('[')) {
+        try { sources = JSON.parse(instruction[2].slice(instruction[2].indexOf('['))); } catch { return report(index, 'ADD in a form this cannot read'); }
+    }
+    const checksum = flags.some((flag) => /^--checksum=sha256:[0-9a-f]{64}$/.test(flag));
+    for (const source of sources.slice(0, -1)) {
+        const git = /^git@|^git:\/\/|\.git(?:#|$)/.test(source);
+        if (git && !/#[0-9a-f]{40}$/.test(source)) report(index, `ADD ${source} takes the branch as it is: name its commit (#<sha>)`);
+        else if (!git && /^[a-z][a-z0-9+.-]*:\/\//i.test(source) && !checksum) report(index, `ADD ${source} without --checksum=sha256:<pinned>`);
+    }
+}
+
 function stages(lines) {
     const names = new Set();
     for (const line of lines) {
@@ -150,29 +188,56 @@ function workflowLine(line, index, lines, report) {
     }
 }
 
-// The values of the matrix key, in the nearest `matrix:` above the line that
-// uses it, as a flow list (`node: ['runner', '24.22.1']`) or one per line.
+// Whether the line is in a `matrix:`, one of the keys it sits under.
+function inMatrix(lines, index) {
+    let indent = lines[index].match(/^\s*/)[0].length;
+    for (let i = index - 1; i >= 0 && indent > 0; i--) {
+        if (lines[i].trim() === '' || /^\s*#/.test(lines[i])) continue;
+        const own = lines[i].match(/^\s*/)[0].length;
+        if (own >= indent) continue;
+        if (/^\s*matrix:\s*(#.*)?$/.test(lines[i])) return true;
+        indent = own;
+    }
+    return false;
+}
+
+// Every value the matrix key takes in the job of the line that uses it: its
+// list, flow (`node: ['runner', '24.22.1']`) or one per line, and every
+// `include:` entry's, block or flow. None, when the matrix is not written out
+// (`matrix: ${{ fromJSON(…) }}`): then the caller reports it.
 function matrixValues(lines, index, key) {
     const unquote = (value) => value.trim().replace(/^(['"])(.*)\1$/, '$2');
-    let start = index;
-    while (start >= 0 && !/^\s*matrix:\s*(#.*)?$/.test(lines[start])) start--;
-    if (start < 0) return [];
     const indent = (line) => line.match(/^\s*/)[0].length;
-    for (let i = start + 1; i < lines.length && (lines[i].trim() === '' || indent(lines[i]) > indent(lines[start])); i++) {
-        const entry = lines[i].match(new RegExp(`^(\\s*)${key}:\\s*(.*?)\\s*(#.*)?$`));
-        if (!entry) continue;
-        const flow = entry[2].match(/^\[(.*)\]$/);
-        if (flow) return flow[1].split(',').map(unquote).filter(Boolean);
-        if (entry[2] !== '') return [unquote(entry[2])];
-        const values = [];
-        for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || /^\s*#/.test(lines[j]) || indent(lines[j]) > entry[1].length); j++) {
-            const item = lines[j].match(/^\s*-\s+(.*?)\s*(#.*)?$/);
-            if (item) values.push(unquote(item[1]));
-            else if (lines[j].trim() !== '' && !/^\s*#/.test(lines[j])) return [];
+    const content = (line) => line.trim() !== '' && !/^\s*#/.test(line);
+    // The job: from its key, the nearest line above at the jobs' indent, to the next.
+    const jobs = lines.findIndex((line) => /^jobs:\s*(#.*)?$/.test(line));
+    if (jobs < 0 || index < jobs) return [];
+    const level = indent(lines.slice(jobs + 1).find(content) ?? '');
+    let start = index;
+    while (start > jobs && !(content(lines[start]) && indent(lines[start]) === level)) start--;
+    let end = start + 1;
+    while (end < lines.length && !(content(lines[end]) && indent(lines[end]) <= level)) end++;
+    const matrix = lines.slice(start, end).findIndex((line) => /^\s*matrix:\s*(#.*)?$/.test(line)) + start;
+    if (matrix < start) return [];
+    const values = [];
+    const entry = new RegExp(`^(\\s*(?:-\\s+)?)${key}:\\s*(.*?)\\s*(#.*)?$`);
+    const inFlow = new RegExp(`[{,]\\s*${key}:\\s*([^,}]+)`, 'g');
+    for (let i = matrix + 1; i < end && (!content(lines[i]) || indent(lines[i]) > indent(lines[matrix])); i++) {
+        for (const flow of lines[i].matchAll(inFlow)) values.push(unquote(flow[1]));
+        const own = lines[i].match(entry);
+        if (!own) continue;
+        const list = own[2].match(/^\[(.*)\]$/);
+        if (list) values.push(...list[1].split(',').map(unquote).filter(Boolean));
+        else if (own[2] !== '') values.push(unquote(own[2]));
+        else {
+            for (let j = i + 1; j < end && (!content(lines[j]) || indent(lines[j]) > own[1].length); j++) {
+                const item = lines[j].match(/^\s*-\s+(.*?)\s*(#.*)?$/);
+                if (item) values.push(unquote(item[1]));
+                else if (content(lines[j])) values.push(lines[j].trim());
+            }
         }
-        return values;
     }
-    return [];
+    return values;
 }
 
 // The file's shell, in order: a workflow's `run:`s, a Dockerfile's `RUN`s, a
@@ -187,7 +252,7 @@ function script(logical, kind) {
             const run = line.match(/^(\s*(?:-\s+)?)run:\s*(.*)$/);
             const indent = line.match(/^\s*/)[0].length;
             if (run) {
-                block = /^[|>][-+]?\s*$/.test(run[2]) ? run[1].length : null;
+                block = /^[|>][-+0-9]*\s*(#.*)?$/.test(run[2]) ? run[1].length : null;
                 text = block === null ? run[2] : '';
             } else if (block !== null && (line.trim() === '' || indent > block)) {
                 text = line;
@@ -206,7 +271,24 @@ function script(logical, kind) {
     return out;
 }
 
-const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for', 'case', 'esac', '!', '{', '}', 'time', 'exec', 'command', 'sudo', 'nohup', 'local', 'export', 'readonly', 'declare']);
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for', 'case', 'esac', '!', '{', '}', 'local', 'export', 'readonly', 'declare']);
+// The commands that run the command after them, with their options that take a value.
+const WRAPPERS = new Map([
+    ['sudo', { value: ['-u', '--user', '-g', '--group', '-C', '--close-from', '-D', '--chdir', '-h', '--host', '-p', '--prompt', '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout'] }],
+    ['env', { value: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'] }],
+    ['timeout', { value: ['-s', '--signal', '-k', '--kill-after'], operands: 1 }],
+    ['nice', { value: ['-n', '--adjustment'] }],
+    ['ionice', { value: ['-c', '--class', '-n', '--classdata'] }],
+    ['stdbuf', { value: ['-i', '-o', '-e'] }],
+    ['xargs', { value: ['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '--max-lines', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars'] }],
+    ['nohup', {}],
+    ['exec', { value: ['-a'] }],
+    ['time', { value: ['-f', '--format', '-o', '--output'] }],
+    ['command', {}],
+]);
+// What only fetches, for a command whose program this cannot read: `docker`,
+// `git` or `pnpm` as a word is as often a name (a group, a service) as a run.
+const FETCHES = new Set(['curl', 'wget', 'apt-get', 'npx', 'pnpx', 'bunx']);
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
 
 /**
@@ -219,9 +301,27 @@ export function commands(text) {
     const out = [];
     parse(text, out, null);
     for (const command of out) {
+        const words = command.words;
         let i = 0;
-        while (i < command.words.length && (KEYWORDS.has(command.words[i]) || ASSIGNMENT.test(command.words[i]))) i++;
-        command.argv = command.words.slice(i);
+        for (;;) {
+            while (i < words.length && (KEYWORDS.has(words[i]) || ASSIGNMENT.test(words[i]))) i++;
+            const wrapper = WRAPPERS.get(words[i]);
+            if (!wrapper) break;
+            // `command -v curl` looks it up and runs nothing.
+            if (words[i] === 'command' && /^-[vV]$/.test(words[i + 1] ?? '')) {
+                i = words.length;
+                break;
+            }
+            for (i++; i < words.length && words[i].startsWith('-') && words[i] !== '-'; i++) {
+                if (words[i] === '--') {
+                    i++;
+                    break;
+                }
+                if (!words[i].includes('=') && wrapper.value?.includes(words[i])) i++;
+            }
+            i += wrapper.operands ?? 0;
+        }
+        command.argv = words.slice(i);
         if (command.argv[0] === 'corepack') command.argv = command.argv.slice(1);
     }
     return out;
@@ -354,6 +454,8 @@ const PNPM_VALUE = new Set(['-C', '--dir', '-F', '--filter', '--filter-prod', '-
 const DOCKER_VALUE = new Set(['-a', '--attach', '--add-host', '--cap-add', '--cap-drop', '--cgroupns', '--cidfile', '--cpus', '-c', '--cpu-shares', '--device', '--dns', '--entrypoint', '-e', '--env', '--env-file', '--expose', '--gpus', '-h', '--hostname', '--health-cmd', '--ip', '-l', '--label', '--log-driver', '--log-opt', '-m', '--memory', '--mount', '--name', '--network', '--net', '--platform', '-p', '--publish', '--pull', '--restart', '--security-opt', '--shm-size', '--stop-signal', '--stop-timeout', '--tmpfs', '-u', '--user', '--ulimit', '-v', '--volume', '--volumes-from', '-w', '--workdir']);
 const NPX_VALUE = new Set(['-c', '--call', '--cache', '--userconfig']);
 const SHA256 = /^(sha256|sha256sum|shasum)$/;
+// Programs that take a command's name as a word and run nothing.
+const NAMES = new Set(['echo', 'printf', 'which', 'type', 'hash', 'grep', 'rg', 'test', '[', '[[', 'case', 'need', 'require']);
 
 function shell(list, report) {
     const assigned = new Map();
@@ -367,6 +469,11 @@ function shell(list, report) {
         if (command.exempt) return;
         const [program, ...args] = command.argv;
         const say = (message) => report(command.index, message);
+        // A command that runs another this cannot pick out (`retry curl …`, `sudo --weird curl`).
+        const hidden = command.argv.slice(1).find((word) => FETCHES.has(word));
+        if (hidden && (program === undefined || program.startsWith('-') || !NAMES.has(program)) && !FETCHES.has(program)) {
+            say(`${program} runs ${hidden} in a way this cannot read: run it directly, or say why with # unpinned:`);
+        }
         if (program === 'curl' || program === 'wget') download(list, at, program, args, say);
         if (program === 'git' && operand(args, new Set(['-C', '-c']))?.value === 'clone') clone(list, at, args, say);
         if (program === 'docker' && ['run', 'create', 'pull'].includes(args[0])) {
@@ -396,18 +503,26 @@ function shell(list, report) {
             const sub = operand(args, new Set(['--prefix']));
             const rest = args.slice(sub.at + 1);
             const named = rest.filter((arg, i) => !arg.startsWith('-') && rest[i - 1] !== '--prefix');
-            if (named.length === 0 || !named.every((arg) => arg.endsWith('.tgz'))) say('npm install outside a lockfile');
+            // A file of this machine's: no scheme (`https:`, `git+ssh:`, `file:`), no `owner/repo#ref`.
+            const local = (arg) => arg.endsWith('.tgz') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(arg) && !arg.includes('#');
+            if (named.length === 0 || !named.every(local)) say('npm install outside a lockfile');
         }
         if ((program === 'apt-get' || program === 'apt') && args.includes('install')) say("apt-get install takes the archive's current versions");
     });
 }
 
 function runner(name, args, say) {
-    // npx's --package names what it runs.
-    const flag = args.findIndex((arg) => arg === '-p' || arg === '--package' || arg.startsWith('--package='));
-    const spec = flag >= 0 ? (args[flag].startsWith('--package=') ? args[flag].slice('--package='.length) : args[flag + 1]) : operand(args, NPX_VALUE)?.value;
-    const version = spec?.slice(spec.lastIndexOf('@') + 1);
-    if (!spec || spec.lastIndexOf('@') <= 0 || !EXACT_VERSION.test(version)) say(`${name} ${spec ?? ''} is not name@<exact version>`);
+    // Each --package names what it fetches; without one, the command does.
+    const specs = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '-p' || args[i] === '--package') specs.push(args[++i]);
+        else if (args[i].startsWith('--package=')) specs.push(args[i].slice('--package='.length));
+    }
+    if (specs.length === 0) specs.push(operand(args, NPX_VALUE)?.value);
+    for (const spec of specs) {
+        const version = spec?.slice(spec.lastIndexOf('@') + 1);
+        if (!spec || spec.lastIndexOf('@') <= 0 || !EXACT_VERSION.test(version)) say(`${name} ${spec ?? ''} is not name@<exact version>`);
+    }
 }
 
 // A download is written to a file, and the first command that names the file
@@ -415,7 +530,9 @@ function runner(name, args, say) {
 // as a value, or read before.
 function download(list, at, program, args, say) {
     const command = list[at];
-    if (args.some((arg) => LOOPBACK.test(arg))) return;
+    // The URLs, and the variables that may hold one; a health check of this machine's fetches no artifact.
+    const urls = args.filter((arg) => /^[a-z][a-z0-9+.-]*:\/\//i.test(arg) || /^(localhost|127\.0\.0\.1|\[::1\])/.test(arg) || arg.startsWith('$'));
+    if (urls.length > 0 && urls.every((url) => LOOPBACK.test(url))) return;
     let file = null;
     let named = false;
     for (let i = 0; i < args.length; i++) {
