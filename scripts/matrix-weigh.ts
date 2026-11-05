@@ -71,16 +71,27 @@ export async function weigh(session: WeighingSession, call: HotCall): Promise<We
 
 /**
  * The sessions that may still see a row deleted by a transaction older than `$1`, a transaction id: in any of the
- * cluster's databases, one whose transaction took an id older than it, or whose snapshot's oldest is. Neither this session (`pg_backend_pid`)
- * nor one holding neither (a session between transactions, or reading with no snapshot yet: `age(NULL)` is no age),
- * nor any but a client's (autovacuum's snapshot holds no one's rows back, and no other kind runs a test's work).
- * `age` compares ids as Postgres does, modulo 2³², which `pg_stat_activity`'s 32-bit ids need.
+ * cluster's databases, one whose transaction took an id older than it, or whose snapshot's oldest is. Neither this
+ * session (`pg_backend_pid`) nor one holding neither (a session between transactions, or reading with no snapshot yet:
+ * `age(NULL)` is no age). Every other kind of session counts, not only clients: an autovacuum worker's ANALYZE runs in a
+ * transaction of its own, whose id and snapshot hold rows back as a client's do; only a lazy VACUUM is left out of the
+ * horizon (`PROC_IN_VACUUM`), and waiting on one too costs at most its run. `age` compares ids as Postgres does, modulo
+ * 2³², which `pg_stat_activity`'s 32-bit ids need.
  */
 const HOLDERS = `
-  SELECT pid, datname, state, xact_start::text AS since, backend_xid::text AS xid, backend_xmin::text AS xmin
+  SELECT pid, backend_type AS kind, datname, state, xact_start::text AS since, backend_xid::text AS xid, backend_xmin::text AS xmin
     FROM pg_stat_activity
-   WHERE pid <> pg_backend_pid() AND backend_type = 'client backend'
+   WHERE pid <> pg_backend_pid()
      AND (age(backend_xid) > age($1::xid) OR age(backend_xmin) > age($1::xid))`;
+
+/**
+ * How often a wait still held up names what holds it, on stderr: a cadence of the log's, which bounds nothing. A batch
+ * waits about 5 s (T225's runs); a wait a minute long is already one to look at, and one held by a session that never
+ * ends names it each minute until CI cancels the job, at 30 minutes (`validate.yml`). The test runner shows a file's
+ * output once the files before it are done, and all of it when it is stopped (SIGINT or SIGTERM), so the names reach
+ * the log either way, where the test's own timeout, two hours, never comes.
+ */
+const NAME_HOLDERS_EVERY_MS = 60_000;
 
 /**
  * Resolves once every row deleted before it is called is dead to every session started after: once no session that
@@ -94,28 +105,36 @@ const HOLDERS = `
  * the rows of the window passed, which delete their principal's rows of the cap's (T225: in CI, the other matrices'
  * work beside them on the one Postgres). Weighed after this, every call faces the index its first warm-up leaves.
  *
- * `watcher` must see every session's state and start, which Postgres shows only to a superuser or `pg_read_all_stats`
- * (the owner's, in compose and CI). It waits until `signal` aborts: the test's own timeout, the only bound there is on
- * how long a transaction elsewhere in the cluster may run, so no number of its own (R70). Aborted, it fails naming each
- * session still in the way, on stderr as well as in its error: a test that timed out reports its timeout alone, not
- * the error it ends with. It polls every 25 ms: how late past the last holder's end a batch is weighed, a delay of the
- * test's alone, which bounds nothing.
+ * `watcher` must have the privileges of `pg_read_all_stats` (a superuser does: the owner, in compose and CI), not only
+ * be a member of it (`USAGE`, not `MEMBER`: a membership granted `INHERIT FALSE` gives none): without them Postgres
+ * shows it no other login's transaction ids, and `HOLDERS` would find nothing to wait on. It waits until `signal`
+ * aborts: the test's own timeout, the only bound there is on how long a transaction elsewhere in the cluster may run,
+ * so no number of its own (R70). While it waits it names what holds it every `NAME_HOLDERS_EVERY_MS`, so that a wait
+ * CI cancels first is not a silent one; aborted, it fails naming each session still in the way, on stderr as well as
+ * in its error: a test that timed out reports its timeout alone, not the error it ends with. It polls every 25 ms: how
+ * late past the last holder's end a batch is weighed, a delay of the test's alone, which bounds nothing.
  */
 export async function deletesSettled(watcher: WeighingSession, signal: AbortSignal): Promise<void> {
-  const [{ sees }] = await watcher.unsafe(`SELECT pg_has_role('pg_read_all_stats', 'MEMBER') AS sees`) as unknown as { sees: boolean }[];
-  if (!sees) throw new Error('deletesSettled needs a login that sees every session (a superuser or pg_read_all_stats): it could not name what it waits for');
+  const [{ sees }] = await watcher.unsafe(`SELECT pg_has_role('pg_read_all_stats', 'USAGE') AS sees`) as unknown as { sees: boolean }[];
+  if (!sees) throw new Error("deletesSettled needs a login with pg_read_all_stats's privileges (a superuser, or a member that inherits them): it could not see what it waits for");
   // One past the newest transaction to have ended (a snapshot's xmax), as `pg_stat_activity`'s 32-bit ids are: every
   // row deleted before the call was deleted by a transaction older than this.
   const [{ ended }] = await watcher.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
-  type Holder = { pid: number; datname: string | null; state: string | null; since: string | null; xid: string | null; xmin: string | null };
+  type Holder = { pid: number; kind: string | null; datname: string | null; state: string | null; since: string | null; xid: string | null; xmin: string | null };
+  const named = (holders: Holder[]) => holders.map((h) => `pid ${h.pid} (${h.kind}, database ${h.datname ?? 'none'}, ${h.state ?? 'no state'}, its transaction begun ${h.since}, xid ${h.xid ?? 'none'}, xmin ${h.xmin ?? 'none'})`).join('; ');
+  const began = performance.now();
+  let nextNaming = began + NAME_HOLDERS_EVERY_MS;
   for (;;) {
     const holders = await watcher.unsafe(HOLDERS, [ended]) as unknown as Holder[];
     if (holders.length === 0) return;
     if (signal.aborted) {
-      const named = holders.map((h) => `pid ${h.pid} (database ${h.datname}, ${h.state}, its transaction begun ${h.since}, xid ${h.xid ?? 'none'}, xmin ${h.xmin ?? 'none'})`);
-      const message = `the rows a batch deleted may still be seen when the test's time ran out: ${named.length} session(s) older than xid ${ended} still run, ${named.join('; ')}`;
+      const message = `the rows a batch deleted may still be seen when the test's time ran out: ${holders.length} session(s) older than xid ${ended} still run, ${named(holders)}`;
       console.error(message);
       throw new Error(message);
+    }
+    if (performance.now() >= nextNaming) {
+      console.error(`deletesSettled has waited ${Math.round((performance.now() - began) / 1000)} s for ${holders.length} session(s) older than xid ${ended}: ${named(holders)}`);
+      nextNaming += NAME_HOLDERS_EVERY_MS;
     }
     await sleep(25, undefined, { signal }).catch(() => undefined);
   }
