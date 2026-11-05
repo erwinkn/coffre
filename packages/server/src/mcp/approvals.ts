@@ -313,6 +313,8 @@ export class McpApprovals {
     const touch = input.approve
       ? await touches.touchFor(ctx, { kind: 'approval', id: row.id, answer: answerDigest([digest, input.basis ?? null, input.value ?? null]) }, input.touch)
       : null;
+    // When it was touched, which the change's entries name as what confirmed it (`McpVia.touched`).
+    const touchedAt = new Date().toISOString();
     // The change's own fresh check (passkeys.md, section 4.4), before the approval is decided, so that a refusal leaves
     // it pending: the touch stands for it; with none, a person who holds no passkey, under `optional`, adds one first.
     if (input.approve && touch === null && tool.change!.fresh === 'always') requireFresh(ctx, 'always', `mcp ${tool.name}`);
@@ -340,10 +342,11 @@ export class McpApprovals {
     // A reveal reads the value for the page alone, so its call may reach Reveal values' route whatever the connection holds.
     const scopes = [...parseScopes(connection.scopes).scopes, ...(tool.change!.reveal === true ? (['reveal'] as const) : [])];
     // Approved with a touch, which the router's fresh check of the change takes for its own (`freshness`).
-    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id, touched: touch !== null };
+    const via: McpVia = { connectionId: connection.id, clientId: connection.clientId, clientName: connection.clientName, scopes, approvalId: row.id, ...(touch === null ? {} : { touched: { by: touch.passkeyId, at: touchedAt } }) };
     let applied: Applied;
     try {
-      applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id }), args as never, { value: input.value, replaced });
+      // The change's own request: the router's check decides what confirms it, from `via` (`requireFresh`), not the page's.
+      applied = await tool.change!.apply(this.#client({ ...ctx, via, provenance: connection.id, confirmed: null }), args as never, { value: input.value, replaced });
     } catch (error) {
       const known = error instanceof CoffreError;
       if (!known) console.error('an approved MCP change failed', logged(error));

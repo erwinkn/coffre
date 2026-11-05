@@ -262,4 +262,7 @@ test("an MCP client's change that takes a fresh check: the approval's own touch 
   assert.equal(approved.status, 200, await approved.clone().text());
   assert.equal(((await approved.json()) as { status: string }).status, 'approved');
   assert.equal(await held(), 1);
+  // The grant's entry names what confirmed it: the approval's touch, not the session's older one (section 11).
+  const granted = (await entries('access.grant')).at(-1)!;
+  assert.deepEqual([granted.metadata.confirmedBy, granted.metadata.confirmedAt], [passkey, new Date().toISOString()]);
 });

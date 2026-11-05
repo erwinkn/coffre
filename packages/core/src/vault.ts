@@ -827,7 +827,8 @@ export type RecordRefusalInput = { ticket: string };
 export type RecordRefusalOutcome = { recorded: true; number: string } | { recorded: false; why: 'expired' };
 
 /** The add `admitRead` prepared, as it answered it. */
-export type AdmitWriteInput = { ticket: string };
+/** The ticket `admitRead` answered, and what confirmed the add (`Confirmation`), which its change records: the add is a fresh check's. */
+export type AdmitWriteInput = { ticket: string; confirmed?: Confirmation | null };
 
 /** The add written and sealed (its change's number), or not: `moved`, the read no longer as decided; `expired`, the ticket's time past. */
 export type AdmitWriteOutcome =
@@ -1090,6 +1091,8 @@ export type IssueTokenInput = {
   via: string | null;
   /** Whose act it was, for its change's record (`RequestTrace`); none for a request on no such credential. */
   trace?: RequestTrace | null;
+  /** What confirmed the session that issues it, for an issue a fresh check guards (`Confirmation`); none otherwise. */
+  confirmed?: Confirmation | null;
   /** Whom it acts as: a service account's `token:<id>`, or the actor, for a personal token or a handle. */
   principal: string;
   /** The principal's generation it is issued at. */
@@ -1430,7 +1433,25 @@ type Correlation = {
    * decides on it, so that a read leads back to its run (docs/design/oidc.md).
    */
   credentialId?: string | null;
+  /** What confirmed the act's session, for an act a fresh check guards (`Confirmation`): copied into its entries. */
+  confirmed?: Confirmation | null;
 };
+
+/**
+ * The passkey touch that let an act a fresh check guards through, as its entries name it, `confirmedBy` and
+ * `confirmedAt` (docs/design/passkeys.md, section 11): the passkey, by id, and when it was touched, ISO 8601. The
+ * session's touch, or the one that approved an MCP client's change. The app's word, which the vault records and never
+ * weighs.
+ */
+export type Confirmation = { by: string; at: string };
+
+/** A confirmation as the app sends one, or none: recorded, never weighed, so held to its shape alone. */
+export function isConfirmation(value: unknown): value is Confirmation | null | undefined {
+  if (value === null || value === undefined) return true;
+  const { by, at } = value as { by?: unknown; at?: unknown };
+  return typeof by === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(by)
+    && typeof at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(at) && !Number.isNaN(Date.parse(at));
+}
 
 /**
  * The credential the request came in on, which the vault decides on, unlike

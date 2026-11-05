@@ -18,6 +18,7 @@ import {
   type Vault,
   type Via,
   type WrappedKey,
+  type Confirmation,
 } from '@coffre/core/vault';
 
 import { AccessChanged, type Recalled } from '../accesses.ts';
@@ -34,7 +35,7 @@ import { ApiError, UNAVAILABLE, UnloggedRefusal, vaultRefused } from './errors.t
  */
 
 /** Who is asking the vault, and why: the operation id ties the vault's entries to the app's for the same action. */
-export type Asking = Through & { principal: string; requestId: string | null; operationId: string | null; credentialId?: string | null };
+export type Asking = Through & { principal: string; requestId: string | null; operationId: string | null; credentialId?: string | null; confirmed?: Confirmation };
 
 export type Keyed<T> = { ok: true; values: T[] } | { ok: false; refusal: Refusal };
 

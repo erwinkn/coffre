@@ -23,6 +23,7 @@ import {
   type ServiceSetting,
 } from '@coffre/core/access';
 import { EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
+import { isConfirmation } from '@coffre/core/vault';
 import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
@@ -297,7 +298,7 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   if (typeof actor !== 'string' || !member.test(actor) || typeof principal !== 'string' || !member.test(principal) || !Number.isInteger(generation)
     || (via !== null && (typeof via !== 'string' || !UUID.test(via))) || !isPolicy(policy)
     || (input.actorAccess !== null && (typeof input.actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(input.actorAccess))) || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
-    || !isTrace(input.trace)) {
+    || !isTrace(input.trace) || !isConfirmation(input.confirmed)) {
     throw new Error('an issue names its issuer, the credential it came in on, whom it acts as at which generation, the policy weighed, and the app\'s key');
   }
   if (typeof c?.id !== 'string' || !UUID.test(c.id) || (c.kind !== 'service' && c.kind !== 'personal' && c.kind !== 'handle') || !isBase64(c.tokenHash, 32)
@@ -465,7 +466,7 @@ export function issueCall(keys: ChangeKeys, input: IssueTokenInput, read: IssueR
   const op: Op = { op: 'credential.issue', principal: input.principal, caller: object.caller, scope: object.scope, expiresAt: object.expiresAt, generation: object.generation };
   // What the change records of the issue besides (D147): who, on which credential, whose act it was (T164), which kind,
   // its label.
-  const payload = canonical({ ...JSON.parse(payloadOf(ref, op)), issue: { by: input.actor, via: input.via, trace: input.trace ?? undefined, kind: c.kind, label: c.label } });
+  const payload = canonical({ ...JSON.parse(payloadOf(ref, op)), issue: { by: input.actor, via: input.via, trace: input.trace ?? undefined, confirmed: input.confirmed ?? undefined, kind: c.kind, label: c.label } });
   const seal = sealOf(keys.seals[0]!, ref, object);
   const row = { at: read.at, requestId: randomUUID(), object: objectKey(ref), actor: input.actor, payload, seal };
   return {

@@ -1,7 +1,7 @@
 import type { ProxyCode } from '../proxy-code.ts';
 import { makesProjects, runsInstance, type Permission } from '@coffre/core/access';
 import type { McpScope } from '@coffre/core/mcp';
-import type { Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
+import type { Confirmation, Refusal as VaultRefusal, RequestTrace, Through, UseInput, Vault } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { lockLogHeadRead } from '@coffre/db/log';
 
@@ -28,8 +28,11 @@ import type { McpService } from '../mcp/service.ts';
  */
 export type McpVia = {
   connectionId: string; clientId: string; clientName: string; scopes: readonly McpScope[]; approvalId?: string;
-  /** For a change its person approved: whether a touch of their passkey approved it, which stands for the change's fresh check (passkeys.md, section 4.4). */
-  touched?: boolean;
+  /**
+   * For a change its person approved with a touch of their passkey: that touch, which stands for the change's fresh
+   * check (passkeys.md, section 4.4), and which its entries name as what confirmed it (`ApiContext.confirmed`).
+   */
+  touched?: Confirmation;
 };
 
 /**
@@ -63,6 +66,13 @@ export type ApiContext = {
   passkeyId: string | null;
   /** That credential, when it is a person's browser or terminal session (`AuthenticatedIdentity.session`); null, or left out, for any other. */
   session?: SessionOf | null;
+  /**
+   * What confirmed the request, once a fresh check let it through on a touch (`requireFresh`): the passkey and the time
+   * of the session's touch, or of the one that approved an MCP client's change. Every entry the request writes, the
+   * app's and the vault's, names it as `confirmedBy` and `confirmedAt` (passkeys.md, section 11). Null, or left out,
+   * before that, or for a request no check confirmed.
+   */
+  confirmed?: Confirmation | null;
   /** The Cloudflare service binding a call came through, which stands in for a credential (`AuthenticatedIdentity.bindingId`). */
   bindingId?: string | null;
   /** Signed in by Cloudflare Access, with no row of coffre's (`AuthenticatedIdentity.access`). */
@@ -134,7 +144,7 @@ export function actor(
 
 export type EntryFields = Omit<AuditEntry, 'actorType' | 'actorId' | 'requestId' | 'sourceIp' | 'action' | 'decision'>;
 
-type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null; via?: McpVia | null };
+type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenance?: string | null; via?: McpVia | null; confirmed?: Confirmation | null };
 
 /**
  * What an entry's metadata adds for a request that came in on a credential
@@ -145,7 +155,14 @@ type Writer = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp'> & { provenan
  */
 function traced(ctx: Writer, metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   const trace = traceOf(ctx);
-  return trace === null ? metadata : { ...metadata, ...traceFields(trace) };
+  const confirmed = confirmedFields(ctx.confirmed);
+  if (trace === null && confirmed === null) return metadata;
+  return { ...metadata, ...confirmed, ...(trace === null ? {} : traceFields(trace)) };
+}
+
+/** What confirmed an act a fresh check guards, as its entries say it (`ApiContext.confirmed`); null for none. */
+export function confirmedFields(confirmed: Confirmation | null | undefined): { confirmedBy: string; confirmedAt: string } | null {
+  return confirmed == null ? null : { confirmedBy: confirmed.by, confirmedAt: confirmed.at };
 }
 
 /**
@@ -518,14 +535,25 @@ export function wayIn(ctx: Pick<ApiContext, 'caller' | 'credentialId' | 'binding
 export type WayIn = Pick<UseInput, 'credential' | 'way'>;
 
 /** The caller, as the vault knows them, for this request. */
-export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & { provenance?: string | null; bindingId?: string | null }, operationId: string | null = null): Asking {
+export function asking(ctx: Pick<ApiContext, 'caller' | 'requestId'> & Correlating, operationId: string | null = null): Asking {
   return {
     principal: formatMember(ctx.caller.principal),
     requestId: ctx.requestId,
     operationId,
-    credentialId: vaultCredential(ctx),
+    ...correlated(ctx),
     ...through(ctx.caller),
   };
+}
+
+type Correlating = { provenance?: string | null; bindingId?: string | null; confirmed?: Confirmation | null };
+
+/**
+ * What a vault call says of the request beside its ids, for the entries it writes: the credential they name
+ * (`vaultCredential`), and what confirmed an act a fresh check guards (`ApiContext.confirmed`). Recorded, never decided on.
+ */
+export function correlated(ctx: Correlating): { credentialId: string | null; confirmed?: Confirmation } {
+  const credentialId = vaultCredential(ctx);
+  return ctx.confirmed == null ? { credentialId } : { credentialId, confirmed: ctx.confirmed };
 }
 
 /** The credential the caller came in on, as the vault decides on it: its scope and its kind. */

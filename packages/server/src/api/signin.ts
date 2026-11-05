@@ -112,7 +112,7 @@ export type SigninServiceDeps = {
 };
 
 /** Who is asking, for the calls a signed-in person makes about their own sign-in. */
-export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance'>>;
+export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId' | 'via' | 'render'> & Partial<Pick<ApiContext, 'provenance' | 'confirmed'>>;
 
 /** Why a provider-verified person was still not let in. */
 export type SigninRefusal =
@@ -1197,6 +1197,7 @@ export class SigninService {
       actor: formatMember(ctx.caller.principal),
       via: ctx.credentialId,
       trace: traceOf(ctx),
+      ...(ctx.confirmed == null ? {} : { confirmed: ctx.confirmed }),
       principal: principalOf(principal),
       generation: options.generation,
       actorAccess: held.accessSeq?.toString() ?? null,

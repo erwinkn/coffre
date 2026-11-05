@@ -191,6 +191,44 @@ test('a sensitive value made a secret in place takes the window, decided where i
   assert.equal((await levels()).DB_PASSWORD, 'secret');
 });
 
+test('every act a fresh check let through names, in its own entry, the passkey and the time that confirmed it; an act it guards nothing of names none', async (t) => {
+  const { later } = clock(t);
+  const key = await SoftAuthenticator.create('ES256');
+  const bob = await enroll(runtime, BOB, key);
+  const touchedAt = new Date().toISOString();
+  const [passkey] = await db.owner.select({ id: passkeys.id }).from(passkeys).where(eq(passkeys.principal, `user:${BOB}`));
+  later(1000);
+  // A first add (the vault's change), a grant (the vault's entry), a service's token (the vault's issue), a role's
+  // definition, and the settings; then a write of a value, which no check guards.
+  assert.equal((await act(bob, 'PUT', `/api/members/user:${CAROL}`, { role: 'developer' })).status, 200);
+  assert.equal((await act(bob, 'PATCH', `/api/access/user:${CAROL}`, { market: 'viewer' })).status, 200);
+  assert.equal((await act(bob, 'PUT', '/api/members/token:deploy', { role: 'member' })).status, 200);
+  assert.equal((await act(bob, 'PATCH', '/api/access/token:deploy', { 'market/dev': 'viewer' })).status, 200);
+  const issued = await act(bob, 'POST', '/api/members/token:deploy/tokens', { expiresInDays: 30, scope: { 'market/dev': 'viewer' } });
+  assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  assert.equal((await act(bob, 'PATCH', '/api/secrets/market/dev', { API_KEY: 'rotated' })).status, 200);
+  // And an environment erased for good (the app's entry).
+  const root = clientFor(deps, ROOT);
+  await root.environments.create('market/qa', { name: 'qa' });
+  await root.environments.update('market/qa', { archived: true });
+  const erased = await act(bob, 'DELETE', '/api/projects/market/qa');
+  assert.equal(erased.status, 200, JSON.stringify(erased.body));
+
+  // Every entry, the vault's sealed changes among them, as the audit page lists them with their details.
+  const entries = (await root.audit.list({ actor: BOB, detail: '1', sealed: '1', limit: 200 })).entries
+    .filter((entry) => entry.actorId === BOB && entry.decision === 'allow');
+  const confirmation = (action: string) => {
+    const found = entries.filter((entry) => entry.action === action);
+    assert.ok(found.length > 0, `${action}: ${JSON.stringify(entries.map((entry) => entry.action))}`);
+    return found.map((entry) => [entry.metadata.confirmedBy ?? null, entry.metadata.confirmedAt ?? null]);
+  };
+  const confirmed = [passkey!.id, touchedAt];
+  for (const action of ['member.add', 'access.grant', 'token.create', 'environment.delete']) {
+    assert.ok(confirmation(action).some((pair) => pair[0] === confirmed[0] && pair[1] === confirmed[1]), `${action} names its confirmation: ${JSON.stringify(confirmation(action))}`);
+  }
+  assert.deepEqual([...new Set(confirmation('secret.write').map(String))], [String([null, null])], 'a write no check guards names none');
+});
+
 test('linking another account takes the window of a person who holds a passkey, at the start and at the callback; the step-up goes on to the link', async (t) => {
   const { later } = clock(t);
   const key = await SoftAuthenticator.create('ES256');

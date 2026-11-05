@@ -597,8 +597,16 @@ way (`steppingUp`, `packages/cli/src/main.ts`); a token or a CI run's
 credential answers the refusal as any other. The device login's label is
 `coffre CLI: <the command>`; a secret is never an argument, so the label
 shows none. The approval's touch is PR 5a's, and its terminal starts
-confirmed when it was decided. A session approved as someone else is
-signed out and the command refused. With `reason: 'add_passkey'` no code
+confirmed when it was decided. Before it asks for the code, the CLI asks
+the instance whose the saved session is (`GET /api/me`, `whoseSession`):
+a session approved as anyone else, whatever another `coffre login` saved
+meanwhile, is signed out and the command refused. The new session
+replaces the saved one only if that is still the session the command
+started on (another login's is left as it is, and the command refused),
+and leaves the default instance where it was, for `--url`. The old
+session is then signed out; one the instance could not end (a 503, no
+answer) is said, with `coffre sessions revoke <id> --apply` to end it,
+its id the instance's answer named. With `reason: 'add_passkey'` no code
 is started: the CLI says to sign in in the browser and add one there.
 
 **What the CLI never needs.** `coffre run`, `export`, `set`, handles and
@@ -1764,6 +1772,19 @@ Changed:
 - `device.approve` names the passkey that approved.
 - Every **always** act names, in its own entry, the passkey and time that
   confirmed the session (`confirmedBy`, `confirmedAt`).
+
+  As built (PR 5b): the router's check, let through on a touch, records
+  what confirmed the request (`ApiContext.confirmed`): the session's
+  passkey and its `confirmedAt`, or, for an MCP client's change, the
+  touch that approved it (`McpVia.touched`). The app's entries take it
+  in `allowed`, beside `credentialId`; every vault call carries it in
+  its correlation (`correlated`), which the vault copies into the
+  entries it writes, as it copies `credentialId`, and a first add's
+  change and a token's issue keep it in their payloads, under the
+  vault's MAC, for the audit page (`confirmed`). Recorded, never
+  weighed. A **holder** act let through on a fresh session names it
+  too; one let through because the person holds no passkey names
+  nothing, as does every act the check does not guard.
 
 A `403 fresh_check_required` or `401 passkey_required` writes no entry; it
 goes to the process log (section 4.5).

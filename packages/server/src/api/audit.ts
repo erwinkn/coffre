@@ -34,7 +34,7 @@ import {
 import { readsPageStanding, type ListedRead, type ReadPlace, type ReadsStanding } from '../db/reads.ts';
 import { Refusal } from '../watch.ts';
 import { can, canAnywhere, placeOf } from './caller.ts';
-import { traceFields, type ApiContext } from './context.ts';
+import { confirmedFields, traceFields, type ApiContext } from './context.ts';
 import { keeps015 } from './changes.ts';
 import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
 import { formatMember, parseMember, type Path } from './paths.ts';
@@ -965,6 +965,7 @@ function sealedView(row: RecordedChange, keyWrites: KeyWrite[]): AuditEntryView 
       targetCredentialId: ref.id,
       expiresAt: time(payload.expiresAt),
       scope: payload.scope,
+      ...confirmedBy(issue.confirmed),
       ...traced(issue.trace),
     });
   }
@@ -989,6 +990,15 @@ type KeyWrite = { entry: AuditEntryView; secretId: string; versionId: string };
  * deleted since keeps its id alone. None for a payload of another shape,
  * which only a database writer could leave under the indexes' conditions.
  */
+/**
+ * What confirmed an act a fresh check guards, as a change's payload records it (`Confirmation`) and an entry names it
+ * (`confirmedFields`): one of another shape says nothing.
+ */
+function confirmedBy(confirmed: unknown): Record<string, string> {
+  const { by, at } = (typeof confirmed === 'object' && confirmed !== null ? confirmed : {}) as { by?: unknown; at?: unknown };
+  return typeof by === 'string' && typeof at === 'string' ? confirmedFields({ by, at })! : {};
+}
+
 function twoTripView(
   row: RecordedChange,
   payload: Record<string, unknown> & { ref?: { kind?: unknown; id?: unknown } },
@@ -1021,7 +1031,7 @@ function twoTripView(
     run: null,
     token: null,
     ...fields,
-    metadata: { ...metadata, ...(credentialId === null ? {} : { credentialId }) },
+    metadata: { ...metadata, ...confirmedBy(request.confirmed), ...(credentialId === null ? {} : { credentialId }) },
   });
   if (ref.kind === 'secret' && op === 'secret.write' && typeof payload.version === 'string') {
     const entry = view('secret.write', {}, payload.nature === 'sensitive' ? { sensitive: true } : {});

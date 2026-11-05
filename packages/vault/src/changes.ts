@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import type { ObjectChange, PreparedChange } from '@coffre/core/vault';
+import type { Confirmation, ObjectChange, PreparedChange } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isMovedChange, type ChangeNumbers } from '@coffre/db/log';
 
@@ -550,7 +550,7 @@ type Asked = { operationId: string | null; requestId: string | null };
 type WriteRequestPart = { number: string; credential: string; identity: string | null } & Asked;
 
 /** What an add's change says of its request, which no number names (its read numbers nothing): the credential and identity it was decided for, the app's ids. */
-type AdmitRequestPart = { credential: string; identity: string | null } & Asked;
+type AdmitRequestPart = { credential: string; identity: string | null; confirmed?: Confirmation } & Asked;
 
 /**
  * A member's first add's change (T179, admit.ts), made from the read its decision weighed: from no object (no row, no
@@ -561,12 +561,14 @@ type AdmitRequestPart = { credential: string; identity: string | null } & Asked;
  */
 export function admitChange(
   keys: Pick<ChangeKeys, 'seals' | 'mac'>,
-  add: { at: number; actor: string; principal: string; after: Input; op: Op; credential: string; identity: string | null; inputs: string } & Asked,
+  add: { at: number; actor: string; principal: string; after: Input; op: Op; credential: string; identity: string | null; inputs: string; confirmed: Confirmation | null } & Asked,
 ): ChangeCall {
   const ref: Ref = { kind: 'principal', id: add.principal };
   const seal = sealOf(keys.seals[0]!, ref, add.after);
-  const { credential, identity, operationId, requestId } = add;
-  const payload = payloadOf(ref, add.op, undefined, { request: { credential, identity, operationId, requestId }, inputs: add.inputs });
+  const { credential, identity, operationId, requestId, confirmed } = add;
+  // What confirmed the add, the app's word (`Confirmation`), beside its ids: an add is a fresh check's (passkeys.md, section 11).
+  const request = { credential, identity, operationId, requestId, ...(confirmed === null ? {} : { confirmed }) };
+  const payload = payloadOf(ref, add.op, undefined, { request, inputs: add.inputs });
   const row = { at: add.at, requestId: randomUUID(), object: objectKey(ref), actor: add.actor, payload, seal };
   return { ref, ...row, value: writes(ref) ? rowValue(add.after) : null, sealFrom: null, mac: entryMac(keys.mac, { tree: 'changes', row }) };
 }

@@ -172,6 +172,8 @@ import {
   type ReleaseProxyInput,
   type ReserveProxyInput,
   type SaveProxyInput,
+  isConfirmation,
+  type Confirmation,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
@@ -670,7 +672,7 @@ type HeadQueue = { waiters: number; line?: HeadLine };
 type KeyAction = 'secret.read' | 'key.wrap' | 'key.rewrap';
 
 /** What ties an entry to the app's request, and to the one action it is part of. */
-type Correlation = { requestId?: string | null; operationId?: string | null; credentialId?: string | null };
+type Correlation = { requestId?: string | null; operationId?: string | null; credentialId?: string | null; confirmed?: Confirmation | null };
 
 /**
  * What the one asking holds through the credential their request came in
@@ -691,9 +693,15 @@ function through(standing: Standing, { credentialScope, caller }: Through): Stan
   return { ...standing, live: { ...standing.live, ...held }, all: { ...standing.all, ...held } };
 }
 
-/** The credential a CI run's request came in on, as its entries record it: copied, never decided on. */
-function traced(correlation: Correlation): { credentialId?: string } {
-  return correlation.credentialId == null ? {} : { credentialId: correlation.credentialId };
+/**
+ * The credential a CI run's request came in on, and what confirmed an act a fresh check guards (`Confirmation`), as its
+ * entries record them: copied, never decided on.
+ */
+function traced(correlation: Correlation): { credentialId?: string; confirmedBy?: string; confirmedAt?: string } {
+  return {
+    ...(correlation.confirmed == null ? {} : { confirmedBy: correlation.confirmed.by, confirmedAt: correlation.confirmed.at }),
+    ...(correlation.credentialId == null ? {} : { credentialId: correlation.credentialId }),
+  };
 }
 
 /** Why a member's row is not the one the vault last wrote; rows.ts. */
@@ -4136,6 +4144,7 @@ class VaultService implements Vault {
     const opened = openTicket(log015.macs, input?.ticket, Date.now() + this.#prepared.options.clockOffset());
     if (opened === 'expired') return { written: false, why: 'expired' };
     if (opened === null) throw new Error("an add's ticket is the vault's own, as admitRead answered it: this one is not");
+    if (!isConfirmation(input.confirmed)) throw new Error('confirmed must name a passkey by its lowercase UUID and when it was touched, ISO 8601');
     const ticket = opened;
     const { principal, actor } = ticket;
     // This isolate's own keys and config, which may not be the reading one's (review r1 of #474): settled as
@@ -4162,6 +4171,7 @@ class VaultService implements Vault {
         return store.laterInputs(tx, [admitChange(log015, {
           at, actor, principal, after, op: { op: 'member.add', role, scope },
           credential: ticket.credential, identity: ticket.identity, inputs: ticket.digest, operationId: ticket.operationId, requestId: ticket.requestId,
+          confirmed: input.confirmed ?? null,
         })]);
       });
     } catch (error) {
@@ -5489,6 +5499,7 @@ function validateCorrelation(input: Correlation): void {
   if (input.credentialId != null && (typeof input.credentialId !== 'string' || !UUID.test(input.credentialId))) {
     throw new Error(`credentialId must be a lowercase UUID, got: ${String(input.credentialId)}`);
   }
+  if (!isConfirmation(input.confirmed)) throw new Error('confirmed must name a passkey by its lowercase UUID and when it was touched, ISO 8601');
 }
 
 /** Validate the entire batch before any provider sees a key. */
