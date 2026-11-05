@@ -29,13 +29,14 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
+import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
 import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
 import { change, emptyLog, seal, useDatabases } from './use-world.ts';
 
@@ -342,7 +343,7 @@ const ROWS: Row[] = shardOf(import.meta.url, [
     ({ map, lost, place, admission, window: 'passed' as const }))))),
 ], labelOf);
 
-test(`a caller learns nothing of a key they may not have, whatever the isolate's map holds, in any of ${ROWS.length} rows of ${KEYS.length} key states (T158, D150, D153)`, { timeout: 7_200_000 }, async () => {
+test(`a caller learns nothing of a key they may not have, whatever the isolate's map holds, in any of ${ROWS.length} rows of ${KEYS.length} key states (T158, D150, D153)`, { timeout: 7_200_000 }, async (t) => {
   const differing: string[] = [];
   /** The widest spread of buffers within a row's refusals, over the run. */
   let widest = 0;
@@ -357,6 +358,15 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
    */
   const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null; early: boolean; turns: { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null }>(results: T[]) => {
     if (ENGINE !== 'postgres') return;
+    // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session first, so
+    // that no transaction elsewhere in the cluster, ending as the batch is weighed, moves a block of `log_bulk` from one
+    // call to the next (T225, `deletesSettled`).
+    const watcher = postgresClient(OWNER_URL, { max: 1 });
+    try {
+      await deletesSettled(watcher, t.signal);
+    } finally {
+      await watcher.end();
+    }
     // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
     // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
     // read hundreds of buffers above the rest (CI, W268). The key's relations as they are: vacuumed, their all-visible

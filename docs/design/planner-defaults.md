@@ -209,6 +209,28 @@ its own database did, and holds it to every other check
     first weighed call to meet (shard 5/6). The settling calls run in
     sessions of their own, so a read a session makes of the key as it
     plans, as T207 r2's dry run did, still shows in every weighed session.
+    Rows deleted before the weighing cost a block of their own. A row of
+    the window passed deletes its principal's `log_bulk` rows. While a
+    transaction older than that delete still runs anywhere in the cluster,
+    in any database (a new snapshot's xmin is the oldest id running
+    anywhere), a new session's planner, probing an end of `log_bulk_pkey`
+    for its estimates (`get_actual_variable_range`, which skips only rows
+    known dead), reads a deleted row's heap page as a live row's. Once that
+    transaction ends, the next session to plan reads the dead row's page
+    and the next row's, and marks the entry dead, and no session after it
+    reads it. CI runs the matrices side by side on one Postgres, so another
+    file's transaction ending between a call and its controls moved that
+    block from one to the next: 9 `log_bulk` blocks beside 8, or 8 beside
+    9 (T225; the deleted rows' heap tuples had their xmax set and their
+    index entries were still live). So each batch, before it is weighed,
+    waits until no session older than its deletes is left in the cluster
+    (`deletesSettled`), as long as the test's own timeout lets it, and
+    fails naming those sessions if it runs out. A transaction of that
+    kind, planted in another database, failed 499 of 500 comparisons
+    without the wait when it committed between the asked call and its
+    controls; committed on a random timer of up to 8 s as each batch was
+    weighed, it failed shard 5/6 without the wait and passed it with the
+    wait.
     The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so
