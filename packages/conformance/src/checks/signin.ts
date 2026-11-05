@@ -9,7 +9,7 @@ import type { Deployment } from '../harness.ts';
 import { defaultGitHubAccount } from '../idp/people.ts';
 import { expect, until } from '../report.ts';
 import { member } from './members.ts';
-import { signIn, type People } from './people.ts';
+import { signIn, touching, type People } from './people.ts';
 import { insertRow, query, restoreRow } from './storage.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest();
@@ -95,7 +95,7 @@ export async function forgedApproval(deployment: Deployment, people: People): Pr
     }
   });
   const control = await startDevice(deployment);
-  await person.api.deviceLogins.decide(control.user_code, true);
+  await touching(person.browser, (touch) => person.api.deviceLogins.decide(control.user_code, true, touch));
   expect((await pollDevice(deployment, control.device_code)).ok, 'a genuine approval no longer works');
   return 'an owner-edited device approval grants nothing and is reported; a genuine approval works';
 }

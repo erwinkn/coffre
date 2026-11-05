@@ -18,7 +18,7 @@ import { CoffreError, type CoffreClient } from '@coffre/client';
 import { bearer } from '../browser.ts';
 import { KEYS } from '../fixtures.ts';
 import { expect, Failure } from '../report.ts';
-import type { Person } from './people.ts';
+import { touching, type Person } from './people.ts';
 
 /** What `coffre verify instance` makes and finds on an instance, as an owner: its own place, service and key. */
 export const PROBE = { project: 'conformance', environment: 'live', service: 'token:conformance-probe', key: 'SIGN_IN_CANARY' } as const;
@@ -102,7 +102,7 @@ export class Cli {
 export async function cliLogin(cli: Cli, person: Person): Promise<{ detail: string; value: Cli }> {
   const login = cli.start(['login', cli.origin, '--no-browser']);
   const [, code] = await login.waitFor(/shows the code\s+(\S+)/, 'its device login');
-  await person.api.deviceLogins.decide(code!, true);
+  await touching(person.browser, (touch) => person.api.deviceLogins.decide(code!, true, touch));
   const status = await login.exited;
   expect(status === 0, `coffre login exited ${status}`, login.output());
   await bearer(cli.origin, cli.session()).me();

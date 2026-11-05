@@ -3,7 +3,7 @@
 import { bearer } from '../browser.ts';
 import type { Deployment } from '../harness.ts';
 import { expect, refused } from '../report.ts';
-import { BULK, canary, DEV, PROD, PROJECT, signIn, valuesIn, type Canaries, type People } from './people.ts';
+import { BULK, canary, DEV, PROD, PROJECT, signIn, touching, valuesIn, type Canaries, type People } from './people.ts';
 import { connectedApp, discovers } from './mcp.ts';
 import { pollDevice, startDevice } from './signin.ts';
 import { listed } from './audit.ts';
@@ -92,7 +92,7 @@ export async function crossSite({ admin }: People, canaries: Canaries): Promise<
 
 export async function offboarding(deployment: Deployment, { admin, leaver, service }: People, canaries: Canaries) {
   const device = await startDevice(deployment);
-  await leaver.api.deviceLogins.decide(device.user_code, true);
+  await touching(leaver.browser, (touch) => leaver.api.deviceLogins.decide(device.user_code, true, touch));
   // What they saw is what to rotate once they are gone: with 0.15's log, once their reads are listed (T166).
   await leaver.cli.secrets.reveal(DEV);
   const expected = Object.keys(valuesIn(canaries, DEV)).map((key) => `${DEV}/${key}`).sort();

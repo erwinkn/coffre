@@ -96,14 +96,20 @@ export class CoffreError extends Error {
   readonly reason: string | undefined;
   /** When to ask again, in seconds, when the answer says (`Retry-After`): a 503's, a 429's. */
   readonly retryAfter: string | undefined;
+  /**
+   * A `403 touch_required`'s ask: the act takes a touch of the person's passkey of its own. `options` go to
+   * `navigator.credentials.get()`, and the act is sent again with `{ state, response }`.
+   */
+  readonly touch: { options: unknown; state: string } | undefined;
 
-  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string) {
+  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string, touch?: { options: unknown; state: string }) {
     super(message);
     this.name = 'CoffreError';
     this.status = status;
     this.code = code;
     this.reason = reason;
     this.retryAfter = retryAfter;
+    this.touch = touch;
   }
 }
 
@@ -156,13 +162,15 @@ export function createClient(options: ClientOptions) {
     const response = await transport(new Request(url, { method, headers, body }));
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      const error = payload as { error?: unknown; message?: unknown; reason?: unknown } | null;
+      const error = payload as { error?: unknown; message?: unknown; reason?: unknown; touch?: { options?: unknown; state?: unknown } } | null;
+      const touch = error?.touch;
       throw new CoffreError(
         response.status,
         typeof error?.error === 'string' ? error.error : 'http_error',
         typeof error?.message === 'string' ? error.message : `request failed with status ${response.status}`,
         typeof error?.reason === 'string' ? error.reason : undefined,
         response.headers.get('retry-after') ?? undefined,
+        touch !== null && typeof touch === 'object' && typeof touch.state === 'string' ? { options: touch.options, state: touch.state } : undefined,
       );
     }
     return payload;
@@ -389,7 +397,9 @@ export function createClient(options: ClientOptions) {
     /** A `coffre login` waiting for someone to approve it, by the code it shows. */
     deviceLogins: {
       get: (code: string) => call('GET /device-logins/:code', { code }),
-      decide: (code: string, approve: boolean) => call('POST /device-logins/:code', { code }, { approve }),
+      /** Approving takes a touch of the person's passkey (`touch`), which the approval without one is refused `touch_required` for. */
+      decide: (code: string, approve: boolean, touch?: { state: string; response: Record<string, unknown> }) =>
+        call('POST /device-logins/:code', { code }, touch === undefined ? { approve } : { approve, touch }),
     },
 
     /**

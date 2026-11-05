@@ -2,7 +2,7 @@
 // is a canary: random, and never to be seen again outside a reveal.
 import { randomBytes } from 'node:crypto';
 
-import type { CoffreClient } from '@coffre/client';
+import { CoffreError, type CoffreClient } from '@coffre/client';
 
 import { SoftAuthenticator } from '../authenticator.ts';
 import { bearer, Browser } from '../browser.ts';
@@ -78,6 +78,31 @@ export async function signIn(
 /** Each person's passkey, once coffre had them add one: the same browser's authenticator, whichever browser signs in. */
 const passkeys = new Map<string, SoftAuthenticator>();
 
+/** Whose passkey each browser signed in with. */
+const holders = new WeakMap<Browser, string>();
+
+/** A touch an act carries (docs/design/passkeys.md, section 4.2), as coffre's pages send it. */
+export type Touch = { state: string; response: Record<string, unknown> };
+
+/**
+ * An act that takes a touch of its own (docs/design/passkeys.md, section 4.2: approving a terminal, an MCP client's
+ * change or its connection), done as coffre's pages do it: sent, and refused `403 touch_required`, sent again with a
+ * touch of the passkey the browser signed in with, for the challenge the refusal carries. A person who holds none is
+ * asked nothing.
+ */
+export async function touching<T>(browser: Browser, send: (touch?: Touch) => Promise<T>): Promise<T> {
+  try {
+    return await send();
+  } catch (error) {
+    if (!(error instanceof CoffreError) || error.code !== 'touch_required' || error.touch === undefined) throw error;
+    const key = passkeys.get(holders.get(browser) ?? '');
+    expect(key !== undefined, 'coffre asked a touch of a browser that signed in with no passkey');
+    const { challenge } = error.touch.options as { challenge: string };
+    const response = await key!.assert({ rpId: new URL(browser.origin).hostname, origin: browser.origin, challenge: new Uint8Array(Buffer.from(challenge, 'base64url')) });
+    return send({ state: error.touch.state, response: response as unknown as Record<string, unknown> });
+  }
+}
+
 /**
  * The passkey a sign-in waits for after the provider (docs/design/passkeys.md, section 3.1), as coffre's page asks the
  * browser for it: a new one, kept, for a person who must add one (an Owner under `optional`); else a touch of theirs.
@@ -99,7 +124,10 @@ async function passkeyStep(deployment: Deployment, browser: Browser, email: stri
   }
   // A new passkey goes back with its sealed `state`, the user handle its options were drawn with.
   const answered = await browser.send('POST', '/api/auth/passkey', { response, ...(state === undefined ? {} : { state }) });
-  if (answered.ok) return { ok: true };
+  if (answered.ok) {
+    holders.set(browser, email);
+    return { ok: true };
+  }
   const { error } = (await answered.json()) as { error: string };
   return { ok: false, error, location: '/auth/passkey' };
 }
@@ -210,7 +238,7 @@ export async function deviceLogin(deployment: Deployment, browser: Browser): Pro
   });
   expect(started.ok, `the device login did not start: ${started.status}`, await started.clone().text());
   const device = (await started.json()) as { device_code: string; user_code: string };
-  await browser.client().deviceLogins.decide(device.user_code, true);
+  await touching(browser, (touch) => browser.client().deviceLogins.decide(device.user_code, true, touch));
   const polled = await fetch(`${deployment.origin}/api/auth/device/token`, {
     method: 'POST',
     headers: json,

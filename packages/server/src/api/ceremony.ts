@@ -1,7 +1,7 @@
 // The passkey ceremonies' own pieces (docs/design/passkeys.md, sections 3 and 7): the sealed state a challenge travels
 // in, the options a browser's `create()` and `get()` take, and the response's credential ID, read before the verifier
 // runs. What they decide, and every row they write, is the sign-in service's (signin.ts).
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import { base64urlLength, deriveKey, MAX_CREDENTIAL_ID, PASSKEY_ALGORITHMS, seal, unseal, USER_VERIFICATION, type PasskeysConfig } from '@coffre/core/identity';
 
@@ -23,7 +23,7 @@ export function remainingMs(state: { issuedAt: number }, now = Date.now()): numb
  * sign-in's cookie, after the provider; `step-up` in the page's JSON, bound to the session it replaces; `create`, in the
  * page's JSON too, the user handle one `create()` of an enrollment was given.
  */
-export type CeremonyPurpose = 'signin' | 'enroll' | 'step-up' | 'create';
+export type CeremonyPurpose = 'signin' | 'enroll' | 'step-up' | 'create' | 'act';
 
 /**
  * A sign-in that passed the provider and waits for its passkey (section 3.1), sealed in `__Host-coffre_passkey`: what
@@ -82,7 +82,33 @@ export type CreateState = {
   issuedAt: number;
 };
 
-type Sealed = PendingFactor | StepUpState | CreateState;
+/**
+ * What one touch approves (section 4.2), and nothing else: a terminal's code, a change an MCP client asked for, or an
+ * MCP client's connection. `answer` is a digest of what the person says yes to, as the page sent it: the change's
+ * digest, the basis it showed and the value typed; the request and the scopes chosen.
+ */
+export type Act = { kind: 'device'; code: string } | { kind: 'approval'; id: string; answer: string } | { kind: 'connect'; answer: string };
+
+/** What an act's `answer` holds: a digest of what the person says yes to, so that the sealed state carries no value typed. */
+export function answerDigest(answer: unknown): string {
+  return createHash('sha256').update(JSON.stringify(answer)).digest('base64url');
+}
+
+/**
+ * A touch for one act (section 4.2), asked in the `403 touch_required` that refused the act without one: bound to the
+ * session it was asked on, and to the act.
+ */
+export type ActState = {
+  purpose: 'act';
+  act: Act;
+  credentialId: string;
+  principal: string;
+  generation: number;
+  challenge: string;
+  issuedAt: number;
+};
+
+type Sealed = PendingFactor | StepUpState | CreateState | ActState;
 
 /** Each purpose's key, from the chain key, so that one purpose's state never opens as another's. */
 export class CeremonyStates {
@@ -94,6 +120,7 @@ export class CeremonyStates {
       enroll: deriveKey(chainKey, 'passkey-state/enroll/v1'),
       'step-up': deriveKey(chainKey, 'passkey-state/step-up/v1'),
       create: deriveKey(chainKey, 'passkey-state/create/v1'),
+      act: deriveKey(chainKey, 'passkey-state/act/v1'),
     };
   }
 

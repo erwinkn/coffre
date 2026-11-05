@@ -12,7 +12,7 @@ import type { Deployment } from '../harness.ts';
 import { expect } from '../report.ts';
 
 import { bearer } from '../browser.ts';
-import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, valuesIn, type Canaries, type People, type Person } from './people.ts';
+import { canary, deviceLogin, DEV, personaOn, PROD, PROJECT, touching, valuesIn, type Canaries, type People, type Person } from './people.ts';
 
 const NAME = 'Conformance MCP client';
 /** A native client's redirect, on loopback. A custom scheme is left out of a registration (D37). */
@@ -74,7 +74,7 @@ async function connect(deployment: Deployment, person: Person, clientId: string,
   expect(view.status === 'ready', 'the consent page refused a good request', view);
   expect(view.client.registration === 'dcr' && view.client.name === NAME && view.scopes.join(' ') === scope && view.loopbackOnly,
     'the consent page does not show the registered client as it is', view);
-  const { redirect } = await person.api.oauth.decide({ request, approve: true, scopes: ticked });
+  const { redirect } = await touching(person.browser, (touch) => person.api.oauth.decide({ request, approve: true, scopes: ticked, ...(touch === undefined ? {} : { touch }) }));
   const back = new URL(redirect);
   expect(`${back.origin}${back.pathname}` === REDIRECT, `the answer went to ${back.origin}${back.pathname}, not the redirect`, redirect);
   expect(back.searchParams.get('state') === STATE && back.searchParams.get('iss') === deployment.origin,
@@ -399,7 +399,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
     'a CLI session opened or decided an approval', { fromCli, decidedFromCli });
   expect(!(await archived('OLD')), 'a refused decision changed something');
 
-  const decided = await changer.api.approvals.decide(approval!.id, { approve: true, digest: shown.digest, basis: shown.basis });
+  const decided = await touching(changer.browser, (touch) => changer.api.approvals.decide(approval!.id, { approve: true, digest: shown.digest, basis: shown.basis, ...(touch === undefined ? {} : { touch }) }));
   expect(decided.status === 'approved' && (await archived('OLD')), 'Approve did not make the change', decided);
   const again = await changer.api.approvals.decide(approval!.id, { approve: true, digest: shown.digest, basis: shown.basis }).then(() => null, (error: unknown) => error);
   expect(again instanceof CoffreError && again.status === 409, 'an approval was decided twice', again);
@@ -418,7 +418,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   const renamedEarly = await admin.api.secrets.list(place);
   expect(renamedEarly.keys.some((key) => key.key === 'KEEP'), 'a change was made before its approval', renamedEarly.keys);
   const second = (await changer.api.approvals.get(id)).approval;
-  expect((await changer.api.approvals.decide(id, { approve: true, digest: second.digest, basis: second.basis })).status === 'approved', 'the second approval was not made');
+  expect((await touching(changer.browser, (touch) => changer.api.approvals.decide(id, { approve: true, digest: second.digest, basis: second.basis, ...(touch === undefined ? {} : { touch }) }))).status === 'approved', 'the second approval was not made');
   const retried = await call(write, 'rename_secret', { secret: `${place}/KEEP`, newKey: 'KEPT' }, { requestState: asked.result!.requestState, inputResponses: { approve: { action: 'accept' } } }, elicits);
   expect(retried.result?.structuredContent?.status === 'approved', 'the retry does not report the approved change', retried.result);
 
@@ -429,7 +429,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   const valueId = valueAsked.result!.structuredContent!.approval!.id;
   const valuePage = (await changer.api.approvals.get(valueId)).approval;
   expect(valuePage.asks?.value !== undefined, 'the approval page does not ask for the value');
-  await changer.api.approvals.decide(valueId, { approve: true, digest: valuePage.digest, basis: valuePage.basis, value: typed });
+  await touching(changer.browser, (touch) => changer.api.approvals.decide(valueId, { approve: true, digest: valuePage.digest, basis: valuePage.basis, value: typed, ...(touch === undefined ? {} : { touch }) }));
   expect((await admin.api.secrets.reveal(`${place}/TYPED`)).values.TYPED === typed, 'the value typed on the page was not written');
   await call(write, 'request_secret_value', { secret: `${place}/TYPED` });
 
@@ -437,7 +437,7 @@ export async function mcpChanges(deployment: Deployment, people: People, canarie
   const generating = await call(write, 'generate_secret_value', { secret: `${place}/GENERATED`, alphabet: 'hex' });
   const generatedId = generating.result!.structuredContent!.approval!.id;
   const generatedPage = (await changer.api.approvals.get(generatedId)).approval;
-  const generated = await changer.api.approvals.decide(generatedId, { approve: true, digest: generatedPage.digest, basis: generatedPage.basis });
+  const generated = await touching(changer.browser, (touch) => changer.api.approvals.decide(generatedId, { approve: true, digest: generatedPage.digest, basis: generatedPage.basis, ...(touch === undefined ? {} : { touch }) }));
   const made = (await admin.api.secrets.reveal(`${place}/GENERATED`)).values.GENERATED ?? '';
   canaries[`${place}/GENERATED`] = made;
   expect(/^[0-9a-f]{64}$/.test(made) && generated.shown.length === 0 && !JSON.stringify(generated).includes(made), 'generate_secret_value did not make a 64-character hex value, shown to no one');
@@ -481,7 +481,7 @@ export async function mcpValues(deployment: Deployment, people: People, canaries
   expect(show.result?.structuredContent?.status === 'pending' && id !== undefined, 'show_secret_value did not open an approval', show.result);
   const page = (await reader.api.approvals.get(id!)).approval;
   expect(page.kind === 'reveal', 'the approval page does not say it shows a value', page);
-  const shown = await reader.api.approvals.decide(id!, { approve: true, digest: page.digest, basis: page.basis });
+  const shown = await touching(reader.browser, (touch) => reader.api.approvals.decide(id!, { approve: true, digest: page.digest, basis: page.basis, ...(touch === undefined ? {} : { touch }) }));
   expect(shown.shown.some((line) => line.value === dev.API_KEY), 'Reveal did not show the person the value');
   const told = await call(reading, 'show_secret_value', { secret: `${DEV}/API_KEY` });
   expect(told.result?.structuredContent?.status === 'approved', 'show_secret_value does not report the value as shown', told.result);

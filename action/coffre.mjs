@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-BDQezHH4.js
+//#region ../client/dist/src-Dj1j2fgO.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1374,13 +1374,19 @@ var CoffreError = class extends Error {
 	reason;
 	/** When to ask again, in seconds, when the answer says (`Retry-After`): a 503's, a 429's. */
 	retryAfter;
-	constructor(status, code, message, reason, retryAfter) {
+	/**
+	* A `403 touch_required`'s ask: the act takes a touch of the person's passkey of its own. `options` go to
+	* `navigator.credentials.get()`, and the act is sent again with `{ state, response }`.
+	*/
+	touch;
+	constructor(status, code, message, reason, retryAfter, touch) {
 		super(message);
 		this.name = "CoffreError";
 		this.status = status;
 		this.code = code;
 		this.reason = reason;
 		this.retryAfter = retryAfter;
+		this.touch = touch;
 	}
 };
 /** `market/prod/KEY` as route parameters. */
@@ -1423,7 +1429,11 @@ function createClient(options) {
 		const payload = await response.json().catch(() => null);
 		if (!response.ok) {
 			const error = payload;
-			throw new CoffreError(response.status, typeof error?.error === "string" ? error.error : "http_error", typeof error?.message === "string" ? error.message : `request failed with status ${response.status}`, typeof error?.reason === "string" ? error.reason : void 0, response.headers.get("retry-after") ?? void 0);
+			const touch = error?.touch;
+			throw new CoffreError(response.status, typeof error?.error === "string" ? error.error : "http_error", typeof error?.message === "string" ? error.message : `request failed with status ${response.status}`, typeof error?.reason === "string" ? error.reason : void 0, response.headers.get("retry-after") ?? void 0, touch !== null && typeof touch === "object" && typeof touch.state === "string" ? {
+				options: touch.options,
+				state: touch.state
+			} : void 0);
 		}
 		return payload;
 	}
@@ -1620,7 +1630,11 @@ set: (member, access) => call("PATCH /access/:member", { member }, access) },
 		/** A `coffre login` waiting for someone to approve it, by the code it shows. */
 		deviceLogins: {
 			get: (code) => call("GET /device-logins/:code", { code }),
-			decide: (code, approve) => call("POST /device-logins/:code", { code }, { approve })
+			/** Approving takes a touch of the person's passkey (`touch`), which the approval without one is refused `touch_required` for. */
+			decide: (code, approve, touch) => call("POST /device-logins/:code", { code }, touch === void 0 ? { approve } : {
+				approve,
+				touch
+			})
 		},
 		/**
 		* Folders, which arrange lists and do nothing else: a folder exists while
@@ -7373,7 +7387,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-TiJKe4F1.js
+//#region ../client/dist/workload-DD67ua3B.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;

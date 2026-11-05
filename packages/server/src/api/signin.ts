@@ -69,14 +69,14 @@ import {
   type PasskeyRead,
   type PasskeyRow,
 } from '../db/queries.ts';
-import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type CreateState, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
+import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type Act, type ActState, type CreateState, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
 import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
 import { AppChanges, COFFRE_ACTOR, connectionRevokes, deploymentOwners, credentialChange, ObjectMoved, retrying, revokedByVault, revokes, vaultIssuesTokens, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, requireInstance, traceOf, withRefusals, type ApiContext } from './context.ts';
 import { accessFor, type Accesses, type Recalled } from '../accesses.ts';
-import { ApiError, badRequest, forbidden, notFound } from './errors.ts';
+import { ApiError, badRequest, forbidden, notFound, TouchRequired } from './errors.ts';
 import { formatMember, parsePath } from './paths.ts';
 import {
   ACCESS_CHANGED,
@@ -966,6 +966,51 @@ export class SigninService {
     } catch (error) {
       return refusalOrThrow(error);
     }
+  }
+
+  // --- a touch for one act --------------------------------------------------
+
+  /**
+   * The touch an act takes of its own (section 4.2): approving a terminal's code, an MCP client's change, or connecting
+   * an MCP client. One touch approves one act, so a session confirmed a minute ago approves none of them alone. Asked
+   * before the act's transaction; the act's transaction then moves its replay mark (`touched`).
+   *
+   * Null when the act takes none: passkeys `off`, or a caller no passkey stands behind, a person who holds none under
+   * `optional` (the per-request check turns away anyone else's such credential). Without a touch, or with a state that
+   * does not open as this act's, on this session (one that expired, say), the act is refused `403 touch_required`,
+   * which carries a touch of the person's live passkeys, sealed and bound to both: a prompt, which writes no entry. With
+   * one that does not check, `403 touch_failed`, a `passkey.check` entry.
+   */
+  async touchFor(ctx: Toucher, act: Act, answer: TouchAnswer | undefined): Promise<ActTouch | null> {
+    if (this.config.passkeys.policy === 'off' || ctx.passkeyId === null) return null;
+    if (ctx.caller.principal.type !== 'user' || ctx.credentialId === null) throw forbidden('only people approve this, signed in as themselves');
+    const principal = principalOf(ctx.caller.principal);
+    const state = answer === undefined ? null : this.#ceremonies.open(answer.state, ['act']);
+    if (state === null || state.credentialId !== ctx.credentialId || state.principal !== principal || state.generation !== ctx.caller.generation || !sameAct(state.act, act)) {
+      const asked: ActState = { purpose: 'act', act, credentialId: ctx.credentialId, principal, generation: ctx.caller.generation, ...challenge() };
+      const passkeys = await livePasskeys(this.#deps.db, this.#deps.chainKey, principal, ctx.caller.generation);
+      throw new TouchRequired(TOUCH_ASKED[act.kind], { options: requestOptions(this.config.passkeys, asked, passkeys), state: this.#ceremonies.seal(asked) });
+    }
+    return withRefusals(this.#deps, async () => {
+      const passkey = await this.#passkeyAnswering(answer!.response, state);
+      if (passkey === null) throw touchFailed(ctx, act, 'unknown_credential', null);
+      const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, values: MAX_BODY_NODES, passkey: storedOf(passkey) };
+      const verified = await verifyAssertion(answer!.response, expected);
+      if (!verified.ok) throw touchFailed(ctx, act, verified.reason, passkey.id);
+      return { state, passkeyId: passkey.id, signCount: verified.signCount };
+    });
+  }
+
+  /**
+   * In the act's transaction, under the log's head: the touch's replay mark moved past its challenge, once, on a passkey
+   * still live and the person's at that generation, and its `passkey.check` entry. A touch counted already (the same
+   * answer sent twice), or a passkey removed since, refuses the act, `403 touch_failed`.
+   */
+  async touched(tx: Transaction, log: AuditEntry[], ctx: Toucher, touch: ActTouch): Promise<void> {
+    const { state, passkeyId, signCount } = touch;
+    const moved = await touchPasskey(tx, { id: passkeyId, principal: state.principal, generation: state.generation, issuedAt: new Date(state.issuedAt), signCount });
+    if (moved === 0) throw touchFailed(ctx, state.act, 'replay', passkeyId);
+    log.push(allowed(ctx, 'passkey.check', { metadata: { purpose: state.act.kind, passkeyId } }));
   }
 
   /** Bind another provider account to the signed-in person. */
@@ -1926,11 +1971,14 @@ export class SigninService {
     };
   }
 
-  async decideDevice(ctx: Asker, userCodeInput: string, approve: boolean): Promise<{ decided: true }> {
+  async decideDevice(ctx: Asker, userCodeInput: string, approve: boolean, answer?: TouchAnswer): Promise<{ decided: true }> {
     const action = approve ? 'device.approve' : 'device.deny';
     const code = normalizeUserCode(userCodeInput);
     // A personal token approving one would make a session with all its person holds.
     if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) throw forbidden('only people approve sign-ins, signed in as themselves');
+    // Approving takes a touch for this code (section 3.5): the terminal gets a credential for 30 days, and the touch is
+    // the moment its person says yes to it. Denying takes none.
+    const touch = approve ? await this.touchFor(ctx, { kind: 'device', code: code ?? userCodeInput.slice(0, 16) }, answer) : null;
     const access = await this.#standing(ctx.caller.principal);
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);
@@ -1949,9 +1997,9 @@ export class SigninService {
               deviceAuthorizations,
               { id: row.id, decidedAt: null },
               approve
-                // The approving session's passkey, which the CLI session it redeems names in turn (passkeys.md, section 5.2):
-                // copied, with no touch of its own until the device ceremony (T176 PR 5) asks one per code.
-                ? { decidedAt: now, decision: 'approved', principal: principalOf(ctx.caller.principal), generation: standing.generation, passkeyId: ctx.passkeyId }
+                // The passkey touched for it, which the CLI session it redeems names in turn, confirmed when this was
+                // decided (passkeys.md, sections 3.5 and 5.2); none without a touch: under `off`, or a person who holds none.
+                ? { decidedAt: now, decision: 'approved', principal: principalOf(ctx.caller.principal), generation: standing.generation, passkeyId: touch?.passkeyId ?? null }
                 : { decidedAt: now, decision: 'denied' },
             );
       if (row === undefined || decided === 0) {
@@ -1960,9 +2008,10 @@ export class SigninService {
           denied(ctx, action, 'unknown_code', { metadata: { userCode: code ?? userCodeInput.slice(0, 16) } }),
         );
       }
+      if (touch !== null) await this.touched(tx, log, ctx, touch);
       log.push(
         allowed(ctx, action, {
-          metadata: { deviceAuthorizationId: row.id, clientLabel: row.clientLabel, clientIp: row.clientIp },
+          metadata: { deviceAuthorizationId: row.id, clientLabel: row.clientLabel, clientIp: row.clientIp, ...(touch === null ? {} : { passkeyId: touch.passkeyId }) },
         }),
       );
       return { decided: true as const };
@@ -2020,9 +2069,10 @@ export class SigninService {
           identityId: null,
           label: row.clientLabel,
           createdBy: principalId,
-          // The approval's passkey. Copied from the approving session, so not fresh: no `confirmedAt` until the device
-          // ceremony's touch stands behind the approval (T176 PR 5), whose `decided_at` it will be.
+          // The passkey touched to approve it (section 3.5), and when: an approval names one only with its touch, so the
+          // terminal starts inside that touch's window, as a browser does after its own.
           passkeyId: row.passkeyId,
+          confirmedAt: row.passkeyId === null ? null : row.decidedAt,
         });
         const entry: AuditEntry = {
           actorType: 'user',
@@ -2047,6 +2097,38 @@ export class SigninService {
       throw error;
     }
   }
+}
+
+/** A touch an act carries (section 4.2): the sealed state its `403 touch_required` asked with, and `get()`'s answer. */
+export type TouchAnswer = { state: string; response: Record<string, unknown> };
+
+/** Who an act's touch is asked of: a person, by the session the request came in on. */
+type Toucher = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId'>;
+
+/** A touch checked for an act, before the act's transaction moves its replay mark (`SigninService.touched`). */
+export type ActTouch = { state: ActState; passkeyId: string; signCount: number };
+
+/** What each act's `403 touch_required` says. */
+const TOUCH_ASKED: Record<Act['kind'], string> = {
+  device: 'approving a terminal takes a touch of your passkey',
+  approval: "approving an app's change takes a touch of your passkey",
+  connect: 'connecting an app takes a touch of your passkey',
+};
+
+/** Whether a sealed act is the one being done: the same kind, target and answer. */
+function sameAct(sealed: Act, act: Act): boolean {
+  return actKey(sealed) === actKey(act);
+}
+
+const actKey = (act: Act): string =>
+  act.kind === 'device' ? `device ${act.code}` : act.kind === 'approval' ? `approval ${act.id} ${act.answer}` : `connect ${act.answer}`;
+
+/** A touch for an act that did not check: refused, with its `passkey.check` entry, since it came from a session. */
+function touchFailed(ctx: Toucher, act: Act, reason: string, passkeyId: string | null): Refusal {
+  return new Refusal(
+    new ApiError('touch_failed', 'that passkey did not confirm it: try again'),
+    denied(ctx, 'passkey.check', reason, { metadata: { purpose: act.kind, passkeyId } }),
+  );
 }
 
 const isOpen = (now: Date) => (row: { decidedAt: Date | null; expiresAt: Date }) =>

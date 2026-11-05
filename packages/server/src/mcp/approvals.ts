@@ -16,6 +16,8 @@ import { mcpApprovals } from '@coffre/db/schema';
 import { allowed, audited, denied, Refusal, withRefusals, type ApiContext, type McpVia } from '../api/context.ts';
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { serveApi } from '../api/router.ts';
+import { answerDigest } from '../api/ceremony.ts';
+import type { TouchAnswer } from '../api/signin.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { decideApproval, findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
@@ -301,6 +303,12 @@ export class McpApprovals {
       }
       if (basisOf(replaced) !== input.basis) throw refuse(conflict('this changed since you opened it: open the approval again'), 'replaced');
     }
+    // A touch for this change as the page showed it (passkeys.md, section 4.4): the one control an agent driving its
+    // person's browser cannot pass, so one touch approves one change, a secret write too, whatever window the session is
+    // in. Asked before the approval is decided, so that a refusal leaves it pending.
+    const touch = input.approve && ctx.signin !== null
+      ? await ctx.signin.touchFor(ctx, { kind: 'approval', id: row.id, answer: answerDigest([digest, input.basis ?? null, input.value ?? null]) }, input.touch)
+      : null;
 
     await audited(ctx, async (tx, log) => {
       // Under the log's head, the approval and its connection as they are now: one that expired, or a disconnect, since they were read refuses it.
@@ -312,7 +320,8 @@ export class McpApprovals {
       }
       // Pending, and unexpired by the database's clock as the write runs.
       if ((await decideApproval(tx, id, input.approve ? 'approved' : 'denied')) === 0) throw refuse(conflict('this approval was decided already, or expired'), 'decided');
-      log.push(allowed(ctx, action, { metadata }));
+      if (touch !== null) await ctx.signin!.touched(tx, log, ctx, touch);
+      log.push(allowed(ctx, action, { metadata: touch === null ? metadata : { ...metadata, passkeyId: touch.passkeyId } }));
     });
     if (!input.approve) {
       const outcome = { text: `The person denied this on coffre: nothing changed.` };
@@ -377,8 +386,8 @@ export class McpApprovals {
   }
 }
 
-/** What the page sends back: the decision, the digest and basis it showed, and a value typed. */
-type Decide = { approve: boolean; digest: string; basis?: string | null; value?: string };
+/** What the page sends back: the decision, the digest and basis it showed, a value typed, and a touch for them. */
+type Decide = { approve: boolean; digest: string; basis?: string | null; value?: string; touch?: TouchAnswer };
 
 /** A connection that failed its MAC is no connection. */
 function untampered(error: unknown): null {

@@ -1,8 +1,10 @@
 // Passkey rows, and a session one confirmed, written as the app writes them
-// (docs/design/passkeys.md, sections 5.1 and 5.2): what the sign-in's touch
-// makes once T176 PR 4b lands, for the tests of what holds them before then.
-import { randomBytes, randomUUID } from 'node:crypto';
+// (docs/design/passkeys.md, sections 5.1 and 5.2), for the tests of what holds
+// them; each row's key is a software authenticator's, which `touching` touches.
+import { randomUUID } from 'node:crypto';
 
+import { CoffreError } from '@coffre/client';
+import { SoftAuthenticator } from '@coffre/conformance/authenticator';
 import { generateToken, hashToken, tokenHint } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { eq } from 'drizzle-orm';
@@ -15,14 +17,43 @@ async function generationOf(owner: Database, email: string): Promise<number> {
   return (await memberStanding(owner, `user:${email}`))!.generation;
 }
 
-/** A live passkey of `email`'s, at their generation; its id. */
+/** The authenticator behind each passkey `addPasskey` wrote, by its id. */
+const keys = new Map<string, SoftAuthenticator>();
+
+/** A live passkey of `email`'s, at their generation, a synced software authenticator's; its id. */
 export async function addPasskey(owner: Database, chainKey: Buffer, email: string): Promise<string> {
+  const key = await SoftAuthenticator.create('ES256', { synced: true });
   const passkey = {
-    id: randomUUID(), principal: `user:${email}`, generation: await generationOf(owner, email), userHandle: randomBytes(16), credentialId: randomBytes(32),
-    publicKey: randomBytes(77), algorithm: -7, removedAt: null,
+    id: randomUUID(), principal: `user:${email}`, generation: await generationOf(owner, email), userHandle: Buffer.from(crypto.getRandomValues(new Uint8Array(16))),
+    credentialId: Buffer.from(key.credentialId), publicKey: Buffer.from(await key.publicKey()), algorithm: -7, removedAt: null,
   };
   await owner.insert(passkeys).values({ ...passkey, synced: true, name: 'YubiKey 5C', createdBy: `user:${email}`, authMac: authMac(chainKey, 'passkeys', passkey) });
+  keys.set(passkey.id, key);
   return passkey.id;
+}
+
+/** A touch an act carries (docs/design/passkeys.md, section 4.2). */
+export type Touch = { state: string; response: Record<string, unknown> };
+
+/**
+ * An act that takes a touch of its own, as coffre's pages do it: sent, and refused `403 touch_required`, sent again
+ * with a touch of `passkeyId`'s authenticator for the challenge the refusal carries, at `origin`.
+ */
+export async function touching<T>(passkeyId: string, send: (touch?: Touch) => Promise<T>, origin = 'https://secrets.acme.example'): Promise<T> {
+  try {
+    return await send();
+  } catch (error) {
+    if (!(error instanceof CoffreError) || error.code !== 'touch_required' || error.touch === undefined) throw error;
+    return send({ state: error.touch.state, response: await touchFor(passkeyId, error.touch.options, origin) });
+  }
+}
+
+/** `passkeyId`'s authenticator's answer to a `touch_required`'s options, at `origin`. */
+export async function touchFor(passkeyId: string, options: unknown, origin = 'https://secrets.acme.example'): Promise<Record<string, unknown>> {
+  const key = keys.get(passkeyId);
+  if (key === undefined) throw new Error(`no authenticator holds passkey ${passkeyId}`);
+  const { challenge, rpId } = options as { challenge: string; rpId: string };
+  return (await key.assert({ rpId, origin, challenge: new Uint8Array(Buffer.from(challenge, 'base64url')) })) as unknown as Record<string, unknown>;
 }
 
 /** Its removal, signed again as the app signs one. */

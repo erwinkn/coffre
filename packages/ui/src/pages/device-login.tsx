@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { failureMessage, statusOf, useCoffre } from '../lib/coffre';
 
@@ -6,6 +6,7 @@ import { ClosedDoor } from '../components/page';
 import { ErrorLine, Spinner, Timestamp } from '../components/ui';
 import { CheckCircle, SlashCircle, Terminal } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
+import { pressTouch, touchMessage, type HeldTouch } from '../lib/touch';
 import type { deviceLogin } from '../options';
 
 const Route = pageRoute<typeof deviceLogin>();
@@ -106,19 +107,22 @@ function Approve({
   const coffre = useCoffre();
   const [pending, setPending] = useState<'approve' | 'deny' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Approving takes a touch of your passkey for this code, if you hold one (docs/design/passkeys.md, section 3.5).
+  const held = useRef<HeldTouch>({ asked: null });
 
   async function decide(approve: boolean) {
     setPending(approve ? 'approve' : 'deny');
     try {
-      await coffre.deviceLogins.decide(request.userCode, approve);
+      if (approve) await pressTouch(held.current, (touch) => coffre.deviceLogins.decide(request.userCode, true, touch));
+      else await coffre.deviceLogins.decide(request.userCode, false);
       onDecided(approve ? 'approved' : 'denied');
     } catch (error) {
       setError(
-        statusOf(error) === 404
+        touchMessage(error, held.current.asked?.options.rpId) ?? (statusOf(error) === 404
           ? 'That code is unknown, already used, or expired. Run coffre login again.'
           : statusOf(error) === undefined
             ? 'The decision could not be sent. Nothing was approved.'
-            : failureMessage(error),
+            : failureMessage(error)),
       );
     } finally {
       setPending(null);

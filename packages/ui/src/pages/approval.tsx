@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ApprovalView, Decision } from '@coffre/client';
 
 import { settled } from '../lib/approval';
@@ -7,6 +7,7 @@ import { ClosedDoor } from '../components/page';
 import { CopyButton, ErrorLine, Notice, Spinner, Timestamp } from '../components/ui';
 import { CheckCircle, Link as LinkIcon, SlashCircle } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
+import { pressTouch, touchMessage, type HeldTouch } from '../lib/touch';
 import type { approval } from '../options';
 
 const Route = pageRoute<typeof approval>();
@@ -88,19 +89,24 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
   const asksValue = view.asks?.value ?? null;
   const reveal = view.kind === 'reveal';
 
+  // Approving takes a touch of your passkey for this change, if you hold one (docs/design/passkeys.md, section 4.4):
+  // asked for this change as shown and the value typed, so typing another forgets an ask held for the last one.
+  const held = useRef<HeldTouch>({ asked: null });
+
   async function decide(approve: boolean) {
     setPending(approve ? 'approve' : 'deny');
+    const answer = { digest: view.digest, basis: view.basis, ...(approve && asksValue !== null ? { value } : {}) };
     try {
       onDecided(
-        await coffre.approvals.decide(view.id, {
-          approve,
-          digest: view.digest,
-          basis: view.basis,
-          ...(approve && asksValue !== null ? { value } : {}),
-        }),
+        approve
+          ? await pressTouch(held.current, (touch) => coffre.approvals.decide(view.id, { approve, ...answer, ...(touch === undefined ? {} : { touch }) }))
+          : await coffre.approvals.decide(view.id, { approve, ...answer }),
       );
     } catch (error) {
-      setError(statusOf(error) === undefined ? 'The answer could not be sent. Nothing changed.' : failureMessage(error));
+      setError(
+        touchMessage(error, held.current.asked?.options.rpId)
+          ?? (statusOf(error) === undefined ? 'The answer could not be sent. Nothing changed.' : failureMessage(error)),
+      );
       setPending(null);
     }
   }
@@ -163,7 +169,7 @@ function Approve({ view, onDecided }: { view: ApprovalView; onDecided: (decision
             spellCheck={false}
             value={value}
             disabled={pending !== null}
-            onChange={(event) => setValue(event.target.value)}
+            onChange={(event) => { held.current.asked = null; setValue(event.target.value); }}
           />
           <small>{asksValue.note}</small>
         </label>
