@@ -1977,8 +1977,9 @@ export class SigninService {
     // A personal token approving one would make a session with all its person holds.
     if (ctx.caller.principal.type !== 'user' || ctx.caller.credentialScope !== null) throw forbidden('only people approve sign-ins, signed in as themselves');
     // Approving takes a touch for this code (section 3.5): the terminal gets a credential for 30 days, and the touch is
-    // the moment its person says yes to it. Denying takes none.
-    const touch = approve ? await this.touchFor(ctx, { kind: 'device', code: code ?? userCodeInput.slice(0, 16) }, answer) : null;
+    // the moment its person says yes to it. Denying takes none, nor a code no terminal could hold: that one is refused
+    // unknown below, with no authenticator asked first.
+    const touch = approve && code !== null ? await this.touchFor(ctx, { kind: 'device', code }, answer) : null;
     const access = await this.#standing(ctx.caller.principal);
     return audited(this.#deps, async (tx, log) => {
       const standing = await this.#currentCaller(tx, ctx, access);

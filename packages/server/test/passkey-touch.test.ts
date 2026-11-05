@@ -131,9 +131,8 @@ test('connecting an app takes a touch of its own, for the scopes chosen, and one
   assert.deepEqual((await entries('passkey.check')).filter((entry) => entry.decision === 'deny').map((entry) => [entry.metadata.purpose, entry.metadata.reason]), [['connect', 'replay']]);
 });
 
-test("an MCP client's change takes a touch on its page, for that change as shown; refused, it stays pending", async () => {
-  const { session, passkey } = await confirmedBrowser();
-  // DEV connects Claude Code, with a touch, and its call asks for a change.
+/** DEV connects Claude Code from `session`, with a touch: its access token. */
+async function connectTouched(session: string, passkey: string): Promise<string> {
   const verifier = randomBytes(32).toString('base64url');
   const request = { ...consent('read write'), code_challenge: createHash('sha256').update(verifier).digest('base64url') };
   const asked = await refusal(await post(session, '/api/oauth/authorizations', { request, approve: true, scopes: ['read', 'write'] }));
@@ -144,11 +143,22 @@ test("an MCP client's change takes a touch on its page, for that change as shown
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: REDIRECT, client_id: CLAUDE_CODE }).toString(),
   });
-  const token = ((await tokens.json()) as { access_token: string }).access_token;
-  const call = await callRaw(token, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
+  return ((await tokens.json()) as { access_token: string }).access_token;
+}
+
+/** A change the client asks for, and its page as `session` opens it. */
+async function asked(token: string, session: string, tool: string, args: Record<string, unknown>) {
+  const call = await callRaw(token, tool, args);
   const id = (call.body.result!.structuredContent!.approval as { id: string }).id;
   const shown = ((await (await route(`/api/approvals/${id}`, { headers: fromPage(session) })).json()) as { approval: { digest: string; basis: string | null } }).approval;
   const status = async () => (await db.owner.select().from(mcpApprovals).where(eq(mcpApprovals.id, id)))[0]!.status;
+  return { id, shown, status };
+}
+
+test("an MCP client's change takes a touch on its page, for that change as shown; refused, it stays pending", async () => {
+  const { session, passkey } = await confirmedBrowser();
+  const token = await connectTouched(session, passkey);
+  const { id, shown, status } = await asked(token, session, 'archive_secret', { secret: 'market/prod/OLD_KEY' });
   const archived = async () => (await clientFor(deps, 'admin@acme.example').secrets.history('market/prod/OLD_KEY')).archived;
 
   const refused = await refusal(await post(session, `/api/approvals/${id}`, { approve: true, digest: shown.digest, basis: shown.basis }));
@@ -161,4 +171,57 @@ test("an MCP client's change takes a touch on its page, for that change as shown
   assert.equal(approved.status, 200, await approved.clone().text());
   assert.equal(await archived(), true);
   assert.equal((await entries('mcp.approve')).at(-1)!.metadata.passkeyId, passkey);
+});
+
+test('a touch approves the change as it was asked for: another typed value, or what it replaces read anew, is asked again', async () => {
+  const { session, passkey } = await confirmedBrowser();
+  const token = await connectTouched(session, passkey);
+  const root = clientFor(deps, 'admin@acme.example');
+  const value = async (key: string) => (await root.secrets.reveal(`market/prod/${key}`)).values[key];
+
+  // Touched for the value A: the same touch sent with B is the touch of another change, so asked again and pending.
+  // That binding is what holds an agent driving the page to the value the person touched for.
+  const typed = await asked(token, session, 'request_secret_value', { secret: 'market/prod/API_KEY' });
+  const prompt = await refusal(await post(session, `/api/approvals/${typed.id}`, { approve: true, digest: typed.shown.digest, basis: typed.shown.basis, value: 'A' }));
+  const touch: Touch = { state: prompt.touch!.state, response: await touchFor(passkey, prompt.touch!.options) };
+  assert.equal((await refusal(await post(session, `/api/approvals/${typed.id}`, { approve: true, digest: typed.shown.digest, basis: typed.shown.basis, value: 'B', touch }))).error, 'touch_required');
+  assert.equal(await typed.status(), 'pending');
+  assert.equal(await value('API_KEY'), 'value');
+  // The same touch with A, as asked: approved, and A written.
+  const approved = await post(session, `/api/approvals/${typed.id}`, { approve: true, digest: typed.shown.digest, basis: typed.shown.basis, value: 'A', touch });
+  assert.equal(approved.status, 200, await approved.clone().text());
+  assert.equal(await value('API_KEY'), 'A');
+
+  // Touched for what OLD_KEY held when the page opened; a version set since, the page opened again: the held touch was
+  // for replacing the old one, so it is asked again, and the approval stays pending.
+  const replacing = await asked(token, session, 'request_secret_value', { secret: 'market/prod/OLD_KEY' });
+  const first = await refusal(await post(session, `/api/approvals/${replacing.id}`, { approve: true, digest: replacing.shown.digest, basis: replacing.shown.basis, value: 'C' }));
+  const held: Touch = { state: first.touch!.state, response: await touchFor(passkey, first.touch!.options) };
+  await root.secrets.set('market/prod', { OLD_KEY: 'meanwhile' });
+  const reopened = ((await (await route(`/api/approvals/${replacing.id}`, { headers: fromPage(session) })).json()) as { approval: { basis: string | null } }).approval;
+  assert.notEqual(reopened.basis, replacing.shown.basis);
+  assert.equal((await refusal(await post(session, `/api/approvals/${replacing.id}`, { approve: true, digest: replacing.shown.digest, basis: reopened.basis, value: 'C', touch: held }))).error, 'touch_required');
+  assert.equal(await replacing.status(), 'pending');
+  assert.equal(await value('OLD_KEY'), 'meanwhile');
+});
+
+test("a touch is its session's: another of the person's sessions sending it is asked again, and it still approves on its own", async () => {
+  const signin = runtime.signin!;
+  // DEV's second browser, signed in before the passkey and stepped up with it after: the same person, generation and
+  // passkey as the first session, another credential.
+  const before = await browserFor(DEV);
+  const { session, passkey } = await confirmedBrowser();
+  const step = (await signin.stepUpStep(before, '/'))!;
+  const stepped = await signin.stepUp(step.state, before, await touchFor(passkey, step.options), { requestId: randomUUID(), sourceIp: null, label: 'Safari' });
+  assert.ok(stepped.ok);
+  const second = stepped.credential.token;
+
+  const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
+  const undecided = async () => (await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.userCode, started.userCode)))[0]!.decidedAt === null;
+  const prompt = await refusal(await post(session, `/api/device-logins/${started.userCode}`, { approve: true }));
+  const touch: Touch = { state: prompt.touch!.state, response: await touchFor(passkey, prompt.touch!.options) };
+  assert.equal((await refusal(await post(second, `/api/device-logins/${started.userCode}`, { approve: true, touch }))).error, 'touch_required');
+  assert.ok(await undecided());
+  assert.equal((await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch })).status, 200);
+  assert.equal(await undecided(), false);
 });

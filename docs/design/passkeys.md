@@ -938,7 +938,9 @@ confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
 // device_authorizations: the passkey that approved this terminal; its decided_at is when.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 
-// mcp_connections: the passkey that confirmed the session that connected it.
+// mcp_connections: the passkey touched to connect it (section 4.2), which may be another of the person's than
+// the one behind the session; under `off`, where no touch is asked, the session's own. Device approvals write
+// none under `off` instead: `off` checks neither, so the two differ in what they record, not in what they allow.
 passkeyId: uuid('passkey_id'),          // FK passkeys(id)
 ```
 

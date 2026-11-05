@@ -17,7 +17,7 @@ import { allowed, audited, denied, Refusal, withRefusals, type ApiContext, type 
 import { ApiError, conflict, forbidden, notFound } from '../api/errors.ts';
 import { serveApi } from '../api/router.ts';
 import { answerDigest } from '../api/ceremony.ts';
-import type { TouchAnswer } from '../api/signin.ts';
+import type { SigninService, TouchAnswer } from '../api/signin.ts';
 import { AuthRowTampered } from '../auth-rows.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { decideApproval, findApproval, findConnection, insertApproval, openApprovals, unansweredApprovals, update, type ApprovalRow, type ConnectionRow } from '../db/queries.ts';
@@ -26,6 +26,9 @@ import type { WorkloadTransport } from '../workloads/transport.ts';
 import type { Applied, Detail, Replaced, Viewing } from './changes.ts';
 import type { McpConnection } from './service.ts';
 import { TOOL_BY_NAME, type Tool } from './tools.ts';
+
+/** The touch an approval asks: required, so that an approval with no sign-in to ask it of cannot pass unasked. */
+type Touches = Pick<SigninService, 'touchFor' | 'touched'>;
 
 /** How long the person has to decide: Q1's bound, for links as for elicitation. */
 export const APPROVAL_SECONDS = 5 * 60;
@@ -264,11 +267,11 @@ export class McpApprovals {
    * ones the page showed: a change that is not what the person read, or
    * that would replace something else now, is refused.
    */
-  async decide(ctx: ApiContext, id: string, input: Decide): Promise<Decision> {
-    return withRefusals(ctx, () => this.#decide(ctx, id, input));
+  async decide(ctx: ApiContext, id: string, input: Decide, touches: Touches): Promise<Decision> {
+    return withRefusals(ctx, () => this.#decide(ctx, id, input, touches));
   }
 
-  async #decide(ctx: ApiContext, id: string, input: Decide): Promise<Decision> {
+  async #decide(ctx: ApiContext, id: string, input: Decide, touches: Touches): Promise<Decision> {
     const action = input.approve ? 'mcp.approve' : 'mcp.deny';
     const { row, connection, tool } = await this.#mine(ctx, id, action);
     const args = JSON.parse(row.arguments) as unknown;
@@ -306,8 +309,8 @@ export class McpApprovals {
     // A touch for this change as the page showed it (passkeys.md, section 4.4): the one control an agent driving its
     // person's browser cannot pass, so one touch approves one change, a secret write too, whatever window the session is
     // in. Asked before the approval is decided, so that a refusal leaves it pending.
-    const touch = input.approve && ctx.signin !== null
-      ? await ctx.signin.touchFor(ctx, { kind: 'approval', id: row.id, answer: answerDigest([digest, input.basis ?? null, input.value ?? null]) }, input.touch)
+    const touch = input.approve
+      ? await touches.touchFor(ctx, { kind: 'approval', id: row.id, answer: answerDigest([digest, input.basis ?? null, input.value ?? null]) }, input.touch)
       : null;
 
     await audited(ctx, async (tx, log) => {
@@ -320,7 +323,7 @@ export class McpApprovals {
       }
       // Pending, and unexpired by the database's clock as the write runs.
       if ((await decideApproval(tx, id, input.approve ? 'approved' : 'denied')) === 0) throw refuse(conflict('this approval was decided already, or expired'), 'decided');
-      if (touch !== null) await ctx.signin!.touched(tx, log, ctx, touch);
+      if (touch !== null) await touches.touched(tx, log, ctx, touch);
       log.push(allowed(ctx, action, { metadata: touch === null ? metadata : { ...metadata, passkeyId: touch.passkeyId } }));
     });
     if (!input.approve) {

@@ -755,7 +755,7 @@ export const routes = {
       // A touch for this change, as the page showed it (passkeys.md, section 4.4), as for a device approval.
       touch: touchAnswer.optional(),
     }).strict(),
-    run: (ctx, { params, input }) => mcp(ctx).approvals.decide(ctx, params.id, input),
+    run: (ctx, { params, input }) => mcp(ctx).approvals.decide(ctx, params.id, input, signin(ctx)),
   }),
 
   // The MCP clients you connected: Connected apps.
