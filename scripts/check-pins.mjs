@@ -19,8 +19,11 @@ import { kindOf, problemsIn } from './pins.mjs';
 const root = new URL('..', import.meta.url).pathname;
 const EXACT = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
-// What pnpm runs of a workspace project's own on install: nothing, as of its dependencies'.
-const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepare'];
+// What pnpm runs of a workspace project's own on install
+// (pnpm.io/scripts#lifecycle-scripts): nothing, as of its dependencies'.
+const INSTALL_SCRIPTS = ['pnpm:devPreinstall', 'preinstall', 'install', 'postinstall', 'preprepare', 'prepare', 'postprepare'];
+// pnpm's settings live in pnpm-workspace.yaml, which scripts/pins.mjs reads.
+const PNPM_SETTINGS = ['allowBuilds', 'onlyBuiltDependencies', 'onlyBuiltDependenciesFile', 'neverBuiltDependencies', 'dangerouslyAllowAllBuilds', 'minimumReleaseAge', 'minimumReleaseAgeExclude', 'strictDepBuilds', 'ignoreScripts'];
 
 const manifests = ['package.json', 'dev/package.json'];
 for (const dir of ['packages', 'examples']) {
@@ -51,6 +54,9 @@ for (const manifest of manifests) {
     }
     for (const script of INSTALL_SCRIPTS) {
         if (pkg.scripts?.[script] !== undefined) problems.push(`${manifest}: scripts.${script} runs on install`);
+    }
+    for (const setting of PNPM_SETTINGS) {
+        if (pkg.pnpm?.[setting] !== undefined) problems.push(`${manifest}: pnpm.${setting} belongs in pnpm-workspace.yaml, where check:pins reads it`);
     }
     if (manifest.startsWith('packages/') && pkg.version !== version) {
         problems.push(`${manifest}: version ${pkg.version} is not ${version}, the other packages'`);
