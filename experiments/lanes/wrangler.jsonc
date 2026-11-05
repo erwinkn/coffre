@@ -1,0 +1,15 @@
+// The prototype's Worker, deployed only to a personal account for a load
+// test, and deleted after. Synthetic data and keys; SEED is not a secret.
+{
+  "name": "coffre-w194-lanes",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": { "SEED": "w194-synthetic", "LANES": "16", "SHARDS": "64" },
+  "durable_objects": { "bindings": [{ "name": "LANE", "class_name": "Lane" }, { "name": "SHARD", "class_name": "Shard" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lane"] }, { "tag": "v2", "new_sqlite_classes": ["Shard"] }],
+  // `wrangler hyperdrive create coffre-w194-lanes --caching-disabled`; locally, the connection string below.
+  "hyperdrive": [{ "binding": "HD", "id": "96ddaeb2c1f646a3afa3e826c0d053fb", "localConnectionString": "postgresql://coffre_owner:local-dev-only@127.0.0.1:30195/lanes" }]
+}
