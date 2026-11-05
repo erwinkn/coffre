@@ -246,6 +246,9 @@ export async function audited<T>(
       const working = work(tx, log);
       // Each heard at once, though awaited in turn: the head's refusal first, then the policy's, then the work's; one
       // left unawaited behind an earlier refusal fails no one.
+      // The head too, behind the factor lock: a factor lock that fails (a `lock_timeout`) is awaited first, and the
+      // head's statement, queued behind it, fails with it (25P02), unheard (review r13 of #500).
+      held.catch(() => {});
       fenced?.catch(() => {});
       working.catch(() => {});
       await factored;

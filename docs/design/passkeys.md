@@ -284,7 +284,13 @@ handle of its own (D173; section 3.2): sealed in the GET's `state`
 (`CreateState`), which the POST sends back and whose handle the row
 stores. Two tabs of one sign-in, or the page reloaded, never hand
 `create()` the same handle, so neither replaces the passkey the other
-added. What an interrupted attempt can leave is a passkey on the device
+added. A page asks the authenticator to `create()` once per options:
+after `passkey_failed`, which keeps the step, it asks coffre for new
+options before the next press (`sendPasskey`'s `once`, review r13). The
+refusal says nothing of the answers sent before it: tab A's POST commits
+and its answer is lost, tab B's sign-in replaces the pending cookie, and
+A's answer, sent again, fails B's challenge; a second `create()` from A's
+options would name the handle coffre now holds. What an interrupted attempt can leave is a passkey on the device
 that coffre never stored: a second tab's `create()` after the first's
 enrollment committed (`passkey_exists`), or one made after the step ended
 (`state_mismatch`). Coffre never offers it: a touch names only the
@@ -987,6 +993,11 @@ entries for what it ends are prepared before the transaction
 call, and the transaction re-reads under the lock what to end, and retries
 if that is not what it prepared. Within it the factor lock comes first,
 then the log's head (`audited` takes it before any row), then the rows.
+Asked together, under one Sync, a factor lock that fails (a
+`lock_timeout`, a cancel) fails the head's statement behind it (25P02);
+`audited` hears both at once and answers the factor lock's error, so the
+head's rejection is never left unhandled, which on Node would end the
+process (review r13).
 
 **The app's own issues take the head, not the factor lock** (PR 4a). Every
 app transaction takes the log's head first, a sign-in's, a poll's, an MCP

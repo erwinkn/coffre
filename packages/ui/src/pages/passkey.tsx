@@ -52,14 +52,14 @@ export function PasskeyPage() {
   // An answer coffre did not answer: the next press sends it again, never asks for another (`sendPasskey`).
   const [unanswered, setUnanswered] = useState(false);
   // The step's answer coffre did not answer, for the next press; each GET's step starts with none.
-  const unsent = useRef<Unsent>({ body: null });
+  const unsent = useRef<Unsent>({ body: null, asked: false });
 
   useEffect(() => {
     const query = stepUp ? `?step-up=1${search.next === undefined ? '' : `&next=${encodeURIComponent(search.next)}`}` : '';
     let current = true;
     setStep(null);
     setUnanswered(false);
-    unsent.current = { body: null };
+    unsent.current = { body: null, asked: false };
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
       if (!current) return;
       setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
@@ -133,7 +133,13 @@ export function PasskeyPage() {
           return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...(current.state === undefined ? {} : { state: current.state }) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
+        current.purpose === 'enroll',
       );
+      if (answer.kind === 'stale') {
+        // Not reached: a refused new passkey asks for new options at once, below. Asked anyway, new options.
+        setAttempt((n) => n + 1);
+        return;
+      }
       setUnanswered(answer.kind === 'unavailable');
       if (answer.kind === 'ok' && typeof answer.value.next === 'string') {
         // A full navigation: the new session cookie is the next page's.
@@ -149,6 +155,9 @@ export function PasskeyPage() {
         );
       } else if (answer.code === 'passkey_failed') {
         setError(enroll ? 'That passkey could not be added. Try again, or another one.' : 'That passkey did not confirm it’s you. Try again, or another one.');
+        // A new passkey's options are asked of the authenticator once (`sendPasskey`'s `once`): the next press's come
+        // from coffre again, with a user handle of their own.
+        if (enroll) setAttempt((n) => n + 1);
       } else {
         setEnded(signinErrorMessage(answer.code ?? 'state_mismatch') ?? signinErrorMessage('state_mismatch'));
       }

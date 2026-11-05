@@ -86,7 +86,32 @@ test("a press the authenticator did not answer, cancelled or timed out, is forgo
     return json({ next: '/projects' }, 200);
   };
   await assert.rejects(sendPasskey(unsent, () => Promise.reject(new DOMException('cancelled', 'NotAllowedError')), send), { name: 'NotAllowedError' });
-  assert.deepEqual(unsent, { body: null });
+  assert.equal(unsent.body, null);
   assert.deepEqual(await sendPasskey(unsent, async () => `{"response":"passkey ${++asked}"}`, send), { kind: 'ok', value: { next: '/projects' } });
   assert.deepEqual(sent, ['{"response":"passkey 1"}']);
+});
+
+test("a new passkey's options are asked of the authenticator once: refused after a lost answer, the next press asks coffre for new options, never create() again (review r13 of #500)", async () => {
+  let asked = 0;
+  const ask = async () => `{"response":"passkey ${++asked}"}`;
+  const sent: string[] = [];
+  // Tab A's POST commits, its answer lost; tab B's sign-in replaces the pending cookie, and A's answer, sent again,
+  // fails B's challenge.
+  const answers = [() => Promise.reject(new TypeError('Failed to fetch')), () => json({ error: 'passkey_failed' }, 401)];
+  const send = (body: string) => {
+    sent.push(body);
+    return answers[sent.length - 1]!();
+  };
+  const page = { body: null, asked: false };
+  assert.deepEqual(await sendPasskey(page, ask, send, true), { kind: 'unavailable' });
+  assert.deepEqual(await sendPasskey(page, ask, send, true), { kind: 'refused', code: 'passkey_failed' });
+  // A second create() would name the handle coffre now holds: the press asks nothing and sends nothing.
+  assert.deepEqual(await sendPasskey(page, ask, send, true), { kind: 'stale' });
+  assert.equal(asked, 1);
+  assert.equal(sent.length, 2);
+  // New options, a new step: one create() of their own.
+  const fresh = { body: null, asked: false };
+  answers.push(() => json({ next: '/projects' }, 200));
+  assert.deepEqual(await sendPasskey(fresh, ask, send, true), { kind: 'ok', value: { next: '/projects' } });
+  assert.equal(asked, 2);
 });

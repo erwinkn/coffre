@@ -29,8 +29,11 @@ export async function passkeyAnswer<T>(request: Promise<Response>): Promise<Pass
   return { kind: 'refused', code: typeof error === 'string' ? error : undefined };
 }
 
-/** A step's answer the server did not answer: the page's own memory, for its next press. */
-export type Unsent = { body: string | null };
+/**
+ * A step's press, in the page's own memory: the answer the server did not answer, for the next press, and whether
+ * the step's options were asked of the authenticator already. Each GET's step starts with neither.
+ */
+export type Unsent = { body: string | null; asked?: boolean };
 
 /**
  * One press of the passkey page's button: the authenticator's answer, sent. An answer the server did not answer
@@ -43,12 +46,27 @@ export type Unsent = { body: string | null };
  * page's `create()` replaces another's. A touch is the same: the same assertion again, never a second touch for one
  * challenge. `ask` throws as the browser's `create()` or `get()` does, and its throw forgets the press: no passkey was
  * made.
+ *
+ * `once`: the options may be asked of the authenticator once only, as a `create()`'s are: after a refusal that keeps
+ * the step, the press answers `stale`, asking nothing, and the page asks coffre for new options, a user handle of
+ * their own. A refusal says nothing of the answers sent before it: tab A's POST commits and its response is lost, tab
+ * B's sign-in replaces the pending cookie, and A's answer, sent again, fails B's challenge (`passkey_failed`); a
+ * second `create()` with A's options would name the handle coffre now holds, and could replace that passkey on the
+ * authenticator (review r13 of #500).
  */
-export async function sendPasskey<T>(unsent: Unsent, ask: () => Promise<string>, send: (body: string) => Promise<Response>): Promise<PasskeyAnswer<T>> {
+export async function sendPasskey<T>(
+  unsent: Unsent,
+  ask: () => Promise<string>,
+  send: (body: string) => Promise<Response>,
+  once = false,
+): Promise<PasskeyAnswer<T> | { kind: 'stale' }> {
+  if (unsent.body === null && once && unsent.asked === true) return { kind: 'stale' };
   const body = unsent.body ?? (await ask());
   unsent.body = body;
+  unsent.asked = true;
   const answer = await passkeyAnswer<T>(send(body));
-  // Kept only while the server may still take it; `passkey_failed` added nothing, so another passkey may be asked for.
+  // Kept only while the server may still take it; `passkey_failed` added nothing of this answer's, so a touch may
+  // ask for another (a new passkey asks for new options first, `once`).
   if (answer.kind !== 'unavailable') unsent.body = null;
   return answer;
 }
