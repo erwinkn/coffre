@@ -107,7 +107,8 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
  *
  * `watcher` must have the privileges of `pg_read_all_stats` (a superuser does: the owner, in compose and CI), not only
  * be a member of it (`USAGE`, not `MEMBER`: a membership granted `INHERIT FALSE` gives none): without them Postgres
- * shows it no other login's transaction ids, and `HOLDERS` would find nothing to wait on. It waits until `signal`
+ * still shows it other logins' `backend_xid` and `backend_xmin`, so it would wait as long, but hides their
+ * `backend_type`, `state` and `xact_start`, which name a holder to whoever must end it. It waits until `signal`
  * aborts: the test's own timeout, the only bound there is on how long a transaction elsewhere in the cluster may run,
  * so no number of its own (R70). While it waits it names what holds it every `NAME_HOLDERS_EVERY_MS`, so that a wait
  * CI cancels first is not a silent one; aborted, it fails naming each session still in the way, on stderr as well as
@@ -116,7 +117,7 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
  */
 export async function deletesSettled(watcher: WeighingSession, signal: AbortSignal): Promise<void> {
   const [{ sees }] = await watcher.unsafe(`SELECT pg_has_role('pg_read_all_stats', 'USAGE') AS sees`) as unknown as { sees: boolean }[];
-  if (!sees) throw new Error("deletesSettled needs a login with pg_read_all_stats's privileges (a superuser, or a member that inherits them): it could not see what it waits for");
+  if (!sees) throw new Error("deletesSettled needs a login with pg_read_all_stats's privileges (a superuser, or a member that inherits them): it could not name the sessions it waits on");
   // One past the newest transaction to have ended (a snapshot's xmax), as `pg_stat_activity`'s 32-bit ids are: every
   // row deleted before the call was deleted by a transaction older than this.
   const [{ ended }] = await watcher.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
