@@ -91,7 +91,11 @@
   personal token or MCP connection is held to the policy: once they hold
   a passkey, one that names none answers `401 passkey_required`, and a
   browser steps it up with a touch. What a credential issues names its
-  passkey, so removing that passkey ends it too. To come: fresh checks
+  passkey, so removing that passkey ends it too. Each `create()` gets a
+  user handle of its own, so a second tab or a reload never replaces a
+  passkey coffre stored; an interrupted attempt may leave an unused
+  passkey on the device, which coffre never offers, and locks nobody
+  out. To come: fresh checks
   for risky acts, Account → Passkeys and the Owner's reset
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.

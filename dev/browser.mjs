@@ -90,7 +90,7 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
     async function passkeyStep(email, cookie) {
         const asked = await fetch(`${api}/api/auth/passkey`, { headers: { cookie } });
         if (!asked.ok) throw new Error(`the passkey step for ${email}: ${asked.status} ${await asked.text()}`);
-        const { purpose, options } = await asked.json();
+        const { purpose, options, state } = await asked.json();
         const ceremony = { rpId: new URL(site).hostname, origin: new URL(site).origin, challenge: new Uint8Array(Buffer.from(options.challenge, 'base64url')) };
         let response;
         if (purpose === 'enroll') {
@@ -107,7 +107,7 @@ export function browser(api, idp, tunnel = {}, { passkeys } = {}) {
         const answered = await fetch(`${api}/api/auth/passkey`, {
             method: 'POST',
             headers: { cookie, origin: site, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' },
-            body: JSON.stringify({ response }),
+            body: JSON.stringify({ response, ...(state === undefined ? {} : { state }) }),
         });
         if (!answered.ok) return null;
         return cookiesOf(answered).find((pair) => /^(__Host-)?coffre_session=/.test(pair)) ?? null;

@@ -85,7 +85,7 @@ const passkeys = new Map<string, SoftAuthenticator>();
 async function passkeyStep(deployment: Deployment, browser: Browser, email: string): Promise<{ ok: true } | { ok: false; error: string; location: string }> {
   const asked = await browser.fetch('/api/auth/passkey');
   expect(asked.ok, 'the passkey page had nothing to ask', await asked.clone().text());
-  const { purpose, options } = (await asked.json()) as { purpose: string; options: { challenge: string; user?: { id: string } } };
+  const { purpose, options, state } = (await asked.json()) as { purpose: string; options: { challenge: string; user?: { id: string } }; state?: string };
   const ceremony = { rpId: new URL(deployment.origin).hostname, origin: deployment.origin, challenge: new Uint8Array(Buffer.from(options.challenge, 'base64url')) };
   let response;
   if (purpose === 'enroll') {
@@ -97,7 +97,8 @@ async function passkeyStep(deployment: Deployment, browser: Browser, email: stri
     expect(key !== undefined, `${email} holds a passkey conformance never added`);
     response = await key!.assert(ceremony);
   }
-  const answered = await browser.send('POST', '/api/auth/passkey', { response });
+  // A new passkey goes back with its sealed `state`, the user handle its options were drawn with.
+  const answered = await browser.send('POST', '/api/auth/passkey', { response, ...(state === undefined ? {} : { state }) });
   if (answered.ok) return { ok: true };
   const { error } = (await answered.json()) as { error: string };
   return { ok: false, error, location: '/auth/passkey' };

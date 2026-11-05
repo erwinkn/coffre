@@ -618,7 +618,7 @@ export const passkeys = pgTable(
     // Whose: the member and the generation it was added in, as identities are bound.
     principal: text().notNull(),
     generation: integer().notNull(),
-    // The WebAuthn user handle: 16 random bytes, the same on every passkey of the person's (section 3.2).
+    // The WebAuthn user handle: 16 random bytes, drawn for the create() that made this passkey (section 3.2).
     userHandle: bytea('user_handle').notNull(),
     // The authenticator's credential ID, raw (WebAuthn caps it at 1023 bytes), unique across the instance.
     credentialId: bytea('credential_id').notNull(),

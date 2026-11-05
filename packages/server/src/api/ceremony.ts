@@ -20,9 +20,10 @@ export function remainingMs(state: { issuedAt: number }, now = Date.now()): numb
 
 /**
  * Why a sealed state was made, each opened by its own key (section 7.2, step 1): `signin` and `enroll` ride in the
- * sign-in's cookie, after the provider; `step-up` in the page's JSON, bound to the session it replaces.
+ * sign-in's cookie, after the provider; `step-up` in the page's JSON, bound to the session it replaces; `create`, in the
+ * page's JSON too, the user handle one `create()` of an enrollment was given.
  */
-export type CeremonyPurpose = 'signin' | 'enroll' | 'step-up';
+export type CeremonyPurpose = 'signin' | 'enroll' | 'step-up' | 'create';
 
 /**
  * A sign-in that passed the provider and waits for its passkey (section 3.1), sealed in `__Host-coffre_passkey`: what
@@ -51,8 +52,6 @@ export type PendingFactor = {
   challenge: string;
   /** When it was made, ms: the replay mark an assertion moves past (section 7.3). */
   issuedAt: number;
-  /** `enroll`: the WebAuthn `user.id` handed to `create()`, base64url, which the post stores. */
-  userHandle: string | null;
   /** `enroll`: how many passkey rows the person had, removed ones included, which the post holds still (section 3.2). */
   passkeysEver: number | null;
 };
@@ -68,7 +67,22 @@ export type StepUpState = {
   issuedAt: number;
 };
 
-type Sealed = PendingFactor | StepUpState;
+/**
+ * The user handle one `create()` of an enrollment was given (section 3.2): drawn afresh for each GET of its options, so
+ * that no two `create()` calls, from two tabs, a reload, or a page whose answer was lost, ever share one. An
+ * authenticator keeps one discoverable credential per (RP ID, user handle) and replaces it on a second `create()` with
+ * the same handle, so a shared one could replace a passkey coffre had already stored with one it refuses, and lock its
+ * person out (reviews r7 to r12 of #500; D173). Sealed in the GET's answer, sent back with the POST, and bound to the
+ * enrollment's challenge, it lasts as long as the enrollment does.
+ */
+export type CreateState = {
+  purpose: 'create';
+  challenge: string;
+  userHandle: string;
+  issuedAt: number;
+};
+
+type Sealed = PendingFactor | StepUpState | CreateState;
 
 /** Each purpose's key, from the chain key, so that one purpose's state never opens as another's. */
 export class CeremonyStates {
@@ -79,6 +93,7 @@ export class CeremonyStates {
       signin: deriveKey(chainKey, 'passkey-state/signin/v1'),
       enroll: deriveKey(chainKey, 'passkey-state/enroll/v1'),
       'step-up': deriveKey(chainKey, 'passkey-state/step-up/v1'),
+      create: deriveKey(chainKey, 'passkey-state/create/v1'),
     };
   }
 
@@ -103,7 +118,7 @@ export function challenge(): { challenge: string; issuedAt: number } {
   return { challenge: randomBytes(32).toString('base64url'), issuedAt: Date.now() };
 }
 
-/** A new WebAuthn user handle (section 3.2): 16 random bytes, which say nothing of the person. */
+/** A new WebAuthn user handle (section 3.2): 16 random bytes, which say nothing of the person, one per `create()`. */
 export function userHandle(): string {
   return randomBytes(16).toString('base64url');
 }

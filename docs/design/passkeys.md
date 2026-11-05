@@ -196,7 +196,6 @@ Ada has two passkeys, "YubiKey 5C" and "iCloud Keychain".
      next: string;                  // where to land, a path of at most 512 characters, or '/projects'
      challenge: string;             // 32 random bytes, base64url
      issuedAt: number;              // ms; also the replay guard (section 7.3)
-     userHandle: string | null;     // enroll: the user.id handed to create(), base64url, which the POST stores
      passkeysEver: number | null;   // enroll: how many passkey rows the person had, removed ones included (section 3.2)
    };
    ```
@@ -272,68 +271,33 @@ arrive whole, as those are the statuses whose refusals may keep the step,
 review r7) clears nothing, so the page says coffre did not answer and
 asks again rather than send the person back to their provider
 (`passkeyAnswer`, `packages/ui/src/lib/passkey-answer.ts`). Asking again
-sends the same answer, never a second `create()` or `get()` for the step
-(`sendPasskey`, review r7): a second `create()` for the same user handle can
-replace, on a discoverable authenticator, the passkey the first POST added
-though its answer was lost, and the server would refuse the new one as
-`passkey_exists`, leaving the person a key coffre does not hold (Chrome's
-virtual authenticator does). Sent again, the first passkey completes the
-step, or, its enrollment having committed, ends it with `passkey_exists`,
-and they sign in again with the key their device holds. The page's memory
-covers one page; two tabs of one sign-in, or the page reloaded, share its
-cookie, so its challenge and its user handle, and a `create()` in the second
-replaces the first's passkey all the same (review r8). An enrollment's step
-therefore lives in `localStorage`, under its challenge (`storedKeeper`):
-`asking` while a `create()` is open, `unsent` once it answered, `done` once
-coffre answered it. A press that finds `asking` makes nothing ("another tab
-is adding your passkey"), finds `unsent` sends that answer, and finds `done`
-ends the page as a sign-in finished in another tab. The step ends five
-minutes after its challenge (`issuedAt`, from which the sealed state's
-expiry is dated), and its options' `timeout` is what is left of those when
-the GET is answered (`remainingMs`), so the page knows when the step ends
-(`Lifetime`): the GET's send plus `timeout`, on both of the browser's
-clocks, the wall clock (`Date.now()`, shared by every tab, moved when the
-system corrects it) and the tab's elapsed clock (`performance.now()`,
-which never jumps but stops in a sleep on some systems). Once either says
-the step is over, a press asks the authenticator for nothing and ends the
-page, a page restored from the back-forward cache included: a page that
-made a `create()` of an expired step could replace the passkey another
-tab added (review r9), and neither clock alone holds through both a
-correction and a sleep (review r10). Each tab that opens the step pushes
-its entry's expiry to the GET's arrival plus `timeout` on the wall clock
-(`endedBy`), which is after that tab's own end, so the entry outlives
-every tab that read it. Timed by its writer alone, it could not: tab A's
-GET at 0 with 300 s left, the clock moved 60 s ahead at 10 s, tab B's GET
-then with 290 s left; A's entry, until 300 by A's reading, lapsed at
-240 s real time while B's step ran to 300 s, and B made a second passkey
-(review r10). The arrival is taken as no earlier than the send, so a
-clock moved back during the GET does not end the entry before the tab
-(review r11). Only a tab of another step removes an entry, once its
-expiry lapsed, as it opens; a tab closed mid-`create()` blocks nothing
-past the step. A tab holds to the entry it found or made as it opened,
-named by a random `id`: that entry gone, or another in its place, the
-step ended for that tab, and a press asks for nothing. An entry can lapse
-before a tab of its step is done (a clock moved ahead, then back; or a
-full storage that would not push its expiry), and the tab that read it
-may since have been answered, with nothing left to say so: read as
-never asked, the missing entry let that tab `create()` again with options
-that name no passkey (review r11). A reload asks the server again, and
-its options name the passkeys added since (`excludeCredentials`), which
-the authenticator will not make again. The answer it holds is a public key and an attestation of
-`none`, no secret, and only the browser holding the sign-in's cookie can
-send it. Where the browser keeps no storage, or refuses a read, a write
-of the step's first entry, or a later write, the page's memory holds the
-step from then on (a tab that cannot push the expiry of an entry it found
-still reads it): a write that failed leaves nothing for a later read to
-find, and the memory has it (review r9). A read refused after the tab
-opened, the tab having written nothing, reads the step ended: what
-another tab did it cannot know. What the storage held stays, so another tab finds the step `asking`
-at worst, and asks for nothing. Two tabs pressed
-within the same instant can still both read nothing (storage has no
-compare-and-set across tabs); a person cannot press two tabs' buttons at
-once. A touch keeps its step in the page alone: a second `get()` replaces
-nothing. A HEAD of the route answers as its GET, never as its POST
-(review r8).
+sends the same answer, never a second `create()` or `get()` from the same
+page (`sendPasskey`, review r7): the page's options name one user handle,
+and a second `create()` with it can replace, on a discoverable
+authenticator, the passkey the first POST added though its answer was
+lost (Chrome's virtual authenticator does), which the server would refuse
+as `passkey_exists`, leaving the person a key coffre does not hold. Sent
+again, the first passkey completes the step, or, its enrollment having
+committed, ends it with `passkey_exists`, and they sign in again with the
+key their device holds. Every GET of an enrollment's options draws a user
+handle of its own (D173; section 3.2): sealed in the GET's `state`
+(`CreateState`), which the POST sends back and whose handle the row
+stores. Two tabs of one sign-in, or the page reloaded, never hand
+`create()` the same handle, so neither replaces the passkey the other
+added. What an interrupted attempt can leave is a passkey on the device
+that coffre never stored: a second tab's `create()` after the first's
+enrollment committed (`passkey_exists`), or one made after the step ended
+(`state_mismatch`). Coffre never offers it: a touch names only the
+passkeys coffre holds (`allowCredentials`), so the browser does not show
+it, and nobody is locked out; the person may delete it from their device.
+Reviews r8 to r12 kept one handle per enrollment and shared its step
+across tabs in `localStorage` instead, and each round found another path
+to a second `create()` with it. The step ends five minutes after its
+challenge (`issuedAt`, from which the sealed state's expiry is dated), and
+its options' `timeout` is what is left of those when the GET is answered
+(`remainingMs`, review r9). A touch keeps its answer in the page too: a
+second `get()` replaces nothing. A HEAD of the route answers as its GET,
+never as its POST (review r8).
 The cookie's value names its purpose, whose key
 opens it (`CeremonyStates`, `packages/server/src/api/ceremony.ts`). The
 callback's reads (`SigninService.afterProvider`) are step 2's, in one round
@@ -429,17 +393,25 @@ unless the count is still that. Rows are never deleted, so every enrollment
 moves the count for good, and no reset moves it back. The add's sealed
 state from Account carries the same count.
 
-`user.id` is 16 random bytes, made at a person's first passkey and kept on
-each of their passkey rows (`passkeys.user_handle`), copied from the
-others when they add one. The registration response does not echo it, so
-the sealed state that goes with `create()` carries it (`userHandle` of the
-`enroll` cookie, or of the add's sealed state), and the `POST` stores that
-exact value. WebAuthn asks that it reveal nothing about the
+`user.id` is 16 random bytes, drawn for each GET of an enrollment's
+options and stored on the passkey row its `create()` makes
+(`passkeys.user_handle`). The registration response does not echo it, so
+the GET seals it in the step's `state` (`CreateState`, bound to the
+enrollment's challenge, `packages/server/src/api/ceremony.ts`), the `POST`
+sends it back, and the row stores that exact value; the add from Account
+(PR 5) does the same. WebAuthn asks that it reveal nothing about the
 person, and a hash of the email, even keyed, can be tested against
 guesses by anyone who learns the key; random bytes cannot, and survive an
-`APP_KEY` rotation. It stays the same across a person's passkeys, so a
-keychain that already holds one for Bob replaces it instead of keeping two,
-and the `userHandle` an assertion returns is checked against the row of the
+`APP_KEY` rotation. Each `create()` gets one of its own (D173): an
+authenticator keeps one discoverable credential per RP ID and user
+handle, and replaces it on a second `create()` with the same one, so a
+handle shared by two tabs of one enrollment, a reload, or a page whose
+answer was lost could replace the passkey coffre had stored with one it
+refuses, and lock its person out (reviews r7 to r12 of #500). A person's
+passkeys therefore have handles of their own, and a keychain that holds
+two of them shows two entries; an interrupted attempt may leave a third
+that coffre never stored and never offers (section 3.1, as built). The
+`userHandle` an assertion returns is checked against the row of the
 passkey it names (7.2). A configured Owner not yet admitted gets one at
 registration, as anyone does; nothing about it depends on the generation.
 
@@ -821,7 +793,7 @@ export const passkeys = pgTable('passkeys', {
   // Whose: the member and the generation it was added in, as identities are bound.
   principal: text().notNull(),
   generation: integer().notNull(),
-  // The WebAuthn user handle: 16 random bytes, the same on every passkey of the person's (section 3.2).
+  // The WebAuthn user handle: 16 random bytes, drawn for the create() that made this passkey (section 3.2).
   userHandle: bytea('user_handle').notNull(),
   // The authenticator's credential ID, raw (WebAuthn caps it at 1023 bytes), unique across the instance.
   credentialId: bytea('credential_id').notNull(),

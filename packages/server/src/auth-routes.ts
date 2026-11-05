@@ -442,11 +442,11 @@ const PASSKEY_REFUSED: Partial<Record<string, number>> = { passkey_failed: 401, 
 /**
  * GET /api/auth/passkey: what the passkey page asks the browser for (passkeys.md, section 3.1), `{ purpose, email,
  * options }`, `options` in WebAuthn's JSON form: a touch for the sign-in waiting in this browser's passkey cookie, or a
- * new passkey for it. `?step-up=1`: a touch for the browser's session, which a person's passkey no longer stands behind
+ * new passkey for it, with its sealed `state`, the user handle this GET drew. `?step-up=1`: a touch for the browser's session, which a person's passkey no longer stands behind
  * (section 6.2), with its sealed `state` too. 404 `state_mismatch` when there is nothing to ask: the sign-in expired,
  * or the session is no step-up's, and signing in again is the way.
  *
- * POST /api/auth/passkey: the browser's answer, `{ response }` (or `{ state, response }` for a step-up), from coffre's
+ * POST /api/auth/passkey: the browser's answer, `{ response }` (or `{ state, response }` for a new passkey or a step-up), from coffre's
  * own page: on success the session cookie, and `{ next }`, where to go.
  */
 export async function passkeyStep(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
@@ -488,13 +488,14 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
     return withCookies(jsonResponse({ next }), [...cookies, ...(await signedInCookies(request, runtime, result, meta))]);
   };
 
-  if (body.state !== undefined) {
-    const stepUp = signin.ceremonies.open(body.state, ['step-up']);
+  // A `state` is a step-up's, or, for an enrollment, the user handle its `create()` was given (`CreateState`).
+  const stepUp = body.state === undefined ? null : signin.ceremonies.open(body.state, ['step-up']);
+  if (stepUp !== null || (body.state !== undefined && state?.purpose !== 'enroll')) {
     if (token === null || stepUp === null) return refused('session_ended');
-    return answered(await signin.stepUp(body.state, token, body.response, meta), stepUp.next, []);
+    return answered(await signin.stepUp(body.state!, token, body.response, meta), stepUp.next, []);
   }
   if (state === null) return refused('state_mismatch', [clear]);
-  const result = await signin.finishPasskey(state, body.response, meta, token);
+  const result = await signin.finishPasskey(state, body.response, meta, token, body.state ?? null);
   // A passkey that did not answer may be tried again, another one too, while the sign-in lasts; anything else starts over.
   return answered(result, state.next, result.ok !== true && result.reason === 'passkey_failed' ? [] : [clear]);
 }
@@ -505,7 +506,7 @@ function withCookies(response: Response, cookies: readonly string[]): Response {
   return response;
 }
 
-/** The step-up's state is the server's own seal, which `open` checks; the body's size bounds its length. */
+/** A step-up's or a new passkey's state is the server's own seal, which `open` checks; the body's size bounds its length. */
 const passkeyAnswer = z.object({ response: z.record(z.string(), z.unknown()), state: z.string().optional() }).strict();
 
 /**

@@ -69,7 +69,7 @@ import {
   type PasskeyRead,
   type PasskeyRow,
 } from '../db/queries.ts';
-import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
+import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type CreateState, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
 import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
@@ -774,7 +774,6 @@ export class SigninService {
         generation,
         next,
         ...challenge(),
-        userHandle: purpose === 'enroll' ? userHandle() : null,
         // Removed ones included, every generation's (`passkeyHistory`): the post adds the first only while it is still this.
         passkeysEver: purpose === 'enroll' ? (row?.ever ?? 0) : null,
       },
@@ -794,7 +793,9 @@ export class SigninService {
 
   /**
    * What the passkey page asks the browser for (section 3.1, step 3): a touch of one of the person's live passkeys, or a
-   * new one. Null when the step can no longer complete: the passkeys it would offer were removed meanwhile.
+   * new one. Null when the step can no longer complete: the passkeys it would offer were removed meanwhile. A new one
+   * comes with a user handle drawn for this GET alone, sealed in `state`, which the post sends back (`CreateState`): two
+   * GETs, from two tabs or a reload, never hand `create()` the same one.
    */
   async passkeyStep(state: PendingFactor): Promise<PasskeyStep | null> {
     const email = memberOf(state.principal).id;
@@ -803,24 +804,26 @@ export class SigninService {
       return passkeys.length === 0 ? null : { purpose: 'signin', email, options: requestOptions(this.config.passkeys, state, passkeys) };
     }
     const person = { email, name: state.account.name, site: this.config.page.title };
-    return { purpose: 'enroll', email, options: creationOptions(this.config.passkeys, { challenge: state.challenge, userHandle: state.userHandle!, issuedAt: state.issuedAt }, person, passkeys) };
+    const create: CreateState = { purpose: 'create', challenge: state.challenge, userHandle: userHandle(), issuedAt: state.issuedAt };
+    return { purpose: 'enroll', email, options: creationOptions(this.config.passkeys, create, person, passkeys), state: this.#ceremonies.seal(create) };
   }
 
   /**
    * The passkey's answer to a pending sign-in (section 3.1, step 4): checked, then today's sign-in from what the
    * provider vouched for, which reads again and checks again everything it decides on, with the touch's replay mark
    * moved, or the passkey added, in its transaction. A refusal writes no entry: whoever answered passed the provider
-   * but not the factor. It goes to the process log.
+   * but not the factor. It goes to the process log. A new passkey comes with `created`, the sealed `CreateState` its
+   * options came with, whose user handle the row stores.
    */
-  async finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta, replaces: string | null = null): Promise<SigninResult> {
+  async finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta, replaces: string | null = null, created: string | null = null): Promise<SigninResult> {
     try {
-      return await this.#finishPasskey(state, response, meta, replaces);
+      return await this.#finishPasskey(state, response, meta, replaces, created);
     } catch (error) {
       return refusalOrThrow(error);
     }
   }
 
-  async #finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta, replaces: string | null): Promise<SigninResult> {
+  async #finishPasskey(state: PendingFactor, response: unknown, meta: ClientMeta, replaces: string | null, created: string | null): Promise<SigninResult> {
     // The issuer that verified the account, sealed at the callback, is still the one this provider ID names.
     if (this.#issuerHash(state.account.provider) !== state.account.issuerHash) {
       return passkeyRefused(meta, state.principal, 'state_mismatch', "the provider's issuer changed since the callback");
@@ -831,9 +834,13 @@ export class SigninService {
     if (state.purpose === 'enroll') {
       const verified = await verifyRegistration(response, expected);
       if (!verified.ok) return passkeyRefused(meta, state.principal, 'passkey_failed', verified.reason);
+      // The handle `create()` was given, for this enrollment's challenge: a response that verified answered it, so
+      // another enrollment's state, or none, is no page of coffre's.
+      const create = this.#ceremonies.open(created, ['create']);
+      if (create === null || create.challenge !== state.challenge) return passkeyRefused(meta, state.principal, 'state_mismatch', "no user handle of this enrollment's");
       const row = {
         id: randomUUID(),
-        userHandle: Buffer.from(state.userHandle!, 'base64url'),
+        userHandle: Buffer.from(create.userHandle, 'base64url'),
         credentialId: Buffer.from(verified.credentialId),
         publicKey: Buffer.from(verified.publicKey),
         algorithm: verified.algorithm,
@@ -2058,7 +2065,7 @@ type Factor =
 /** What the passkey page asks the browser to do, for whom: a touch (`get()`), or a new passkey (`create()`). */
 export type PasskeyStep =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestOptionsJSON }
-  | { purpose: 'enroll'; email: string; options: CreationOptionsJSON };
+  | { purpose: 'enroll'; email: string; options: CreationOptionsJSON; state: string };
 
 /** What the callback read and resolved, for the sign-in it completes (`#afterProvider`). */
 type Known = {

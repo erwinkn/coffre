@@ -1,21 +1,22 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { browserClock, lifetime, memoryKeeper, passkeyAnswer, sendPasskey, storedKeeper, type KeptStorage, type Lifetime } from '../lib/passkey-answer';
+import { passkeyAnswer, sendPasskey, type Unsent } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
 const Route = pageRoute<typeof passkey>();
 
-/** What `GET /api/auth/passkey` asks the browser for: a touch (`get()`), or a new passkey (`create()`), in WebAuthn's JSON form. */
+/**
+ * What `GET /api/auth/passkey` asks the browser for: a touch (`get()`), or a new passkey (`create()`), in WebAuthn's
+ * JSON form, with the sealed `state` the answer goes back with: a step-up's, or the user handle this GET drew for a new
+ * passkey (D173).
+ */
 type Step =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestJSON; state?: string }
-  | { purpose: 'enroll'; email: string; options: CreationJSON };
-
-/** A step, and when it ends, timed from its GET (`Lifetime`). */
-type Timed = Step & { life: Lifetime };
+  | { purpose: 'enroll'; email: string; options: CreationJSON; state: string };
 
 type Descriptor = { type: 'public-key'; id: string; transports?: string[] };
 type RequestJSON = { challenge: string; rpId: string; allowCredentials: Descriptor[]; userVerification: UserVerificationRequirement; timeout: number };
@@ -42,7 +43,7 @@ export function PasskeyPage() {
   const search = Route.useSearch();
   const stepUp = search['step-up'] === '1';
   // `unavailable`: coffre did not answer what to ask; the sign-in still waits, so the page offers to ask again.
-  const [step, setStep] = useState<Timed | 'none' | 'unavailable' | null>(null);
+  const [step, setStep] = useState<Step | 'none' | 'unavailable' | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,22 +51,18 @@ export function PasskeyPage() {
   const [ended, setEnded] = useState<string | null>(null);
   // An answer coffre did not answer: the next press sends it again, never asks for another (`sendPasskey`).
   const [unanswered, setUnanswered] = useState(false);
-  // What the step holds between presses: an enrollment's in `localStorage`, shared by its tabs and reloads; a touch's here.
-  // Either reads the step ended once its lifetime is over, a page restored from the back-forward cache included.
-  const keeper = useMemo(
-    () => (step === null || typeof step === 'string' ? null : step.purpose === 'enroll' ? storedKeeper(browserStorage(), step.options.challenge, step.life) : memoryKeeper(step.life)),
-    [step],
-  );
+  // The step's answer coffre did not answer, for the next press; each GET's step starts with none.
+  const unsent = useRef<Unsent>({ body: null });
 
   useEffect(() => {
     const query = stepUp ? `?step-up=1${search.next === undefined ? '' : `&next=${encodeURIComponent(search.next)}`}` : '';
     let current = true;
     setStep(null);
     setUnanswered(false);
-    const sent = browserClock();
+    unsent.current = { body: null };
     void passkeyAnswer<Step>(fetch(`/api/auth/passkey${query}`, { credentials: 'same-origin' })).then((answer) => {
       if (!current) return;
-      setStep(answer.kind === 'ok' ? { ...answer.value, life: lifetime(sent, browserClock(), answer.value.options.timeout) } : answer.kind === 'refused' ? 'none' : 'unavailable');
+      setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? 'none' : 'unavailable');
     });
     return () => {
       current = false;
@@ -122,19 +119,18 @@ export function PasskeyPage() {
 
   const enroll = step.purpose === 'enroll';
 
-  async function answer(current: Timed) {
-    if (keeper === null) return;
+  async function answer(current: Step) {
     setBusy(true);
     setError(null);
     try {
       const answer = await sendPasskey<{ next?: unknown }>(
-        keeper,
+        unsent.current,
         async () => {
           const credential = current.purpose === 'enroll'
             ? await navigator.credentials.create({ publicKey: creationOptions(current.options) })
             : await navigator.credentials.get({ publicKey: requestOptions(current.options) });
           if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-          return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...('state' in current ? { state: current.state } : {}) });
+          return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...(current.state === undefined ? {} : { state: current.state }) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
       );
@@ -144,10 +140,7 @@ export function PasskeyPage() {
         window.location.assign(answer.value.next);
         return;
       }
-      if (answer.kind === 'elsewhere') {
-        // Another tab of this sign-in is making its passkey: a second `create()` could replace that one (review r8 of #500).
-        setError('Another tab of this sign-in is adding your passkey. Finish there, or try again here in a moment.');
-      } else if (answer.kind !== 'refused') {
+      if (answer.kind !== 'refused') {
         // No answer to go by: the sign-in still waits, and the next press sends the same answer again.
         setError(
           enroll
@@ -204,15 +197,6 @@ export function PasskeyPage() {
       {!enroll && <p className="signin-lede">Lost your passkeys? An Owner can reset them.</p>}
     </section>
   );
-}
-
-/** `localStorage`, or null where the browser keeps none for this page or refuses to say. */
-function browserStorage(): KeptStorage | null {
-  try {
-    return globalThis.localStorage ?? null;
-  } catch {
-    return null;
-  }
 }
 
 const bytes = (value: string): ArrayBuffer => {

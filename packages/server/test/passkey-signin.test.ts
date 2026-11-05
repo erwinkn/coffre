@@ -133,9 +133,10 @@ class Browser {
 const RP = { rpId: 'secrets.acme.example', origin: ORIGIN };
 const bytes = (value: string) => new Uint8Array(Buffer.from(value, 'base64url'));
 
-/** `create()`, answered by `key`. */
-function register(key: SoftAuthenticator, options: any, tweak?: Tweak) {
-  return key.register({ ...RP, challenge: bytes(options.challenge), userHandle: bytes(options.user.id) }, tweak);
+/** `create()` of a step's options, answered by `key`: the page's answer, with the step's sealed user handle. */
+async function register(key: SoftAuthenticator, step: any, tweak?: Tweak) {
+  const response = await key.register({ ...RP, challenge: bytes(step.options.challenge), userHandle: bytes(step.options.user.id) }, tweak);
+  return { response, state: step.state };
 }
 
 /** `get()`, answered by `key`. */
@@ -149,7 +150,7 @@ async function enroll(runtime: CoffreRuntime, email: string, key: SoftAuthentica
   assert.equal(await browser.provider(email), '/auth/passkey');
   const step = await browser.step();
   assert.equal(step.body.purpose, 'enroll');
-  const done = await browser.answer({ response: await register(key, step.body.options) });
+  const done = await browser.answer(await register(key, step.body));
   assert.deepEqual(done, { status: 200, body: { next: '/projects/market' } });
   return browser;
 }
@@ -239,7 +240,7 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   assert.deepEqual(await counts(), before, 'nothing written before the passkey answered');
 
   const key = await SoftAuthenticator.create('ES256');
-  const done = await browser.answer({ response: await register(key, step.body.options) });
+  const done = await browser.answer(await register(key, step.body));
   assert.deepEqual(done, { status: 200, body: { next: '/projects/market' } });
   assert.equal(browser.jar.has('__Host-coffre_passkey'), false, 'the pending cookie is cleared');
   assert.equal(await me(browser), 'ok');
@@ -275,7 +276,7 @@ test("an enrollment begun before an Owner's first admission adds nothing once th
   assert.deepEqual([row!.status, row!.generation], ['active', 1]);
   const before = await counts();
 
-  const done = await browser.answer({ response: await register(await SoftAuthenticator.create('ES256'), step.body.options) });
+  const done = await browser.answer(await register(await SoftAuthenticator.create('ES256'), step.body));
   assert.deepEqual(done, { status: 400, body: { error: 'state_mismatch' } });
   assert.equal(browser.session, undefined, 'no session');
   assert.deepEqual(await counts(), before, 'no passkey, no session, nothing bound');
@@ -352,22 +353,59 @@ test("a first passkey whose enrollment committed but whose answer was lost, sent
   const browser = new Browser(runtime);
   assert.equal(await browser.provider(ADA), '/auth/passkey');
   const { body } = await browser.step();
-  const response = await register(key, body.options);
+  const answer = await register(key, body);
   // Committed, its answer and cookies lost on the way: the browser is as it was before it.
   const before = new Map(browser.jar);
-  assert.equal((await browser.answer({ response })).status, 200);
+  assert.equal((await browser.answer(answer)).status, 200);
   browser.jar.clear();
   for (const [name, value] of before) browser.jar.set(name, value);
 
   // The page sends the same passkey again, not a new one: the step ends, nothing more is added or issued.
   const { keys, sessions } = await counts();
-  assert.deepEqual(await browser.answer({ response }), { status: 400, body: { error: 'passkey_exists' } });
+  assert.deepEqual(await browser.answer(answer), { status: 400, body: { error: 'passkey_exists' } });
   assert.equal(browser.jar.get('__Host-coffre_passkey'), undefined, 'the pending sign-in is cleared');
   assert.equal(browser.session, undefined);
   assert.deepEqual(await counts().then(({ keys, sessions }) => ({ keys, sessions })), { keys, sessions });
 
   // The key on the device is the one coffre holds.
   assert.equal(await me(await touch(runtime, ADA, key)), 'ok');
+});
+
+test("each GET of an enrollment's options draws its own user handle, sealed in its state: two tabs never hand create() the same one, and the row stores the handle of the create() that answered (section 3.2; D173, reviews r7 to r12 of #500)", async () => {
+  const runtime = deployment('required');
+  const browser = new Browser(runtime);
+  assert.equal(await browser.provider(ADA), '/auth/passkey');
+  const cookie = browser.jar.get('__Host-coffre_passkey')!;
+  const first = (await browser.step()).body;
+  const second = (await browser.step()).body;
+  assert.equal(first.options.challenge, second.options.challenge, 'one enrollment, one challenge');
+  assert.notEqual(first.options.user.id, second.options.user.id, 'but a user handle for each create()');
+  assert.equal(Buffer.from(first.options.user.id, 'base64url').length, 16);
+
+  // No state, or another enrollment's, is no answer of coffre's page: refused before anything is written.
+  const before = await counts();
+  const key = await SoftAuthenticator.create('ES256');
+  const { response } = await register(key, first);
+  assert.deepEqual(await browser.answer({ response }), { status: 400, body: { error: 'state_mismatch' } });
+  browser.jar.set('__Host-coffre_passkey', cookie);
+  const elsewhere = new Browser(runtime);
+  await elsewhere.provider(ADA);
+  const foreign = (await elsewhere.step()).body.state;
+  assert.deepEqual(await browser.answer({ response, state: foreign }), { status: 400, body: { error: 'state_mismatch' } });
+  assert.deepEqual(await counts(), before);
+
+  // The first tab's passkey is added, under its own handle.
+  browser.jar.set('__Host-coffre_passkey', cookie);
+  assert.equal((await browser.answer({ response, state: first.state })).status, 200);
+  const [added] = await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${ADA}`));
+  assert.equal(Buffer.from(added!.userHandle).toString('base64url'), first.options.user.id);
+
+  // The second tab's create(), another handle, replaces nothing on the device; coffre adds nothing for it.
+  const tab = new Browser(runtime);
+  tab.jar.set('__Host-coffre_passkey', cookie);
+  assert.deepEqual(await tab.answer(await register(await SoftAuthenticator.create('ES256'), second)), { status: 400, body: { error: 'passkey_exists' } });
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${ADA}`))).length, 1);
+  assert.equal(await me(await touch(runtime, ADA, key)), 'ok', 'the first passkey signs in');
 });
 
 test('a first passkey ends everything of the person\'s no passkey stood behind, approved device codes included; the sign-in that adds it does not (sections 6.1, 13.23)', async () => {
@@ -403,17 +441,17 @@ test('an enrollment state adds a first passkey once, ever: again after a reset, 
   await browser.provider(ADA);
   const cookie = browser.jar.get('__Host-coffre_passkey')!;
   const step = (await browser.step()).body;
-  assert.equal((await browser.answer({ response: await register(await SoftAuthenticator.create(), step.options) })).status, 200);
+  assert.equal((await browser.answer(await register(await SoftAuthenticator.create(), step))).status, 200);
 
   const replay = new Browser(runtime);
   replay.jar.set('__Host-coffre_passkey', cookie);
-  assert.deepEqual(await replay.answer({ response: await register(await SoftAuthenticator.create(), step.options) }), { status: 400, body: { error: 'passkey_exists' } });
+  assert.deepEqual(await replay.answer(await register(await SoftAuthenticator.create(), step)), { status: 400, body: { error: 'passkey_exists' } });
 
   // An Owner resets it; the saved state is no way back in.
   const [row] = await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${ADA}`));
   await rows.removePasskey(db.owner, deps.chainKey, row!.id);
   replay.jar.set('__Host-coffre_passkey', cookie);
-  assert.deepEqual(await replay.answer({ response: await register(await SoftAuthenticator.create(), step.options) }), { status: 400, body: { error: 'passkey_exists' } });
+  assert.deepEqual(await replay.answer(await register(await SoftAuthenticator.create(), step)), { status: 400, body: { error: 'passkey_exists' } });
   assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${ADA}`))).length, 1);
 });
 
@@ -435,7 +473,7 @@ test("a pending sign-in whose provider's issuer the deployment replaced complete
   await browser.provider(ADA);
   const step = (await browser.step()).body;
   browser.runtime = deployment('required', 'https://other-idp.acme.example');
-  assert.deepEqual(await browser.answer({ response: await register(await SoftAuthenticator.create(), step.options) }), { status: 400, body: { error: 'state_mismatch' } });
+  assert.deepEqual(await browser.answer(await register(await SoftAuthenticator.create(), step)), { status: 400, body: { error: 'state_mismatch' } });
   assert.equal(browser.session, undefined);
 });
 
@@ -538,7 +576,7 @@ test("a HEAD asks what a GET asks, and answers nothing: it never reads a body, n
   // The sign-in still waits, and completes.
   const step = await browser.step();
   assert.equal(step.body.purpose, 'enroll');
-  assert.deepEqual(await browser.answer({ response: await register(await SoftAuthenticator.create('ES256'), step.body.options) }), { status: 200, body: { next: '/projects/market' } });
+  assert.deepEqual(await browser.answer(await register(await SoftAuthenticator.create('ES256'), step.body)), { status: 200, body: { next: '/projects/market' } });
 });
 
 test("a person promoted to an Owner of the whole instance between the callback's answer and its sign-in is asked for a first passkey, not signed in by the provider alone (section 2; review r1 of #500)", async () => {
@@ -575,13 +613,13 @@ test("a new passkey whose credential ID is another person's already is refused a
   assert.equal(await browser.provider(BOB), '/auth/passkey');
   const step = await browser.step();
   // The same authenticator's credential, answering Bob's create(): its ID the one NAMED's passkey has.
-  const taken = await browser.answer({ response: await register(key, step.body.options) });
+  const taken = await browser.answer(await register(key, step.body));
   assert.deepEqual(taken, { status: 401, body: { error: 'passkey_failed' } });
   assert.ok(browser.jar.has('__Host-coffre_passkey'), 'another passkey may be tried while the sign-in lasts');
   assert.equal(browser.session, undefined);
   assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${BOB}`))).length, 0);
   const other = await SoftAuthenticator.create('Ed25519');
-  const done = await browser.answer({ response: await register(other, (await browser.step()).body.options) });
+  const done = await browser.answer(await register(other, (await browser.step()).body));
   assert.deepEqual(done, { status: 200, body: { next: '/projects/market' } });
 });
 
@@ -596,7 +634,7 @@ test("a passkey's removal forged in the database, its MAC left as it was, refuse
   assert.equal(await again.provider(ADA), '/auth/passkey');
   const step = await again.step();
   assert.equal(step.body.purpose, 'enroll');
-  assert.deepEqual(await again.answer({ response: await register(await SoftAuthenticator.create(), step.body.options) }), { status: 400, body: { error: 'tampered' } });
+  assert.deepEqual(await again.answer(await register(await SoftAuthenticator.create(), step.body)), { status: 400, body: { error: 'tampered' } });
   assert.equal(again.session, undefined);
 
   // Under optional, the callback reads no passkey and signs in by the provider alone, which, under the head, refuses.
