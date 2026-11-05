@@ -1,6 +1,6 @@
 import { CoffreError } from '@coffre/client';
 
-import { authenticatorError } from './passkey-answer.ts';
+import { authenticatorError, browserClock, deadlineOf, leftOf, readClock, type Clock, type Deadline } from './passkey-answer.ts';
 import { requestOptions, toJSON, type RequestJSON } from './webauthn.ts';
 
 /** What a `403 touch_required` asks: `get()`'s options, for this act and this session alone, and the state to send back. */
@@ -9,8 +9,11 @@ export type TouchAsked = { options: RequestJSON; state: string };
 /** The act's touch, as it is sent again: that state, and the authenticator's answer. */
 export type TouchAnswer = { state: string; response: Record<string, unknown> };
 
-/** The ask a press got and has not answered yet, which the next press asks the authenticator with at once. */
-export type HeldTouch = { asked: TouchAsked | null };
+/**
+ * The ask a press got and has not answered yet, which the next press asks the authenticator with at once, while its
+ * options last (`ends`, dated from the send that was refused, by both clocks as a step's are). A lapsed one is dropped.
+ */
+export type HeldTouch = { asked: (TouchAsked & { ends: Deadline }) | null };
 
 /**
  * One press of an act that takes a touch of its own (docs/design/passkeys.md, section 4.2): approving a terminal, an
@@ -26,26 +29,38 @@ export async function pressTouch<T>(
   held: HeldTouch,
   send: (touch?: TouchAnswer) => Promise<T>,
   ask: (options: RequestJSON) => Promise<Record<string, unknown>> = getAssertion,
+  clock: Clock = browserClock,
 ): Promise<T> {
+  // A held ask whose options lapsed (the page left open past their five minutes) would only be refused for a new one:
+  // drop it, and the press starts over, asking with the options the new refusal carries.
+  if (held.asked !== null && leftOf(held.asked.ends, clock) === 0) held.asked = null;
   let asked = held.asked;
   if (asked === null) {
+    const sent = readClock(clock);
     try {
       return await send();
     } catch (error) {
-      asked = touchOf(error);
+      asked = holding(error, sent);
       if (asked === null) throw error;
       held.asked = asked;
     }
   }
-  // Throws as `get()` does: the ask stays held for the next press.
-  const response = await ask(asked.options);
+  // Throws as `get()` does: the ask stays held for the next press. The authenticator waits only what is left.
+  const response = await ask({ ...asked.options, timeout: leftOf(asked.ends, clock) });
   held.asked = null;
+  const sent = readClock(clock);
   try {
     return await send({ state: asked.state, response });
   } catch (error) {
-    held.asked = touchOf(error);
+    held.asked = holding(error, sent);
     throw error;
   }
+}
+
+/** The ask a refusal carries, to hold until its options lapse: their `timeout` from `sent`, the send refused. */
+function holding(error: unknown, sent: { wall: number; elapsed: number }): HeldTouch['asked'] {
+  const asked = touchOf(error);
+  return asked === null ? null : { ...asked, ends: deadlineOf(sent, asked.options.timeout) };
 }
 
 /**

@@ -718,7 +718,11 @@ know beforehand who holds a passkey. Ada presses Approve on `QJXM-4WTP`:
    `touch: { state, response }` (`pressTouch`, `@coffre/ui`'s `touch.ts`).
    A browser that wants the touch closer to the click than a round trip
    (Safari's user activation) throws; the page keeps the ask, and the next
-   press asks it first, before it sends anything.
+   press asks it first, before it sends anything, while its options last:
+   the authenticator gets what is left of their five minutes, and a press
+   after them drops the ask and starts over, so Ada is never asked to touch
+   a challenge coffre would only answer with another `touch_required`
+   (review r1 of PR 5a).
 3. The route opens the state, holds it to the act and the session, finds
    the passkey the assertion names among Ada's live ones, and verifies it
    (`SigninService.touchFor`), before any transaction. A state that does
@@ -747,7 +751,13 @@ that opens a window issues a new session so that a copy of the old cookie
 cannot ride it; a touch for one act leaves nothing to ride, and the act it
 approved cannot be approved twice. Replacing the session here would have
 needed an API route to set cookies, and `#decide` to rebuild its context
-around the new credential, for nothing the act needs.
+around the new credential, for nothing the act needs. What it gives up:
+a copy of Ada's cookie taken at 12:00 still reads at 12:02, after her
+touch at 12:01, until the session expires or is revoked, where a
+replacement would have ended it at 12:01. That copy could read at 11:59
+as well, and approves nothing without a touch of its own; ending it is
+signing out or removing the session (section 6.1), not a side effect an
+attacker can count on Ada's approving a terminal to bring.
 
 ### 4.3 Reads
 
@@ -1277,9 +1287,9 @@ the check, through `accepts`, as `named-use.ts` asks of any new check, with
 ### 6.5 Fresh, and replacing a session
 
 **Fresh** is `confirmed_at` within five minutes. Only a touch sets it, on a
-credential that touch issued: a browser session at sign-in, at a step-up, a
-fresh check, or a device or MCP approval; a CLI session from its device
-approval.
+credential that touch issued: a browser session at sign-in, at a step-up or
+a fresh check; a CLI session from its device approval (as built, PR 5a:
+confirmed when the approval was decided, by the act's own touch).
 
 **A touch replaces the session it came in on, once.** The transaction that
 issues the new session first ends the old one, conditionally (`revoked_at

@@ -78,12 +78,15 @@ test('approving a terminal takes a touch for its code: a confirmed session alone
   assert.equal((await refusal(await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch: crossed }))).error, 'touch_required');
   assert.ok((await undecided(started.userCode)) && (await undecided(other.userCode)));
 
-  // A passkey that is not the person's: refused, logged, undecided.
+  // Another member's live passkey, at their generation, its signature good for this challenge: not the person's, so
+  // refused, logged, undecided. And a key coffre holds no row of: the same.
+  const admins = await addPasskey(db.owner, deps.chainKey, 'admin@acme.example');
+  const borrowed = await refusal(await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch: { state: asked.touch!.state, response: await touchFor(admins, asked.touch!.options, ORIGIN) } }));
+  assert.equal(borrowed.error, 'touch_failed');
   const stranger = await SoftAuthenticator.create('ES256', { synced: true });
   const forged = await stranger.assert({ rpId: asked.touch!.options.rpId, origin: ORIGIN, challenge: new Uint8Array(Buffer.from(asked.touch!.options.challenge, 'base64url')) });
-  const failed = await refusal(await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch: { state: asked.touch!.state, response: forged } }));
-  assert.equal(failed.error, 'touch_failed');
-  assert.deepEqual((await entries('passkey.check')).filter((entry) => entry.decision === 'deny').map((entry) => [entry.metadata.purpose, entry.metadata.reason]), [['device', 'unknown_credential']]);
+  assert.equal((await refusal(await post(session, `/api/device-logins/${started.userCode}`, { approve: true, touch: { state: asked.touch!.state, response: forged } }))).error, 'touch_failed');
+  assert.deepEqual((await entries('passkey.check')).filter((entry) => entry.decision === 'deny').map((entry) => [entry.metadata.purpose, entry.metadata.reason]), [['device', 'unknown_credential'], ['device', 'unknown_credential']]);
   assert.ok(await undecided(started.userCode));
 
   // The touch for this code: approved, naming the passkey, and the CLI session it redeems confirmed when it was decided.

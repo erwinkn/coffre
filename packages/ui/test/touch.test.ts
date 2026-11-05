@@ -87,3 +87,34 @@ test("any other refusal is the act's to say, and holds no ask", async () => {
   assert.equal(held.asked, null, 'a touch that failed asks afresh on the next press');
   assert.equal(touchMessage(failed, undefined), null);
 });
+
+test('a held ask lapses with its options: the press after drops it and asks with the new ones, never the expired challenge', async () => {
+  let now = 1_000;
+  const clock = { wall: () => now, elapsed: () => now };
+  const held: HeldTouch = { asked: null };
+  const act = route([() => asking('c1'), () => asking('c2'), (touch) => ({ approved: touch!.state })]);
+  const cancelled = new DOMException('cancelled', 'NotAllowedError');
+  await assert.rejects(pressTouch(held, act.send, async () => { throw cancelled; }, clock), cancelled);
+  assert.equal(held.asked?.state, 'state-c1');
+
+  now += 60_000;
+  const timeouts: number[] = [];
+  const asked: string[] = [];
+  const ask = async (given: RequestJSON) => {
+    asked.push(given.challenge);
+    timeouts.push(given.timeout);
+    throw cancelled;
+  };
+  await assert.rejects(pressTouch(held, act.send, ask, clock), cancelled);
+  assert.deepEqual(timeouts, [240_000], 'a held ask waits only what is left of its five minutes');
+
+  now += 240_001;
+  asked.length = 0;
+  const done = await pressTouch(held, act.send, async (given) => {
+    asked.push(given.challenge);
+    return { id: 'key' };
+  }, clock);
+  assert.deepEqual(asked, ['c2'], 'the lapsed c1 was never asked');
+  assert.deepEqual(done, { approved: 'state-c2' });
+  assert.deepEqual(act.sent.map((touch) => touch?.state), [undefined, undefined, 'state-c2']);
+});
