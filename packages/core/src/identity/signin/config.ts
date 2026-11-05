@@ -432,7 +432,10 @@ export function defineSignin(options: {
 /**
  * The passkeys option, checked against the public URL (section 7.1): the RP ID is its host, or a parent of it on a label
  * boundary with at least two labels. A host no browser makes a passkey for, an IP address, fails unless passkeys are
- * `off`: every sign-in of a person who has one, and under `required` every sign-in, would be out of reach.
+ * `off`: every sign-in of a person who has one, and under `required` every sign-in, would be out of reach. Whether a
+ * parent is registrable (`acme.co.uk`) or a public suffix (`co.uk`, `workers.dev`) is the browser's public suffix
+ * list's to say, which changes weekly and which coffre does not ship: a parent the browser refuses fails the first
+ * passkey asked for, the Owner's as the deployment is set up, and the page names `passkeys.rpId` (review r15 of #500).
  */
 export function passkeysConfig(options: PasskeysOptions | undefined, origin: string): PasskeysConfig {
   const { policy: asked, rpId: named } = checkPasskeysOption(options);

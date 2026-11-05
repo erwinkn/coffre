@@ -1293,7 +1293,15 @@ credential", which the check above needs.
 - `rpId` is `publicUrl`'s host, `secrets.acme.example`, unless the config
   names a parent of it, `acme.example`. Checked at startup: the host itself
   or a suffix on a label boundary with at least two labels. Browsers apply
-  the public suffix list themselves. A `publicUrl` whose host is no valid
+  the public suffix list themselves: `co.uk` for `coffre.acme.co.uk`, or
+  `workers.dev` for `coffre.workers.dev`, passes startup and the browser
+  refuses it (`SecurityError`). coffre does not ship the list (weekly
+  releases, 130 KB minified in every isolate, and a copy older or newer
+  than the browser's refuses what the browser takes, or the reverse); the
+  first passkey asked for, the Owner's as the deployment is set up, fails,
+  and the page says `passkeys.rpId` must be the host or a registrable parent.
+  Nothing is stored under the refused RP ID, so fixing the config loses
+  nothing. A `publicUrl` whose host is no valid
   RP ID (an IP address, `127.0.0.1`) with a policy other than `off` fails
   at startup: no browser would make a passkey there, and every risky act
   would be out of reach.

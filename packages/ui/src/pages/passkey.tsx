@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
 import { pageRoute } from '../lib/page-route';
-import { browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
+import { authenticatorError, browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
 import type { passkey } from '../options';
 
@@ -176,14 +176,9 @@ export function PasskeyPage() {
         setEnded(signinErrorMessage(answer.code ?? 'state_mismatch') ?? signinErrorMessage('state_mismatch'));
       }
     } catch (thrown) {
-      // Cancelled, timed out, or a passkey this browser already holds for you: the person decides what next.
-      setError(
-        thrown instanceof DOMException && thrown.name === 'InvalidStateError'
-          ? 'This device already holds a passkey of yours here. Use another device, or sign in with that one.'
-          : thrown instanceof DOMException && thrown.name === 'NotAllowedError'
-            ? 'No passkey answered. Try again when you’re ready.'
-            : 'Your browser could not use a passkey here.',
-      );
+      // Cancelled, timed out, a passkey this browser already holds for you, or an RP ID it refuses: said, and the person
+      // decides what next.
+      setError(authenticatorError(thrown, current.purpose === 'enroll' ? current.options.rp.id : current.options.rpId));
     } finally {
       setBusy(false);
     }

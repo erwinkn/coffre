@@ -110,3 +110,20 @@ export async function sendPasskey<T>(
   if (answer.kind !== 'unavailable') unsent.body = null;
   return answer;
 }
+
+/**
+ * What the page says when the browser's `create()` or `get()` throws, for the RP ID the options named. `SecurityError`
+ * is the browser refusing the RP ID for this origin: one that is not the host or a registrable parent of it, which
+ * only the browser's public suffix list decides (`co.uk`, `workers.dev`). coffre's startup check holds `rpId` to the
+ * host or a parent on a label boundary, and leaves that list to the browser (docs/design/passkeys.md, section 7.1), so
+ * the first to press here, the Owner setting the deployment up, is told which setting to fix (review r15 of #500).
+ */
+export function authenticatorError(thrown: unknown, rpId: string): string {
+  const name = thrown instanceof DOMException ? thrown.name : undefined;
+  if (name === 'InvalidStateError') return 'This device already holds a passkey of yours here. Use another device, or sign in with that one.';
+  if (name === 'NotAllowedError') return 'No passkey answered. Try again when you’re ready.';
+  if (name === 'SecurityError') {
+    return `This browser makes no passkey for ${rpId} on this site. Whoever runs coffre here: passkeys.rpId must be this site’s host or a domain registered above it, not a public suffix such as co.uk or workers.dev.`;
+  }
+  return 'Your browser could not use a passkey here.';
+}

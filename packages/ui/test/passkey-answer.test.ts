@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deadlineOf, passkeyAnswer, readClock, sendPasskey, type Clock } from '../src/lib/passkey-answer.ts';
+import { authenticatorError, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Clock } from '../src/lib/passkey-answer.ts';
 
 const json = (body: unknown, status: number) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } }));
 
@@ -179,4 +179,15 @@ test("an answer coffre did not answer is still sent again past the deadline: the
   assert.deepEqual(await sendPasskey(page, async () => `{"response":"passkey ${++asked}"}`, send, { once: true, clock }), { kind: 'refused', code: 'state_mismatch' });
   assert.equal(asked, 1);
   assert.deepEqual(sent, ['{"response":"passkey 1"}', '{"response":"passkey 1"}']);
+});
+
+test("an RP ID the browser refuses names the setting to fix (Sol r15, #500)", () => {
+  // Chromium refuses `co.uk` for https://coffre.acme.co.uk with a SecurityError: a public suffix, which coffre's
+  // startup check leaves to the browser's list.
+  const said = authenticatorError(new DOMException('The relying party ID is not a registrable domain suffix of, nor equal to the current domain.', 'SecurityError'), 'co.uk');
+  assert.match(said, /no passkey for co\.uk/);
+  assert.match(said, /passkeys\.rpId/);
+  assert.match(authenticatorError(new DOMException('cancelled', 'NotAllowedError'), 'acme.co.uk'), /No passkey answered/);
+  assert.match(authenticatorError(new DOMException('held', 'InvalidStateError'), 'acme.co.uk'), /already holds a passkey/);
+  assert.match(authenticatorError(new TypeError('no WebAuthn'), 'acme.co.uk'), /could not use a passkey/);
 });
