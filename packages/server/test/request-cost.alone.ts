@@ -1624,7 +1624,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     // add's), and the batch planted next fills that room first, a row a page. So where an autovacuum landed decided
     // which rows lay scattered: one late in the 50,000 newer refused adds left the newest 100 a page each, and their
     // first page read 103 pages, where it read 8 before. The only VACUUMs are then this one, of the room the file's
-    // earlier cases left, and `settle`'s, and every run lays the log out alike.
+    // earlier cases left, and `settle`'s, so every run clusters each kind's rows the same way.
     await db.owner.execute(sql`ALTER TABLE log_changes SET (autovacuum_enabled = off)`);
     await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
     // A log whose indexes are as deep as they get for long (a probe of each is its depth's pages): 60,000 changes of
@@ -1744,8 +1744,11 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     assert.deepEqual(credentials.map((id) => origins.get(id)?.kind), credentials.map(() => 'signIn'));
     assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
   } finally {
-    await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
-    await db.owner.execute(sql`ALTER TABLE log_changes RESET (autovacuum_enabled)`);
+    try {
+      await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+    } finally {
+      await db.owner.execute(sql`ALTER TABLE log_changes RESET (autovacuum_enabled)`);
+    }
   }
 });
 
