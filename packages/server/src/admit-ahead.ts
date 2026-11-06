@@ -11,6 +11,7 @@ import { PARAMS, routeParts } from './api/router.ts';
 import { memberBody } from './api/routes.ts';
 import type { Touch } from './api/signin.ts';
 import { findCredential } from './db/queries.ts';
+import { check, parseJsonBody } from './http.ts';
 import { namedAhead } from './db/read-ahead.ts';
 import { acceptance } from './named-use.ts';
 import { passkeyAhead } from './passkey-check.ts';
@@ -65,11 +66,12 @@ export function admitAsked(request: Request, body: Uint8Array): AdmitAsked | nul
   }
   let json: unknown;
   try {
-    json = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
+    // Decoded and counted as the route reads it (`readJson`).
+    json = parseJsonBody(new TextDecoder('utf-8', { fatal: true }).decode(body));
   } catch {
     return null;
   }
-  const parsed = memberBody.safeParse(json);
+  const parsed = check(memberBody, json);
   if (!parsed.success || parsed.data.access !== undefined) return null;
   const { role, scope } = parsed.data;
   if (scope !== undefined && (role === undefined || role === 'member')) return null;

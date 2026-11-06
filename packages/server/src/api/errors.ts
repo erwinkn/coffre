@@ -1,4 +1,4 @@
-import { isDeploying, isUnsealed } from '@coffre/core/vault';
+import { isDeploying, isStackOverflow, isUnsealed } from '@coffre/core/vault';
 import { z } from 'zod';
 
 import { gaveUp, isUnavailable } from '@coffre/db/dialect';
@@ -228,6 +228,9 @@ export const DEPLOYING = 'coffre is deploying a new release: try again in a seco
 export const DEPLOYING_RETRY_AFTER = '1';
 
 /** The status and body for anything a handler throws. */
+/** A body nested deeper than coffre can walk, said once for every entry point. */
+export const NESTED_TOO_DEEPLY = 'the body is nested too deeply to read: flatten it';
+
 export function toErrorBody(error: unknown): { status: number; body: ErrorBody } {
   // The vault on another release than this app (`versioned`): it read and wrote nothing. Not logged: a deploy's seconds.
   if (isDeploying(error)) return { status: 503, body: { error: 'deploying', message: DEPLOYING } };
@@ -241,6 +244,12 @@ export function toErrorBody(error: unknown): { status: number; body: ErrorBody }
   // An instance still under a key the log moved on from, as for the seconds a deploy takes: refused, not a bug.
   if (error instanceof KeyRetired || error instanceof Superseded) {
     return { status: 503, body: { error: 'app_key', message: 'this instance runs under an app key the audit log has moved on from: a newer deployment replaces it' } };
+  }
+  // A body nested deeper than a walk of it holds (`STACK_OVERFLOW`): the caller's to fix, as any input that does not
+  // read. Logged as well, so that a recursion of coffre's own, which looks the same, still shows.
+  if (isStackOverflow(error)) {
+    console.error('a request nested too deeply to read', logged(error));
+    return { status: 400, body: { error: 'bad_request', message: NESTED_TOO_DEEPLY } };
   }
   if (error instanceof z.ZodError) {
     const issue = error.issues[0];

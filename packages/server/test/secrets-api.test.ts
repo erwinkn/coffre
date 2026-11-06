@@ -173,18 +173,22 @@ test('writing twice appends a version rather than mutating one', async () => {
   assert.equal((await root.secrets.reveal('market/dev/API_KEY')).values.API_KEY, 'v2');
 });
 
-test('the longest value round-trips, however many bytes it takes', async () => {
-  // 64 Ki characters is the most a value holds: 64 KiB of ASCII, or three
-  // times that in euro signs. Both must fit after encryption.
+test('the longest value round-trips, 64 KiB of UTF-8, however many characters it takes; a byte more is refused', async () => {
+  // 64 KiB is the most a value holds, in bytes, as an environment variable takes it (`MAX_VALUE_BYTES`): 65,536
+  // characters of ASCII, or 21,845 euro signs of three bytes each and one more byte.
   const ascii = 'x'.repeat(64 * 1024);
-  const euros = '€'.repeat(64 * 1024);
+  const euros = `${'€'.repeat(21_845)}x`;
+  assert.equal(Buffer.byteLength(euros), 64 * 1024);
   await root.secrets.set('market/dev', { ASCII: ascii, EUROS: euros });
 
   const { values } = await root.secrets.reveal('market/dev');
   assert.equal(values.ASCII, ascii);
   assert.equal(values.EUROS, euros);
   const stored = await db.owner.select({ ciphertext: secretVersions.ciphertext }).from(secretVersions);
-  assert.deepEqual(stored.map((row) => row.ciphertext.length).sort((a, b) => a - b), [64 * 1024, 3 * 64 * 1024]);
+  assert.deepEqual(stored.map((row) => row.ciphertext.length), [64 * 1024, 64 * 1024]);
+  // A character short of 64 Ki, but past 64 KiB as UTF-8: refused, as it was not before.
+  await assert.rejects(root.secrets.set('market/dev', { EUROS: `${euros}€` }), /at most 64 KiB, as UTF-8/);
+  await assert.rejects(root.secrets.set('market/dev', { EUROS: '€'.repeat(64 * 1024 - 1) }), /at most 64 KiB, as UTF-8/);
 });
 
 test('keys that differ only in case are different secrets', async () => {

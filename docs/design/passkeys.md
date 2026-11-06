@@ -363,7 +363,7 @@ is counted, though: every item and map key of the attestation object, the
 authenticator data's CBOR and the COSE key, and every value of the decoded
 client data's JSON, whose unknown members are ignored (5.8.1), together, is
 held to the count
-the API holds a body's JSON values to (`MAX_BODY_NODES`, 20,000, R27's CPU
+the API holds a body's JSON values to (`MAX_BODY_NODES`, 1,600, R27's CPU
 budget), counted again on what the body's strings decode to, so a response
 costs at most twice what a body's JSON may (Fable review). Without it, a megabyte of maps
 nested one byte apiece, in an attestation statement the verifier ignores,

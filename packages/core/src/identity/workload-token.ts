@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import { createLocalJWKSet, errors, importJWK, jwtVerify, type JSONWebKeySet, type JWK, type JWTPayload } from 'jose';
 
+import { countValues, MAX_BODY_NODES } from '../schemas.ts';
+
 export type { JSONWebKeySet };
 
 /**
@@ -10,8 +12,6 @@ export type { JSONWebKeySet };
  * refusal says which, as a reason a CI user can act on.
  */
 
-/** A compact JWS is three base64url parts; the whole token at most this long. */
-export const MAX_TOKEN_BYTES = 8 * 1024;
 /** Each side of every time check. */
 export const CLOCK_TOLERANCE_SECONDS = 30;
 /** The oldest token accepted, by its `iat`: tokens handed to a job at its start fit, day-old ones do not. */
@@ -65,14 +65,18 @@ const PART = /^[A-Za-z0-9_-]+$/;
 export function decodeWorkloadToken(token: string): DecodedToken {
   const malformed = (why: string) => new WorkloadTokenRefused('malformed', `the token ${why}`);
   if (typeof token !== 'string' || token.length === 0) throw malformed('is empty');
-  if (token.length > MAX_TOKEN_BYTES) throw malformed(`is longer than ${MAX_TOKEN_BYTES} bytes`);
   const parts = token.split('.');
   if (parts.length !== 3 || !parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
   const json = (part: string): Record<string, unknown> => {
+    let text: string;
     let value: unknown;
     try {
-      value = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
-    } catch {
+      text = Buffer.from(part, 'base64url').toString('utf8');
+      // Counted before it is parsed, as a body is (`MAX_BODY_NODES`): a token's few kilobytes cannot hide a tree a body could not carry.
+      if (countValues(text, MAX_BODY_NODES) > MAX_BODY_NODES) throw malformed(`has a part of more than ${MAX_BODY_NODES} values`);
+      value = JSON.parse(text);
+    } catch (error) {
+      if (error instanceof WorkloadTokenRefused) throw error;
       throw malformed('has a part that is not JSON');
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw malformed('has a part that is not an object');
@@ -189,7 +193,15 @@ function refusalOf(error: unknown): WorkloadTokenRefused {
   return new WorkloadTokenRefused('signature', 'the token does not verify');
 }
 
-/** At most this many keys in a set, fetched or uploaded. */
+/**
+ * At most this many keys in a set, fetched or uploaded: a bound on a CI
+ * sign-in's work, not on a field. A token that names no key, or one several
+ * share, is tried against each (`anyKey`), and a failed check costs 77 µs
+ * of CPU for RS256 and 133 µs for ES256 (Node 24, jose, the median of 1,400
+ * on the machine that measured `MAX_BODY_NODES`): 32 tries are 4.3 ms at
+ * worst, under half the 10 ms R27 gives a request at p50, on the hot path
+ * CI sign-in is (R44).
+ */
 export const MAX_KEYS = 32;
 
 /** One key of an uploaded set, as an owner sees it: its `kid`, its algorithm, and its RFC 7638 thumbprint. */

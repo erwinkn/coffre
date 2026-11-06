@@ -1,8 +1,9 @@
 // Every request body is read with a byte cap and abandoned past it, so an
 // oversize or endless body never buffers and never reaches JSON.parse: the
 // unauthenticated device-login endpoints (W155 red-team: a 20 MB body was
-// buffered and parsed before validation), the whole authenticated API, and
-// the bulk writes' key counts.
+// buffered and parsed before validation) and the whole authenticated API,
+// one bound for both (`API_BODY_BYTES`); and its values counted before it is
+// parsed (`MAX_BODY_NODES`), then validated to their first issue.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -10,7 +11,9 @@ import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 
 import { coffreRoute } from '../src/app.ts';
-import { readJson, readLimitedJson, readLimitedText } from '../src/http.ts';
+import { z } from 'zod';
+
+import { API_BODY_BYTES, check, countValues, MAX_BODY_NODES, readJson, readLimitedJson, readLimitedText } from '../src/http.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -52,13 +55,60 @@ test('readJson abandons an oversize body instead of buffering and parsing it', a
   await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: '{"a":{"b":{"__proto__":1}}}' }), 4 * 1024), /__proto__/);
 });
 
-test('readJson refuses a body with too many values, nested array or record alike', async () => {
-  const bigArray = `{"paths":[${Array.from({ length: 30000 }, () => '0').join(',')}]}`;
-  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: bigArray }), 4 * 1024 * 1024), /more than 20000 values/);
-  const bigRecord = `{${Array.from({ length: 30000 }, (_, i) => `"K${i}":0`).join(',')}}`;
-  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: bigRecord }), 4 * 1024 * 1024), /more than 20000 values/);
-  // A legal-sized nested array passes.
+test('readJson refuses a body with too many values, nested array or record alike, before it is parsed', async () => {
+  const over = new RegExp(`more than ${MAX_BODY_NODES} values`);
+  const bigArray = `{"paths":[${Array.from({ length: MAX_BODY_NODES }, () => '0').join(',')}]}`;
+  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: bigArray }), API_BODY_BYTES), over);
+  const bigRecord = `{${Array.from({ length: MAX_BODY_NODES }, (_, i) => `"K${i}":0`).join(',')}}`;
+  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: bigRecord }), API_BODY_BYTES), over);
+  // As deep as it is wide: each level a value.
+  const deep = `${'['.repeat(MAX_BODY_NODES + 1)}${']'.repeat(MAX_BODY_NODES + 1)}`;
+  await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: deep }), API_BODY_BYTES), over);
+  // One under the count passes; so does a small nested array.
+  const most = `{${Array.from({ length: MAX_BODY_NODES - 1 }, (_, i) => `"K${i}":0`).join(',')}}`;
+  assert.equal(Object.keys((await readJson(new Request('https://x/', { method: 'POST', body: most }), API_BODY_BYTES)) as object).length, MAX_BODY_NODES - 1);
   assert.ok(await readJson(new Request('https://x/', { method: 'POST', body: '{"paths":[1,2,3]}' }), 4 * 1024));
+  // A mebibyte of tiny entries is refused by the count, which makes none of them: JSON.parse is never called.
+  const parse = JSON.parse;
+  let parsed = 0;
+  JSON.parse = ((...args: Parameters<typeof JSON.parse>) => ((parsed += 1), parse(...args))) as typeof JSON.parse;
+  try {
+    const tiny = `[${'0,'.repeat(API_BODY_BYTES / 2 - 2)}0]`;
+    await assert.rejects(readJson(new Request('https://x/', { method: 'POST', body: tiny }), API_BODY_BYTES), over);
+  } finally {
+    JSON.parse = parse;
+  }
+  assert.equal(parsed, 0);
+});
+
+test('the count is the one JSON.parse would make: the root, each element and each entry, strings read whole', () => {
+  const tree = (value: unknown): number =>
+    1 + (value !== null && typeof value === 'object' ? (Array.isArray(value) ? value : Object.values(value)).reduce<number>((sum, child) => sum + tree(child), 0) : 0);
+  for (const text of [
+    '1', '"a"', 'null', '[]', '{}', ' [ ] ', '[1,2,3]', '{"a":[1,2]}', '[[],[[]],{}]', '{"a":{"b":{"c":null}}}',
+    '{"k,[{":"v]}","q":"\\\"","r":["\u005b",1.5e3,true,false]}', '\n{\t"a" :\r\n [ 1 , { } ] }',
+  ]) {
+    const value: unknown = JSON.parse(text);
+    assert.equal(countValues(text), tree(value), text);
+  }
+  // It stops once past its cap.
+  assert.equal(countValues('[1,2,3,4,5,6]', 3), 4);
+});
+
+test('validation answers the first issue alone, as safeParse would name it, however many entries fail', () => {
+  const schema = z.record(z.string().regex(/^K/), z.union([z.string(), z.object({ value: z.string() }).strict()]));
+  const failing = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`K${i}`, i]));
+  const ours = check(schema, failing);
+  const zods = schema.safeParse(failing);
+  assert.equal(ours.success, false);
+  assert.equal(zods.success, false);
+  assert.equal(ours.error!.issues.length, 1);
+  // The issue an answer names, its path and its message; a union's branches inside it keep a message no one reads.
+  const named = ({ code, path, message }: z.core.$ZodIssue) => ({ code, path, message });
+  assert.deepEqual(named(ours.error!.issues[0]!), named(zods.error!.issues[0]!));
+  assert.deepEqual(named(ours.error!.issues[0]!), { code: 'invalid_union', path: ['K0'], message: 'Invalid input' });
+  // And what passes, passes as zod parses it.
+  assert.deepEqual(check(schema, { K1: 'a', K2: { value: 'b' } }), schema.safeParse({ K1: 'a', K2: { value: 'b' } }));
 });
 
 test('a body is abandoned soon after the cap, not drained to the end', async () => {
@@ -73,16 +123,16 @@ test('a body is abandoned soon after the cap, not drained to the end', async () 
   assert.ok(pulled <= 8, `the stream was abandoned soon after the cap, not drained (pulled ${pulled} chunks)`);
 });
 
-test('both unauthenticated device-login endpoints refuse an oversize body', async () => {
+test('both unauthenticated device-login endpoints refuse an oversize body, to the one bound every body has', async () => {
   for (const path of ['/api/auth/device', '/api/auth/device/token']) {
-    const body = JSON.stringify({ client_label: 'x', device_code: 'a'.repeat(32 * 1024) });
+    const body = JSON.stringify({ client_label: 'x', device_code: 'a'.repeat(API_BODY_BYTES) });
     const response = await coffreRoute(
       new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
       runtime,
       '203.0.113.7',
     );
     assert.equal(response!.status, 400, path);
-    assert.match(JSON.stringify(await response!.json()), /larger than 4096 bytes/);
+    assert.match(JSON.stringify(await response!.json()), new RegExp(`larger than ${API_BODY_BYTES} bytes`));
   }
 });
 
@@ -90,14 +140,19 @@ test('readLimitedJson refuses a top-level __proto__ key, as readJson does', asyn
   await assert.rejects(readLimitedJson(new Request('https://x/', { method: 'POST', body: '{"__proto__":1}' }), 1024), /__proto__/);
 });
 
-test('an object body names at most MAX_BODY_KEYS entries, refused before its values are validated', async () => {
+test('a write names as many keys as its body holds values, and a refusal names its first bad entry', async () => {
   await root.projects.create('market');
   await root.environments.create('market/dev');
-  const is400 = (error: unknown) => { assert.equal((error as { status: number }).status, 400); return true; };
-  // Over the cap (2000): refused by the router's entry-count guard, before the value union is validated.
-  await assert.rejects(root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K${i}`, 'v']))), is400);
-  await assert.rejects(root.environments.dismiss('market/dev', Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [`K${i}`, true as const]))), is400);
-  // A normal write is accepted; a write may name more keys than the 1000-key bulk-read cap returns.
+  const is400 = (pattern: RegExp) => (error: unknown) => {
+    assert.equal((error as { status: number }).status, 400);
+    assert.match((error as Error).message, pattern);
+    return true;
+  };
+  // Past the count, refused before it is parsed: the keys and the root.
+  await assert.rejects(root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: MAX_BODY_NODES }, (_, i) => [`K${i}`, 'v']))), is400(/more than \d+ values/));
+  // Within it, every entry bad: the first is the one named.
+  await assert.rejects(root.environments.dismiss('market/dev', Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`K${i}`, 0 as unknown as true]))), is400(/^K0: /));
+  // A write may name more keys than the 1000-key bulk-read cap returns.
   await root.secrets.set('market/dev', Object.fromEntries(Array.from({ length: 1001 }, (_, i) => [`K${i}`, 'v'])));
   assert.equal((await root.secrets.list('market/dev')).keys.length, 1001);
 });

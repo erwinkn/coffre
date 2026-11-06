@@ -42,9 +42,9 @@ export type Tool<I extends z.ZodObject = z.ZodObject> = {
   | { change: Change<I>; run?: undefined }
 );
 
-const environment = z.string().min(1).max(200).describe('An environment, as project/environment: market/prod');
-const secret = z.string().min(1).max(300).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
-const member = z.string().min(1).max(320).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
+const environment = z.string().min(1).describe('An environment, as project/environment: market/prod');
+const secret = z.string().min(1).describe('A secret, as project/environment/KEY: market/prod/STRIPE_KEY');
+const member = z.string().min(1).describe('A member: user:ada@acme.example, or service:ci-deploy for a service account');
 
 const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({ type: 'object', properties, required });
 const list = { type: 'array' };
@@ -124,7 +124,7 @@ const READ_TOOLS: readonly Tool[] = [
     readOnly: true,
     idempotent: true,
     destructive: false,
-    input: z.object({ place: z.string().min(1).max(200).optional().describe('A project or project/environment: market, market/prod') }).strict(),
+    input: z.object({ place: z.string().min(1).optional().describe('A project or project/environment: market, market/prod') }).strict(),
     output: object({ members: list }),
     names: ({ place }) => (place === undefined ? [] : [place]),
     run: async ({ api }, { place }) => ({ structured: await api.members.list(place) }),
@@ -161,8 +161,8 @@ const READ_TOOLS: readonly Tool[] = [
     destructive: false,
     input: z
       .object({
-        path: z.string().min(1).max(300).optional().describe('Only entries about a project, environment or secret'),
-        actor: z.string().min(1).max(320).optional().describe('Only entries by this member'),
+        path: z.string().min(1).optional().describe('Only entries about a project, environment or secret'),
+        actor: z.string().min(1).optional().describe('Only entries by this member'),
         decision: z.enum(['allow', 'deny']).optional(),
         before: z.union([z.number().int().min(1), z.string().regex(AUDIT_NEXT)]).optional().describe('Only entries older than where the last call stopped: its `next`'),
         limit: z.number().int().min(1).max(200).optional(),
@@ -187,7 +187,7 @@ const REVEAL_VALUES = tool({
   readOnly: true,
   idempotent: true,
   destructive: false,
-  input: z.object({ path: z.string().min(1).max(300).describe('An environment, market/prod, or one secret, market/prod/STRIPE_KEY') }).strict(),
+  input: z.object({ path: z.string().min(1).describe('An environment, market/prod, or one secret, market/prod/STRIPE_KEY') }).strict(),
   output: object({ path: { type: 'string' }, values: { type: 'object' }, sensitive: list }),
   names: ({ path }) => [path],
   run: async ({ api }, { path }) => {

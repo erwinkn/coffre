@@ -7,11 +7,12 @@ import type { WriteKeysOutcome } from '@coffre/core/vault';
 
 import { authenticateRequest, endedCredential, refusedByKind, unauthenticated, type AuthenticatedIdentity } from './auth.ts';
 import { vaultWrites } from './api/changes.ts';
-import { MAX_BODY_KEYS, PARAMS, routeParts } from './api/router.ts';
+import { PARAMS, routeParts } from './api/router.ts';
 import { secretPatch } from './api/routes.ts';
 import type { Touch } from './api/signin.ts';
 import type { SecretValue } from './api/secrets.ts';
 import { findCredential, type ResolvedPath } from './db/queries.ts';
+import { check, parseJsonBody } from './http.ts';
 import { namedAhead } from './db/read-ahead.ts';
 import { acceptance } from './named-use.ts';
 import { passkeyAhead } from './passkey-check.ts';
@@ -66,12 +67,13 @@ export function writeAsked(request: Request, body: Uint8Array): WriteAsked | nul
   if (!PARAMS.project!.safeParse(project).success || !PARAMS.environment!.safeParse(environment).success || personalOf(environment) !== null) return null;
   let raw: unknown;
   try {
-    raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body));
+    // Decoded and counted as the route reads it (`readJson`).
+    raw = parseJsonBody(new TextDecoder('utf-8', { fatal: true }).decode(body));
   } catch {
     return null;
   }
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length === 0 || Object.keys(raw).length > MAX_BODY_KEYS) return null;
-  const parsed = secretPatch.safeParse(raw);
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length === 0) return null;
+  const parsed = check(secretPatch, raw);
   if (!parsed.success) return null;
   const patch: Record<string, SecretValue> = {};
   for (const [name, value] of Object.entries(parsed.data)) {

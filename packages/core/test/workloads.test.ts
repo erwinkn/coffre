@@ -13,7 +13,7 @@ import {
   githubWorkflow,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
-  MAX_CLAIMS,
+  MAX_ISSUER_BYTES,
   type BindingClaims,
 } from '@coffre/core/identity';
 
@@ -207,10 +207,15 @@ test('a known issuer forces its profile; any other issuer is custom, by its subj
   refused({ profile: 'nope', issuer: null, claims: {} }, /unknown profile "nope"/);
 });
 
-test('claims are bounded strings with names a binding may match, and never the exchange\'s own', () => {
-  const many = Object.fromEntries(Array.from({ length: MAX_CLAIMS }, (_, i) => [`c${i}`, 'x']));
-  refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { ...many, sub: 'x' } }, /at most 16 claims/);
-  refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'é'.repeat(129) } }, /longer than 256 bytes/);
+test('claims are nonempty strings with names a binding may match, and never the exchange\'s own, as many and as long as the body holds', () => {
+  // No count or length of their own (R70): the body's bounds hold them (`API_BODY_BYTES`, `MAX_BODY_NODES`).
+  const many = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`c${i}`, 'é'.repeat(1000)]));
+  assert.equal(Object.keys(checkBinding({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { ...many, sub: 'x' } }).claims).length, 201);
+  // The issuer is held to what fits in its index entry beside its service, the one bound left that is storage's.
+  assert.equal(MAX_ISSUER_BYTES, 2310);
+  checkBinding({ profile: 'custom', issuer: 'i'.repeat(MAX_ISSUER_BYTES), claims: { sub: 'x' } }, { uploaded: true });
+  assert.throws(() => checkBinding({ profile: 'custom', issuer: 'i'.repeat(MAX_ISSUER_BYTES + 1), claims: { sub: 'x' } }, { uploaded: true }), /longer than 2310 bytes/);
+  refused({ profile: 'custom', issuer: `https://idp.acme.example/${'p'.repeat(MAX_ISSUER_BYTES)}`, claims: { sub: 'x' } }, /longer than 2310 bytes/);
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '' } }, /nonempty string/);
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', groups: ['a'] as unknown as string } }, /nonempty string/);
   for (const name of ['aud', 'iss', 'exp', 'iat', 'nbf', 'jti']) {
@@ -219,6 +224,49 @@ test('claims are bounded strings with names a binding may match, and never the e
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', 'kubernetes.io serviceaccount': 'y' } }, /not a claim name/);
   // As a JSON body has it: an own `__proto__`, which the stored binding would otherwise drop, matching more than it says.
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: JSON.parse('{"sub":"x","__proto__":"y"}') as Record<string, unknown> }, /not a claim name/);
+});
+
+test("a claim's lookup costs the token's keys, not the ways a long name splits: the same readings as every split tried", () => {
+  // What `claimAt` was, every split of the name tried at every step: the reference its readings are held to.
+  const splits = (claims: Record<string, unknown>, name: string): unknown => {
+    const parts = name.split('.');
+    let found: unknown;
+    let readings = 0;
+    const walk = (at: unknown, from: number): void => {
+      if (readings > 1) return;
+      if (from === parts.length) {
+        found = at;
+        readings++;
+        return;
+      }
+      if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
+      for (let to = from + 1; to <= parts.length; to++) {
+        const key = parts.slice(from, to).join('.');
+        if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
+      }
+    };
+    walk(claims, 0);
+    return readings === 1 ? found : undefined;
+  };
+  let seed = 7;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const pieces = ['a', 'b', 'a.b', 'b.a', 'a.a', ''];
+  const tree = (depth: number): Record<string, unknown> => Object.fromEntries(
+    Array.from({ length: 1 + Math.floor(random() * 3) }, () => [pieces[Math.floor(random() * pieces.length)]!, depth > 0 && random() < 0.6 ? tree(depth - 1) : `v${Math.floor(random() * 3)}`]),
+  );
+  for (let i = 0; i < 3000; i++) {
+    const claims = tree(3);
+    const name = Array.from({ length: 1 + Math.floor(random() * 4) }, () => pieces[Math.floor(random() * pieces.length)]).join('.');
+    assert.deepEqual(claimAt(claims, name), splits(claims, name), `${name} in ${JSON.stringify(claims)}`);
+  }
+  // A name of 10,000 dots, as a binding with no length of its own may name: read at once, the token's keys its work.
+  const long = `${'a.'.repeat(10_000)}a`;
+  const started = performance.now();
+  assert.equal(claimAt({ sub: 'x', a: { a: { b: 'y' } } }, long), undefined);
+  let chain: unknown = 'deep';
+  for (let i = 0; i < 1000; i++) chain = { a: chain };
+  assert.equal(claimAt(chain as Record<string, unknown>, `${'a.'.repeat(999)}a`), 'deep');
+  assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {
@@ -281,7 +329,7 @@ test('a binding that carries its keys names any issuer, exactly, but never one c
     assert.equal(custom(issuer).issuer, issuer);
   }
   assert.throws(() => checkBinding({ profile: 'custom', issuer: 'https://kubernetes.default.svc.cluster.local', claims: { sub: 'x' } }), /public host name/);
-  for (const issuer of ['', ' https://idp', 'https://idp\n', 'x'.repeat(401)]) assert.throws(() => custom(issuer), BindingInvalid);
+  for (const issuer of ['', ' https://idp', 'https://idp\n', 'x'.repeat(MAX_ISSUER_BYTES + 1)]) assert.throws(() => custom(issuer), BindingInvalid);
   assert.throws(() => checkBinding({ profile: 'github', issuer: null, claims: {} }, { uploaded: true }), /publishes its keys/);
   assert.throws(() => checkBinding({ profile: 'gitlab', issuer: GITLAB_ISSUER, claims: {} }, { uploaded: true }), /publishes its keys/);
 });

@@ -2,6 +2,7 @@
 export * from './auth.ts';
 export * from './constraints.ts';
 export * from './dpop.ts';
+export * from './fetched.ts';
 export * from './github-app.ts';
 export * from './profile-rules.ts';
 export * from './run-proof.ts';

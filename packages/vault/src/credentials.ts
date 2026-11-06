@@ -7,7 +7,6 @@ import {
   HANDLE_POLICY,
   heldColumns,
   issuesCredential,
-  CREDENTIAL_LABEL_MAX,
   MAX_PERSONAL_TOKEN_MINUTES,
   MAX_SERVICE_TOKEN_DAYS,
   ownsProject,
@@ -197,7 +196,7 @@ function checkCredential(c: SignInCredential): void {
   const time = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
   if (typeof c?.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(c.id)
     || (c.kind !== 'service' && c.kind !== 'workload') || !isBase64(c.tokenHash, 32) || !isBase64(c.authMac, 32) || !text(c.tokenHint, 64)
-    || !optional(c.label, CREDENTIAL_LABEL_MAX) || (c.scope !== null && typeof c.scope !== 'string') || (c.places !== null && typeof c.places !== 'string')
+    || !optional(c.label, Infinity) || (c.scope !== null && typeof c.scope !== 'string') || (c.places !== null && typeof c.places !== 'string')
     || !time(c.expiresAt) || (c.notAfter !== null && !time(c.notAfter)) || !optional(c.jkt, 128)) {
     throw new Error('a sign-in\'s credential is its row: an id, its kind, its token\'s hash and hint, its times, and the app\'s MAC');
   }
@@ -303,7 +302,7 @@ export function checkIssue(input: IssueTokenInput): CredentialScope {
   }
   if (typeof c?.id !== 'string' || !UUID.test(c.id) || (c.kind !== 'service' && c.kind !== 'personal' && c.kind !== 'handle') || !isBase64(c.tokenHash, 32)
     || !isBase64(c.authMac, 32) || typeof c.tokenHint !== 'string' || c.tokenHint.length === 0 || c.tokenHint.length > 64
-    || (c.label !== null && (typeof c.label !== 'string' || c.label.length > CREDENTIAL_LABEL_MAX)) || typeof c.scope !== 'string' || (c.places !== null && typeof c.places !== 'string')
+    || (c.label !== null && typeof c.label !== 'string') || typeof c.scope !== 'string' || (c.places !== null && typeof c.places !== 'string')
     || typeof c.expiresAt !== 'number' || !Number.isSafeInteger(c.expiresAt) || typeof c.createdBy !== 'string'
     || (c.passkeyId !== null && (typeof c.passkeyId !== 'string' || !UUID.test(c.passkeyId)))) {
     throw new Error('an issue\'s token is its row: an id, its kind, its token\'s hash and hint, its scope as stored, its end, its maker, its passkey, and the app\'s MAC');
