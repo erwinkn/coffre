@@ -1078,7 +1078,9 @@ export class SigninService {
   async addStep(ctx: Asker & Pick<ApiContext, 'session'>, member: PrincipalRef): Promise<{ options: CreationOptionsJSON; state: string }> {
     this.#adding(ctx, member);
     const principal = principalOf(member);
-    const rows = await passkeysOf(this.#deps.db, this.#deps.chainKey, principal);
+    const rows = await passkeysOf(this.#deps.db, this.#deps.chainKey, principal).catch((error: unknown) => {
+      throw error instanceof AuthRowTampered ? tamperedPasskeys() : error;
+    });
     const live = rows.filter((row) => row.generation === ctx.caller.generation && row.removedAt === null);
     addable(live.length);
     const state: AddState = { purpose: 'add', credentialId: ctx.credentialId!, principal, generation: ctx.caller.generation, userHandle: userHandle(), passkeysEver: rows.length, ...challenge() };
@@ -1160,40 +1162,58 @@ export class SigninService {
    * and the provider alone signs them in under `optional`.
    */
   async resetPasskeys(ctx: Asker, member: PrincipalRef): Promise<PasskeyReset> {
-    await withRefusals(this.#deps, async () => {
-      mayReset(ctx, member);
-      if (ctx.caller.principal.id === member.id) {
-        throw new Refusal(forbidden('your own passkeys are removed from Account → Passkeys, with a touch of one you keep'), denied(ctx, 'passkey.reset', 'own_passkeys', { metadata: { principalType: 'user', principalId: member.id } }));
-      }
-    });
     const principal = principalOf(member);
-    const standing = await this.#standing(member);
-    if (standing.status !== 'active') throw notFound('no such member');
     try {
-      return await retrying(async () => {
-        const changes = await AppChanges.prepare(this.#deps.vault, formatMember(ctx.caller.principal), async () => {
-          const at = new Date();
-          return [
-            ...revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(member, at))),
-            ...connectionRevokes(await liveConnections(this.#deps.db, this.#deps.chainKey, principal, at)),
-          ];
+      return await withRefusals(this.#deps, async () => {
+        // The Owner as the vault answers now, held to under the head: demoted meanwhile, they reset no one (`issuerStill`;
+        // review r1 of #529), as an issuer demoted meanwhile gives a token nothing.
+        const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'passkey.reset' });
+        const asker = { ...ctx, caller };
+        mayReset(asker, member);
+        if (caller.principal.id === member.id) {
+          throw new Refusal(forbidden('your own passkeys are removed from Account → Passkeys, with a touch of one you keep'), denied(ctx, 'passkey.reset', 'own_passkeys', { metadata: { principalType: 'user', principalId: member.id } }));
+        }
+        const standing = await this.#standing(member);
+        if (standing.status !== 'active') throw notFound('no such member');
+        const credentialEnded = () => new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'passkey.reset', 'credential_ended', { metadata: { principalType: 'user', principalId: member.id } }));
+        return await retrying(async () => {
+          const changes = await AppChanges.prepare(this.#deps.vault, formatMember(caller.principal), async () => {
+            const at = new Date();
+            const [held, connected] = await Promise.all([
+              liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(member, at)),
+              liveConnections(this.#deps.db, this.#deps.chainKey, principal, at),
+            ]);
+            return [...revokes(held), ...connectionRevokes(connected)];
+          });
+          return audited({ ...this.#deps, caller }, async (tx, log) => {
+            // Read together, one round trip: the Owner's access as it was weighed, the session they asked on still live and
+            // still backed by the passkey it names, the person still the member they were, and their passkeys.
+            const [, , stands, still, rows] = await Promise.all([
+              issuerStill(tx, caller, accessSeq),
+              credentialStill(asker, tx, 'passkey.reset'),
+              sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, asker),
+              this.#stillMember(tx, member, standing),
+              passkeysOf(tx, this.#deps.chainKey, principal),
+            ]);
+            if (!stands) throw credentialEnded();
+            if (!still) throw notFound('no such member');
+            const live = rows.filter((row) => row.generation === standing.generation && row.removedAt === null);
+            if (live.length === 0) throw new ApiError('conflict', `${member.id} has no passkey to reset`, 'no_passkeys');
+            const now = new Date();
+            const by = { removedAt: now, removedBy: caller.principal.id };
+            // Every write at once, under the person's factor lock, which no issue or sign-in of theirs passes meanwhile:
+            // the removals' compare-and-sets and the revocations, each checked after (review r1 of #529).
+            const [moved, ended] = await Promise.all([
+              Promise.all(live.map((row) => removePasskeyRow(tx, this.#deps.chainKey, row, by))),
+              this.#endEverything(tx, member, now, caller.principal.id, changes),
+            ]);
+            if (moved.some((count) => count === 0)) throw new ObjectMoved();
+            log.push(allowed(asker, 'passkey.reset', {
+              metadata: { principalType: 'user', principalId: member.id, passkeys: live.map((row) => row.id), ended: countsOf(ended) },
+            }));
+            return { reset: live.length, ended: countsOf(ended) };
+          }, changes, principal);
         });
-        return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
-          const [still, rows] = await Promise.all([this.#stillMember(tx, member, standing), passkeysOf(tx, this.#deps.chainKey, principal)]);
-          if (!still) throw notFound('no such member');
-          const live = rows.filter((row) => row.generation === standing.generation && row.removedAt === null);
-          if (live.length === 0) throw new ApiError('conflict', `${member.id} has no passkey to reset`, 'no_passkeys');
-          const now = new Date();
-          const by = { removedAt: now, removedBy: ctx.caller.principal.id };
-          for (const row of live) {
-            if ((await removePasskeyRow(tx, this.#deps.chainKey, row, by)) === 0) throw new ObjectMoved();
-          }
-          const ended = await this.#endEverything(tx, member, now, ctx.caller.principal.id, changes);
-          log.push(allowed(ctx, 'passkey.reset', {
-            metadata: { principalType: 'user', principalId: member.id, passkeys: live.map((row) => row.id), ended: countsOf(ended) },
-          }));
-          return { reset: live.length, ended: countsOf(ended) };
-        }, changes, principal);
       });
     } catch (error) {
       if (error instanceof AuthRowTampered) throw tamperedPasskeys();
@@ -1263,11 +1283,11 @@ export class SigninService {
           const plan = { id: randomUUID(), expiresAt: session.expiresAt, generation: standing.generation };
           const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
             const at = new Date();
-            return [
-              this.#issueChange('browser', principal, plan),
-              ...revokes(await liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(principal, at))),
-              ...connectionRevokes(await liveConnections(this.#deps.db, this.#deps.chainKey, state.principal, at)),
-            ];
+            const [held, connected] = await Promise.all([
+              liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(principal, at)),
+              liveConnections(this.#deps.db, this.#deps.chainKey, state.principal, at),
+            ]);
+            return [this.#issueChange('browser', principal, plan), ...revokes(held), ...connectionRevokes(connected)];
           });
           return audited(this.#deps, async (tx, log) => {
             const [member, rows] = await Promise.all([this.#stillMember(tx, principal, standing), passkeysOf(tx, this.#deps.chainKey, state.principal)]);
@@ -1279,17 +1299,21 @@ export class SigninService {
             if (live.length === 1 && this.config.passkeys.policy === 'required') throw new Refusal(new SigninRefused('last_passkey'), entry('passkey.remove', 'deny', { reason: 'last_passkey' }));
             if ((state.touch === 'last') !== (live.length === 1) && state.touch !== 'none') throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.remove', 'deny', { reason: 'passkeys_changed' }));
             const now = new Date();
-            // The session it replaces ends first, once (section 6.5): of two removals on one session, one goes.
-            const replaced = await revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.id(session.id), { revokedAt: now, revokedBy: principal.id });
+            // Three compare-and-sets asked together, one round trip, each checked after, in this order: the session it
+            // replaces ended, once (section 6.5: of two removals on one session, one goes); the touch taken, once, on a
+            // passkey still live (section 7.3); the passkey removed. Any of them not moving rolls everything back.
+            const [replaced, took, moved] = await Promise.all([
+              revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.id(session.id), { revokedAt: now, revokedBy: principal.id }),
+              touched === null ? 1 : touchPasskey(tx, { id: touched.passkey.id, principal: state.principal, generation: state.generation, issuedAt: new Date(state.issuedAt), signCount: touched.signCount }),
+              removePasskeyRow(tx, this.#deps.chainKey, target, { removedAt: now, removedBy: principal.id }),
+            ]);
             if (replaced.length !== 1) throw new Refusal(new SigninRefused('session_ended'), entry('passkey.remove', 'deny', { reason: 'session_ended' }));
-            // The touch taken, once, on a passkey still live (section 7.3), before the one removed goes.
-            if (touched !== null && (await touchPasskey(tx, { id: touched.passkey.id, principal: state.principal, generation: state.generation, issuedAt: new Date(state.issuedAt), signCount: touched.signCount })) === 0) {
-              throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.check', 'deny', { purpose: 'remove', reason: 'replay', touched: touched.passkey.id }));
-            }
-            if ((await removePasskeyRow(tx, this.#deps.chainKey, target, { removedAt: now, removedBy: principal.id })) === 0) throw new ObjectMoved();
-            const ended = await this.#endEverything(tx, principal, now, principal.id, changes, replaced);
+            if (took === 0) throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.check', 'deny', { purpose: 'remove', reason: 'replay', touched: touched!.passkey.id }));
+            if (moved === 0) throw new ObjectMoved();
             // The passkey touched, if it is one the person keeps; none otherwise, and no window opens.
             const passkeyId = state.touch === 'kept' ? touched!.passkey.id : null;
+            // Everything else of theirs ended before the new session is written, which that would end too.
+            const ended = await this.#endEverything(tx, principal, now, principal.id, changes, replaced);
             const credential = await this.#issue(tx, 'browser', principal, {
               ...plan, identityId: session.identityId, label: session.label, createdBy: principal.id, passkeyId, confirmedAt: passkeyId === null ? null : now,
             });
@@ -1316,12 +1340,19 @@ export class SigninService {
    * head, whose prepared changes it holds to what it ends (`changes`). `already`: a session the caller ended first.
    */
   async #endEverything(tx: Transaction, principal: PrincipalRef, at: Date, by: string, changes: AppChanges | null, already: readonly string[] = []): Promise<Ended> {
-    const ended: Ended = { credentials: [...already], connections: [], approvals: [] };
-    ended.credentials.push(...await revokeCredentialsWhere(tx, this.#deps.chainKey, personCredentials(principal, at), { revokedAt: at, revokedBy: by }));
-    for (const row of await liveConnections(tx, this.#deps.chainKey, principalOf(principal), at)) {
-      if ((await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt: at, revokedBy: by })) > 0) ended.connections.push(row.id);
-    }
-    ended.approvals.push(...await denyApprovals(tx, this.#deps.chainKey, principalOf(principal), at, { unbacked: false }));
+    // Independent, so asked together: the revocations and the two reads in one round trip, the compare-and-sets those
+    // reads lead to in a second (review r1 of #529; change-cost.test.ts).
+    const endConnections = async () => {
+      const rows = await liveConnections(tx, this.#deps.chainKey, principalOf(principal), at);
+      const moved = await Promise.all(rows.map(async (row) => ((await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt: at, revokedBy: by })) > 0 ? row.id : null)));
+      return moved.filter((id) => id !== null);
+    };
+    const [credentials, connections, approvals] = await Promise.all([
+      revokeCredentialsWhere(tx, this.#deps.chainKey, personCredentials(principal, at), { revokedAt: at, revokedBy: by }),
+      endConnections(),
+      denyApprovals(tx, this.#deps.chainKey, principalOf(principal), at, { unbacked: false }),
+    ]);
+    const ended: Ended = { credentials: [...already, ...credentials], connections, approvals };
     changes?.expectRevoked(ended.credentials);
     changes?.expectRevoked(ended.connections, 'connection');
     return ended;

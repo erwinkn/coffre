@@ -246,7 +246,8 @@
   browser a new one. An Owner of the whole instance resets someone
   else's, `DELETE /api/members/:member/passkeys`, from a fresh session:
   every live passkey removed and everything that person is signed in
-  with ended, `passkey.reset` in the log. To come: the pages (Account →
+  with ended, `passkey.reset` in the log; an Owner demoted while it runs
+  resets no one. To come: the pages (Account →
   Passkeys, the reset dialog, the prompt under `optional`)
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.

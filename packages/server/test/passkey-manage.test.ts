@@ -3,6 +3,7 @@
 // confirmed in the last five minutes, renames one, and removes one with a touch of one they keep, which signs them out
 // everywhere else and gives this browser a new session; an Owner of the whole instance resets someone's, which ends
 // everything that person is signed in with. The clock is the test's.
+import { randomUUID } from 'node:crypto';
 import test, { after, before, beforeEach, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -15,7 +16,7 @@ import { MAX_PASSKEYS } from '../src/api/signin.ts';
 import { passkeyName } from '../src/passkey-names.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, passkeys } from './db/tables.ts';
+import { auditLog, credentials, deviceAuthorizations, mcpConnections, passkeys } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, bytes, enroll, me, register, RP, signinDeployment, touch } from './signin-browser.ts';
 
@@ -45,6 +46,7 @@ beforeEach(async () => {
   await root.members.add(`user:${BOB}`, { role: 'owner' });
   await root.members.add(`user:${DANA}`, { role: 'owner' });
   await root.projects.create('market', { name: 'Market' });
+  await root.environments.create('market/prod', { name: 'Production' });
   runtime = signinDeployment(deps, 'optional');
 });
 
@@ -94,6 +96,31 @@ async function remove(browser: Browser, id: string, key: SoftAuthenticator | nul
 async function sessionRow(browser: Browser) {
   const [row] = await db.owner.select().from(credentials).where(eq(credentials.tokenHash, hashToken(browser.session!)));
   return row!;
+}
+
+/** Whether a terminal polling with `deviceCode` gets a session. */
+async function redeems(deviceCode: string): Promise<boolean> {
+  return (await runtime.signin!.pollDevice(deviceCode, { requestId: randomUUID(), sourceIp: null })).status === 'approved';
+}
+
+/** What an approved device code's row and a connection's say once a change to the person's passkeys ended them. */
+async function endedRows(approval: string, connection: string) {
+  const [code] = await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.id, approval));
+  const [app] = await db.owner.select().from(mcpConnections).where(eq(mcpConnections.id, connection));
+  return { decision: code!.decision, passkeyId: code!.passkeyId, connectionRevoked: app!.revokedAt !== null };
+}
+
+/** Run `meanwhile` once, as the vault is next asked about `principal`: before it answers, or with `after`, once it has. */
+function onNextAccess(principal: string, meanwhile: () => Promise<unknown>, { after = false } = {}): void {
+  const access = deps.vault.access;
+  deps.vault.access = async (asked, ...rest) => {
+    if (asked !== principal) return access(asked, ...rest);
+    deps.vault.access = access;
+    if (!after) await meanwhile();
+    const answer = await access(asked, ...rest);
+    if (after) await meanwhile();
+    return answer;
+  };
 }
 
 /** The entries of `action`, oldest first. */
@@ -168,7 +195,12 @@ test('removing a passkey takes a touch of one the person keeps, signs them out e
   const terminal = await rows.confirmedSession(db.owner, deps.chainKey, BOB, removed.id);
   const token = await act(bob, 'POST', `/api/members/user:${BOB}/tokens`, { label: 'agent', expiresInMinutes: 60, scope: { market: 'viewer' } });
   assert.equal(token.status, 200, JSON.stringify(token.body));
-  assert.deepEqual((await listed(bob, BOB)).ends, { sessions: 2, tokens: 1, handles: 0, apps: 0 });
+  const handle = await act(bob, 'POST', '/api/handles', { label: 'agent', paths: ['market/prod'] });
+  assert.equal(handle.status, 200, JSON.stringify(handle.body));
+  // A terminal code approved with the passkey removed, not yet redeemed, and an app connected with it (review r1 of #529).
+  const approval = await rows.approvedCode(db.owner, deps.chainKey, BOB, removed.id);
+  const app = await rows.connectedApp(db.owner, deps.chainKey, BOB, removed.id);
+  assert.deepEqual((await listed(bob, BOB)).ends, { sessions: 2, tokens: 1, handles: 1, apps: 1 });
 
   // What the door asks: a touch of the one kept, never of the one removed.
   later(1);
@@ -188,13 +220,16 @@ test('removing a passkey takes a touch of one the person keeps, signs them out e
   copy.jar.set('__Host-coffre_session', before);
   assert.equal(await me(copy), 'unauthenticated');
   assert.equal(await me(laptop), 'unauthenticated');
-  for (const ended of [terminal, token.body.token]) {
+  for (const ended of [terminal, token.body.token, handle.body.token]) {
     const [row] = await db.owner.select().from(credentials).where(eq(credentials.tokenHash, hashToken(ended)));
     assert.notEqual(row!.revokedAt, null);
   }
+  // The code, denied, names neither person nor passkey, and redeems nothing; the app, disconnected.
+  assert.deepEqual(await endedRows(approval.id, app), { decision: 'denied', passkeyId: null, connectionRevoked: true });
+  assert.equal(await redeems(approval.deviceCode), false);
   assert.deepEqual((await listed(bob, BOB)).passkeys.map((row) => row.id), [kept.id]);
   const [entry] = await entries('passkey.remove');
-  assert.deepEqual([entry!.decision, entry!.metadata.passkeyId, entry!.metadata.touched, entry!.metadata.ended.credentials], ['allow', removed.id, kept.id, 4]);
+  assert.deepEqual([entry!.decision, entry!.metadata.passkeyId, entry!.metadata.touched, entry!.metadata.ended], ['allow', removed.id, kept.id, { credentials: 5, connections: 1, approvals: 1 }]);
   // The removed passkey signs nobody in.
   const again = new Browser(runtime);
   assert.equal(await again.provider(BOB), '/auth/passkey');
@@ -245,13 +280,16 @@ test("an Owner of the whole instance resets someone's passkeys from a fresh sess
   const { later } = clock(t);
   const danaKey = await SoftAuthenticator.create('ES256');
   const dana = await enroll(runtime, DANA, danaKey);
-  const terminal = await rows.confirmedSession(db.owner, deps.chainKey, DANA, (await listed(dana, DANA)).passkeys[0]!.id);
+  const danaPasskey = (await listed(dana, DANA)).passkeys[0]!.id;
+  const terminal = await rows.confirmedSession(db.owner, deps.chainKey, DANA, danaPasskey);
+  const approval = await rows.approvedCode(db.owner, deps.chainKey, DANA, danaPasskey);
+  const app = await rows.connectedApp(db.owner, deps.chainKey, DANA, danaPasskey);
   const bobKey = await SoftAuthenticator.create('ES256');
   let bob = await enroll(runtime, BOB, bobKey);
 
   // What Bob weighs first: Dana's passkeys, and what a reset ends.
   const weighed = await listed(bob, DANA);
-  assert.deepEqual([weighed.passkeys.length, weighed.ends, weighed.reset], [1, { sessions: 2, tokens: 0, handles: 0, apps: 0 }, null]);
+  assert.deepEqual([weighed.passkeys.length, weighed.ends, weighed.reset], [1, { sessions: 2, tokens: 0, handles: 0, apps: 1 }, null]);
   // Never his own, nor someone with none, and only from a fresh session.
   assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${BOB}/passkeys`)), [403, 'forbidden', 'own_passkeys']);
   assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${ADA}/passkeys`)), [409, 'conflict', 'no_passkeys']);
@@ -261,7 +299,9 @@ test("an Owner of the whole instance resets someone's passkeys from a fresh sess
 
   bob = await touch(runtime, BOB, bobKey);
   const reset = await act(bob, 'DELETE', `/api/members/user:${DANA}/passkeys`);
-  assert.deepEqual(reset, { status: 200, body: { reset: 1, ended: { credentials: 2, connections: 0, approvals: 0 } } });
+  assert.deepEqual(reset, { status: 200, body: { reset: 1, ended: { credentials: 2, connections: 1, approvals: 1 } } });
+  assert.deepEqual(await endedRows(approval.id, app), { decision: 'denied', passkeyId: null, connectionRevoked: true });
+  assert.equal(await redeems(approval.deviceCode), false);
   // Everything Dana was signed in with, ended; her passkey, removed by Bob.
   assert.equal(await me(dana), 'unauthenticated');
   const [cli] = await db.owner.select().from(credentials).where(eq(credentials.tokenHash, hashToken(terminal)));
@@ -302,4 +342,47 @@ test('a reset shows where its person reads their passkeys until they add one', a
   // from the vault's side here: Bob's view of Dana's names the reset.
   const seen = await listed(bob, DANA);
   assert.deepEqual([seen.passkeys, seen.reset?.by, seen.reset?.at], [[], BOB, new Date(Date.now()).toISOString()]);
+});
+
+test("an Owner demoted while resetting someone's passkeys resets nothing: weighed as the vault answers, committed only while still so", async (t) => {
+  const { later } = clock(t);
+  const dana = await enroll(runtime, DANA, await SoftAuthenticator.create('ES256'));
+  const bobKey = await SoftAuthenticator.create('ES256');
+  later(1);
+  let bob = await enroll(runtime, BOB, bobKey);
+  const root = clientFor(deps, ROOT);
+
+  // Demoted after the vault weighed him for the reset, before it commits: 409, asked again.
+  onNextAccess(`user:${DANA}`, () => root.members.add(`user:${BOB}`, { role: 'admin' }));
+  assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${DANA}/passkeys`)), [409, 'conflict', 'access_changed']);
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${DANA}`)))[0]!.removedAt, null);
+  assert.equal(await me(dana), 'ok');
+  // Asked again, he is weighed as he is now: an Admin, who resets no one.
+  assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${DANA}/passkeys`)), [403, 'forbidden', 'not_owner']);
+
+  // Demoted after his request was let in, before the reset weighs him: an Admin by then, refused.
+  await root.members.add(`user:${BOB}`, { role: 'owner' });
+  later(1);
+  bob = await touch(runtime, BOB, bobKey);
+  // The request's own ask answers him as an Owner; he is demoted before the reset weighs him.
+  onNextAccess(`user:${BOB}`, () => root.members.add(`user:${BOB}`, { role: 'admin' }), { after: true });
+  assert.deepEqual(refused(await act(bob, 'DELETE', `/api/members/user:${DANA}/passkeys`)), [403, 'forbidden', 'not_owner']);
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${DANA}`)))[0]!.removedAt, null);
+  assert.equal(await me(dana), 'ok');
+});
+
+test('a passkey row failing its MAC refuses adding another and removing one, 409 `tampered`, changing nothing', async (t) => {
+  const { later } = clock(t);
+  const key = await SoftAuthenticator.create('ES256');
+  const bob = await enroll(runtime, BOB, key);
+  assert.equal((await add(bob, BOB, await SoftAuthenticator.create('ES256'))).status, 200);
+  later(1);
+  const [backing, other] = (await listed(bob, BOB)).passkeys;
+  // The one behind the session stays whole; the other's signature no longer matches it.
+  await db.owner.update(passkeys).set({ algorithm: -257 }).where(eq(passkeys.id, other!.id));
+  assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys/options`)), [409, 'conflict', 'tampered']);
+  assert.deepEqual(await bob.step(`?remove=${backing!.id}`), { status: 409, body: { error: 'tampered' } });
+  assert.deepEqual(await bob.step(`?remove=${other!.id}`), { status: 409, body: { error: 'tampered' } });
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${BOB}`))).filter((row) => row.removedAt === null).length, 2);
+  assert.equal(await me(bob), 'ok');
 });

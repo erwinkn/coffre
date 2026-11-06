@@ -2729,7 +2729,9 @@ wait, READ COMMITTED:
   (`SigninService.removePasskey`), whose new session is `n`, and a reset
   (`resetPasskeys`, `DELETE /api/members/:member/passkeys`), which issues
   none. Each reads under the head every row of the person's passkeys and
-  every credential of theirs it ends.
+  every credential of theirs it ends. Who may reset is not this model's:
+  the Owner is held to the vault's answer under the head as an issuer is
+  (`Issuing.tla`, `IssuerFence`).
 
 `FactorApp` (PR 4a) puts the app's side beside the change instead:
 

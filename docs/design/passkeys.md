@@ -755,6 +755,16 @@ live passkey (`409 no_passkeys` otherwise). Under the target's factor lock
 and the head, it removes every live passkey of theirs (`removed_by`, the
 Owner) and ends everything they are signed in with, as a removal does,
 issuing nothing; `passkey.reset` names the passkeys and how much ended.
+The Owner is weighed as the vault answers when the reset starts, not as
+their request was let in, and held to that answer under the head, as an
+issuer is (`issuerNow`, `issuerStill`; formal/Issuing.tla's
+`IssuerFence`), with the session they asked on still live and still
+backed: demoted meanwhile, they reset no one (`409 access_changed`, then
+`403 not_owner`). Approved terminal codes not yet redeemed are denied,
+naming no passkey. The removals and revocations are asked together, so
+a reset costs the same round trips for one passkey as for ten
+(`change-cost.test.ts`). A passkey row failing its MAC refuses the
+reset, an add's options and the removal door alike, `409 tampered`.
 The notice is read from the rows: while the person holds no live
 passkey, a newest removal by someone else is a reset, `{ by, at }`,
 which the Passkeys tab's read and the sign-in's enroll step answer. Each

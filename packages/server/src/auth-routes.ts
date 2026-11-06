@@ -481,7 +481,8 @@ const PASSKEY_REFUSED: Partial<Record<string, number>> = { passkey_failed: 401, 
  * (section 6.2), with its sealed `state` too. 404 `state_mismatch` when there is nothing to ask: the sign-in expired,
  * or the session is no step-up's, and signing in again is the way. `?remove=<id>`: what removing that passkey of the
  * session's person asks (section 3.6), `{ purpose: 'remove', email, name, options, state }`, `options` null under `off`,
- * where it asks no touch; 409 `last_passkey` for their last one under `required`.
+ * where it asks no touch; 409 `last_passkey` for their last one under `required`, and 409 `tampered` when one of the
+ * person's passkey rows fails its MAC.
  *
  * POST /api/auth/passkey: the browser's answer, `{ response }` (or `{ state, response }` for a new passkey, a step-up or
  * a removal, `{ state }` alone for a removal under `off`), from coffre's own page: on success the session cookie, and
@@ -499,7 +500,8 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
     if (removing !== null) {
       const token = readCookie(request, sessionCookieName(auth));
       const step = token === null ? null : await signin.removeStep(token, removing);
-      if (step !== null && 'refused' in step) return jsonResponse({ error: step.refused }, PASSKEY_REFUSED[step.refused]);
+      // Both refusals, a last passkey under `required` and a passkey row failing its MAC, are 409s, as the passkeys API's.
+      if (step !== null && 'refused' in step) return jsonResponse({ error: step.refused }, 409);
       return step === null ? nothing() : jsonResponse(step, 200, { 'cache-control': 'no-store' });
     }
     if (url.searchParams.get('step-up') === '1') {

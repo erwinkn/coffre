@@ -1713,7 +1713,8 @@ export function lockFactor(tx: Transaction, principal: string): Promise<unknown>
 
 /**
  * A person's approved device codes that no CLI has redeemed yet: what a change to their passkeys denies (section 6.1),
- * each a compare-and-set on its MAC, and a denial names nobody (`device_authorizations_approval_names_principal`).
+ * each a compare-and-set on its MAC, and a denial names nobody and no passkey (`device_authorizations_approval_names_principal`,
+ * `device_authorizations_passkey_check`).
  * `unbacked`: only those that name no passkey, a first passkey's; otherwise all of them, a removal's and a reset's.
  * The ids it denied.
  */
@@ -1726,12 +1727,13 @@ export async function denyApprovals(tx: Queryable, chainKey: Buffer, principal: 
     which.unbacked ? isNull(deviceAuthorizations.passkeyId) : undefined,
     gt(deviceAuthorizations.expiresAt, at),
   ));
-  const denied: string[] = [];
-  for (const row of rows) {
-    if (!checkAuthRow(chainKey, 'device_authorizations', row)) continue;
-    if ((await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0 })) > 0) denied.push(row.id);
-  }
-  return denied;
+  // A denial names no passkey either (`device_authorizations_passkey_check`; review r1 of #529): the touch that approved
+  // it no longer stands. Each its own compare-and-set, asked together: one round trip for them all.
+  const decided = await Promise.all(rows.filter((row) => checkAuthRow(chainKey, 'device_authorizations', row)).map(async (row) => {
+    const moved = await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0, passkeyId: null });
+    return moved > 0 ? row.id : null;
+  }));
+  return decided.filter((id) => id !== null);
 }
 
 /**
@@ -2527,12 +2529,10 @@ export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, wher
 /** Revoke the live credentials `where` names, each a compare-and-set on its MAC, as `updateAuth` does: the ids it revoked. */
 export async function revokeCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere, by: { revokedAt: Date; revokedBy: string }): Promise<string[]> {
   const { credentials } = tablesOf(db);
-  const revoked: string[] = [];
-  for (const row of await liveCredentialsWhere(db, chainKey, where)) {
-    const done = await update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) });
-    if (done > 0) revoked.push(row.id);
-  }
-  return revoked;
+  // Each its own compare-and-set, asked together: one round trip for them all, however many (review r1 of #529).
+  const rows = await liveCredentialsWhere(db, chainKey, where);
+  const done = await Promise.all(rows.map((row) => update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) })));
+  return rows.filter((_, i) => done[i]! > 0).map((row) => row.id);
 }
 
 /**
