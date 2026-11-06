@@ -24,7 +24,7 @@ export function UnregisteredPage() {
           )}{' '}
           was changed outside coffre, so the vault refuses it and you have no access.
         </p>
-        <p>To start over, ask a coffre admin to remove you under Users and add you again.</p>
+        <p>Removing you and adding you again does not clear it. Ask whoever runs this coffre to put your record back from a backup.</p>
       </ClosedDoor>
     );
   }

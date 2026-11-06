@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The UI and the CLI no longer tell anyone to remove a tampered member to
+  start over (T195).** 0.15's log refuses that removal. The Users page, the
+  signed-in member's own page, `coffre members` and `coffre access` now say
+  that removing does not clear it and that the record is put back from a
+  backup (`docs/restore.md`, "A member refused as tampered").
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a
