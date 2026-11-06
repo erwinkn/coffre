@@ -107,6 +107,14 @@ test('a package runner, a registry install, a release download or a clone is ban
         'npm install -g wrangler',
         'npm i wrangler',
         'npm ci',
+        'npm install-test',
+        'npm it',
+        'npm --prefix fixture install-ci-test',
+        'npm cit',
+        'npm clean-install',
+        'npm isntall wrangler',
+        'npm link wrangler',
+        'npm dedupe',
         'npm pack @coffre/cli@0.15.0',
         'pnpm dlx wrangler@4.0.0 deploy',
         'pnpm --dir app add jose',
@@ -172,6 +180,9 @@ test('pnpm install carries --frozen-lockfile, each command its own', () => {
     assert.equal(one('scripts/a.sh', 'pnpm install; echo --frozen-lockfile\n').length, 1);
     assert.equal(one('scripts/a.sh', 'pnpm i | tee log\n').length, 1);
     assert.equal(one('scripts/a.sh', 'pnpm install --frozen-lockfile=false\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'pnpm install-test\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'pnpm it\n').length, 1);
+    assert.deepEqual(one('scripts/a.sh', 'pnpm install-test --frozen-lockfile\n'), []);
     assert.equal(one('.cursor/environment.json', '{ "install": "corepack pnpm install\\necho --frozen-lockfile" }\n').length, 1);
 });
 
@@ -207,6 +218,18 @@ test('a YAML scalar YAML folds into one line is read as that line', () => {
     assert.deepEqual(one('.github/workflows/a.yml', step('>-\n          pnpm --dir app\n          install --frozen-lockfile')), []);
     assert.deepEqual(one('.github/workflows/a.yml', step('|\n          pnpm --dir app\n          install --frozen-lockfile')), []);
     assert.equal(one('.github/workflows/a.yml', step('|\n          pnpm --dir app install\n          echo --frozen-lockfile')).length, 1);
+    // A blank line, or a line indented past a `>` block's, breaks the fold:
+    // the first install is a command of its own, unfrozen.
+    for (const run of [
+        '>-\n          pnpm --dir cli install\n\n          pnpm --dir web install --frozen-lockfile',
+        '>\n          pnpm --dir cli install\n            echo --frozen-lockfile',
+        'pnpm --dir cli install\n\n          pnpm --dir web install --frozen-lockfile',
+    ]) assert.equal(one('.github/workflows/a.yml', step(run)).length, 1, run);
+    assert.deepEqual(one('.github/workflows/a.yml', step('>-\n          pnpm --dir cli install --frozen-lockfile\n\n          pnpm --dir web install --frozen-lockfile')), []);
+    // An anchor or a tag before the header: still a `|` block, line by line.
+    for (const header of ['&install |', '!!str |-', '&install !!str >-']) {
+        assert.equal(one('.github/workflows/a.yml', step(`${header}\n          pnpm --dir app install\n          echo --frozen-lockfile`)).length, header.includes('>') ? 0 : 1, header);
+    }
     // Keys beneath a key are no scalar of it.
     assert.deepEqual(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - uses: actions/checkout@${SHA} # v4.4.0\n        with:\n          persist-credentials: false\n`), []);
     assert.equal(one('docker-compose.yml', 'services:\n  pg:\n    command: >\n      sh -c "npm\n      install"\n').length, 1);

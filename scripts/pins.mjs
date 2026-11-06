@@ -44,7 +44,7 @@ const command = (program, subcommands) => new RegExp(`${word(program)}${AT_VERSI
 const BANNED = [
     { pattern: new RegExp(word('(?:curl|wget)')), local: true, say: (m) => `${m} downloads: use scripts/fetch.sh <url> <sha256> <file> (a Dockerfile: ADD --checksum=sha256:…), or mark a health check of this machine \`# pins: local\`` },
     { pattern: new RegExp(word('(?:npx|pnpx|bunx|uvx|pipx)')), say: (m) => `${m} runs a package no lockfile holds` },
-    { pattern: command('npm', 'exec|x|install|i|in|add|ci|update|up|upgrade|pack|create|init|dlx'), say: () => 'npm fetches packages outside the lockfile: install with pnpm install --frozen-lockfile' },
+    { pattern: command('npm', 'exec|x|install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|add|install-test|it|ci|clean-install|ic|install-clean|isntall-clean|install-ci-test|cit|clean-install-test|sit|update|up|upgrade|udpate|link|ln|dedupe|ddp|pack|create|init|innit|dlx'), say: () => 'npm fetches packages outside the lockfile: install with pnpm install --frozen-lockfile' },
     { pattern: command('pnpm', 'dlx|create|add|update|up|upgrade|self-update'), say: (m) => `${m} fetches packages outside the lockfile (add one with pnpm run add:dep)` },
     { pattern: command('yarn', 'dlx|add|create'), say: (m) => `${m} fetches packages outside the lockfile` },
     { pattern: command('gh', `(?:release|run|attestation)${THEN}download`), say: (m) => `${m} downloads: use scripts/fetch.sh <url> <sha256> <file>` },
@@ -55,7 +55,7 @@ const BANNED = [
     { pattern: command('(?:pip|pip3|gem|cargo|brew)', 'install'), say: (m) => `${m} fetches packages no lockfile holds` },
     { pattern: command('go', 'install|get'), say: (m) => `${m} fetches modules outside go.sum` },
 ];
-const PNPM_INSTALL = command('pnpm', 'install|i');
+const PNPM_INSTALL = command('pnpm', 'install|i|install-test|it');
 // Corepack's own subcommands that fetch, right after it (`corepack pnpm install` is pnpm's).
 const COREPACK_FETCH = new RegExp(`${word('corepack')}${AT_VERSION}\\s+(?:install|prepare|hydrate)(?=[\\s"';&|)]|\\\\n|$)`);
 // `docker run`, and its management command's spelling, `docker container run`;
@@ -179,12 +179,15 @@ function logicalLines(lines, kind) {
     return joined;
 }
 
-// YAML folds every scalar but a `|` block into one line: `run: >-` over
-// `pnpm --dir app` and `install` runs `pnpm --dir app install`, and so does a
-// plain or quoted value continued on the lines below its key. Each such
-// scalar, its key's line and every line indented past the key, is one line
-// here, at the key's index; a `|` block keeps its lines, as the shell reads
-// them. Joining more than YAML would only finds more.
+// YAML folds every scalar but a `|` block: `run: >-` over `pnpm --dir app`
+// and `install` runs `pnpm --dir app install`, and so does a plain or quoted
+// value continued on the lines below its key. A blank line breaks the fold,
+// and in a `>` block a line indented past the block's keeps its breaks on both
+// sides (yaml.org/spec/1.2.2, 8.1.3, 6.5): `pnpm --dir cli install`, a blank
+// line, then `pnpm --dir web install --frozen-lockfile` are two commands. Each
+// folded run of lines is one line here, at its first's index (its key's, for
+// the first); a `|` block keeps its lines, as the shell reads them. An anchor
+// or a tag before the header (`run: &install |`) is no part of it.
 function yamlLines(lines) {
     const indent = (line) => line.match(/^\s*/)[0].length;
     const below = (i, column) => {
@@ -204,20 +207,34 @@ function yamlLines(lines) {
         }
         // A key's value is past its column; an entry's, past its dash.
         const column = space.length + (key === undefined ? 0 : dashes.length);
-        const value = rest.replace(/(^|\s)#.*$/, '').trim();
+        const value = rest.replace(/(^|\s)#.*$/, '').trim().replace(/^(?:[&!]\S*(?:\s+|$))*/, '');
+        const block = /^([|>])[1-9+-]*$/.exec(value)?.[1];
         const end = below(i, column);
         const next = lines.slice(i + 1, end + 1).find((line) => line.trim() !== '' && !/^\s*#/.test(line));
         // A `|` block, or a mapping or list beneath: those lines are read on their own.
         const structure = next !== undefined && NODE.exec(next)[3] !== undefined || /^\s*-(\s|$)/.test(next ?? '');
-        if (end === i || value.startsWith('|') || (value === '' && structure)) {
+        if (end === i || block === '|' || (value === '' && structure)) {
             items.push({ index: i, line: lines[i] });
-            if (value.startsWith('|')) {
+            if (block === '|') {
                 for (let j = i + 1; j <= end; j++) items.push({ index: j, line: lines[j] });
                 i = end;
             }
             continue;
         }
-        items.push({ index: i, line: [lines[i], ...lines.slice(i + 1, end + 1).map((line) => line.trim())].join(' ') });
+        const content = indent(next ?? '');
+        let run = { index: i, parts: [lines[i]] };
+        const close = () => {
+            if (run) items.push({ index: run.index, line: run.parts.join(' ') });
+            run = undefined;
+        };
+        for (let j = i + 1; j <= end; j++) {
+            if (lines[j].trim() === '') close();
+            else if (block === '>' && indent(lines[j]) > content) {
+                close();
+                items.push({ index: j, line: lines[j] });
+            } else (run ??= { index: j, parts: [] }).parts.push(lines[j].trim());
+        }
+        close();
         i = end;
     }
     return items;

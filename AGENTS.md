@@ -347,7 +347,8 @@ unsupported diff select full validation.
   download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
   a message too, options between a command's words included (`gh release
   --repo o/r download`). A YAML value folded over lines (`run: >-`, or a plain
-  one continued below its key) is read as the one line YAML makes of it. A
+  one continued below its key) is read as the lines YAML makes of it: a blank
+  line, or one indented past a `>` block's, ends a line. A
   pnpm setting written in any style but block fails. A fetch
   hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
   A health check of this machine is curl marked `# pins: local`, every URL
