@@ -683,7 +683,7 @@ EXPECTED=(
 # at 5 more. So it is three, each 11 to 18 minutes there, none dominated by a
 # scenario that could not move:
 #   probing   Probing, ProbingFork and ProbingFallback: 17 minutes;
-#   routing   Routing's seven and the other Probing variants: 17 minutes;
+#   routing   Routing's six and the other Probing variants: 17 minutes;
 #   rest      every other scenario, the Writing ones' 63 and 59 seconds the
 #             largest: 11 to 13 minutes.
 # T165's ProbingMany scenarios, about 10 minutes of CI (ProbingManyFork 7 of

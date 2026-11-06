@@ -2881,7 +2881,7 @@ every pull request that is not a version-only bump:
     times, each far from the 45-minute limit:
     - `probing`: Probing, ProbingFork and ProbingFallback, about 17 minutes
       there;
-    - `routing`: Routing's seven and the other Probing variants, about 17;
+    - `routing`: Routing's six and the other Probing variants, about 17;
     - `rest`: everything else, 11 to 13;
   - 0.15's models in seven:
     - `hotpath`;
