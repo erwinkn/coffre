@@ -2139,7 +2139,7 @@ function presignTarget(credential: Resolved, asked: PresignAsked, token: string 
   if (target.pathname.split('/').some(climbs)) return failure(400, 'the path may not climb out of the credential\'s upstream');
   const relative = target.pathname.slice(under.length) || '/';
   // Its allow list, as for a request through it: the URL is one.
-  const refused = allowed(credential, asked.method, relative);
+  const refused = allowed(credential, asked.method, relative, credential.allowed === null ? [] : segmentsOf(credential.allowed, relative));
   if (refused !== null) return refused;
   // A URL is for sharing: neither the handle nor the session's token goes in it, its path or its query, as it is or
   // decoded however often a server behind may decode it (review r1 of #480: `query: { trace: <token> }`).
@@ -2188,8 +2188,12 @@ async function presigned(inject: SigV4Rule, asked: PresignAsked, target: URL, va
 }
 
 /** Where a request through a credential goes, under its upstream, once its path is checked: the URL, the upstream's own path, and the request's within it. */
-/** Where a request goes: its target, the upstream's path, the path under it as the app sent it, and, through a `path()` rule, the index of its segment there (`pathSlot`). */
-type Aim = { target: URL; under: string; relative: string; slot: number };
+/**
+ * Where a request goes: its target, the upstream's path, the path under it as the app sent it, and, through a `path()`
+ * rule, the index of its segment there (`pathSlot`); and that path's segments as its allow list matches them
+ * (`segmentsOf`), decoded once for the request's method and again for its override's (`overridden`).
+ */
+type Aim = { target: URL; under: string; relative: string; slot: number; segments: string[] };
 
 /**
  * The upstream URL a request through `credential` goes to, or the refusal:
@@ -2206,7 +2210,8 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
   const at = within(credential, rest, search);
   if (at === null) return failure(400, `${credential.name} reaches ${credential.base.href} only`);
   const { target, under, relative } = at;
-  const refused = allowed(credential, request.method, relative);
+  const segments = credential.allowed === null ? [] : segmentsOf(credential.allowed, relative);
+  const refused = allowed(credential, request.method, relative, segments);
   if (refused !== null) return refused;
   // A path rule's segment, found in the path as the app sent it, before anything is opened: the value never decides it.
   const slot = credential.path === undefined ? -1 : pathSlot(credential.path.framed!, relative);
@@ -2219,7 +2224,7 @@ function aim(request: Request, credential: Resolved, rest: string[], search: str
     }
     if (hash !== '' && hash !== 'UNSIGNED-PAYLOAD' && !/^[0-9a-f]{64}$/.test(hash)) return failure(400, 'x-amz-content-sha256 is a SHA-256, hex, or UNSIGNED-PAYLOAD');
   }
-  return { target, under, relative, slot };
+  return { target, under, relative, slot, segments };
 }
 
 /**
@@ -2246,10 +2251,9 @@ function within(credential: Resolved, rest: readonly string[], search: string): 
  * prefix, a `**`, a trailing slash past a segment a server reads as one, or
  * an entry of methods alone takes them, as S3's keys may hold `//`.
  */
-function allowed(credential: Resolved, method: string, relative: string): Response | null {
+function allowed(credential: Resolved, method: string, relative: string, segments: readonly string[]): Response | null {
   if (credential.allowed === null) return null;
   if (credential.allowed.length === 0) return failure(403, `${credential.name}'s allow list is empty: it takes no request`);
-  const segments = segmentsOf(credential.allowed, relative);
   const verdict = allows(credential.allowed, method, segments);
   if (verdict === 'allowed') return null;
   if (verdict === 'path') return failure(403, `${credential.name} is not for ${relative}`);
@@ -2266,19 +2270,18 @@ function segmentsOf(entries: readonly AllowEntry[], relative: string): string[] 
 }
 
 /**
- * The headers an upstream may take a request's method from instead of its own (T189): Google's and ASP.NET's
- * `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, and `X-Method-Override`; as `overrideHeader` reads a name.
+ * The headers an upstream may take a request's method from instead of its own (T189), lowercase: Google's and
+ * ASP.NET's `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, and `X-Method-Override`; with any character but a
+ * letter or a digit between the words, as a CGI-style server reads a name, each the `_` of an `HTTP_` variable. Rack
+ * and PHP read `X_HTTP_METHOD_OVERRIDE`, and PHP `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which
+ * Symfony takes for the dashed one (review r3 of #526). One test, allocating nothing: every header of every request
+ * passes it.
  */
-const OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override']);
+const OVERRIDE_HEADER = /^x[^a-z0-9](?:http[^a-z0-9]method(?:[^a-z0-9]override)?|method[^a-z0-9]override)$/;
 
-/**
- * Whether a header's name, lowercase, is an override header's (`OVERRIDE_HEADERS`) as a CGI-style server reads it:
- * every character but a letter or a digit is a `-` to it, as each is the `_` of an `HTTP_` variable. Rack and PHP read
- * `X_HTTP_METHOD_OVERRIDE`, and PHP `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which Symfony
- * takes for the dashed one (review r3 of #526).
- */
+/** Whether a header's name, lowercase, is an override header's (`OVERRIDE_HEADER`). */
 function overrideHeader(name: string): boolean {
-  return OVERRIDE_HEADERS.has(name.replace(/[^a-z0-9]/g, '-'));
+  return OVERRIDE_HEADER.test(name);
 }
 
 /** `text` without the characters up to a space at either end, as Java's `trim`; a loop, linear however long the run. */
@@ -2347,7 +2350,7 @@ function methodPairs(text: string): string[] {
  */
 function overridden(credential: Resolved, aimed: Aim, headers: Headers, session: { constraints: Constraints | null; place: string } | null = null): Response | null {
   const entries = credential.allowed;
-  const segments = entries === null ? [] : segmentsOf(entries, aimed.relative);
+  const { segments } = aimed;
   const narrowed = session !== null && session.constraints !== null && session.constraints.methods !== undefined;
   if (!narrowed && (entries === null || entries.some((entry) => entry.methods === null && (entry.path === null || matches(entry.path, segments))))) return null;
   const asked: { method: string; via: string }[] = [];

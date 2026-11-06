@@ -542,6 +542,14 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   multipart framing, header folding, encoded names, compression), so
   against such an upstream a method limit is not a boundary: hold its
   credential to paths, or to a key whose own scope holds what it may do.
+  The same holds for an override under a name of the upstream's own: the
+  conventional names above are held, but every framework listed lets a
+  deployment rename its override (Express's `methodOverride('X-Do')`,
+  Spring's `methodParam`, Hono's `header` and `query` options, Restlet's
+  `?method=`), and a POST with `X-Do: DELETE` goes on as it came. A bare
+  `method` parameter is not held either: RPC-style APIs name a call with
+  it (`?method=flickr.photos.search`), and refusing those would break
+  them.
   `methods` and `paths`, as before, are one entry per path, and keep what
   they meant: `/` takes every path, `/companies/` what is below
   `/companies` and not it, a `*` is itself, never a glob (with a warning
