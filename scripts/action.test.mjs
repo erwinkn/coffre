@@ -67,6 +67,25 @@ test('bump moves the packages and examples and leaves the Action, which names no
     }
 });
 
+test("check:pins holds a deployment's Node to CI's, read from each file's data", (t) => {
+    const dir = checkout(t);
+    const deploy = join(dir, 'examples/workers/.github/workflows/deploy.yml');
+    const prepare = join(dir, '.github/actions/prepare/action.yml');
+    const original = { deploy: readFileSync(deploy, 'utf8'), prepare: readFileSync(prepare, 'utf8') };
+    // Quoted keys, as GitHub reads them, and a deployment on another Node.
+    writeFileSync(deploy, original.deploy.replace('node-version: 24.22.1', "'node-version': 22.23.4"));
+    writeFileSync(prepare, original.prepare.replace('node-version: 24.22.1', '"Node-Version": 24.22.1'));
+    let checked = run(dir, 'check-pins.mjs');
+    assert.equal(checked.status, 1);
+    assert.match(checked.stderr, /deploy\.yml: node-version 22\.23\.4, and CI's is 24\.22\.1/);
+    // A setup-node step that names none.
+    writeFileSync(deploy, original.deploy.replace(/\n\s*node-version: 24\.22\.1/, ''));
+    writeFileSync(prepare, original.prepare);
+    checked = run(dir, 'check-pins.mjs');
+    assert.equal(checked.status, 1);
+    assert.match(checked.stderr, /deploy\.yml: a setup-node step without one node-version/);
+});
+
 test('a release is bump and a commit: pnpm takes its lockfile as it is, and the version-only gate its diff', (t) => {
     const dir = checkout(t);
     const git = (...args) => execFileSync('git', ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Bump test', '-c', 'user.email=bump@example.test', ...args], { cwd: dir, encoding: 'utf8' }).trim();

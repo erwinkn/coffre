@@ -267,6 +267,10 @@ function data(document, kind, text, report, options) {
     const visit = (node, path, job) => {
         const where = path.map((part, i) => (typeof part === 'number' ? `[${part}]` : i === 0 ? part : `.${part}`)).join('') || '(file)';
         if (kind !== 'json') held(node, path, where, job, { kind, text, report });
+        // A Dockerfile written in the compose file is read as one.
+        if (kind === 'compose' && typeof node === 'string' && at(path, 'services', '*', 'build', 'dockerfile_inline')) {
+            return scan(node, 'dockerfile', (index, message) => report(`${where}, line ${index + 1}`, message), options);
+        }
         if (typeof node === 'string') return commands(node, where, job, report, options);
         if (Array.isArray(node)) {
             if (node.length > 1 && node.every(isScalar)) return commands(node.join(' '), where, job, report, options);
@@ -349,6 +353,18 @@ function held(value, path, where, job, { kind, text, report }) {
             }
         }
     }
+    // What Compose builds from: a directory here, or a repository at its
+    // commit (`https://github.com/o/r.git#<sha>`), or an image by its digest.
+    if (kind === 'compose') {
+        const build = (...rest) => at(path, 'services', '*', 'build', ...rest);
+        const contexts = build() && !isMapping(value) ? [value]
+            : build('context') ? [value]
+            : build('additional_contexts', '*') ? [value]
+            // Its list form names each `name=source`.
+            : build('additional_contexts') && Array.isArray(value) ? value.map((each) => (typeof each === 'string' ? each.replace(/^[^=]*=/, '') : each))
+            : [];
+        for (const each of contexts) context(each, where, report);
+    }
     if (kind !== 'workflow') return;
     if (at(path, 'jobs', '*', 'uses') || step('uses')) uses(value, where, text, report);
     if (at(path, 'jobs', '*', 'runs-on')) {
@@ -371,6 +387,21 @@ function held(value, path, where, job, { kind, text, report }) {
             if (!EXACT_VERSION.test(version)) report(where, `${key} ${version} is not an exact version`);
         }
     }
+}
+
+// A build context: a path here, another service's (`service:db`), a
+// repository at its commit, or an image by its digest. Any other URL (a
+// branch, a tarball) is what its server has today.
+function context(value, where, report) {
+    if (!isScalar(value)) return report(where, `build context ${JSON.stringify(value)} is not a path, a repository at its commit or an image by its digest`);
+    const source = String(value);
+    if (source.startsWith('docker-image://')) {
+        if (!IMAGE.test(source.slice('docker-image://'.length))) report(where, `build context ${source} is not docker-image://name:tag@sha256:<index digest>`);
+        return;
+    }
+    if (!/^[a-z][a-z0-9+.-]*:\/\/|^git@/i.test(source)) return;
+    const git = /^git@|^git:\/\/|\.git(?:#|$)/.test(source);
+    if (!git || !/#[0-9a-f]{40}(?::[^#]*)?$/.test(source)) report(where, `build context ${source} is what its server has today: name a repository's commit (#<sha>)`);
 }
 
 // An action by its commit, `owner/repo@<sha> # v<version>`, the version for

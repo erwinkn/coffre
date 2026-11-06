@@ -336,7 +336,9 @@ unsupported diff select full validation.
   workflow, Dockerfile, compose file, shell script and pnpm setting to what it
   fetches being pinned (`scripts/pins.mjs`): an action by its commit, `owner/repo@<sha>
   # vX.Y.Z`, the same repository's through `$/`; an image as
-  `name:tag@sha256:<index digest>`, on the line that pulls it; a download
+  `name:tag@sha256:<index digest>`, on the line that pulls it; a Compose
+  build from a directory, a repository at its commit (`….git#<sha>`) or an
+  image by its digest, its `dockerfile_inline` read as a Dockerfile; a download
   through `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only
   if its SHA-256 is the pinned one, or a Dockerfile's `ADD
   --checksum=sha256:…`; a toolchain an action installs at an exact version,

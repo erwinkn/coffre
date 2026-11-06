@@ -56,6 +56,21 @@ test('an image is name:tag@sha256:<digest>, in compose, a workflow, a Dockerfile
     assert.equal(one('Dockerfile', 'FROM scratch\nADD git@github.com:o/r.git#main /src\n').length, 1);
     assert.deepEqual(one('Dockerfile', `FROM scratch\nADD https://github.com/o/r.git#${SHA} /src\n`), []);
     assert.equal(one('Dockerfile', 'FROM scratch\nADD ["https://example.com/t.tgz", "/opt/"]\n').length, 1);
+    // What Compose builds: a Dockerfile written in it, read as one, and a context
+    // here, another service's, a repository at its commit or an image by its digest.
+    const inline = (body) => `services:\n  app:\n    build:\n      dockerfile_inline: |\n${body.split('\n').map((line) => `        ${line}`).join('\n')}\n`;
+    assert.match(one('docker-compose.yml', inline('FROM node:24'))[0], /dockerfile_inline, line 1: FROM node:24 is not/);
+    assert.match(one('docker-compose.yml', inline(`FROM node:24@${DIGEST}\nADD https://example.com/t.tgz /t`))[0], /line 2: ADD https:\/\/example\.com\/t\.tgz without --checksum/);
+    assert.deepEqual(one('docker-compose.yml', inline(`FROM node:24@${DIGEST}\nRUN pnpm install --frozen-lockfile`)), []);
+    const build = (value) => `services:\n  app:\n    build: ${value}\n`;
+    assert.match(one('docker-compose.yml', build('https://github.com/docker-library/hello-world.git'))[0], /services\.app\.build: build context https:\/\/github\.com\/docker-library\/hello-world\.git is what its server has today/);
+    assert.equal(one('docker-compose.yml', build('{context: "git@github.com:o/r.git#main"}')).length, 1);
+    assert.equal(one('docker-compose.yml', build('https://example.com/context.tar.gz')).length, 1);
+    assert.deepEqual(one('docker-compose.yml', build(`{context: "https://github.com/o/r.git#${SHA}:dir"}`)), []);
+    assert.deepEqual(one('docker-compose.yml', build('.')), []);
+    assert.equal(one('docker-compose.yml', build('{context: ., additional_contexts: {base: "docker-image://alpine:3"}}')).length, 1);
+    assert.equal(one('docker-compose.yml', build('{context: ., additional_contexts: ["base=docker-image://alpine:3", "db=service:db"]}')).length, 1);
+    assert.deepEqual(one('docker-compose.yml', build(`{context: ., additional_contexts: {base: "docker-image://alpine:3@${DIGEST}", src: ../src, db: "service:db"}}`)), []);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver docker-container --use\n').length, 1, 'BuildKit’s default image');
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver-opt image=moby/buildkit:v0.34.1 --use\n').length, 1);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx build --attest type=sbom,generator=docker/buildkit-syft-scanner:1.12.1 .\n').length, 1);

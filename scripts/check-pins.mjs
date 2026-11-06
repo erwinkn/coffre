@@ -14,6 +14,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadAll } from 'js-yaml';
 import { kindOf, problemsIn } from './pins.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -114,11 +115,31 @@ const libsql = read('packages/db/package.json').dependencies['@libsql/client'];
 const nodeDriver = read('examples/node/package.json').dependencies?.['@libsql/client'];
 if (nodeDriver !== libsql) problems.push(`examples/node/package.json: @libsql/client is ${nodeDriver ?? 'missing'}, and @coffre/db's is ${libsql}`);
 
-// The Node a deployment's workflow runs is the workspace's, which CI runs.
-const node = (path) => readFileSync(join(root, path), 'utf8').match(/node-version: (\S+)/)?.[1];
-const workspaceNode = node('.github/actions/prepare/action.yml');
-const deployNode = node('examples/workers/.github/workflows/deploy.yml');
-if (deployNode !== workspaceNode) problems.push(`examples/workers/.github/workflows/deploy.yml: node-version ${deployNode}, and CI's is ${workspaceNode}`);
+// The Node a deployment's workflow runs is the workspace's, which CI runs:
+// every setup-node step's `node-version`, read as GitHub reads the file (an
+// input's name whatever its case), and at least one.
+const nodeVersions = (path) => {
+    const versions = [];
+    const visit = (node) => {
+        if (Array.isArray(node)) return node.forEach(visit);
+        if (node === null || typeof node !== 'object') return;
+        if (typeof node.uses === 'string' && node.uses.startsWith('actions/setup-node@')) {
+            const inputs = node.with !== null && typeof node.with === 'object' ? node.with : {};
+            const named = Object.entries(inputs).filter(([key]) => key.toLowerCase() === 'node-version');
+            versions.push(named.length === 1 ? String(named[0][1]) : undefined);
+        }
+        Object.values(node).forEach(visit);
+    };
+    loadAll(readFileSync(join(root, path), 'utf8')).forEach(visit);
+    if (versions.length === 0 || versions.some((version) => version === undefined)) {
+        problems.push(`${path}: a setup-node step without one node-version`);
+    }
+    return versions;
+};
+const [workspaceNode] = nodeVersions('.github/actions/prepare/action.yml');
+for (const deployNode of nodeVersions('examples/workers/.github/workflows/deploy.yml')) {
+    if (deployNode !== workspaceNode) problems.push(`examples/workers/.github/workflows/deploy.yml: node-version ${deployNode}, and CI's is ${workspaceNode}`);
+}
 
 const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean);
 let files = 0;
