@@ -651,8 +651,9 @@ export type TreeVerification =
       /** The entries above the newest pair it checked. */
       unsealed: number;
       /**
-       * Whether more lie there than a check reads (`ABOVE_NEWEST`, 2,000): a
-       * checkpointer behind. Not checked to the head, so `ok` is false; no
+       * Whether more lie there than a check reads (the vault's
+       * `ABOVE_NEWEST`, packages/vault/src/verifier.ts): a checkpointer
+       * behind, or rows a writer planted. Not checked to the head, so `ok` is false; no
        * problem either, and never a break of the log.
        */
       capped: boolean;

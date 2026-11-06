@@ -10,6 +10,17 @@
   CLI's default stays 90 days: under a lower maximum, pass `--expires-in`.
   Tokens already issued keep their end.
 
+- **The sealed log's check reads at most 1,000 entries above its newest
+  checkpoint, down from 2,000 (W331, limits #18).** The 2,000 came from a
+  rate, four ticks at 1,000 uses a second, and cost some 35 ms of CPU in
+  local workerd, against R27's 20 ms at p99. The bound now comes from
+  that budget and the check's measured cost on a Worker (5.8 ms, then
+  14.5 µs an entry; `packages/vault/test/bench/verifier.ts`). Past it,
+  the audit page shows "Sealed log not checked to the head (1,000+
+  entries pending)", and `coffre verify instance` and conformance fail that
+  check as the checkpointer behind, as they did past 2,000. A checkpointer
+  on time holds at most a tick's worth, 500 entries at 1,000 uses a second.
+
 - **`serveVault` passes its options to the vault it runs (T230).** On Node
   a vault in a process of its own ignored a deployment's `uses`
   (`inFlight`, `connections`, `coverMs`, `names`, `batch`) and kept the
