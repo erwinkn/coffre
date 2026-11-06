@@ -18372,7 +18372,7 @@ async function whoHasAccess(args) {
 	}
 	for (const member of result.members) {
 		const role = member.instanceRole === "member" ? "" : `  ${roleInWords(member)}`;
-		const tampered = member.tampered ? "  [record failed its integrity check: remove to start over]" : "";
+		const tampered = member.tampered ? "  [record failed its integrity check: removing does not clear it, restore the record from a backup]" : "";
 		process.stdout.write(`${named(member.principalType, member.principalId)}${role}${tampered}\n`);
 		for (const g of member.grants) {
 			const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;
@@ -18393,7 +18393,7 @@ async function whoHasAccess(args) {
 async function memberAccess(member, json) {
 	const access = await client().members.access(member);
 	if (json) return void process.stdout.write(`${JSON.stringify(access, null, 2)}\n`);
-	const tampered = access.status === "tampered" ? "  [record failed its integrity check: remove to start over]" : access.status === "removed" ? "  [removed]" : "";
+	const tampered = access.status === "tampered" ? "  [record failed its integrity check: removing does not clear it, restore the record from a backup]" : access.status === "removed" ? "  [removed]" : "";
 	process.stdout.write(`${named(access.principalType, access.principalId)}  ${roleInWords(access)}${tampered}\n`);
 	for (const g of access.grants) {
 		const place = g.environment === null ? g.project : `${g.project}/${g.environment}`;

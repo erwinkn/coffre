@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The UI and the CLI no longer tell anyone to remove a tampered member to
+  start over (T195).** 0.15's log refuses that removal. The Users page, the
+  signed-in member's own page, `coffre members` and `coffre access` now say
+  that removing does not clear it and that the record is put back from a
+  backup (`docs/restore.md`, "A member refused as tampered").
+
 - **Seven tables renamed (T178).** `vault_members` is `principals` (people
   and service accounts alike), `vault_grants` is `grants`,
   `device_authorizations` is `device_logins`, `enrollments` is
