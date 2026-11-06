@@ -5770,8 +5770,6 @@ object({
 }).strict();
 string().uuid();
 string().email().max(320);
-//#endregion
-//#region ../core/dist/workloads.js
 const WORKLOAD_PROFILES = [
 	"github",
 	"github-reusable",
