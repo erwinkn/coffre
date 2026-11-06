@@ -20,6 +20,7 @@ import { resolveConfig } from '../src/config.ts';
 import type { Gates } from '../src/gate.ts';
 import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
+import { liveReferences, places, secretHeads } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -190,6 +191,26 @@ test('a workload listing "*" at landing/prod alone reads its references into bac
   const held = await session();
   assert.equal(await sessionReveal(held, 'landing/prod/STRIPE_SECRET_KEY'), STRIPE);
   assert.equal(await sessionReveal(held, 'landing/prod/CLERK_SECRET_KEY'), CLERK, 'an Owner of landing bound it: its sensitive values are theirs to give');
+});
+
+test('a workload listing one of landing/prod\'s references by name reads it, by its own ID, and not the other', async () => {
+  await bind({ reads: { 'landing/prod': ['STRIPE_SECRET_KEY'] } });
+  const held = await session();
+  assert.equal(await sessionReveal(held, 'landing/prod/STRIPE_SECRET_KEY'), STRIPE);
+  assert.equal(await sessionReveal(held, 'landing/prod/CLERK_SECRET_KEY'), '404 use_only');
+});
+
+test('a workload listing both of landing/prod\'s references by name reads both; a listed reference is as sensitive as its source', async () => {
+  await bind({ reads: { 'landing/prod': ['CLERK_SECRET_KEY', 'STRIPE_SECRET_KEY'] } });
+  const again = await session();
+  assert.equal(await sessionReveal(again, 'landing/prod/CLERK_SECRET_KEY'), CLERK);
+  assert.equal(await sessionReveal(again, 'landing/prod/STRIPE_SECRET_KEY'), STRIPE);
+  // A listed reference is as sensitive as its source is now (R23), which the binding's issuer must be an Owner to give (R32).
+  const [landing] = (await places(db.runtime)).filter((project) => project.slug === 'landing');
+  const heads = await secretHeads(db.runtime, landing!.environments.find((environment) => environment.slug === 'prod')!.id, { keys: ['CLERK_SECRET_KEY', 'STRIPE_SECRET_KEY'] });
+  const natures = await liveReferences(db.runtime, heads.map((row) => row.id));
+  assert.deepEqual(Object.fromEntries(heads.map((row) => [row.key, natures.get(row.id)])), { CLERK_SECRET_KEY: { sensitive: true }, STRIPE_SECRET_KEY: { sensitive: false } });
+  await assert.rejects(bind({ reads: { 'landing/prod': ['MISSING'] } }), /does not hold: MISSING/);
 });
 
 test('a service token of landing/prod alone, issued by an Owner of landing, reads its references, sensitive and secret; one a Developer issued, the secret alone', async () => {
