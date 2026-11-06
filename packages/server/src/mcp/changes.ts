@@ -23,6 +23,7 @@ import type { McpScope } from '@coffre/core/mcp';
 import { instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
 import { z } from 'zod';
 
+import { trimSlashes } from '../api/paths.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import type { Tool, ToolContext } from './tools.ts';
 
@@ -91,7 +92,7 @@ const name = z.string().trim().min(1).optional().describe('Ignored: it goes by i
 
 /** `market/prod/KEY` as its environment and key, or why not. */
 function splitSecret(path: string): { environment: string; key: string } {
-  const parts = path.replace(/^\/+|\/+$/g, '').split('/');
+  const parts = trimSlashes(path).split('/');
   if (parts.length !== 3 || !slug.safeParse(parts[0]).success || !slug.safeParse(parts[1]).success || !secretKey.safeParse(parts[2]).success) {
     throw new CoffreError(400, 'bad_request', `"${path}" is not a secret: name one as project/environment/KEY`);
   }
@@ -99,7 +100,7 @@ function splitSecret(path: string): { environment: string; key: string } {
 }
 
 function splitEnvironment(path: string): { project: string; environment: string } {
-  const parts = path.replace(/^\/+|\/+$/g, '').split('/');
+  const parts = trimSlashes(path).split('/');
   if (parts.length !== 2 || !slug.safeParse(parts[0]).success || !slug.safeParse(parts[1]).success) {
     throw new CoffreError(400, 'bad_request', `"${path}" is not an environment: name one as project/environment`);
   }
@@ -387,7 +388,7 @@ type AccessChange = z.infer<typeof accessChange>;
 const shownAccess = (to: AccessChange) => (to === null ? 'nothing' : typeof to === 'string' ? to : `${to.role}${to.until === null ? '' : ` until ${to.until}`}`);
 
 // A place as the API reads one, without spaces or slashes around it: market, or market/prod.
-const placeOf = (raw: string) => raw.trim().replace(/^\/+|\/+$/g, '');
+const placeOf = (raw: string) => trimSlashes(raw.trim());
 
 /** What `set_access` replaces: the role a member holds at each place, and until when, or nothing. */
 async function heldAt(api: CoffreClient, member: string, changes: Record<string, AccessChange>): Promise<Replaced> {

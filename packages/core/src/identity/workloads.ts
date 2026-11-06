@@ -408,33 +408,69 @@ function checkGitLab(claims: BindingClaims): void {
  * `kubernetes.io.serviceaccount.uid` is `4f1c…`, `kubernetes.io` an object,
  * and `kubernetes.io.pod` nothing.
  */
-export function claimAt(claims: Record<string, unknown>, name: string, work: MatchWork = { left: MATCH_CHARS }): unknown {
-  // Read by the token's own keys at each step, each matched where the name is at: a key that the name continues with,
-  // to its end or to a dot. So the work is the token's keys, never every way a long name's dots can split it, which
-  // the name's length alone would make quadratic; and each object at each place in the name is read once, its readings
-  // kept (two meaning several), however many ways lead to it. What it compares is spent from `work`: once that is
-  // gone, the name reads nothing, nor does any other that shares it.
+export function claimAt(claims: Record<string, unknown>, name: string, work: MatchWork = matchWork()): unknown {
+  // Each step finds the keys of the object it is in that the name continues with, from where it is to a dot or its
+  // end, whichever way costs less: each such end's slice looked up, or the object's keys tried, listed once and kept.
+  // So a short name in a wide object costs a few lookups, and a long dotted name in a small one a few keys, never
+  // every split of the name nor every key for every claim; each object at each place in the name is read once, its
+  // readings kept (two meaning several), however many ways lead to it. What each step does is spent from `work`
+  // (`MATCH_NS`): once it is gone, the name reads nothing, nor does any other that shares it.
   if (work.left < 0) return undefined;
+  const dots: number[] = [];
+  for (let at = name.indexOf('.'); at !== -1; at = name.indexOf('.', at + 1)) dots.push(at);
+  work.left -= name.length * CHAR_NS;
+  // `after[i]`, the sum of the dots from the i-th on: the lengths of a step's slices, summed at once.
+  const after = new Array<number>(dots.length + 1).fill(0);
+  for (let i = dots.length - 1; i >= 0; i--) after[i] = after[i + 1]! + dots[i]!;
   type Reading = { count: number; value: unknown };
   const none: Reading = { count: 0, value: undefined };
   const read = new Map<object, Map<number, Reading>>();
-  // What the name from `from` on reaches in `at`: a key must start there.
+  // What the name from `start` on reaches in `at`: a key must start there.
   const from = (at: unknown, start: number): Reading => {
-    if (typeof at !== 'object' || at === null || Array.isArray(at)) return none;
+    if (work.left < 0 || typeof at !== 'object' || at === null || Array.isArray(at)) return none;
     const kept = read.get(at)?.get(start);
     if (kept !== undefined) return kept;
+    let first = 0;
+    for (let high = dots.length; first < high;) {
+      const middle = (first + high) >> 1;
+      if (dots[middle]! < start) first = middle + 1;
+      else high = middle;
+    }
+    // A key ends at a dot from `start` on, or at the name's end: what slicing each of them costs.
+    const ends = dots.length - first + 1;
+    const slicing = ends * SLICE_NS + (after[first]! - start * (ends - 1) + name.length - start) * CHAR_NS;
+    let listed = work.keys.get(at);
+    if (listed === undefined && slicing > LIST_THRESHOLD_NS) {
+      const keys = Object.keys(at);
+      listed = { keys, chars: keys.reduce((sum, key) => sum + key.length, 0) };
+      work.keys.set(at, listed);
+      work.left -= keys.length * KEY_LISTED_NS;
+    }
+    // Trying every key costs each one and its characters, as many of them as the name has left.
+    const scanning = listed === undefined ? Infinity : listed.keys.length * KEY_TRIED_NS + Math.min(listed.chars, listed.keys.length * (name.length - start)) * CHAR_NS;
     let reading: Reading = none;
-    for (const key of Object.keys(at)) {
-      work.left -= Math.min(key.length, name.length - start) + 1;
-      if (work.left < 0) return none;
-      if (!name.startsWith(key, start)) continue;
-      const end = start + key.length;
-      if (end !== name.length && name.charCodeAt(end) !== 0x2e) continue;
+    const take = (key: string, end: number): boolean => {
       const child = (at as Record<string, unknown>)[key];
       const next = end === name.length ? { count: 1, value: child } : from(child, end + 1);
-      if (next.count === 0) continue;
-      reading = { count: Math.min(2, reading.count + next.count), value: next.value };
-      if (reading.count > 1) break;
+      if (next.count > 0) reading = { count: Math.min(2, reading.count + next.count), value: next.value };
+      return reading.count > 1;
+    };
+    if (slicing <= scanning) {
+      work.left -= slicing;
+      for (let i = first; i <= dots.length && work.left >= 0; i++) {
+        const end = i < dots.length ? dots[i]! : name.length;
+        const key = name.slice(start, end);
+        if (Object.hasOwn(at, key) && take(key, end)) break;
+      }
+    } else {
+      for (const key of listed!.keys) {
+        work.left -= KEY_TRIED_NS + Math.min(key.length, name.length - start) * CHAR_NS;
+        if (work.left < 0) break;
+        if (!name.startsWith(key, start)) continue;
+        const end = start + key.length;
+        if (end !== name.length && name.charCodeAt(end) !== 0x2e) continue;
+        if (take(key, end)) break;
+      }
     }
     if (!read.has(at)) read.set(at, new Map());
     read.get(at)!.set(start, reading);
@@ -445,20 +481,36 @@ export function claimAt(claims: Record<string, unknown>, name: string, work: Mat
 }
 
 /**
- * What matching a token's claims may compare, in characters, for all of a
- * binding's claims together (`differingClaims`): what is left of a request's
- * CPU once the largest body is read (`REQUEST_CPU_US` less `READ_CPU_US`,
- * 16 ms: a sign-in's own body is small), at a compared character's cost,
- * 2.2 ns (`String.prototype.startsWith` over 1,400-character keys, Node 24,
- * the median of seven). 7.3 million: a real binding compares a few
- * thousand; one of hundreds of long names, against a token of as many long
- * keys sharing their start, would compare hundreds of millions, and is
- * refused, as matching nothing, once these are spent.
+ * What matching a sign-in's claims may spend, in nanoseconds of CPU, for all
+ * the bindings it weighs and all their claims together: what is left of a
+ * request's CPU once the largest body is read (`REQUEST_CPU_US` less
+ * `READ_CPU_US`, 16 ms; a sign-in's own body is small). A real sign-in
+ * spends a few microseconds; hundreds of long names against as many long
+ * keys, or a thousand claims in each of sixteen bindings, would spend
+ * hundreds of milliseconds, and match nothing once this is spent.
  */
-export const MATCH_CHARS = Math.floor(((REQUEST_CPU_US - READ_CPU_US) * 1000) / 2.2);
+export const MATCH_NS = (REQUEST_CPU_US - READ_CPU_US) * 1000;
 
-/** What is left of a match's characters (`MATCH_CHARS`), spent as `claimAt` compares. */
-export type MatchWork = { left: number };
+// What each step costs, in nanoseconds, as `claimAt` and its callers spend it: measured on Node 24, the median of
+// seven, over keys of 4 to 1,400 characters, each rounded up.
+/** A character compared, sliced, or parsed (a binding's claims, before they are read). */
+export const CHAR_NS = 2.2;
+/** A key of the token's listed (`Object.keys`), once an object, then kept for every claim. */
+const KEY_LISTED_NS = 25;
+/** A listed key tried against the name, beside its characters. */
+const KEY_TRIED_NS = 5;
+/** A slice of the name looked up in the object, beside its characters. */
+const SLICE_NS = 10;
+/** Below this, a step's slices are looked up without listing the object's keys: a short name's handful. */
+const LIST_THRESHOLD_NS = 64 * SLICE_NS;
+
+/** What is left of a search's time (`MATCH_NS`), spent as it reads, and the keys it listed of each object. */
+export type MatchWork = { left: number; keys: WeakMap<object, { keys: string[]; chars: number }> };
+
+/** A search's budget, `MATCH_NS`: one for a sign-in, whatever bindings it weighs. */
+export function matchWork(): MatchWork {
+  return { left: MATCH_NS, keys: new WeakMap() };
+}
 
 /**
  * The claims of a verified token that differ from what a binding expects,
@@ -473,11 +525,11 @@ export type MatchWork = { left: number };
  *   case-insensitive, so `Production` and `production` are one environment,
  *   under the same protection rules.
  */
-export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>): string[] {
+export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>, work: MatchWork = matchWork()): string[] {
   const github = profile.startsWith('github');
   const claims = github ? atBaseBranch(token) : token;
-  // One budget for all of them: a binding that costs more to match than a sign-in may spend matches nothing.
-  const work: MatchWork = { left: MATCH_CHARS };
+  // One budget for all of them, and for every binding the sign-in weighs (`work`, its caller's): a search that costs
+  // more than a sign-in may spend matches nothing.
   const differing = Object.entries(expected)
     .filter(([name, value]) => {
       const actual = claimAt(claims, name, work);

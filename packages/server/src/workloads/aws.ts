@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { differingClaims, PROFILE_URNS, SESSION_MS } from '@coffre/core/identity';
+import { CHAR_NS, differingClaims, matchWork, PROFILE_URNS, SESSION_MS, type BindingClaims } from '@coffre/core/identity';
 
 import { ExchangeRefused, madeElsewhere, madeHere, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
 import { liveBindings, memberStanding, type BindingRow } from '../db/queries.ts';
@@ -251,7 +251,13 @@ export function awsClaims(identity: AwsIdentity): { account: string; role_id: st
 /** The oldest of `bindings` the identity matches: an `aws` binding naming its account and role ID. */
 export function matchAwsBinding(bindings: readonly BindingRow[], identity: AwsIdentity): BindingRow | null {
   const claims = awsClaims(identity);
-  return bindings.find((row) => row.profile === 'aws' && differingClaims('aws', JSON.parse(row.claims), claims).length === 0) ?? null;
+  // One budget for the whole search, each binding's claims read from it too (`MATCH_NS`).
+  const work = matchWork();
+  return bindings.find((row) => {
+    if (row.profile !== 'aws') return false;
+    work.left -= row.claims.length * CHAR_NS;
+    return work.left >= 0 && differingClaims('aws', JSON.parse(row.claims) as BindingClaims, claims, work).length === 0;
+  }) ?? null;
 }
 
 /** A service's live `aws` bindings. */

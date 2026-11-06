@@ -6,7 +6,7 @@ import { MCP_SCOPES } from '@coffre/core/mcp';
 
 import { ApiError, notFound, toErrorBody, UNAVAILABLE_RETRY_AFTER } from '../api/errors.ts';
 import { bearerToken } from '../auth.ts';
-import { API_BODY_BYTES, errorResponse, jsonResponse, MAX_BODY_NODES, readLimitedJson, readLimitedText } from '../http.ts';
+import { API_BODY_BYTES, errorResponse, jsonResponse, readLimitedForm, readLimitedJson } from '../http.ts';
 import { logged } from '../logged.ts';
 import type { CoffreRuntime } from '../runtime.ts';
 import { OAuthError, type McpConnection, type McpService } from './service.ts';
@@ -87,13 +87,8 @@ async function form(request: Request): Promise<URLSearchParams> {
   if (!/^application\/x-www-form-urlencoded\b/i.test(type)) {
     throw new OAuthError('invalid_request', 'send the request as application/x-www-form-urlencoded');
   }
-  const text = await readLimitedText(request, API_BODY_BYTES);
-  // Its fields held to the values a JSON body may hold (`MAX_BODY_NODES`), counted on the text, before
-  // `URLSearchParams` makes any: it takes seconds over a mebibyte of empty ones. Then each name looked at once.
-  let fields = text.length === 0 ? 0 : 1;
-  for (let at = text.indexOf('&'); at !== -1 && fields <= MAX_BODY_NODES; at = text.indexOf('&', at + 1)) fields += 1;
-  if (fields > MAX_BODY_NODES) throw new OAuthError('invalid_request', `the form holds more than ${MAX_BODY_NODES} fields`);
-  const params = new URLSearchParams(text);
+  // Its fields counted before any is read, and read in one pass (`readLimitedForm`).
+  const params = await readLimitedForm(request, API_BODY_BYTES);
   const seen = new Set<string>();
   for (const name of params.keys()) {
     if (seen.has(name)) throw new OAuthError('invalid_request', `${name} appears more than once`);

@@ -12,7 +12,9 @@ import {
   checkPolicy,
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
+  CHAR_NS,
   differingClaims,
+  matchWork,
   generateToken,
   GitHubAppUnavailable,
   GITLAB_ISSUER,
@@ -1719,8 +1721,12 @@ function refused(error: unknown): ExchangeRefused {
  */
 function matching(bindings: BindingRow[], claims: Record<string, unknown>, member: string): BindingRow {
   let closest: string[] | null = null;
+  // One budget for the whole search, each binding's claims read from it too (`MATCH_NS`).
+  const work = matchWork();
   for (const binding of bindings) {
-    const differ = differingClaims(binding.profile as WorkloadProfile, JSON.parse(binding.claims) as BindingClaims, claims);
+    work.left -= binding.claims.length * CHAR_NS;
+    if (work.left < 0) throw new ExchangeRefused('no_match', `${shownMember(member)}'s bindings cost more to match than a sign-in may spend: none trusts these claims`);
+    const differ = differingClaims(binding.profile as WorkloadProfile, JSON.parse(binding.claims) as BindingClaims, claims, work);
     if (differ.length === 0) return binding;
     if (closest === null || differ.length < closest.length) closest = differ;
   }

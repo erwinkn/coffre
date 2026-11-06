@@ -13,7 +13,8 @@ import {
   githubWorkflow,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
-  MATCH_CHARS,
+  MATCH_NS,
+  matchWork,
   MAX_ISSUER_BYTES,
   type BindingClaims,
 } from '@coffre/core/identity';
@@ -251,11 +252,13 @@ test("a claim's lookup costs the token's keys, not the ways a long name splits: 
   };
   let seed = 7;
   const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
-  const pieces = ['a', 'b', 'a.b', 'b.a', 'a.a', ''];
+  // Short pieces, read by slices; and long ones, past which a step lists the object's keys and tries them instead.
+  const z = 'z'.repeat(400);
+  const pieces = ['a', 'b', 'a.b', 'b.a', 'a.a', '', z, `${z}.a`, `a.${z}`];
   const tree = (depth: number): Record<string, unknown> => Object.fromEntries(
     Array.from({ length: 1 + Math.floor(random() * 3) }, () => [pieces[Math.floor(random() * pieces.length)]!, depth > 0 && random() < 0.6 ? tree(depth - 1) : `v${Math.floor(random() * 3)}`]),
   );
-  for (let i = 0; i < 3000; i++) {
+  for (let i = 0; i < 6000; i++) {
     const claims = tree(3);
     const name = Array.from({ length: 1 + Math.floor(random() * 4) }, () => pieces[Math.floor(random() * pieces.length)]).join('.');
     assert.deepEqual(claimAt(claims, name), splits(claims, name), `${name} in ${JSON.stringify(claims)}`);
@@ -270,23 +273,40 @@ test("a claim's lookup costs the token's keys, not the ways a long name splits: 
   assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
 });
 
-test("matching a binding's claims spends at most MATCH_CHARS compared characters, all its claims together; past them it matches nothing", () => {
-  // Hundreds of long names against as many long keys sharing their start: hundreds of millions of characters to
-  // compare, which once cost half a second a sign-in (review r2 of #533). Now refused once the budget is spent.
+test("matching a sign-in's claims spends at most MATCH_NS of CPU, every binding it weighs together; past it, nothing matches", () => {
+  const cpu = (run: () => unknown) => {
+    const started = process.cpuUsage();
+    const result = run();
+    const spent = process.cpuUsage(started);
+    return { result, ms: (spent.user + spent.system) / 1000 };
+  };
+  assert.equal(MATCH_NS, 16_000_000);
+  // Wide and short, as a binding with no count of its own may be: each claim a lookup or two, read at once and matched.
+  const wide = Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`c${i}`, 'v']));
+  const short = cpu(() => differingClaims('custom', { sub: 'x', ...wide }, { sub: 'x', ...wide }));
+  assert.deepEqual(short.result, []);
+  assert.ok(short.ms < 16, `1,500 short claims took ${short.ms} ms`);
+  // Long names against as many long keys sharing their start: once half a second a sign-in (#533, review r2). Each
+  // name looked up whole, a slice, not tried against every key: matched as well.
   const prefix = 'p'.repeat(1400);
-  const token: Record<string, unknown> = { sub: 'x', ...Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`${prefix}${i}`, 'v'])) };
-  const expected: BindingClaims = { sub: 'x', ...Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`${prefix}${i}`, 'v'])) };
-  const started = process.cpuUsage();
-  const differing = differingClaims('custom', expected, token);
-  const spent = process.cpuUsage(started);
-  assert.equal(differing.length, 501, 'all of them, as none could be read within the budget');
-  assert.ok((spent.user + spent.system) / 1000 < 100, `took ${(spent.user + spent.system) / 1000} ms of CPU`);
-  assert.equal(MATCH_CHARS, 7_272_727);
-  // What a real binding compares is nothing beside it: matched, every claim read.
-  assert.deepEqual(differingClaims('custom', { sub: 'x', [`${prefix}7`]: 'v' }, token), []);
+  const long = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`${prefix}${i}`, 'v']));
+  const shared = cpu(() => differingClaims('custom', { sub: 'x', ...long }, { sub: 'x', ...long }));
+  assert.deepEqual(shared.result, []);
+  assert.ok(shared.ms < 16, `500 long claims took ${shared.ms} ms`);
+  // Sixteen bindings of a thousand claims, each differing in one: one budget for the search, not one each (review r3).
+  const work = matchWork();
+  const token = { sub: 'x', ...Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`c${i}`, 'v'])) };
+  const search = cpu(() => Array.from({ length: 16 }, (_, b) => differingClaims('custom', { ...token, [`c${b}`]: 'other' }, token, work)));
+  assert.ok(search.ms < 40, `sixteen bindings took ${search.ms} ms`);
+  // A long dotted name against a wide token: what neither way reads cheaply, refused once the budget is spent.
+  const dotted = `${'a.'.repeat(5000)}a`;
+  const wideToken: Record<string, unknown> = Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`${'a.'.repeat(i % 700)}a`, { a: 'v' }]));
+  const spent = cpu(() => differingClaims('custom', Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`${dotted}${i}`, 'v'])), wideToken));
+  assert.equal((spent.result as string[]).length, 200);
+  assert.ok(spent.ms < 40, `the costly search took ${spent.ms} ms`);
   // Spent, a reading is none, though the token holds it.
-  assert.equal(claimAt({ sub: 'x' }, 'sub', { left: 0 }), undefined);
-  assert.equal(claimAt({ sub: 'x' }, 'sub', { left: 10 }), 'x');
+  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...matchWork(), left: 0 }), undefined);
+  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...matchWork(), left: 100 }), 'x');
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

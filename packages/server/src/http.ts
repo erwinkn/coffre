@@ -133,6 +133,65 @@ export function validate<S extends z.ZodType>(schema: S, value: unknown): z.outp
   return result.data;
 }
 
+/** A hex digit's value, or -1. */
+function hexDigit(byte: number): number {
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  const lower = byte | 0x20;
+  return lower >= 0x61 && lower <= 0x66 ? lower - 0x57 : -1;
+}
+
+/** One name or value of a form, bytes `start` to `end`: `+` a space, `%XX` its byte, then UTF-8 (WHATWG URL, 5.1). */
+function formComponent(bytes: Uint8Array, start: number, end: number): string {
+  const out = new Uint8Array(end - start);
+  let n = 0;
+  for (let i = start; i < end; i += 1) {
+    const byte = bytes[i]!;
+    const high = byte === 0x25 && i + 2 < end ? hexDigit(bytes[i + 1]!) : -1;
+    const low = high === -1 ? -1 : hexDigit(bytes[i + 2]!);
+    if (low !== -1) {
+      out[n++] = high * 16 + low;
+      i += 2;
+    } else out[n++] = byte === 0x2b ? 0x20 : byte;
+  }
+  return LENIENT.decode(out.subarray(0, n));
+}
+
+/** UTF-8 as a form's names and values are read: an invalid sequence a replacement character, as `URLSearchParams` has it. */
+const LENIENT = new TextDecoder();
+
+/**
+ * A form body (`application/x-www-form-urlencoded`) of at most `max` bytes,
+ * as `URLSearchParams` reads one (WHATWG URL, 5.1), but its fields counted
+ * first and held to `MAX_BODY_NODES`, as a JSON body's values are, and read
+ * in one pass over its bytes: `URLSearchParams` takes seconds over a
+ * mebibyte of empty fields, and 50 ms over one field of a mebibyte of `+`,
+ * where this pass takes 2 or 3 (`scripts/body-cost.ts`'s machine).
+ */
+export async function readLimitedForm(request: Request, max: number): Promise<URLSearchParams> {
+  const bytes = await readLimitedBytes(request, max);
+  let fields = bytes.length === 0 ? 0 : 1;
+  for (let at = bytes.indexOf(0x26); at !== -1 && fields <= MAX_BODY_NODES; at = bytes.indexOf(0x26, at + 1)) fields += 1;
+  if (fields > MAX_BODY_NODES) throw badRequest(`the form holds more than ${MAX_BODY_NODES} fields`);
+  // UTF-8, as every body coffre reads: refused otherwise, before a field is read.
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw badRequest('the body is not UTF-8');
+  }
+  const form = new URLSearchParams();
+  for (let start = 0; start <= bytes.length;) {
+    const amp = bytes.indexOf(0x26, start);
+    const end = amp === -1 ? bytes.length : amp;
+    if (end > start) {
+      const equals = bytes.subarray(start, end).indexOf(0x3d);
+      const split = equals === -1 ? end : start + equals;
+      form.append(formComponent(bytes, start, split), split === end ? '' : formComponent(bytes, split + 1, end));
+    }
+    start = end + 1;
+  }
+  return form;
+}
+
 /** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */
 export async function readLimitedJson(request: Request, max: number): Promise<unknown> {
   return parseJsonBody(await readLimitedText(request, max));

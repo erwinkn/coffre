@@ -10,10 +10,11 @@ import assert from 'node:assert/strict';
 import { createClient, type CoffreClient } from '@coffre/client';
 import { github, signin } from '@coffre/core/identity';
 
+import { parsePath, trimSlashes } from '../src/api/paths.ts';
 import { coffreRoute } from '../src/app.ts';
 import { z } from 'zod';
 
-import { API_BODY_BYTES, check, countValues, MAX_BODY_NODES, readJson, readLimitedJson, readLimitedText } from '../src/http.ts';
+import { API_BODY_BYTES, check, countValues, MAX_BODY_NODES, readJson, readLimitedForm, readLimitedJson, readLimitedText } from '../src/http.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -93,6 +94,42 @@ test('the count is the one JSON.parse would make: the root, each element and eac
   }
   // It stops once past its cap.
   assert.equal(countValues('[1,2,3,4,5,6]', 3), 4);
+});
+
+test('a form reads as URLSearchParams reads it, its fields counted first, in one pass however long a field', async () => {
+  const request = (body: string | Uint8Array<ArrayBuffer>) => new Request('https://x/', { method: 'POST', body });
+  let seed = 11;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  // Raw characters past ASCII or escapes of them, not both: where they meet in one name or value, a broken escape
+  // beside a raw one, Node's URLSearchParams reads otherwise than the standard, which this reads as written (below).
+  const pieces = ['a', 'b=', '=', '&', '&&', '+', '%', '%2', '%20', '%2B', '%e2%82%ac', '%E2%82', '%zz', ' ', '%26', '%3D'];
+  for (const text of ['é=€', 'a=€+é', '€%20=%26']) assert.deepEqual([...(await readLimitedForm(request(text), API_BODY_BYTES))], [...new URLSearchParams(text)], text);
+  // The standard: UTF-8 of the text, its escapes decoded, then UTF-8 read again, a broken sequence one U+FFFD.
+  assert.deepEqual([...(await readLimitedForm(request('a=€%E2%82a'), API_BODY_BYTES))], [['a', '€\uFFFDa']]);
+  for (let i = 0; i < 4000; i++) {
+    const text = Array.from({ length: Math.floor(random() * 12) }, () => pieces[Math.floor(random() * pieces.length)]).join('');
+    assert.deepEqual([...(await readLimitedForm(request(text), API_BODY_BYTES))], [...new URLSearchParams(text)], JSON.stringify(text));
+  }
+  await assert.rejects(readLimitedForm(request(new Uint8Array([0x61, 0x3d, 0xff])), API_BODY_BYTES), /not UTF-8/);
+  await assert.rejects(readLimitedForm(request(Array.from({ length: MAX_BODY_NODES + 1 }, () => 'x').join('&')), API_BODY_BYTES), /more than \d+ fields/);
+  // One field of a mebibyte of `+`, which URLSearchParams takes 50 ms to read: a pass over its bytes.
+  const plus = `x=${'+'.repeat(API_BODY_BYTES - 2)}`;
+  const started = process.cpuUsage();
+  const read = await readLimitedForm(request(plus), API_BODY_BYTES);
+  const spent = process.cpuUsage(started);
+  assert.equal(read.get('x'), ' '.repeat(API_BODY_BYTES - 2));
+  assert.ok((spent.user + spent.system) / 1000 < 20, `took ${(spent.user + spent.system) / 1000} ms`);
+});
+
+test('a path of a long run of slashes is read in a pass: trimmed at either end, refused for its empty parts', () => {
+  assert.equal(trimSlashes('//market/dev/'), 'market/dev');
+  assert.equal(trimSlashes('///'), '');
+  assert.deepEqual(parsePath('/market/dev/KEY/'), { project: 'market', environment: 'dev', key: 'KEY' });
+  // 50,000 slashes inside, as long as a body lets a path be: once seconds of a regular expression's retries.
+  const started = process.cpuUsage();
+  assert.throws(() => parsePath(`x${'/'.repeat(50_000)}y`), /name a project/);
+  const spent = process.cpuUsage(started);
+  assert.ok((spent.user + spent.system) / 1000 < 20, `took ${(spent.user + spent.system) / 1000} ms`);
 });
 
 test('validation answers the first issue alone, as safeParse would name it, however many entries fail', () => {
