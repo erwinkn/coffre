@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { HANDLE_POLICY, issuedGrant, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, storedScope } from '@coffre/core/access';
+import { EVERYWHERE, HANDLE_POLICY, issuedGrant, type Holdings, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
 import { CLOCK_SKEW_MS, type IssueTokenInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
@@ -14,6 +14,7 @@ import { postgresSession } from '@coffre/db/connect';
 import { asc, count, desc, eq, sql } from 'drizzle-orm';
 
 import type { ResolvedVaultConfig } from '../src/config.ts';
+import { weighIssue } from '../src/credentials.ts';
 import { objectKey } from '../src/inputs.ts';
 import { emptyDatabase, newEnvironment, newProject, openLocalVault, openTestDatabase, OWNER_URL, postgresOnly, sealed, nothingHeld, withLogUnlocked, type TestDatabase } from './database.ts';
 
@@ -202,20 +203,22 @@ test("a handle's end is held to the scoped credential it was made on, by what th
   assert.equal(!outcome.ok && outcome.why, 'a handle lasts at most a week, and never past the token that made it');
 });
 
-test("a token's end may run past its longest by CLOCK_SKEW_MS, the app's clock against the vault's, and no further (#501 D3)", async () => {
+test("a token's end may run past its longest by CLOCK_SKEW_MS, the app's clock against the vault's, and not a millisecond further (#501 D3, review r1 of #534)", async () => {
   const w = await world();
+  // Weighed at a fixed time, as the vault weighs what it read at its own clock's `at`: neither clock nor a pause moves the bound.
+  const at = Date.UTC(2026, 10, 6);
+  const holder: Holdings = { role: 'member', scope: EVERYWHERE, grants: [] };
   const ending = (input: IssueTokenInput, expiresAt: number): IssueTokenInput => ({ ...input, credential: { ...input.credential, expiresAt } });
   const longest = [
     { make: () => asked(w), ms: MAX_SERVICE_TOKEN_DAYS * 86_400_000, why: `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days` },
     { make: () => personal(w), ms: MAX_PERSONAL_TOKEN_MINUTES * 60_000, why: 'a personal token lasts at most a week' },
+    { make: () => handleOf(w, null), ms: MAX_PERSONAL_TOKEN_MINUTES * 60_000, why: 'a handle lasts at most a week, and never past the token that made it' },
   ];
   for (const { make, ms, why } of longest) {
-    // Five seconds either side of the bound: the vault reads its clock after this one, within them.
-    const over = await w.vault.issueToken!(ending(make(), Date.now() + ms + CLOCK_SKEW_MS + 5_000));
-    assert.equal(!over.ok && over.why, why);
-    assert.ok((await w.vault.issueToken!(ending(make(), Date.now() + ms + CLOCK_SKEW_MS - 5_000))).ok, why);
+    const weigh = (expiresAt: number) => weighIssue(ending(make(), expiresAt), [], holder, [], null, at, null);
+    assert.notEqual(weigh(at + ms + CLOCK_SKEW_MS), why, `${why}: its longest and a minute is kept`);
+    assert.equal(weigh(at + ms + CLOCK_SKEW_MS + 1), why, `${why}: a millisecond past is refused`);
   }
-  assert.equal(await credentialRows(), 2);
 });
 
 test("a handle names each environment it reaches, and stands in for those alone: no project's grant, no place it does not reach, no mapping it cannot read (review r3)", async () => {
