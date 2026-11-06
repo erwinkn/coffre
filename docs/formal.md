@@ -63,6 +63,9 @@ scripts/formal.sh Deletion   # one, with its runs without a protection
   their passkeys take, the log's head, which orders the app's own issues
   against a change, the check of every request, and the sign-in's decision
   whether a person adds a passkey first ([below](#factortla)).
+- One holds 0.16's roles split out of `log_config` while 0.15.0's code still
+  runs on the new schema: [`formal/Roles.tla`](../formal/Roles.tla)
+  ([below](#rolestla)).
 - [`scripts/formal.sh`](../scripts/formal.sh) downloads TLC, checks its
   checksum and runs everything.
 - [`scripts/formal-trace.mjs`](../scripts/formal-trace.mjs) prints a
@@ -2799,6 +2802,71 @@ name, a key write, an add), which run the check as a statement of their
 own (passkeys.md, section 6.2): `req` is one statement either way. SQLite,
 whose one writer serializes the change and every issue whole, so the
 interleavings cannot happen.
+
+## 0.16: the roles split
+
+### Roles.tla
+
+The roles split out of `log_config` (T178 PR 2), written before the code
+(R45). Until 0.16 the roles are one sealed object, `roles`/`instance`: the
+Owner's edits of every role in one row of `log_config`, its seal the one its
+newest change left. 0.16 makes each role an object of its own, a row of the
+`roles` table that `grants` names through a foreign key, sealed by its own
+newest change. Between `coffre migrate` and the deploy, and again after a
+rollback, 0.15.0's vault serves on the new schema: its TypeScript knows only
+the whole object, while its SQL, `change_input` included, is the
+migration's.
+
+**The model.** Two roles, one shipped (`dev`, which 0.15.0 left edited) and
+one an Owner makes (`c`); every change and every use is one step, as each
+holds the head and the fence:
+
+- `OldEdit`, 0.15.0's change of one role: a change of the whole object, and
+  `change_input`, which writes `log_config` and the role's own row, unsealed;
+- `OldGrant`, 0.15.0's grant of a role its whole object defines, which the
+  foreign key holds to a row of `roles`;
+- `NewEdit`, 0.16's change of one role: a change of its object and one of
+  the whole object, in one transaction;
+- `RecRead` and `RecWrite`, the vault's reconcile, at its start and when a
+  use finds the roles behind: it reads `log_config`, then under the head and
+  the fence seals each role that is not what the whole object says, and
+  writes a change of the whole object, 0.16's;
+- `NewUse` and `OldUse`, a use of each release, deciding on one role;
+- `Tamper`, someone who writes the database (R64): a row with any
+  definition and no seal, an earlier sealed one put back, or none.
+
+**What it found.** Two holes in the first design, which checked each role's
+row against its own object only. A shipped role whose row was deleted before
+its first change of its own read as no edit, the definition the release
+ships, which can be wider than the Owner's. And a put-back row: 0.16 seals
+`c` as `d1`, 0.15.0 changes it to `d2` (its row unsealed), the writer puts
+the sealed `d1` row back, and a use serves it, since 0.15.0 never moves
+`c`'s own object. Both close with the fence: a 0.16 use reads the roles
+only while the whole object's newest change, which today's use reads
+already, is 0.16's. After 0.15.0's, until the reconcile, it refuses.
+
+| Protection | Without it |
+|---|---|
+| `NullOnOld`: `change_input` writes the role's row, unsealed, on 0.15.0's change | 0.15.0 makes a role and its grant finds no row (`OldGrantWorks`) |
+| `DualWrite`: 0.16's change writes the whole object too | 0.15.0's use, after a rollback, decides on an edit 0.16 replaced |
+| `ReconcileRechecks`: the reconcile holds `log_config` to what it read | it seals what 0.15.0 changed meanwhile, as it was |
+| `ReconcileFromConfig`: it seals the whole object's definition, not the row's | it seals a definition the writer wrote |
+| `ReconcileEveryRole`: it seals each role that differs, current or not | a put-back row, current on its own object, stays |
+| `OldFenced`: 0.16 reads the roles only after 0.16's change of the whole object | the put-back row above |
+| `NewestChecked`: a role's row is served only on its newest change's seal | an earlier sealed row put back |
+
+| Scenario | What | Distinct states |
+|---|---|---|
+| `Roles` | both releases change, grant and use two roles while the vault reconciles and someone writes the rows | 21,701 |
+
+Checked once at larger bounds too (three roles, ten changes, two tampers):
+29,202,452 distinct states, no error.
+
+**What it does not cover.** The policy, whose object stays one and whose
+typed row is its newest change's value, which every change carries whole:
+HotPathOne.tla's `CapFromPolicy` and `CapSealed` hold unchanged. What a
+role grants, which `@coffre/core/access` decides and the Lean proofs hold.
+0.17, which drops `log_config`, the whole object and the fence.
 
 ## TLC
 
