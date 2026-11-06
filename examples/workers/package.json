@@ -1,7 +1,7 @@
 {
   "name": "coffre-workers",
   "private": true,
-  "packageManager": "pnpm@11.28.9",
+  "packageManager": "pnpm@12.17.0",
   "type": "module",
   "engines": {
     "node": ">=24"

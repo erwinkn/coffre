@@ -53,11 +53,16 @@
 
 - **No Corepack: a deployment pins its pnpm and its Node exactly, and
   `coffre update` moves both (T234).** Node is dropping Corepack. `coffre
-  init` now writes `.node-version` (Node 24.22.2, which the deploy
-  workflow's setup-node and Workers Builds read) beside `packageManager`
-  (now pnpm 11.28.9: 11.8.0 has three advisories, fixed in 11.11.0), and
-  the deploy workflow installs pnpm with pnpm/action-setup, pinned by
-  commit, where it ran `corepack enable`. `coffre update` pins both to its
+  init` now writes `.node-version` (Node 26.13.0, the latest release of
+  the LTS line, which the deploy workflow's setup-node and Workers Builds
+  read) beside `packageManager` (now pnpm 12.17.0, the latest release of
+  pnpm 12 past the week deployments wait: 11.8.0 has three advisories,
+  fixed in 11.11.0), and the deploy workflow installs pnpm with
+  pnpm/action-setup 6.1.0, pinned by commit, where it ran `corepack
+  enable`. pnpm 12 installs a lockfile pnpm 11 wrote as it stands,
+  resolving nothing anew, and writes a document pinning pnpm itself ahead
+  of it (`packageManagerDependencies`); it fails a command on a
+  `pnpm-workspace.yaml` setting it does not know, where pnpm 11 ignored it. `coffre update` pins both to its
   release's, as it already did pnpm; a plan from an earlier release names
   no Node and leaves `.node-version` alone, and an earlier CLI drops the
   Node a later plan names: after updating from 0.15.0 or before, run

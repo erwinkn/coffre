@@ -18,6 +18,9 @@ import {
   minimumReleaseAge,
   HeldBack,
   install,
+  installed,
+  lockedVersions,
+  packagesLock,
   pinPackageManager,
   removeCleared,
   resolveAgain,
@@ -277,6 +280,30 @@ test('a temporary exclusion is named, with its date, and goes once the date has 
     assert.deepEqual(removeCleared(dir, new Date('2026-10-08T00:00:00Z')), ['pg-protocol@1.16.1']);
     assert.deepEqual(removeCleared(dir, new Date('2026-10-09T00:00:00Z')), ['@types/node@26.6.4']);
     assert.equal(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'), before, 'back as init wrote it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("installed as locked: pnpm 12's copy in node_modules leaves out the document pinning pnpm", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-installed-'));
+  try {
+    const packages = "lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n\npackages:\n\n  esbuild@0.25.0:\n    resolution: {integrity: sha512-x}\n";
+    const pnpm =
+      "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    packageManagerDependencies:\n      pnpm:\n        specifier: 12.17.0\n        version: 12.17.0\n\n" +
+      "packages:\n\n  '@pnpm/exe.linux-x64@12.17.0':\n    resolution: {integrity: sha512-y}\n\n---\n";
+    assert.equal(packagesLock(pnpm + packages), packages);
+    assert.equal(packagesLock(packages), packages, "pnpm 11's, as it is");
+    assert.deepEqual([...lockedVersions(pnpm + packages)], [['esbuild', new Set(['0.25.0'])]], "the packages', not pnpm's");
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), pnpm + packages);
+    assert.equal(installed(dir), false, 'no node_modules');
+    mkdirSync(join(dir, 'node_modules', '.pnpm'), { recursive: true });
+    writeFileSync(join(dir, 'node_modules', '.pnpm', 'lock.yaml'), packages);
+    assert.equal(installed(dir), true);
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), packages);
+    assert.equal(installed(dir), true, "pnpm 11's lockfile");
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), pnpm + packages.replace('{}', '{ dependencies: {} }'));
+    assert.equal(installed(dir), false, 'another lockfile');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -824,30 +851,30 @@ function pnpmBinary(version: string): string | null {
 
 const needsPnpm = (...versions: string[]) => ({ skip: versions.every(pnpmAt) ? false : `needs pnpm ${versions.join(' and ')}` });
 
-test('a deployment moved from pnpm 10 to 11 installs without a terminal, its node_modules purged', needsPnpm('10.15.0', PNPM), async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
-  try {
-    mkdirSync(join(dir, 'dep'));
-    writeFileSync(join(dir, 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }));
-    const manifest = (pnpm: string) =>
-      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${pnpm}`, dependencies: { dep: 'file:./dep' } }));
-    manifest('10.15.0');
-    await install(dir);
-    manifest(PNPM);
-    // What erwinkn/secrets met: pnpm 11 would remove pnpm 10's node_modules, and without a terminal it stops.
-    // Not as CI, where pnpm removes it unasked: CI=false says so, whatever else the environment holds.
+test("a deployment moved from pnpm 10 or 11 to the template's installs without a terminal, unasked", needsPnpm('10.15.0', '11.28.9', PNPM), async () => {
+  // What erwinkn/secrets met with pnpm 11: it would remove another major's node_modules, and without a
+  // terminal it stopped (ABORTED_REMOVE_MODULES_DIR_NO_TTY), so install's `purge` said yes for the person.
+  // pnpm 12 replaces it unasked. Not as CI, where pnpm 11 removed it unasked too: CI=false says so.
+  for (const from of ['10.15.0', '11.28.9']) {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-majors-'));
     const ci = process.env.CI;
-    process.env.CI = 'false';
     try {
-      await assert.rejects(install(dir), /ABORTED_REMOVE_MODULES_DIR_NO_TTY/);
+      mkdirSync(join(dir, 'dep'));
+      writeFileSync(join(dir, 'dep', 'package.json'), JSON.stringify({ name: 'dep', version: '1.0.0' }));
+      const manifest = (pnpm: string) =>
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'deployment', private: true, packageManager: `pnpm@${pnpm}`, dependencies: { dep: 'file:./dep' } }));
+      manifest(from);
+      await install(dir);
+      assert.ok(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8').includes(`pnpm@${from}`), from);
+      manifest(PNPM);
+      process.env.CI = 'false';
+      await install(dir);
+      assert.ok(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8').includes(`pnpm@${PNPM}`), `${from} to ${PNPM}`);
     } finally {
       if (ci === undefined) delete process.env.CI;
       else process.env.CI = ci;
+      rmSync(dir, { recursive: true, force: true });
     }
-    await install(dir, { purge: true });
-    assert.ok(readFileSync(join(dir, 'node_modules', '.modules.yaml'), 'utf8').includes(`pnpm@${PNPM}`));
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -894,8 +921,8 @@ test('when no version old enough fits, resolving again says which, and puts the 
   }
 });
 
-const eleven = pnpmBinary(PNPM);
-test("pnpm 11's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", { skip: eleven === null ? `needs pnpm ${PNPM}` : false }, () => {
+const pinned = pnpmBinary(PNPM);
+test("the template's pnpm's own global install, as it lays it out: found by asking pnpm, though it lives in the store's links/", { skip: pinned === null ? `needs pnpm ${PNPM}` : false }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'coffre-pnpm-global-'));
   try {
     // A stand-in @coffre/cli, which says where it runs from as the real one finds itself: its real path.
@@ -903,16 +930,16 @@ test("pnpm 11's own global install, as it lays it out: found by asking pnpm, tho
     writeFileSync(join(dir, 'cli', 'package', 'package.json'), JSON.stringify({ name: '@coffre/cli', version: '9.9.9', bin: { coffre: 'dist/main.js' } }));
     writeFileSync(join(dir, 'cli', 'package', 'dist', 'main.js'), "#!/usr/bin/env node\nconsole.log(require('node:fs').realpathSync(__filename));\n");
     spawnSync('tar', ['czf', join(dir, 'cli.tgz'), '-C', join(dir, 'cli'), 'package']);
-    // pnpm 11, its home and data of its own, as `pnpm setup` leaves them: its bin directory on PATH.
+    // The template's pnpm, its home and data of its own, as `pnpm setup` leaves them: its bin directory on PATH.
     const home = join(dir, 'home');
     mkdirSync(home);
     writeFileSync(join(home, 'package.json'), JSON.stringify({ name: 'home', private: true, packageManager: `pnpm@${PNPM}` }));
     const pnpmHome = join(dir, 'pnpm');
-    // `pnpm add -g` ignores a project's packageManager pin: on a host whose own pnpm is another major (12 lays a
-    // global out in global/v11/…/node_modules/.pnpm, not the store's links/), the layout below would be that one's.
-    // So `pnpm` here is the workspace's 11 itself, the command pnpm switches to, wherever the host's pnpm is from.
+    // `pnpm add -g` ignores a project's packageManager pin: on a host whose own pnpm is another release (12.11
+    // lays a global out in global/v11/…/node_modules/.pnpm, not the store's links/), the layout below would be that
+    // one's. So `pnpm` here is the workspace's own, the command pnpm switches to, wherever the host's pnpm is from.
     mkdirSync(join(dir, 'shim'));
-    writeFileSync(join(dir, 'shim', 'pnpm'), `#!/bin/sh\nexec ${JSON.stringify(eleven)} "$@"\n`);
+    writeFileSync(join(dir, 'shim', 'pnpm'), `#!/bin/sh\nexec ${JSON.stringify(pinned)} "$@"\n`);
     chmodSync(join(dir, 'shim', 'pnpm'), 0o755);
     const base = {
       ...process.env,

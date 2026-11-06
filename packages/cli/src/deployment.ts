@@ -21,9 +21,10 @@ export function deploymentKind(dir: string): Kind | 'empty' | 'other' {
  * Install a deployment's packages, as its README says: with pnpm, which
  * switches itself to the version the deployment's packageManager pins.
  * `purge`, when the person has said
- * yes already: a pnpm of another major than the one that installed
- * node_modules removes it first, and without a terminal it would ask, and
- * stop. `frozen`: exactly as the lockfile says, changing nothing.
+ * yes already: pnpm 11, meeting node_modules another major installed,
+ * removes it first, and without a terminal it would ask, and stop (pnpm 12
+ * replaces it unasked). `frozen`: exactly as the lockfile says, changing
+ * nothing.
  */
 export function install(dir: string, { purge = false, frozen = false }: { purge?: boolean; frozen?: boolean } = {}): Promise<void> {
   const attempt = (command: string, args: string[]) =>
@@ -55,14 +56,23 @@ export function install(dir: string, { purge = false, frozen = false }: { purge?
 /**
  * Whether a deployment's packages are installed as its lockfile says. pnpm
  * keeps a copy of the lockfile it last installed in node_modules/.pnpm, the
- * same byte for byte: none, or another, is an install to do. Without a
- * lockfile, there is nothing to match: node_modules being there is all.
+ * same byte for byte but for the document pnpm 12 writes ahead of it, which
+ * pins pnpm itself (`packageManagerDependencies`): none, or another, is an
+ * install to do. Without a lockfile, there is nothing to match:
+ * node_modules being there is all.
  */
 export function installed(dir: string): boolean {
   const lockfile = join(dir, 'pnpm-lock.yaml');
   if (!existsSync(lockfile)) return existsSync(join(dir, 'node_modules'));
   const copy = join(dir, 'node_modules', '.pnpm', 'lock.yaml');
-  return existsSync(copy) && readFileSync(copy, 'utf8') === readFileSync(lockfile, 'utf8');
+  return existsSync(copy) && readFileSync(copy, 'utf8') === packagesLock(readFileSync(lockfile, 'utf8'));
+}
+
+/** A pnpm-lock.yaml without the document pinning pnpm that pnpm 12 writes first, `---` above and below it. */
+export function packagesLock(text: string): string {
+  if (!text.startsWith('---\n')) return text;
+  const end = text.indexOf('\n---\n');
+  return end === -1 ? text : text.slice(end + '\n---\n'.length);
 }
 
 /**
@@ -281,10 +291,10 @@ export function installFailure(output: string): string {
   return `pnpm install failed: ${output.trim().split('\n').slice(-3).join(' ')}`;
 }
 
-/** Each package's locked versions, from a pnpm lockfile's `packages:`. */
+/** Each package's locked versions, from a pnpm lockfile's `packages:`, not those of the document pinning pnpm. */
 export function lockedVersions(lockfile: string): Map<string, Set<string>> {
   const versions = new Map<string, Set<string>>();
-  const section = /^packages:\n([\s\S]*?)(?=^\S|(?![\s\S]))/m.exec(lockfile)?.[1] ?? '';
+  const section = /^packages:\n([\s\S]*?)(?=^\S|(?![\s\S]))/m.exec(packagesLock(lockfile))?.[1] ?? '';
   for (const match of section.matchAll(/^  '?(@?[^@\s']+)@([^:('\s]+)/gm)) {
     const set = versions.get(match[1]!) ?? new Set<string>();
     set.add(match[2]!);

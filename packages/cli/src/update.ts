@@ -549,7 +549,7 @@ export async function update(args: string[]): Promise<void> {
         const repin = pnpm !== null && coffrePackageManager(deployment) !== pnpm;
         const node = plan.node;
         const renode = node !== null && nodeVersion(deployment) !== node;
-        // What it installs and runs with, as coffre's template pins them: `pnpm 11.28.9 and Node 24.22.2`.
+        // What it installs and runs with, as coffre's template pins them: `pnpm 12.17.0 and Node 26.13.0`.
         const on = listed([...(repin ? [pnpm!.replace('@', ' ')] : []), ...(renode ? [`Node ${node}`] : [])], 'and');
         // The deployment gains the pages coffre has added since its release, and loses those it retired.
         const pages = plan.pages;

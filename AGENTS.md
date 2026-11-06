@@ -54,14 +54,18 @@ Running a package's `.ts` with plain `node` outside those scripts needs the flag
 
 ## Setup
 
-**Toolchain.** Node **24.22.2**, as `.node-version` pins it (CI's setup-node reads it),
-and pnpm **11.28.9**, as `package.json`'s `packageManager` pins it: install any pnpm
+**Toolchain.** Node **26.13.0**, as `.node-version` pins it (CI's setup-node reads it),
+and pnpm **12.17.0**, as `package.json`'s `packageManager` pins it: install any pnpm
 (https://pnpm.io/installation), which switches itself to that release, checked against
-npm's registry signature. No Corepack, which Node drops: CI installs pnpm with
-pnpm/action-setup and `.cursor/Dockerfile` from npm's tarball by its SHA-256, and
+npm's registry signature, once the release is past the 7-day `minimumReleaseAge` (a
+younger pin only warns, and the pnpm you have runs). Each is the latest release of the
+latest major (Node's, of its latest LTS line) with no known vulnerability and at least
+7 days old; a move picks the same way. No Corepack, which Node drops: CI installs pnpm with
+pnpm/action-setup (6.1 or later, which knows pnpm 12's native executable) and
+`.cursor/Dockerfile` from npm's `@pnpm/exe.linux-<arch>` tarball by its SHA-256, and
 `check:pins` rejects `corepack` anywhere. The examples pin the same two, as every
 deployment `init` writes does, and `coffre update` moves them with coffre's packages.
-Node 24 is a hard requirement
+Node 24 is the floor, and a hard requirement
 for workspace source, not just an `engines` field: the CLI, dev IdP, migrations, and the
 `node --test` suite all execute TypeScript source (`*.ts`) directly with plain `node`,
 which relies on native type-stripping (default only in Node 23.6+/24). The
@@ -403,7 +407,7 @@ with `@coffre/*` exempt so that a coffre fix is not held back a week.
 ## Cursor
 
 The Cloud Agent environment is defined in-repo by `.cursor/environment.json` and
-`.cursor/Dockerfile` (Node 24.22.2 via nvm, pnpm 11.28.9 from npm's tarball, and a Docker engine set
+`.cursor/Dockerfile` (Node 26.13.0 via nvm, pnpm 12.17.0's native executable from npm's tarball, and a Docker engine set
 up for the nested VM). Two things worth knowing:
 
 - **Docker and Postgres** come up each boot via `.cursor/start.sh`
@@ -415,6 +419,6 @@ up for the nested VM). Two things worth knowing:
   `docker.sock`. If `docker info` fails or `:55432` is down, re-run that
   script. Web and the dev IdP are started by `pnpm dev`, or by hand.
 - **Node on PATH.** The Cloud runtime injects its own Node 22 ahead on `PATH`, so the
-  image prepends the nvm-managed Node 24 in `~/.bashrc` (above the stock interactive-guard
+  image prepends the nvm-managed Node 26 in `~/.bashrc` (above the stock interactive-guard
   early return, since the runtime sources it for non-interactive shells too) and in
   `/etc/profile.d`. If `node -v` ever shows 22, that prepend did not run.

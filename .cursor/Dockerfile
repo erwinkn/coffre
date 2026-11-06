@@ -1,7 +1,7 @@
 # Cursor Cloud base image for coffre.
 #
-# Provides the system-level toolchain the repo needs: Node 24 (via nvm),
-# pnpm 11.28.9 (npm's tarball of it, no Corepack), and a Docker engine
+# Provides the system-level toolchain the repo needs: Node 26 (via nvm),
+# pnpm 12.17.0 (its native executable, npm's tarball of it, no Corepack), and a Docker engine
 # configured to run inside the Cloud Agent VM (fuse-overlayfs, no containerd
 # snapshotter, legacy iptables) so the Postgres service in docker-compose.yml
 # works. Repo dependencies are
@@ -14,35 +14,42 @@
 # against the archive's signed index. Rebuilding the image takes the security
 # fixes of the day.
 
-# Node 24.22.2, the workspace's (.node-version), for each architecture: its
+# Node 26.13.0, the workspace's (.node-version), for each architecture: its
 # tarball and the SHA-256 nodejs.org's SHASUMS256.txt gives. Only the stage
 # of the platform being built is fetched.
 ARG TARGETARCH
 FROM scratch AS node-amd64
-ADD --chmod=644 --checksum=sha256:48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75 \
-    https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz /node.tar.xz
+ADD --chmod=644 --checksum=sha256:d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997 \
+    https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz /node.tar.xz
 FROM scratch AS node-arm64
-ADD --chmod=644 --checksum=sha256:eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8 \
-    https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-arm64.tar.xz /node.tar.xz
+ADD --chmod=644 --checksum=sha256:406fe3fbde1c054adff8b297c16fdb5af6659db327c1ac8acd46b56ef1af9a92 \
+    https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-arm64.tar.xz /node.tar.xz
 # unpinned: one of the two stages above, the platform's.
 FROM node-${TARGETARCH} AS node
 
-# pnpm 11.28.9, the workspace's packageManager: npm's tarball of it, which
-# runs on any architecture, held to its SHA-256.
-FROM scratch AS pnpm
-ADD --chmod=644 --checksum=sha256:e54b07e5634b7bf4352153e0c8c25bcef2930a29e3d1bdc42a9eaf2ffd4436df \
-    https://registry.npmjs.org/pnpm/-/pnpm-11.28.9.tgz /pnpm.tgz
+# pnpm 12.17.0, the workspace's packageManager, for each architecture: its
+# native executable, the tarball npm serves as @pnpm/exe.linux-<arch> (what
+# the pnpm package's install script would fetch), held to its SHA-256.
+FROM scratch AS pnpm-amd64
+ADD --chmod=644 --checksum=sha256:6c1c71d00f82765d8f7488df6d1a94533fd1ad5d47c86da41211b1da1093c9d4 \
+    https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.linux-x64-12.17.0.tgz /pnpm.tgz
+FROM scratch AS pnpm-arm64
+ADD --chmod=644 --checksum=sha256:017e0264aac3a955e34d82f5d94c100504a791c0dd387f111b7a984024115d50 \
+    https://registry.npmjs.org/@pnpm/exe.linux-arm64/-/exe.linux-arm64-12.17.0.tgz /pnpm.tgz
+# unpinned: one of the two stages above, the platform's.
+FROM pnpm-${TARGETARCH} AS pnpm
 
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Base tooling. git + curl are required in fully custom images; lsof is used by
-# dev/start.sh, gnupg by the Docker apt repo, sudo by the start hook.
+# dev/start.sh, gnupg by the Docker apt repo, sudo by the start hook,
+# libatomic1 by Node 26's binary.
 # unpinned: Ubuntu's archive, above.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git gnupg lsof sudo openssh-client xz-utils procps iproute2 \
+        ca-certificates curl git gnupg lsof sudo openssh-client xz-utils procps iproute2 libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker engine + compose plugin (docker-in-docker) and fuse-overlayfs. The
@@ -87,19 +94,18 @@ USER ubuntu
 WORKDIR /home/ubuntu
 ENV NVM_DIR=/home/ubuntu/.nvm
 
-# Node 24 via nvm, and pnpm beside it. nvm is v0.40.3's nvm.sh, at its commit
+# Node 26 via nvm, and pnpm beside it. nvm is v0.40.3's nvm.sh, at its commit
 # and held to its SHA-256; Node is the tarball above, unpacked where nvm keeps
-# the versions it installs, so that `nvm use 24` finds it; pnpm is its
-# tarball above, unpacked where `npm install -g` would put it, its command
-# linked in Node's bin. The Cloud runtime injects its
-# own Node 22 ahead of us on PATH, so we must prepend the nvm-managed Node 24
+# the versions it installs, so that nvm finds it; pnpm is the executable in
+# its tarball above, put in Node's bin. The Cloud runtime injects its
+# own Node 22 ahead of us on PATH, so we must prepend the nvm-managed Node 26
 # bin. The runtime sources ~/.bashrc even for non-interactive shells (via
 # BASH_ENV), so put the prepend ABOVE the stock interactive-guard early return,
 # and also in /etc/profile.d for login shells. A resolved absolute path (baked
-# at build time from `nvm which`) avoids sourcing nvm on every command. Node 24
+# at build time from `nvm which`) avoids sourcing nvm on every command. Node 24 or later
 # is required because the CLI, dev IdP, migrations, and test runner execute .ts
 # files directly via node (native type-stripping, Node 23.6+/24 only).
-ARG NODE_VERSION=24.22.2
+ARG NODE_VERSION=26.13.0
 RUN mkdir -p "$NVM_DIR"
 ADD --chown=ubuntu:ubuntu --checksum=sha256:390260ab9eb1da20e8bc0ebea2ee90f528d53e5e9f6e13b16717db4af454df9d \
     https://raw.githubusercontent.com/nvm-sh/nvm/977563e97ddc66facf3a8e31c6cff01d236f09bd/nvm.sh /home/ubuntu/.nvm/nvm.sh
@@ -107,9 +113,7 @@ RUN --mount=type=bind,from=node,source=/node.tar.xz,target=/tmp/node.tar.xz \
     --mount=type=bind,from=pnpm,source=/pnpm.tgz,target=/tmp/pnpm.tgz \
     mkdir -p "$NVM_DIR/versions/node/v$NODE_VERSION" \
     && tar -xJf /tmp/node.tar.xz -C "$NVM_DIR/versions/node/v$NODE_VERSION" --strip-components=1 \
-    && mkdir "$NVM_DIR/versions/node/v$NODE_VERSION/lib/node_modules/pnpm" \
-    && tar -xzf /tmp/pnpm.tgz -C "$NVM_DIR/versions/node/v$NODE_VERSION/lib/node_modules/pnpm" --strip-components=1 \
-    && ln -s ../lib/node_modules/pnpm/bin/pnpm.mjs "$NVM_DIR/versions/node/v$NODE_VERSION/bin/pnpm" \
+    && tar -xzf /tmp/pnpm.tgz -C "$NVM_DIR/versions/node/v$NODE_VERSION/bin" --strip-components=1 package/pnpm \
     && printf '%s\n' 'export NVM_DIR="$HOME/.nvm"' '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> "$HOME/.bashrc" \
     && . "$NVM_DIR/nvm.sh" \
     && nvm alias default "$NODE_VERSION" \
