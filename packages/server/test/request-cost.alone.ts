@@ -1586,22 +1586,13 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   };
   /**
    * `count` changes numbered from `from`, each asked at the millisecond `at` + its place (`from`'s by default), long
-   * before any checkpoint's floor: of `actor`, one kind's, each its own object or `object`'s. After a VACUUM, so that
-   * the batch lies where it would however autovacuum ran meanwhile (T227): a page a batch fills keeps room smaller than
-   * its rows, which a smaller kind's row may fit (a page of key writes keeps one refused add's), and the free space map
-   * offers such room across the table only once a VACUUM has filled it in. An autovacuum landing near the end of the
-   * 50,000 refused adds gave each of the newest a page of its own, and their first page read 103 pages, 101 of heap,
-   * where it read 8 before. After a VACUUM a batch takes every room it fits first, then new pages, its newest rows
-   * together.
+   * before any checkpoint's floor: of `actor`, one kind's, each its own object or `object`'s.
    */
-  const plant = async (from: number, count: number, actor: string, kind: keyof typeof payloads, options: { object?: SQL; at?: number } = {}) => {
-    await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
-    await db.owner.execute(sql`
+  const plant = (from: number, count: number, actor: string, kind: keyof typeof payloads, options: { object?: SQL; at?: number } = {}) => db.owner.execute(sql`
     INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
     SELECT ${from} + g, ${options.at ?? from} + g, 'planted-' || (${from} + g), ${options.object ?? sql`gen_random_uuid()`}, ${actor}, ${payloads[kind](actor)},
       decode(repeat('00', 16), 'hex')
     FROM generate_series(1, ${count}) g`);
-  };
   /**
    * The log as autovacuum leaves it once its rounds have caught up: every page all-visible, so that an index-only scan
    * reads no heap, and its statistics fresh. VACUUM marks a page all-visible only once no snapshot in the database may
@@ -1628,6 +1619,14 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     await db.owner.execute(sql`ANALYZE log_changes`);
   };
   try {
+    // No autovacuum on the log while it is planted (T227). A VACUUM tells the free space map of the room each page kept,
+    // too little for the rows that filled it but enough for a smaller kind's (a page of key writes keeps a refused
+    // add's), and the batch planted next fills that room first, a row a page. So where an autovacuum landed decided
+    // which rows lay scattered: one late in the 50,000 newer refused adds left the newest 100 a page each, and their
+    // first page read 103 pages, where it read 8 before. The only VACUUMs are then this one, of the room the file's
+    // earlier cases left, and `settle`'s, and every run lays the log out alike.
+    await db.owner.execute(sql`ALTER TABLE log_changes SET (autovacuum_enabled = off)`);
+    await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
     // A log whose indexes are as deep as they get for long (a probe of each is its depth's pages): 60,000 changes of
     // members, 20,000 sign-ins of another service, 20,000 records of another person's, and the service's and Ada's own.
     await plant(0, 60_000, 'user:admin@acme.example', 'member');
@@ -1746,6 +1745,7 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
     assert.deepEqual(tokens.map((id) => origins.get(id)), tokens.map(() => ({ kind: 'personal', label: 'l1', principal: ADA })));
   } finally {
     await db.owner.execute(sql`DELETE FROM log_changes WHERE request_id LIKE 'planted-%'`);
+    await db.owner.execute(sql`ALTER TABLE log_changes RESET (autovacuum_enabled)`);
   }
 });
 
