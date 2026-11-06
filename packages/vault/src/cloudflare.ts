@@ -19,7 +19,7 @@
  * Any number of isolates run it side by side: every decision locks what it
  * is about in the database, so they share one log and one bulk limit.
  */
-import { gated, type NamedManyInput, type NamedUseInput, type ProxyItemInput, type RouteUseInput, type UseInput, type UseManyInput, type Vault, type VaultAnswer, type VaultEntry, type VaultMethod } from '@coffre/core/vault';
+import { gated, isStackOverflow, STACK_OVERFLOW, type NamedManyInput, type NamedUseInput, type ProxyItemInput, type RouteUseInput, type UseInput, type UseManyInput, type Vault, type VaultAnswer, type VaultEntry, type VaultMethod } from '@coffre/core/vault';
 import { createDatabase } from '@coffre/db';
 import { HyperdrivePool, type PostgresDatabase } from '@coffre/db/hyperdrive';
 import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -93,7 +93,11 @@ const START_AGAIN_MS = 10_000;
  */
 export class VaultEntrypoint extends WorkerEntrypoint implements VaultEntry {
   async call(release: string, method: VaultMethod, args: readonly unknown[]): Promise<VaultAnswer> {
-    return gated(release, method, args, (name, given) => this.#dispatch(name, given));
+    return gated(release, method, args, (name, given) => this.#dispatch(name, given)).catch((error: unknown) => {
+      // A stack that ran out, as a plain `RangeError`, which RPC hands back with its type and message (`isStackOverflow`):
+      // one wrapped in another error would lose its cause on the way.
+      throw isStackOverflow(error) ? new RangeError(STACK_OVERFLOW) : error;
+    });
   }
 
   #dispatch(method: VaultMethod, args: unknown[]): Promise<unknown> {

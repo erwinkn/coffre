@@ -12,6 +12,7 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import { pageClient } from '../src/fetch-api.ts';
+import { MAX_BODY_NODES } from '../src/http.ts';
 import { updateAuth } from '../src/db/queries.ts';
 import { forgetDocuments } from '../src/mcp/clients.ts';
 import { McpService } from '../src/mcp/service.ts';
@@ -199,6 +200,21 @@ test('the metadata documents say where the authorization server is, and what it 
     const response = await route(path, path === '/mcp' ? { method: 'POST' } : {}, off);
     assert.equal(response.status, 404, `${path} without signin({ mcp })`);
   }
+});
+
+test("the token endpoint's form: each field once, as many as a body holds values, each looked at once", async () => {
+  const form = (body: string) => route('/api/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+  const said = async (response: Response) => ({ status: response.status, body: (await response.json()) as { error: string; error_description: string } });
+  const twice = await said(await form('grant_type=refresh_token&grant_type=authorization_code'));
+  assert.equal(twice.status, 400);
+  assert.match(twice.body.error_description, /grant_type appears more than once/);
+  // 200,000 short fields, 1.4 MB under the mebibyte's bound: refused past the count, in a pass, not a search per name.
+  const many = Array.from({ length: 150_000 }, (_, i) => `f${i}=`).join('&');
+  const started = performance.now();
+  const refused = await said(await form(many.slice(0, 1024 * 1024 - 1)));
+  assert.equal(refused.status, 400);
+  assert.match(refused.body.error_description, new RegExp(`more than ${MAX_BODY_NODES} fields`));
+  assert.ok(performance.now() - started < 500, `took ${performance.now() - started} ms`);
 });
 
 test('/mcp answers 401, and where to sign in, without a good token; a request from another site, 403', async () => {

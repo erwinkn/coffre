@@ -9,7 +9,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 
-import { isStackOverflow, STACK_OVERFLOW } from '@coffre/core/vault';
+import { isStackOverflow, STACK_OVERFLOW, STACK_OVERFLOW_CODE } from '@coffre/core/vault';
+import { z } from 'zod';
 
 import { NESTED_TOO_DEEPLY, toErrorBody } from '../src/api/errors.ts';
 import { MAX_BODY_NODES } from '../src/http.ts';
@@ -26,16 +27,23 @@ function overflowed(): RangeError {
   }
 }
 
-test('a stack that ran out is known by its message, through causes and across the vault socket, and answered 400', () => {
+test('a stack that ran out is known as V8 throws it, through causes and by the vault socket\'s code, and answered 400; never by words a caller wrote', () => {
   const thrown = overflowed();
   assert.ok(thrown instanceof RangeError);
   assert.equal(thrown.message, STACK_OVERFLOW);
   // As thrown; wrapped by what caught it; and as the vault's Node socket hands it back, its words in a plain Error.
-  for (const error of [thrown, new Error('the policy could not be read', { cause: thrown }), new Error(`vault policy: the call is nested too deeply to read (${STACK_OVERFLOW})`)]) {
+  for (const error of [thrown, new Error('the policy could not be read', { cause: thrown }), Object.assign(new Error('vault policy: the call is nested too deeply to read'), { code: STACK_OVERFLOW_CODE })]) {
     assert.equal(isStackOverflow(error), true);
     assert.deepEqual(toErrorBody(error), { status: 400, body: { error: 'bad_request', message: NESTED_TOO_DEEPLY } });
   }
   assert.equal(isStackOverflow(new RangeError('Invalid array length')), false);
+  // A caller's words that only say it: a key so named, in a validation's error, is that validation's 400, its own message.
+  const named = z.record(z.string().regex(/^[A-Z_]+$/), z.string()).safeParse({ [STACK_OVERFLOW]: 'v' });
+  assert.equal(named.success, false);
+  assert.ok(named.error!.message.includes(STACK_OVERFLOW));
+  assert.equal(isStackOverflow(named.error), false);
+  assert.notEqual(toErrorBody(named.error).body.message, NESTED_TOO_DEEPLY);
+  assert.equal(isStackOverflow(new Error(`vault policy: ${STACK_OVERFLOW}`)), false);
   assert.equal(toErrorBody(new RangeError('Invalid array length')).status, 500);
 });
 

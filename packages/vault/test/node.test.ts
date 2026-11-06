@@ -163,11 +163,12 @@ test('a call nested deeper than the vault can walk is refused, 400 with a plain 
     for (const method of METHODS) {
       const answer = await post(`{"release":${JSON.stringify(RELEASE)},"method":"${method}","args":[${deep}]}`);
       assert.equal(answer.status, 400, method);
-      assert.match(answer.body.error, /^the call is nested too deeply to read/, method);
+      assert.equal(answer.body.error, 'the call is nested too deeply to read', method);
     }
     assert.equal(await entries(), before, 'nothing written');
-    // The app's side of the socket: the refusal as the error it raises, which the app answers 400 (`isStackOverflow`).
-    const refused = failureOf(new RangeError(STACK_OVERFLOW));
+    // The app's side of the socket: the refusal as the error it raises, which the app answers 400 (`isStackOverflow`); an
+    // overflow wrapped in another error, its words gone from the message, crosses by its code all the same.
+    const refused = failureOf(new Error('could not walk the call', { cause: new RangeError(STACK_OVERFLOW) }));
     assert.equal(refused.status, 400);
     const server = createServer((_req, res) => res.writeHead(refused.status, { 'content-type': 'application/json' }).end(JSON.stringify(refused.body)));
     const socket = join(dir, 'refusing.sock');

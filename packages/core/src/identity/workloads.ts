@@ -409,25 +409,35 @@ function checkGitLab(claims: BindingClaims): void {
  * and `kubernetes.io.pod` nothing.
  */
 export function claimAt(claims: Record<string, unknown>, name: string): unknown {
-  const parts = name.split('.');
-  let found: unknown;
-  let readings = 0;
-  // Each step takes one key, of one or more parts, from the object it is in; stops once a second reading shows.
-  const walk = (at: unknown, from: number): void => {
-    if (readings > 1) return;
-    if (from === parts.length) {
-      found = at;
-      readings++;
-      return;
+  // Read by the token's own keys at each step, each matched where the name is at: a key that the name continues with,
+  // to its end or to a dot. So the work is the token's keys, never every way a long name's dots can split it, which
+  // the name's length alone would make quadratic; and each object at each place in the name is read once, its readings
+  // kept (two meaning several), however many ways lead to it.
+  type Reading = { count: number; value: unknown };
+  const none: Reading = { count: 0, value: undefined };
+  const read = new Map<object, Map<number, Reading>>();
+  // What the name from `from` on reaches in `at`: a key must start there.
+  const from = (at: unknown, start: number): Reading => {
+    if (typeof at !== 'object' || at === null || Array.isArray(at)) return none;
+    const kept = read.get(at)?.get(start);
+    if (kept !== undefined) return kept;
+    let reading: Reading = none;
+    for (const key of Object.keys(at)) {
+      if (!name.startsWith(key, start)) continue;
+      const end = start + key.length;
+      if (end !== name.length && name.charCodeAt(end) !== 0x2e) continue;
+      const child = (at as Record<string, unknown>)[key];
+      const next = end === name.length ? { count: 1, value: child } : from(child, end + 1);
+      if (next.count === 0) continue;
+      reading = { count: Math.min(2, reading.count + next.count), value: next.value };
+      if (reading.count > 1) break;
     }
-    if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
-    for (let to = from + 1; to <= parts.length; to++) {
-      const key = parts.slice(from, to).join('.');
-      if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
-    }
+    if (!read.has(at)) read.set(at, new Map());
+    read.get(at)!.set(start, reading);
+    return reading;
   };
-  walk(claims, 0);
-  return readings === 1 ? found : undefined;
+  const reading = from(claims, 0);
+  return reading.count === 1 ? reading.value : undefined;
 }
 
 /**

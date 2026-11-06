@@ -226,6 +226,49 @@ test('claims are nonempty strings with names a binding may match, and never the 
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: JSON.parse('{"sub":"x","__proto__":"y"}') as Record<string, unknown> }, /not a claim name/);
 });
 
+test("a claim's lookup costs the token's keys, not the ways a long name splits: the same readings as every split tried", () => {
+  // What `claimAt` was, every split of the name tried at every step: the reference its readings are held to.
+  const splits = (claims: Record<string, unknown>, name: string): unknown => {
+    const parts = name.split('.');
+    let found: unknown;
+    let readings = 0;
+    const walk = (at: unknown, from: number): void => {
+      if (readings > 1) return;
+      if (from === parts.length) {
+        found = at;
+        readings++;
+        return;
+      }
+      if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
+      for (let to = from + 1; to <= parts.length; to++) {
+        const key = parts.slice(from, to).join('.');
+        if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
+      }
+    };
+    walk(claims, 0);
+    return readings === 1 ? found : undefined;
+  };
+  let seed = 7;
+  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const pieces = ['a', 'b', 'a.b', 'b.a', 'a.a', ''];
+  const tree = (depth: number): Record<string, unknown> => Object.fromEntries(
+    Array.from({ length: 1 + Math.floor(random() * 3) }, () => [pieces[Math.floor(random() * pieces.length)]!, depth > 0 && random() < 0.6 ? tree(depth - 1) : `v${Math.floor(random() * 3)}`]),
+  );
+  for (let i = 0; i < 3000; i++) {
+    const claims = tree(3);
+    const name = Array.from({ length: 1 + Math.floor(random() * 4) }, () => pieces[Math.floor(random() * pieces.length)]).join('.');
+    assert.deepEqual(claimAt(claims, name), splits(claims, name), `${name} in ${JSON.stringify(claims)}`);
+  }
+  // A name of 10,000 dots, as a binding with no length of its own may name: read at once, the token's keys its work.
+  const long = `${'a.'.repeat(10_000)}a`;
+  const started = performance.now();
+  assert.equal(claimAt({ sub: 'x', a: { a: { b: 'y' } } }, long), undefined);
+  let chain: unknown = 'deep';
+  for (let i = 0; i < 1000; i++) chain = { a: chain };
+  assert.equal(claimAt(chain as Record<string, unknown>, `${'a.'.repeat(999)}a`), 'deep');
+  assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
+});
+
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {
   const at = (url: string, options: { allowLoopback?: boolean; path?: boolean; query?: boolean } = {}) =>
     checkFetchUrl(url, 'the issuer', { path: true, query: false, ...options });

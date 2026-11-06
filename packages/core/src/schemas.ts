@@ -100,3 +100,95 @@ export const scopeInput = z.object({ projects: scopeFilter.optional(), environme
 export const grantId = z.string().uuid();
 /** As `principalId`: 320 characters at most (RFC 5321, section 4.5.3.1). */
 export const emailAddress = z.string().email().max(320);
+
+/**
+ * The most an API request body may be, read as it streams and abandoned
+ * past this, at every route the app answers, sign-in's included (one bound
+ * before sign-in, as after): a control-plane request, a bulk secret write
+ * its largest. Workers gives an isolate 128 MB
+ * (https://developers.cloudflare.com/workers/platform/limits/, "Memory"); a
+ * body takes about 5 MiB of it while it is read, 4% at most: its chunks and
+ * their one copy (2 MiB), its text (up to 2 MiB, two bytes a character past
+ * Latin-1) and its parsed value, which `MAX_BODY_NODES` holds to about its
+ * size (`packages/server/scripts/body-cost.ts`: 1.0 times, where a mebibyte
+ * of tiny entries or nesting, parsed, would hold 8 to 28). Uses carry no
+ * body, and an isolate serves a few control-plane requests at once. An `.env` of a
+ * thousand keys is a few dozen kilobytes.
+ */
+export const API_BODY_BYTES = 1024 * 1024;
+
+/**
+ * A request's CPU at p99, in microseconds: R27's 20 ms, under which every
+ * request stays, so that a body, refused or not, costs no more before its
+ * route runs.
+ */
+export const REQUEST_CPU_US = 20_000;
+
+/**
+ * Reading the largest body at worst, in microseconds: counting its values
+ * (`countValues`), then `JSON.parse` of one that passes, a mebibyte of
+ * strings its costliest, 2.6 to 3.9 ms; a body refused by the count costs
+ * 0.1 ms (`packages/server/scripts/body-cost.ts`, Node 24, the machine
+ * named below).
+ */
+export const READ_CPU_US = 4_000;
+
+/**
+ * Validation's CPU per body value, at worst, in microseconds:
+ * `@coffre/server`'s `check` with every route's schema, on bodies of
+ * `MAX_BODY_NODES` values in the costliest shapes, alone and under every
+ * field a route reads a map or a list from
+ * (`packages/server/scripts/body-cost.ts`: Node 24.22 on a 96-core Linux
+ * host at a load of 15, the thread's own CPU, the median of five; with zod's
+ * eval-built
+ * fast paths and without, as on Workers, which forbids eval). The worst is a
+ * secret write whose every entry fails its six-way union, 7.7 to 9.4 µs a
+ * value over six runs, taken as 10; every other route is under 5. Through
+ * zod's own `safeParse`, which builds every issue's message and a JSON of
+ * them all, the same body cost 18 to 21.
+ */
+export const VALUE_CPU_US = 10;
+
+/**
+ * The most values a request body may hold, counted over the whole tree
+ * (every object entry, array element and leaf) before it is parsed: what is
+ * left of a request's CPU once the largest body is read, at validation's
+ * worst cost per value (1,600). A bulk write of plain values is one per key
+ * and its root: an `.env` of 1,599 keys fits, a larger one is written in
+ * parts. The CBOR a passkey's response carries in its strings decodes under
+ * the same count, on its own (`CeremonyExpectation.values`).
+ */
+export const MAX_BODY_NODES = Math.floor((REQUEST_CPU_US - READ_CPU_US) / VALUE_CPU_US);
+
+/**
+ * How many values a JSON text holds, counted as `JSON.parse` would make
+ * them but without making any: the root, each array element and each object
+ * entry, a key and its value together (`{"a":[1,2]}` is 4). One pass over
+ * the characters, strings skipped whole, and it stops once past `cap`. A
+ * value starts at the first character after `[`, `{` or `,` that is not
+ * space and does not close a container, whatever the container is, so no
+ * stack is kept. Text that is not JSON may count otherwise; `JSON.parse`
+ * refuses it after.
+ */
+export function countValues(text: string, cap = Infinity): number {
+  let count = 1;
+  let expecting = false;
+  for (let i = 0; i < text.length && count <= cap; i += 1) {
+    const c = text.charCodeAt(i);
+    // Space, tab, line feed, carriage return: JSON's whitespace, which neither starts nor ends a value.
+    if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) continue;
+    if (expecting) {
+      expecting = false;
+      if (c !== 0x5d && c !== 0x7d) count += 1;
+    }
+    if (c === 0x5b || c === 0x7b || c === 0x2c) expecting = true;
+    else if (c === 0x22) {
+      for (i += 1; i < text.length; i += 1) {
+        const d = text.charCodeAt(i);
+        if (d === 0x5c) i += 1;
+        else if (d === 0x22) break;
+      }
+    }
+  }
+  return count;
+}

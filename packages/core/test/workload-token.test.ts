@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { decodeWorkloadToken, keySummaries, KeysInvalid, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
+import { MAX_BODY_NODES } from '@coffre/core/schemas';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
 const ISSUER = 'https://token.actions.githubusercontent.com';
@@ -98,6 +99,11 @@ test('the shape is checked before anything is trusted', () => {
   assert.throws(() => decodeWorkloadToken('a.b'), /not a compact JWS/);
   // No length of its own: the body's bound (`API_BODY_BYTES`) holds a token, and a long one is read as any other.
   assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /not JSON/);
+  // But its parts are counted before they are parsed, as a body's values are: a short string may hide a large tree.
+  const encoded = (text: string) => Buffer.from(text).toString('base64url');
+  const tree = `{"iss":"x","sub":"y","exp":1,"iat":1,"pad":[${'[],'.repeat(MAX_BODY_NODES)}[]]}`;
+  assert.throws(() => decodeWorkloadToken(`${encoded('{"alg":"RS256"}')}.${encoded(tree)}.c`), new RegExp(`more than ${MAX_BODY_NODES} values`));
+  assert.throws(() => decodeWorkloadToken(`${encoded(`{"alg":"RS256","x":${'['.repeat(MAX_BODY_NODES)}${']'.repeat(MAX_BODY_NODES)}}`)}.${encoded('{}')}.c`), /more than/);
 });
 
 test('with a lifetime given, a token that lives longer, iat to exp, is refused, however recently issued', async () => {

@@ -1,4 +1,4 @@
-import { isStackOverflow } from '@coffre/core/vault';
+import { isStackOverflow, STACK_OVERFLOW_CODE } from '@coffre/core/vault';
 import { isUnavailable } from '@coffre/db/dialect';
 
 /**
@@ -16,9 +16,9 @@ export function failureOf(error: unknown): { status: number; body: { error: stri
     const found = (cause as { code?: unknown }).code;
     if (typeof found === 'string') code = found;
   }
-  // A call's value nested deeper than the vault's walk of it holds: the caller's, as its input, never the vault's state.
-  // V8's own words stay in it, which the app reads it by (`isStackOverflow`).
-  if (isStackOverflow(error)) return { status: 400, body: { error: `the call is nested too deeply to read (${message})` } };
+  // A call's value nested deeper than the vault's walk of it holds, however it was wrapped: the caller's, as its input,
+  // never the vault's state. Its code says so, which `connectVault` puts back on its error (`isStackOverflow`).
+  if (isStackOverflow(error)) return { status: 400, body: { error: 'the call is nested too deeply to read', code: STACK_OVERFLOW_CODE } };
   if (!isUnavailable(error)) return { status: 500, body: code === undefined ? { error: message } : { error: message, code } };
   return { status: 503, body: { error: message, code: code !== undefined && isUnavailable({ code }) ? code : '08006' } };
 }

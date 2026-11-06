@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import { createLocalJWKSet, errors, importJWK, jwtVerify, type JSONWebKeySet, type JWK, type JWTPayload } from 'jose';
 
+import { countValues, MAX_BODY_NODES } from '../schemas.ts';
+
 export type { JSONWebKeySet };
 
 /**
@@ -66,10 +68,15 @@ export function decodeWorkloadToken(token: string): DecodedToken {
   const parts = token.split('.');
   if (parts.length !== 3 || !parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
   const json = (part: string): Record<string, unknown> => {
+    let text: string;
     let value: unknown;
     try {
-      value = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
-    } catch {
+      text = Buffer.from(part, 'base64url').toString('utf8');
+      // Counted before it is parsed, as a body is (`MAX_BODY_NODES`): a token's few kilobytes cannot hide a tree a body could not carry.
+      if (countValues(text, MAX_BODY_NODES) > MAX_BODY_NODES) throw malformed(`has a part of more than ${MAX_BODY_NODES} values`);
+      value = JSON.parse(text);
+    } catch (error) {
+      if (error instanceof WorkloadTokenRefused) throw error;
       throw malformed('has a part that is not JSON');
     }
     if (typeof value !== 'object' || value === null || Array.isArray(value)) throw malformed('has a part that is not an object');
