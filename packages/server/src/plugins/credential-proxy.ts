@@ -40,11 +40,13 @@
  * values its person may read, plain and secret ones, never a sensitive one
  * (docs/design/credential-proxy.md, section 2).
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 
 import { CoffreError } from '@coffre/client';
 import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow, CREDENTIAL_NAME, type GateCount } from '@coffre/core/identity';
+import { BODIES_BYTES, BODY_READ_WHOLE_BYTES, CACHE_SLICE_BYTES, Lru, weight } from '@coffre/core/memory';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
 
@@ -383,8 +385,6 @@ const TEMPLATE_KEY = SHARED_TEMPLATE_KEY;
 /** A handle, wherever the app put it: alone, or inside a header the upstream's own scheme frames. */
 const HANDLE = /coffre_use_[A-Za-z0-9_-]{43}/;
 const HANDLES = new RegExp(HANDLE.source, 'g');
-/** A request's body that declares no digest is read whole before it is sent on: an API call's, not an upload's. */
-const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** A body a form or JSON rule fills a field of is read whole, and parsed: a token refresh's or a siteverify's, never an upload's. */
 const MAX_FIELD_BODY = 64 * 1024;
 /**
@@ -394,7 +394,10 @@ const MAX_FIELD_BODY = 64 * 1024;
  */
 const MAX_FIELDS = 256;
 const MAX_DEPTH = 32;
-/** An AWS-signed upload streams through, up to S3's own limit for one request; past it, a multipart upload's parts each pass. */
+/**
+ * A body that streams with no digest coffre checks, an AWS-signed upload's or one nothing signs, streams up to S3's own
+ * limit for one request; past it, a multipart upload's parts each pass.
+ */
 const MAX_STREAM_BYTES = 5 * 1024 ** 3;
 const HANDLE_LENGTH = 'coffre_use_'.length + 43;
 /**
@@ -470,22 +473,28 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
   if (!(recheckMs > 0 && recheckMs <= 3_600_000)) throw new Error('credentialProxy: recheckSeconds is above 0, an hour at most');
   const cacheMs = (options.cacheSeconds ?? DEFAULT_CACHE_SECONDS) * 1000;
   if (!Number.isFinite(cacheMs) || cacheMs < 0 || cacheMs > 3_600_000) throw new Error('credentialProxy: cacheSeconds is between 0 and 3600');
-  // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md, "What an isolate keeps").
-  const cache = new Map<string, Kept>();
-  const handles = new Map<string, { paths: readonly (string | null)[] | null; until: number }>();
+  // Values a handle opened, by handle, environment and credential: settled values only, never a pending read (AGENTS.md,
+  // "What an isolate keeps"). Each cache the least recently used out first, past its slice of the isolate's (`@coffre/core/memory`).
+  const cache = new Lru<string, Kept>(CACHE_SLICE_BYTES);
+  const handles = new Lru<string, { paths: readonly (string | null)[] | null; until: number }>(CACHE_SLICE_BYTES);
   const groups = new Map<string, Group>();
+  const bodies: Bodies = { held: 0 };
   const editable = options.editable === true;
-  const ui: UiState = { items: new Map(), last: new Map(), kept: new Map(), places: new Map() };
+  const ui: UiState = { items: new Lru<string, UiItem>(CACHE_SLICE_BYTES, itemWeight), last: new Lru(CACHE_SLICE_BYTES), kept: new Lru(CACHE_SLICE_BYTES), places: new Lru(CACHE_SLICE_BYTES) };
   const plugin = withProxyCode({
     name: 'credential-proxy',
     routes: {
       prefix: '/use',
       fetch: async (request, coffre) => {
+        // The bodies it reads whole, counted against the isolate's share until it ends, however it ends (`take`).
+        const holding: Holding = { bodies, taken: 0 };
         try {
-          return await serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles, editable, ui });
+          return await requests.run(holding, () => serve(request, coffre, { credentials, groups, tunnels, signers, verifiers, messageBytes, insecure: options.insecureUpstreams === true, recheckMs, generate, cacheMs, cache, handles, editable, ui }));
         } catch (error) {
           if (error instanceof CoffreError) return failure(error.status, error.message, error.reason ?? error.code, error.retryAfter);
           throw error;
+        } finally {
+          bodies.held -= holding.taken;
         }
       },
       socket: async (request, coffre) => {
@@ -512,8 +521,9 @@ export function credentialProxy(options: CredentialProxyOptions): CoffrePlugin {
 const UI_STATES = new WeakMap<CoffrePlugin, UiState>();
 
 /**
- * Test-only: drop a proxy's copies of UI items' definitions, as `remember` does past `UI_KEPT` entries, its copies of
- * which digest each reading last had kept. Tests save no ten thousand items to turn them over; nothing else calls it.
+ * Test-only: drop a proxy's copies of UI items' definitions, as its cache does once they are the least recently used
+ * past its slice, its copies of which digest each reading last had kept. Tests save no thousand items to turn them
+ * over; nothing else calls it.
  */
 export function forgetUiItems(plugin: CoffrePlugin): void {
   UI_STATES.get(plugin)?.items.clear();
@@ -547,9 +557,9 @@ type Proxy = {
   recheckMs: number;
   generate: Map<string, 'all' | readonly string[]>;
   cacheMs: number;
-  cache: Map<string, Kept>;
+  cache: Lru<string, Kept>;
   /** The environments each handle was made for, by path, kept for `cacheSeconds` as its values are (`madeFor`). A workload's are its statement's to say. */
-  handles: Map<string, { paths: readonly (string | null)[] | null; until: number }>;
+  handles: Lru<string, { paths: readonly (string | null)[] | null; until: number }>;
   /** Whether the environments' UI definitions serve the names code lacks (`editable`), and this isolate's copies of them. */
   editable: boolean;
   ui: UiState;
@@ -561,21 +571,28 @@ type Proxy = {
  * and when (the copy, which only saves the item's bytes: CopyFromVault); and the values each caller's use opened, by
  * caller and the reading the vault took (`keptAt`), each kept with the item it was decided on, which a cache hit sends by
  * (BoundToDefinition). Settled
- * values only, bounded.
+ * values only, each map the least recently used out first past its slice of the caches' share (`@coffre/core/memory`).
  */
 type UiState = {
-  items: Map<string, { definition: ProxyDefinition; resolved: Resolved | string | null }>;
-  last: Map<string, { digest: string; confirmed: number }>;
-  kept: Map<string, UiKept>;
+  /** Each item's copy, by its digest. */
+  items: Lru<string, UiItem>;
+  last: Lru<string, { digest: string; confirmed: number }>;
+  kept: Lru<string, UiKept>;
   /** Until when each handle's URL `<a>/<b>` was found the place itself (`placeKept`), by handle and path. */
-  places: Map<string, number>;
+  places: Lru<string, number>;
 };
+
+/** An item's copy: its definition, and the credential the proxy reads it as once a request needs it (`uiCredential`). */
+type UiItem = { definition: ProxyDefinition; resolved: Resolved | string | null };
+
+/**
+ * What an item's copy weighs: its definition, and what the proxy reads of it (`resolve`), which holds 1.8 to 2.3 times
+ * as much as the definition's own `weight` (Node 24, a one-rule route and one of 40 allow entries, W331 phase 2b).
+ */
+const itemWeight = (digest: string, item: UiItem) => weight(digest) + 3 * weight(item.definition);
 
 /** A UI use's values, kept: until when, the item they were decided on (its digest), the reading and the place it was at. */
 type UiKept = Opened & { until: number; digest: string; definition: ProxyDefinition; reading: RouteUsed['reading']; path: string };
-
-/** The most of each that an isolate keeps: past it, a map starts over. */
-const UI_KEPT = 10_000;
 
 /** A credential's values, opened, and which keys of it are plain, no secret: what the answer's redaction leaves as it is. */
 type Opened = { values: Record<string, string>; plain: readonly string[] };
@@ -905,14 +922,14 @@ async function uiForward(request: Request, coffre: PluginContext, proxy: Proxy, 
     if (used.reading === 'place') {
       // The place's, kept as a made-for list keeps it, for `cacheSeconds` and never past the handle's end: the next such
       // URL serves the place's at once, and a copy's refusal there stands for this handle only while it stands (Sol r1).
-      if (proxy.cacheMs > 0) remember(proxy.ui.places, `${handle}\n${itself}`, Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)));
+      if (proxy.cacheMs > 0) proxy.ui.places.set(`${handle}\n${itself}`, Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)));
       return null;
     }
     const definition = itemOf(proxy, used.item);
     if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
-    remember(proxy.ui.last, used.reading === 'named' ? readings[0]! : `s\n${handle}\n${stable!}`, { digest: used.item.digest, confirmed: now });
+    proxy.ui.last.set(used.reading === 'named' ? readings[0]! : `s\n${handle}\n${stable!}`, { digest: used.item.digest, confirmed: now });
     kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) };
-    if (proxy.cacheMs > 0) remember(proxy.ui.kept, keptAt(handle, used.reading === 'named' ? { named: named! } : { stable: stable! }), kept);
+    if (proxy.cacheMs > 0) proxy.ui.kept.set(keptAt(handle, used.reading === 'named' ? { named: named! } : { stable: stable! }), kept);
     sendBy = Math.min(now + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
   } else {
     sendBy = kept.until;
@@ -985,13 +1002,13 @@ function placeKept(proxy: Proxy, handle: string, at: string, now: number): boole
  */
 function itemOf(proxy: Proxy, item: DecidedItem, copy: { digest: string; definition: ProxyDefinition } | null = null): ProxyDefinition | null {
   if (item.definition !== null) {
-    remember(proxy.ui.items, item.digest, { definition: item.definition, resolved: null });
+    proxy.ui.items.set(item.digest, { definition: item.definition, resolved: null });
     return item.definition;
   }
   const held = proxy.ui.items.get(item.digest)?.definition;
   if (held !== undefined) return held;
   if (copy === null || copy.digest !== item.digest) return null;
-  remember(proxy.ui.items, item.digest, { definition: copy.definition, resolved: null });
+  proxy.ui.items.set(item.digest, { definition: copy.definition, resolved: null });
   return copy.definition;
 }
 
@@ -1013,7 +1030,7 @@ function uiCredential(proxy: Proxy, digest: string, definition: ProxyRoute): Res
       resolved = `${definition.name}: its definition is not one this proxy takes (${(error as Error).message})`;
     }
   }
-  remember(proxy.ui.items, digest, { definition, resolved });
+  proxy.ui.items.set(digest, { definition, resolved });
   return resolved;
 }
 
@@ -1037,12 +1054,6 @@ function credentialOf(route: ProxyRoute): Credential {
   };
 }
 
-/** `map` holding `value` at `key`, a map starting over past `UI_KEPT` entries. */
-function remember<T>(map: Map<string, T>, key: string, value: T): void {
-  if (map.size >= UI_KEPT && !map.has(key)) map.clear();
-  map.set(key, value);
-}
-
 /** A credential the URL names that the deployment's proxy has not. */
 const noCredential = (name: string) => failure(404, `this instance has no credential ${JSON.stringify(name)}: its deployment's credentialProxy names them`);
 
@@ -1057,11 +1068,7 @@ async function madeFor(coffre: PluginContext, proxy: Proxy, handle: string): Pro
   const kept = proxy.handles.get(handle);
   if (kept !== undefined && kept.until > now) return kept.paths;
   const { paths, expiresAt } = await coffre.handle(handle);
-  if (proxy.cacheMs > 0) {
-    // A handful of handles in a dev loop: past a thousand, the oldest go.
-    if (proxy.handles.size >= 1000) for (const [old, entry] of proxy.handles) if (entry.until <= now || proxy.handles.size >= 1000) proxy.handles.delete(old);
-    proxy.handles.set(handle, { paths, until: Math.min(now + proxy.cacheMs, Date.parse(expiresAt)) });
-  }
+  if (proxy.cacheMs > 0) proxy.handles.set(handle, { paths, until: Math.min(now + proxy.cacheMs, Date.parse(expiresAt)) });
   return paths;
 }
 
@@ -1570,7 +1577,7 @@ async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling
     const definition = itemOf(proxy, decided, copy);
     if (definition === null) return gone(decided);
     // The vault's item is this isolate's copy now (`CopyFromVault`).
-    remember(proxy.ui.last, reading, { digest: decided.digest, confirmed: Date.now() });
+    proxy.ui.last.set(reading, { digest: decided.digest, confirmed: Date.now() });
     return undialled(definition);
   } });
   const definition = itemOf(proxy, used.item, copy);
@@ -1593,7 +1600,7 @@ async function uiDialled(coffre: PluginContext, proxy: Proxy, dialling: Dialling
   const run = () => coffre.useRoute!(who, { ...asked, digests: [digest], logged: { ui: true, tunnel: true, recheck: true }, refuses: (decided) => {
     if (decided.digest === digest) return null;
     const definition = itemOf(proxy, decided);
-    if (definition !== null) remember(proxy.ui.last, reading, { digest: decided.digest, confirmed: Date.now() });
+    if (definition !== null) proxy.ui.last.set(reading, { digest: decided.digest, confirmed: Date.now() });
     return new CoffreError(503, 'unavailable', `${name} was saved anew since this session dialled it`, 'moved', '1');
   } }).then((again) => again.item.digest === digest && Object.hasOwn(again.values, item.key));
   return session(tunnel, {
@@ -1937,7 +1944,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
     const definition = itemOf(proxy, decided);
     if (definition === null) return null;
     // The vault's item is this isolate's copy now (`CopyFromVault`), whatever is made of it.
-    remember(proxy.ui.last, computing.reading, { digest: decided.digest, confirmed: Date.now() });
+    proxy.ui.last.set(computing.reading, { digest: decided.digest, confirmed: Date.now() });
     const refused = unfit(definition, operation, bytes);
     return refused === null ? null : admitted !== null && admitted !== decided.digest ? movedItem(name) : refused;
   } });
@@ -1976,7 +1983,7 @@ async function uiMade(coffre: PluginContext, proxy: Proxy, computing: Computing,
   const hmac = hmacOf(definition)!;
   if (!Object.hasOwn(used.values, hmac.key)) return failure(409, `${used.environment.path} holds no ${hmac.key}, which ${name} ${operation === 'sign' ? 'signs' : 'checks'} with`);
   if (proxy.cacheMs > 0) {
-    remember(proxy.ui.kept, computing.kept, { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
+    proxy.ui.kept.set(computing.kept, { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: used.reading, path: used.environment.path, until: Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt)) });
   }
   return hmacMade(used.environment.path, name, hmac, used.values, operation, message!, given.signature, answerBy);
 }
@@ -2262,29 +2269,36 @@ function allowed(credential: Resolved, method: string, relative: string): Respon
 }
 
 /**
- * What a request through a credential carries: a body read whole, up to
- * 16 MiB, or, for one that says its length and declares its digest, the
- * length it streams with, never held whole: an AWS-signed upload's
- * `x-amz-content-sha256`, which S3 checks (an S3 object may be gigabytes,
- * and its signature needs no byte of it), or a `Content-Digest`'s SHA-256,
- * `digest`, which coffre checks as the bytes pass (`scanned`), up to
- * `MAX_DIGESTED_BODY`; or the refusal. A body read whole is what its
- * `Content-Digest` declares, too.
+ * What a request through a credential carries: a body read whole, up to 1 MiB (`BODY_READ_WHOLE_BYTES`), or one that
+ * says its length and streams with it, never held whole:
+ *
+ *   an AWS-signed upload's, through a `sigv4` credential: the `x-amz-content-sha256` it declares, which S3 checks (an
+ *     object may be gigabytes, and its signature needs no byte of it), up to `MAX_STREAM_BYTES`;
+ *   a `Content-Digest`'s SHA-256, `digest`, which coffre checks as the bytes pass (`scanned`), up to `MAX_DIGESTED_BODY`;
+ *   past 1 MiB, any body nothing signs, through a credential that only sets a header, the query or the path: the
+ *     bytes pass as they came, a handle in them stops them (`scanned`), up to `MAX_STREAM_BYTES`.
+ *
+ * What signs the body's hash before it goes needs its bytes, unless it declares the hash: a `sigv4` credential's
+ * signature, and a workload's proof (`proof`, its body line). A body read whole is what its `Content-Digest` declares,
+ * too. Otherwise, the refusal.
  */
 type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string; digest: string | null };
 
-async function carried(request: Request, credential: Resolved): Promise<Carried | Response> {
-  return carriedAs(request, credential.name, { field: credential.body.length > 0, sigv4: credential.sigv4 !== undefined });
+async function carried(request: Request, credential: Resolved, proof = false): Promise<Carried | Response> {
+  const sigv4 = credential.sigv4 !== undefined;
+  return carriedAs(request, credential.name, { field: credential.body.length > 0, sigv4, signed: sigv4 || proof });
 }
 
 /**
  * `carried`, by what the credential does with a body: `field`, a form or JSON rule's, which fills a field of it;
- * `sigv4`, whose `x-amz-content-sha256` binds it. A UI route's workload request, whose item comes after its proof,
- * is carried by its headers alone (`sigv4` whatever it is, no field: the client's rule, `bodyLine`), and the decided
- * item then takes it or refuses it (`uiCarried`).
+ * `sigv4`, whose `x-amz-content-sha256` binds it; `signed`, whether something signs its hash before it goes, a
+ * `sigv4` credential's signature or a workload's proof. A UI route's workload request, whose item comes after its
+ * proof, is carried by its headers alone (`sigv4` whatever it is, no field: the client's rule, `bodyLine`; signed when
+ * a proof signs it), and the decided item then takes it or refuses it (`uiCarried`).
  */
-async function carriedAs(request: Request, name: string, { field, sigv4 }: { field: boolean; sigv4: boolean }): Promise<Carried | Response> {
+async function carriedAs(request: Request, name: string, { field, sigv4, signed }: { field: boolean; sigv4: boolean; signed: boolean }): Promise<Carried | Response> {
   const declared = request.headers.get('content-length') ?? '';
+  const length = /^\d+$/.test(declared) ? Number(declared) : null;
   // A body whose field coffre fills is read whole, and small: it is parsed, and changed.
   const amz = sigv4 && request.headers.has('x-amz-content-sha256');
   let digest: string | null = null;
@@ -2293,20 +2307,26 @@ async function carriedAs(request: Request, name: string, { field, sigv4 }: { fie
   } catch (error) {
     return failure(400, (error as Error).message);
   }
+  // Past what is read whole, a body nothing signs streams as it came: a GET's or a HEAD's, which no upstream reads, never.
+  const unsigned = !signed && length !== null && length > BODY_READ_WHOLE_BYTES && request.method !== 'GET' && request.method !== 'HEAD';
   // An empty body is checked before anything goes: with no last byte to hold back, its request is whole once its headers are.
-  const streamed = !field && (amz || (digest !== null && Number(declared) > 0)) && request.body !== null && /^\d+$/.test(declared);
-  if (streamed && amz && Number(declared) > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
-  if (streamed && !amz && Number(declared) > MAX_DIGESTED_BODY) {
+  const streamed = !field && request.body !== null && length !== null && (amz || (digest !== null ? length > 0 : unsigned));
+  if (streamed && digest === null && length > MAX_STREAM_BYTES) return failure(413, `an upload through the proxy carries at most ${MAX_STREAM_BYTES / 1024 ** 3} GiB: send a larger one in parts`);
+  if (streamed && digest !== null && length > MAX_DIGESTED_BODY) {
     return failure(413, `a body that declares its digest streams through the proxy up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB, under the 100 MB a Cloudflare zone takes: send a larger one in parts`);
   }
-  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request, field ? MAX_FIELD_BODY : MAX_BODY_BYTES);
+  const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request, field ? MAX_FIELD_BODY : BODY_READ_WHOLE_BYTES);
   if (body === null && field) return failure(413, `${name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
-  if (body === null) {
-    return failure(413, `a request through the proxy carries at most ${MAX_BODY_BYTES / 1024 / 1024} MiB read whole; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
-  }
+  if (body === null && !signed) return failure(413, `a request through the proxy carries at most ${BODY_READ_WHOLE_BYTES / 1024 / 1024} MiB read whole; a larger one streams when it says its length: send its Content-Length`);
+  if (body === null) return hashUndeclared(name);
   if (digest !== null && !streamed && (await bodyDigest(body ?? new Uint8Array(0))) !== digest) return failure(400, 'the body is not what its Content-Digest says');
   // As a number writes it: `00` is the 0 it says, as it goes on and as the body's line reads it.
-  return { body, streamed, declared: streamed ? String(Number(declared)) : declared, digest };
+  return { body, streamed, declared: streamed ? String(length) : declared, digest };
+}
+
+/** A body past what is read whole, whose hash something signs, and which declares none. */
+function hashUndeclared(name: string): Response {
+  return failure(413, `a request through the proxy carries at most ${BODY_READ_WHOLE_BYTES / 1024 / 1024} MiB read whole, as ${name} signs its hash; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
 }
 
 /**
@@ -2362,7 +2382,8 @@ async function forward(request: Request, coffre: PluginContext, proxy: Proxy, pa
   // under the upstream gives back. Otherwise the placeholder's shape around the handle, which the proxy reads as the app's own
   // (`e30` is `{}`: the proxy reads no claim).
   const back = backOf(credential, target, handle);
-  // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes out.
+  // Read whole first, however long it takes to come, so the handle is checked, and the values opened, as the request goes
+  // out; or, past what is read whole, streamed with its length, each byte scanned as it passes (`carried`).
   const content = early?.content ?? (await read(() => body((from) => carried(from, credential))));
   if (content instanceof Response) return refuse(content);
   const through = { host: target.host };
@@ -2515,7 +2536,7 @@ async function workloadForward(request: Request, coffre: PluginContext, proxy: P
   if (aimed instanceof Response) return nonced(aimed, caller);
   // An environment the URL names, which a code item may not serve: before the body is read or the gate asked, as `forward`.
   if (path !== null && !serves(credential, path)) return nonced(notServed(credential.name, path), caller);
-  const content = await carried(request, credential);
+  const content = await carried(request, credential, token !== null);
   if (content instanceof Response) return nonced(content, caller);
   // The body's line in `req`, and the payload hash a sigv4 credential signs again: one value, so what goes out is what
   // the proof bound. A body of any bytes signs the SHA-256 its `Content-Digest` declares, which `carried` and `scanned`
@@ -2599,7 +2620,7 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
     through = { fetch: coffre.publicFetch };
   }
   // Its body, by its headers alone: the item that says how it goes is not known before the proof that binds it.
-  const content = await carriedAs(request, at.credential!, { field: false, sigv4: true });
+  const content = await carriedAs(request, at.credential!, { field: false, sigv4: true, signed: token !== null });
   if (content instanceof Response) return content;
   const amz = content.digest === null ? request.headers.get('x-amz-content-sha256') : null;
   const declared = content.digest ?? amz;
@@ -2654,9 +2675,9 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
       } });
       const definition = itemOf(proxy, used.item);
       if (definition === null) return failure(503, `${used.item.name}: this isolate's copy of its definition is gone; ask again`, 'moved', '1');
-      remember(proxy.ui.last, `w\n${caller.place}\n${name}`, { digest: used.item.digest, confirmed: nowAt });
+      proxy.ui.last.set(`w\n${caller.place}\n${name}`, { digest: used.item.digest, confirmed: nowAt });
       kept = { values: used.values, plain: used.plain, digest: used.item.digest, definition, reading: 'stable', path: used.environment.path, until: Math.min(nowAt + proxy.cacheMs, Date.parse(used.expiresAt)) };
-      if (proxy.cacheMs > 0) remember(proxy.ui.kept, keptAt, kept);
+      if (proxy.cacheMs > 0) proxy.ui.kept.set(keptAt, kept);
       sendBy = Math.min(nowAt + Math.max(proxy.cacheMs, USE_DEADLINE_MS), Date.parse(used.expiresAt));
     } else {
       sendBy = kept.until;
@@ -2692,14 +2713,16 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
 /**
  * A UI workload request's body as its headers carried it (`carriedAs`), as the decided item takes it: a hash declared
  * in `x-amz-content-sha256` binds it only through a `sigv4` item (another was decided on another copy: 503 `moved`,
- * nothing sent); a form or JSON item fills a field of a body read whole, 64 KiB at most, so a streamed one is read
- * whole now and still held to the digest the proof bound (docs/design/proxy-ui.md, section 3, "What is read before
- * the answer").
+ * nothing sent); a service binding's body streamed with no hash declared, which nothing signed, goes through no `sigv4`
+ * item, whose signature needs it (413); a form or JSON item fills a field of a body read whole, 64 KiB at most, so a
+ * streamed one is read whole now and still held to the digest the proof bound (docs/design/proxy-ui.md, section 3,
+ * "What is read before the answer").
  */
 async function uiCarried(request: Request, credential: Resolved, content: Carried, declared: string | null): Promise<Carried | Response> {
   if (declared !== null && content.digest === null && credential.sigv4 === undefined) {
     return failure(503, `${credential.name} no longer signs with sigv4(), which this request's x-amz-content-sha256 is for: send it again`, 'moved', '1');
   }
+  if (content.streamed && declared === null && credential.sigv4 !== undefined) return hashUndeclared(credential.name);
   if (credential.body.length === 0) return content;
   if (!content.streamed) {
     if ((content.body?.byteLength ?? 0) > MAX_FIELD_BODY) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
@@ -2750,7 +2773,7 @@ function itemCounts(proxy: Proxy): ItemCounted {
         else if (found.item === null || found.item.definition === null) copy = new CoffreError(404, 'not_found', `this instance has no credential ${JSON.stringify(name)} here: neither its deployment's code nor this environment's definitions name it`);
         else {
           const definition = itemOf(proxy, found.item)!;
-          remember(proxy.ui.last, reading, { digest: found.item.digest, confirmed: now });
+          proxy.ui.last.set(reading, { digest: found.item.digest, confirmed: now });
           copy = { digest: found.item.digest, definition, fresh: true };
         }
       } catch (error) {
@@ -3210,10 +3233,6 @@ async function valuesFor(
   decided?.();
   // Kept only over the entry it set out from: an older answer replaces no newer one, brings back none a refusal ended, and none a tunnel's end removed.
   if (proxy.cacheMs > 0 && (live === undefined || proxy.cache.get(key) === live)) {
-    // Its own entry out first, so that it goes last in line, and replacing it makes no room at another's cost.
-    proxy.cache.delete(key);
-    // A handful of handles in a dev loop: past a thousand, the oldest go.
-    if (proxy.cache.size >= 1000) for (const [old, entry] of proxy.cache) if (entry.until <= now || proxy.cache.size >= 1000) proxy.cache.delete(old);
     // From when the vault was asked, not when it answered: a revoked handle serves no longer than `cacheSeconds`.
     const until = Math.min(now + proxy.cacheMs, Date.parse(used.expiresAt));
     // An answer that serves no longer than the last (the handle's or session's end) is not asked for again.
@@ -3545,23 +3564,75 @@ async function fromCopy<T>(request: Request, reading: (copy: Request) => Promise
   }
 }
 
-/** The body, read whole up to `max` bytes, and no further: null past it, the rest left unread. */
-async function boundedBody(request: Request, max = MAX_BODY_BYTES): Promise<Uint8Array<ArrayBuffer> | undefined | null> {
-  if (Number(request.headers.get('content-length') ?? '0') > max) return null;
+/**
+ * The bytes an isolate's requests hold of the bodies they read whole, out of `BODIES_BYTES` (`@coffre/core/memory`):
+ * one count for the proxy's requests in the isolate. On Node, the process's, as a defensive bound.
+ */
+type Bodies = { held: number };
+
+/** A request's part of its isolate's bodies: what it took, which the plugin's `fetch` gives back as the request ends. */
+type Holding = { bodies: Bodies; taken: number };
+
+/** The request each read runs for, so that what it holds is counted to it (`take`) wherever the body is read. */
+const requests = new AsyncLocalStorage<Holding>();
+
+/**
+ * A body read whole is held twice at most: its bytes, and either its chunks until they are joined or, under the stable
+ * URL, the request's own body, which keeps what a copy of it read (`fromCopy`).
+ */
+const HELD_PER_BYTE = 2;
+
+/**
+ * Takes `bytes` of the isolate's bodies for this request, or refuses it: past the share, 503 at once, before the bytes
+ * are read, and asked again in a second, the least `Retry-After` says (RFC 9110, section 10.2.3), as a body the
+ * isolate holds is given back when its request ends.
+ */
+function take(bytes: number): void {
+  const holding = requests.getStore();
+  if (holding === undefined) throw new Error('a body is read whole only for a request through the proxy, which counts it');
+  if (holding.bodies.held + bytes > BODIES_BYTES) {
+    throw new CoffreError(503, 'unavailable', `this isolate holds as many bodies read whole as it takes, ${BODIES_BYTES / 1024 / 1024} MiB: send it again in a moment, or stream it (a length and a declared SHA-256)`, 'overloaded', '1');
+  }
+  holding.bodies.held += bytes;
+  holding.taken += bytes;
+}
+
+/**
+ * The body, read whole up to `max` bytes, and no further: null past it, the rest left unread. What it holds is taken
+ * from the isolate's bodies before it is read (`take`): the length it says, at once, else each chunk as it comes.
+ */
+async function boundedBody(request: Request, max: number): Promise<Uint8Array<ArrayBuffer> | undefined | null> {
+  const said = request.headers.get('content-length');
+  const length = said !== null && /^\d+$/.test(said) ? Number(said) : null;
+  if (length !== null && length > max) return null;
   if (request.body === null) return undefined;
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) {
-      // Not waited for: a copy's (`peekField`) settles only once the request's own body is done with too.
-      void reader.cancel().catch(() => undefined);
-      return null;
+  let counted = 0;
+  try {
+    if (length !== null) {
+      take(HELD_PER_BYTE * length);
+      counted = length;
     }
-    chunks.push(value);
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        // Not waited for: a copy's (`peekField`) settles only once the request's own body is done with too.
+        void reader.cancel().catch(() => undefined);
+        return null;
+      }
+      if (size > counted) {
+        take(HELD_PER_BYTE * (size - counted));
+        counted = size;
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
   }
   const body = new Uint8Array(size);
   let at = 0;

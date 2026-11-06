@@ -47,6 +47,11 @@
       "types": "./dist/kek.d.ts",
       "default": "./dist/kek.js"
     },
+    "./memory": {
+      "coffre:source": "./src/memory.ts",
+      "types": "./dist/memory.d.ts",
+      "default": "./dist/memory.js"
+    },
     "./merkle": {
       "coffre:source": "./src/audit/merkle.ts",
       "types": "./dist/merkle.d.ts",

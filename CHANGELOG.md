@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- **The credential proxy holds 1 MiB of a body at most, and an isolate's
+  memory is split into named shares (W331, limits S11-S13, S26, S52).** A
+  Worker's isolate has 128 MB; `@coffre/core/memory` now gives it shares:
+  64 MB for uses in flight (stated only: `useLimits` still counts them,
+  pending Q1), 16 MiB for the bodies the proxy reads whole, 16 MiB for
+  caches, and the rest, 30 MB, for the runtime, which holds 8.6 MB idle.
+  - A request's body is read whole up to 1 MiB, down from 16 MiB. A
+    larger one that says its length streams on as it came, up to 5 GiB,
+    through a credential that signs no hash of it (a header, Basic, a
+    query parameter or a path segment), each byte scanned for the handle
+    as it passes. A workload's request, whose proof signs the body's
+    hash, and an AWS-signed one stream past 1 MiB only when they declare
+    that hash (`Content-Digest`, as `coffre serve` and
+    `@coffre/client/workload` send it, or `x-amz-content-sha256`), as
+    before; otherwise 413, naming it. A body past 1 MiB that says no
+    length is refused, 413, asking for its `Content-Length`.
+  - The bodies an isolate holds read whole are held to 16 MiB together,
+    each counted twice (its bytes and a copy): past that, 503 `overloaded`
+    with `Retry-After: 1`, before a byte is read, rather than an isolate
+    ended for its memory.
+  - The proxy's caches (values, handles' environments, UI items, readings,
+    values and places) and the app's kept answers about each principal
+    (`Accesses`) drop their least recently used entry, one at a time,
+    within an equal slice of the caches' 16 MiB, each entry weighed by
+    what it holds. They kept 1,000 entries, dropping the oldest, or
+    10,000 before clearing all.
+  - On Node, a plugin's WebSocket message is held to 1 MiB too (16 MiB
+    before), 1009 past it. Node has no 128 MB limit: each process holds
+    to the same numbers, as defensive bounds.
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

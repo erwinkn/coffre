@@ -227,7 +227,7 @@ test('through the sidecar: a redirect within coffre comes back to it, a SigV4 up
   const size = 17 * 1024 * 1024;
   const upload = await fetch(`${listener}/use/s3/bucket/big`, { method: 'PUT', headers: { 'x-amz-content-sha256': 'UNSIGNED-PAYLOAD' }, body: new Uint8Array(size) });
   assert.deepEqual(await upload.json(), { path: '/use/s3/bucket/big', size });
-  // With the length it says, which coffre streams it by: without one, coffre would read it whole, and refuse it past 16 MiB.
+  // With the length it says, which coffre streams it by: without one, coffre would read it whole, and refuse it past 1 MiB.
   assert.equal(coffre.forwarded.at(-1)!.length, String(size));
 
   // The gate restarts: the next upgrade is refused for its nonce, and the one after it signs with the nonce that refusal gave.

@@ -336,7 +336,7 @@ test('a streamed upload sends nothing of a handle split across chunks, and nothi
   assert.equal(objects.get('uploads/streamed'), 'abcd');
 });
 
-test("a handle's upload past 16 MiB that declares its Content-Digest streams, S3 checking that digest too; other bytes, or the handle split across chunks, never reach it whole", async () => {
+test("a handle's upload past the 1 MiB read whole that declares its Content-Digest streams, S3 checking that digest too; other bytes, or the handle split across chunks, never reach it whole", async () => {
   const { handle } = await appClient();
   const upload = (key: string, bytes: Buffer, declared: Buffer = bytes, cut = 1024 * 1024) => {
     let at = 0;

@@ -731,7 +731,7 @@ the headers `hdr` names, plus the credential's injection. A header added on
 the way, by an HTTP library or a proxy, is dropped rather than refused, so
 `user-agent` and `via` do no harm.
 
-- **Bodies.** A buffered body (up to the proxy's 16 MiB) is hashed whole. A
+- **Bodies.** A buffered body (up to the proxy's 1 MiB) is hashed whole. A
   body that declares its `Content-Digest` and length is bound by that
   digest and streams, up to 95 MiB: coffre hashes it as it passes and holds
   back its last bytes until the digest matches, so the upstream never gets

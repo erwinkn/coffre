@@ -8,13 +8,18 @@ import { connect as tls } from 'node:tls';
 import type { Duplex } from 'node:stream';
 
 import { WebSocketServer, type WebSocket } from 'ws';
+import { BODY_READ_WHOLE_BYTES } from '@coffre/core/memory';
 
 import type { Connect, Pipe, Socket } from './plugins.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import { admitSocket } from './socket-admission.ts';
 import { literalRefusal, publicLookup } from './workloads/node-transport.ts';
 
-const sockets = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 });
+/**
+ * A message is held whole until it has all come, as a body read whole is, and no larger (`@coffre/core/memory`). A
+ * tunnel's clients send 64 KiB a message at most: `@coffre/client`'s frames, and what the CLI's socket reads at once.
+ */
+const sockets = new WebSocketServer({ noServer: true, maxPayload: BODY_READ_WHOLE_BYTES });
 
 /** What frames an HTTP answer, which the refusal writer says itself. */
 const FRAMING = new Set(['connection', 'content-length', 'transfer-encoding', 'keep-alive', 'upgrade']);
