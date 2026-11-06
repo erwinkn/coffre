@@ -78,7 +78,7 @@ start_coffre() {
     ) >"$scratch/coffre-$1.log" 2>&1 &
     coffre=$!
     for _ in $(seq 120); do
-        if curl -sf "$COFFRE_DEV_URL/livez" >/dev/null; then return; fi
+        if curl -sf "http://127.0.0.1:$port/livez" >/dev/null; then return; fi # pins: local
         sleep 1
     done
     cat "$scratch/coffre-$1.log" >&2

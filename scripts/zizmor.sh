@@ -26,27 +26,15 @@ case "$(uname -s)-$(uname -m)" in
     *) echo "no zizmor $ZIZMOR_VERSION release pinned for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
-# A file's SHA-256: sha256sum on Linux, shasum on macOS.
-sha256() {
-    if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
-}
-
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/coffre"
 home="$cache/zizmor-$ZIZMOR_VERSION-$target"
 if [ ! -x "$home/zizmor" ]; then
-    mkdir -p "$cache"
     archive="$cache/zizmor-$ZIZMOR_VERSION-$target.tar.gz"
-    curl -fsSL --retry 3 -o "$archive.part" \
-        "https://github.com/zizmorcore/zizmor/releases/download/v$ZIZMOR_VERSION/zizmor-$target.tar.gz"
-    if [ "$(sha256 "$archive.part")" != "$digest" ]; then
-        echo "zizmor-$target.tar.gz does not match its pinned SHA-256" >&2
-        rm -f "$archive.part"
-        exit 1
-    fi
+    scripts/fetch.sh "https://github.com/zizmorcore/zizmor/releases/download/v$ZIZMOR_VERSION/zizmor-$target.tar.gz" "$digest" "$archive"
     rm -rf "$home.part"
     mkdir -p "$home.part"
-    tar -xzf "$archive.part" -C "$home.part"
-    rm -f "$archive.part"
+    tar -xzf "$archive" -C "$home.part"
+    rm -f "$archive"
     mv "$home.part" "$home"
 fi
 

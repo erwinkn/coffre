@@ -604,12 +604,14 @@ must be seven days old before it can be installed. That last rule blocked
 The rest of what CI and the scripts fetch is pinned too: each action to its
 commit, its version in a comment beside it; each image to its index digest,
 written `name:tag@sha256:<digest>`; each tool downloaded (TLC, Lean, Go,
-Terraform, OpenTofu, zizmor, the Cursor image's Node) to its version and
-SHA-256; nvm's clone to its commit; each install to the lockfile. `pnpm check:pins` and `pnpm
-check:workflows` (zizmor) fail on anything else, on every pull request. A
-line that cannot be pinned says why, `# unpinned: <reason>`: the Cursor
-image's apt packages, and the fresh installs of what `coffre init` writes,
-which has no lockfile yet.
+Terraform, OpenTofu, zizmor, the Cursor image's nvm and Node) to its version
+and SHA-256, through the one script that downloads, `scripts/fetch.sh`, or
+a Dockerfile's `ADD --checksum`; each install to the lockfile. `pnpm
+check:pins` bans curl, wget and every other fetcher anywhere else, and with
+`pnpm check:workflows` (zizmor) fails on anything unpinned, on every pull
+request. A line that cannot be pinned says why, `# unpinned: <reason>`: the
+Cursor image's apt packages, and the fresh installs of what `coffre init`
+writes, which has no lockfile yet.
 
 Two traps, both noted in `pnpm-workspace.yaml`:
 

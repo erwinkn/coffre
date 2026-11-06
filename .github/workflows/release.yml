@@ -145,6 +145,7 @@ jobs:
           tarball="$RUNNER_TEMP/context/coffre-cli-$VERSION.tgz"
           # Its tarball, too, may be served a moment after its document.
           for _ in $(seq 30); do
+            # unpinned: our own release at its exact version, which npm never serves changed; its integrity is checked below.
             npm pack "@coffre/cli@$VERSION" --pack-destination "$RUNNER_TEMP/context" && break
             sleep 10
           done

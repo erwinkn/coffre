@@ -336,15 +336,20 @@ unsupported diff select full validation.
   workflow, Dockerfile, compose file, shell script and pnpm setting to what it
   fetches being pinned (`scripts/pins.mjs`): an action by its commit, `owner/repo@<sha>
   # vX.Y.Z`, the same repository's through `$/`; an image as
-  `name:tag@sha256:<index digest>`; a download by its SHA-256, checked by
-  the first command that reads the file, never piped; a clone by its commit;
-  a toolchain an action installs at an exact version, Corepack's too, and
-  Node never by `nvm install` (it checks nodejs.org's own list); an install
-  by the lockfile. It fails closed, on a fetch it cannot read as pinned and on a
-  pnpm setting written in any style but block, and reads commands as people
-  write them, not as they would hide them (`eval`): review covers those. A
-  line that cannot be pinned carries `# unpinned: <reason>`, on itself or
-  right above it. `check:workflows` runs zizmor
+  `name:tag@sha256:<index digest>`, on the line that pulls it; a download
+  through `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only
+  if its SHA-256 is the pinned one, or a Dockerfile's `ADD
+  --checksum=sha256:…`; a toolchain an action installs at an exact version,
+  and Corepack only the workspace's pnpm; an install by the lockfile
+  (`--frozen-lockfile`). It parses no shell: every other fetcher is banned by
+  name on any line but a comment (curl, wget, npx and the other package
+  runners, `npm exec` or `install`, `pnpm dlx` or `add`, `gh release
+  download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
+  a message too. A pnpm setting written in any style but block fails. A fetch
+  hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
+  A health check of this machine is curl marked `# pins: local`, every URL
+  on the line 127.0.0.1, localhost or [::1]; a line that cannot be pinned
+  carries `# unpinned: <reason>`, on itself or right above it. `check:workflows` runs zizmor
   (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
   against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
   GitHub whether each pinned commit is its repository's. Validate runs both

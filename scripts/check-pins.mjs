@@ -125,15 +125,15 @@ let files = 0;
 for (const path of tracked) {
     if (kindOf(path) === null || !existsSync(join(root, path))) continue;
     files++;
-    problems.push(...problemsIn(path, readFileSync(join(root, path), 'utf8'), { root: path === 'pnpm-workspace.yaml' }));
+    problems.push(...problemsIn(path, readFileSync(join(root, path), 'utf8'), { root: path === 'pnpm-workspace.yaml', pnpm: pnpm.replace(/^pnpm@/, '') }));
 }
 
 if (problems.length > 0) {
     console.error('Dependency pinning check FAILED:\n');
     for (const problem of problems) console.error(`  ${problem}`);
     console.error('\nUse: pnpm run add:dep <pkg>@<version>, and `pnpm bump <version>` to move every package.');
-    console.error('Pin an action as owner/repo@<commit SHA> # v<version>, an image as name:tag@sha256:<index digest>, a download by its SHA-256;');
-    console.error('a line that cannot be pinned says why: `# unpinned: <reason>`.');
+    console.error('Pin an action as owner/repo@<commit SHA> # v<version>, an image as name:tag@sha256:<index digest>; download through scripts/fetch.sh <url> <sha256> <file>;');
+    console.error('a health check of this machine is marked `# pins: local`; a line that cannot be pinned says why: `# unpinned: <reason>`.');
     process.exit(1);
 }
 

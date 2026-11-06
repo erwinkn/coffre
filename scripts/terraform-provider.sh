@@ -49,24 +49,9 @@ pinned() {
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/coffre/terraform-provider"
 mkdir -p "$cache"
 
-sha256() {
-    if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
-}
-
-# fetch <url> <sha256> <file>: the file, downloaded once and held to its hash.
+# fetch <url> <sha256> <file>: the file in the cache, downloaded once and held to its hash.
 fetch() {
-    local url="$1" want="$2" file="$cache/$3"
-    if [ ! -f "$file" ] || [ "$(sha256 "$file")" != "$want" ]; then
-        curl -fsSL --retry 3 -o "$file.part" "$url"
-        local got
-        got="$(sha256 "$file.part")"
-        if [ "$got" != "$want" ]; then
-            rm -f "$file.part"
-            echo "$url: SHA-256 $got, not the pinned $want" >&2
-            exit 1
-        fi
-        mv "$file.part" "$file"
-    fi
+    "$root/scripts/fetch.sh" "$1" "$2" "$cache/$3"
 }
 
 go_os="${platform%_*}" go_arch="${platform#*_}"

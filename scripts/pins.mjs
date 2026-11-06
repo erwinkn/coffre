@@ -1,25 +1,60 @@
 // What scripts/check-pins.mjs holds every tracked file to, besides the
 // manifests: whatever CI, a Dockerfile or a script fetches is named by
 // something that cannot move under it. An action by its commit, an image by
-// its index digest (its tag beside it, for people), a tool by its version and
-// its SHA-256, a clone by its commit, an install by the lockfile. zizmor holds
-// the actions to their commits too (scripts/zizmor.sh); this needs no network
-// and no binary.
+// its index digest (its tag beside it, for people), a download by its
+// SHA-256, an install by the lockfile. zizmor holds the actions to their
+// commits too (scripts/zizmor.sh); this needs no network and no binary.
 //
-// It fails closed: a fetch it cannot read as pinned is a problem, whatever
-// its form. It reads the commands people write, one at a time, not those
-// built to hide (`eval "$cmd"`): review covers those, and a change that means
-// to get past this can edit it anyway. What it catches is drift.
+// It reads no shell. A download goes through scripts/fetch.sh, which checks
+// the file against the SHA-256 it is given, or a Dockerfile's
+// `ADD --checksum=sha256:…`; every other fetcher (curl, wget, npx, `npm
+// exec`, `gh release download`, `git clone`, …) is banned by name, on any
+// line that is not a comment, however it is called. Its words in a message
+// are banned too: reword the message. A fetch it has no name for, or one
+// built to hide (`eval "$cmd"`, `node -e 'fetch(…)'`), is review's to catch.
 //
-// A line that cannot be pinned says why, on the line itself or in a comment
-// right above it: `# unpinned: <reason>`. The reason is the review.
+// Two markers, each on the line it covers:
+//   `# pins: local`        curl or wget of this machine (127.0.0.1, localhost
+//                          or [::1]) and nothing else: a health check.
+//   `# unpinned: <reason>` anything that cannot be pinned, on the line or in
+//                          the comment block right above it. The reason is
+//                          the review.
 
 // `name:tag@sha256:<digest>`: the tag for people, the digest for Docker.
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::\d+)?\/?[a-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$/;
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?$/;
-const COMMIT = /^[0-9a-f]{40}$/;
-// A URL of this machine's, or the dev stack's own: what it answers is no artifact.
-const LOOPBACK = /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)|^\$\{?COFFRE_DEV_[A-Z_]*URL\}?(?:\/|$)/;
+
+// The one file that downloads.
+const FETCHER = 'scripts/fetch.sh';
+
+// A program's name as a word of its own, or a path's last (`/usr/bin/curl`): not
+// `libcurl`, `curl-config` or `/etc/docker/`.
+const word = (name) => `(?<![\\w.-])${name}(?![\\w./-])`;
+// The rest of a command: up to the next `;`, `&`, `|`, `)` or `\n`.
+const REST = String.raw`(?:(?![;&|)]|\\n).)*?`;
+const command = (program, subcommands) => new RegExp(`${word(program)}\\s+(?:${REST}\\s)?(?:${subcommands})(?=[\\s"';&|)]|\\\\n|$)`);
+
+// What fetches something no lockfile, digest or checksum holds.
+const BANNED = [
+    { pattern: new RegExp(word('(?:curl|wget)')), local: true, say: (m) => `${m} downloads: use scripts/fetch.sh <url> <sha256> <file> (a Dockerfile: ADD --checksum=sha256:…), or mark a health check of this machine \`# pins: local\`` },
+    { pattern: new RegExp(word('(?:npx|pnpx|bunx|uvx|pipx)')), say: (m) => `${m} runs a package no lockfile holds` },
+    { pattern: command('npm', 'exec|x|install|i|in|add|ci|update|up|upgrade|pack|create|init|dlx'), say: () => 'npm fetches packages outside the lockfile: install with pnpm install --frozen-lockfile' },
+    { pattern: command('pnpm', 'dlx|create|add|update|up|upgrade|self-update'), say: (m) => `${m} fetches packages outside the lockfile (add one with pnpm run add:dep)` },
+    { pattern: command('yarn', 'dlx|add|create'), say: (m) => `${m} fetches packages outside the lockfile` },
+    { pattern: command('gh', '(?:release|run|attestation)\\s+download'), say: (m) => `${m} downloads: use scripts/fetch.sh <url> <sha256> <file>` },
+    { pattern: command('git', 'clone|submodule\\s+update\\s+--remote'), say: (m) => `${m} takes a branch as it is: fetch a file at its commit with scripts/fetch.sh` },
+    { pattern: command('nvm', 'install|reinstall-packages|install-latest-npm'), say: (m) => `${m} checks Node against nodejs.org's own list: fetch the tarball by its SHA-256` },
+    { pattern: command('corepack', 'up|use'), say: (m) => `${m} moves packageManager` },
+    { pattern: command('(?:apt-get|apt)', 'install'), say: () => "apt-get install takes the archive's current versions" },
+    { pattern: command('(?:pip|pip3|gem|cargo|brew)', 'install'), say: (m) => `${m} fetches packages no lockfile holds` },
+    { pattern: command('go', 'install|get'), say: (m) => `${m} fetches modules outside go.sum` },
+];
+const PNPM_INSTALL = command('pnpm', 'install|i');
+// `docker run`, and its management command's spelling, `docker container run`.
+const DOCKER_PULLS = new RegExp(`${word('docker')}\\s+(?:(?:image|container|service)\\s+)?(?:run|create|pull)(?=\\s|$)`);
+const PINNED_IMAGE = /@sha256:[0-9a-f]{64}(?![0-9a-f])/;
+const URL = /[a-z][a-z0-9+.-]*:\/\/[^\s"'`)]*/gi;
+const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)/;
 
 /** The kinds of file whose contents fetch or run something. */
 export function kindOf(path) {
@@ -33,8 +68,11 @@ export function kindOf(path) {
     return null;
 }
 
-/** Every problem in one file, as `path:line: what`. */
-export function problemsIn(path, text, { root = false } = {}) {
+/**
+ * Every problem in one file, as `path:line: what`. `pnpm` is the workspace's
+ * packageManager version, the one pnpm Corepack may fetch.
+ */
+export function problemsIn(path, text, { root = false, pnpm } = {}) {
     const kind = kindOf(path);
     if (kind === null) return [];
     const lines = text.split('\n');
@@ -44,8 +82,7 @@ export function problemsIn(path, text, { root = false } = {}) {
         workspace(lines, report, root);
         return problems;
     }
-    const logical = kind === 'json' ? jsonLines(text, lines) : logicalLines(lines, kind);
-    for (const { index, line, exempt } of logical) {
+    for (const { index, line, exempt } of logicalLines(lines, kind)) {
         if (exempt) continue;
         // A Dockerfile's frontend is an image BuildKit pulls.
         const syntax = kind === 'dockerfile' && line.match(/^#\s*syntax\s*=\s*(\S+)/i);
@@ -70,9 +107,39 @@ export function problemsIn(path, text, { root = false } = {}) {
         for (const option of line.matchAll(/\b(?:image|generator)=([^\s,"']+)/g)) {
             if (!IMAGE.test(option[1])) report(index, `image ${option[1]} is not name:tag@sha256:<index digest>`);
         }
+        if (path !== FETCHER) fetches(line, index, report, pnpm);
     }
-    if (kind !== 'compose') shell(script(logical, kind), report);
     return problems;
+}
+
+// What a line fetches by name: a banned fetcher, an unfrozen install, an
+// image no digest names, a pnpm Corepack would fetch other than the workspace's.
+function fetches(line, index, report, pnpm) {
+    for (const { pattern, local, say } of BANNED) {
+        const match = line.match(pattern);
+        if (!match) continue;
+        if (local && localOnly(line)) continue;
+        report(index, say(match[0].trim().replace(/\s+/g, ' ')));
+    }
+    // Each `pnpm … install` up to the end of its command carries the flag.
+    for (const match of line.matchAll(new RegExp(PNPM_INSTALL.source + REST + String.raw`(?=[;&|)]|\\n|$)`, 'g'))) {
+        if (!/(?<![\w-])--frozen-lockfile(?:=true)?(?![\w=-])/.test(match[0])) report(index, 'pnpm install without --frozen-lockfile');
+    }
+    // An image a command pulls is named by its digest on the line itself.
+    if (DOCKER_PULLS.test(line) && !PINNED_IMAGE.test(line)) {
+        report(index, 'docker run, create or pull of an image this line does not name by @sha256:<index digest>');
+    }
+    // Corepack fetches the package manager it is named: the workspace's alone.
+    for (const match of line.matchAll(/(?<![\w./-])(pnpm|yarn|npm)@([^\s"'`;&|)]*)/g)) {
+        if (match[1] !== 'pnpm' || match[2] !== pnpm) report(index, `${match[0]} is not pnpm@${pnpm ?? '<the workspace packageManager version>'}, the workspace's`);
+    }
+}
+
+// `# pins: local` on a line whose every URL is this machine's.
+function localOnly(line) {
+    if (!/#\s*pins:\s*local\s*$/.test(line)) return false;
+    const urls = line.replace(/#\s*pins:\s*local\s*$/, '').match(URL) ?? [];
+    return urls.length > 0 && urls.every((url) => LOOPBACK.test(url));
 }
 
 // Shell's and Dockerfiles' backslash continuations joined into one line, each
@@ -96,22 +163,6 @@ function logicalLines(lines, kind) {
     return joined;
 }
 
-// The shell lines of a JSON file: each string value's, at the line it is on.
-function jsonLines(text, lines) {
-    const strings = [];
-    const walk = (value) => {
-        if (typeof value === 'string') strings.push(value);
-        else if (value && typeof value === 'object') Object.values(value).forEach(walk);
-    };
-    walk(JSON.parse(text));
-    const out = [];
-    for (const value of strings) {
-        const at = Math.max(lines.findIndex((line) => line.includes(JSON.stringify(value).slice(1, -1))), 0);
-        for (const line of value.split('\n')) out.push({ index: at, line, exempt: /#\s*unpinned:\s*\S/.test(line) });
-    }
-    return out;
-}
-
 // The marker on the line, or on any line of the comment block right above it.
 function exempted(lines, start, line) {
     if (/#\s*unpinned:\s*\S/.test(line)) return true;
@@ -130,6 +181,9 @@ function dockerfileLine(line, index, lines, report) {
     const named = stages(lines);
     const image = (ref, what) => {
         if (ref === 'scratch' || /^\d+$/.test(ref) || named.has(ref.toLowerCase()) || IMAGE.test(ref)) return;
+        // A stage per platform (`FROM node-${TARGETARCH}`): each platform's is a stage above.
+        const each = ref.toLowerCase().replace(/\$\{?targetarch\}?/g, '\0');
+        if (each.includes('\0') && ['amd64', 'arm64'].every((arch) => named.has(each.replaceAll('\0', arch)))) return;
         report(index, `${what} ${ref} is not name:tag@sha256:<index digest>`);
     };
     const words = instruction[2].trim().split(/\s+/);
@@ -238,400 +292,6 @@ function matrixValues(lines, index, key) {
         }
     }
     return values;
-}
-
-// The file's shell, in order: a workflow's `run:`s, a Dockerfile's `RUN`s, a
-// script's every line.
-function script(logical, kind) {
-    const out = [];
-    let block = null;
-    for (const { index, line, exempt } of logical) {
-        let text = line;
-        if (kind === 'workflow') {
-            // A `run:`'s own line, or a line of its block: deeper than its key.
-            const run = line.match(/^(\s*(?:-\s+)?)run:\s*(.*)$/);
-            const indent = line.match(/^\s*/)[0].length;
-            if (run) {
-                block = /^[|>][-+0-9]*\s*(#.*)?$/.test(run[2]) ? run[1].length : null;
-                text = block === null ? run[2] : '';
-            } else if (block !== null && (line.trim() === '' || indent > block)) {
-                text = line;
-            } else {
-                block = null;
-                continue;
-            }
-        }
-        if (kind === 'dockerfile') {
-            const run = text.match(/^\s*RUN\s+(?:--\S+\s+)*(.*)$/i);
-            if (!run) continue;
-            text = run[1];
-        }
-        for (const command of commands(text)) out.push({ ...command, index, exempt });
-    }
-    return out;
-}
-
-const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for', 'case', 'esac', '!', '{', '}', 'local', 'export', 'readonly', 'declare']);
-// The commands that run the command after them, with their options that take a value.
-const WRAPPERS = new Map([
-    ['sudo', { value: ['-u', '--user', '-g', '--group', '-C', '--close-from', '-D', '--chdir', '-h', '--host', '-p', '--prompt', '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout'] }],
-    ['env', { value: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'] }],
-    ['timeout', { value: ['-s', '--signal', '-k', '--kill-after'], operands: 1 }],
-    ['nice', { value: ['-n', '--adjustment'] }],
-    ['ionice', { value: ['-c', '--class', '-n', '--classdata'] }],
-    ['stdbuf', { value: ['-i', '-o', '-e'] }],
-    ['xargs', { value: ['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '--max-lines', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars'] }],
-    ['nohup', {}],
-    ['exec', { value: ['-a'] }],
-    ['time', { value: ['-f', '--format', '-o', '--output'] }],
-    ['command', {}],
-]);
-// What only fetches, for a command whose program this cannot read: `docker`,
-// `git` or `pnpm` as a word is as often a name (a group, a service) as a run.
-const FETCHES = new Set(['curl', 'wget', 'apt-get', 'npx', 'pnpx', 'bunx']);
-const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
-
-/**
- * A line of shell as its simple commands, in the order they start: each its
- * words (quotes taken off), `argv` (the words after keywords and
- * assignments), its redirects, whether it pipes into the next or takes the
- * previous one's output, and `parent`, the command whose `$(…)` it runs in.
- */
-export function commands(text) {
-    const out = [];
-    parse(text, out, null);
-    for (const command of out) {
-        const words = command.words;
-        let i = 0;
-        for (;;) {
-            while (i < words.length && (KEYWORDS.has(words[i]) || ASSIGNMENT.test(words[i]))) i++;
-            const wrapper = WRAPPERS.get(words[i]);
-            if (!wrapper) break;
-            // `command -v curl` looks it up and runs nothing.
-            if (words[i] === 'command' && /^-[vV]$/.test(words[i + 1] ?? '')) {
-                i = words.length;
-                break;
-            }
-            for (i++; i < words.length && words[i].startsWith('-') && words[i] !== '-'; i++) {
-                if (words[i] === '--') {
-                    i++;
-                    break;
-                }
-                if (!words[i].includes('=') && wrapper.value?.includes(words[i])) i++;
-            }
-            i += wrapper.operands ?? 0;
-        }
-        command.argv = words.slice(i);
-        // `corepack pnpm …` runs pnpm; `corepack prepare …` is corepack's own.
-        if (command.argv[0] === 'corepack' && ['pnpm', 'pnpx', 'yarn', 'npm', 'npx'].includes(command.argv[1])) command.argv = command.argv.slice(1);
-    }
-    return out;
-}
-
-function parse(text, out, parent) {
-    const fresh = (pipeIn) => ({ words: [], redirects: [], pipeIn, pipeOut: false, parent, pending: null });
-    let command = fresh(false);
-    let word = null;
-    const endWord = () => {
-        if (word === null) return;
-        if (command.pending) {
-            command.redirects.push({ ...command.pending, target: word });
-            command.pending = null;
-        } else command.words.push(word);
-        word = null;
-    };
-    const end = (pipe) => {
-        endWord();
-        if (command.words.length > 0 || command.redirects.length > 0) {
-            command.pipeOut = pipe;
-            delete command.pending;
-            out.push(command);
-        }
-        command = fresh(pipe);
-    };
-    // `$(…)`: its commands are the current one's children; the word keeps its text.
-    const substitute = (at) => {
-        const close = closing(text, at + 1);
-        parse(text.slice(at + 2, close), out, command);
-        return close;
-    };
-    for (let i = 0; i < text.length; i++) {
-        const c = text[i];
-        if (c === '\\') {
-            word = (word ?? '') + (text[i + 1] ?? '');
-            i++;
-        } else if (c === "'") {
-            const close = text.indexOf("'", i + 1);
-            const stop = close < 0 ? text.length : close;
-            word = (word ?? '') + text.slice(i + 1, stop);
-            i = stop;
-        } else if (c === '"') {
-            let j = i + 1;
-            let value = '';
-            while (j < text.length && text[j] !== '"') {
-                if (text[j] === '\\') {
-                    value += text[j + 1] ?? '';
-                    j += 2;
-                } else if (text[j] === '$' && text[j + 1] === '(') {
-                    const close = substitute(j);
-                    value += text.slice(j, close + 1);
-                    j = close + 1;
-                } else value += text[j++];
-            }
-            word = (word ?? '') + value;
-            i = j;
-        } else if (c === '$' && text[i + 1] === '(') {
-            const close = substitute(i);
-            word = (word ?? '') + text.slice(i, close + 1);
-            i = close;
-        } else if (c === '$' && text[i + 1] === '{') {
-            const close = text.indexOf('}', i);
-            const stop = close < 0 ? text.length - 1 : close;
-            word = (word ?? '') + text.slice(i, stop + 1);
-            i = stop;
-        } else if (/\s/.test(c)) {
-            endWord();
-        } else if (c === '#' && word === null) {
-            break;
-        } else if (c === ';' || c === '(' || c === ')') {
-            if (c === ';' && text[i + 1] === ';') i++;
-            end(false);
-        } else if (c === '|') {
-            if (text[i + 1] === '|') {
-                i++;
-                end(false);
-            } else end(true);
-        } else if (c === '&' && text[i + 1] === '>') {
-            endWord();
-            i++;
-            const append = text[i + 1] === '>';
-            if (append) i++;
-            command.pending = { fd: 'all', op: append ? '>>' : '>' };
-        } else if (c === '&') {
-            if (text[i + 1] === '&') i++;
-            end(false);
-        } else if (c === '>' || c === '<') {
-            let fd = c === '>' ? '1' : '0';
-            if (word !== null && /^\d+$/.test(word)) {
-                fd = word;
-                word = null;
-            } else endWord();
-            let op = c;
-            if (/[>&|]/.test(text[i + 1] ?? '')) op += text[++i];
-            command.pending = { fd, op };
-        } else word = (word ?? '') + c;
-    }
-    end(false);
-}
-
-// The `)` that closes the `(` at `open`.
-function closing(text, open) {
-    let depth = 0;
-    for (let j = open; j < text.length; j++) {
-        const c = text[j];
-        if (c === '\\') j++;
-        else if (c === "'") {
-            j = text.indexOf("'", j + 1);
-            if (j < 0) return text.length;
-        } else if (c === '"') {
-            for (j++; j < text.length && text[j] !== '"'; j++) if (text[j] === '\\') j++;
-        } else if (c === '(') depth++;
-        else if (c === ')' && --depth === 0) return j;
-    }
-    return text.length;
-}
-
-// The first word after the options, skipping the values of those that take one.
-function operand(args, takesValue) {
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        if (!arg.startsWith('-') || arg === '-') return { value: arg, at: i };
-        if (!arg.includes('=') && takesValue.has(arg)) i++;
-    }
-    return null;
-}
-
-const PNPM_VALUE = new Set(['-C', '--dir', '-F', '--filter', '--filter-prod', '--reporter', '--loglevel', '--workspace-concurrency', '--store-dir', '--config']);
-const DOCKER_VALUE = new Set(['-a', '--attach', '--add-host', '--cap-add', '--cap-drop', '--cgroupns', '--cidfile', '--cpus', '-c', '--cpu-shares', '--device', '--dns', '--entrypoint', '-e', '--env', '--env-file', '--expose', '--gpus', '-h', '--hostname', '--health-cmd', '--ip', '-l', '--label', '--log-driver', '--log-opt', '-m', '--memory', '--mount', '--name', '--network', '--net', '--platform', '-p', '--publish', '--pull', '--restart', '--security-opt', '--shm-size', '--stop-signal', '--stop-timeout', '--tmpfs', '-u', '--user', '--ulimit', '-v', '--volume', '--volumes-from', '-w', '--workdir']);
-const NPX_VALUE = new Set(['-c', '--call', '--cache', '--userconfig']);
-const SHA256 = /^(sha256|sha256sum|shasum)$/;
-// Programs that take a command's name as a word and run nothing.
-const NAMES = new Set(['echo', 'printf', 'which', 'type', 'hash', 'grep', 'rg', 'test', '[', '[[', 'case', 'need', 'require']);
-
-function shell(list, report) {
-    const assigned = new Map();
-    for (const command of list) {
-        for (const word of command.words) {
-            const assignment = word.match(ASSIGNMENT);
-            if (assignment) assigned.set(assignment[1], assignment[2]);
-        }
-    }
-    list.forEach((command, at) => {
-        if (command.exempt) return;
-        const [program, ...args] = command.argv;
-        const say = (message) => report(command.index, message);
-        // A command that runs another this cannot pick out (`retry curl …`, `sudo --weird curl`).
-        const hidden = command.argv.slice(1).find((word) => FETCHES.has(word));
-        if (hidden && (program === undefined || program.startsWith('-') || !NAMES.has(program)) && !FETCHES.has(program)) {
-            say(`${program} runs ${hidden} in a way this cannot read: run it directly, or say why with # unpinned:`);
-        }
-        if (program === 'curl' || program === 'wget') download(list, at, program, args, say);
-        if (program === 'git' && operand(args, new Set(['-C', '-c']))?.value === 'clone') clone(list, at, args, say);
-        // `docker image pull` and `docker container run|create` are the same commands.
-        const docker = program === 'docker' && ((args[0] === 'image' && args[1] === 'pull') || (args[0] === 'container' && ['run', 'create'].includes(args[1]))) ? args.slice(1) : args;
-        if (program === 'docker' && ['run', 'create', 'pull'].includes(docker[0])) {
-            const image = operand(docker.slice(1), DOCKER_VALUE)?.value;
-            const variable = image?.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
-            // An image a variable names: a pinned one, or compose's, which is pinned.
-            const value = variable ? assigned.get(variable[1]) : image;
-            const pinned = value !== undefined && (IMAGE.test(value) || (variable && /docker compose config/.test(value)));
-            if (!pinned) say(`docker ${docker[0]} ${image ?? 'with no image'}: not name:tag@sha256:<index digest>`);
-        }
-        if (program === 'pnpm') {
-            const sub = operand(args, PNPM_VALUE);
-            const rest = sub ? args.slice(sub.at + 1) : [];
-            if (sub && ['install', 'i'].includes(sub.value) && !args.some((arg) => /^--frozen-lockfile(=true)?$/.test(arg))) say('pnpm install without --frozen-lockfile');
-            if (sub?.value === 'add') {
-                for (const spec of rest.filter((arg) => !arg.startsWith('-'))) {
-                    if (!EXACT_VERSION.test(spec.slice(spec.lastIndexOf('@') + 1))) say(`pnpm add ${spec} is not name@<exact version>`);
-                }
-            }
-            if (sub?.value === 'dlx') runner('pnpm dlx', rest, say);
-        }
-        // A package runner names its package's exact version.
-        if (['npx', 'pnpx', 'bunx'].includes(program)) runner(program, args, say);
-        if (program === 'yarn' && args[0] === 'dlx') runner('yarn dlx', args.slice(1), say);
-        // npm, which this repository installs nothing with, only for a local tarball: what it fetches is that file.
-        if (program === 'npm' && ['install', 'i', 'add'].includes(operand(args, new Set(['--prefix']))?.value)) {
-            const sub = operand(args, new Set(['--prefix']));
-            const rest = args.slice(sub.at + 1);
-            const named = rest.filter((arg, i) => !arg.startsWith('-') && rest[i - 1] !== '--prefix');
-            // A file of this machine's: no scheme (`https:`, `git+ssh:`, `file:`), no `owner/repo#ref`.
-            const local = (arg) => arg.endsWith('.tgz') && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(arg) && !arg.includes('#');
-            if (named.length === 0 || !named.every(local)) say('npm install outside a lockfile');
-        }
-        if ((program === 'apt-get' || program === 'apt') && args.includes('install')) say("apt-get install takes the archive's current versions");
-        // nvm checks what it downloads against the same server's SHASUMS256.txt, pinned by nobody.
-        if (program === 'nvm' && ['install', 'reinstall-packages', 'install-latest-npm'].includes(args[0])) {
-            say(`nvm ${args[0]} checks Node against nodejs.org's own list: download the tarball and check its pinned SHA-256`);
-        }
-        // Corepack fetches the version it is named, or packageManager's, which check:pins holds exact.
-        if (program === 'corepack' && ['prepare', 'install', 'use', 'up'].includes(args[0])) {
-            const specs = args.slice(1).filter((arg) => !arg.startsWith('-'));
-            if (args[0] === 'up') say('corepack up moves packageManager to the newest version');
-            for (const spec of specs) {
-                if (!EXACT_VERSION.test(spec.slice(spec.lastIndexOf('@') + 1)) || spec.lastIndexOf('@') <= 0) say(`corepack ${args[0]} ${spec} is not name@<exact version>`);
-            }
-            if (args[0] === 'prepare' && specs.length === 0) say('corepack prepare without name@<exact version>');
-        }
-    });
-}
-
-function runner(name, args, say) {
-    // Each --package names what it fetches; without one, the command does.
-    const specs = [];
-    for (let i = 0; i < args.length; i++) {
-        if (args[i] === '-p' || args[i] === '--package') specs.push(args[++i]);
-        else if (args[i].startsWith('--package=')) specs.push(args[i].slice('--package='.length));
-    }
-    if (specs.length === 0) specs.push(operand(args, NPX_VALUE)?.value);
-    for (const spec of specs) {
-        const version = spec?.slice(spec.lastIndexOf('@') + 1);
-        if (!spec || spec.lastIndexOf('@') <= 0 || !EXACT_VERSION.test(version)) say(`${name} ${spec ?? ''} is not name@<exact version>`);
-    }
-}
-
-// The options of curl and wget that take a value: their value is no URL.
-const CURL_OPTIONS = {
-    short: 'AbcCdDeEFhHKmoQrtTuUwxXYyz',
-    long: new Set(['--output', '--header', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--json', '--form', '--request', '--user', '--user-agent', '--referer', '--write-out', '--max-time', '--connect-timeout', '--retry', '--retry-delay', '--retry-max-time', '--cacert', '--capath', '--cert', '--key', '--config', '--cookie', '--cookie-jar', '--dump-header', '--upload-file', '--proxy', '--resolve', '--connect-to', '--range', '--limit-rate', '--max-filesize', '--unix-socket', '--interface', '--stderr', '--trace', '--trace-ascii', '--oauth2-bearer', '--output-dir']),
-};
-const WGET_OPTIONS = {
-    short: 'aABdDeiIlOoPQRtTUwX',
-    long: new Set(['--output-document', '--output-file', '--append-output', '--header', '--user-agent', '--user', '--password', '--tries', '--timeout', '--wait', '--directory-prefix', '--post-data', '--post-file', '--method', '--body-data', '--body-file', '--ca-certificate', '--certificate', '--private-key', '--input-file', '--referer', '--execute', '--level', '--accept', '--reject', '--domains', '--include-directories', '--exclude-directories', '--limit-rate', '--quota']),
-};
-
-// A command's words as its operands, the options it was given a value
-// (`-o f`, `-of`, `-fsSLo f`, `--output f`, `--output=f`) and its flags.
-function options(args, takes) {
-    const operands = [];
-    const values = [];
-    const flags = [];
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        if (arg === '--') {
-            operands.push(...args.slice(i + 1));
-            break;
-        }
-        if (arg.startsWith('--')) {
-            const [option, value] = arg.includes('=') ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg, undefined];
-            if (value !== undefined) values.push({ option, value });
-            else if (takes.long.has(option)) values.push({ option, value: args[++i] });
-            else flags.push(option);
-        } else if (arg.startsWith('-') && arg !== '-') {
-            for (let j = 1; j < arg.length; j++) {
-                const option = `-${arg[j]}`;
-                if (!takes.short.includes(arg[j])) {
-                    flags.push(option);
-                    continue;
-                }
-                values.push({ option, value: j < arg.length - 1 ? arg.slice(j + 1) : args[++i] });
-                break;
-            }
-        } else operands.push(arg);
-    }
-    return { operands, values, flags };
-}
-
-// A download is written to a file, and the first command that names the file
-// after it checks its SHA-256 against a pinned one: never piped onward, kept
-// as a value, or read before.
-function download(list, at, program, args, say) {
-    const command = list[at];
-    const { operands, values, flags } = options(args, program === 'curl' ? CURL_OPTIONS : WGET_OPTIONS);
-    // The URLs are its operands, never an option's value; a health check of this machine's fetches no artifact.
-    if (operands.length > 0 && operands.every((url) => LOOPBACK.test(url))) return;
-    const output = program === 'curl' ? values.filter((v) => ['-o', '--output'].includes(v.option)) : values.filter((v) => ['-O', '--output-document'].includes(v.option));
-    let file = output.at(-1)?.value ?? null;
-    const named = program === 'curl' && flags.some((flag) => ['-O', '--remote-name', '--remote-name-all', '-J', '--remote-header-name'].includes(flag));
-    const stdout = command.redirects.find((r) => (r.fd === '1' || r.fd === 'all') && r.op.startsWith('>') && r.op !== '>&');
-    if ((file === null || file === '-') && stdout) file = stdout.target;
-    if (file === '/dev/null') return;
-    if (file === null || file === '-') {
-        if (command.pipeOut) return say(`${program} pipes a download onward: write it to a file and check its SHA-256 first`);
-        if (command.parent) return say(`${program} keeps a download as a value: write it to a file and check its SHA-256 first`);
-        if (named || program === 'wget') return say(`${program} writes a download to a name it picks: name the file (${program === 'curl' ? '-o' : '-O'}) and check its SHA-256`);
-        return say(`${program} writes a download to stdout: name the file (-o) and check its SHA-256`);
-    }
-    const next = list.findIndex((other, i) => i > at && other.words.some((word) => word.includes(file)));
-    if (next < 0 || !verifies(list, next)) say(`${program} downloads ${file}, and the first thing that reads it after does not check its SHA-256`);
-}
-
-// `echo "<sha256>  <file>" | sha256sum -c`, or `[ "$(sha256 <file>)" = "$pinned" ]`,
-// directly or through a variable it is kept in.
-function verifies(list, at) {
-    const command = list[at];
-    if (['echo', 'printf'].includes(command.argv[0]) && command.pipeOut) {
-        const check = list[at + 1];
-        const pinned = command.words.some((word) => /[0-9a-f]{64}|\$/.test(word));
-        return pinned && check?.pipeIn && SHA256.test(check.argv[0] ?? '') && check.argv.some((arg) => ['-c', '--check'].includes(arg));
-    }
-    if (!SHA256.test(command.argv[0] ?? '') || !command.parent) return false;
-    const compares = (test) => ['[', '[[', 'test'].includes(test.argv[0]) && test.argv.some((arg) => ['=', '==', '!='].includes(arg));
-    if (compares(command.parent)) return true;
-    const kept = command.parent.argv.length === 0 && command.parent.words.map((word) => word.match(ASSIGNMENT)).find(Boolean);
-    if (!kept) return false;
-    const variable = new RegExp(`\\$\\{?${kept[1]}\\b`);
-    return list.some((test, i) => i > at && compares(test) && test.words.some((word) => variable.test(word)));
-}
-
-// A clone names its commit: `--revision=<sha>`, or the next git command checks it out.
-function clone(list, at, args, say) {
-    const revision = args.findIndex((arg) => arg === '--revision' || arg.startsWith('--revision='));
-    if (revision >= 0 && COMMIT.test(args[revision].startsWith('--revision=') ? args[revision].slice('--revision='.length) : args[revision + 1] ?? '')) return;
-    const next = list.find((other, i) => i > at && other.argv[0] === 'git');
-    const checksOut = next && ['checkout', 'switch', 'reset'].includes(operand(next.argv.slice(1), new Set(['-C', '-c']))?.value) && next.argv.some((arg) => COMMIT.test(arg));
-    if (!checksOut) say('git clone takes the branch as it is: check out a commit (git -C <dir> checkout <sha>) right after');
 }
 
 // pnpm's supply-chain settings, in the workspace's and each example's. This

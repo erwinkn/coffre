@@ -724,12 +724,7 @@ while [ $# -gt 0 ]; do
 done
 
 jar="${XDG_CACHE_HOME:-$HOME/.cache}/coffre/tla2tools-$TLA_VERSION.jar"
-if [ -z "$list" ] && ! echo "$TLA_SHA256  $jar" | sha256sum -c --status 2>/dev/null; then
-  mkdir -p "$(dirname "$jar")"
-  curl -fsSL --retry 3 -o "$jar.part" "$TLA_URL"
-  echo "$TLA_SHA256  $jar.part" | sha256sum -c --quiet
-  mv "$jar.part" "$jar"
-fi
+if [ -z "$list" ]; then "$root/scripts/fetch.sh" "$TLA_URL" "$TLA_SHA256" "$jar"; fi
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT

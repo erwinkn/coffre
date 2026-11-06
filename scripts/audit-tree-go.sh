@@ -19,10 +19,6 @@ set -euo pipefail
 GO_VERSION=1.27.3
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-sha256() {
-  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
-}
-
 if [ "$(go env GOVERSION 2>/dev/null || true)" != "go$GO_VERSION" ]; then
   # Each platform's archive and its SHA-256, from go.dev/dl's own metadata.
   case "$(uname -s)-$(uname -m)" in
@@ -36,17 +32,11 @@ if [ "$(go env GOVERSION 2>/dev/null || true)" != "go$GO_VERSION" ]; then
   home="$cache/go-$GO_VERSION-$platform"
   if [ ! -x "$home/bin/go" ]; then
     file="$cache/go$GO_VERSION.$platform.tar.gz"
-    mkdir -p "$cache"
-    curl -fsSL --retry 3 -o "$file.part" "https://go.dev/dl/go$GO_VERSION.$platform.tar.gz"
-    if [ "$(sha256 "$file.part")" != "$digest" ]; then
-      echo "go$GO_VERSION.$platform.tar.gz does not match its pinned SHA-256" >&2
-      rm -f "$file.part"
-      exit 1
-    fi
+    "$root/scripts/fetch.sh" "https://go.dev/dl/go$GO_VERSION.$platform.tar.gz" "$digest" "$file"
     rm -rf "$home.part"
     mkdir -p "$home.part"
-    tar -xzf "$file.part" -C "$home.part" --strip-components=1
-    rm -f "$file.part"
+    tar -xzf "$file" -C "$home.part" --strip-components=1
+    rm -f "$file"
     mv "$home.part" "$home"
   fi
   export PATH="$home/bin:$PATH" GOTOOLCHAIN=local

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { problemsIn } from './pins.mjs';
 
 const SHA = '11d5960a326750d5838078e36cf38b85af677262';
@@ -20,7 +24,6 @@ test('an action is pinned by its commit, its version beside it; the repository�
     assert.deepEqual(one('.github/workflows/a.yml', workflow(`'actions/checkout@${SHA}' # v4.4.0`)), []);
     assert.equal(one('.github/workflows/a.yml', workflow('"actions/checkout@v4" # v4.4.0')).length, 1);
 });
-
 test('an image is name:tag@sha256:<digest>, in compose, a workflow, a Dockerfile or a command', () => {
     assert.deepEqual(one('docker-compose.yml', `services:\n  postgres:\n    image: postgres:16.14@${DIGEST}\n`), []);
     assert.match(one('docker-compose.yml', 'services:\n  postgres:\n    image: postgres:16.14\n')[0], /image postgres:16\.14 is not name:tag@sha256/);
@@ -48,125 +51,126 @@ test('an image is name:tag@sha256:<digest>, in compose, a workflow, a Dockerfile
     assert.equal(one('Dockerfile', 'FROM scratch\nADD git@github.com:o/r.git#main /src\n').length, 1);
     assert.deepEqual(one('Dockerfile', `FROM scratch\nADD https://github.com/o/r.git#${SHA} /src\n`), []);
     assert.equal(one('Dockerfile', 'FROM scratch\nADD ["https://example.com/t.tgz", "/opt/"]\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'docker run --rm -p 127.0.0.1::5432 golang:1.25-alpine go run .\n').length, 1);
-    // An image a variable names: compose's, which is pinned, or a pinned one.
-    const compose = 'image="$(docker compose config --format json | node -e \'…\')"\n';
-    assert.deepEqual(one('scripts/a.sh', `${compose}docker run --rm -e A=b -p 127.0.0.1::5432 "$image"\n`), []);
-    assert.deepEqual(one('scripts/a.sh', `image=postgres:16.14@${DIGEST}\ndocker run --rm "\${image}" -c fsync=off\n`), []);
-    assert.equal(one('scripts/a.sh', 'docker run --rm -e A=b "$image"\n').length, 1, 'nothing says what it names');
-    assert.ok(one('scripts/a.sh', 'image=postgres:16.14\ndocker run --rm "$image"\n').some((p) => p.startsWith('scripts/a.sh:2: docker run')));
-    assert.equal(one('scripts/a.sh', 'docker run --rm "postgres:16.14"\n').length, 1, 'quoted');
-    assert.equal(one('scripts/a.sh', 'docker run --rm postgres\n').length, 1, 'latest, implied');
-    assert.equal(one('scripts/a.sh', 'docker pull --platform linux/amd64 postgres\n').length, 1);
-    assert.deepEqual(one('scripts/a.sh', `docker run --rm --name pg --platform=linux/amd64 -it postgres:16.14@${DIGEST} psql\n`), []);
-    // Docker's management commands are the same commands.
-    assert.match(one('scripts/a.sh', 'docker image pull postgres:16.14\n')[0], /docker pull postgres:16\.14: not/);
-    assert.match(one('scripts/a.sh', 'docker container run --rm postgres:16.14\n')[0], /docker run postgres:16\.14: not/);
-    assert.equal(one('scripts/a.sh', 'docker container create --name pg postgres:16.14\n').length, 1);
-    assert.deepEqual(one('scripts/a.sh', `docker image pull postgres:16.14@${DIGEST}\ndocker image inspect postgres:16.14\ndocker image rm -f "$image"\n`), []);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver docker-container --use\n').length, 1, 'BuildKit’s default image');
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver-opt image=moby/buildkit:v0.34.1 --use\n').length, 1);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx build --attest type=sbom,generator=docker/buildkit-syft-scanner:1.12.1 .\n').length, 1);
 });
 
-test('a download is written to a file whose SHA-256 is checked; never piped onward', () => {
-    assert.deepEqual(one('scripts/a.sh', 'curl -fsSL -o "$file.part" "$url"\n[ "$(sha256 "$file.part")" = "$want" ] || exit 1\n'), []);
-    assert.deepEqual(one('scripts/a.sh', 'curl -fsSL --retry 3 -o "$jar.part" \\\n  "$URL"\necho "$SHA  $jar.part" | sha256sum -c --quiet\n'), []);
-    assert.deepEqual(one('scripts/a.sh', 'got="$(sha256 "$f.part")"\ncurl -o "$f.part" "$u"\nlocal got\ngot="$(sha256 "$f.part")"\nif [ "$got" != "$want" ]; then exit 1; fi\n'), []);
-    assert.deepEqual(one('.cursor/Dockerfile', 'RUN curl -fsSL -o /tmp/k.asc https://example.com/k \\\n    && echo "' + 'b'.repeat(64) + '  /tmp/k.asc" | sha256sum -c - \\\n    && gpg --dearmor /tmp/k.asc\n'), []);
-    assert.match(one('scripts/a.sh', 'curl -fsSL -o tool.tgz https://example.com/tool.tgz\ntar -xzf tool.tgz\n')[0], /downloads tool\.tgz, and the first thing that reads it after does not check its SHA-256/);
-    assert.equal(one('scripts/a.sh', 'curl -fsSL -o tool.tgz https://example.com/tool.tgz\n').length, 1, 'nothing reads it');
-    // Its output, however it is written.
-    assert.equal(one('scripts/a.sh', 'curl -fsSL https://example.com/tool.tgz > tool.tgz\ntar -xzf tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'wget -qO tool.tgz https://example.com/tool.tgz\ntar -xzf tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl -fsSLotool.tgz https://example.com/tool.tgz\ntar -xzf tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl --output=tool.tgz https://example.com/tool.tgz\ntar -xzf tool.tgz\n').length, 1);
-    assert.deepEqual(one('scripts/a.sh', 'wget -qO tool.tgz https://example.com/tool.tgz\necho "$SHA  tool.tgz" | sha256sum -c\n'), []);
-    assert.deepEqual(one('scripts/a.sh', 'curl -fsSL https://example.com/t > t\n[ "$(sha256sum t | cut -d\' \' -f1)" = "$SHA" ]\n'), []);
-    assert.match(one('scripts/a.sh', 'curl -fsSLO https://example.com/tool.tgz\n')[0], /a name it picks/);
-    assert.match(one('scripts/a.sh', 'wget https://example.com/tool.tgz\n')[0], /a name it picks/);
-    assert.match(one('scripts/a.sh', 'curl -fsSL https://example.com/version\n')[0], /writes a download to stdout/);
-    assert.match(one('scripts/a.sh', 'v="$(curl -fsSL https://example.com/version)"\n')[0], /keeps a download as a value/);
-    // A hash taken, or named, is not a hash checked; nor one checked after the file is used.
-    assert.equal(one('scripts/a.sh', 'curl -o tool.tgz https://example.com/tool.tgz\nsha256sum tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl -o tool.tgz https://example.com/tool.tgz # check tool.tgz with sha256 later\ntar -xzf tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl -o tool.tgz https://example.com/tool.tgz\n# sha256 tool.tgz\ntar -xzf tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl -o t https://example.com/t\ntar -xzf t\necho "$SHA  t" | sha256sum -c\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl -o t https://example.com/t\necho "t" | sha256sum -c\n').length, 1, 'no pinned hash beside it');
-    assert.match(one('.cursor/Dockerfile', 'RUN curl -fsSL https://example.com/install.sh | bash\n')[0], /pipes a download onward/);
-    assert.equal(one('.github/workflows/a.yml', '        run: wget -qO- https://example.com/key | gpg --dearmor\n').length, 1);
-    assert.equal(one('.github/workflows/a.yml', '        run: |\n          set -e\n          curl -fsSL https://example.com/i.sh | sh\n      - name: Next\n').length, 1, 'a run block');
-    assert.deepEqual(one('.github/workflows/a.yml', '      - name: Not curl https://example.com | sh\n'), [], 'only run: is shell');
-    // A run block whose header carries a comment, or an indentation indicator, is shell all the same.
+test('a download goes through scripts/fetch.sh or ADD --checksum; curl and wget are banned anywhere else', () => {
+    assert.deepEqual(one('scripts/a.sh', '"$root/scripts/fetch.sh" "https://go.dev/dl/go$V.tar.gz" "$digest" "$file"\ntar -xzf "$file"\n'), []);
+    assert.deepEqual(one('Dockerfile', `FROM scratch\nADD --chmod=644 --checksum=sha256:${'c'.repeat(64)} \\\n    https://example.com/tool.tar.gz /opt/\n`), []);
+    // The helper itself is the one place curl runs.
+    assert.deepEqual(one('scripts/fetch.sh', 'curl -fsSL --proto =https -o "$file.part" "$url"\n'), []);
+    assert.match(one('scripts/a.sh', 'curl -fsSL -o t.tgz https://example.com/t.tgz\n')[0], /a\.sh:1: curl downloads: use scripts\/fetch\.sh/);
+    // Checked or not, written or piped, however it is called: the name is enough.
+    for (const line of [
+        'curl -fsSL -o "$f" "$url" && echo "$SHA  $f" | sha256sum -c',
+        'curl -fsSL https://example.com/i.sh | sh',
+        'wget -qO- https://example.com/key | gpg --dearmor',
+        'v="$(curl -fsSL https://example.com/version)"',
+        'sudo -u ci -E curl -fsSL https://example.com/i.sh',
+        'env -i PATH="$PATH" curl -o t https://example.com/t',
+        'retry 3 curl -o t https://example.com/t',
+        'timeout 60 wget https://example.com/t',
+        'curl -fsS -o "$response" "$COFFRE_DEV_URL/api/me"',
+        '/usr/bin/curl -o t https://example.com/t',
+    ]) assert.equal(one('scripts/a.sh', `${line}\n`).length, 1, line);
+    assert.equal(one('.github/workflows/a.yml', '        run: |\n          set -e\n          curl -fsSL https://example.com/i.sh | sh\n').length, 1, 'a run block');
     assert.equal(one('.github/workflows/a.yml', '        run: | # Install tools\n          curl -fsSL https://example.com/i.sh | sh\n').length, 1);
-    assert.equal(one('.github/workflows/a.yml', '        run: >-  # zizmor: ignore[x]\n          pnpm install\n').length, 1);
-    assert.equal(one('.github/workflows/a.yml', '        run: |2\n            curl -fsSL https://example.com/i.sh | sh\n').length, 1);
-    // Through sudo, env and the like, with their options.
-    assert.match(one('scripts/a.sh', 'sudo -n apt-get install -y jq\n')[0], /apt-get install/);
-    assert.match(one('scripts/a.sh', 'sudo -u ci -E curl -fsSL https://example.com/i.sh | sh\n')[0], /curl pipes/);
-    assert.match(one('scripts/a.sh', 'env -i PATH="$PATH" curl -fsSL https://example.com/i.sh | sh\n')[0], /curl pipes/);
-    assert.match(one('scripts/a.sh', 'timeout -k 5 60 curl -fsSL https://example.com/i.sh | sh\n')[0], /curl pipes/);
-    assert.match(one('scripts/a.sh', 'retry 3 curl -fsSL -o t https://example.com/t\n')[0], /retry runs curl in a way this cannot read/);
-    assert.deepEqual(one('scripts/a.sh', 'command -v curl >/dev/null || exit 1\nsudo docker info >/dev/null\nusermod -aG docker ubuntu\n'), []);
-    // A loopback URL is the exemption, never a destination that looks like one.
-    assert.equal(one('scripts/a.sh', 'curl -fSL -o "$COFFRE_CACHE/tool.tgz" https://example.com/tool.tgz\ntar -xzf "$COFFRE_CACHE/tool.tgz"\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'curl -o /tmp/localhost.tgz https://example.com/t.tgz\ntar -xzf /tmp/localhost.tgz\n').length, 1);
-    assert.deepEqual(one('scripts/a.sh', 'curl -s http://127.0.0.1:3000/api/x | jq .\ncurl -s localhost:8081/.well-known/x | jq .\n'), []);
-    // A health check of the stack itself fetches nothing.
-    assert.deepEqual(one('scripts/a.sh', 'until curl -sf "$COFFRE_DEV_URL/livez" >/dev/null; do sleep 1; done\n'), []);
-    // An option's value is no URL: a response written to a file, a header, a retry count.
-    assert.deepEqual(one('scripts/a.sh', 'curl -fsS -o "$response" "$COFFRE_DEV_URL/api/me"\njq . "$response"\n'), []);
-    assert.deepEqual(one('scripts/a.sh', 'curl -fsS -H "Authorization: Bearer $token" --retry 3 -w \'%{http_code}\' "$COFFRE_DEV_URL/api/me"\n'), []);
-    assert.deepEqual(one('scripts/a.sh', 'curl -sSfo "$out" http://127.0.0.1:3000/api/x\n'), []);
-    assert.equal(one('scripts/a.sh', 'curl -fsS -o "$response" "$COFFRE_DEV_URL/api/me" https://example.com/t\njq . "$response"\n').length, 1, 'one URL elsewhere');
-    assert.equal(one('scripts/a.sh', 'curl -H "Host: localhost" -o t https://example.com/t\ntar -xf t\n').length, 1, 'a header naming localhost');
-    assert.deepEqual(one('scripts/a.sh', '# curl https://example.com/x | sh, as nobody here does\n'), []);
+    assert.equal(one('.cursor/Dockerfile', 'FROM scratch\nRUN apt-get update \\\n    && curl -fsSL -o /k https://example.com/k\n').length, 1, 'a continued RUN');
+    assert.equal(one('.cursor/environment.json', '{ "install": "curl -o t https://example.com/t\\ntar -xf t" }\n').length, 1);
+    // A comment names it without running it; libcurl and the like are other words.
+    assert.deepEqual(one('scripts/a.sh', '# curl https://example.com/x | sh, as nobody here does\npkg-config --libs libcurl\n'), []);
 });
 
-test('a toolchain installer fetches a version pinned by SHA-256 or exact', () => {
-    assert.match(one('.cursor/Dockerfile', 'RUN . "$NVM_DIR/nvm.sh" && nvm install 24\n')[0], /nvm install checks Node against nodejs\.org's own list/);
-    assert.equal(one('scripts/a.sh', 'nvm install 24.22.1\n').length, 1, 'exact, but checked against nobody’s pin');
-    assert.deepEqual(one('scripts/a.sh', '# unpinned: a developer’s own machine\nnvm install 24\n'), []);
+test('a health check of this machine is curl marked `# pins: local`, every URL on it loopback', () => {
+    assert.deepEqual(one('scripts/a.sh', 'until curl -sf "http://127.0.0.1:$port/livez" >/dev/null; do sleep 1; done # pins: local\n'), []);
+    assert.deepEqual(one('scripts/a.sh', 'curl -s http://localhost:8081/x -o "$out" # pins: local\ncurl -s "http://[::1]:3000/x" # pins: local\n'), []);
+    // Not a variable, nor another host, nor any URL beside it; the marker on the line itself.
+    assert.equal(one('scripts/a.sh', 'curl -sf "$COFFRE_DEV_URL/livez" # pins: local\n').length, 1, 'no URL it can read');
+    assert.equal(one('scripts/a.sh', 'curl -sf https://example.com/livez # pins: local\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'curl -o t http://127.0.0.1:3000/x https://example.com/t # pins: local\n').length, 1, 'one URL elsewhere');
+    assert.equal(one('scripts/a.sh', 'curl -o t https://localhost.example.com/t # pins: local\n').length, 1, 'a host named like it');
+    assert.equal(one('scripts/a.sh', 'curl -o t http://127.0.0.1.example.com/t # pins: local\n').length, 1);
+    assert.equal(one('scripts/a.sh', '# pins: local\ncurl -sf http://127.0.0.1:3000/livez\n').length, 1, 'on the line itself');
+    assert.equal(one('scripts/a.sh', 'npx tool http://127.0.0.1:3000 # pins: local\n').length, 1, 'curl and wget alone');
+});
+
+test('a package runner, a registry install, a release download or a clone is banned by name', () => {
+    for (const line of [
+        'npx -y @coffre/cli@0.15.0 --version',
+        'pnpx wrangler deploy',
+        'bunx tsx a.ts',
+        'npm exec -- wrangler deploy',
+        'npm x wrangler',
+        'npm --cache "$dir/cache" exec wrangler',
+        'npm install -g wrangler',
+        'npm i wrangler',
+        'npm ci',
+        'npm pack @coffre/cli@0.15.0',
+        'pnpm dlx wrangler@4.0.0 deploy',
+        'pnpm --dir app add jose',
+        'pnpm update',
+        'pnpm create vite',
+        'yarn dlx wrangler',
+        'gh release download v1.0.0 --repo o/r',
+        'gh release download --repo o/r --pattern "*.tgz"',
+        'gh run download 123',
+        'git clone https://github.com/a/b.git',
+        `git -C dir clone --revision=${SHA} https://github.com/a/b.git`,
+        'nvm install 24',
+        'nvm install 24.22.1',
+        'corepack up',
+        'corepack use pnpm@11.8.0',
+        'sudo apt-get install -y jq',
+        'pip install requests',
+        'go install golang.org/x/tools/cmd/goimports@latest',
+        'cargo install ripgrep',
+    ]) assert.equal(one('scripts/a.sh', `${line}\n`).length >= 1, true, line);
+    // What fetches nothing: a metadata read, a publish, a local pack, a pnpm script.
+    assert.deepEqual(one('scripts/a.sh', 'npm view @coffre/cli version\nnpm --version\nnpm publish "$dir"/*.tgz\npnpm --filter @coffre/cli pack\npnpm run add:dep jose@6.2.3\ngo run . vectors\ngit -C "$dir" checkout main\n'), []);
     assert.deepEqual(one('scripts/a.sh', 'nvm alias default "$NODE_VERSION" && nvm use default && nvm which default\n'), []);
-    assert.match(one('.cursor/Dockerfile', 'RUN corepack enable && corepack prepare pnpm@latest --activate\n')[0], /corepack prepare pnpm@latest is not name@<exact version>/);
-    assert.equal(one('scripts/a.sh', 'corepack prepare --activate\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'corepack use pnpm@11\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'corepack up\n').length, 1);
-    assert.deepEqual(one('.cursor/Dockerfile', 'RUN corepack enable && corepack prepare pnpm@11.8.0 --activate && corepack install\n'), []);
-    assert.deepEqual(one('.cursor/environment.json', '{ "install": "corepack pnpm install --frozen-lockfile" }\n'), []);
 });
 
-test('a clone checks out its commit', () => {
-    assert.deepEqual(one('.cursor/Dockerfile', `RUN git clone --quiet https://github.com/nvm-sh/nvm.git "$NVM_DIR" \\\n    && git -C "$NVM_DIR" -c advice.detachedHead=false checkout --quiet ${SHA}\n`), []);
-    assert.deepEqual(one('scripts/a.sh', `git clone --revision=${SHA} https://github.com/a/b.git\n`), []);
-    assert.match(one('.cursor/Dockerfile', 'RUN git clone --quiet https://github.com/nvm-sh/nvm.git "$NVM_DIR"\n')[0], /git clone takes the branch/);
-    assert.equal(one('scripts/a.sh', 'git clone https://github.com/a/b.git b\ngit -C b checkout v0.40.3\n').length, 1, 'a tag moves');
-    assert.equal(one('scripts/a.sh', 'git clone --branch v1 https://github.com/a/b.git\n').length, 1);
+test('Corepack fetches the workspace’s pnpm alone', () => {
+    const pnpm = { pnpm: '11.8.0' };
+    assert.deepEqual(one('.cursor/Dockerfile', 'FROM scratch\nRUN corepack enable && corepack prepare pnpm@11.8.0 --activate\n', pnpm), []);
+    assert.match(one('.cursor/Dockerfile', 'FROM scratch\nRUN corepack prepare pnpm@latest --activate\n', pnpm)[0], /pnpm@latest is not pnpm@11\.8\.0/);
+    assert.equal(one('scripts/a.sh', 'corepack pnpm@latest install --frozen-lockfile\n', pnpm).length, 1);
+    assert.equal(one('scripts/a.sh', 'corepack pnpm@11.7.0 install --frozen-lockfile\n', pnpm).length, 1);
+    assert.equal(one('scripts/a.sh', 'corepack install -g yarn@4.5.0\n', pnpm).length, 1);
+    assert.equal(one('scripts/a.sh', 'corepack prepare pnpm@11 --activate\n', pnpm).length, 1);
+    assert.deepEqual(one('scripts/a.sh', 'corepack pnpm@11.8.0 install --frozen-lockfile\n', pnpm), []);
 });
 
-test('a package runner names an exact version, and an install installs the lockfile', () => {
-    assert.deepEqual(one('scripts/a.sh', 'npx -y @coffre/cli@0.15.0 --version\n'), []);
-    assert.equal(one('scripts/a.sh', 'npx @coffre/cli --version\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'pnpm dlx wrangler@latest deploy\n').length, 1);
-    // Every package a runner fetches, each exact.
-    assert.equal(one('scripts/a.sh', 'npx --yes --package typescript@5.9.3 --package ts-node ts-node script.ts\n').length, 1);
-    assert.deepEqual(one('scripts/a.sh', 'npx --yes -p typescript@5.9.3 --package=ts-node@10.9.2 ts-node script.ts\n'), []);
+test('pnpm install carries --frozen-lockfile, each command its own', () => {
     assert.deepEqual(one('.github/workflows/a.yml', '        run: pnpm install --frozen-lockfile\n'), []);
+    assert.deepEqual(one('.cursor/environment.json', '{ "install": "nvm use 24\\ncorepack pnpm install --frozen-lockfile" }\n'), []);
+    assert.deepEqual(one('scripts/a.sh', 'pnpm -C a install --frozen-lockfile && pnpm --filter b build\n'), []);
     assert.match(one('.github/workflows/a.yml', '        run: pnpm install\n')[0], /pnpm install without --frozen-lockfile/);
     assert.equal(one('scripts/a.sh', 'pnpm --dir "$project" install --silent\n').length, 1);
-    // Each command's flags are its own.
+    assert.equal(one('scripts/a.sh', 'pnpm i\n').length, 1);
     assert.equal(one('scripts/a.sh', 'pnpm install && pnpm --dir other install --frozen-lockfile\n').length, 1);
     assert.equal(one('scripts/a.sh', 'pnpm install; echo --frozen-lockfile\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'pnpm i | tee log # --frozen-lockfile\n').length, 1);
-    assert.deepEqual(one('scripts/a.sh', 'pnpm -C a install --frozen-lockfile && pnpm --filter b build\n'), []);
-    assert.equal(one('.cursor/environment.json', '{ "install": "nvm use 24\\ncorepack pnpm install" }\n').length, 1);
-    assert.deepEqual(one('.github/workflows/a.yml', '        run: npm install --ignore-scripts --prefix "$dir" "$dir/coffre-cli-$version.tgz"\n'), []);
-    // A tarball from anywhere else is no file of this machine's.
-    assert.equal(one('scripts/a.sh', 'npm install --ignore-scripts https://example.com/tool.tgz\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'npm install --ignore-scripts git+https://github.com/o/r.git#v1.tgz\n').length, 1);
-    assert.equal(one('.github/workflows/a.yml', '        run: npm install -g wrangler\n').length, 1);
-    assert.equal(one('scripts/a.sh', 'pnpm add --save-exact jose\n').length, 1);
-    assert.equal(one('.cursor/Dockerfile', 'RUN apt-get update && apt-get install -y curl\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'pnpm i | tee log\n').length, 1);
+    assert.equal(one('scripts/a.sh', 'pnpm install --frozen-lockfile=false\n').length, 1);
+    assert.equal(one('.cursor/environment.json', '{ "install": "corepack pnpm install\\necho --frozen-lockfile" }\n').length, 1);
+});
+
+test('docker run, create or pull names its image by digest on the line', () => {
+    assert.deepEqual(one('scripts/a.sh', `docker run --rm --name pg -it postgres:16.14@${DIGEST} psql\n`), []);
+    assert.deepEqual(one('scripts/a.sh', `docker run --rm -d \\\n    -p 127.0.0.1::5432 \\\n    postgres:16.14@${DIGEST}\n`), [], 'a continued line');
+    assert.deepEqual(one('scripts/a.sh', 'docker image inspect "$image"\ndocker image rm -f "$image"\ndocker compose up -d --pull always postgres\nusermod -aG docker ubuntu\n'), []);
+    for (const line of [
+        'docker run --rm -p 127.0.0.1::5432 golang:1.25-alpine go run .',
+        'docker run --rm "$image"',
+        'docker pull postgres',
+        'docker image pull postgres:16.14',
+        'docker container run --rm postgres:16.14',
+        'docker container create --name pg postgres:16.14',
+        'sudo docker run --rm postgres:16.14',
+    ]) assert.equal(one('scripts/a.sh', `${line}\n`).length, 1, line);
+    assert.deepEqual(one('scripts/a.sh', "# unpinned: compose's image, pinned there\ndocker run --rm \"$image\"\n"), []);
 });
 
 test('a line that cannot be pinned says why, on itself or right above it', () => {
@@ -222,4 +226,48 @@ test("pnpm waits a week, runs no install script nobody decided on, and saves exa
     assert.equal(one('pnpm-workspace.yaml', root.replace('  esbuild: false', '  esbuild: false\n  ? koffi\n'), { root: true }).length, 1, 'an entry this cannot read');
     assert.match(one('pnpm-workspace.yaml', `${root}minimumReleaseAge: 0\n`, { root: true })[0], /set twice/);
     assert.match(one('pnpm-workspace.yaml', `${root}onlyBuiltDependencies:\n  - esbuild\n`, { root: true })[0], /allowBuilds is the one place/);
+});
+
+test('scripts/fetch.sh keeps a download only if its SHA-256 is the pinned one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-fetch-'));
+    try {
+        // A curl that writes $BODY to its -o, and counts its calls.
+        const bin = join(dir, 'bin');
+        writeFileSync(join(dir, 'calls'), '');
+        spawnSync('mkdir', [bin]);
+        writeFileSync(join(bin, 'curl'), `#!/bin/sh\necho call >> "${join(dir, 'calls')}"\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac; done\nprintf '%s' "$BODY" > "$out"\n`);
+        chmodSync(join(bin, 'curl'), 0o755);
+        const hello = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+        const fetch = (args, body = 'hello') => spawnSync('bash', [new URL('./fetch.sh', import.meta.url).pathname, ...args], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BODY: body }, encoding: 'utf8' });
+        const calls = () => readFileSync(join(dir, 'calls'), 'utf8').split('\n').filter(Boolean).length;
+        const file = join(dir, 'cache', 'tool.tgz');
+
+        const ok = fetch(['https://example.com/tool.tgz', hello, file]);
+        assert.equal(ok.status, 0, ok.stderr);
+        assert.equal(readFileSync(file, 'utf8'), 'hello');
+        assert.equal(existsSync(`${file}.part`), false);
+        // Kept, once its hash is the pinned one: no second download.
+        assert.equal(fetch(['https://example.com/tool.tgz', hello, file]).status, 0);
+        assert.equal(calls(), 1);
+
+        // Another body: refused, and nothing kept.
+        const other = join(dir, 'other.tgz');
+        const bad = fetch(['https://example.com/tool.tgz', hello, other], 'tampered');
+        assert.equal(bad.status, 1);
+        assert.match(bad.stderr, /not the pinned 2cf24dba/);
+        assert.equal(existsSync(other), false);
+        assert.equal(existsSync(`${other}.part`), false);
+        // A file there with another hash is fetched again, and refused again.
+        writeFileSync(other, 'stale');
+        assert.equal(fetch(['https://example.com/tool.tgz', hello, other], 'tampered').status, 1);
+
+        // Only https, only a SHA-256, all three arguments.
+        assert.equal(fetch(['http://example.com/tool.tgz', hello, other]).status, 2);
+        assert.equal(fetch(['https://example.com/tool.tgz', 'abc', other]).status, 2);
+        assert.equal(fetch(['https://example.com/tool.tgz', hello.toUpperCase(), other]).status, 2);
+        assert.equal(fetch(['https://example.com/tool.tgz', hello]).status, 2);
+        assert.equal(calls(), 3);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 });

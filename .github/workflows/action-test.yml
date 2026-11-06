@@ -57,6 +57,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/coffre-action-consumer"
           pnpm --filter @coffre/cli pack --pack-destination "$RUNNER_TEMP/coffre-action-consumer"
           version=$(node -p 'JSON.parse(require("fs").readFileSync("packages/cli/package.json")).version')
+          # unpinned: this revision's own packed CLI, a file here; it depends on nothing, so npm fetches no package.
           npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/coffre-action-consumer" "$RUNNER_TEMP/coffre-action-consumer/coffre-cli-$version.tgz"
       - name: Boot and seed a real coffre deployment
         run: |
