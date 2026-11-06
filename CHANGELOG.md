@@ -14,8 +14,8 @@
   checkpoint, down from 2,000 (W331, limits #18).** The 2,000 came from a
   rate, four ticks at 1,000 uses a second, and cost some 31 ms of a
   Worker's CPU in local workerd. The bound now comes from a budget, R27's
-  20 ms for the check at the cap, at the median, its p90 about there, and the check's
-  measured cost in workerd: 4.5 ms, then 13.4 µs an entry
+  20 ms for the check at the cap at the median, its p90 about there, and
+  the check's measured cost in workerd: 4.5 ms, then 13.4 µs an entry
   (`packages/vault/test/bench/verifier.ts`). Past it, the audit page shows
   "Sealed log not checked to the head (1,000+ entries pending)", and
   `coffre verify instance` and conformance fail that check as the
