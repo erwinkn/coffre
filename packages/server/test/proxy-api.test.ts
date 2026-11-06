@@ -172,7 +172,9 @@ test("the tab marks an item that would not route now, until someone who reads it
   // lacks, is decided at use.
   await root.access.set(LIN, { 'market/dev': null });
   assert.deepEqual(await marks(), [['maps', null], ['openai', 'OPENAI_API_KEY']]);
-  assert.match((await vic.proxy.get('market/dev')).items[1]!.notCleared!.reason, /OPENAI_API_KEY: its editor does not read it in dev/);
+  const unread = (await vic.proxy.get('market/dev')).items[1]!.notCleared!;
+  assert.deepEqual([unread.code, unread.environment], ['unread', 'dev']);
+  assert.match(unread.reason, /OPENAI_API_KEY: its editor does not read it in dev/);
   // Her offboarding preview names what she saved, each stopped once she no longer reads its keys.
   assert.deepEqual((await root.members.get(LIN)).proxy, [
     { project: 'market', environment: 'dev', name: 'maps', kind: 'route', keys: ['MAPS_KEY'] },
@@ -188,8 +190,25 @@ test("the tab marks an item that would not route now, until someone who reads it
   const again = await lin.proxy.save('market/dev', { seal: (await lin.proxy.get('market/dev')).seal, items: { openai: route('openai') } });
   assert.equal(again.items.find((item) => item.definition.name === 'openai')!.savedBy, LIN);
   await root.secrets.set('market/dev', { OPENAI_API_KEY: { value: 'sk-dev-2', sensitivity: 'sensitive' } });
+  // She is no Owner, nor was her save: what it froze is why, whatever she is now.
   const mark = (await vic.proxy.get('market/dev')).items.find((item) => item.definition.name === 'openai')!.notCleared;
-  assert.equal(mark?.key, 'OPENAI_API_KEY');
+  assert.deepEqual([mark?.key, mark?.code, mark?.environment], ['OPENAI_API_KEY', 'not_owner_at_save', 'dev']);
+  await root.access.set(LIN, { market: 'owner', 'market/dev': null });
+  assert.equal((await vic.proxy.get('market/dev')).items.find((item) => item.definition.name === 'openai')!.notCleared?.code, 'not_owner_at_save');
+});
+
+test("an Owner's save of a sensitive key stops routing once they are no Owner, and the mark says so, not that the save was no Owner's", ON_015, async () => {
+  await pat.proxy.save('market/dev', { seal: null, items: { stripe2: route('stripe2', ['STRIPE_SECRET_KEY']) } });
+  const mark = async () => (await vic.proxy.get('market/dev')).items[0]!.notCleared;
+  assert.equal(await mark(), null);
+  // Pat, a Router of market now: she still reads market/dev, and owns nothing there.
+  await root.access.set(PAT, { market: 'router' });
+  const now = await mark();
+  assert.deepEqual([now?.key, now?.code, now?.environment], ['STRIPE_SECRET_KEY', 'not_owner', 'dev']);
+  assert.match(now!.reason, /STRIPE_SECRET_KEY is sensitive, and its editor, an Owner of its project when they saved it, no longer is/);
+  // An Owner again: it routes as she saved it.
+  await root.access.set(PAT, { market: 'owner' });
+  assert.equal(await mark(), null);
 });
 
 test("a fork's inherited item is marked where the fork resolves its keys: its own value over its parent's", ON_015, async () => {
@@ -201,8 +220,13 @@ test("a fork's inherited item is marked where the fork resolves its keys: its ow
   // dev-eu sets its own, which Lin does not read: dev's item, inherited, would not route there, though it does in dev.
   await root.secrets.set('market/dev-eu', { OPENAI_API_KEY: 'sk-eu' });
   assert.equal((await vic.proxy.get('market/dev')).items[0]!.notCleared, null);
-  assert.equal((await inherited())?.openai?.key, 'OPENAI_API_KEY');
-  assert.match((await inherited())!.openai!.reason, /its editor does not read it in dev-eu/);
+  const unread = (await inherited())!.openai!;
+  assert.deepEqual([unread.key, unread.code, unread.environment], ['OPENAI_API_KEY', 'unread', 'dev-eu']);
+  assert.match(unread.reason, /its editor does not read it in dev-eu/);
+  // Given read of dev-eu since: she reads it now, and what her save froze, a role on market/dev alone, does not.
+  await root.access.set(LIN, { 'market/dev': 'router', 'market/dev-eu': 'router' });
+  const frozen = (await inherited())!.openai!;
+  assert.deepEqual([frozen.key, frozen.code, frozen.environment], ['OPENAI_API_KEY', 'unread_at_save', 'dev-eu']);
 });
 
 test("a reference is decided where it lives (R71): its sensitive value is routed by an Owner of the holder's project, whatever project its source is in", ON_015, async () => {
