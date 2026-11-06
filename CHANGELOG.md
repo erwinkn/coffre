@@ -43,10 +43,12 @@
   slashes are trimmed in a pass, not by a regular expression's retries; a
   device login's admission reads the open logins' addresses and never their
   labels; and a sign-in's claim matching takes, at each step, the cheaper of
-  looking up the name's splits or trying the token's keys, all the bindings
-  it weighs within one budget, `MATCH_NS` (16 ms, what R27's 20 ms leaves
-  after the largest read, spent at measured costs): past it, nothing
-  matches.
+  looking up the name's splits or trying the token's keys. A workload's
+  sign-in has one budget, `SIGN_IN_WORK_NS` (16 ms, what R27's 20 ms leaves
+  after the largest read, spent at measured costs), for its token's tries
+  against its issuer's keys, each paid for with the token's size, and for
+  matching its claims against every binding it weighs: past it, the
+  sign-in is refused.
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

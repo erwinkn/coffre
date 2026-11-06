@@ -24,8 +24,9 @@
  * no GitHub binding matches `sub`: `ref` and `workflow_ref` stay as they were.
  */
 
-import { READ_CPU_US, REQUEST_CPU_US, shownMember } from '../schemas.ts';
+import { shownMember } from '../schemas.ts';
 import type { Constraints } from './constraints.ts';
+import { CHAR_NS, DOT_NS, KEY_LISTED_NS, KEY_TRIED_NS, LIST_THRESHOLD_NS, SLICE_NS, signInWork, type SignInWork } from './sign-in-work.ts';
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 export const GITLAB_ISSUER = 'https://gitlab.com';
@@ -408,17 +409,22 @@ function checkGitLab(claims: BindingClaims): void {
  * `kubernetes.io.serviceaccount.uid` is `4f1c…`, `kubernetes.io` an object,
  * and `kubernetes.io.pod` nothing.
  */
-export function claimAt(claims: Record<string, unknown>, name: string, work: MatchWork = matchWork()): unknown {
+export function claimAt(claims: Record<string, unknown>, name: string, work: SignInWork = signInWork()): unknown {
   // Each step finds the keys of the object it is in that the name continues with, from where it is to a dot or its
   // end, whichever way costs less: each such end's slice looked up, or the object's keys tried, listed once and kept.
   // So a short name in a wide object costs a few lookups, and a long dotted name in a small one a few keys, never
   // every split of the name nor every key for every claim; each object at each place in the name is read once, its
   // readings kept (two meaning several), however many ways lead to it. What each step does is spent from `work`
-  // (`MATCH_NS`): once it is gone, the name reads nothing, nor does any other that shares it.
+  // (`SIGN_IN_WORK_NS`): once it is gone, the name reads nothing, nor does any other that shares it.
   if (work.left < 0) return undefined;
-  const dots: number[] = [];
-  for (let at = name.indexOf('.'); at !== -1; at = name.indexOf('.', at + 1)) dots.push(at);
+  // The name's dots, each paid for as it is found: a name of nothing but dots stops once the budget is spent.
   work.left -= name.length * CHAR_NS;
+  const dots: number[] = [];
+  for (let at = name.indexOf('.'); at !== -1 && work.left >= 0; at = name.indexOf('.', at + 1)) {
+    dots.push(at);
+    work.left -= DOT_NS;
+  }
+  if (work.left < 0) return undefined;
   // `after[i]`, the sum of the dots from the i-th on: the lengths of a step's slices, summed at once.
   const after = new Array<number>(dots.length + 1).fill(0);
   for (let i = dots.length - 1; i >= 0; i--) after[i] = after[i + 1]! + dots[i]!;
@@ -481,38 +487,6 @@ export function claimAt(claims: Record<string, unknown>, name: string, work: Mat
 }
 
 /**
- * What matching a sign-in's claims may spend, in nanoseconds of CPU, for all
- * the bindings it weighs and all their claims together: what is left of a
- * request's CPU once the largest body is read (`REQUEST_CPU_US` less
- * `READ_CPU_US`, 16 ms; a sign-in's own body is small). A real sign-in
- * spends a few microseconds; hundreds of long names against as many long
- * keys, or a thousand claims in each of sixteen bindings, would spend
- * hundreds of milliseconds, and match nothing once this is spent.
- */
-export const MATCH_NS = (REQUEST_CPU_US - READ_CPU_US) * 1000;
-
-// What each step costs, in nanoseconds, as `claimAt` and its callers spend it: measured on Node 24, the median of
-// seven, over keys of 4 to 1,400 characters, each rounded up.
-/** A character compared, sliced, or parsed (a binding's claims, before they are read). */
-export const CHAR_NS = 2.2;
-/** A key of the token's listed (`Object.keys`), once an object, then kept for every claim. */
-const KEY_LISTED_NS = 25;
-/** A listed key tried against the name, beside its characters. */
-const KEY_TRIED_NS = 5;
-/** A slice of the name looked up in the object, beside its characters. */
-const SLICE_NS = 10;
-/** Below this, a step's slices are looked up without listing the object's keys: a short name's handful. */
-const LIST_THRESHOLD_NS = 64 * SLICE_NS;
-
-/** What is left of a search's time (`MATCH_NS`), spent as it reads, and the keys it listed of each object. */
-export type MatchWork = { left: number; keys: WeakMap<object, { keys: string[]; chars: number }> };
-
-/** A search's budget, `MATCH_NS`: one for a sign-in, whatever bindings it weighs. */
-export function matchWork(): MatchWork {
-  return { left: MATCH_NS, keys: new WeakMap() };
-}
-
-/**
  * The claims of a verified token that differ from what a binding expects,
  * by name: none when it matches. A claim matches when the token carries its
  * value, or one of its values, where `claimAt` reads it. On GitHub's
@@ -525,7 +499,7 @@ export function matchWork(): MatchWork {
  *   case-insensitive, so `Production` and `production` are one environment,
  *   under the same protection rules.
  */
-export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>, work: MatchWork = matchWork()): string[] {
+export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>, work: SignInWork = signInWork()): string[] {
   const github = profile.startsWith('github');
   const claims = github ? atBaseBranch(token) : token;
   // One budget for all of them, and for every binding the sign-in weighs (`work`, its caller's): a search that costs

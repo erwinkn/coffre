@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decodeWorkloadToken, keySummaries, KeysInvalid, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
+import { decodeWorkloadToken, KEY_TRY_NS, keySummaries, KeysInvalid, SIGN_IN_WORK_NS, signInWork, TOKEN_BYTE_NS, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused } from '@coffre/core/identity';
 import { MAX_BODY_NODES } from '@coffre/core/schemas';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 
@@ -161,6 +161,23 @@ test('an uploaded key set keeps the public keys that sign, written one way, and 
   const respelled = `${ec.jwk.x!.slice(0, -1)}${'AEIMQUYcgkosw048'.includes(last) ? String.fromCharCode(last.charCodeAt(0) + 1) : last}`;
   if (respelled !== ec.jwk.x) await invalid({ keys: [{ ...ec.jwk, x: respelled }] }, /32 bytes/);
   await invalid({ keys: [{ ...ec.jwk, x: `${ec.jwk.x}AA` }] }, /32 bytes/);
+});
+
+test("a token tried against several keys pays each try from the sign-in's budget, its size counted: a large one gets few", async () => {
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const keys = await Promise.all(Array.from({ length: 32 }, async (_, i) => unnamed((await signer('ES256', `k${i}`)).jwk)));
+  const stranger = await signer('ES256', 'stranger');
+  // 700,000 characters in its header, a body's single value: each try decodes and hashes all of it again (review r4).
+  const large = await stranger.sign({}, { kid: undefined, pad: 'x'.repeat(700_000) });
+  const work = signInWork();
+  const started = process.cpuUsage();
+  await assert.rejects(verifyWorkloadToken(large, { keys }, { issuer: ISSUER, audience: AUDIENCE, now: NOW, work }), /costs more to check against every one of its issuer's keys/);
+  const spent = process.cpuUsage(started);
+  assert.ok(work.left < 0);
+  assert.ok((spent.user + spent.system) / 1000 < 40, `took ${(spent.user + spent.system) / 1000} ms of CPU`);
+  // A token of the usual size is tried against all 32 within it, as before.
+  await refused(verifyWorkloadToken(await stranger.sign({}, { kid: undefined }), { keys }, { issuer: ISSUER, audience: AUDIENCE, now: NOW, work: signInWork() }), 'signature');
+  assert.ok(32 * (KEY_TRY_NS + 2048 * TOKEN_BYTE_NS) < SIGN_IN_WORK_NS);
 });
 
 test('a token that names no key verifies under whichever key of the set signed it, as while an issuer rotates', async () => {

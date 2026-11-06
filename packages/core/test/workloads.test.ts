@@ -13,8 +13,8 @@ import {
   githubWorkflow,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
-  MATCH_NS,
-  matchWork,
+  SIGN_IN_WORK_NS,
+  signInWork,
   MAX_ISSUER_BYTES,
   type BindingClaims,
 } from '@coffre/core/identity';
@@ -273,14 +273,14 @@ test("a claim's lookup costs the token's keys, not the ways a long name splits: 
   assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
 });
 
-test("matching a sign-in's claims spends at most MATCH_NS of CPU, every binding it weighs together; past it, nothing matches", () => {
+test("matching a sign-in's claims spends at most SIGN_IN_WORK_NS of CPU, every binding it weighs together; past it, nothing matches", () => {
   const cpu = (run: () => unknown) => {
     const started = process.cpuUsage();
     const result = run();
     const spent = process.cpuUsage(started);
     return { result, ms: (spent.user + spent.system) / 1000 };
   };
-  assert.equal(MATCH_NS, 16_000_000);
+  assert.equal(SIGN_IN_WORK_NS, 16_000_000);
   // Wide and short, as a binding with no count of its own may be: each claim a lookup or two, read at once and matched.
   const wide = Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`c${i}`, 'v']));
   const short = cpu(() => differingClaims('custom', { sub: 'x', ...wide }, { sub: 'x', ...wide }));
@@ -294,7 +294,7 @@ test("matching a sign-in's claims spends at most MATCH_NS of CPU, every binding 
   assert.deepEqual(shared.result, []);
   assert.ok(shared.ms < 16, `500 long claims took ${shared.ms} ms`);
   // Sixteen bindings of a thousand claims, each differing in one: one budget for the search, not one each (review r3).
-  const work = matchWork();
+  const work = signInWork();
   const token = { sub: 'x', ...Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`c${i}`, 'v'])) };
   const search = cpu(() => Array.from({ length: 16 }, (_, b) => differingClaims('custom', { ...token, [`c${b}`]: 'other' }, token, work)));
   assert.ok(search.ms < 40, `sixteen bindings took ${search.ms} ms`);
@@ -304,9 +304,15 @@ test("matching a sign-in's claims spends at most MATCH_NS of CPU, every binding 
   const spent = cpu(() => differingClaims('custom', Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`${dotted}${i}`, 'v'])), wideToken));
   assert.equal((spent.result as string[]).length, 200);
   assert.ok(spent.ms < 40, `the costly search took ${spent.ms} ms`);
+  // Names of nothing but dots, one to a binding, each found dot paid for as it is found: the search stops once the
+  // budget is spent, not after every binding's names are taken apart (review r4).
+  const dots = signInWork();
+  const prepared = cpu(() => Array.from({ length: 6 }, (_, b) => differingClaims('custom', { sub: 'x', [`${'.'.repeat(400_000)}${b}`]: 'v' }, { sub: 'x' }, dots)));
+  assert.ok(dots.left < 0);
+  assert.ok(prepared.ms < 40, `six bindings of 400,000 dots took ${prepared.ms} ms`);
   // Spent, a reading is none, though the token holds it.
-  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...matchWork(), left: 0 }), undefined);
-  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...matchWork(), left: 100 }), 'x');
+  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...signInWork(), left: 0 }), undefined);
+  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...signInWork(), left: 100 }), 'x');
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

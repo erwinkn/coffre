@@ -156,8 +156,12 @@ function formComponent(bytes: Uint8Array, start: number, end: number): string {
   return LENIENT.decode(out.subarray(0, n));
 }
 
-/** UTF-8 as a form's names and values are read: an invalid sequence a replacement character, as `URLSearchParams` has it. */
-const LENIENT = new TextDecoder();
+/**
+ * UTF-8 as a form's names and values are read: an invalid sequence a
+ * replacement character, and a leading U+FEFF kept, as `URLSearchParams` has
+ * them (`TextDecoder` drops one unless told).
+ */
+const LENIENT = new TextDecoder('utf-8', { ignoreBOM: true });
 
 /**
  * A form body (`application/x-www-form-urlencoded`) of at most `max` bytes,

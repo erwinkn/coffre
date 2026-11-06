@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { createLocalJWKSet, errors, importJWK, jwtVerify, type JSONWebKeySet, type JWK, type JWTPayload } from 'jose';
 
 import { countValues, MAX_BODY_NODES } from '../schemas.ts';
+import { KEY_TRY_NS, signInWork, TOKEN_BYTE_NS, type SignInWork } from './sign-in-work.ts';
 
 export type { JSONWebKeySet };
 
@@ -111,7 +112,7 @@ export function decodeWorkloadToken(token: string): DecodedToken {
 export async function verifyWorkloadToken(
   token: string,
   keys: JSONWebKeySet,
-  expected: { issuer: string; audience: string; now: Date; maxLifetime?: number; maxAge?: null },
+  expected: { issuer: string; audience: string; now: Date; maxLifetime?: number; maxAge?: null; work?: SignInWork },
 ): Promise<JWTPayload & DecodedToken['claims']> {
   const options = {
     algorithms: [...WORKLOAD_ALGORITHMS],
@@ -126,7 +127,7 @@ export async function verifyWorkloadToken(
     ({ payload } = await jwtVerify(token, createLocalJWKSet(keys), options));
   } catch (error) {
     if (!(error instanceof errors.JWKSMultipleMatchingKeys)) throw refusalOf(error);
-    payload = await anyKey(token, error, options);
+    payload = await anyKey(token, error, options, expected.work ?? signInWork());
   }
   const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000, expected.maxAge === null ? Infinity : MAX_TOKEN_AGE_SECONDS);
   if (issued !== null) throw issued;
@@ -157,10 +158,15 @@ export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_S
 /**
  * A token that names no key, or one several keys share, verified by
  * whichever of them signed it: a set may hold several, as while its issuer
- * rotates. At most `MAX_KEYS` tries, each a signature check alone.
+ * rotates. At most `MAX_KEYS` tries, each a signature check, which decodes
+ * and hashes the whole token again: each is paid for from the sign-in's
+ * budget (`work`) before it is made, so a token of most of a mebibyte gets a
+ * try or two, not 32, and is refused once the budget is spent.
  */
-async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2]): Promise<JWTPayload> {
+async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2], work: SignInWork): Promise<JWTPayload> {
   for await (const key of matching) {
+    work.left -= KEY_TRY_NS + token.length * TOKEN_BYTE_NS;
+    if (work.left < 0) throw new WorkloadTokenRefused('signature', "the token costs more to check against every one of its issuer's keys than a sign-in may spend: name its key (kid)");
     try {
       return (await jwtVerify(token, key, options)).payload;
     } catch (error) {

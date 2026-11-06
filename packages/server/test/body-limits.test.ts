@@ -102,7 +102,9 @@ test('a form reads as URLSearchParams reads it, its fields counted first, in one
   const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
   // Raw characters past ASCII or escapes of them, not both: where they meet in one name or value, a broken escape
   // beside a raw one, Node's URLSearchParams reads otherwise than the standard, which this reads as written (below).
-  const pieces = ['a', 'b=', '=', '&', '&&', '+', '%', '%2', '%20', '%2B', '%e2%82%ac', '%E2%82', '%zz', ' ', '%26', '%3D'];
+  const pieces = ['a', 'b=', '=', '&', '&&', '+', '%', '%2', '%20', '%2B', '%e2%82%ac', '%E2%82', '%zz', ' ', '%26', '%3D', '%EF%BB%BF'];
+  // A leading U+FEFF is a name's or a value's own, never dropped: `%EF%BB%BFcode` is no `code`.
+  assert.deepEqual([...(await readLimitedForm(request('%EF%BB%BFcode=%EF%BB%BFabc'), API_BODY_BYTES))], [['\uFEFFcode', '\uFEFFabc']]);
   for (const text of ['é=€', 'a=€+é', '€%20=%26']) assert.deepEqual([...(await readLimitedForm(request(text), API_BODY_BYTES))], [...new URLSearchParams(text)], text);
   // The standard: UTF-8 of the text, its escapes decoded, then UTF-8 read again, a broken sequence one U+FFFD.
   assert.deepEqual([...(await readLimitedForm(request('a=€%E2%82a'), API_BODY_BYTES))], [['a', '€\uFFFDa']]);

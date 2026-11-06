@@ -6,6 +6,7 @@ export * from './fetched.ts';
 export * from './github-app.ts';
 export * from './profile-rules.ts';
 export * from './run-proof.ts';
+export * from './sign-in-work.ts';
 export * from './signin/index.ts';
 export * from './tokens.ts';
 export * from './types.ts';

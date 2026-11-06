@@ -14,7 +14,8 @@ import {
   decodeWorkloadToken,
   CHAR_NS,
   differingClaims,
-  matchWork,
+  signInWork,
+  type SignInWork,
   generateToken,
   GitHubAppUnavailable,
   GITLAB_ISSUER,
@@ -329,7 +330,9 @@ const OIDC: ProofKind = {
     // A token its platform hands out again is as old as its platform's cache: its own `exp` ends it, not an hour after `iat`.
     const repeats = taking.some((binding) => REPEATING_PROFILES.includes(binding.profile as WorkloadProfile));
     const newest = candidates[candidates.length - 1]!;
-    const expected = { issuer, audience, now: new Date(), ...(repeats ? { maxAge: null } : {}) };
+    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`).
+    const work = signInWork();
+    const expected = { issuer, audience, now: new Date(), work, ...(repeats ? { maxAge: null } : {}) };
     let claims: Record<string, unknown>;
     try {
       claims = newest.jwks === null
@@ -347,7 +350,7 @@ const OIDC: ProofKind = {
     }
     let binding: BindingRow;
     try {
-      binding = matching(taking.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, ctx.service);
+      binding = matching(taking.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, ctx.service, work);
     } catch (error) {
       if (error instanceof ExchangeRefused) return error;
       throw error;
@@ -1202,7 +1205,9 @@ export class WorkloadService {
     if (candidates.length === 0) throw madeElsewhere(loaded[loaded.length - 1]!, this.#deps.publicUrl);
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
-    const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };
+    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`).
+    const work = signInWork();
+    const expected = { issuer, audience: this.#deps.publicUrl, now: new Date(), work };
     let claims: Record<string, unknown>;
     try {
       claims = newest.jwks === null
@@ -1214,7 +1219,7 @@ export class WorkloadService {
       if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') throw new UnknownKey(member, newest, issuer, shownKid(decoded.header));
       throw refused(error);
     }
-    const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member);
+    const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member, work);
     return { binding, claims, token: decoded, spent, policySeq };
   }
 
@@ -1719,10 +1724,10 @@ function refused(error: unknown): ExchangeRefused {
  * the claims that differ from the closest binding, by name, never the
  * values it expects.
  */
-function matching(bindings: BindingRow[], claims: Record<string, unknown>, member: string): BindingRow {
+function matching(bindings: BindingRow[], claims: Record<string, unknown>, member: string, work: SignInWork): BindingRow {
   let closest: string[] | null = null;
-  // One budget for the whole search, each binding's claims read from it too (`MATCH_NS`).
-  const work = matchWork();
+  // The sign-in's budget, what its key tries left (`SIGN_IN_WORK_NS`), for the whole search: each binding's claims are
+  // read from it too.
   for (const binding of bindings) {
     work.left -= binding.claims.length * CHAR_NS;
     if (work.left < 0) throw new ExchangeRefused('no_match', `${shownMember(member)}'s bindings cost more to match than a sign-in may spend: none trusts these claims`);
