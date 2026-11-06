@@ -273,7 +273,7 @@ it uses with its own key.
   sends one, goes as it is, never read here. A `Content-Digest` the app set
   itself stays as it is: a SHA-256 in it is the body's line, and one
   without (`sha-512` alone) declares nothing to coffre, so the body is read
-  whole, up to 16 MiB.
+  whole, up to 1 MiB, the most coffre holds of one body.
 - **Waits** for an enrollment code that is `full` (up to 5 minutes), for a
   person to approve a pending session (up to 10 minutes, every 5 seconds),
   and for the kubelet to write the next projected token when the file still
