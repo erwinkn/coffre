@@ -334,7 +334,7 @@ test('T169, review r3, Node: a tick that stalls in its memory write: the keeper\
 
 test('T169, review r5, Node: an upkeep past its bound retires its runner, as a stall does: another opens, and its upkeep runs again once answered', { timeout: 60_000 }, async () => {
   // Only the upkeep's pruning of the bulk cap's rows goes unanswered; the ticks are answered as ever.
-  const stall = stallable(db.vault, (text) => /prune_bulk|DELETE FROM log_bulk/i.test(text));
+  const stall = stallable(db.vault, (text) => /prune_bulk|DELETE FROM bulk_cap/i.test(text));
   stall.hold();
   const kept = await keepCheckpointer({ database: stall.db, signingKeys: [SIGNING_KEY], memory: join(dir, `memory-${ENGINE}-6`), intervalMs: 20, retryMs: 50, tickBoundMs: 300, upkeepBoundMs: 300 });
   try {

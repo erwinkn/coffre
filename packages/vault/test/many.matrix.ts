@@ -185,8 +185,8 @@ async function cell(row: Row, states: readonly [State, State]) {
     principal: w.principal,
     measure: async () => {
       const entries = () => count(sql`SELECT count(*) AS n FROM log_uses WHERE credential = ${w.credentialId}`);
-      const capRows = () => count(sql`SELECT count(*) AS n FROM log_bulk WHERE principal = ${w.principal}`);
-      if (row.window === 'passed') await run(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${w.principal}`);
+      const capRows = () => count(sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
+      if (row.window === 'passed') await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
       const [beforeEntries, beforeCap] = [await entries(), await capRows()];
       await measured.connect();
       measured.slow(delayOf());

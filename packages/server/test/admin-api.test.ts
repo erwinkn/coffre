@@ -7,7 +7,7 @@ import { and, asc, count, eq } from 'drizzle-orm';
 import { PROJECT_PAGES } from '@coffre/core/pages';
 import { EVERYWHERE } from '@coffre/core/access';
 
-import { auditLog, projects, vaultMembers } from './db/tables.ts';
+import { auditLog, projects, principals } from './db/tables.ts';
 import {
   clientFor,
   openTestDatabase,
@@ -381,7 +381,7 @@ test('an email is one member however it is capitalised, accents included', async
   // É; the server folds every email before it reaches the database.
   assert.equal((await root.members.add('user:Émile@Acme.example')).created, true);
   assert.equal((await root.members.add('user:ÉMILE@acme.EXAMPLE')).created, false);
-  const stored = await db.owner.select({ principal: vaultMembers.principal }).from(vaultMembers);
+  const stored = await db.owner.select({ principal: principals.principal }).from(principals);
   assert.deepEqual(stored.map((row) => row.principal).filter((principal) => principal.startsWith('user:é')), ['user:émile@acme.example']);
 });
 

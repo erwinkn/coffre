@@ -31,7 +31,7 @@ export function snapshotQuery(asked: Asked): SQL {
           SELECT unnest(${environments})
           UNION SELECT parent_id FROM environments WHERE id = ANY(${environments}) AND owner IS NOT NULL${asked.seals === true
             ? sql`
-          UNION SELECT environment_id FROM vault_grants WHERE principal = ANY(${principals}) AND environment_id IS NOT NULL`
+          UNION SELECT environment_id FROM grants WHERE principal = ANY(${principals}) AND environment_id IS NOT NULL`
             : sql``}
           UNION SELECT (place #>> '{}')::uuid FROM policy, jsonb_path_query(policy.metadata::jsonb, '$.policy.protected[*].environmentId') AS place
           WHERE (place #>> '{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -55,13 +55,13 @@ export function snapshotQuery(asked: Asked): SQL {
         ? sql`(SELECT coalesce(json_agg(json_build_object(
             'principal', principal, 'status', status, 'owner', owner, 'role', role, 'scope', scope, 'generation', generation,
             'createdAt', created_at, 'createdBy', created_by, 'statusChangedAt', status_changed_at, 'statusChangedBy', status_changed_by,
-            'accessSeq', access_seq::text, 'mac', encode(mac, 'hex'))), '[]') FROM vault_members WHERE principal = ANY(${principals}))`
+            'accessSeq', access_seq::text, 'mac', encode(mac, 'hex'))), '[]') FROM principals WHERE principal = ANY(${principals}))`
         : sql`'[]'::json`},
       'grants', (
         SELECT coalesce(json_agg(json_build_object(
           'principal', g.principal, 'projectId', coalesce(g.project_id, env.project_id), 'environmentId', g.environment_id,
           'environmentSlug', g.environment_slug, 'role', g.role, 'expiresAt', g.expires_at, 'grantedAt', g.granted_at, 'grantedBy', g.granted_by)), '[]')
-        FROM vault_grants g LEFT JOIN environments env ON env.id = g.environment_id
+        FROM grants g LEFT JOIN environments env ON env.id = g.environment_id
         WHERE g.principal = ANY(${principals})
       ),
       'access', (
@@ -82,7 +82,7 @@ export function snapshotQuery(asked: Asked): SQL {
           'principal', asked.principal, 'seal', encode(m.seal, 'hex'), 'number', l.number::text, 'at', l.at::text, 'requestId', l.request_id,
           'object', l.object, 'actor', l.actor, 'payload', l.payload, 'newest', encode(l.seal, 'hex'), 'mac', encode(l.mac, 'hex'))), '[]')
         FROM unnest(${principals}) AS asked (principal)
-        LEFT JOIN vault_members m ON m.principal = asked.principal
+        LEFT JOIN principals m ON m.principal = asked.principal
         LEFT JOIN LATERAL (
           SELECT x.* FROM log_changes x WHERE x.object = log_object('principal', asked.principal) ORDER BY x.number DESC LIMIT 1
         ) l ON true

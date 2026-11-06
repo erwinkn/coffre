@@ -300,11 +300,12 @@ test("coffre's objects are what its migrations make, by name, as Postgres folds 
     managedObjects([
       'CREATE TABLE "audit_log" (\n "id" bigint);\nCREATE TABLE IF NOT EXISTS public."Mixed" ();\n--> statement-breakpoint\nCREATE UNLOGGED TABLE Folded ();',
       'CREATE MATERIALIZED VIEW "totals" AS SELECT 1;\nCREATE SEQUENCE "public"."numbers";\nCREATE FUNCTION audit_log_append_only() RETURNS trigger\nCREATE OR REPLACE FUNCTION "Quoted" ()\nALTER TABLE "audit_log" ADD COLUMN "scope" text;',
+      'ALTER TABLE "totals" RENAME TO "Sums";\nALTER TABLE public.folded RENAME TO Kept;\nALTER TABLE "audit_log" RENAME CONSTRAINT "a" TO "b";',
     ]),
-    { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers'], functions: ['audit_log_append_only', 'Quoted'] },
+    { relations: ['audit_log', 'Mixed', 'folded', 'totals', 'numbers', 'Sums', 'kept'], functions: ['audit_log_append_only', 'Quoted'] },
   );
   const made = managedObjects(readdirSync(migrationsFolder('postgres')).filter((file) => file.endsWith('.sql')).map((file) => readFileSync(join(migrationsFolder('postgres'), file), 'utf8')));
-  assert.ok(made.relations.includes('vault_members') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
+  assert.ok(made.relations.includes('principals') && made.relations.includes('mcp_approvals') && made.functions.includes('secret_versions_erase_only'), JSON.stringify(made));
 });
 
 test("in a deployment's folder, a CLI that is not the version it pins refuses, before asking for anything", async () => {

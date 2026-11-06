@@ -16,7 +16,7 @@ import { logObject } from './inputs.ts';
  * with `authentic` before it seals anything. The tag is public and names
  * the key, so that once the vault's signing key rotates (T168), the
  * database can refuse an entry under a key the log moved on from, and a
- * reader knows which key to check it under (`log_fence.retired`).
+ * reader knows which key to check it under (`checkpoint_fence.retired`).
  */
 
 /** A change as `log_changes` holds it, `object` a uuid in lower case. */

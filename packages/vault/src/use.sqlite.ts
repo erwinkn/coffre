@@ -253,10 +253,10 @@ async function readRoute(tx: Queryable, layers: readonly string[], route: string
   if (typeof serving.savedBy === 'string') {
     const principal = serving.savedBy;
     const member = await one<{ status: string; owner: number; role: string | null; scope: string | null; generation: number; seal: Buffer | null }>(sql`SELECT status, owner, role, scope, generation, seal
-      FROM vault_members WHERE principal = ${principal}`);
+      FROM principals WHERE principal = ${principal}`);
     const grants = member === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx, sql`SELECT
       coalesce(g.project_id, e.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
-      FROM vault_grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
+      FROM grants g LEFT JOIN environments e ON e.id = g.environment_id WHERE g.principal = ${principal}`);
     const last = await one<Changed>(sql`SELECT ${CHANGED} FROM log_changes c
       WHERE c.object = ${objectKey({ kind: 'principal', id: principal })} ORDER BY c.number DESC LIMIT 1`);
     const access = await one<{ seq: string }>(sql`SELECT CAST(a.seq AS TEXT) AS seq FROM audit_log a WHERE a.author = 'vault' AND a.subject_principal = ${principal}
@@ -402,9 +402,9 @@ function direct(tx: Queryable): Rows {
   const one = async <T>(query: SQL): Promise<T | undefined> => (await rowsOf<T>(tx, query))[0];
   return {
     read: (_key, load) => load(),
-    bulk: (principal, secret) => one<{ last: number }>(sql`SELECT last FROM log_bulk WHERE principal = ${principal} AND secret = ${secret}`),
+    bulk: (principal, secret) => one<{ last: number }>(sql`SELECT last FROM bulk_cap WHERE principal = ${principal} AND secret = ${secret}`),
     others: async (principal, secret, since, count) => Number((await one<{ n: number }>(sql`SELECT count(*) AS n FROM (
-      SELECT 1 FROM log_bulk WHERE principal = ${principal} AND secret <> ${secret} AND last > ${since} LIMIT ${count})`))!.n),
+      SELECT 1 FROM bulk_cap WHERE principal = ${principal} AND secret <> ${secret} AND last > ${since} LIMIT ${count})`))!.n),
     cover: async ({ cover, ...call }) => (await one(sql`SELECT 1 FROM log_uses WHERE at = ${cover.at} AND request_id = ${BigInt(cover.requestId)} AND number = ${BigInt(cover.number)}
       AND credential = ${call.credential} AND secret = ${call.secretId} AND purpose = ${call.purpose} AND place IS ${call.place} AND route IS ${call.route ?? null}`)) !== undefined,
     use: async (call) => {
@@ -413,7 +413,7 @@ function direct(tx: Queryable): Rows {
       return next;
     },
     enter: async (principal, secret, period) => {
-      await rowsOf(tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${principal}, ${secret}, ${period})
+      await rowsOf(tx, sql`INSERT INTO bulk_cap (principal, secret, last) VALUES (${principal}, ${secret}, ${period})
         ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
     },
   };
@@ -568,7 +568,7 @@ class Batched implements Rows {
       const all = [...entered];
       for (let start = 0; start < all.length; start += CHUNK) {
         const values = all.slice(start, start + CHUNK).map((secret) => sql`(${principal}, ${secret}, ${rows.get(secret)!})`);
-        await rowsOf(this.#tx, sql`INSERT INTO log_bulk (principal, secret, last) VALUES ${sql.join(values, sql`, `)}
+        await rowsOf(this.#tx, sql`INSERT INTO bulk_cap (principal, secret, last) VALUES ${sql.join(values, sql`, `)}
           ON CONFLICT (principal, secret) DO UPDATE SET last = max(last, excluded.last)`);
       }
     }
@@ -579,7 +579,7 @@ class Batched implements Rows {
     const known = this.#bulk.get(principal);
     if (known !== undefined && known.since <= since) return known;
     const bulk: Bulk = known ?? { since, rows: new Map(), entered: new Set(), above: new Map() };
-    const read = await rowsOf<{ secret: string; last: number }>(this.#tx, sql`SELECT secret, last FROM log_bulk WHERE principal = ${principal} AND last > ${since}`);
+    const read = await rowsOf<{ secret: string; last: number }>(this.#tx, sql`SELECT secret, last FROM bulk_cap WHERE principal = ${principal} AND last > ${since}`);
     // A row the batch entered keeps the greater `last`, as its write will.
     for (const row of read) bulk.rows.set(row.secret, Math.max(bulk.rows.get(row.secret) ?? -Infinity, Number(row.last)));
     bulk.since = since;
@@ -627,7 +627,7 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
   const n = await once<{ number: string; mac: Buffer }>('head', sql`SELECT CAST(c.number AS TEXT) AS number, c.mac FROM log_changes c ORDER BY c.number DESC LIMIT 1`);
   const known = call.known;
   let cached = n !== undefined && known !== undefined && n.number === known.newest && Buffer.from(n.mac).equals(known.newestMac);
-  const floor = await once<{ at_floor: number; retired: string }>('floor', sql`SELECT at_floor, retired FROM log_fence WHERE only_row`);
+  const floor = await once<{ at_floor: number; retired: string }>('floor', sql`SELECT at_floor, retired FROM checkpoint_fence WHERE only_row`);
   // A MAC that names a key the log moved on from (T168), first, as the Postgres function has it.
   if (floor !== undefined && (JSON.parse(floor.retired) as string[]).includes(call.mac.subarray(0, 4).toString('hex'))) return nothing('superseded');
   if (floor === undefined || call.at < floor.at_floor || Date.now() > call.deadline) return nothing('late');
@@ -739,10 +739,10 @@ async function useOnce(tx: Queryable, call: UseCall, rows: Rows, routed?: { read
         : await once<WayRow>(`way\n${way}\n${read.credential}`, sql`SELECT principal, kind, scope, revoked_at, expires_at, not_after, seal, generation, token_hash FROM credentials WHERE id = ${read.credential}`);
   const wRow = way !== 'binding' || c === undefined ? null : (await once<Record<string, unknown>>(`binding\n${read.credential}`, sql`SELECT principal, generation, profile, issuer, origin, jwks_uri, claims, scope, policy, revoked_at FROM service_bindings WHERE id = ${read.credential}`)) ?? null;
   const m = c === undefined ? undefined : await once<{ status: string; owner: number; role: string | null; scope: string | null; seal: Buffer | null; generation: number }>(
-    `member\n${c.principal}`, sql`SELECT status, owner, role, scope, seal, generation FROM vault_members WHERE principal = ${c.principal}`);
+    `member\n${c.principal}`, sql`SELECT status, owner, role, scope, seal, generation FROM principals WHERE principal = ${c.principal}`);
   const grants = m === undefined ? [] : await rows.read(`grants\n${c!.principal}`, () => rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
     sql`SELECT coalesce(g.project_id, ge.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
-          FROM vault_grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c!.principal}`));
+          FROM grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c!.principal}`));
   const config = await rows.read('config', () => rowsOf<{ name: string; value: string; seal: Buffer | null }>(tx, sql`SELECT name, value, seal FROM log_config`));
   const roles = config.find((row) => row.name === 'roles');
   const policyRow = config.find((row) => row.name === 'policy');
@@ -882,10 +882,10 @@ async function standsAt(tx: Queryable, credentialId: string, place: string, call
           FROM environments e LEFT JOIN projects p ON p.id = e.project_id WHERE e.id = ${place}`);
   if (c === undefined || e === undefined) return false;
   const m = await one<{ status: string; owner: number; role: string | null; scope: string | null; generation: number }>(
-    sql`SELECT status, owner, role, scope, generation FROM vault_members WHERE principal = ${c.principal}`);
+    sql`SELECT status, owner, role, scope, generation FROM principals WHERE principal = ${c.principal}`);
   const grants = m === undefined ? [] : await rowsOf<{ project_id: string | null; environment_id: string | null; environment_slug: string | null; role: string; expires_at: number | null }>(tx,
     sql`SELECT coalesce(g.project_id, ge.project_id) AS project_id, g.environment_id, g.environment_slug, g.role, g.expires_at
-          FROM vault_grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c.principal}`);
+          FROM grants g LEFT JOIN environments ge ON ge.id = g.environment_id WHERE g.principal = ${c.principal}`);
   const roles = await one<{ value: string }>(sql`SELECT value FROM log_config WHERE name = 'roles'`);
   const credential = credentialObject({
     id: credentialId, principal: c.principal, kind: c.kind, scope: c.scope, revoked: c.revoked_at !== null,

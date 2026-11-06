@@ -31,7 +31,7 @@ import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, noth
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { testPostgresPool, watched } from './db/postgres-pool.ts';
-import { logFence } from './db/tables.ts';
+import { checkpointFence } from './db/tables.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { inBulkPeriod } from './window-fixture.ts';
 
@@ -98,7 +98,7 @@ before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
   // Uses go in at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps it.
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   const kek = randomBytes(32);
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const setup = createRuntime(resolveConfig({ publicUrl: ORIGIN, vault: deps.vault, auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })] }), auditChainKey: deps.chainKey.toString('base64') }), deps.db, deps.vault, transport);

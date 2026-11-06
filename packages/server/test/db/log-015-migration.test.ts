@@ -28,6 +28,8 @@ import { TEST_ENGINE } from './engine.ts';
 
 const TAGS: Record<Engine, string> = { postgres: '0022_log_015', sqlite: '0018_log_015' };
 const SEALED = ['credentials', 'environments', 'secrets', 'service_bindings', 'vault_members'];
+// What 0.16 renamed (0073_table_renames, T178): read under 0.14.5's names before, under these after.
+const RENAMED: Record<string, string> = { vault_members: 'principals', vault_grants: 'grants' };
 const hex = (byte: number, length = 32) => Buffer.alloc(length, byte).toString('hex');
 
 /** The engine's migrations up to the one before 0.15's first: 0.14.5's schema. */
@@ -181,7 +183,7 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
     assert.equal(await migrated(opened.owner), true);
     for (const [table, before] of Object.entries(kept)) {
       // What 0.16 adds to the sign-in rows: the passkey that confirmed one, null on every row before it (0063_passkeys).
-      const read016 = await read(opened.owner, table);
+      const read016 = await read(opened.owner, RENAMED[table] ?? table);
       assert.ok(read016.every((row) => (row.passkey_id ?? null) === null && (row.confirmed_at ?? null) === null), `${table} names no passkey`);
       const after = read016.map(({ passkey_id: _, confirmed_at: __, ...row }) => row);
       if (SEALED.includes(table)) {
@@ -196,9 +198,9 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
         assert.deepEqual(after, before, `${table} is as it was`);
       }
     }
-    const [fence] = await read(opened.owner, 'log_fence');
+    const [fence] = await read(opened.owner, 'checkpoint_fence');
     assert.ok(fence !== undefined && Number(fence.at_floor) > Date.now() - 600_000, 'the fence has its floor');
-    for (const table of ['log_changes', 'log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles', 'log_config']) {
+    for (const table of ['log_changes', 'log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_config']) {
       assert.deepEqual(await read(opened.owner, table), [], `${table} starts empty`);
     }
 

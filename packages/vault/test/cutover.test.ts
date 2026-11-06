@@ -168,9 +168,9 @@ test("a 0.14 instance cut over: each member sealed as 0.14 accepts them, naming 
   assert.equal((objects.get(objectKey({ kind: 'environment', id: w.dev })) as Extract<Input, { kind: 'environment' }>).protected, false);
   assert.deepEqual((objects.get(objectKey({ kind: 'policy', id: 'instance' })) as Extract<Input, { kind: 'policy' }>).bulk, w.config.bulkLimit);
   // Each member's genesis names their newest access entry, as their row does (UsesSeeOldWrites).
-  const { logChanges, vaultMembers } = tablesOf(db.owner);
+  const { logChanges, principals } = tablesOf(db.owner);
   for (const principal of [ROOT, ADA, CI]) {
-    const [{ accessSeq }] = await db.owner.select({ accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+    const [{ accessSeq }] = await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, principal));
     const [genesis] = await db.owner.select({ payload: logChanges.payload }).from(logChanges).where(eq(logChanges.object, objectKey({ kind: 'principal', id: principal })));
     assert.equal((JSON.parse(genesis!.payload) as { old?: string }).old, accessSeq.toString(), principal);
   }
@@ -484,8 +484,8 @@ test("a member whose row 0.14's check refuses is left unsealed, reported, every 
   assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);
   assert.ok((await w.old.admit({ actor: ROOT, principal: CI })).ok);
   // A grant written around the vault: Ada's row's MAC no longer holds.
-  const { vaultGrants } = tablesOf(db.owner);
-  await db.owner.insert(vaultGrants).values({ principal: ADA, projectId: w.project, environmentId: null, environmentSlug: null, role: 'owner', grantedAt: Date.now(), grantedBy: ROOT });
+  const { grants } = tablesOf(db.owner);
+  await db.owner.insert(grants).values({ principal: ADA, projectId: w.project, environmentId: null, environmentSlug: null, role: 'owner', grantedAt: Date.now(), grantedBy: ROOT });
   assert.deepEqual(await cutOver(await vault015(w.config)), { ok: true, done: true });
   assert.deepEqual(await opsOf({ kind: 'principal', id: ADA }), []);
   assert.deepEqual(await opsOf({ kind: 'principal', id: CI }), ['genesis']);
@@ -639,8 +639,8 @@ test("0.14's writes refused once the cutover is there: a decision of 0.14's vaul
   assert.ok((await w.old.admit({ actor: ROOT, principal: ADA })).ok);
   const vault = await vault015(w.config);
   assert.deepEqual(await cutOver(vault), { ok: true, done: true });
-  const { vaultMembers } = tablesOf(db.owner);
-  const member = async () => (await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA)))[0];
+  const { principals } = tablesOf(db.owner);
+  const member = async () => (await db.owner.select().from(principals).where(eq(principals.principal, ADA)))[0];
   const before = await member();
   const [{ entries }] = await rows<{ entries: string | number }>(db.owner, sql`SELECT count(*) AS entries FROM audit_log`);
   await assert.rejects(w.old.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] }), refusedLate);

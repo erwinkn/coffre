@@ -261,9 +261,9 @@ test('a removed member stays out despite a live session, until the vault admits 
 
 test('a grant forged in the database lists as stored until the vault meets it, which marks its member', { skip: START_OVER_014 }, async () => {
   // Someone who owns the database gives the developer the whole project.
-  const { projects, vaultGrants } = tablesOf(db.owner);
+  const { projects, grants } = tablesOf(db.owner);
   const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
-  await db.owner.insert(vaultGrants).values({
+  await db.owner.insert(grants).values({
     principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
   });
   const listed = async () => {
@@ -367,9 +367,9 @@ test('the audit verification checks the vault\'s rows too, and finds a grant wri
   assert.ok(verified.ok);
 
   // Someone who owns the database gives the developer the whole project.
-  const { projects, vaultGrants } = tablesOf(db.owner);
+  const { projects, grants } = tablesOf(db.owner);
   const [{ id: projectId }] = await db.owner.select({ id: projects.id }).from(projects).where(eq(projects.slug, 'market'));
-  await db.owner.insert(vaultGrants).values({
+  await db.owner.insert(grants).values({
     principal: `user:${DEV}`, projectId, environmentId: null, role: 'owner', expiresAt: null, grantedAt: 0, grantedBy: `user:${ROOT}`,
   });
   // The developer's record no longer carries the vault's MAC, and the

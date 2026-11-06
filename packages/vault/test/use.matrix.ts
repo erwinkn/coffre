@@ -151,8 +151,8 @@ async function cell(row: Row, key: Key) {
     const grant = { ...w.grant, expiresAt: ends };
     await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant },
       { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [grant] }, async (tx, value) => {
-        await run(tx, sql`UPDATE vault_grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
-        await seal('vault_members', 'principal', w.principal)(tx, value);
+        await run(tx, sql`UPDATE grants SET expires_at = ${ends} WHERE principal = ${w.principal}`);
+        await seal('principals', 'principal', w.principal)(tx, value);
       });
   }
   // What a map set as it should never be points to, besides `dev`: another place where they stand, holding a key of
@@ -222,8 +222,8 @@ async function cell(row: Row, key: Key) {
     measure: async () => {
       setMap(row, { w, cache: measured.cache, name, elsewhere, elsewhereKey, gone, otherCredential });
       const entries = () => count(sql`SELECT count(*) AS n FROM log_uses WHERE credential = ${w.credentialId}`);
-      const capRows = () => count(sql`SELECT count(*) AS n FROM log_bulk WHERE principal = ${w.principal}`);
-      if (row.window === 'passed') await run(db.owner, sql`DELETE FROM log_bulk WHERE principal = ${w.principal}`);
+      const capRows = () => count(sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
+      if (row.window === 'passed') await run(db.owner, sql`DELETE FROM bulk_cap WHERE principal = ${w.principal}`);
       const [beforeEntries, beforeCap] = [await entries(), await capRows()];
       await measured.connect();
       measured.slow(delayOf());
@@ -359,7 +359,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null; early: boolean; turns: { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null }>(results: T[]) => {
     if (ENGINE !== 'postgres') return;
     // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session first, so
-    // that no transaction elsewhere in the cluster, ending as the batch is weighed, moves a block of `log_bulk` from one
+    // that no transaction elsewhere in the cluster, ending as the batch is weighed, moves a block of `bulk_cap` from one
     // call to the next (T225, `deletesSettled`).
     const watcher = postgresClient(OWNER_URL, { max: 1 });
     try {
@@ -474,11 +474,11 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       /** The floor of `at` past the requests `row` makes from now, while `work` runs: a batch's rows share their admission but in turn. */
       const past = async <T>(row: Row, work: () => Promise<T>): Promise<T> => {
         if (!floor(row)) return work();
-        await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() + 60_000}`);
+        await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() + 60_000}`);
         try {
           return await work();
         } finally {
-          await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}`);
+          await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
         }
       };
       if (inTurn) {

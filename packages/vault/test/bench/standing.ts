@@ -91,7 +91,7 @@ async function sidecar(isolates: number, changesPerSecond: number): Promise<stri
   // Each isolate's names read once, before the count starts: a sidecar's isolates are warm. Then the cap's rows go, so
   // that each key enters the set once while counted, and moves on once a minute later.
   for (const vault of vaults) for (const key of names) await vault.useNamed!(ask(key));
-  await run(db.owner, sql`DELETE FROM log_bulk`);
+  await run(db.owner, sql`DELETE FROM bulk_cap`);
   const start = { ...counts };
   const seconds = 70;
   const rate = 1000;

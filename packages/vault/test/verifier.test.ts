@@ -45,8 +45,8 @@ before(async () => {
 after(() => db.close());
 beforeEach(async () => {
   await emptyDatabase(db.owner);
-  for (const table of ['log_uses', 'log_bulk', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
-  await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}`);
+  for (const table of ['log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   if (ENGINE === 'postgres') {
     const today = new Date().toISOString().slice(0, 10);
     await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
@@ -237,8 +237,8 @@ test('review r1: a database rolled back whole to an earlier pair is named agains
   // Every row the grant and its seal left, gone: its entries, the pairs above, Bo.
   await run(db.owner, sql`DELETE FROM log_checkpoints WHERE upto > ${BigInt(earlier!.upto)}`);
   await run(db.owner, sql`DELETE FROM log_changes WHERE number > ${BigInt(earlier!.upto)}`);
-  await run(db.owner, sql`DELETE FROM vault_grants WHERE principal = ${BO}`);
-  await run(db.owner, sql`DELETE FROM vault_members WHERE principal = ${BO}`);
+  await run(db.owner, sql`DELETE FROM grants WHERE principal = ${BO}`);
+  await run(db.owner, sql`DELETE FROM principals WHERE principal = ${BO}`);
   const named = `the database ends up to ${earlier!.upto}; a pair held outside seals up to ${signed}: entries or checkpoints were deleted`;
   const checked = await w.verify();
   assert.ok(!checked.ok);

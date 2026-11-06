@@ -12,7 +12,7 @@ import type { PostgresClient } from '@coffre/db/connect';
 import type { Vault } from '@coffre/core/vault';
 import { asc, desc, eq, isNotNull, sql, type SQL } from 'drizzle-orm';
 
-import { auditLog, consumedTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
+import { auditLog, spentIdTokens, credentials, logChanges, projects, serviceBindings } from './db/tables.ts';
 import { authMac } from '../src/auth-rows.ts';
 import { answer, type Pages } from './start-fixture.ts';
 import { resolveConfig } from '../src/config.ts';
@@ -342,9 +342,9 @@ test('the scheduled beat forgets a token two hours after it was spent, never soo
   assert.equal((await trade(jwt)).status, 200);
   // Records the owner dates: three spent just over two hours ago, one just under.
   const spent = (byte: number, minutes: number) => ({ hash: Buffer.alloc(32, byte), consumedAt: new Date(Date.now() - minutes * 60_000) });
-  await db.owner.insert(consumedTokens).values([spent(1, 121), spent(2, 121), spent(3, 121), spent(4, 119)]);
+  await db.owner.insert(spentIdTokens).values([spent(1, 121), spent(2, 121), spent(3, 121), spent(4, 119)]);
   // Which of those are left, by their byte.
-  const left = async () => (await db.owner.select({ hash: consumedTokens.hash }).from(consumedTokens))
+  const left = async () => (await db.owner.select({ hash: spentIdTokens.hash }).from(spentIdTokens))
     .flatMap(({ hash }) => (hash.equals(Buffer.alloc(32, hash[0])) ? [hash[0]] : [])).sort().join();
   assert.equal(await pruneSpentTokens(db.runtime, 2), 2);
   assert.equal((await left()).split(',').length, 2);
@@ -764,7 +764,7 @@ test('a binding removed, or a member removed or admitted again, while an exchang
   const root = await contextFor(deps, ROOT);
   const nothingWritten = async () => {
     assert.deepEqual(await db.owner.select().from(credentials), []);
-    assert.deepEqual(await db.owner.select().from(consumedTokens), []);
+    assert.deepEqual(await db.owner.select().from(spentIdTokens), []);
   };
   // Unbound once the bindings were read: the vault still answers for the member, and only the binding's re-check refuses.
   beforeAccess = async () => {
@@ -804,7 +804,7 @@ test('the spend writes the credential and stamps the binding only when it spent 
   const lastUsed = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, bound)))[0]!.at?.getTime() ?? null;
   // A token spent already: refused, no credential, the binding's last use as it was.
   const spentHash = randomBytes(32);
-  await db.owner.insert(consumedTokens).values({ hash: spentHash });
+  await db.owner.insert(spentIdTokens).values({ hash: spentHash });
   const refused = row();
   assert.equal(await exchangeToken(db.runtime, spentHash, refused, bound, new Date(Date.now() + 1000)), false);
   assert.equal(await credentialRows(refused.id!), 0);
@@ -815,7 +815,7 @@ test('the spend writes the credential and stamps the binding only when it spent 
   const at = new Date(Date.now() + 2000);
   assert.equal(await exchangeToken(db.runtime, fresh, issued, bound, at), true);
   assert.equal(await credentialRows(issued.id!), 1);
-  assert.equal((await db.owner.select().from(consumedTokens).where(eq(consumedTokens.hash, fresh))).length, 1);
+  assert.equal((await db.owner.select().from(spentIdTokens).where(eq(spentIdTokens.hash, fresh))).length, 1);
   assert.equal(await lastUsed(), at.getTime());
 });
 

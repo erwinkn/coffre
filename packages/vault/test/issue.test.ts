@@ -315,7 +315,7 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
   try {
     // The account's row held, which the issue's write locks first (by principal): its read done, the write waits there.
     await holder.unsafe('BEGIN');
-    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${CI}' FOR NO KEY UPDATE`);
     const issuing = w.vault.issueToken!(byAdmin());
     // Asked on a connection of its own: in the holder's transaction, `pg_stat_activity` stays as it first read it.
     const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
@@ -336,8 +336,8 @@ test("an issue weighed before its issuer's demotion commits is weighed again, on
 
 test("an issue the app weighed on its issuer's access as it was is refused, for the app to weigh again; at the access as it is, issued", async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
-  const [{ accessSeq }] = (await db.owner.select({ accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, ADMIN))) as [{ accessSeq: bigint }];
+  const { principals } = tablesOf(db.owner);
+  const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ADMIN))) as [{ accessSeq: bigint }];
   const at = (seq: bigint) => asked(w, (input) => ({ ...input, actor: ADMIN, actorAccess: seq.toString(), credential: { ...input.credential, createdBy: 'admin@acme.example' } }));
   assert.equal(((await w.vault.issueToken!(at(accessSeq - 1n))) as { refused?: string }).refused, 'access');
   assert.ok((await w.vault.issueToken!(at(accessSeq))).ok);
@@ -372,7 +372,7 @@ test("an environment the scope names, renamed while the issue's write waits, ref
   try {
     // The account's row held: the issue's read is done, its write waits; meanwhile the environment is renamed.
     await holder.unsafe('BEGIN');
-    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${CI}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${CI}' FOR NO KEY UPDATE`);
     const issuing = w.vault.issueToken!(scoped);
     const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%issue_token(%'`))[0]!.n;
     for (let tries = 0; (await waits()) === 0; tries += 1) {
@@ -413,8 +413,8 @@ test('an issue takes the issue lock, never the fence: it commits while a change 
 
 /** A passkey of `principal`'s, as the app writes one at enrollment (PR 4); its MAC is the app's, which the vault never reads. */
 async function passkeyOf(principal: string, generationsAgo = 0): Promise<string> {
-  const { passkeys, vaultMembers } = tablesOf(db.owner);
-  const [member] = await db.owner.select({ generation: vaultMembers.generation }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const { passkeys, principals } = tablesOf(db.owner);
+  const [member] = await db.owner.select({ generation: principals.generation }).from(principals).where(eq(principals.principal, principal));
   const id = randomUUID();
   await db.owner.insert(passkeys).values({
     id, authMac: randomBytes(32), principal, generation: member!.generation - generationsAgo, userHandle: randomBytes(16), credentialId: randomBytes(32), publicKey: randomBytes(77),
@@ -512,7 +512,7 @@ test("an issue takes the factor lock first, and holds it while it waits on a mem
   try {
     // The Owner's member row held: the issue has the factor lock and waits there.
     await holder.unsafe('BEGIN');
-    await holder.unsafe(`SELECT 1 FROM vault_members WHERE principal = '${ROOT}' FOR NO KEY UPDATE`);
+    await holder.unsafe(`SELECT 1 FROM principals WHERE principal = '${ROOT}' FOR NO KEY UPDATE`);
     const made = handleOf(w, token.credential.id, undefined, onViewerToken);
     const issuing = w.vault.issueToken!(made);
     const waits = async () => (await db.owner.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event <> 'advisory' AND query LIKE '%issue_token(%'`))[0]!.n;
@@ -542,7 +542,7 @@ test("an issue takes the factor lock first, and holds it while it waits on a mem
 test('`issue_token` takes the factor lock before any row, and the previous release\'s signature is the same statement carrying no passkey (0064)', postgresOnly('functions of 0064'), async () => {
   const [{ body }] = await db.owner.execute<{ body: string }>(sql`SELECT pg_get_functiondef(${ISSUE_TOKEN}::regprocedure) AS body`);
   const lock = body.indexOf('pg_advisory_xact_lock(1717658484, hashtext(p_actor))');
-  assert.ok(lock > 0 && lock < body.indexOf('FROM public.vault_members') && lock < body.indexOf('FROM public.credentials'));
+  assert.ok(lock > 0 && lock < body.indexOf('FROM public.principals') && lock < body.indexOf('FROM public.credentials'));
   assert.doesNotMatch(body, /jit/i, 'no planner setting (R69)');
   const [{ old }] = await db.owner.execute<{ old: string }>(sql`SELECT pg_get_functiondef(${OLD_ISSUE_TOKEN}::regprocedure) AS old`);
   assert.match(old, /SELECT public\.issue_token\([^;]*p_expires, NULL::uuid\)/);

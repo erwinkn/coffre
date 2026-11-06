@@ -22,7 +22,7 @@ type Select = PromiseLike<unknown> & { toSQL(): Query; prepare(...name: never[])
  * values go to the driver as they are, not through a column's encoding:
  * strings, numbers, bigints and bytes.
  *
- *   const member = prepared((db) => db.select().from(tablesOf(db).vaultMembers).where(eq(…, sql.placeholder('principal'))));
+ *   const member = prepared((db) => db.select().from(tablesOf(db).principals).where(eq(…, sql.placeholder('principal'))));
  *   const [row] = await member(db, { principal });
  */
 export function prepared<Q extends Select>(

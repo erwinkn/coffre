@@ -31,8 +31,8 @@ import { contextFor, holdSomething, LOG, openTestDatabase, resetDatabase, testAn
 import {
   auditLog,
   credentials,
-  deviceAuthorizations,
-  enrollments,
+  deviceLogins,
+  enrollmentCodes,
   passkeys,
   identities,
   mcpConnections,
@@ -46,7 +46,7 @@ const SERVICE = 'token:ci-deploy';
 const AUTH = signin({ providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })] });
 const [A, B, C] = [Buffer.alloc(32, 0xa1), Buffer.alloc(32, 0xb2), Buffer.alloc(32, 0xc3)];
 const transport: WorkloadTransport = { json: async () => assert.fail('a rotation fetches nothing') };
-const TABLES = { identities, credentials, device_authorizations: deviceAuthorizations, service_bindings: serviceBindings, oauth_clients: oauthClients, mcp_connections: mcpConnections, enrollments, passkeys };
+const TABLES = { identities, credentials, device_authorizations: deviceLogins, service_bindings: serviceBindings, oauth_clients: oauthClients, mcp_connections: mcpConnections, enrollments: enrollmentCodes, passkeys };
 
 let db: Awaited<ReturnType<typeof openTestDatabase>>;
 let deps: FixtureDeps;
@@ -107,7 +107,7 @@ beforeEach(async () => {
     jkt: 'jkt', notAfter: new Date(Date.now() + 86_400_000), ancestors: null, constraints: null, enrollmentId: null, approvedAt: null, approvedBy: null,
   });
   const code = { id: randomUUID(), bindingId, codeHash: randomBytes(32), codeHint: 'coffre_enr_x', scope: '{}', createdBy: ROOT, createdWith: null, expiresAt: new Date(Date.now() + 86_400_000) };
-  await db.owner.insert(enrollments).values({ ...code, authMac: authMac(A, 'enrollments', code) });
+  await db.owner.insert(enrollmentCodes).values({ ...code, authMac: authMac(A, 'enrollments', code) });
   const clientId = randomUUID();
   await insertOauthClient(deps.db, A, { id: clientId, name: 'Claude', redirectUris: '["http://127.0.0.1/callback"]' });
   await insertConnection(deps.db, A, {

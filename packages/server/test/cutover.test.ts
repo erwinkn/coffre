@@ -20,7 +20,7 @@ import { CUTTING_OVER_NOW, cutoverReady, type CutoverKnown } from '../src/cutove
 import { finishRotation, rotateStep } from '../src/key-rotation.ts';
 import { resolvePath } from '../src/db/queries.ts';
 import { createRuntime } from '../src/runtime.ts';
-import { auditLog, credentials, environments, identities, logChanges, logFence, projects, secrets, vaultGrants, vaultMembers } from './db/tables.ts';
+import { auditLog, credentials, environments, identities, logChanges, checkpointFence, projects, secrets, grants, principals } from './db/tables.ts';
 import { TEST_HOT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly, TEST_ENGINE, withLogUnlocked } from './db/engine.ts';
 import { clientFor, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, type FixtureDeps, type TestVault } from './api-fixture.ts';
@@ -46,7 +46,7 @@ let old: { vault: TestVault; deps: FixtureDeps; root: CoffreClient };
 beforeEach(async () => {
   await resetDatabase(db.owner);
   // Uses go in today's partition, at or past the floor of `at` (schema 0022), as a deployment's checkpointer keeps them.
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   if (TEST_ENGINE === 'postgres') {
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
     await db.owner.execute(sql`SELECT make_day(${day(Date.now() - 86_400_000)}::date), make_day(${day(Date.now())}::date), make_day(${day(Date.now() + 86_400_000)}::date)`);
@@ -452,15 +452,15 @@ async function refusalDropped<T>(work: () => Promise<T>): Promise<T> {
 /** A member's row and grants as they stand: what a writer copies, to put back later. */
 async function memberRows(principal: string) {
   return {
-    member: (await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, principal)))[0]!,
-    grants: await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, principal)),
+    member: (await db.owner.select().from(principals).where(eq(principals.principal, principal)))[0]!,
+    grants: await db.owner.select().from(grants).where(eq(grants.principal, principal)),
   };
 }
 
-async function putBack({ member, grants }: Awaited<ReturnType<typeof memberRows>>): Promise<void> {
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, member.principal));
-  if (grants.length > 0) await db.owner.insert(vaultGrants).values(grants);
-  await db.owner.update(vaultMembers).set(member).where(eq(vaultMembers.principal, member.principal));
+async function putBack({ member, grants: held }: Awaited<ReturnType<typeof memberRows>>): Promise<void> {
+  await db.owner.delete(grants).where(eq(grants.principal, member.principal));
+  if (held.length > 0) await db.owner.insert(grants).values(held);
+  await db.owner.update(principals).set(member).where(eq(principals.principal, member.principal));
 }
 
 test("0.14's writes refused once the cutover is there: an old isolate's write fails whole, its app's or its vault's, its reads and uses go on; 0.15's own write lands (OldWritesRefused, PR 9b)", async () => {

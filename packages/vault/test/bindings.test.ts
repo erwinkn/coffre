@@ -346,8 +346,8 @@ test("an unbind takes 0.14's head first, which 0.14's use of a credential it end
 
 test("a binding's maker whose access moved since the app weighed it is refused, for the app to weigh again", async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
-  const [{ accessSeq }] = (await db.owner.select({ accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, ROOT))) as [{ accessSeq: bigint }];
+  const { principals } = tablesOf(db.owner);
+  const [{ accessSeq }] = (await db.owner.select({ accessSeq: principals.accessSeq }).from(principals).where(eq(principals.principal, ROOT))) as [{ accessSeq: bigint }];
   const stale = await w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', actorAccess: String(BigInt(accessSeq) + 1n) }));
   assert.equal(!stale.ok && stale.refused, 'access');
   const { serviceBindings } = tablesOf(db.owner);

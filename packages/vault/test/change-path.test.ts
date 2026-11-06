@@ -154,14 +154,14 @@ test('every change a decision makes to a member is an entry of 0.15\'s log, op b
   // her row names (UsesSeeOldWrites, plan PR 5).
   const cited = (await changeRows()).filter((row) => row.object === objectKey(member(ADA))).map((row) => (JSON.parse(row.payload) as { old?: string }).old);
   assert.deepEqual(cited.at(-1), old.at(-1)!.seq.toString());
-  const [{ accessSeq }] = await db.owner.select({ accessSeq: tablesOf(db.owner).vaultMembers.accessSeq }).from(tablesOf(db.owner).vaultMembers).where(eq(tablesOf(db.owner).vaultMembers.principal, ADA));
+  const [{ accessSeq }] = await db.owner.select({ accessSeq: tablesOf(db.owner).principals.accessSeq }).from(tablesOf(db.owner).principals).where(eq(tablesOf(db.owner).principals.principal, ADA));
   assert.equal(cited.at(-1), accessSeq.toString());
   assert.ok(cited.every((seq) => seq !== undefined));
 });
 
 test('a change to a member row put back from before a revoke is refused, though 0.14\'s log was cut to match it (ChangeChecksSeal)', async () => {
   const w = await world();
-  const { vaultMembers, vaultGrants, auditLog } = tablesOf(db.owner);
+  const { principals, grants, auditLog } = tablesOf(db.owner);
   const third = (await places(db.owner)).dev;
   const grant = (environmentId: string, projectId: string, role: string | null) =>
     w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId, environmentId, role, expiresAt: null }] });
@@ -169,8 +169,8 @@ test('a change to a member row put back from before a revoke is refused, though 
   assert.ok((await grant(w.dev, w.project, 'viewer')).ok); // A
   assert.ok((await grant(w.prod, w.project, 'developer')).ok); // B
   // Mallory keeps Ada's rows as they are with A and B, sealed {A, B} by the log's newest change then.
-  const [kept] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
-  const keptGrants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA));
+  const [kept] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
+  const keptGrants = await db.owner.select().from(grants).where(eq(grants.principal, ADA));
   const keptSeq = (await rows<{ seq: string }>(db.owner, sql`SELECT max(seq) AS seq FROM audit_log`))[0]!.seq;
   assert.ok((await grant(w.prod, w.project, null)).ok); // B revoked: the log seals {A}
   const revoked = (await changeRows()).at(-1)!;
@@ -184,9 +184,9 @@ test('a change to a member row put back from before a revoke is refused, though 
   });
   // A vault that starts after the cut, as a new isolate does, which remembers no head past it.
   forgetLogHeads();
-  await db.owner.update(vaultMembers).set(kept!).where(eq(vaultMembers.principal, ADA));
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, ADA));
-  await db.owner.insert(vaultGrants).values(keptGrants);
+  await db.owner.update(principals).set(kept!).where(eq(principals.principal, ADA));
+  await db.owner.delete(grants).where(eq(grants.principal, ADA));
+  await db.owner.insert(grants).values(keptGrants);
   const before = (await changeRows()).length;
 
   // A grant of C would seal {A, B, C}: B served again. It is refused, and nothing is written or logged.
@@ -194,7 +194,7 @@ test('a change to a member row put back from before a revoke is refused, though 
   assert.equal(!refused.ok && refused.refusal.code, 'tampered');
   assert.equal((await changeRows()).length, before);
   assert.deepEqual((await changeRows()).at(-1)!.seal, revoked.seal);
-  assert.deepEqual((await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA))).map((row) => row.environmentId).sort(), [w.dev, w.prod].sort());
+  assert.deepEqual((await db.owner.select().from(grants).where(eq(grants.principal, ADA))).map((row) => row.environmentId).sort(), [w.dev, w.prod].sort());
   // The vault reported it, in 0.14's log as any tampered row.
   const reports = await rows<{ code: string }>(db.owner, sql`SELECT code FROM audit_log WHERE action = 'vault.tampered' AND subject_principal = ${ADA}`);
   assert.deepEqual(reports.map(({ code }) => code), ['stale']);
@@ -202,15 +202,15 @@ test('a change to a member row put back from before a revoke is refused, though 
 
 test("the same rows put back, and the revoke's seal column made theirs: the next change is refused, never sealing the writer's rows as the log's (T190, ChangeChecksMac)", async () => {
   const w = await world();
-  const { vaultMembers, vaultGrants, auditLog, logChanges } = tablesOf(db.owner);
+  const { principals, grants, auditLog, logChanges } = tablesOf(db.owner);
   const third = (await places(db.owner)).dev;
   const grant = (environmentId: string, projectId: string, role: string | null) =>
     w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId, environmentId, role, expiresAt: null }] });
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
   assert.ok((await grant(w.dev, w.project, 'viewer')).ok); // A
   assert.ok((await grant(w.prod, w.project, 'developer')).ok); // B
-  const [kept] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, ADA));
-  const keptGrants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA));
+  const [kept] = await db.owner.select().from(principals).where(eq(principals.principal, ADA));
+  const keptGrants = await db.owner.select().from(grants).where(eq(grants.principal, ADA));
   const keptSeq = (await rows<{ seq: string }>(db.owner, sql`SELECT max(seq) AS seq FROM audit_log`))[0]!.seq;
   assert.ok((await grant(w.prod, w.project, null)).ok); // B revoked: the log seals {A}
   const revoked = (await changeRows()).at(-1)!;
@@ -222,9 +222,9 @@ test("the same rows put back, and the revoke's seal column made theirs: the next
     await owned.update(tablesOf(owned).auditChainHead).set({ nextSeq: BigInt(keptSeq) + 1n, headHash: hash });
   });
   forgetLogHeads();
-  await db.owner.update(vaultMembers).set(kept!).where(eq(vaultMembers.principal, ADA));
-  await db.owner.delete(vaultGrants).where(eq(vaultGrants.principal, ADA));
-  await db.owner.insert(vaultGrants).values(keptGrants);
+  await db.owner.update(principals).set(kept!).where(eq(principals.principal, ADA));
+  await db.owner.delete(grants).where(eq(grants.principal, ADA));
+  await db.owner.insert(grants).values(keptGrants);
   await db.owner.update(logChanges).set({ seal: kept!.seal }).where(eq(logChanges.number, revoked.number));
   const before = (await changeRows()).length;
 
@@ -233,17 +233,17 @@ test("the same rows put back, and the revoke's seal column made theirs: the next
   const refused = await grant(third, (await rows<{ project_id: string }>(db.owner, sql`SELECT project_id FROM environments WHERE id = ${third}`))[0]!.project_id, 'viewer');
   assert.equal(!refused.ok && refused.refusal.code, 'tampered');
   assert.equal((await changeRows()).length, before);
-  assert.deepEqual((await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, ADA))).map((row) => row.environmentId).sort(), [w.dev, w.prod].sort());
+  assert.deepEqual((await db.owner.select().from(grants).where(eq(grants.principal, ADA))).map((row) => row.environmentId).sort(), [w.dev, w.prod].sort());
 });
 
 test('change_input refuses a row that is not its object\'s newest change\'s, under the lock, whatever the vault read (ChangeChecksSeal)', async () => {
   const w = await world();
-  const { vaultMembers } = tablesOf(db.owner);
+  const { principals } = tablesOf(db.owner);
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA })).ok);
-  const [{ seal: added }] = await db.owner.select({ seal: vaultMembers.seal }).from(vaultMembers).where(eq(vaultMembers.principal, ADA));
+  const [{ seal: added }] = await db.owner.select({ seal: principals.seal }).from(principals).where(eq(principals.principal, ADA));
   assert.ok((await w.vault.admit({ actor: ROOT, principal: ADA, role: 'auditor' })).ok);
   // The row's seal put back to the one before: the vault, asked from that seal, would CAS from what it read.
-  await db.owner.update(vaultMembers).set({ seal: added }).where(eq(vaultMembers.principal, ADA));
+  await db.owner.update(principals).set({ seal: added }).where(eq(principals.principal, ADA));
   const call = (requestId: string) => made(w.keys, member(ADA), { op: 'member.role', role: 'admin', scope: EVERYWHERE }, { kind: 'principal', principal: ADA, status: 'active', generation: 0, role: 'admin', scope: EVERYWHERE, grants: [] }, added!, requestId);
   await assert.rejects(change([call(randomUUID())]), (error) => store.isStale(error));
   assert.equal((await opsOf(w.keys, member(ADA))).length, 2);
@@ -276,11 +276,11 @@ test('change_input_strict, with the COMMIT: its number answers after it; a chang
   const from = (await store.readObject(db.owner, { kind: 'environment', id: w.prod })).seal;
   const ref = { kind: 'environment' as const, id: w.prod };
   const protect = (on: boolean) => made(w.keys, ref, { op: 'environment.protect', protected: on }, { ...environment(w.project, w.prod, 'prod'), protected: on }, from);
-  const { vaultMembers } = tablesOf(db.vault);
+  const { principals } = tablesOf(db.vault);
   // A write beside it, left to `later` too: it commits with the change, or not at all.
-  const written = (principal: string) => db.vault.select().from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const written = (principal: string) => db.vault.select().from(principals).where(eq(principals.principal, principal));
   const commit = (call: store.ChangeCall, principal: string) => db.vault.transaction(async (tx) => {
-    later(tx, tx.insert(vaultMembers).values({ principal, status: 'active', role: 'viewer', mac: randomBytes(32), createdAt: Date.now(), createdBy: ROOT, statusChangedAt: Date.now(), statusChangedBy: ROOT, accessSeq: 0n }));
+    later(tx, tx.insert(principals).values({ principal, status: 'active', role: 'viewer', mac: randomBytes(32), createdAt: Date.now(), createdBy: ROOT, statusChangedAt: Date.now(), statusChangedBy: ROOT, accessSeq: 0n }));
     return store.laterInputs(tx, [call]);
   });
   const numbers = await commit(protect(true), ADA);
@@ -569,7 +569,7 @@ test('a 0.15 change beside a 0.14 decision holding its member\'s row: row, head,
     // which takes the fence (OldWritesFence). Marked as a writer under 0.15's log marks it: once cut over, 0.14's own is
     // refused at its append (PR 9b), after its row and head, which this holds all the same.
     await old.unsafe('BEGIN');
-    await old.unsafe(`SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM vault_members WHERE principal = $1 FOR NO KEY UPDATE`, [ADA]);
+    await old.unsafe(`SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM principals WHERE principal = $1 FOR NO KEY UPDATE`, [ADA]);
     const changed = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'viewer', expiresAt: null }] });
     await waitFor(async () => (await waiting()) > 0, 'the change waits for the row');
     await old.unsafe('SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE');

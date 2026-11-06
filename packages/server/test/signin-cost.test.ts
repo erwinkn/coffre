@@ -201,7 +201,7 @@ test("a sign-in's statements read as many rows and pages however many credential
     SELECT gen_random_uuid(), 'service', sha256(convert_to('m' || g, 'UTF8')), sha256(convert_to('t' || g, 'UTF8')), 'x', 0, ${`token:${SERVICE}`}, ${`binding:${binding}`},
            now() - (g || ' minutes')::interval - interval '1 hour', now() - (g || ' minutes')::interval
       FROM generate_series(1, 20000) g`);
-  await db.owner.execute(sql`INSERT INTO consumed_tokens (hash, consumed_at) SELECT sha256(convert_to('s' || g, 'UTF8')), now() - (g || ' seconds')::interval FROM generate_series(1, 20000) g`);
+  await db.owner.execute(sql`INSERT INTO spent_id_tokens (hash, consumed_at) SELECT sha256(convert_to('s' || g, 'UTF8')), now() - (g || ' seconds')::interval FROM generate_series(1, 20000) g`);
   await db.owner.transaction(async (tx) => {
     await tx.execute(sql`ALTER TABLE audit_log DISABLE TRIGGER USER`);
     await tx.execute(sql`

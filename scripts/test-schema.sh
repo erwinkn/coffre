@@ -134,7 +134,7 @@ let_go
 # holding the fence and deadlocking on the row.
 owner_psql >"$scratch/old.log" 2>&1 <<'SQL' &
 BEGIN;
-SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM vault_members WHERE principal = 'token:deploy' FOR NO KEY UPDATE;
+SELECT pg_advisory_xact_lock(1668245101, hashtext(principal)) FROM principals WHERE principal = 'token:deploy' FOR NO KEY UPDATE;
 SELECT pg_sleep(2) /* coffre-test-holder */;
 SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE;
 INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)
@@ -146,7 +146,7 @@ held 1668245101
 vault_psql -At >"$scratch/change.log" 2>&1 <<'SQL' || { cat "$scratch/change.log" >&2; echo 'a 0.15 change did not pass a 0.14 write in flight' >&2; exit 1; }
 SET lock_timeout = '10s';
 SELECT change_input('principal', 'token:deploy', 'reseal-under-0.14', 1, 'system:test', '{"op":"genesis"}', NULL,
-    (SELECT seal FROM vault_members WHERE principal = 'token:deploy'), decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
+    (SELECT seal FROM principals WHERE principal = 'token:deploy'), decode(repeat('5f', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NOT NULL;
 SQL
 wait "$old" || { cat "$scratch/old.log" >&2; echo "0.14's write failed beside a 0.15 change" >&2; exit 1; }
 [[ "$(cat "$scratch/change.log")" == t ]] || { cat "$scratch/change.log" >&2; exit 1; }
@@ -156,7 +156,7 @@ wait "$old" || { cat "$scratch/old.log" >&2; echo "0.14's write failed beside a 
 # member's credential: the change waits behind it, then passes.
 owner_psql >"$scratch/old.log" 2>&1 <<'SQL' &
 BEGIN;
-SELECT pg_advisory_xact_lock_shared(1668245101, hashtext(principal)) FROM vault_members WHERE principal = 'token:deploy' FOR SHARE;
+SELECT pg_advisory_xact_lock_shared(1668245101, hashtext(principal)) FROM principals WHERE principal = 'token:deploy' FOR SHARE;
 SELECT pg_sleep(2) /* coffre-test-holder */;
 SELECT 1 FROM audit_chain_head WHERE only_row FOR UPDATE;
 INSERT INTO audit_log (seq, author, key_id, occurred_at, actor, action, decision, prev_hash, mac, hash)

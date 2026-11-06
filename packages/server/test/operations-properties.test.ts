@@ -10,7 +10,7 @@ import { and, eq, ne } from 'drizzle-orm';
 import { propertySettings } from '../../../scripts/property-settings.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testAnchor, testVault, waitUntil, watchUses, type FixtureDeps } from './api-fixture.ts';
 import { drainBackgroundTasks } from './background-tasks.ts';
-import { auditLog, vaultMembers, vaultGrants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
+import { auditLog, principals, grants, credentials as storedCredentials, identities, environments as storedEnvironments, projects as storedProjects, secrets as storedSecrets, secretReferences, secretVersions } from './db/tables.ts';
 import { SigninService } from '../src/api/signin.ts';
 import { fetchApi } from '../src/fetch-api.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
@@ -252,8 +252,8 @@ async function scenario(operations: readonly Operation[]) {
   async function state() {
     await drainBackgroundTasks();
     return {
-      members: await database.owner.select().from(vaultMembers).orderBy(vaultMembers.principal),
-      grants: await database.owner.select().from(vaultGrants).orderBy(vaultGrants.principal, vaultGrants.projectId, vaultGrants.environmentId),
+      members: await database.owner.select().from(principals).orderBy(principals.principal),
+      grants: await database.owner.select().from(grants).orderBy(grants.principal, grants.projectId, grants.environmentId),
       credentials: await database.owner.select().from(storedCredentials).orderBy(storedCredentials.id),
       identities: await database.owner.select().from(identities).orderBy(identities.id),
       allowed: await database.owner.select().from(auditLog).where(eq(auditLog.decision, 'allow')).orderBy(auditLog.seq),

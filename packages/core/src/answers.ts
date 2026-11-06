@@ -28,7 +28,7 @@ export const PRINCIPAL = /^(user|token):[^\s:][^\s]*$/;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A member's row, as `vault_members` holds it, its instance role and scope read (`storedRole` in @coffre/db/grants). */
+/** A member's row, as `principals` holds it, its instance role and scope read (`storedRole` in @coffre/db/grants). */
 export type MemberFacts = {
   status: 'active' | 'removed';
   role: InstanceRole;
@@ -39,7 +39,7 @@ export type MemberFacts = {
   statusChangedBy: string;
 };
 
-/** A grant, as `vault_grants` holds it, its environment's project filled in; times in milliseconds since the epoch. */
+/** A grant, as `grants` holds it, its environment's project filled in; times in milliseconds since the epoch. */
 export type GrantFacts = {
   projectId: string | null;
   environmentId: string | null;

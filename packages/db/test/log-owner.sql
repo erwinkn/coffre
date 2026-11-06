@@ -11,7 +11,7 @@ DECLARE
 BEGIN
     UPDATE log_config SET value = '{"bulk":{"count":99,"windowMs":86400000}}' WHERE name = 'policy';
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 30, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000, p_decided => true));
-    IF r.state IS NOT NULL OR r.cap_count <> 1 OR r.in_set OR EXISTS (SELECT 1 FROM log_bulk WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
+    IF r.state IS NOT NULL OR r.cap_count <> 1 OR r.in_set OR EXISTS (SELECT 1 FROM bulk_cap WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
         RAISE EXCEPTION 'FAIL: the policy''s row moved the cap: %', r;
     END IF;
     INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
@@ -54,22 +54,22 @@ $$;
 DO $$
 DECLARE
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
-    before bytea := (SELECT seal FROM vault_members WHERE principal = 'token:deploy');
+    before bytea := (SELECT seal FROM principals WHERE principal = 'token:deploy');
     object record;
 BEGIN
     IF change_input('principal', 'token:deploy', 'reseal-a', t, 'system:test', '{"op":"genesis"}', NULL, before, decode(repeat('6e', 16), 'hex'), decode(repeat('ee', 16), 'hex')) IS NULL THEN
         RAISE EXCEPTION 'FAIL: a change from the row''s own seal did nothing';
     END IF;
-    UPDATE vault_members SET seal = before WHERE principal = 'token:deploy';
+    UPDATE principals SET seal = before WHERE principal = 'token:deploy';
     BEGIN
         PERFORM change_input('principal', 'token:deploy', 'reseal-b', t, 'system:test', '{"op":"genesis"}', NULL, before, decode(repeat('7e', 16), 'hex'), decode(repeat('ee', 16), 'hex'));
         RAISE EXCEPTION 'FAIL: a change sealed a row put back from before the newest change';
     EXCEPTION WHEN data_corrupted THEN NULL;
     END;
-    IF EXISTS (SELECT 1 FROM log_changes WHERE request_id = 'reseal-b') OR (SELECT seal FROM vault_members WHERE principal = 'token:deploy') <> before THEN
+    IF EXISTS (SELECT 1 FROM log_changes WHERE request_id = 'reseal-b') OR (SELECT seal FROM principals WHERE principal = 'token:deploy') <> before THEN
         RAISE EXCEPTION 'FAIL: a refused change left a trace';
     END IF;
-    UPDATE vault_members SET seal = decode(repeat('6e', 16), 'hex') WHERE principal = 'token:deploy';
+    UPDATE principals SET seal = decode(repeat('6e', 16), 'hex') WHERE principal = 'token:deploy';
     -- And each other kind's row, a binding's (the credential that is no token) and the roles' among them.
     FOR object IN SELECT * FROM (VALUES
         ('credential', '66666666-6666-6666-6666-666666666666', 'service_bindings', 'id'),
@@ -95,7 +95,7 @@ DECLARE
     barrier record;
     lowered bigint;
 BEGIN
-    UPDATE log_fence SET at_floor = at_floor - 600000 RETURNING at_floor INTO lowered;
+    UPDATE checkpoint_fence SET at_floor = at_floor - 600000 RETURNING at_floor INTO lowered;
     SELECT * INTO barrier FROM close_one();
     IF barrier.floor_found <> lowered OR barrier.at_floor <= lowered THEN
         RAISE EXCEPTION 'FAIL: the barrier hid a lowered floor: found %, lowered %', barrier.floor_found, lowered;
@@ -115,5 +115,39 @@ BEGIN
     END IF;
     DELETE FROM log_tiles WHERE (tree, level, leaf) IN (('uses', 0, 256), ('uses', 2, 0));
     RAISE NOTICE 'PASS: leaf tiles by range, the levels above in one table';
+END
+$$;
+
+-- 0.15's names for the tables 0.16 renamed (0073_table_renames, T178), kept one release: each a view of its table,
+-- written through as the table (automatically updatable), checked as the caller (security_invoker), and granting
+-- every role exactly what the table grants it, table and column privileges alike, so that neither is wider.
+DO $$
+DECLARE
+    pair record;
+    wider text;
+BEGIN
+    FOR pair IN SELECT * FROM (VALUES ('principals', 'vault_members'), ('grants', 'vault_grants'), ('device_logins', 'device_authorizations'),
+        ('enrollment_codes', 'enrollments'), ('spent_id_tokens', 'consumed_tokens'), ('bulk_cap', 'log_bulk'), ('checkpoint_fence', 'log_fence')) AS v (tbl, old) LOOP
+        IF NOT EXISTS (SELECT 1 FROM information_schema.views WHERE table_schema = 'public' AND table_name = pair.old
+                         AND is_updatable = 'YES' AND is_insertable_into = 'YES' AND is_trigger_updatable = 'NO')
+           OR NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = format('public.%I', pair.old)::regclass AND 'security_invoker=true' = ANY(reloptions))
+           OR (SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = format('public.%I', pair.old)::regclass AND attnum > 0)
+              IS DISTINCT FROM (SELECT string_agg(attname, ',' ORDER BY attnum) FROM pg_attribute WHERE attrelid = format('public.%I', pair.tbl)::regclass AND attnum > 0 AND NOT attisdropped) THEN
+            RAISE EXCEPTION 'FAIL: % is not a plain view of every column of %, checked as its caller', pair.old, pair.tbl;
+        END IF;
+        SELECT string_agg(format('%s %s%s', r.rolname, p.privilege, coalesce(' (' || a.attname || ')', '')), ', ') INTO wider
+          FROM pg_roles r
+         CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p (privilege)
+          LEFT JOIN pg_attribute a ON a.attrelid = format('public.%I', pair.tbl)::regclass AND a.attnum > 0 AND NOT a.attisdropped
+                                  AND p.privilege IN ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+         WHERE r.rolname <> current_user AND NOT r.rolsuper
+           AND CASE WHEN a.attname IS NULL
+                    THEN has_table_privilege(r.oid, format('public.%I', pair.tbl), p.privilege) <> has_table_privilege(r.oid, format('public.%I', pair.old), p.privilege)
+                    ELSE has_column_privilege(r.oid, format('public.%I', pair.tbl), a.attname, p.privilege) <> has_column_privilege(r.oid, format('public.%I', pair.old), a.attname, p.privilege) END;
+        IF wider IS NOT NULL THEN
+            RAISE EXCEPTION 'FAIL: % and its table % grant differently: %', pair.old, pair.tbl, wider;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'PASS: 0.15''s seven names are plain views of their renamed tables, each granting what its table grants';
 END
 $$;

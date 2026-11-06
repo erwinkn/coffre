@@ -19,7 +19,7 @@ import { fetchApi } from '../src/fetch-api.ts';
 import { passkeyStands } from '../src/passkey-check.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, LOG, openTestDatabase, resetDatabase, testDeps, usesLogged, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, deviceAuthorizations, passkeys } from './db/tables.ts';
+import { auditLog, credentials, deviceLogins, passkeys } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 import { touching } from './passkey-rows.ts';
 
@@ -178,7 +178,7 @@ test('what a request issues names its passkey: a device approval, the CLI sessio
 
   const started = await signin.startDevice({ clientLabel: 'laptop', sourceIp: null });
   await touching(key, (touch) => approving.deviceLogins.decide(started.userCode, true, touch));
-  const [approval] = await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.userCode, started.userCode));
+  const [approval] = await db.owner.select().from(deviceLogins).where(eq(deviceLogins.userCode, started.userCode));
   assert.equal(approval!.passkeyId, key);
 
   const polled = await signin.pollDevice(started.deviceCode, meta());

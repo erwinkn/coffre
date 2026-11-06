@@ -15,7 +15,7 @@ import { and, asc, count, countDistinct, desc, eq, exists, getTableColumns, getT
 
 import { answerQuery, settingsQuery } from './answers.ts';
 import { readsBy } from './reads.ts';
-import { authMac, AuthRowTampered, checkAuthRow, issuedBy, issuingBinding, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
+import { authMac, AuthRowTampered, checkAuthRow, issuedBy, issuingBinding, signedAs, verifyAuthRow, type AuthRow, type AuthTable } from '../auth-rows.ts';
 
 /**
  * Every query coffre runs, and nowhere else: named reads returning all
@@ -112,7 +112,7 @@ export async function touchCredential(db: Queryable, touch: { credential: string
 
 /** State changes authenticate the old row first and cannot overwrite a concurrent change. */
 export async function updateAuth<
-  T extends Tables['identities'] | Tables['credentials'] | Tables['deviceAuthorizations'] | Tables['serviceBindings'] | Tables['oauthClients'] | Tables['mcpConnections'],
+  T extends Tables['identities'] | Tables['credentials'] | Tables['deviceLogins'] | Tables['serviceBindings'] | Tables['oauthClients'] | Tables['mcpConnections'],
 >(
   db: Queryable,
   chainKey: Buffer,
@@ -121,7 +121,7 @@ export async function updateAuth<
   changes: Partial<NewRow<T>>,
 ): Promise<number> {
   const mine = own(db, table);
-  const kind = getTableName(table) as AuthTable;
+  const kind = signedAs(getTableName(table));
   const rows = await db.select().from(mine as Table).where(matching(mine, match));
   let changed = 0;
   for (const raw of rows) {
@@ -637,7 +637,7 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
   /** Members with no instance role, whose every live grant is among `grants`. */
   stranded: string[];
 }> {
-  const { secrets, secretVersions, vaultGrants, vaultMembers, environments } = tablesOf(db);
+  const { secrets, secretVersions, grants, principals, environments } = tablesOf(db);
   const under = secretsUnder(secrets, place);
   // Every grant on the instance, the place's and all others: few rows, and what tells who is left holding nothing.
   const [going, [keys], [versions], held] = await Promise.all([
@@ -649,30 +649,30 @@ export async function deletionScope(db: Queryable, place: Doomed): Promise<{
     db.select({ n: count() }).from(secretVersions).innerJoin(secrets, eq(secrets.id, secretVersions.secretId))
       .where(and(under, holdsValue(secretVersions))),
     db.select({
-      principal: vaultGrants.principal,
-      projectId: sql<string>`coalesce(${vaultGrants.projectId}, ${environments.projectId})`,
-      environmentId: vaultGrants.environmentId,
-      role: vaultGrants.role,
-      expiresAt: vaultGrants.expiresAt,
-      owner: vaultMembers.owner,
-      instanceRole: vaultMembers.role,
-      scope: vaultMembers.scope,
+      principal: grants.principal,
+      projectId: sql<string>`coalesce(${grants.projectId}, ${environments.projectId})`,
+      environmentId: grants.environmentId,
+      role: grants.role,
+      expiresAt: grants.expiresAt,
+      owner: principals.owner,
+      instanceRole: principals.role,
+      scope: principals.scope,
     })
-      .from(vaultGrants)
-      .innerJoin(vaultMembers, eq(vaultMembers.principal, vaultGrants.principal))
-      .leftJoin(environments, eq(environments.id, vaultGrants.environmentId))
-      .orderBy(asc(vaultGrants.principal)),
+      .from(grants)
+      .innerJoin(principals, eq(principals.principal, grants.principal))
+      .leftJoin(environments, eq(environments.id, grants.environmentId))
+      .orderBy(asc(grants.principal)),
   ]);
   const doomed = (grant: (typeof held)[number]) =>
     place.environmentId === null ? grant.projectId === place.projectId : grant.environmentId === place.environmentId;
-  const grants = held.filter(doomed).map(({ owner: _, instanceRole: _role, scope: _scope, ...grant }) => grant);
+  const lost = held.filter(doomed).map(({ owner: _, instanceRole: _role, scope: _scope, ...grant }) => grant);
   const now = Date.now();
   // An instance role that reaches anything keeps them in, wherever its scope does.
   const roleless = (grant: (typeof held)[number]) => storedRole({ owner: grant.owner, role: grant.instanceRole, scope: grant.scope }).role === 'member';
-  const stranded = [...new Set(grants.map((grant) => grant.principal))].filter((principal) =>
+  const stranded = [...new Set(lost.map((grant) => grant.principal))].filter((principal) =>
     held.every((grant) => grant.principal !== principal
       || (roleless(grant) && (doomed(grant) || (grant.expiresAt !== null && grant.expiresAt <= now)))));
-  return { environments: going, keys: Number(keys.n), versions: Number(versions.n), grants, stranded };
+  return { environments: going, keys: Number(keys.n), versions: Number(versions.n), grants: lost, stranded };
 }
 
 function secretsUnder(secrets: Tables['secrets'], place: Doomed): SQL {
@@ -882,11 +882,11 @@ export function memberOf(principal: string): { type: 'user' | 'service'; id: str
  * reads holds until it commits.
  */
 export async function memberStanding(db: Queryable, principal: string): Promise<{ status: string; generation: number; accessSeq: bigint } | null> {
-  const { vaultMembers } = tablesOf(db);
+  const { principals } = tablesOf(db);
   const [row] = await db
-    .select({ status: vaultMembers.status, generation: vaultMembers.generation, accessSeq: vaultMembers.accessSeq })
-    .from(vaultMembers)
-    .where(eq(vaultMembers.principal, principal));
+    .select({ status: principals.status, generation: principals.generation, accessSeq: principals.accessSeq })
+    .from(principals)
+    .where(eq(principals.principal, principal));
   return row ?? null;
 }
 
@@ -900,8 +900,8 @@ export async function memberStanding(db: Queryable, principal: string): Promise<
  * answers it from its cache.
  */
 export async function newestAccessSeq(db: Queryable, principal: string): Promise<bigint | null> {
-  const { vaultMembers } = tablesOf(db);
-  const [row] = await db.select({ seq: vaultMembers.accessSeq, now: clock(db) }).from(vaultMembers).where(eq(vaultMembers.principal, principal));
+  const { principals } = tablesOf(db);
+  const [row] = await db.select({ seq: principals.accessSeq, now: clock(db) }).from(principals).where(eq(principals.principal, principal));
   return row?.seq ?? null;
 }
 
@@ -919,7 +919,7 @@ export async function wayInStands(
   db: Queryable,
   way: { principal: string; generation: number; credentialId: string | null; bindingId?: string | null; connectionId: string | null },
 ): Promise<boolean> {
-  const { vaultMembers, credentials, mcpConnections, serviceBindings } = tablesOf(db);
+  const { principals, credentials, mcpConnections, serviceBindings } = tablesOf(db);
   const credential = way.credentialId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${credentials} WHERE ${credentials.id} = ${way.credentialId}
     AND ${credentials.revokedAt} IS NULL AND ${credentials.generation} = ${way.generation})`;
   const connection = way.connectionId === null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${mcpConnections} WHERE ${mcpConnections.id} = ${way.connectionId}
@@ -927,9 +927,9 @@ export async function wayInStands(
   const binding = way.bindingId == null ? sql`1 = 1` : sql`EXISTS (SELECT 1 FROM ${serviceBindings} WHERE ${serviceBindings.id} = ${way.bindingId}
     AND ${serviceBindings.revokedAt} IS NULL AND ${serviceBindings.generation} = ${way.generation}) AND NOT ${hasTombstone(db, way.bindingId)}`;
   const [row] = await db
-    .select({ status: vaultMembers.status, generation: vaultMembers.generation, stands: truth(sql`${credential} AND ${connection} AND ${binding}`), now: clock(db) })
-    .from(vaultMembers)
-    .where(eq(vaultMembers.principal, way.principal));
+    .select({ status: principals.status, generation: principals.generation, stands: truth(sql`${credential} AND ${connection} AND ${binding}`), now: clock(db) })
+    .from(principals)
+    .where(eq(principals.principal, way.principal));
   return row !== undefined && row.status === 'active' && row.generation === way.generation && row.stands;
 }
 
@@ -939,12 +939,12 @@ export async function wayInStands(
  * many active people hold each instance role.
  */
 export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, number>; instanceRoles: Map<InstanceRole, number> }> {
-  const { vaultGrants, vaultMembers } = tablesOf(db);
+  const { grants, principals } = tablesOf(db);
   const [granted, people] = await Promise.all([
-    db.select({ role: vaultGrants.role, count: count() }).from(vaultGrants).groupBy(vaultGrants.role),
-    db.select({ owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
-      .from(vaultMembers)
-      .where(and(eq(vaultMembers.status, 'active'), like(vaultMembers.principal, 'user:%'))),
+    db.select({ role: grants.role, count: count() }).from(grants).groupBy(grants.role),
+    db.select({ owner: principals.owner, role: principals.role, scope: principals.scope })
+      .from(principals)
+      .where(and(eq(principals.status, 'active'), like(principals.principal, 'user:%'))),
   ]);
   const instanceRoles = new Map<InstanceRole, number>();
   for (const row of people) {
@@ -963,12 +963,12 @@ export async function roleHolders(db: Queryable): Promise<{ roles: Map<string, n
  * database has them.
  */
 export async function memberHoldings(db: Queryable, now: Date): Promise<{ principal: string; service: boolean; role: InstanceRole; scope: Scope; grants: StoredGrant[] }[]> {
-  const { vaultMembers } = tablesOf(db);
+  const { principals } = tablesOf(db);
   const [rows, granted] = await Promise.all([
-    db.select({ principal: vaultMembers.principal, owner: vaultMembers.owner, role: vaultMembers.role, scope: vaultMembers.scope })
-      .from(vaultMembers)
-      .where(eq(vaultMembers.status, 'active'))
-      .orderBy(asc(vaultMembers.principal)),
+    db.select({ principal: principals.principal, owner: principals.owner, role: principals.role, scope: principals.scope })
+      .from(principals)
+      .where(eq(principals.status, 'active'))
+      .orderBy(asc(principals.principal)),
     readGrants(db, { liveAt: now.getTime() }),
   ]);
   const byPrincipal = new Map<string, StoredGrant[]>();
@@ -983,7 +983,7 @@ export async function memberHoldings(db: Queryable, now: Date): Promise<{ princi
 }
 
 /**
- * A grant as `vault_grants` holds it: on a project, or one of its
+ * A grant as `grants` holds it: on a project, or one of its
  * environments (with its project). A grant on every project of 0.4, which
  * names neither until the vault replaces it, reaches nothing (`grantKind`).
  */
@@ -1066,15 +1066,15 @@ export type MemberAccessRows = {
  * to name them by. A member page reads this once, not one list per project.
  *
  *   SELECT m.status, m.owner, m.role, m.scope, m.status_changed_by, <finding>, <change>, x.*
- *   FROM vault_members m LEFT JOIN (
- *     SELECT 'grant', g.principal, project, slugs, role, end FROM vault_grants g … WHERE g.principal = $1 AND live
+ *   FROM principals m LEFT JOIN (
+ *     SELECT 'grant', g.principal, project, slugs, role, end FROM grants g … WHERE g.principal = $1 AND live
  *     UNION ALL
  *     SELECT 'project', $1, p.id, p.slug, … FROM projects p WHERE m's scope is set
  *   ) x ON x.principal = m.principal
  *   WHERE m.principal = $1
  */
 export async function memberAccess(db: Queryable, principal: string, now: Date): Promise<MemberAccessRows> {
-  const { vaultMembers: m, vaultGrants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
+  const { principals: m, grants: g, environments: e, projects: p, auditLog: log } = tablesOf(db);
   const actions = sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `);
   const place = sql`coalesce(${g.projectId}, ${e.projectId})`;
   const found = findingsOf(db, principal);
@@ -1150,7 +1150,7 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
   if (member !== undefined) {
     const principal = principalOf(member);
     const rows = await dialect.rowsOf<{ principal: string }>(db, sql`SELECT CAST(${principal} AS text) AS principal
-      WHERE NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = ${principal})
+      WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = ${principal})
         AND (EXISTS (SELECT 1 FROM log_changes WHERE log_changes.object = ${logObject('principal', principal)})
           OR EXISTS (SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = ${principal} AND decision = 'allow'
             AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})))`);
@@ -1169,14 +1169,14 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
     )
     SELECT principal FROM named
     WHERE (principal LIKE 'user:%' OR principal LIKE 'token:%')
-      AND NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = named.principal)
+      AND NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = named.principal)
       AND EXISTS (
         SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = named.principal AND decision = 'allow'
           AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})
       )
     UNION
     SELECT a.principal FROM (SELECT ${added} AS principal FROM log_changes WHERE ${recorded(engine, sql.raw('log_changes.payload'), 'admitted')}) AS a
-    WHERE NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = a.principal)
+    WHERE NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = a.principal)
   ) AS missing ORDER BY principal`);
   return rows.map((row) => row.principal);
 }
@@ -1196,28 +1196,28 @@ export async function members(
   filter: { member?: { type: string; id: string }; sessions?: false; standing?: false },
   now: Date,
 ): Promise<MemberRow[]> {
-  const { vaultMembers, credentials, identities } = tablesOf(db);
+  const { principals, credentials, identities } = tablesOf(db);
   const principal = filter.member === undefined ? undefined : principalOf(filter.member);
-  const of = (column: typeof vaultMembers.principal | typeof credentials.principal | typeof identities.principal) =>
+  const of = (column: typeof principals.principal | typeof credentials.principal | typeof identities.principal) =>
     principal === undefined ? undefined : eq(column, principal);
   // Read binary columns directly. Relational JSON encodes bytea on Postgres
   // and cannot hold blobs on SQLite, so it cannot carry these MACs unchanged.
   const [rows, held, bound, granted, tampered] = await Promise.all([
     db
       .select({
-        principal: vaultMembers.principal,
-        createdAt: vaultMembers.createdAt,
-        status: vaultMembers.status,
-        owner: vaultMembers.owner,
-        role: vaultMembers.role,
-        scope: vaultMembers.scope,
-        generation: vaultMembers.generation,
-        statusChangedAt: vaultMembers.statusChangedAt,
-        statusChangedBy: vaultMembers.statusChangedBy,
+        principal: principals.principal,
+        createdAt: principals.createdAt,
+        status: principals.status,
+        owner: principals.owner,
+        role: principals.role,
+        scope: principals.scope,
+        generation: principals.generation,
+        statusChangedAt: principals.statusChangedAt,
+        statusChangedBy: principals.statusChangedBy,
       })
-      .from(vaultMembers)
-      .where(of(vaultMembers.principal))
-      .orderBy(asc(vaultMembers.principal)),
+      .from(principals)
+      .where(of(principals.principal))
+      .orderBy(asc(principals.principal)),
     // Live ones only, through `credentials_live_idx`: a CI service leaves an expired one behind each run.
     filter.sessions === false ? [] : db.select().from(credentials).where(and(of(credentials.principal), isNull(credentials.revokedAt), gt(credentials.expiresAt, now))),
     filter.sessions === false ? [] : db.select().from(identities).where(of(identities.principal)),
@@ -1644,7 +1644,7 @@ export async function signinMembers(
   account: { provider: string; issuerHash: string; subject: string },
   emails: readonly string[],
 ): Promise<Map<string, SigninMember>> {
-  const { vaultMembers, identities } = tablesOf(db);
+  const { principals, identities } = tablesOf(db);
   const bound = db
     .select({ principal: identities.principal })
     .from(identities)
@@ -1652,17 +1652,17 @@ export async function signinMembers(
   const candidates = emails.map((email) => `user:${email}`);
   const rows = await db
     .select({
-      principal: vaultMembers.principal,
-      status: vaultMembers.status,
-      generation: vaultMembers.generation,
-      accessSeq: vaultMembers.accessSeq,
+      principal: principals.principal,
+      status: principals.status,
+      generation: principals.generation,
+      accessSeq: principals.accessSeq,
       // Named in full: drizzle writes a column of the one table it selects from unqualified, which the subquery would read as its own.
-      ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = vault_members.principal)`,
-      live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = vault_members.principal AND live.generation = vault_members.generation AND live.removed_at IS NULL)`,
+      ever: sql<number>`(SELECT count(*) FROM passkeys ever WHERE ever.principal = principals.principal)`,
+      live: sql<number>`(SELECT count(*) FROM passkeys live WHERE live.principal = principals.principal AND live.generation = principals.generation AND live.removed_at IS NULL)`,
       now: clock(db),
     })
-    .from(vaultMembers)
-    .where(candidates.length === 0 ? inArray(vaultMembers.principal, bound) : or(inArray(vaultMembers.principal, candidates), inArray(vaultMembers.principal, bound)));
+    .from(principals)
+    .where(candidates.length === 0 ? inArray(principals.principal, bound) : or(inArray(principals.principal, candidates), inArray(principals.principal, bound)));
   return new Map(rows.map(({ now: _, ever, live, ...row }) => [row.principal, { ...row, ever: Number(ever), live: Number(live) }]));
 }
 
@@ -1733,22 +1733,22 @@ export function lockFactor(tx: Transaction, principal: string): Promise<unknown>
 
 /**
  * A person's approved device codes that no CLI has redeemed yet and that name no passkey: what a first passkey denies
- * (section 6.1), each a compare-and-set on its MAC, and a denial names nobody (`device_authorizations_approval_names_principal`).
+ * (section 6.1), each a compare-and-set on its MAC, and a denial names nobody (`device_logins_approval_names_principal`).
  * The ids it denied.
  */
 export async function denyUnbackedApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<string[]> {
-  const { deviceAuthorizations } = tablesOf(tx);
-  const rows = await tx.select().from(deviceAuthorizations).where(and(
-    eq(deviceAuthorizations.principal, principal),
-    eq(deviceAuthorizations.decision, 'approved'),
-    isNull(deviceAuthorizations.consumedAt),
-    isNull(deviceAuthorizations.passkeyId),
-    gt(deviceAuthorizations.expiresAt, at),
+  const { deviceLogins } = tablesOf(tx);
+  const rows = await tx.select().from(deviceLogins).where(and(
+    eq(deviceLogins.principal, principal),
+    eq(deviceLogins.decision, 'approved'),
+    isNull(deviceLogins.consumedAt),
+    isNull(deviceLogins.passkeyId),
+    gt(deviceLogins.expiresAt, at),
   ));
   const denied: string[] = [];
   for (const row of rows) {
     if (!checkAuthRow(chainKey, 'device_authorizations', row)) continue;
-    if ((await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0 })) > 0) denied.push(row.id);
+    if ((await updateAuth(tx, chainKey, deviceLogins, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0 })) > 0) denied.push(row.id);
   }
   return denied;
 }
@@ -1901,9 +1901,9 @@ export async function exchangeCandidates(
   max: number,
   token: Buffer,
 ): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null }> {
-  const { consumedTokens, serviceBindings, vaultMembers } = tablesOf(db);
+  const { spentIdTokens, serviceBindings, principals } = tablesOf(db);
   const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
-  const spent = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, token));
+  const spent = db.select({ hash: spentIdTokens.hash }).from(spentIdTokens).where(eq(spentIdTokens.hash, token));
   const rows = await db
     .select({
       binding: serviceBindings,
@@ -1912,7 +1912,7 @@ export async function exchangeCandidates(
       now: clock(db),
     })
     .from(serviceBindings)
-    .innerJoin(vaultMembers, and(eq(vaultMembers.principal, serviceBindings.principal), eq(vaultMembers.generation, serviceBindings.generation)))
+    .innerJoin(principals, and(eq(principals.principal, serviceBindings.principal), eq(principals.generation, serviceBindings.generation)))
     .where(and(
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),
@@ -1974,19 +1974,19 @@ export async function exchangeStill(
   since: Date,
   atMost: number,
 ): Promise<{ stands: boolean; recent: number; scope: string | null }> {
-  const { serviceBindings, vaultMembers } = tablesOf(db);
+  const { serviceBindings, principals } = tablesOf(db);
   const recent = issuedSince(db, binding.principal, issuedBy(binding.id), since, atMost);
   const [row] = await db
     .select({
       binding: serviceBindings,
       tombstoned: truth(hasTombstone(db, binding.id)),
-      status: vaultMembers.status,
-      generation: vaultMembers.generation,
+      status: principals.status,
+      generation: principals.generation,
       recent: sql`(SELECT count(*) FROM ${recent} AS recent)`.mapWith(Number),
       now: clock(db),
     })
     .from(serviceBindings)
-    .leftJoin(vaultMembers, eq(vaultMembers.principal, binding.principal))
+    .leftJoin(principals, eq(principals.principal, binding.principal))
     .where(eq(serviceBindings.id, binding.id));
   if (row === undefined) return { stands: false, recent: 0, scope: null };
   const member = row.status === 'active' && row.generation === binding.generation;
@@ -2337,14 +2337,14 @@ export async function sealedHidden(
  * on to the vault and the commit, which refuses it only there.
  */
 export async function tokenConsumed(db: Queryable, hash: Buffer): Promise<boolean> {
-  const { consumedTokens } = tablesOf(db);
-  const [row] = await db.select({ hash: consumedTokens.hash, now: clock(db) }).from(consumedTokens).where(eq(consumedTokens.hash, hash));
+  const { spentIdTokens } = tablesOf(db);
+  const [row] = await db.select({ hash: spentIdTokens.hash, now: clock(db) }).from(spentIdTokens).where(eq(spentIdTokens.hash, hash));
   return row !== undefined;
 }
 
 /** Spend a token: false when it was spent already, which the primary key decides. */
 export async function consumeToken(db: Queryable, hash: Buffer): Promise<boolean> {
-  return (await insertIfAbsent(db, tablesOf(db).consumedTokens, { hash })) === 1;
+  return (await insertIfAbsent(db, tablesOf(db).spentIdTokens, { hash })) === 1;
 }
 
 /**
@@ -2360,9 +2360,9 @@ export async function pruneSpentTokens(db: Queryable, atMost: number): Promise<n
     const [{ pruned }] = await db.execute<{ pruned: number }>(sql`/* writes */ SELECT prune_consumed_tokens(${atMost}) AS pruned`) as unknown as [{ pruned: number }];
     return pruned;
   }
-  const { consumedTokens } = tablesOf(db);
-  const old = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(lt(consumedTokens.consumedAt, sql`${clockMillis(db)} - ${SPENT_TOKENS_KEPT_MS}`)).limit(atMost);
-  return changedRows(await db.delete(consumedTokens).where(inArray(consumedTokens.hash, old)));
+  const { spentIdTokens } = tablesOf(db);
+  const old = db.select({ hash: spentIdTokens.hash }).from(spentIdTokens).where(lt(spentIdTokens.consumedAt, sql`${clockMillis(db)} - ${SPENT_TOKENS_KEPT_MS}`)).limit(atMost);
+  return changedRows(await db.delete(spentIdTokens).where(inArray(spentIdTokens.hash, old)));
 }
 
 /** How long a spent token's record is kept: prune_consumed_tokens's two hours, which SQLite applies here. */
@@ -2395,14 +2395,14 @@ function issuedSince(db: Queryable, principal: string, createdBy: string, since:
  * data-modifying CTE, runs them in turn.
  */
 export async function exchangeToken(db: Queryable, token: Buffer, credential: NewRow<Tables['credentials']>, bindingId: string, at: Date): Promise<boolean> {
-  const { consumedTokens, credentials, serviceBindings } = tablesOf(db);
+  const { spentIdTokens, credentials, serviceBindings } = tablesOf(db);
   if (dialect.engineOf(db) === 'sqlite') {
     if (!(await consumeToken(db, token))) return false;
     await insert(db, credentials, credential);
     await update(db, serviceBindings, { id: bindingId }, { lastUsedAt: at });
     return true;
   }
-  const spend = db.insert(consumedTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: consumedTokens.hash });
+  const spend = db.insert(spentIdTokens).values({ hash: token }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
   // The credential's row once for each token spent: none, or one. Its other columns take the database's defaults: a column
   // added later with a default of Drizzle's own (`$defaultFn`) gets it from `insert` on SQLite, not here.
   const columns = Object.entries(getTableColumns(credentials)).filter(([name]) => credential[name as keyof typeof credential] !== undefined);
@@ -2687,16 +2687,16 @@ export async function findDeviceAuthorizations(
   chainKey: Buffer,
   by: { userCode: string } | { deviceCodeHash: Buffer } | { openAt: Date },
 ) {
-  const { deviceAuthorizations } = tablesOf(db);
+  const { deviceLogins } = tablesOf(db);
   const rows = await db
     .select()
-    .from(deviceAuthorizations)
+    .from(deviceLogins)
     .where(
       'userCode' in by
-        ? eq(deviceAuthorizations.userCode, by.userCode)
+        ? eq(deviceLogins.userCode, by.userCode)
         : 'deviceCodeHash' in by
-          ? eq(deviceAuthorizations.deviceCodeHash, by.deviceCodeHash)
-          : and(isNull(deviceAuthorizations.decidedAt), gt(deviceAuthorizations.expiresAt, by.openAt)),
+          ? eq(deviceLogins.deviceCodeHash, by.deviceCodeHash)
+          : and(isNull(deviceLogins.decidedAt), gt(deviceLogins.expiresAt, by.openAt)),
     );
   for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
   return rows;

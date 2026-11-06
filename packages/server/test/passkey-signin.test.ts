@@ -19,7 +19,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { coffreRoute } from '../src/app.ts';
 import type { CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, testVault, waitUntil, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials, deviceAuthorizations, identities, passkeys, vaultMembers } from './db/tables.ts';
+import { auditLog, credentials, deviceLogins, identities, passkeys, principals } from './db/tables.ts';
 import * as rows from './passkey-rows.ts';
 import { assertion, Browser, enroll, me, ORIGIN, provider, register, signinDeployment, touch } from './signin-browser.ts';
 
@@ -66,7 +66,7 @@ async function sessionRow(browser: Browser) {
 
 async function counts() {
   const [members, bound, keys, sessions] = await Promise.all([
-    db.owner.select().from(vaultMembers),
+    db.owner.select().from(principals),
     db.owner.select().from(identities),
     db.owner.select().from(passkeys),
     db.owner.select().from(credentials),
@@ -111,7 +111,7 @@ test("an Owner the deployment names, never admitted, passes the provider and sto
   const { cold } = laterOwner();
   const runtime = deployment('required', undefined, cold);
   assert.ok((await cold.about()).owners?.includes(LATER), 'the deployment names them an Owner');
-  assert.deepEqual(await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${LATER}`)), [], 'no row of theirs');
+  assert.deepEqual(await db.owner.select().from(principals).where(eq(principals.principal, `user:${LATER}`)), [], 'no row of theirs');
   const before = await counts();
   const browser = new Browser(runtime);
   assert.equal(await browser.provider(LATER), '/auth/passkey');
@@ -159,7 +159,7 @@ test("an enrollment begun before an Owner's first admission adds nothing once th
   const root = clientFor(deps, ROOT);
   await root.members.remove(`user:${LATER}`);
   await root.members.add(`user:${LATER}`, { role: 'owner' });
-  const [row] = await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${LATER}`));
+  const [row] = await db.owner.select().from(principals).where(eq(principals.principal, `user:${LATER}`));
   assert.deepEqual([row!.status, row!.generation], ['active', 1]);
   const before = await counts();
 
@@ -303,18 +303,18 @@ test('a first passkey ends everything of the person\'s no passkey stood behind, 
   const code = randomUUID();
   const { hashToken } = await import('@coffre/core/identity');
   const { authMac } = await import('../src/auth-rows.ts');
-  const generation = (await db.owner.select().from(vaultMembers).where(eq(vaultMembers.principal, `user:${ADA}`)))[0]!.generation;
+  const generation = (await db.owner.select().from(principals).where(eq(principals.principal, `user:${ADA}`)))[0]!.generation;
   const approval = {
     id: randomUUID(), deviceCodeHash: hashToken(code), userCode: 'ABCD-EFGH', decision: 'approved', decidedAt: new Date(), principal: `user:${ADA}`, generation,
     expiresAt: new Date(Date.now() + 600_000), consumedAt: null, passkeyId: null,
   };
-  await db.owner.insert(deviceAuthorizations).values({ ...approval, clientLabel: null, clientIp: null, authMac: authMac(deps.chainKey, 'device_authorizations', approval) });
+  await db.owner.insert(deviceLogins).values({ ...approval, clientLabel: null, clientIp: null, authMac: authMac(deps.chainKey, 'device_authorizations', approval) });
 
   const runtime = deployment('required');
   const browser = await enroll(runtime, ADA, await SoftAuthenticator.create('RS256'));
   assert.equal(await me(browser), 'ok');
   assert.equal(await me(Object.assign(earlier, { runtime: off })), 'unauthenticated', 'revoked, even under off');
-  const [denied] = await db.owner.select().from(deviceAuthorizations).where(eq(deviceAuthorizations.id, approval.id));
+  const [denied] = await db.owner.select().from(deviceLogins).where(eq(deviceLogins.id, approval.id));
   assert.equal(denied!.decision, 'denied');
   const live = await db.owner.select().from(credentials).where(and(eq(credentials.principal, `user:${ADA}`), isNull(credentials.revokedAt)));
   assert.deepEqual(live.map(({ id }) => id), [(await sessionRow(browser)).id], 'the new session alone is left');

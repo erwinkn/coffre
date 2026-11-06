@@ -63,7 +63,7 @@ function scopeOf(stored: string | null): CredentialScope | null {
   return isCredentialScope(parsed) ? parsed : [];
 }
 
-/** A member's grant as its object holds it, from its row (`vault_grants`): an environment's with that environment's project. */
+/** A member's grant as its object holds it, from its row (`grants`): an environment's with that environment's project. */
 type GrantColumns = Pick<InputGrant, 'projectId' | 'environmentId' | 'environmentSlug' | 'role' | 'expiresAt'>;
 
 /** A member's object, from their row (its role and scope as `storedRole` reads them) and their grants, lapsed ones too. */

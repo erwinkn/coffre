@@ -121,8 +121,8 @@ test("a use the rules refuse is logged as its request all the same, and refused 
   // Revoke the grant: a change to the principal (PR 4's access.revoke, played here).
   const revoked = { ...(w.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.revoke', place: { projectId: w.project, environmentId: w.dev, environmentSlug: null } }, revoked, async (tx, value) => {
-    await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w.principal}`);
-    await seal('vault_members', 'principal', w.principal)(tx, value);
+    await run(tx, sql`DELETE FROM grants WHERE principal = ${w.principal}`);
+    await seal('principals', 'principal', w.principal)(tx, value);
   });
   const outcome = heard(await use(ask(w, id, when)));
   assert.equal(!outcome.ok && 'code' in outcome && outcome.code, 'no_grant');
@@ -236,7 +236,7 @@ test('FloorChecked: a use stamped below the floor of `at` writes nothing', async
   const w = await world();
   const id = await w.key();
   const { use } = await isolate();
-  await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() + 500}`);
+  await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() + 500}`);
   assert.deepEqual(await use(ask(w, id)), { ok: false, busy: 'late', retryAfter: 1 });
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_uses`)).length, 0);
 });
@@ -260,16 +260,16 @@ test('Unsealed = {}: each input put back from before its change is refused stale
   const v = await isolate();
   const w2 = await world();
   const key2 = await w2.key();
-  const memberBefore = (await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM vault_members WHERE principal = ${w2.principal}`))[0]!.seal;
+  const memberBefore = (await rows<{ seal: Buffer }>(db.owner, sql`SELECT seal FROM principals WHERE principal = ${w2.principal}`))[0]!.seal;
   const revokedMember = { ...(w2.objects.principal as Extract<Input, { kind: 'principal' }>), grants: [] };
   await change({ kind: 'principal', id: w2.principal }, { op: 'access.revoke', place: { projectId: w2.project, environmentId: w2.dev, environmentSlug: null } }, revokedMember,
     async (tx, value) => {
-      await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${w2.principal}`);
-      await seal('vault_members', 'principal', w2.principal)(tx, value);
+      await run(tx, sql`DELETE FROM grants WHERE principal = ${w2.principal}`);
+      await seal('principals', 'principal', w2.principal)(tx, value);
     });
   const t = tablesOf(db.owner);
-  await db.owner.insert(t.vaultGrants).values({ principal: w2.principal, projectId: null, environmentId: w2.dev, environmentSlug: null, role: 'viewer', grantedAt: Date.now(), grantedBy: ROOT });
-  await run(db.owner, sql`UPDATE vault_members SET seal = ${memberBefore} WHERE principal = ${w2.principal}`);
+  await db.owner.insert(t.grants).values({ principal: w2.principal, projectId: null, environmentId: w2.dev, environmentSlug: null, role: 'viewer', grantedAt: Date.now(), grantedBy: ROOT });
+  await run(db.owner, sql`UPDATE principals SET seal = ${memberBefore} WHERE principal = ${w2.principal}`);
   assert.equal(code(heard(await v.use(ask(w2, key2)))), 'stale', 'the member put back');
   const w3 = await world();
   const key3 = await w3.key();
@@ -311,13 +311,13 @@ test('the roles and the policy: a row put back is stale; the cap is the policy\'
   // call, its key not in the set, and nothing is written (review r2 of D153).
   await run(db.owner, sql`UPDATE log_config SET value = ${JSON.stringify({ kind: 'policy', bulk: { count: 99, windowMs: DAY } })} WHERE name = 'policy'`);
   assert.equal(code(heard(await use(ask(w, first)))), 'tampered', 'its seal is not over the row any more');
-  assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 0);
+  assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 0);
   // A call made as decided, a row put back between its two calls: the cap is still the newest change's, one key in.
   if (ENGINE === 'postgres') {
     assert.equal((await call(db.owner, w, first, Date.now())).state, null);
-    assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 1, 'the cap moved as the newest change says: one key in');
+    assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 1, 'the cap moved as the newest change says: one key in');
     await call(db.owner, w, second, Date.now());
-    assert.equal((await rows(db.owner, sql`SELECT last FROM log_bulk`)).length, 1, 'and the second was not let in');
+    assert.equal((await rows(db.owner, sql`SELECT last FROM bulk_cap`)).length, 1, 'and the second was not let in');
   }
   assert.equal(code(heard(await use(ask(w, second)))), 'tampered');
   await replayAgrees();
@@ -381,7 +381,7 @@ test('RefreshShared: uses moving one principal\'s keys on wait for none of one a
   const { use } = await isolate();
   for (const id of [k1, k2]) assert.ok(heard(await use(ask(w, id))).ok);
   // Both rows from two periods before, still in the 15-minute window: the next use of each moves it on.
-  await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+  await run(db.owner, sql`UPDATE bulk_cap SET last = last - 120000`);
   // Every use from here stamped the same: one refresh period.
   const at = onePeriod();
   const asked = (id: string) => ask(w, id, { at, deadline: at + 3000 });
@@ -415,10 +415,10 @@ test('RefreshShared: uses moving one principal\'s keys on wait for none of one a
     await b?.release();
   }
   // Every row is the start of its last writer's refresh period (RefreshPeriods), a minute here.
-  for (const { last } of await rows<{ last: string }>(db.owner, sql`SELECT last FROM log_bulk WHERE principal = ${w.principal}`)) {
+  for (const { last } of await rows<{ last: string }>(db.owner, sql`SELECT last FROM bulk_cap WHERE principal = ${w.principal}`)) {
     assert.equal(Number(last) % 60_000, 0);
   }
-  assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_bulk WHERE principal = ${w.principal}`)).length, 3);
+  assert.equal((await rows(db.owner, sql`SELECT 1 FROM bulk_cap WHERE principal = ${w.principal}`)).length, 3);
   assert.ok(await replayAgrees() >= 5);
 });
 
@@ -426,7 +426,7 @@ test('RefreshShared after a rollback: the uses that waited elect one to move the
   const w = await world();
   const k1 = await w.key();
   assert.ok(heard(await (await isolate()).use(ask(w, k1))).ok);
-  await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+  await run(db.owner, sql`UPDATE bulk_cap SET last = last - 120000`);
   // Every use from here stamped the same: one refresh period.
   const at = onePeriod();
   const asked = (id: string) => ask(w, id, { at, deadline: at + 3000 });
@@ -455,7 +455,7 @@ test('RefreshShared after a rollback: the uses that waited elect one to move the
     await b.release();
     await c.release();
   }
-  const [after] = await rows<{ last: string }>(db.owner, sql`SELECT last FROM log_bulk WHERE principal = ${w.principal}`);
+  const [after] = await rows<{ last: string }>(db.owner, sql`SELECT last FROM bulk_cap WHERE principal = ${w.principal}`);
   assert.equal(Number(after!.last), at - (at % 60_000), 'moved on to the uses\' period, by the one elected after the rollback');
   assert.ok(await replayAgrees() >= 2);
 });
@@ -497,15 +497,15 @@ test('a session\'s first call does its planning\'s cold work before it takes the
   const id = await w.key();
   // The indexes the four statements' plans choose among, which a session opens when it first plans them: its cold work,
   // tens of milliseconds on a new connection, which no use may do holding the fence a barrier waits for.
-  const opened = ['credentials_token_hash_key', 'environments_pkey', 'log_bulk_pkey', 'log_config_pkey', 'log_fence_pkey',
-    'secret_versions_pkey', 'secrets_pkey', 'vault_grants_on_project', 'vault_members_pkey'];
+  const opened = ['bulk_cap_pkey', 'checkpoint_fence_pkey', 'credentials_token_hash_key', 'environments_pkey', 'grants_on_project',
+    'log_config_pkey', 'principals_pkey', 'secret_versions_pkey', 'secrets_pkey'];
   const fence = postgresSession(OWNER_URL);
   // Whether a fresh session's first call, cut short at the fence, has parsed the four statements and opened those indexes.
   const beforeFence = async (planned: boolean) => {
     const fresh = postgresSession(OWNER_URL);
     try {
       await fresh.unsafe(`SET lock_timeout = '200ms'`);
-      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0071', false)`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0073', false)`);
       const at = Date.now();
       await assert.rejects(
         fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
@@ -536,7 +536,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
         [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
       assert.equal(answer!.use.state, null);
       const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-      assert.equal(setting!.planned, '0071');
+      assert.equal(setting!.planned, '0073');
     } finally {
       await fresh.end();
     }
@@ -562,7 +562,7 @@ test('covers: a repeat rides its entry, and writes none, until any input changes
   const reveal = heard(await use(ask(w, id, { ...when, purpose: 'reveal' })));
   assert.ok(reveal.ok && !reveal.covered);
   // CoverFresh: with its key's bulk row gone (erased by a writer: it is no seal's), a repeat rides no cover, and is logged.
-  await run(db.owner, sql`DELETE FROM log_bulk`);
+  await run(db.owner, sql`DELETE FROM bulk_cap`);
   const unfresh = heard(await use(ask(w, id, when)));
   assert.ok(unfresh.ok && !unfresh.covered, JSON.stringify(unfresh));
   // A change to the key (its value moved): the next repeat is an entry of its own.
@@ -619,7 +619,7 @@ test('UsesSeeOldWrites: a 0.14 access entry about the principal that the new log
   const appended = await withLogUnlocked(db.owner, (tx) => appendEntries(tx as never, vaultLogKey(SIGNING_KEY), [{ actor: ROOT, action: 'access.grant', decision: 'allow', subjectPrincipal: w.principal, metadata: '{}' }]));
   assert.equal(code(heard(await use(ask(w, id, { purpose: 'reveal' })))), 'stale');
   // A change that names it accounts for it: the principal's newest change names the entry, as a 0.15 decision's mirror.
-  await change({ kind: 'principal', id: w.principal }, { op: 'genesis', value: w.objects.principal }, w.objects.principal, seal('vault_members', 'principal', w.principal), appended.seqStart);
+  await change({ kind: 'principal', id: w.principal }, { op: 'genesis', value: w.objects.principal }, w.objects.principal, seal('principals', 'principal', w.principal), appended.seqStart);
   assert.ok(heard(await use(ask(w, id, { purpose: 'compare' }))).ok);
   await replayAgrees();
 });
@@ -820,8 +820,8 @@ async function grant(w: Awaited<ReturnType<typeof world>>, environmentId: string
   const added = { projectId: w.project, environmentId, environmentSlug: null, role, expiresAt: null };
   const after = { ...before, grants: [...before.grants, added] };
   await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: added }, after, async (tx, value) => {
-    await run(tx, sql`INSERT INTO vault_grants (principal, environment_id, role, granted_at, granted_by) VALUES (${w.principal}, ${environmentId}, ${role}, ${Date.now()}, ${ROOT})`);
-    await seal('vault_members', 'principal', w.principal)(tx, value);
+    await run(tx, sql`INSERT INTO grants (principal, environment_id, role, granted_at, granted_by) VALUES (${w.principal}, ${environmentId}, ${role}, ${Date.now()}, ${ROOT})`);
+    await seal('principals', 'principal', w.principal)(tx, value);
   });
   w.objects.principal = after;
 }
@@ -970,14 +970,14 @@ for (const period of ['the same', 'passed'] as const) {
     const lapsing = { ...before.grants[0]!, expiresAt: lapses };
     const after = { ...before, grants: [lapsing] };
     await change({ kind: 'principal', id: w.principal }, { op: 'access.grant', grant: lapsing }, after, async (tx, value) => {
-      await run(tx, sql`UPDATE vault_grants SET expires_at = ${lapses} WHERE principal = ${w.principal}`);
-      await seal('vault_members', 'principal', w.principal)(tx, value);
+      await run(tx, sql`UPDATE grants SET expires_at = ${lapses} WHERE principal = ${w.principal}`);
+      await seal('principals', 'principal', w.principal)(tx, value);
     });
     const { use } = await isolate();
     assert.ok(heard(await use(ask(w, id))).ok);
     await sleep(500);
     // Its key's row from two periods back: asked again uncovered, the use would move it on, which takes the lock.
-    if (period === 'passed') await run(db.owner, sql`UPDATE log_bulk SET last = last - 120000`);
+    if (period === 'passed') await run(db.owner, sql`UPDATE bulk_cap SET last = last - 120000`);
     const repeat = heard(await use(ask(w, id)));
     assert.equal(code(repeat), 'expired');
     if (period === 'the same') {

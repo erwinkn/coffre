@@ -63,7 +63,7 @@ binding's columns the app names (its scope, and a workload's reads with it,
 4. the rate, 60 a minute, counted under the binding's row;
 5. the proof's own times (`validUntil`: the ID token's `exp`, its `iat`'s
    hour) and the credential's end, by the database's clock;
-6. the token spent, by the primary key of `consumed_tokens` (SpentChecked),
+6. the token spent, by the primary key of `spent_id_tokens` (SpentChecked),
    once the app's key is known not to be one it rotated from (as 0.14's
    append refuses one, KeyRetired);
 7. the credential inserted with its seal, the binding stamped;

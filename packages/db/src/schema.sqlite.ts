@@ -242,8 +242,8 @@ export const dismissedKeys = sqliteTable(
   ],
 );
 
-export const vaultMembers = sqliteTable(
-  'vault_members',
+export const principals = sqliteTable(
+  'principals',
   {
     principal: text().primaryKey(),
     status: text().notNull(),
@@ -261,25 +261,25 @@ export const vaultMembers = sqliteTable(
     seal: bytes('seal'),
   },
   (table) => [
-    check('vault_members_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
-    check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
+    check('principals_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+    check('principals_mac_check', sql`octet_length(${table.mac}) = 32`),
     // `^(user|token):[^[:space:]:][^[:space:]]*$`, without regular expressions.
     check(
-      'vault_members_principal_check',
+      'principals_principal_check',
       sql`(${table.principal} GLOB 'user:?*' OR ${table.principal} GLOB 'token:?*')
         AND substr(${table.principal}, instr(${table.principal}, ':') + 1, 1) <> ':'
         AND instr(${table.principal}, ' ') = 0 AND instr(${table.principal}, char(9)) = 0
         AND instr(${table.principal}, char(10)) = 0 AND instr(${table.principal}, char(13)) = 0`,
     ),
-    check('vault_members_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
-    check('vault_members_status_check', sql`${table.status} IN ('active', 'removed')`),
-    check('vault_members_owner_check', sql`NOT ${table.owner} OR (${table.status} = 'active' AND ${table.principal} LIKE 'user:%')`),
-    check('vault_members_generation_check', sql`${table.generation} >= 0`),
+    check('principals_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
+    check('principals_status_check', sql`${table.status} IN ('active', 'removed')`),
+    check('principals_owner_check', sql`NOT ${table.owner} OR (${table.status} = 'active' AND ${table.principal} LIKE 'user:%')`),
+    check('principals_generation_check', sql`${table.generation} >= 0`),
   ],
 );
 
-export const vaultGrants = sqliteTable(
-  'vault_grants',
+export const grants = sqliteTable(
+  'grants',
   {
     principal: text().notNull(),
     projectId: text('project_id'),
@@ -292,32 +292,32 @@ export const vaultGrants = sqliteTable(
   },
   (table) => [
     check(
-      'vault_grants_one_place',
+      'grants_one_place',
       sql`((${table.projectId} IS NULL) <> (${table.environmentId} IS NULL) AND ${table.environmentSlug} IS NULL) OR (${table.projectId} IS NULL AND ${table.environmentId} IS NULL)`,
     ),
-    check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR (${isSlug(table.environmentSlug, 63)})`),
+    check('grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR (${isSlug(table.environmentSlug, 63)})`),
     // A role's id, one that ships or one an Owner made (`ROLE_ID`): which the instance's policy defines, and which of them an
     // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md). Its length is
     // `ROLE_ID`'s; a database migrated holds its own copy, which `vault/test/sql-copies.test.ts` holds to it.
-    check('vault_grants_role_check', sql`length(${table.role}) BETWEEN 2 AND ${sql.raw(String(ROLE_ID_MAX))} AND ${table.role} GLOB '[a-z]*' AND ${table.role} NOT GLOB '*[^a-z0-9-]*'`),
-    unique('vault_grants_on_project').on(table.principal, table.projectId),
-    unique('vault_grants_on_environment').on(table.principal, table.environmentId),
-    unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),
-    uniqueIndex('vault_grants_on_every_project')
+    check('grants_role_check', sql`length(${table.role}) BETWEEN 2 AND ${sql.raw(String(ROLE_ID_MAX))} AND ${table.role} GLOB '[a-z]*' AND ${table.role} NOT GLOB '*[^a-z0-9-]*'`),
+    unique('grants_on_project').on(table.principal, table.projectId),
+    unique('grants_on_environment').on(table.principal, table.environmentId),
+    unique('grants_on_environment_slug').on(table.principal, table.environmentSlug),
+    uniqueIndex('grants_on_every_project')
       .on(table.principal)
       .where(sql`${table.projectId} IS NULL AND ${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL`),
     foreignKey({
-      name: 'vault_grants_principal_fkey',
+      name: 'grants_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     foreignKey({
-      name: 'vault_grants_project_id_fkey',
+      name: 'grants_project_id_fkey',
       columns: [table.projectId],
       foreignColumns: [projects.id],
     }).onDelete('restrict'),
     foreignKey({
-      name: 'vault_grants_environment_id_fkey',
+      name: 'grants_environment_id_fkey',
       columns: [table.environmentId],
       foreignColumns: [environments.id],
     }).onDelete('restrict'),
@@ -545,7 +545,7 @@ export const identities = sqliteTable(
     foreignKey({
       name: 'identities_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     uniqueIndex('identities_active_subject').on(table.provider, table.issuerHash, table.activeSubject),
     index('identities_principal_idx').on(table.principal, table.generation),
@@ -591,7 +591,7 @@ export const passkeys = sqliteTable(
     foreignKey({
       name: 'passkeys_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
     // Every passkey a person has had, removed ones included: the callback's count of them, and what the first passkey and
@@ -640,7 +640,7 @@ export const serviceBindings = sqliteTable(
     foreignKey({
       name: 'service_bindings_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     index('service_bindings_principal_idx').on(table.principal, table.issuer),
     // What an exchange may match: a service's live bindings on an issuer, in a
@@ -651,13 +651,13 @@ export const serviceBindings = sqliteTable(
   ],
 );
 
-export const consumedTokens = sqliteTable(
-  'consumed_tokens',
+export const spentIdTokens = sqliteTable(
+  'spent_id_tokens',
   {
     hash: bytes('hash').primaryKey(),
     consumedAt: time('consumed_at').notNull().default(now),
   },
-  (table) => [check('consumed_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
+  (table) => [check('spent_id_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
 );
 
 export const cappedAlerts = sqliteTable(
@@ -751,7 +751,7 @@ export const mcpConnections = sqliteTable(
     foreignKey({
       name: 'mcp_connections_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     unique('mcp_connections_code_hash_key').on(table.codeHash),
     unique('mcp_connections_refresh_hash_key').on(table.refreshHash),
@@ -801,8 +801,8 @@ export const mcpApprovals = sqliteTable(
  * fixed at minting, is the binding's within what the minter held; the MAC
  * covers everything but its hint and creation time (auth-rows.ts in the server).
  */
-export const enrollments = sqliteTable(
-  'enrollments',
+export const enrollmentCodes = sqliteTable(
+  'enrollment_codes',
   {
     id: text().primaryKey(),
     authMac: bytes('auth_mac').notNull(),
@@ -819,17 +819,17 @@ export const enrollments = sqliteTable(
     expiresAt: time('expires_at').notNull(),
   },
   (table) => [
-    unique('enrollments_code_hash_key').on(table.codeHash),
-    check('enrollments_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
-    check('enrollments_code_hash_check', sql`octet_length(${table.codeHash}) = 32`),
-    check('enrollments_scope_check', sql`json_valid(${table.scope})`),
+    unique('enrollment_codes_code_hash_key').on(table.codeHash),
+    check('enrollment_codes_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('enrollment_codes_code_hash_check', sql`octet_length(${table.codeHash}) = 32`),
+    check('enrollment_codes_scope_check', sql`json_valid(${table.scope})`),
     foreignKey({
-      name: 'enrollments_binding_id_fkey',
+      name: 'enrollment_codes_binding_id_fkey',
       columns: [table.bindingId],
       foreignColumns: [serviceBindings.id],
     }).onDelete('restrict'),
     // A binding's codes, newest first, for its page.
-    index('enrollments_binding_idx').on(table.bindingId, table.createdAt),
+    index('enrollment_codes_binding_idx').on(table.bindingId, table.createdAt),
   ],
 );
 
@@ -892,7 +892,7 @@ export const credentials = sqliteTable(
     foreignKey({
       name: 'credentials_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     // A session's account is its own member's, bound in the same generation.
     foreignKey({
@@ -909,7 +909,7 @@ export const credentials = sqliteTable(
     foreignKey({
       name: 'credentials_enrollment_id_fkey',
       columns: [table.enrollmentId],
-      foreignColumns: [enrollments.id],
+      foreignColumns: [enrollmentCodes.id],
     }).onDelete('restrict'),
     // A code's sessions made by the exchange, ended ones too: its capacity and its tripwire's last hour, never a child.
     index('credentials_enrollment_roots_idx')
@@ -918,8 +918,8 @@ export const credentials = sqliteTable(
   ],
 );
 
-export const deviceAuthorizations = sqliteTable(
-  'device_authorizations',
+export const deviceLogins = sqliteTable(
+  'device_logins',
   {
     id: text().primaryKey(),
     deviceCodeHash: bytes('device_code_hash').notNull(),
@@ -940,20 +940,20 @@ export const deviceAuthorizations = sqliteTable(
   },
   (table) => [
     foreignKey({
-      name: 'device_authorizations_passkey_id_fkey',
+      name: 'device_logins_passkey_id_fkey',
       columns: [table.passkeyId],
       foreignColumns: [passkeys.id],
     }).onDelete('restrict'),
-    check('device_authorizations_passkey_check', sql`${table.passkeyId} IS NULL OR (${table.decision} IS NOT NULL AND ${table.decision} = 'approved')`),
-    unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
-    unique('device_authorizations_user_code_key').on(table.userCode),
-    check('device_authorizations_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('device_logins_passkey_check', sql`${table.passkeyId} IS NULL OR (${table.decision} IS NOT NULL AND ${table.decision} = 'approved')`),
+    unique('device_logins_device_code_hash_key').on(table.deviceCodeHash),
+    unique('device_logins_user_code_key').on(table.userCode),
+    check('device_logins_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     check(
-      'device_authorizations_decision_check',
+      'device_logins_decision_check',
       sql`${table.decision} IS NULL OR ${table.decision} IN ('approved', 'denied')`,
     ),
     check(
-      'device_authorizations_approval_names_principal',
+      'device_logins_approval_names_principal',
       sql`(${table.decision} IS NULL AND ${table.decidedAt} IS NULL AND ${table.principal} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
         OR (${table.decision} IS NOT NULL AND ${table.decidedAt} IS NOT NULL AND (
           (${table.decision} = 'denied' AND ${table.principal} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
@@ -961,9 +961,9 @@ export const deviceAuthorizations = sqliteTable(
         ))`,
     ),
     foreignKey({
-      name: 'device_authorizations_principal_fkey',
+      name: 'device_logins_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
   ],
 );
@@ -1149,25 +1149,25 @@ export const logReadsCursor = sqliteTable(
   ],
 );
 
-export const logBulk = sqliteTable(
-  'log_bulk',
+export const bulkCap = sqliteTable(
+  'bulk_cap',
   {
     principal: text().notNull(),
     secret: text().notNull(),
     last: integer({ mode: 'number' }).notNull(),
   },
-  (table) => [primaryKey({ name: 'log_bulk_pkey', columns: [table.principal, table.secret] })],
+  (table) => [primaryKey({ name: 'bulk_cap_pkey', columns: [table.principal, table.secret] })],
 );
 
-export const logFence = sqliteTable(
-  'log_fence',
+export const checkpointFence = sqliteTable(
+  'checkpoint_fence',
   {
     onlyRow: flag('only_row').primaryKey().default(true),
     atFloor: integer('at_floor', { mode: 'number' }).notNull(),
     /** The tags of the signing keys the log moved on from (T168), hex, a JSON array. */
     retired: byteList('retired').notNull().default(sql`'[]'`),
   },
-  (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
+  (table) => [check('checkpoint_fence_only_row_check', sql`${table.onlyRow}`)],
 );
 
 export const logCheckpoints = sqliteTable(

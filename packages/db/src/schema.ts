@@ -248,8 +248,8 @@ export const dismissedKeys = pgTable(
  * the time of the vault's log entry that set it, so the log replays to
  * these rows exactly.
  */
-export const vaultMembers = pgTable(
-  'vault_members',
+export const principals = pgTable(
+  'principals',
   {
     principal: text().primaryKey(),
     status: text().notNull(),
@@ -279,14 +279,14 @@ export const vaultMembers = pgTable(
     seal: bytea(),
   },
   (table) => [
-    check('vault_members_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
-    check('vault_members_mac_check', sql`octet_length(${table.mac}) = 32`),
-    check('vault_members_principal_check', sql`${table.principal} ~ '^(user|token):[^[:space:]:][^[:space:]]*$'`),
+    check('principals_seal_check', sql`${table.seal} IS NULL OR octet_length(${table.seal}) = 16`),
+    check('principals_mac_check', sql`octet_length(${table.mac}) = 32`),
+    check('principals_principal_check', sql`${table.principal} ~ '^(user|token):[^[:space:]:][^[:space:]]*$'`),
     // A person is their email address, lowercased, as in sign-in.
-    check('vault_members_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
-    check('vault_members_status_check', sql`${table.status} IN ('active', 'removed')`),
-    check('vault_members_owner_check', sql`NOT ${table.owner} OR (${table.status} = 'active' AND ${table.principal} LIKE 'user:%')`),
-    check('vault_members_generation_check', sql`${table.generation} >= 0`),
+    check('principals_user_lowercase', sql`${table.principal} NOT LIKE 'user:%' OR ${table.principal} = lower(${table.principal})`),
+    check('principals_status_check', sql`${table.status} IN ('active', 'removed')`),
+    check('principals_owner_check', sql`NOT ${table.owner} OR (${table.status} = 'active' AND ${table.principal} LIKE 'user:%')`),
+    check('principals_generation_check', sql`${table.generation} >= 0`),
   ],
 );
 
@@ -297,8 +297,8 @@ export const vaultMembers = pgTable(
  * expired one stays until its place is granted again, so the members page
  * can say it lapsed.
  */
-export const vaultGrants = pgTable(
-  'vault_grants',
+export const grants = pgTable(
+  'grants',
   {
     principal: text().notNull(),
     projectId: uuid('project_id'),
@@ -311,32 +311,32 @@ export const vaultGrants = pgTable(
   },
   (table) => [
     check(
-      'vault_grants_one_place',
+      'grants_one_place',
       sql`((${table.projectId} IS NULL) <> (${table.environmentId} IS NULL) AND ${table.environmentSlug} IS NULL) OR (${table.projectId} IS NULL AND ${table.environmentId} IS NULL)`,
     ),
-    check('vault_grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR ${table.environmentSlug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check('grants_environment_slug_check', sql`${table.environmentSlug} IS NULL OR ${table.environmentSlug} ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
     // A role's id, one that ships or one an Owner made (`ROLE_ID`): which the instance's policy defines, and which of them an
     // environment may be granted, the vault decides, as the policy is now (docs/design/roles.md). The pattern is
     // `ROLE_ID`'s; a database migrated holds its own copy, which `vault/test/sql-copies.test.ts` holds to it.
-    check('vault_grants_role_check', sql`${table.role} ~ ${sql.raw(`'${ROLE_ID.source}'`)}`),
-    unique('vault_grants_on_project').on(table.principal, table.projectId),
-    unique('vault_grants_on_environment').on(table.principal, table.environmentId),
-    unique('vault_grants_on_environment_slug').on(table.principal, table.environmentSlug),
-    uniqueIndex('vault_grants_on_every_project')
+    check('grants_role_check', sql`${table.role} ~ ${sql.raw(`'${ROLE_ID.source}'`)}`),
+    unique('grants_on_project').on(table.principal, table.projectId),
+    unique('grants_on_environment').on(table.principal, table.environmentId),
+    unique('grants_on_environment_slug').on(table.principal, table.environmentSlug),
+    uniqueIndex('grants_on_every_project')
       .on(table.principal)
       .where(sql`${table.projectId} IS NULL AND ${table.environmentId} IS NULL AND ${table.environmentSlug} IS NULL`),
     foreignKey({
-      name: 'vault_grants_principal_fkey',
+      name: 'grants_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     foreignKey({
-      name: 'vault_grants_project_id_fkey',
+      name: 'grants_project_id_fkey',
       columns: [table.projectId],
       foreignColumns: [projects.id],
     }).onDelete('restrict'),
     foreignKey({
-      name: 'vault_grants_environment_id_fkey',
+      name: 'grants_environment_id_fkey',
       columns: [table.environmentId],
       foreignColumns: [environments.id],
     }).onDelete('restrict'),
@@ -591,7 +591,7 @@ export const identities = pgTable(
     foreignKey({
       name: 'identities_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     // An account is bound to one person at a time: the subject counts only
     // while the identity is not revoked (see ACTIVE_SUBJECT).
@@ -657,7 +657,7 @@ export const passkeys = pgTable(
     foreignKey({
       name: 'passkeys_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     // A person's live passkeys: the per-request check, the sign-in's read and the Passkeys tab.
     index('passkeys_live_idx').on(table.principal, table.generation).where(sql`${table.removedAt} IS NULL`),
@@ -716,7 +716,7 @@ export const serviceBindings = pgTable(
     foreignKey({
       name: 'service_bindings_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     index('service_bindings_principal_idx').on(table.principal, table.issuer),
     // What an exchange may match: a service's live bindings on an issuer, in a
@@ -733,13 +733,13 @@ export const serviceBindings = pgTable(
  * spelling of the same token counts as another. Kept whatever becomes of
  * the credential it bought; the primary key decides a race.
  */
-export const consumedTokens = pgTable(
-  'consumed_tokens',
+export const spentIdTokens = pgTable(
+  'spent_id_tokens',
   {
     hash: bytea('hash').primaryKey(),
     consumedAt: timestamp('consumed_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [check('consumed_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
+  (table) => [check('spent_id_tokens_hash_check', sql`octet_length(${table.hash}) = 32`)],
 );
 
 /**
@@ -842,7 +842,7 @@ export const mcpConnections = pgTable(
     foreignKey({
       name: 'mcp_connections_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     unique('mcp_connections_code_hash_key').on(table.codeHash),
     unique('mcp_connections_refresh_hash_key').on(table.refreshHash),
@@ -902,8 +902,8 @@ export const mcpApprovals = pgTable(
  * fixed at minting, is the binding's within what the minter held; the MAC
  * covers everything but its hint and creation time (auth-rows.ts in the server).
  */
-export const enrollments = pgTable(
-  'enrollments',
+export const enrollmentCodes = pgTable(
+  'enrollment_codes',
   {
     id: uuid().primaryKey(),
     authMac: bytea('auth_mac').notNull(),
@@ -920,17 +920,17 @@ export const enrollments = pgTable(
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },
   (table) => [
-    unique('enrollments_code_hash_key').on(table.codeHash),
-    check('enrollments_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
-    check('enrollments_code_hash_check', sql`octet_length(${table.codeHash}) = 32`),
-    check('enrollments_scope_check', sql`${table.scope}::jsonb IS NOT NULL`),
+    unique('enrollment_codes_code_hash_key').on(table.codeHash),
+    check('enrollment_codes_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('enrollment_codes_code_hash_check', sql`octet_length(${table.codeHash}) = 32`),
+    check('enrollment_codes_scope_check', sql`${table.scope}::jsonb IS NOT NULL`),
     foreignKey({
-      name: 'enrollments_binding_id_fkey',
+      name: 'enrollment_codes_binding_id_fkey',
       columns: [table.bindingId],
       foreignColumns: [serviceBindings.id],
     }).onDelete('restrict'),
     // A binding's codes, newest first, for its page.
-    index('enrollments_binding_idx').on(table.bindingId, table.createdAt.desc()),
+    index('enrollment_codes_binding_idx').on(table.bindingId, table.createdAt.desc()),
   ],
 );
 
@@ -1004,7 +1004,7 @@ export const credentials = pgTable(
     foreignKey({
       name: 'credentials_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
     // A session's account is its own member's, bound in the same generation.
     foreignKey({
@@ -1021,7 +1021,7 @@ export const credentials = pgTable(
     foreignKey({
       name: 'credentials_enrollment_id_fkey',
       columns: [table.enrollmentId],
-      foreignColumns: [enrollments.id],
+      foreignColumns: [enrollmentCodes.id],
     }).onDelete('restrict'),
     // A code's sessions made by the exchange, ended ones too: its capacity and its tripwire's last hour, never a child.
     index('credentials_enrollment_roots_idx')
@@ -1037,8 +1037,8 @@ export const credentials = pgTable(
  * the short user code in their browser. It works the same on a laptop and on
  * a server reached over SSH, which a localhost redirect does not.
  */
-export const deviceAuthorizations = pgTable(
-  'device_authorizations',
+export const deviceLogins = pgTable(
+  'device_logins',
   {
     id: uuid().primaryKey().defaultRandom(),
     deviceCodeHash: bytea('device_code_hash').notNull(),
@@ -1059,20 +1059,20 @@ export const deviceAuthorizations = pgTable(
   },
   (table) => [
     foreignKey({
-      name: 'device_authorizations_passkey_id_fkey',
+      name: 'device_logins_passkey_id_fkey',
       columns: [table.passkeyId],
       foreignColumns: [passkeys.id],
     }).onDelete('restrict'),
-    check('device_authorizations_passkey_check', sql`${table.passkeyId} IS NULL OR (${table.decision} IS NOT NULL AND ${table.decision} = 'approved')`),
-    unique('device_authorizations_device_code_hash_key').on(table.deviceCodeHash),
-    unique('device_authorizations_user_code_key').on(table.userCode),
-    check('device_authorizations_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
+    check('device_logins_passkey_check', sql`${table.passkeyId} IS NULL OR (${table.decision} IS NOT NULL AND ${table.decision} = 'approved')`),
+    unique('device_logins_device_code_hash_key').on(table.deviceCodeHash),
+    unique('device_logins_user_code_key').on(table.userCode),
+    check('device_logins_auth_mac_check', sql`octet_length(${table.authMac}) = 32`),
     check(
-      'device_authorizations_decision_check',
+      'device_logins_decision_check',
       sql`${table.decision} IS NULL OR ${table.decision} IN ('approved', 'denied')`,
     ),
     check(
-      'device_authorizations_approval_names_principal',
+      'device_logins_approval_names_principal',
       sql`(${table.decision} IS NULL AND ${table.decidedAt} IS NULL AND ${table.principal} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
         OR (${table.decision} IS NOT NULL AND ${table.decidedAt} IS NOT NULL AND (
           (${table.decision} = 'denied' AND ${table.principal} IS NULL AND ${table.generation} = 0 AND ${table.consumedAt} IS NULL)
@@ -1080,9 +1080,9 @@ export const deviceAuthorizations = pgTable(
         ))`,
     ),
     foreignKey({
-      name: 'device_authorizations_principal_fkey',
+      name: 'device_logins_principal_fkey',
       columns: [table.principal],
-      foreignColumns: [vaultMembers.principal],
+      foreignColumns: [principals.principal],
     }).onDelete('restrict'),
   ],
 );
@@ -1347,14 +1347,14 @@ export const logReadsCursor = pgTable(
  * refresh, the deadline and a minute counts for nothing; `prune_bulk`
  * forgets it an hour after that.
  */
-export const logBulk = pgTable(
-  'log_bulk',
+export const bulkCap = pgTable(
+  'bulk_cap',
   {
     principal: text().notNull(),
     secret: uuid().notNull(),
     last: bigint({ mode: 'number' }).notNull(),
   },
-  (table) => [primaryKey({ name: 'log_bulk_pkey', columns: [table.principal, table.secret] })],
+  (table) => [primaryKey({ name: 'bulk_cap_pkey', columns: [table.principal, table.secret] })],
 );
 
 /**
@@ -1364,14 +1364,14 @@ export const logBulk = pgTable(
  * tag of each signing key the log moved on from (T168, `log_rotate`): an
  * entry whose MAC names one is refused, a use `superseded`.
  */
-export const logFence = pgTable(
-  'log_fence',
+export const checkpointFence = pgTable(
+  'checkpoint_fence',
   {
     onlyRow: boolean('only_row').primaryKey().default(true),
     atFloor: bigint('at_floor', { mode: 'number' }).notNull(),
     retired: bytea().array().notNull().default(sql`'{}'`),
   },
-  (table) => [check('log_fence_only_row_check', sql`${table.onlyRow}`)],
+  (table) => [check('checkpoint_fence_only_row_check', sql`${table.onlyRow}`)],
 );
 
 /**

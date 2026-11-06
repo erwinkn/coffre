@@ -549,7 +549,7 @@ Whether a caller is still in, and what they may do, comes only from
 returned.
 
 **Lists are reads.** The Users page, `coffre access`, a project's Access tab
-and a member's page read `vault_members` and `vault_grants` directly, with
+and a member's page read `principals` and `grants` directly, with
 the app's sessions and sign-in accounts, in one query: a list is a display,
 not a decision. The app cannot check the vault's MAC over a member's row,
 so a row changed around the vault lists as stored; the vault refuses it at
@@ -595,7 +595,7 @@ moves both Workers; nothing serves across two releases.
 | | App (Worker `coffre`) | Vault (Worker `coffre-vault`) |
 |---|---|---|
 | Config | `auditChainKey`, `auth` (sign-in or Access settings), `rotateAfterDays` | `kek`, `previousKeks`, `owners`, `bulkLimit`; `signingKey` with a KMS key |
-| Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `vault_members`, `vault_grants`; vault entries in `audit_log` |
+| Tables it writes | projects, environments, ciphertext and wrapped keys, the directory, sessions; app entries in `audit_log` | `principals`, `grants`; vault entries in `audit_log` |
 | Connection | `coffre_runtime`, through `HYPERDRIVE` or a Node Postgres URL | `coffre_vault_runtime`, through `VAULT_HYPERDRIVE` or a Node Postgres URL |
 
 Both connections reach the same database. Each Worker gets only its own
@@ -977,13 +977,16 @@ before using it. A database writer cannot mint a session or edit its
 authority without the app's key. Each row has a 32-byte `auth_mac`, an
 HMAC-SHA-256 under HKDF-SHA-256 of `auditChainKey`, with empty salt and the
 purpose `coffre/signin-rows/v1`. The message is a JSON tuple beginning with
-`coffre.auth.v1` and the table name, followed by these fields in order:
+`coffre.auth.v1` and the table name, followed by these fields in order. The
+name is the one the table had when its MACs were first written, so 0.16's
+renames moved none: `device_logins` signs as `device_authorizations`, and
+`enrollment_codes` as `enrollments`.
 
 | Table | Authenticated fields |
 |---|---|
 | `identities` | id, provider, issuer hash, subject, principal type and id, generation, revoked at |
 | `credentials` | id, token hash, kind, principal type and id, generation, identity id, expires at, revoked at |
-| `device_authorizations` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
+| `device_logins` | id, device code hash, user code, decision, decided at, principal type and id, generation, expires at, consumed at |
 | `service_bindings` | id, principal, generation, profile, issuer, JWKS URL, claims, revoked at |
 | `oauth_clients` | id, name, redirect URIs, revoked at |
 | `mcp_connections` | id, principal, generation, client id, client name, client host, registration, scopes, redirect URI, code hash, code challenge, code expires at, refresh hash, previous refresh hash, expires at, revoked at |
@@ -995,7 +998,7 @@ target an approval or revocation selects. `decided_at` is covered because
 clearing it would allow another decision. Display labels, email addresses
 and last-use telemetry do not grant access and are outside the MAC.
 
-A row of `credentials`, `device_authorizations` or `mcp_connections` that
+A row of `credentials`, `device_logins` or `mcp_connections` that
 names the passkey behind it (`passkey_id`, set once, with the row) is a
 kind of its own, `confirmed_<table>`, whose tuple adds that passkey and, on
 a credential, `confirmed_at`, the touch. A row from before passkeys names
@@ -1017,7 +1020,7 @@ must belong to the same member and generation, enforced by a foreign key.
 
 Changing `auditChainKey` invalidates these rows too, unless a rotation
 signs them again under the new key ([above](#one-log-two-authors)): it does
-so for every table here (`passkeys` last) and `enrollments`, and signs out browser and CLI
+so for every table here (`passkeys` last) and `enrollment_codes`, and signs out browser and CLI
 sessions. A MAC proves a row genuine, not current: see [Limits](#limits).
 
 ### Trust bindings

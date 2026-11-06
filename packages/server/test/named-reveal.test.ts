@@ -18,7 +18,7 @@ import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { clientFor, entryOf, contextFor, openTestDatabase, resetDatabase, sealedNow, nothingHeld, testDeps, testVault, usesLogged, type FixtureDeps } from './api-fixture.ts';
-import { auditLog, credentials as credentialRows, environments, logBulk, logFence, logUses, vaultGrants } from './db/tables.ts';
+import { auditLog, credentials as credentialRows, environments, bulkCap, checkpointFence, logUses, grants } from './db/tables.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
 const ORIGIN = 'https://secrets.acme.example';
@@ -89,7 +89,7 @@ function counted(vault: Vault, serves: boolean): Vault {
 before(async () => {
   db = await openTestDatabase();
   await resetDatabase(db.owner);
-  await db.owner.update(logFence).set({ atFloor: Date.now() - 60_000 });
+  await db.owner.update(checkpointFence).set({ atFloor: Date.now() - 60_000 });
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   runtime = runtimeOver(counted(deps.vault, true));
   unnamed = runtimeOver(counted(deps.vault, false));
@@ -515,9 +515,9 @@ async function both<T>(ask: (at: CoffreRuntime) => Promise<T>): Promise<{ answer
 test('a grant a writer put back after its revoke stands for nothing: the request asks the vault, and is answered as before, and reported (review r1 of #412)', async () => {
   const token = await personalToken(FORGED);
   assert.equal((await reveal(token, { path: 'market/dev/API_KEY' })).status, 200);
-  const grants = await db.owner.select().from(vaultGrants).where(eq(vaultGrants.principal, `user:${FORGED}`));
+  const held = await db.owner.select().from(grants).where(eq(grants.principal, `user:${FORGED}`));
   await clientFor(deps, ROOT).access.set(`user:${FORGED}`, { 'market/dev': null });
-  await db.owner.insert(vaultGrants).values(grants);
+  await db.owner.insert(grants).values(held);
   // The vault reports a tampered row once a process (`vault.tampered`): whichever asks first.
   const since = await newest();
   const reported = ({ answer, entries }: { answer: unknown; entries: string[] }) => ({ answer, entries: entries.filter((entry) => !entry.startsWith('vault.tampered')) });
@@ -591,7 +591,7 @@ test("a service's bearer token on a strict instance (useOnly) is refused by its 
     auditChainKey: deps.chainKey.toString('base64'),
   });
   const strict = createRuntime(config, deps.db, counted(deps.vault, true), { json: async (url) => { throw new Error(`no fetch of ${url.href} here`); } });
-  const [uses, bulk] = [(await db.owner.select().from(logUses)).length, (await db.owner.select().from(logBulk)).length];
+  const [uses, bulk] = [(await db.owner.select().from(logUses)).length, (await db.owner.select().from(bulkCap)).length];
   named = 0;
   for (const body of [{ path: 'market/dev/API_KEY' }, { path: 'market/dev', keys: ['API_KEY'] }]) {
     const read = await reveal(service, body, strict);
@@ -599,7 +599,7 @@ test("a service's bearer token on a strict instance (useOnly) is refused by its 
     assert.equal(read.body.reason, 'use_only');
   }
   assert.equal(named, 0, 'the vault asked nothing');
-  assert.deepEqual([(await db.owner.select().from(logUses)).length, (await db.owner.select().from(logBulk)).length], [uses, bulk], 'no use, no row of the cap');
+  assert.deepEqual([(await db.owner.select().from(logUses)).length, (await db.owner.select().from(bulkCap)).length], [uses, bulk], 'no use, no row of the cap');
 });
 
 // T165 (B2): a fork's key and `dev@me`'s are the vault's one call by name too (migration 0051): the vault finds the place

@@ -491,6 +491,13 @@
       "when": 1793810000000,
       "tag": "0072_passkeys_principal",
       "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1793820000000,
+      "tag": "0073_table_renames",
+      "breakpoints": true
     }
   ]
 }

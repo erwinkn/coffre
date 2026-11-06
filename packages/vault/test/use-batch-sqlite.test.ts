@@ -37,7 +37,7 @@ const LIMIT = { count: 6, windowMs: WINDOW };
 async function written() {
   return {
     uses: await rows(db.owner, sql`SELECT number, at, request_id, credential, secret, purpose, mac, place FROM log_uses ORDER BY number`),
-    bulk: await rows(db.owner, sql`SELECT principal, secret, last FROM log_bulk ORDER BY principal, secret`),
+    bulk: await rows(db.owner, sql`SELECT principal, secret, last FROM bulk_cap ORDER BY principal, secret`),
   };
 }
 
@@ -76,7 +76,7 @@ test('a thousand and one keys at once: the thousandth allowed, the next over the
   // one a kind for its keys' rows, and its writes; each key's use alone is some 20.
   const calls = 2 * Math.ceil(ids.length / prepared.uses.limits.batch);
   assert.ok(statements - before <= 20 * calls, `${statements - before} statements for ${calls} batch statements`);
-  const [set] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM log_bulk WHERE principal = ${w.principal}`);
+  const [set] = await rows<{ n: number }>(db.owner, sql`SELECT count(*) AS n FROM bulk_cap WHERE principal = ${w.principal}`);
   assert.equal(Number(set!.n), 1000, 'the cap holds');
 });
 
@@ -101,10 +101,10 @@ test('a batch answers each key as its use alone does, row for row, and writes th
   const entryMac = randomBytes(16);
   const start = async () => {
     await run(db.owner, sql`DELETE FROM log_uses`);
-    await run(db.owner, sql`DELETE FROM log_bulk`);
+    await run(db.owner, sql`DELETE FROM bulk_cap`);
     await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place)
       VALUES (${BigInt(entry.number)}, ${entry.at}, ${BigInt(entry.requestId)}, ${w.credentialId}, ${covered}, 1, ${entryMac}, NULL)`);
-    const cap = (secret: string, last: number, principal = w.principal) => run(db.owner, sql`INSERT INTO log_bulk (principal, secret, last) VALUES (${principal}, ${secret}, ${last})`);
+    const cap = (secret: string, last: number, principal = w.principal) => run(db.owner, sql`INSERT INTO bulk_cap (principal, secret, last) VALUES (${principal}, ${secret}, ${last})`);
     // In the set, this period's; in it, an earlier period's (moved on); past the set, but counted against a new key
     // (`window + refresh + deadline + ahead`); past both.
     await cap(fresh1, period);
@@ -177,7 +177,7 @@ test('a batch answers each key as its use alone does, row for row, and writes th
   // What the decided batch did, as the cap's rule has it: the first new key entered, the rest over the cap.
   await start();
   const rowsOf = await callBatch(db.vault, cases[0]![1], null);
-  const entered = await rows<{ secret: string }>(db.owner, sql`SELECT secret FROM log_bulk WHERE principal = ${w.principal} AND last = ${period}`);
+  const entered = await rows<{ secret: string }>(db.owner, sql`SELECT secret FROM bulk_cap WHERE principal = ${w.principal} AND last = ${period}`);
   assert.ok(entered.some((row) => row.secret === entering[0]), 'the first new key entered');
   assert.ok(!entered.some((row) => row.secret === entering[1]), 'the second, over the cap, did not');
   assert.deepEqual([rowsOf[1]!.others, rowsOf[2]!.others, rowsOf[4]!.in_set], [5, 6, true]);

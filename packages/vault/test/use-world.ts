@@ -48,9 +48,9 @@ export async function useDatabases(opened: TestDatabase): Promise<Database> {
 
 /** The log as a new instance's: no change, no use, the floor a minute back, days of uses made around today. */
 export async function emptyLog(): Promise<void> {
-  for (const table of ['log_uses', 'log_bulk', 'log_changes', 'log_config']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await emptyReads(db.owner);
-  await run(db.owner, sql`UPDATE log_fence SET at_floor = ${Date.now() - 60_000}`);
+  await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   if (ENGINE === 'postgres') {
     // Numbers from the start again: a test may have moved them past 2^53.
     await run(db.owner, sql`SELECT setval('log_number', 1, false)`);
@@ -130,11 +130,11 @@ export async function world(options: {
   const now = Date.now();
   await db.owner.insert(t.projects).values({ id: project, slug: projectSlug(project), name: 'Project' });
   await db.owner.insert(t.environments).values({ id: dev, projectId: project, slug: 'dev', name: 'Development', protected: false });
-  await db.owner.insert(t.vaultMembers).values({
+  await db.owner.insert(t.principals).values({
     principal, status: 'active', role: null, scope: null, generation: 0, createdAt: now, createdBy: ROOT, statusChangedAt: now, statusChangedBy: ROOT,
     accessSeq: 0n, mac: Buffer.alloc(32),
   });
-  await db.owner.insert(t.vaultGrants).values({ principal, projectId: null, environmentId: dev, environmentSlug: null, role: options.role ?? 'viewer', grantedAt: now, grantedBy: ROOT });
+  await db.owner.insert(t.grants).values({ principal, projectId: null, environmentId: dev, environmentSlug: null, role: options.role ?? 'viewer', grantedAt: now, grantedBy: ROOT });
   const expiresAt = now + DAY;
   const identityId = options.identity === undefined ? null : randomUUID();
   if (options.identity !== undefined) {
@@ -212,7 +212,7 @@ export async function cutOverStandIn(): Promise<void> {
 export async function genesis(ref: Ref, object: Input): Promise<void> {
   const op: Op = { op: 'genesis', value: object };
   const where: Record<string, [string, string]> = {
-    principal: ['vault_members', 'principal'], credential: ['credentials', 'id'], environment: ['environments', 'id'], secret: ['secrets', 'id'],
+    principal: ['principals', 'principal'], credential: ['credentials', 'id'], environment: ['environments', 'id'], secret: ['secrets', 'id'],
     connection: ['mcp_connections', 'id'], binding: ['service_bindings', 'id'],
   };
   await change(ref, op, object, async (tx, value) => {

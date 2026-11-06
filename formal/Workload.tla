@@ -55,7 +55,7 @@ CONSTANTS
     \* A tunnel's recheck runs the same statement, freezes included (8.2).
     TunnelRecheckSeesFreezes,
     \* The statement compares the row's generation with its member's in
-    \* vault_members, so a removal counts before the app's sweep revokes.
+    \* principals, so a removal counts before the app's sweep revokes.
     GenerationInStatement,
     \* The statement checks each ancestor as it checks the row (8.4)...
     AncestorsChecked,
@@ -102,7 +102,7 @@ Min(a, b) == IF a < b THEN a ELSE b
 VARIABLES
     now,            \* the database's clock
     sessions,       \* sessions[s]: the credentials row
-    status,         \* status[w]: the member's status in vault_members
+    status,         \* status[w]: the member's status in principals
     gen,            \* gen[w]: its generation
     unbound,        \* unbound[w]: its binding is untrusted
     log,            \* the audit log, in seq order: its ends and freezes

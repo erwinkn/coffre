@@ -19,15 +19,15 @@ BEGIN
     FOREACH attempt IN ARRAY ARRAY[
         $q$INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac) VALUES (1, 1, 1, gen_random_uuid(), gen_random_uuid(), 0, decode(repeat('00', 16), 'hex'))$q$,
         $q$INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac) VALUES (1, 1, 'x', gen_random_uuid(), 'system:x', '{}', decode(repeat('00', 16), 'hex'))$q$,
-        $q$INSERT INTO log_bulk VALUES ('token:deploy', gen_random_uuid(), 1)$q$,
+        $q$INSERT INTO bulk_cap VALUES ('token:deploy', gen_random_uuid(), 1)$q$,
         $q$INSERT INTO log_config VALUES ('policy', '{}', NULL)$q$,
-        $q$UPDATE log_fence SET at_floor = 0$q$,
-        $q$DELETE FROM log_bulk$q$,
+        $q$UPDATE checkpoint_fence SET at_floor = 0$q$,
+        $q$DELETE FROM bulk_cap$q$,
         $q$TRUNCATE log_changes$q$,
         $q$INSERT INTO log_tiles VALUES ('changes', 0, 0, decode(repeat('00', 32), 'hex'))$q$,
         $q$INSERT INTO log_checkpoints VALUES (1, 1, 1, 0, decode(repeat('00', 32), 'hex'), 'n', 0, decode(repeat('00', 32), 'hex'), 'n')$q$,
         $q$UPDATE credentials SET seal = NULL$q$,
-        $q$UPDATE vault_members SET seal = NULL$q$,
+        $q$UPDATE principals SET seal = NULL$q$,
         $q$UPDATE service_bindings SET seal = NULL$q$,
         $q$UPDATE environments SET seal = NULL$q$,
         $q$UPDATE secrets SET seal = NULL$q$,
@@ -42,7 +42,7 @@ BEGIN
         END;
     END LOOP;
     PERFORM count(*) FROM log_uses;
-    PERFORM count(*) FROM log_changes, log_bulk, log_fence, log_checkpoints, log_tiles, log_config;
+    PERFORM count(*) FROM log_changes, bulk_cap, checkpoint_fence, log_checkpoints, log_tiles, log_config;
     RAISE NOTICE 'PASS: coffre_vault reads the log and writes it only through its functions';
 END
 $$;
@@ -329,7 +329,7 @@ BEGIN
         RAISE EXCEPTION 'FAIL: change_input applied an op this schema does not know';
     EXCEPTION WHEN invalid_parameter_value THEN NULL;
     END;
-    IF (SELECT seal FROM vault_members WHERE principal = 'token:deploy') IS DISTINCT FROM sealed
+    IF (SELECT seal FROM principals WHERE principal = 'token:deploy') IS DISTINCT FROM sealed
        OR (SELECT object FROM log_changes WHERE request_id = 'genesis-member') <> log_object('principal', 'token:deploy') THEN
         RAISE EXCEPTION 'FAIL: genesis left the row or its object other than it said';
     END IF;
@@ -356,7 +356,7 @@ BEGIN
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM log_uses WHERE number = r.number AND at = t AND request_id = 7 AND purpose = 258 AND place = '22222222-2222-2222-2222-222222222222' AND log_uses.mac = tag
-    ) OR (SELECT last FROM log_bulk WHERE principal = 'token:deploy' AND secret = '44444444-4444-4444-4444-444444444441') <> t - t % 60000 THEN
+    ) OR (SELECT last FROM bulk_cap WHERE principal = 'token:deploy' AND secret = '44444444-4444-4444-4444-444444444441') <> t - t % 60000 THEN
         RAISE EXCEPTION 'FAIL: the use''s entry or its key''s bulk row (its refresh period''s start) is not as asked';
     END IF;
     BEGIN
@@ -400,7 +400,7 @@ BEGIN
     -- The cap at one key: the other key is asked for, logged, and not let in.
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 12, t + 3, 1::smallint, NULL, tag, t + 2000, p_decided => true));
     IF r.state IS NOT NULL OR r.number IS NULL OR r.in_set OR r.others <> 1
-       OR EXISTS (SELECT 1 FROM log_bulk WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
+       OR EXISTS (SELECT 1 FROM bulk_cap WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
         RAISE EXCEPTION 'FAIL: the cap let a second key in: %', r;
     END IF;
     RAISE NOTICE 'PASS: a use logs its request once, reads every input sealed, and keeps covers (CoverExists), the cache (CacheSameChange) and the cap';
@@ -420,19 +420,19 @@ BEGIN
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 20, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 3001, p_decided => true));
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a deadline past deadline_max was taken'; END IF;
     -- A use from a clock running ahead: a proof would not find it from its window.
-    last := (SELECT b.last FROM log_bulk b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441');
+    last := (SELECT b.last FROM bulk_cap b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441');
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 23, t + 61000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 63000, p_decided => true));
     IF r.state IS DISTINCT FROM 'ahead' OR r.number IS NOT NULL OR r.covered IS NOT NULL OR EXISTS (SELECT 1 FROM log_uses WHERE request_id = 23)
-       OR (SELECT b.last FROM log_bulk b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441') IS DISTINCT FROM last THEN
+       OR (SELECT b.last FROM bulk_cap b WHERE b.principal = 'token:deploy' AND b.secret = '44444444-4444-4444-4444-444444444441') IS DISTINCT FROM last THEN
         RAISE EXCEPTION 'FAIL: a use stamped ahead of the database wrote something';
     END IF;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 21, t - 2000, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t - 1, p_decided => true));
     IF r.state <> 'late' THEN RAISE EXCEPTION 'FAIL: a use past its deadline was taken'; END IF;
-    before := (SELECT at_floor FROM log_fence);
+    before := (SELECT at_floor FROM checkpoint_fence);
     SELECT * INTO barrier FROM close_one();
     IF barrier.floor_found <> before THEN RAISE EXCEPTION 'FAIL: the barrier misreported the floor it found'; END IF;
     IF barrier.upto <> (SELECT max(n) FROM (SELECT max(number) AS n FROM log_uses UNION ALL SELECT max(number) FROM log_changes) x)
-       OR barrier.at_floor < t - 3000 OR barrier.at_floor <> (SELECT at_floor FROM log_fence) THEN
+       OR barrier.at_floor < t - 3000 OR barrier.at_floor <> (SELECT at_floor FROM checkpoint_fence) THEN
         RAISE EXCEPTION 'FAIL: the barrier closed at % with floor %', barrier.upto, barrier.at_floor;
     END IF;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444441', 22, barrier.at_floor - 1, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 1000, p_decided => true));
@@ -441,9 +441,9 @@ BEGIN
     END IF;
     -- Each its own statement: one statement's snapshot would not see the rows its call deleted.
     pruned := prune_bulk(100);
-    IF pruned <> 1 OR EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:gone') THEN RAISE EXCEPTION 'FAIL: prune_bulk kept a key no window counts'; END IF;
+    IF pruned <> 1 OR EXISTS (SELECT 1 FROM bulk_cap WHERE principal = 'token:gone') THEN RAISE EXCEPTION 'FAIL: prune_bulk kept a key no window counts'; END IF;
     pruned := prune_bulk(100);
-    IF pruned <> 0 OR NOT EXISTS (SELECT 1 FROM log_bulk WHERE principal = 'token:deploy') THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
+    IF pruned <> 0 OR NOT EXISTS (SELECT 1 FROM bulk_cap WHERE principal = 'token:deploy') THEN RAISE EXCEPTION 'FAIL: prune_bulk forgot a key its window counts'; END IF;
     RAISE NOTICE 'PASS: late uses, and uses stamped ahead, write nothing (DeadlineChecked, FloorChecked), the barrier raises the floor, and pruning keeps what a window counts';
 END
 $$;
@@ -563,7 +563,7 @@ BEGIN
     END;
     BEGIN
         PERFORM change_input('principal', 'token:deploy', 'member-valued', t, 'system:vault', '{"op":"member.remove","ref":{"kind":"principal","id":"token:deploy"}}',
-                             '{}', (SELECT seal FROM vault_members WHERE principal = 'token:deploy'), next, tag);
+                             '{}', (SELECT seal FROM principals WHERE principal = 'token:deploy'), next, tag);
         RAISE EXCEPTION 'FAIL: a principal''s change carried a value its row is not written from';
     EXCEPTION WHEN invalid_parameter_value THEN NULL;
     END;

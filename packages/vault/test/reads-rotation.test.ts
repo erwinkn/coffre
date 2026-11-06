@@ -29,7 +29,7 @@ beforeEach(async () => {
   await emptyLog();
   for (const table of ['log_checkpoints', 'log_tiles']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   // No key retired: each test's log starts under A.
-  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE log_fence SET retired = '{}'` : sql`UPDATE log_fence SET retired = '[]'`);
+  await run(db.owner, ENGINE === 'postgres' ? sql`UPDATE checkpoint_fence SET retired = '{}'` : sql`UPDATE checkpoint_fence SET retired = '[]'`);
 });
 
 /** The key the deploy moves to; the old one, A, is the fixture's `SIGNING_KEY`. */

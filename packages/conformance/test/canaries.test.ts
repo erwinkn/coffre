@@ -44,7 +44,7 @@ test('the canary scan detects plaintext in a Postgres bytea column', {
 
 test('a missing shared table fails the canary scan instead of passing an incomplete inspection', async (t) => {
   const { deployment, people, sql } = await sqliteFixture(t);
-  await sql.exec('DROP TABLE vault_members');
+  await sql.exec('DROP TABLE principals');
   await assert.rejects(canaryScan(deployment, people, { KEY: canary() }), /shared tables could not be inspected/);
 });
 

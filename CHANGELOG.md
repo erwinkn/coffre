@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Seven tables renamed (T178).** `vault_members` is `principals` (people
+  and service accounts alike), `vault_grants` is `grants`,
+  `device_authorizations` is `device_logins`, `enrollments` is
+  `enrollment_codes`, `consumed_tokens` is `spent_id_tokens`, `log_bulk` is
+  `bulk_cap` and `log_fence` is `checkpoint_fence`; each constraint and
+  index takes its table's new name. No column, row or grant changes. On
+  Postgres each old name stays for this release as a plain view of its
+  table, granting each login exactly what the table does, so 0.15's code
+  serves through them between `coffre migrate` and the deploy; the release
+  after this one drops them. SQLite, which no deployment runs, keeps no
+  views. Queries of your own against the old names (a dashboard, a backup
+  check) work through the views until then: move them to the new names. The
+  sign-in rows' MACs still name the tables as they were when first written
+  (`device_authorizations`, `enrollments`), so nothing is signed again.
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

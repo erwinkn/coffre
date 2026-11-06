@@ -26,11 +26,11 @@ export async function routeWorld(db: TestDatabase) {
     const principal = `user:${randomUUID()}@acme.example`;
     const now = Date.now();
     const t = tablesOf(db.owner);
-    await db.owner.insert(t.vaultMembers).values({
+    await db.owner.insert(t.principals).values({
       principal, status: 'active', role: null, scope: null, generation: 0, createdAt: now, createdBy: ROOT, statusChangedAt: now, statusChangedBy: ROOT, accessSeq: 0n, mac: Buffer.alloc(32),
     });
     for (const grant of grants) {
-      await db.owner.insert(t.vaultGrants).values({ principal, projectId: grant.environmentId === null ? w.project : null, environmentId: grant.environmentId, environmentSlug: null, role: grant.role, grantedAt: now, grantedBy: ROOT });
+      await db.owner.insert(t.grants).values({ principal, projectId: grant.environmentId === null ? w.project : null, environmentId: grant.environmentId, environmentSlug: null, role: grant.role, grantedAt: now, grantedBy: ROOT });
     }
     const object: Extract<Input, { kind: 'principal' }> = {
       kind: 'principal', principal, status: 'active', generation: 0, role: 'member', scope: { projects: 'all', environments: 'all' },
@@ -58,14 +58,14 @@ export async function routeWorld(db: TestDatabase) {
     for (const op of ops) {
       const after = applyOp(editor.object, ref, op) as Extract<Input, { kind: 'principal' }>;
       await change(ref, named(ref, op), after, async (tx, value) => {
-        await run(tx, sql`DELETE FROM vault_grants WHERE principal = ${editor.principal}`);
+        await run(tx, sql`DELETE FROM grants WHERE principal = ${editor.principal}`);
         const now = Date.now();
         for (const grant of after.grants) {
-          await run(tx, sql`INSERT INTO vault_grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
+          await run(tx, sql`INSERT INTO grants (principal, project_id, environment_id, environment_slug, role, granted_at, granted_by)
             VALUES (${editor.principal}, ${grant.environmentId === null ? w.project : null}, ${grant.environmentId}, NULL, ${grant.role}, ${now}, ${ROOT})`);
         }
-        await run(tx, sql`UPDATE vault_members SET status = ${after.status}, generation = ${after.generation} WHERE principal = ${editor.principal}`);
-        await seal('vault_members', 'principal', editor.principal)(tx, value);
+        await run(tx, sql`UPDATE principals SET status = ${after.status}, generation = ${after.generation} WHERE principal = ${editor.principal}`);
+        await seal('principals', 'principal', editor.principal)(tx, value);
       });
       editor.object = after;
     }

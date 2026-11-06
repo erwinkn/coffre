@@ -253,6 +253,13 @@
       "when": 1793792343116,
       "tag": "0035_passkeys_principal",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1793820000000,
+      "tag": "0036_table_renames",
+      "breakpoints": true
     }
   ]
 }
