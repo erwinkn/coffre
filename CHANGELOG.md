@@ -27,7 +27,7 @@
   label's length either. What stays says why beside it: a secret's value,
   64 KiB of UTF-8, now counted in bytes (Linux's `MAX_ARG_STRLEN` is
   128 KiB per environment string, and `coffre run` makes each value one); a
-  binding's issuer, 2,310 bytes, from 400, what fits in its Postgres index
+  binding's issuer, 1,670 bytes, from 400, what fits in its Postgres index
   entry; a role's ID, 2 to 32, a format; an email address's 320 (RFC 5321);
   a key set's 32 keys, which bound the signature checks of a sign-in. The
   CLI still cuts its own labels to 120, which instances up to 0.15 refuse

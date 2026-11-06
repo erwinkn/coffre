@@ -66,8 +66,13 @@ const PART = /^[A-Za-z0-9_-]+$/;
 export function decodeWorkloadToken(token: string): DecodedToken {
   const malformed = (why: string) => new WorkloadTokenRefused('malformed', `the token ${why}`);
   if (typeof token !== 'string' || token.length === 0) throw malformed('is empty');
-  const parts = token.split('.');
-  if (parts.length !== 3 || !parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
+  // Its two dots found by index, never split on: a body of nothing but dots is refused at its third, not cut into a
+  // million parts.
+  const first = token.indexOf('.');
+  const second = first === -1 ? -1 : token.indexOf('.', first + 1);
+  if (second === -1 || token.indexOf('.', second + 1) !== -1) throw malformed('is not a compact JWS');
+  const parts = [token.slice(0, first), token.slice(first + 1, second), token.slice(second + 1)];
+  if (!parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
   const json = (part: string): Record<string, unknown> => {
     let text: string;
     let value: unknown;
@@ -122,12 +127,16 @@ export async function verifyWorkloadToken(
     requiredClaims: ['iss', 'sub', 'exp', 'iat'],
     currentDate: expected.now,
   };
+  // The first check paid for too, its token decoded and, under a key it names, hashed: then each further key's.
+  const work = expected.work ?? signInWork();
+  work.left -= KEY_TRY_NS + token.length * TOKEN_BYTE_NS;
+  if (work.left < 0) throw new WorkloadTokenRefused('signature', 'the token costs more to check than a sign-in may spend');
   let payload: JWTPayload;
   try {
     ({ payload } = await jwtVerify(token, createLocalJWKSet(keys), options));
   } catch (error) {
     if (!(error instanceof errors.JWKSMultipleMatchingKeys)) throw refusalOf(error);
-    payload = await anyKey(token, error, options, expected.work ?? signInWork());
+    payload = await anyKey(token, error, options, work);
   }
   const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000, expected.maxAge === null ? Infinity : MAX_TOKEN_AGE_SECONDS);
   if (issued !== null) throw issued;

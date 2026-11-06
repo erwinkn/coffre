@@ -214,10 +214,10 @@ test('claims are nonempty strings with names a binding may match, and never the 
   const many = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`c${i}`, 'é'.repeat(1000)]));
   assert.equal(Object.keys(checkBinding({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { ...many, sub: 'x' } }).claims).length, 201);
   // The issuer is held to what fits in its index entry beside its service, the one bound left that is storage's.
-  assert.equal(MAX_ISSUER_BYTES, 2310);
+  assert.equal(MAX_ISSUER_BYTES, 1670);
   checkBinding({ profile: 'custom', issuer: 'i'.repeat(MAX_ISSUER_BYTES), claims: { sub: 'x' } }, { uploaded: true });
-  assert.throws(() => checkBinding({ profile: 'custom', issuer: 'i'.repeat(MAX_ISSUER_BYTES + 1), claims: { sub: 'x' } }, { uploaded: true }), /longer than 2310 bytes/);
-  refused({ profile: 'custom', issuer: `https://idp.acme.example/${'p'.repeat(MAX_ISSUER_BYTES)}`, claims: { sub: 'x' } }, /longer than 2310 bytes/);
+  assert.throws(() => checkBinding({ profile: 'custom', issuer: 'i'.repeat(MAX_ISSUER_BYTES + 1), claims: { sub: 'x' } }, { uploaded: true }), /longer than 1670 bytes/);
+  refused({ profile: 'custom', issuer: `https://idp.acme.example/${'p'.repeat(MAX_ISSUER_BYTES)}`, claims: { sub: 'x' } }, /longer than 1670 bytes/);
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: '' } }, /nonempty string/);
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', groups: ['a'] as unknown as string } }, /nonempty string/);
   for (const name of ['aud', 'iss', 'exp', 'iat', 'nbf', 'jti']) {

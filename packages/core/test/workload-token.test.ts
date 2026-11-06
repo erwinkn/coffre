@@ -97,6 +97,12 @@ test('the shape is checked before anything is trusted', () => {
     assert.throws(() => decodeWorkloadToken(token(claims)), why);
   }
   assert.throws(() => decodeWorkloadToken('a.b'), /not a compact JWS/);
+  // A body of nothing but dots, refused at its third, never cut into a million parts first (review r5).
+  const started = process.cpuUsage();
+  assert.throws(() => decodeWorkloadToken('.'.repeat(1_048_400)), /not a compact JWS/);
+  assert.throws(() => decodeWorkloadToken(`a.b.c.${'.'.repeat(1_048_400)}`), /not a compact JWS/);
+  const spent = process.cpuUsage(started);
+  assert.ok((spent.user + spent.system) / 1000 < 5, `took ${(spent.user + spent.system) / 1000} ms`);
   // No length of its own: the body's bound (`API_BODY_BYTES`) holds a token, and a long one is read as any other.
   assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /not JSON/);
   // But its parts are counted before they are parsed, as a body's values are: a short string may hide a large tree.
@@ -171,10 +177,14 @@ test("a token tried against several keys pays each try from the sign-in's budget
   const large = await stranger.sign({}, { kid: undefined, pad: 'x'.repeat(700_000) });
   const work = signInWork();
   const started = process.cpuUsage();
+  // As an exchange spends it: the token's decoding first, then its checks.
+  work.left -= large.length * TOKEN_BYTE_NS;
+  decodeWorkloadToken(large);
   await assert.rejects(verifyWorkloadToken(large, { keys }, { issuer: ISSUER, audience: AUDIENCE, now: NOW, work }), /costs more to check against every one of its issuer's keys/);
   const spent = process.cpuUsage(started);
   assert.ok(work.left < 0);
-  assert.ok((spent.user + spent.system) / 1000 < 40, `took ${(spent.user + spent.system) / 1000} ms of CPU`);
+  // R27's 20 ms, the first check (its header decoded) and a try at most, the decoding before it paid too (review r5).
+  assert.ok((spent.user + spent.system) / 1000 < 20, `took ${(spent.user + spent.system) / 1000} ms of CPU`);
   // A token of the usual size is tried against all 32 within it, as before.
   await refused(verifyWorkloadToken(await stranger.sign({}, { kid: undefined }), { keys }, { issuer: ISSUER, audience: AUDIENCE, now: NOW, work: signInWork() }), 'signature');
   assert.ok(32 * (KEY_TRY_NS + 2048 * TOKEN_BYTE_NS) < SIGN_IN_WORK_NS);

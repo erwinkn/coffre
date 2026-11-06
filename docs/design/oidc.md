@@ -404,7 +404,7 @@ in [ci.md](../ci.md#issuers-coffre-cannot-reach), and Kubernetes' in
 
 - **Nothing is fetched.** Not at bind time, not at an exchange. The issuer
   is then any string a token's `iss` holds, matched exactly, with no
-  control character or space at either end, at most 2,310 bytes, what fits
+  control character or space at either end, at most 1,670 bytes, what fits
   in the index entry it shares with its service (`MAX_ISSUER_BYTES`). github.com's
   and gitlab.com's issuers are refused: they rotate their keys, so coffre
   always fetches theirs.

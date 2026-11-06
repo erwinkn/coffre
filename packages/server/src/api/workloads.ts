@@ -15,6 +15,7 @@ import {
   CHAR_NS,
   differingClaims,
   signInWork,
+  TOKEN_BYTE_NS,
   type SignInWork,
   generateToken,
   GitHubAppUnavailable,
@@ -330,8 +331,9 @@ const OIDC: ProofKind = {
     // A token its platform hands out again is as old as its platform's cache: its own `exp` ends it, not an hour after `iat`.
     const repeats = taking.some((binding) => REPEATING_PROFILES.includes(binding.profile as WorkloadProfile));
     const newest = candidates[candidates.length - 1]!;
-    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`).
+    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`), the token's decoding above paid from it.
     const work = signInWork();
+    work.left -= input.length * TOKEN_BYTE_NS;
     const expected = { issuer, audience, now: new Date(), work, ...(repeats ? { maxAge: null } : {}) };
     let claims: Record<string, unknown>;
     try {
@@ -1205,8 +1207,9 @@ export class WorkloadService {
     if (candidates.length === 0) throw madeElsewhere(loaded[loaded.length - 1]!, this.#deps.publicUrl);
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
-    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`).
+    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`), the token's decoding above paid from it.
     const work = signInWork();
+    work.left -= token.length * TOKEN_BYTE_NS;
     const expected = { issuer, audience: this.#deps.publicUrl, now: new Date(), work };
     let claims: Record<string, unknown>;
     try {

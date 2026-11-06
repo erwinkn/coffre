@@ -1,6 +1,6 @@
 import { expectedAudiences, PROFILE_RULES } from './profile-rules.ts';
 import { CLOCK_TOLERANCE_SECONDS, decodeWorkloadToken, MAX_TOKEN_AGE_SECONDS, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from './workload-token.ts';
-import { CHAR_NS, signInWork } from './sign-in-work.ts';
+import { CHAR_NS, signInWork, TOKEN_BYTE_NS } from './sign-in-work.ts';
 import { claimAt, differingClaims, REPEATING_PROFILES, type BindingClaims, type BindingPolicy, type WorkloadProfile } from './workloads.ts';
 
 /**
@@ -115,8 +115,9 @@ export async function verifyRunToken(
   const named = soleAudience(unverified.aud);
   const audience = named !== null && accepted.includes(named) ? named : accepted[0]!;
   const repeating = context.workload !== null && REPEATING_PROFILES.includes(binding.profile);
-  // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`).
+  // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`), the token's decoding above paid from it.
   const work = signInWork();
+  work.left -= token.length * TOKEN_BYTE_NS;
   const expected = { issuer: binding.issuer, audience, now: context.now, work, ...(repeating ? { maxAge: null } : {}) };
   let claims: Record<string, unknown>;
   try {

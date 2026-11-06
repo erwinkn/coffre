@@ -254,12 +254,13 @@ export function defaultIssuer(profile: WorkloadProfile): string | null {
  * id). A btree entry is at most 2,704 bytes on 8 KiB pages (`BTMaxItemSize`,
  * `src/include/access/nbtree.h`), and past it the insert fails ("index row
  * size exceeds btree version 4 maximum 2704"). The rest of the entry takes
- * 394 at most: its 8-byte header, the principal (`token:` and an id of 320,
- * `principalId`, with a 4-byte length), the issuer's own length (4), the
- * generation (4), the time (8), the id (16), and up to 24 of alignment. No
- * issuer's URL comes near it; an uploaded binding's issuer is any string.
+ * 1,034 at most: its 8-byte header, the principal (`token:` and an id of 320
+ * characters, `principalId`, each up to 3 bytes of UTF-8, with a 4-byte
+ * length), the issuer's own length (4), the generation (4), the time (8),
+ * the id (16), and up to 24 of alignment. No issuer's URL comes near it; an
+ * uploaded binding's issuer is any string.
  */
-export const MAX_ISSUER_BYTES = 2704 - (8 + 4 + 6 + 320 + 4 + 4 + 8 + 16 + 24);
+export const MAX_ISSUER_BYTES = 2704 - (8 + 4 + 6 + 320 * 3 + 4 + 4 + 8 + 16 + 24);
 
 /**
  * Check a binding against its profile, and return it as stored: the
