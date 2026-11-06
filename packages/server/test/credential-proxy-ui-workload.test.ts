@@ -18,6 +18,7 @@ import { WebSocket } from 'ws';
 
 import { bodyDigest, contentDigest, createProof, generateProofKey, thumbprint, type ProofKey } from '@coffre/client/dpop';
 import { github, hashToken, signin } from '@coffre/core/identity';
+import { BODY_READ_WHOLE_BYTES } from '@coffre/core/memory';
 import type { ProxyDefinition, Vault } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { eq, sql, type SQL } from 'drizzle-orm';
@@ -262,6 +263,28 @@ test("a Cloudflare call's UI route is its binding's, at the one environment it r
     assert.equal(reached.at(-1)!.headers['x-trace'], 't-1');
   }
   assert.deepEqual(reached.map((one) => one.url), ['/openai/v1/models/a', '/openai/v1/models/b']);
+});
+
+test("past 1 MiB, a Cloudflare call's body streams through a UI route nothing of which signs its hash; a SigV4 route, or a session's proof, needs the hash declared (review r1)", ON_015, async () => {
+  const s3: ProxyDefinition = { ...uiRoute('files', '/s3'), inject: [{ kind: 'sigv4', accessKeyId: '{OPENAI_API_KEY}', secretAccessKey: '{OTHER_KEY}', sessionToken: null, region: 'eu-west-3', service: 's3' }] } as ProxyDefinition;
+  await save({ openai: uiRoute('openai', '/openai'), files: s3 });
+  await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'cloudflare', issuer: null, claims: {} as never, label: 'edge', replaces: [], policy: {} }, { dryRun: false });
+  const bytes = 'b'.repeat(BODY_READ_WHOLE_BYTES + 1);
+  const viaBinding = async (path: string) => read((await bindingRoute(new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-length': String(bytes.length) }, body: new Blob([bytes]).stream(), duplex: 'half' } as RequestInit), runtime, MEMBER))!);
+  const streamed = await viaBinding('/use/openai/v1/files');
+  assert.equal(streamed.status, 200, JSON.stringify(streamed.body));
+  assert.deepEqual([reached.at(-1)!.body.length, reached.at(-1)!.headers['content-length'], reached.at(-1)!.headers.authorization], [bytes.length, String(bytes.length), `Bearer ${OPENAI}`]);
+  // Through SigV4, whose signature needs the hash: refused, nothing sent.
+  const before = reached.length;
+  const unsigned = await viaBinding('/use/files/v1/bucket/a.bin');
+  assert.equal(unsigned.status, 413, JSON.stringify(unsigned.body));
+  assert.match(unsigned.body.message as string, /as files signs its hash; one that says its length and declares its SHA-256 streams/);
+  // A session's proof signs the body's hash: past 1 MiB, it is declared or refused.
+  await bind();
+  const held = await session();
+  const proven = await use(held, 'POST', '/use/openai/v1/files', { headers: { 'content-length': String(bytes.length) }, body: new Blob([bytes]).stream(), line: createHash('sha256').update(bytes).digest('hex') });
+  assert.equal(proven.status, 413, JSON.stringify(proven.body));
+  assert.equal(reached.length, before);
 });
 
 test("a UI route's limit is counted on a cold isolate before the gate, from the vault's item; a raised one refuses one request more at most", ON_015, async () => {

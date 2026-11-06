@@ -2285,17 +2285,18 @@ function allowed(credential: Resolved, method: string, relative: string): Respon
 type Carried = { body: Uint8Array<ArrayBuffer> | undefined; streamed: boolean; declared: string; digest: string | null };
 
 async function carried(request: Request, credential: Resolved, proof = false): Promise<Carried | Response> {
-  return carriedAs(request, credential.name, { field: credential.body.length > 0, sigv4: credential.sigv4 !== undefined, proof });
+  const sigv4 = credential.sigv4 !== undefined;
+  return carriedAs(request, credential.name, { field: credential.body.length > 0, sigv4, signed: sigv4 || proof });
 }
 
 /**
  * `carried`, by what the credential does with a body: `field`, a form or JSON rule's, which fills a field of it;
- * `sigv4`, whose `x-amz-content-sha256` binds it and whose signature needs its hash; `proof`, a workload's, which
- * signs its hash too. A UI route's workload request, whose item comes after its proof, is carried by its headers alone
- * (`sigv4` whatever it is, no field: the client's rule, `bodyLine`), and the decided item then takes it or refuses it
- * (`uiCarried`).
+ * `sigv4`, whose `x-amz-content-sha256` binds it; `signed`, whether something signs its hash before it goes, a
+ * `sigv4` credential's signature or a workload's proof. A UI route's workload request, whose item comes after its
+ * proof, is carried by its headers alone (`sigv4` whatever it is, no field: the client's rule, `bodyLine`; signed when
+ * a proof signs it), and the decided item then takes it or refuses it (`uiCarried`).
  */
-async function carriedAs(request: Request, name: string, { field, sigv4, proof }: { field: boolean; sigv4: boolean; proof: boolean }): Promise<Carried | Response> {
+async function carriedAs(request: Request, name: string, { field, sigv4, signed }: { field: boolean; sigv4: boolean; signed: boolean }): Promise<Carried | Response> {
   const declared = request.headers.get('content-length') ?? '';
   const length = /^\d+$/.test(declared) ? Number(declared) : null;
   // A body whose field coffre fills is read whole, and small: it is parsed, and changed.
@@ -2306,7 +2307,6 @@ async function carriedAs(request: Request, name: string, { field, sigv4, proof }
   } catch (error) {
     return failure(400, (error as Error).message);
   }
-  const signed = sigv4 || proof;
   // Past what is read whole, a body nothing signs streams as it came: a GET's or a HEAD's, which no upstream reads, never.
   const unsigned = !signed && length !== null && length > BODY_READ_WHOLE_BYTES && request.method !== 'GET' && request.method !== 'HEAD';
   // An empty body is checked before anything goes: with no last byte to hold back, its request is whole once its headers are.
@@ -2318,12 +2318,15 @@ async function carriedAs(request: Request, name: string, { field, sigv4, proof }
   const body = request.method === 'GET' || request.method === 'HEAD' || streamed ? undefined : await boundedBody(request, field ? MAX_FIELD_BODY : BODY_READ_WHOLE_BYTES);
   if (body === null && field) return failure(413, `${name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
   if (body === null && !signed) return failure(413, `a request through the proxy carries at most ${BODY_READ_WHOLE_BYTES / 1024 / 1024} MiB read whole; a larger one streams when it says its length: send its Content-Length`);
-  if (body === null) {
-    return failure(413, `a request through the proxy carries at most ${BODY_READ_WHOLE_BYTES / 1024 / 1024} MiB read whole, as ${name} signs its hash; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
-  }
+  if (body === null) return hashUndeclared(name);
   if (digest !== null && !streamed && (await bodyDigest(body ?? new Uint8Array(0))) !== digest) return failure(400, 'the body is not what its Content-Digest says');
   // As a number writes it: `00` is the 0 it says, as it goes on and as the body's line reads it.
   return { body, streamed, declared: streamed ? String(length) : declared, digest };
+}
+
+/** A body past what is read whole, whose hash something signs, and which declares none. */
+function hashUndeclared(name: string): Response {
+  return failure(413, `a request through the proxy carries at most ${BODY_READ_WHOLE_BYTES / 1024 / 1024} MiB read whole, as ${name} signs its hash; one that says its length and declares its SHA-256 streams, up to ${MAX_DIGESTED_BODY / 1024 / 1024} MiB: Content-Digest: sha-256=:<base64>:, as coffre serve and @coffre/client/workload send it, or x-amz-content-sha256 through an AWS-signed credential`);
 }
 
 /**
@@ -2617,7 +2620,7 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
     through = { fetch: coffre.publicFetch };
   }
   // Its body, by its headers alone: the item that says how it goes is not known before the proof that binds it.
-  const content = await carriedAs(request, at.credential!, { field: false, sigv4: true, proof: token !== null });
+  const content = await carriedAs(request, at.credential!, { field: false, sigv4: true, signed: token !== null });
   if (content instanceof Response) return content;
   const amz = content.digest === null ? request.headers.get('x-amz-content-sha256') : null;
   const declared = content.digest ?? amz;
@@ -2710,14 +2713,16 @@ async function uiWorkloadForward(request: Request, coffre: PluginContext, proxy:
 /**
  * A UI workload request's body as its headers carried it (`carriedAs`), as the decided item takes it: a hash declared
  * in `x-amz-content-sha256` binds it only through a `sigv4` item (another was decided on another copy: 503 `moved`,
- * nothing sent); a form or JSON item fills a field of a body read whole, 64 KiB at most, so a streamed one is read
- * whole now and still held to the digest the proof bound (docs/design/proxy-ui.md, section 3, "What is read before
- * the answer").
+ * nothing sent); a service binding's body streamed with no hash declared, which nothing signed, goes through no `sigv4`
+ * item, whose signature needs it (413); a form or JSON item fills a field of a body read whole, 64 KiB at most, so a
+ * streamed one is read whole now and still held to the digest the proof bound (docs/design/proxy-ui.md, section 3,
+ * "What is read before the answer").
  */
 async function uiCarried(request: Request, credential: Resolved, content: Carried, declared: string | null): Promise<Carried | Response> {
   if (declared !== null && content.digest === null && credential.sigv4 === undefined) {
     return failure(503, `${credential.name} no longer signs with sigv4(), which this request's x-amz-content-sha256 is for: send it again`, 'moved', '1');
   }
+  if (content.streamed && declared === null && credential.sigv4 !== undefined) return hashUndeclared(credential.name);
   if (credential.body.length === 0) return content;
   if (!content.streamed) {
     if ((content.body?.byteLength ?? 0) > MAX_FIELD_BODY) return failure(413, `${credential.name} fills a field of a body read whole, ${MAX_FIELD_BODY / 1024} KiB at most`);
