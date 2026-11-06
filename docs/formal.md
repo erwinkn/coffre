@@ -2826,7 +2826,7 @@ shortest one.
 Before 0.15's models, run in order, the 125 TLC runs took 22 minutes, twice
 the tests. As three shards they took about 11 (Tampering's), as long as the
 tests do; skipped, seconds. With 0.15's models the suite is 370 TLC runs in
-ten shards; the seven new ones are 0.15's. On a shared host with 4 workers,
+twelve shards, since `rest` was split in three (below); seven of them are 0.15's. On a shared host with 4 workers,
 each new one takes about 5 minutes. CI's runners took about twice as long:
 in its first CI run, Tampering took 10.7 minutes (6.4 here) and the bulk
 shards 10.9 (5.8 and 5.5 here).
@@ -2866,14 +2866,23 @@ every pull request that is not a version-only bump:
   branch could already make `Validate` pass by editing the workflow in their
   own pull request, so this guards against mistakes and stale answers, not
   against them.
-- **A run is ten jobs in parallel.** `scripts/formal.sh --shard
+- **A run is twelve jobs in parallel.** `scripts/formal.sh --shard
   <name>` runs the scenarios of one
   (`shard_of`), each with its runs without a protection, balanced by what
   they took:
   - Tampering's 7 to 11 minutes (17.5 million states) alone;
   - Overtaking, Walking, Sharing, Rows and Mixed together, and T165's
-    ProbingMany four (about 10 minutes on CI, ProbingManyFork 7 of them): in
-    `rest`, which took 39 minutes of its 45 by 2026-11-02, they timed it out;
+    ProbingMany four (about 10 minutes on CI, ProbingManyFork 7 of them):
+    `large`;
+  - the other scenarios, which were one shard, `rest`: 39 minutes of its 45 by
+    2026-11-02, and cancelled at 45 on every uncached run from 2026-11-06, when
+    CI's runners got about 1.75 times slower (Probing 361 s against 201 s, the
+    same states). Three now, balanced from run 42220741374's per-scenario
+    times, each far from the 45-minute limit:
+    - `probing`: Probing, ProbingFork and ProbingFallback, about 17 minutes
+      there;
+    - `routing`: Routing's seven and the other Probing variants, about 17;
+    - `rest`: everything else, 11 to 13;
   - 0.15's models in seven:
     - `hotpath`;
     - `hotpath-policy` (the policy, liveness, stall liveness and stale-bulk scenarios);
@@ -2883,11 +2892,12 @@ every pull request that is not a version-only bump:
     - `seal-plugin` (SealPlugin, SealCore and SealStall);
     - `seal-retention` (SealRetention, SealRetentionCrash and Rotation's
       eleven, about 3.5 minutes of it here before the last three);
-  - the rest.
 
-  A new scenario is in `rest`, unless its name starts as 0.15's do. `--list` prints
-  what a run would run, without TLC; a test holds the ten to a partition
-  of it. A shard that fails fails `Formal model`, and each prints its own
+  A new scenario is in `rest`, unless its name starts as one above. `--list` prints
+  what a run would run, without TLC; `scripts/formal-shards.test.mjs` (part of
+  `pnpm test`) holds the matrix to `formal.sh`'s shard list and the twelve to a
+  partition of every scenario and every run without a protection, so a scenario
+  can neither fall out of CI nor run twice. A shard that fails fails `Formal model`, and each prints its own
   counterexamples. CI gives TLC 4 GB of heap (`--heap 4g`, the script's
   default is 1g) with 4 workers: Tampering took 11 minutes at 1g and 7 at 4g
   or 8g in a benchmark on a 4-core, 16 GB runner (10.7 in its first CI run).
