@@ -18,9 +18,11 @@
   credential has; the app answers `401 passkey_required` as before, and
   checks the passkey rows' MACs on what the vault answered. A key write
   makes one app statement, not two, and a refused one or a member add
-  none. Postgres migration 0073 replaces `use_credential`,
-  `use_named_batch`, `write_request` and `admit_read`; the previous
-  release's calls, which pass no policy, are answered as before.
+  none. A UI route's handle call holds its credential to the same check,
+  by the credential's kind, on both engines. Postgres migration 0073
+  replaces `use_credential`, `use_named_batch`, `use_route`,
+  `write_request` and `admit_read`; the previous release's calls, which
+  pass no policy, are answered as before.
 
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from

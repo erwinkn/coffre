@@ -1,7 +1,7 @@
 -- 0.16, T216: a person's named reveal, key write and member's add run the passkey check in the vault's own call, not in a statement of the app's before or beside it. Since T176 PR 4a, the three paths whose credential the vault reads in its own call (a use by name, `use_credential` and `use_named_batch`; a key write, `write_request`; an add, `admit_read`) ran `passkeyByToken` for a person's credential with passkeys not `off`: a statement before a reveal's call, and one beside a write's or an add's (docs/design/passkeys.md, sections 6.2 and 6.4). Now:
--- - `use_credential` takes `p_passkeys`, the app's policy, and holds a named call's credential to the check with what its config accepts (Probing.tla, AcceptedFirst), first, under the fence, before anything of the place or the key: a person's session or token that names a passkey is taken while that passkey is live, theirs, at the credential's generation; one that names none, under `optional`, while they hold no live passkey, never under `required`. Refused, it is `unknown`, as a token no credential has: the app's own check then answers it, 401 `passkey_required`, as before. Its answer's app rows carry what it read (`passkey`, `passkey_held`), whose MACs the app checks, reading nothing itself. `use_named_batch` passes it to its gate.
+-- - `use_credential` takes `p_passkeys`, the app's policy, and holds a named call's credential to the check with what its config accepts (Probing.tla, AcceptedFirst), first, under the fence, before anything of the place or the key: a person's session or token that names a passkey is taken while that passkey is live, theirs, at the credential's generation; one that names none, under `optional`, while they hold no live passkey, never under `required`. Refused, it is `unknown`, as a token no credential has: the app's own check then answers it, 401 `passkey_required`, as before. Its answer's app rows carry what it read (`passkey`, `passkey_held`), whose MACs the app checks, reading nothing itself. `use_named_batch` and `use_route` pass it to their gates: a route's handle call names its credential as any named call does, and the check goes by the credential's kind, not the call's.
 -- - `write_request` and `admit_read` answer the same rows with the app's. They decide nothing of passkeys: what they read and prepare commits only with the app's transaction, which the app's check of those rows, after the call, refuses before it begins, as it refused it after its own statement.
--- The vault's logins still read no passkey: these functions run as their owner. Additive (AGENTS.md, "expand, then contract"): without `p_passkeys` (the previous release's vault, whose app runs the check itself first), each call is 0071's, and every other answer is unchanged. `use_credential` and `use_named_batch` gain a parameter, so each is dropped and made again with its grants, as 0060 did. Their warm-up marks move to `0073` (T131), `use_route`'s with `use_credential`'s, which says the session planned its statements too. `write_request` and `admit_read` keep their settings as 0068 left them.
+-- The vault's logins still read no passkey: these functions run as their owner. Additive (AGENTS.md, "expand, then contract"): without `p_passkeys` (the previous release's vault, whose app runs the check itself first), each call is 0071's, and every other answer is unchanged. `use_credential`, `use_named_batch` and `use_route` gain a parameter, so each is dropped and made again with its grants, as 0060 did. Their warm-up marks move to `0073` (T131), `use_route`'s with `use_credential`'s, which says the session planned its statements too. `write_request` and `admit_read` keep their settings as 0068 left them.
 DROP FUNCTION use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean);
 --> statement-breakpoint
 -- `use_credential` as 0071 made it, but for `p_passkeys` (above) and its warm-up's mark.
@@ -1335,15 +1335,18 @@ REVOKE ALL ON FUNCTION use_named_batch(bytea, text, text, boolean, text[], boole
 --> statement-breakpoint
 GRANT EXECUTE ON FUNCTION use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text) TO coffre_vault;
 --> statement-breakpoint
--- `use_route` as 0071 made it, but for its warm-up's mark, which moves with `use_credential`'s.
-CREATE OR REPLACE FUNCTION use_route(
+DROP FUNCTION use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean);
+--> statement-breakpoint
+-- `use_route` as 0071 made it, but for `p_passkeys`, which its gates' named calls hold a handle's credential to, as
+-- `use_named_batch`'s (review r4 of #528), and its warm-up's mark, which moves with `use_credential`'s.
+CREATE FUNCTION use_route(
     p_token_hash bytea, p_project text, p_environment text, p_named text, p_stable text, p_reading smallint,
     p_signin boolean, p_issuers text[], p_roles jsonb,
     p_credential uuid, p_way smallint, p_principal text, p_place uuid,
     p_at bigint, p_purpose smallint, p_deadline bigint, p_read_mac bytea,
     p_secrets uuid[], p_places uuid[], p_requests bigint[], p_macs bytea[],
     p_covers bigint[], p_cover_ats bigint[], p_cover_requests bigint[], p_decided boolean[],
-    p_offset integer, p_limit integer, p_lock text, p_use boolean, p_light boolean DEFAULT false
+    p_offset integer, p_limit integer, p_lock text, p_use boolean, p_light boolean DEFAULT false, p_passkeys text DEFAULT NULL
 ) RETURNS json
     LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp SET bytea_output = 'hex' AS $$
 DECLARE
@@ -1449,7 +1452,7 @@ BEGIN
             false, v_reading = 2,
             CASE WHEN v_reading = 2 AND p_project IS NOT NULL THEN ARRAY[p_project || '/' || p_environment] ELSE '{}'::text[] END,
             p_signin, p_issuers, p_roles,
-            0::smallint, NULL::text, true, NULL::text, v_light
+            0::smallint, NULL::text, true, NULL::text, v_light, p_passkeys => p_passkeys
         );
         v_gated := v_reading;
         EXIT WHEN p_named IS NULL OR v_attempt = 2;
@@ -1639,7 +1642,7 @@ BEGIN
             false, v_reading = 2,
             CASE WHEN v_reading = 2 AND p_project IS NOT NULL THEN ARRAY[p_project || '/' || p_environment] ELSE '{}'::text[] END,
             p_signin, p_issuers, p_roles,
-            0::smallint, NULL::text, true, NULL::text, false
+            0::smallint, NULL::text, true, NULL::text, false, p_passkeys => p_passkeys
         );
     END IF;
     -- The handle's places by path, as named now, for the vault's map to pick the next reading by (`made_for`): on an
@@ -1676,6 +1679,10 @@ BEGIN
     );
 END
 $$;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text) FROM PUBLIC;
+--> statement-breakpoint
+GRANT EXECUTE ON FUNCTION use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text) TO coffre_vault;
 --> statement-breakpoint
 -- `write_request` as 0061 made it (its settings as 0068 left them), but for the passkey rows in the app's.
 CREATE OR REPLACE FUNCTION write_request(p_at bigint, p_token_hash bytea, p_project text, p_environment text, p_keys text[]) RETURNS json
@@ -1739,7 +1746,7 @@ END
 $$;
 --> statement-breakpoint
 -- As 0060's: each use function runs as its owner, and each it calls must be that owner's to execute, granted by name,
--- caller to callee. The two made again here are the login's that runs this, a member of the owner where the owner
+-- caller to callee. The three made again here are the login's that runs this, a member of the owner where the owner
 -- migrated before (`scripts/test-schema-owner.sh`), and the drop took each grant made to the old ones: `use_batch`,
 -- 0048's, would lose `use_credential`, and every batch read, the previous release's included, would fail.
 DO $$
@@ -1756,7 +1763,7 @@ BEGIN
         (v_credential, 'public.use_scope_holds(uuid, uuid, text, jsonb)'::regprocedure),
         ('public.use_batch(uuid, uuid[], bigint[], bigint, smallint, uuid[], bytea[], bigint, bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], boolean[], smallint, text, text)'::regprocedure, v_credential),
         ('public.use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text)'::regprocedure, v_credential),
-        ('public.use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean)'::regprocedure, v_credential)
+        ('public.use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean, text)'::regprocedure, v_credential)
     ) AS calls(caller, callee) LOOP
         v_owner := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_call.caller);
         IF NOT has_function_privilege(v_owner, v_call.callee, 'EXECUTE') THEN

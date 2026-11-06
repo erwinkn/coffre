@@ -121,6 +121,37 @@ test('a route of two keys, and of plain keys only: every key decided on one vers
   assert.equal(await count('log_uses'), before, 'a plain value: no entry');
 });
 
+test("T216: a person's credential no passkey stands behind, presented as a handle's, is refused at its gate as the policy says, cold and warm, a route of one key and of two: nothing used, nothing logged (review r4 of #528; docs/design/passkeys.md, section 6.2)", async () => {
+  const w = await routeWorld(db);
+  // The fixture's caller is a person's CLI token, which names no passkey: `required` refuses it whatever they hold, and
+  // the check goes by the credential's kind, not the call's (`use_credential`, `passkeyBacks`).
+  const [{ kind }] = await rows<{ kind: string }>(db.owner, sql`SELECT kind FROM credentials WHERE token_hash = ${w.tokenHash}`);
+  assert.equal(kind, 'cli');
+  const [a, b] = [await w.key('access-key'), await w.key('secret-key')];
+  const [nameA, nameB] = [await w.nameOf(a), await w.nameOf(b)];
+  const ada = await w.member([{ environmentId: null, role: 'owner' }]);
+  await w.save({ s3: { definition: route('s3', [nameA, nameB]), editor: ada }, openai: { definition: route('openai', [nameA]), editor: ada } });
+  const under = (named: string, passkeys: 'off' | 'optional' | 'required') =>
+    w.askRoute(named, { caller: { kind: 'handle', tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [], passkeys } } });
+  const refusedAt = async (vault: ReturnType<typeof openVault>, named: string, when: string) => {
+    const uses = await count('log_uses');
+    const outcome = await vault.useRoute(under(named, 'required'));
+    assert.ok(outcome.served && outcome.route === 'credential', `${named}, ${when}: ${JSON.stringify(outcome)}`);
+    assert.equal(await count('log_uses'), uses, `${named}, ${when}: nothing used`);
+  };
+  for (const named of ['s3', 'openai']) {
+    // Cold: the map holds nothing of the route, and the whole gate (`use_route`) refuses it.
+    const { vault } = await isolate();
+    await refusedAt(vault, named, 'cold');
+    // Served as before where the policy lets her in (`optional`, for one who holds no live passkey), which warms the
+    // map with the route's ids; the next call, under `required`, is the warm one: refused all the same.
+    const served = values(await vault.useRoute(under(named, 'optional')));
+    assert.deepEqual(Object.keys(served).sort(), (named === 's3' ? [nameA, nameB] : [nameA]).sort());
+    await refusedAt(vault, named, 'warm');
+    assert.ok(values(await vault.useRoute(under(named, 'off'))), `${named}: served under off`);
+  }
+});
+
 test('EditorStillHolds: an editor demoted or removed after their save routes nothing they no longer read, until a holder saves again', async () => {
   const w = await routeWorld(db);
   const key = await w.key('sk');
@@ -632,9 +663,9 @@ test("T205: a route of one key given a second, then edited again under the use: 
         const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         if (!armed || !String(args[0]).includes('use_route')) return sent;
         // A first round's statement only: a key new to the cap's set (third) takes one more, under the principal's lock,
-        // `p_lock`, the third parameter from the end (0060).
+        // `p_lock`, the fourth parameter from the end (0060), before `p_use`, `p_light` and `p_passkeys` (0073).
         const params = args[1] as unknown[];
-        if (params[params.length - 3] !== null) return sent;
+        if (params[params.length - 4] !== null) return sent;
         routed += 1;
         if (routed > 1) return sent;
         return Promise.resolve(sent).then(async (result) => {
@@ -678,9 +709,9 @@ test("a later statement's fresh ids reach the map: an edit between a use's state
         const sent = (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
         if (!String(args[0]).includes('use_route')) return sent;
         // A first round's statement: no principal's lock (a key new to the cap's set takes one more, under it). `p_lock`
-        // is the third parameter from the end, before `p_use` and `p_light` (0060).
+        // is the fourth parameter from the end, before `p_use` and `p_light` (0060) and `p_passkeys` (0073).
         const params = args[1] as unknown[];
-        if (params[params.length - 3] === null) routed += 1;
+        if (params[params.length - 4] === null) routed += 1;
         if (!armed) return sent;
         armed = false;
         return Promise.resolve(sent).then(async (result) => {
@@ -1088,7 +1119,8 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     // `use_route`, its gate asked whole.
     const routeAt = (call: HotCall): number => (call.query.includes('use_route') ? 3 : call.args.length - 2);
     assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && call.query.includes('p_passkeys =>') && typeof call.args[routeAt(call)] === 'string'), 'the warm map asked the route\'s named call');
-    assert.ok(asked.slice(3).every(({ call }) => call.query.includes('use_route') && call.args.at(-1) === false), 'the cold map asked use_route, its gate whole');
+    // `p_light` is `use_route`'s last argument but `p_passkeys` (0073).
+    assert.ok(asked.slice(3).every(({ call }) => call.query.includes('use_route') && call.args.at(-2) === false), 'the cold map asked use_route, its gate whole');
     await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
     // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
