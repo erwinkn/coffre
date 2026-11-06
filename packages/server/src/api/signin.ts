@@ -1297,6 +1297,8 @@ export class SigninService {
     const now = new Date();
     const asked = request.at === undefined ? now : new Date(request.at);
     const tokenHash = hashToken(token);
+    // Under `off` nothing behind the credential is read, as nothing below decides on it (review r1 of #528).
+    const checked = this.#deps.signin.passkeys.policy !== 'off';
 
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
@@ -1309,7 +1311,7 @@ export class SigninService {
         await sealScopes(db, chainKey, this.#deps.vault);
         this.#scopes.sealed = true;
       }
-      row = await findCredential(db, chainKey, { tokenHash }, request.shows === 'caller' ? 'answer' : request.shows ?? request.ahead);
+      row = await findCredential(db, chainKey, { tokenHash }, request.shows === 'caller' ? 'answer' : request.shows ?? request.ahead, checked);
       const shown = row === null || request.shows !== 'caller' ? null : answerOf(row.principal, row.answer);
       settings = shown?.settings ?? row?.settings;
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
@@ -1329,7 +1331,7 @@ export class SigninService {
         if (issued !== null) {
           await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: binding === null ? 'token' : 'binding', id: binding ?? row.id, principal: row.principal, createdBy: issued.createdBy, scope: issued.scope }]);
         }
-        row = await findCredential(db, chainKey, { tokenHash });
+        row = await findCredential(db, chainKey, { tokenHash }, undefined, checked);
         if (row !== null && this.#unsealed(row, access, asked)) throw new Error('its scope could not be sealed');
       }
     } catch (error) {

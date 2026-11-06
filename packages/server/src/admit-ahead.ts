@@ -188,7 +188,7 @@ export async function admitAhead(
     const credential = rows(tried)?.credential;
     if (credential == null) return false;
     try {
-      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential);
+      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential, false);
       return row !== null && row.id === credentialId;
     } catch {
       return false;

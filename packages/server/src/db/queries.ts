@@ -1442,6 +1442,12 @@ export async function findCredential(
    * `'settings'`, with the instance's settings alone, as they say them.
    */
   ahead?: CredentialRead | null | 'answer' | 'settings',
+  /**
+   * Whether a check will decide on what stands behind it: false when none will (the policy `off`; a later try's check
+   * that it is still the same credential), and then nothing more is read for it (`passkeyOf`'s history) and
+   * `passkeyRead` is undefined, as for a row read without it (review r1 of #528).
+   */
+  checked = true,
 ) {
   let row: CredentialRead | undefined;
   if ('id' in by) {
@@ -1464,8 +1470,8 @@ export async function findCredential(
   const stands = binding === null ? null : await standingBinding(db, chainKey, binding, row.credential.principal, row.credential.generation);
   return {
     ...row.credential,
-    /** What stands behind it, read with it (`passkeyOf`): undefined when the row came from a read that did not (`app_read`, the vault's). */
-    passkeyRead: await passkeyOf(db, chainKey, row.credential, row),
+    /** What stands behind it, read with it (`passkeyOf`): undefined when no check asked (`checked`) or the row came from a read that did not (`app_read`, the vault's). */
+    passkeyRead: checked ? await passkeyOf(db, chainKey, row.credential, row) : undefined,
     /** For a credential a trust binding issued: whether that binding still stands. Null for any other. */
     bindingStands: binding === null ? null : stands !== null,
     /** Its scope, as stored: its own, or for one a binding issued, the binding's. */

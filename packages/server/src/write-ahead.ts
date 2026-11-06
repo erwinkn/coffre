@@ -258,12 +258,13 @@ export async function writeAhead(
     return { identity, written: null };
   }
   const credentialId = identity.credentialId;
-  // A later try's rows, checked as the first's were: the same credential, its rows' MACs whole (`findCredential` reads nothing given them).
+  // A later try's rows, checked as the first's were: the same credential, its rows' MACs whole (`findCredential` reads
+  // nothing given them, nor what stands behind it, which the first try's check decided on).
   const still = async (tried: Tried): Promise<boolean> => {
     const credential = rows(tried)?.credential;
     if (credential == null) return false;
     try {
-      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential);
+      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential, false);
       return row !== null && row.id === credentialId;
     } catch {
       return false;
