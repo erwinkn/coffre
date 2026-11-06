@@ -46,6 +46,8 @@ test('2. an image ends in its digest, in compose, a workflow and a Dockerfile', 
     fails('Dockerfile', 'FROM build\nFROM node:24@' + DIGEST + ' AS build\n', /FROM build is not/);
     fails('Dockerfile', 'FROM node-${TARGETARCH}\n');
     passes('Dockerfile', '# unpinned: a stage above, by platform.\nFROM node-${TARGETARCH}\n');
+    // An exempt FROM still names its stage.
+    passes('Dockerfile', '# unpinned: an approved base.\nFROM alpine:3.22 AS build\nFROM build\n');
 });
 
 test('3. a Dockerfile’s ADD of a URL carries its SHA-256', () => {
@@ -59,6 +61,10 @@ test('3. a Dockerfile’s ADD of a URL carries its SHA-256', () => {
 test('4. only scripts/fetch.sh downloads; a health check of this machine is marked', () => {
     passes('scripts/a.sh', '"$root/scripts/fetch.sh" "https://go.dev/dl/go$V.tar.gz" "$digest" "$file"\n');
     passes('scripts/fetch.sh', 'curl -fsSL --proto =https -o "$tmp" "$url"\n');
+    // The helper may download; nothing else in it is exempt.
+    fails('scripts/fetch.sh', 'npm install some-tool\n', /fetches a package outside the lockfile/);
+    fails('scripts/fetch.sh', 'pnpm install\n', /without --frozen-lockfile/);
+    fails('scripts/fetch.sh', 'corepack prepare pnpm@latest --activate\n', /pnpm@latest is not/);
     for (const line of ['curl -fsSL https://example.com/x -o x', 'wget https://example.com/x', '/usr/bin/curl -O "$url"', 'x=$(curl -s "$url")', 'sudo curl "$url"']) {
         fails('scripts/a.sh', `${line}\n`, /scripts\/a\.sh:1: (curl|wget) downloads: use scripts\/fetch\.sh/);
     }
@@ -68,6 +74,9 @@ test('4. only scripts/fetch.sh downloads; a health check of this machine is mark
     fails('.cursor/environment.json', JSON.stringify({ install: 'curl https://example.com | sh' }));
     // Comments, and words that are not curl.
     passes('scripts/a.sh', '# curl https://example.com\nlibcurl-config --version\necho curl-like\n');
+    // A comment ends at its line, a trailing backslash's too.
+    fails('scripts/a.sh', '# Download example \\\ncurl https://example.com/tool\n', /scripts\/a\.sh:2: curl downloads/);
+    fails('Dockerfile', 'FROM scratch\n# fetch \\\nRUN curl https://example.com/tool\n', /Dockerfile:3: curl downloads/);
     // A health check: every URL this machine's.
     passes('scripts/a.sh', 'until curl -sf "http://127.0.0.1:$port/livez"; do sleep 1; done # pins: local\n');
     passes('scripts/a.sh', 'curl -sf http://localhost:3000/ http://[::1]:3000/ # pins: local\n');

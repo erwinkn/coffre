@@ -29,7 +29,8 @@
 // continuations joined, and each line of every string in a YAML or JSON
 // file's data, as js-yaml reads it (and GitHub, Compose and pnpm). A list of
 // words (`command: [pnpm, install]`, `RUN ["npm", "install"]`) is the line
-// they make. Comment lines are skipped. Rules 5 and 6 read each command of a
+// they make. Comment lines are skipped, and end at their line, a trailing
+// backslash's too. scripts/fetch.sh is held to rules 5 to 7. Rules 5 and 6 read each command of a
 // line apart, its part between `;`, `&` and `|`: the program's name, then a
 // subcommand's anywhere after it, or a one- or two-letter alias (`npm i`)
 // right after it. A line no rule can hold carries `# unpinned: <reason>` (in
@@ -114,15 +115,18 @@ function lines(text, kind, report, { path, pnpm }) {
     const stages = new Set();
     for (let k = 0; k < raw.length; k++) {
         const index = k;
+        // A comment ends at its line, backslash or not.
+        if (/^\s*#/.test(raw[k])) continue;
         let line = raw[k];
         while (/\\\s*$/.test(line) && k + 1 < raw.length) line = line.replace(/\\\s*$/, ' ') + raw[++k];
-        if (/^\s*#/.test(line) || exempt(raw, index, line)) continue;
+        const skip = exempt(raw, index, line);
         if (kind === 'dockerfile') {
-            dockerfile(line, stages, (message) => report(index, message));
+            // An exempt FROM still names its stage.
+            dockerfile(line, stages, skip ? () => {} : (message) => report(index, message));
             // An argument list is the command its words make.
             line = line.replace(/"\s*,\s*"/g, ' ');
         }
-        if (path !== FETCHER) commands(line, pnpm, (message) => report(index, message));
+        if (!skip) commands(line, pnpm, (message) => report(index, message), { downloads: path === FETCHER });
     }
 }
 
@@ -150,9 +154,10 @@ function dockerfile(line, stages, report) {
 }
 
 // Rules 4 to 7 on one line.
-function commands(line, pnpm, report) {
+// scripts/fetch.sh may run a downloader; nothing else in it is exempt.
+function commands(line, pnpm, report, { downloads = false } = {}) {
     const downloader = line.match(DOWNLOADERS);
-    if (downloader && !localOnly(line)) {
+    if (downloader && !downloads && !localOnly(line)) {
         report(`${downloader[0]} downloads: use scripts/fetch.sh <url> <sha256> <file> (a Dockerfile: ADD --checksum=sha256:…), or mark a health check of this machine \`# pins: local\``);
     }
     for (const command of line.split(/[;&|]/)) {
