@@ -223,6 +223,24 @@ test("the token endpoint's form: each field once, as many as a body holds values
   assert.doesNotMatch(most.body.error_description, /more than/);
 });
 
+test("an authorization request is at most the URL that brought it to the consent page, 16 KB: a longer one is refused, not echoed", async () => {
+  const cookie = await session(DEV);
+  const { challenge } = pkce();
+  const long = { ...request(CLAUDE_CODE, 'http://localhost:51234/callback', challenge, { scope: 'read' }), state: '+'.repeat(900 * 1024) };
+  const answer = await route('/api/oauth/authorizations', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${cookie}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ request: long, approve: false, scopes: ['read'] }),
+  });
+  // The route's schema refuses it, a 400 and no redirect: the service, which would echo the state, never sees it.
+  assert.equal(answer.status, 400);
+  const body = (await answer.json()) as { error: string; message: string; redirect?: string };
+  assert.equal(body.error, 'bad_request');
+  assert.match(body.message, /at most 16000 bytes together/);
+  assert.equal(body.redirect, undefined);
+  assert.ok(!JSON.stringify(body).includes('++++'), 'the state is not echoed');
+});
+
 test('/mcp answers 401, and where to sign in, without a good token; a request from another site, 403', async () => {
   const bare = await discover(null);
   assert.equal(bare.status, 401);

@@ -1947,7 +1947,8 @@ export function checkedCandidates(chainKey: Buffer, rows: readonly BindingRow[],
   const checked: BindingRow[] = [];
   for (const row of rows) {
     if (work !== undefined) {
-      work.left -= (row.claims.length + row.issuer.length + (row.jwksUri?.length ?? 0)) * ROW_BYTE_NS;
+      // In UTF-16 units, each up to 3 bytes of the UTF-8 the MAC reads: paid as if every one were.
+      work.left -= (row.claims.length + row.issuer.length + (row.jwksUri?.length ?? 0)) * 3 * ROW_BYTE_NS;
       if (work.left < 0) throw new SignInWorkSpent();
     }
     if (checkAuthRow(chainKey, 'service_bindings', row)) checked.push(row);

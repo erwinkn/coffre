@@ -46,6 +46,16 @@ test("a sign-in's candidate bindings are checked only while its budget lasts: si
   // R27's 20 ms: what the budget lets through, and no more (`SIGN_IN_WORK_NS`, 16 ms).
   assert.ok(ms < 20, `took ${ms} ms`);
   assert.ok(work.left < 0 && SIGN_IN_WORK_NS === 16_000_000);
+  // Claims of three-byte characters, a third as many units for the same bytes to MAC: paid as bytes (review r7).
+  const wide = JSON.stringify({ sub: '一'.repeat(300_000) });
+  const wideRow = (i: number) => {
+    const fields = { id: crypto.randomUUID(), principal: 'token:api', generation: 0, profile: 'custom', issuer: 'https://idp.acme.example', jwksUri: `sha256:${i}`, claims: wide, revokedAt: null };
+    return { ...fields, authMac: authMac(key, 'service_bindings', fields as never) } as unknown as BindingRow;
+  };
+  const wideRows = Array.from({ length: 16 }, (_, i) => wideRow(i));
+  const widely = cpu(() => checkedCandidates(key, wideRows, signInWork()));
+  assert.ok(widely.result instanceof SignInWorkSpent, String(widely.result));
+  assert.ok(widely.ms < 20, `took ${widely.ms} ms`);
   // A few small ones are all checked, a sliver of the budget spent.
   const small = signInWork();
   const fields = { id: crypto.randomUUID(), principal: 'token:api', generation: 0, profile: 'custom', issuer: 'https://idp.acme.example', jwksUri: 'sha256:x', claims: '{"sub":"x"}', revokedAt: null };

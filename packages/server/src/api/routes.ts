@@ -234,6 +234,14 @@ function mcp(ctx: ApiContext) {
  */
 const touchAnswer = z.object({ state: z.string().min(1), response: z.record(z.string(), z.unknown()) }).strict();
 
+/**
+ * What an authorization request's parameters may be, together, in bytes: they come to the consent page in its URL,
+ * and Workers takes a URL of 16 KB at most (https://developers.cloudflare.com/workers/platform/limits/, "URL size",
+ * read as decimal, the smaller reading), so no request a person consented to on Workers is longer. Its refusal or its
+ * code goes back in a redirect's `Location`, as long. Node holds to the same number, so a deployment answers alike.
+ */
+const AUTHORIZATION_URL_BYTES = 16_000;
+
 const authorizationRequest = z.object({
   client_id: z.string().optional(),
   redirect_uri: z.string().optional(),
@@ -243,7 +251,10 @@ const authorizationRequest = z.object({
   state: z.string().optional(),
   scope: z.string().optional(),
   resource: z.string().optional(),
-});
+}).refine(
+  (request) => Object.values(request).reduce((sum, value) => sum + (value === undefined ? 0 : Buffer.byteLength(value)), 0) <= AUTHORIZATION_URL_BYTES,
+  `an authorization request's parameters are at most ${AUTHORIZATION_URL_BYTES} bytes together: the URL that brings them is no longer`,
+);
 
 /** An issuer's public keys, uploaded with a binding: a JWKS, whose keys `uploadedKeys` checks one by one. */
 const keySet = z.object({ keys: z.array(z.record(z.string(), z.unknown())).min(1).max(MAX_KEYS) });
