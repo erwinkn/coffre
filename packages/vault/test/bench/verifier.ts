@@ -66,8 +66,12 @@ after(async () => {
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
-/** The workerd processes this one started: wrangler's two, the one that runs the Worker and the proxy before it. */
-function workerds(): number[] {
+/**
+ * The workerd that runs the Worker, of the two wrangler starts under this process: the one with the inspector the
+ * bench asks for (`inspectorPort`), not the proxy before it, which no deployment runs. Their arguments differ in that
+ * alone; anything else found fails the bench rather than measure the wrong one.
+ */
+function workerOf(): number {
   const parent = new Map<number, number>();
   const named = new Map<number, string>();
   for (const entry of readdirSync('/proc')) {
@@ -86,7 +90,13 @@ function workerds(): number[] {
     for (let p = pid; p > 1; p = parent.get(p) ?? 0) if (p === process.pid) return true;
     return false;
   };
-  return [...named].filter(([pid, name]) => name === 'workerd' && ours(pid)).map(([pid]) => pid);
+  const workerds = [...named].filter(([pid, name]) => name === 'workerd' && ours(pid)).map(([pid]) => pid);
+  const args = (pid: number) => readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+  const running = workerds.filter((pid) => args(pid).some((arg) => arg.startsWith('--inspector-addr=')));
+  if (workerds.length !== 2 || running.length !== 1) {
+    throw new Error(`expected wrangler's two workerd, one with an inspector: ${JSON.stringify(workerds.map((pid) => args(pid)))}`);
+  }
+  return running[0]!;
 }
 
 /**
@@ -147,13 +157,7 @@ test("the verifier's check in workerd, by the entries above the newest pair", { 
     if (!response.ok) throw new Error(body.error ?? String(response.status));
     return body;
   };
-  // The workerd that runs the Worker: the one a check moves the most. The other, wrangler's proxy, runs in no deployment.
-  const pids = workerds();
-  assert.ok(pids.length > 0, 'no workerd of ours found');
-  await ask('verify');
-  const moved: { pid: number; ms: number }[] = [];
-  for (const pid of pids) moved.push({ pid, ms: (await measure(pid, () => ask('verify'))).main });
-  const pid = moved.sort((a, b) => b.ms - a.ms)[0]!.pid;
+  const pid = workerOf();
   const points: [number, number][] = [];
   let above = 0;
   for (const size of SIZES) {
@@ -174,8 +178,8 @@ test("the verifier's check in workerd, by the entries above the newest pair", { 
     points.push([size, of('main', 0.5)]);
     console.log(`${size} above the pair: the isolate's thread ${of('main', 0.5).toFixed(2)} ms at the median, ${of('main', 0.9).toFixed(2)} at p90, ${of('main', 1).toFixed(2)} at most; all of workerd's threads ${of('all', 0.5).toFixed(2)}, ${of('all', 0.9).toFixed(2)}, ${of('all', 1).toFixed(2)} (a request that does nothing, its median, taken off)`);
   }
-  // A line through the counts up to 2,000, by least squares: the check's fixed cost and an entry's.
-  const near = points.filter(([size]) => size <= 2_000 && size <= ABOVE_NEWEST);
+  // A line through the counts up to 2,000 or the cap, by least squares: the check's fixed cost and an entry's.
+  const near = points.filter(([size]) => size <= Math.min(2_000, ABOVE_NEWEST));
   if (near.length >= 2) {
     const n = near.length;
     const sx = near.reduce((s, [x]) => s + x, 0);
@@ -184,6 +188,6 @@ test("the verifier's check in workerd, by the entries above the newest pair", { 
     const sxy = near.reduce((s, [x, y]) => s + x * y, 0);
     const perEntry = (n * sxy - sx * sy) / (n * sxx - sx * sx);
     const fixed = (sy - perEntry * sx) / n;
-    console.log(`the isolate's thread, at the median, fitted up to 2,000: ${fixed.toFixed(2)} ms fixed, ${(perEntry * 1000).toFixed(1)} µs an entry; ${BUDGET_MS} ms fits ${Math.floor((BUDGET_MS - fixed) / perEntry)} entries; ABOVE_NEWEST is ${ABOVE_NEWEST}`);
+    console.log(`the isolate's thread, at the median, fitted through ${near.map(([size]) => size).join(', ')}: ${fixed.toFixed(2)} ms fixed, ${(perEntry * 1000).toFixed(1)} µs an entry; ${BUDGET_MS} ms fits ${Math.floor((BUDGET_MS - fixed) / perEntry)} entries; ABOVE_NEWEST is ${ABOVE_NEWEST}`);
   }
 });
