@@ -511,14 +511,15 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   (`.method`, `_method[]`, `_method `, any case), and a parameter named
   as one of those headers counts as one, as ServiceStack and ASP.NET MVC
   read them, ASP.NET's `%uXXXX` decoded too (`%u0058-HTTP-Method-Override`).
-  An empty value names no method and changes nothing (`?_method=`). A
-  header's value is held as written as well as uppercased, as ASP.NET
-  Core sets the request's method to it: a list that takes `PATCH` refuses
-  `X-HTTP-Method-Override: pAtCh`, as it would a request whose own method
-  is `pAtCh`, and so does a query parameter named as one of those
-  headers (`?X-HTTP-Method-Override=pAtCh`), whose case ASP.NET MVC and
-  ServiceStack keep; a query's `_method=patch`, which what reads it
-  uppercases, is PATCH. An override the list takes
+  An empty value names no method and changes nothing (`?_method=`).
+  Every override, header or query, is held both as written and
+  uppercased, because upstreams disagree: Express, Rack, Laravel and
+  Symfony uppercase it, while ASP.NET Core, ASP.NET MVC, ServiceStack and
+  Hono set the request's method to it as written. So a list that takes
+  `PATCH` refuses `X-HTTP-Method-Override: pAtCh`, `?_method=pAtCh` and
+  `?_method=patch` alike, as it would a request whose own method is
+  `pAtCh` or `patch` (`delete` is DELETE, as fetch reads it). A client
+  that writes `PATCH` is never refused for its case. An override the list takes
   goes on as it came (Google's `PATCH` through a POST): the upstream acts
   on a method the list allows either way, so refusing what it does not
   take closes the gap and breaks no client that stays inside the list,
