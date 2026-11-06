@@ -345,7 +345,10 @@ unsupported diff select full validation.
   name on any line but a comment (curl, wget, npx and the other package
   runners, `npm exec` or `install`, `pnpm dlx` or `add`, `gh release
   download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
-  a message too. A pnpm setting written in any style but block fails. A fetch
+  a message too, options between a command's words included (`gh release
+  --repo o/r download`). A YAML value folded over lines (`run: >-`, or a plain
+  one continued below its key) is read as the one line YAML makes of it. A
+  pnpm setting written in any style but block fails. A fetch
   hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
   A health check of this machine is curl marked `# pins: local`, every URL
   on the line 127.0.0.1, localhost or [::1]; a line that cannot be pinned

@@ -116,6 +116,10 @@ test('a package runner, a registry install, a release download or a clone is ban
         'gh release download v1.0.0 --repo o/r',
         'gh release download --repo o/r --pattern "*.tgz"',
         'gh run download 123',
+        // Options between a command's words.
+        'gh release --repo o/r download v1.0.0',
+        'gh run --repo o/r download 123',
+        'git submodule --quiet update --init --remote',
         'git clone https://github.com/a/b.git',
         `git -C dir clone --revision=${SHA} https://github.com/a/b.git`,
         'nvm install 24',
@@ -183,8 +187,29 @@ test('docker run, create or pull names its image by digest on the line', () => {
         'docker container run --rm postgres:16.14',
         'docker container create --name pg postgres:16.14',
         'sudo docker run --rm postgres:16.14',
+        'docker --context ci run --rm postgres:16.14',
+        'docker container --debug run --rm postgres:16.14',
     ]) assert.equal(one('scripts/a.sh', `${line}\n`).length, 1, line);
     assert.deepEqual(one('scripts/a.sh', "# unpinned: compose's image, pinned there\ndocker run --rm \"$image\"\n"), []);
+});
+
+test('a YAML scalar YAML folds into one line is read as that line', () => {
+    const step = (run) => `jobs:\n  a:\n    steps:\n      - name: Install\n        run: ${run}\n      - run: pnpm build\n`;
+    for (const run of [
+        '>-\n          pnpm --dir app\n          install',
+        '>\n          gh release\n          download v1.0.0',
+        'pnpm --dir app\n          install',
+        '"pnpm --dir app\n          install"',
+        '\n          pnpm --dir app\n          install',
+    ]) assert.equal(one('.github/workflows/a.yml', step(run)).length, 1, run);
+    assert.match(one('.github/workflows/a.yml', step('>-\n          pnpm --dir app\n          install'))[0], /a\.yml:5: pnpm install without --frozen-lockfile/);
+    // Folded, frozen: nothing; a `|` block's lines are the shell's own.
+    assert.deepEqual(one('.github/workflows/a.yml', step('>-\n          pnpm --dir app\n          install --frozen-lockfile')), []);
+    assert.deepEqual(one('.github/workflows/a.yml', step('|\n          pnpm --dir app\n          install --frozen-lockfile')), []);
+    assert.equal(one('.github/workflows/a.yml', step('|\n          pnpm --dir app install\n          echo --frozen-lockfile')).length, 1);
+    // Keys beneath a key are no scalar of it.
+    assert.deepEqual(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - uses: actions/checkout@${SHA} # v4.4.0\n        with:\n          persist-credentials: false\n`), []);
+    assert.equal(one('docker-compose.yml', 'services:\n  pg:\n    command: >\n      sh -c "npm\n      install"\n').length, 1);
 });
 
 test('a line that cannot be pinned says why, on itself or right above it', () => {
@@ -294,10 +319,12 @@ test('scripts/fetch.sh keeps a download only if its SHA-256 is the pinned one', 
 test('scripts/fetch.sh beside itself keeps only the pinned bytes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'coffre-fetch-'));
     try {
-        // A curl that writes its body in two halves, a moment apart.
+        // A curl that writes half its body, waits until every run's curl has
+        // started (so none has found the file already there), then the rest.
         const bin = join(dir, 'bin');
+        const runs = 12;
         spawnSync('mkdir', [bin]);
-        writeFileSync(join(bin, 'curl'), `#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac; done\nprintf '%s' "\${BODY%???}" > "$out"\nsleep 0.05\nprintf '%s' "\${BODY#\${BODY%???}}" >> "$out"\n`);
+        writeFileSync(join(bin, 'curl'), `#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac; done\nprintf '%s' "\${BODY%???}" > "$out"\necho >> "${join(dir, 'started')}"\ni=0; while [ "$(wc -l < "${join(dir, 'started')}")" -lt ${runs} ]; do i=$((i+1)); [ $i -lt 1000 ] || exit 9; sleep 0.01; done\nprintf '%s' "\${BODY#\${BODY%???}}" >> "$out"\n`);
         chmodSync(join(bin, 'curl'), 0o755);
         const hello = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
         const file = join(dir, 'cache', 'tool.tgz');
@@ -305,8 +332,8 @@ test('scripts/fetch.sh beside itself keeps only the pinned bytes', async () => {
             const child = spawn('bash', [new URL('./fetch.sh', import.meta.url).pathname, 'https://example.com/tool.tgz', hello, file], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BODY: body }, stdio: 'ignore' });
             child.on('exit', (code) => resolve({ body, code }));
         });
-        const runs = await Promise.all(Array.from({ length: 12 }, (_, i) => run(i % 2 ? 'hello' : 'tampered')));
-        for (const { body, code } of runs) assert.equal(code, body === 'hello' ? 0 : 1, body);
+        const results = await Promise.all(Array.from({ length: runs }, (_, i) => run(i % 2 ? 'hello' : 'tampered')));
+        for (const { body, code } of results) assert.equal(code, body === 'hello' ? 0 : 1, body);
         assert.equal(readFileSync(file, 'utf8'), 'hello');
         assert.deepEqual(readdirSync(join(dir, 'cache')), ['tool.tgz']);
     } finally {

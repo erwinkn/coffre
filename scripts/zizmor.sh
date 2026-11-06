@@ -31,11 +31,13 @@ home="$cache/zizmor-$ZIZMOR_VERSION-$target"
 if [ ! -x "$home/zizmor" ]; then
     archive="$cache/zizmor-$ZIZMOR_VERSION-$target.tar.gz"
     scripts/fetch.sh "https://github.com/zizmorcore/zizmor/releases/download/v$ZIZMOR_VERSION/zizmor-$target.tar.gz" "$digest" "$archive"
-    rm -rf "$home.part"
-    mkdir -p "$home.part"
-    tar -xzf "$archive" -C "$home.part"
-    rm -f "$archive"
-    mv "$home.part" "$home"
+    # Each run unpacks into a directory of its own, and the first to link it in
+    # wins: a symlink is made whole or not at all, and never over another (-n:
+    # nor inside the one there). The archive stays, for a run beside this one
+    # that has yet to unpack it.
+    unpacked="$(mktemp -d "$home.XXXXXX")"
+    tar -xzf "$archive" -C "$unpacked"
+    ln -sn "$(basename "$unpacked")" "$home" 2>/dev/null || rm -rf "$unpacked"
 fi
 
 online=(--offline)

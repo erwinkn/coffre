@@ -34,7 +34,11 @@ const word = (name) => `(?<![\\w.-])${name}(?![\\w./-])`;
 const REST = String.raw`(?:(?![;&|)]|\\n).)*?`;
 // A program's version beside it, as Corepack runs one (`corepack pnpm@11.8.0 dlx`).
 const AT_VERSION = String.raw`(?:@[^\s"'\`;&|)]*)?`;
-const command = (program, subcommands) => new RegExp(`${word(program)}${AT_VERSION}\\s+(?:${REST}\\s)?(?:${subcommands})(?=[\\s"';&|)]|\\\\n|$)`);
+// The space between two words of a command, and any words between them.
+const THEN = String.raw`\s+(?:${REST}\s)?`;
+// A program, any options, then its subcommands, each word of them after any
+// options of its own (`gh release --repo o/r download`).
+const command = (program, subcommands) => new RegExp(`${word(program)}${AT_VERSION}${THEN}(?:${subcommands})(?=[\\s"';&|)]|\\\\n|$)`);
 
 // What fetches something no lockfile, digest or checksum holds.
 const BANNED = [
@@ -43,8 +47,8 @@ const BANNED = [
     { pattern: command('npm', 'exec|x|install|i|in|add|ci|update|up|upgrade|pack|create|init|dlx'), say: () => 'npm fetches packages outside the lockfile: install with pnpm install --frozen-lockfile' },
     { pattern: command('pnpm', 'dlx|create|add|update|up|upgrade|self-update'), say: (m) => `${m} fetches packages outside the lockfile (add one with pnpm run add:dep)` },
     { pattern: command('yarn', 'dlx|add|create'), say: (m) => `${m} fetches packages outside the lockfile` },
-    { pattern: command('gh', '(?:release|run|attestation)\\s+download'), say: (m) => `${m} downloads: use scripts/fetch.sh <url> <sha256> <file>` },
-    { pattern: command('git', 'clone|submodule\\s+update\\s+--remote'), say: (m) => `${m} takes a branch as it is: fetch a file at its commit with scripts/fetch.sh` },
+    { pattern: command('gh', `(?:release|run|attestation)${THEN}download`), say: (m) => `${m} downloads: use scripts/fetch.sh <url> <sha256> <file>` },
+    { pattern: command('git', `clone|submodule${THEN}update${THEN}--remote`), say: (m) => `${m} takes a branch as it is: fetch a file at its commit with scripts/fetch.sh` },
     { pattern: command('nvm', 'install|reinstall-packages|install-latest-npm'), say: (m) => `${m} checks Node against nodejs.org's own list: fetch the tarball by its SHA-256` },
     { pattern: command('corepack', 'up|use'), say: (m) => `${m} moves packageManager` },
     { pattern: command('(?:apt-get|apt)', 'install'), say: () => "apt-get install takes the archive's current versions" },
@@ -54,8 +58,9 @@ const BANNED = [
 const PNPM_INSTALL = command('pnpm', 'install|i');
 // Corepack's own subcommands that fetch, right after it (`corepack pnpm install` is pnpm's).
 const COREPACK_FETCH = new RegExp(`${word('corepack')}${AT_VERSION}\\s+(?:install|prepare|hydrate)(?=[\\s"';&|)]|\\\\n|$)`);
-// `docker run`, and its management command's spelling, `docker container run`.
-const DOCKER_PULLS = new RegExp(`${word('docker')}\\s+(?:(?:image|container|service)\\s+)?(?:run|create|pull)(?=\\s|$)`);
+// `docker run`, and its management command's spelling, `docker container run`;
+// `docker buildx create`'s image is its `--driver-opt image=`, read below.
+const DOCKER_PULLS = command('docker(?!\\s+buildx\\b)', `(?:(?:image|container|service)${THEN})?(?:run|create|pull)`);
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}(?![0-9a-f])/;
 const URL = /[a-z][a-z0-9+.-]*:\/\/[^\s"'`)]*/gi;
 const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)/;
@@ -153,23 +158,69 @@ function localOnly(line) {
 
 // Shell's and Dockerfiles' backslash continuations joined into one line, each
 // at the index of its first, with whether a `# unpinned: <reason>` covers it.
+// YAML's folded scalars are one line first (`yamlLines`).
 function logicalLines(lines, kind) {
+    const items = kind === 'workflow' || kind === 'compose' ? yamlLines(lines) : lines.map((line, index) => ({ index, line }));
     const joined = [];
-    for (let i = 0; i < lines.length; i++) {
-        const start = i;
-        let line = lines[i];
-        while (/\\\s*$/.test(line) && i + 1 < lines.length) {
-            i++;
+    for (let k = 0; k < items.length; k++) {
+        const { index: start } = items[k];
+        let { line } = items[k];
+        while (/\\\s*$/.test(line) && k + 1 < items.length) {
+            k++;
             // A Dockerfile's comment inside a continued RUN is no part of it.
-            if (kind === 'dockerfile' && /^\s*#/.test(lines[i])) {
+            if (kind === 'dockerfile' && /^\s*#/.test(items[k].line)) {
                 line = line.replace(/\\\s*$/, '\\');
                 continue;
             }
-            line = line.replace(/\\\s*$/, ' ') + lines[i];
+            line = line.replace(/\\\s*$/, ' ') + items[k].line;
         }
         joined.push({ index: start, line, exempt: exempted(lines, start, line) });
     }
     return joined;
+}
+
+// YAML folds every scalar but a `|` block into one line: `run: >-` over
+// `pnpm --dir app` and `install` runs `pnpm --dir app install`, and so does a
+// plain or quoted value continued on the lines below its key. Each such
+// scalar, its key's line and every line indented past the key, is one line
+// here, at the key's index; a `|` block keeps its lines, as the shell reads
+// them. Joining more than YAML would only finds more.
+function yamlLines(lines) {
+    const indent = (line) => line.match(/^\s*/)[0].length;
+    const below = (i, column) => {
+        let end = i;
+        while (end + 1 < lines.length && (lines[end + 1].trim() === '' || indent(lines[end + 1]) > column)) end++;
+        while (end > i && lines[end].trim() === '') end--;
+        return end;
+    };
+    // A key (`- run:`, `"on":`) or a sequence entry's dash.
+    const NODE = /^(\s*)((?:-\s+)*)(?:((?:"[^"]*"|'[^']*'|[^\s#'"-][^:#]*?|-[^\s:#][^:#]*?)):(?=\s|$))?\s*(.*)$/;
+    const items = [];
+    for (let i = 0; i < lines.length; i++) {
+        const [, space, dashes, key, rest] = lines[i].match(NODE);
+        if (key === undefined && dashes === '') {
+            items.push({ index: i, line: lines[i] });
+            continue;
+        }
+        // A key's value is past its column; an entry's, past its dash.
+        const column = space.length + (key === undefined ? 0 : dashes.length);
+        const value = rest.replace(/(^|\s)#.*$/, '').trim();
+        const end = below(i, column);
+        const next = lines.slice(i + 1, end + 1).find((line) => line.trim() !== '' && !/^\s*#/.test(line));
+        // A `|` block, or a mapping or list beneath: those lines are read on their own.
+        const structure = next !== undefined && NODE.exec(next)[3] !== undefined || /^\s*-(\s|$)/.test(next ?? '');
+        if (end === i || value.startsWith('|') || (value === '' && structure)) {
+            items.push({ index: i, line: lines[i] });
+            if (value.startsWith('|')) {
+                for (let j = i + 1; j <= end; j++) items.push({ index: j, line: lines[j] });
+                i = end;
+            }
+            continue;
+        }
+        items.push({ index: i, line: [lines[i], ...lines.slice(i + 1, end + 1).map((line) => line.trim())].join(' ') });
+        i = end;
+    }
+    return items;
 }
 
 // The marker on the line, or on any line of the comment block right above it.
