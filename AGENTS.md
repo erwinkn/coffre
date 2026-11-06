@@ -338,7 +338,10 @@ unsupported diff select full validation.
   # vX.Y.Z`, the same repository's through `$/`; an image as
   `name:tag@sha256:<index digest>`, on the line that pulls it; a Compose
   build from a directory, a repository at its commit (`….git#<sha>`) or an
-  image by its digest, its `dockerfile_inline` read as a Dockerfile; a download
+  image by its digest, its `dockerfile_inline` read as a Dockerfile, a compose
+  file it includes or extends here; a Dockerfile a build or `docker build -f`
+  names, and a compose file `docker compose -f` does, under a name it reads
+  (`Dockerfile`, `Containerfile`, `<name>.Dockerfile`, …); a download
   through `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only
   if its SHA-256 is the pinned one, or a Dockerfile's `ADD
   --checksum=sha256:…`; a toolchain an action installs at an exact version,
@@ -353,7 +356,8 @@ unsupported diff select full validation.
   YAML (workflows, actions, compose, pnpm's settings) it reads with
   js-yaml, a root dependency, as the data GitHub, Compose and pnpm make of
   it, whatever the style: every string checked as the
-  lines a shell runs, once per value of a matrix it names, and each image,
+  lines a shell runs, once per value of a matrix it names (`matrix.key`,
+  `matrix['key']`, whatever its case; any other read of the matrix fails), and each image,
   action, runner and toolchain where they read one. A fetch
   hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
   A health check of this machine is curl marked `# pins: local`, every URL

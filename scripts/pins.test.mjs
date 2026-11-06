@@ -71,6 +71,25 @@ test('an image is name:tag@sha256:<digest>, in compose, a workflow, a Dockerfile
     assert.equal(one('docker-compose.yml', build('{context: ., additional_contexts: {base: "docker-image://alpine:3"}}')).length, 1);
     assert.equal(one('docker-compose.yml', build('{context: ., additional_contexts: ["base=docker-image://alpine:3", "db=service:db"]}')).length, 1);
     assert.deepEqual(one('docker-compose.yml', build(`{context: ., additional_contexts: {base: "docker-image://alpine:3@${DIGEST}", src: ../src, db: "service:db"}}`)), []);
+    // r12: a stage is named once its FROM is read, so `FROM alpine AS alpine` pulls alpine.
+    assert.match(one('Dockerfile', 'FROM alpine AS alpine\nRUN true\n')[0], /Dockerfile:1: FROM alpine is not/);
+    assert.match(one('docker-compose.yml', inline('FROM alpine AS alpine'))[0], /dockerfile_inline, line 1: FROM alpine is not/);
+    assert.deepEqual(one('Dockerfile', `FROM alpine:3.20@${DIGEST} AS base\nFROM base\nCOPY --from=base /a /b\n`), []);
+    // r12: Compose's short spelling of a repository is one too.
+    assert.match(one('docker-compose.yml', build('github.com/docker-library/hello-world.git'))[0], /build context github\.com\/docker-library\/hello-world\.git is what its server has today/);
+    assert.deepEqual(one('docker-compose.yml', build(`github.com/docker-library/hello-world.git#${SHA}`)), []);
+    // r12: the Dockerfile a build names has a name check:pins reads, and a Containerfile is one.
+    assert.match(one('docker-compose.yml', build('{context: ., dockerfile: build.txt}'))[0], /services\.app\.build\.dockerfile: dockerfile "build\.txt": name it Dockerfile/);
+    assert.deepEqual(one('docker-compose.yml', build('{context: ., dockerfile: docker/app.Dockerfile}')), []);
+    assert.match(one('Containerfile', 'FROM alpine:latest\n')[0], /Containerfile:1: FROM alpine:latest is not/);
+    assert.match(one('a.sh', 'docker buildx build --file "$DOCKERFILE" .\n')[0], /a\.sh:1: --file "\$DOCKERFILE": name it Dockerfile/);
+    assert.match(one('a.sh', 'docker compose -f stack.yml up -d\n')[0], /a\.sh:1: -f stack\.yml: name it compose\.yaml/);
+    assert.deepEqual(one('a.sh', 'docker build -f packages/cli/Dockerfile .\ndocker compose --file docker-compose.yml up\n'), []);
+    // r12: a compose file Compose fetches, by `include:` or `extends:`, is no pin.
+    assert.match(one('docker-compose.yml', 'include: [oci://registry.example.com/base:latest]\n')[0], /include\[0\]: "oci:\/\/registry\.example\.com\/base:latest" is a compose file Compose fetches/);
+    assert.match(one('docker-compose.yml', 'include:\n  - path: [./a.yml, https://example.com/b.yml]\n')[0], /include\[0\]\.path: "https:\/\/example\.com\/b\.yml"/);
+    assert.match(one('docker-compose.yml', 'services:\n  a:\n    extends: {file: "git@github.com:o/r.git", service: x}\n')[0], /services\.a\.extends\.file: .* is a compose file Compose fetches/);
+    assert.deepEqual(one('docker-compose.yml', 'include: [./local.yml]\nservices:\n  a:\n    extends: {file: ./base.yml, service: x}\n'), []);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver docker-container --use\n').length, 1, 'BuildKit’s default image');
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx create --driver-opt image=moby/buildkit:v0.34.1 --use\n').length, 1);
     assert.equal(one('.github/workflows/a.yml', 'run: docker buildx build --attest type=sbom,generator=docker/buildkit-syft-scanner:1.12.1 .\n').length, 1);
@@ -281,6 +300,16 @@ test('YAML is read as the data GitHub and Compose make of it, by js-yaml', () =>
     assert.match(one('docker-compose.yml', 'x-base: &base\n  image: redis:7\nservices:\n  r:\n    <<: *base\n')[0], /services\.r\.image: image redis:7 is not/);
     // A string a matrix completes is read with each of its values.
     assert.match(problems('jobs:\n  a:\n    strategy:\n      matrix:\n        command: [build, install]\n    steps:\n      - run: pnpm ${{ matrix.command }}\n')[0], /pnpm install without --frozen-lockfile/);
+    // r12: GitHub looks a matrix key up whatever its case, and by brackets; any other read of it fails.
+    const matrix = (values, run) => `jobs:\n  a:\n    strategy:\n      matrix: ${values}\n    steps:\n      - run: ${run}\n`;
+    assert.match(problems(matrix('{Command: [install]}', 'pnpm ${{ matrix.command }}'))[0], /pnpm install without --frozen-lockfile/);
+    assert.match(problems(matrix('{command: [install]}', "pnpm ${{ matrix['command'] }}"))[0], /pnpm install without --frozen-lockfile/);
+    assert.match(problems(matrix('{command: [install]}', 'pnpm ${{ Matrix.Command }}'))[0], /pnpm install without --frozen-lockfile/);
+    assert.match(problems(matrix('{include: [{Command: install}]}', 'pnpm ${{ matrix.command }}'))[0], /pnpm install without --frozen-lockfile/);
+    assert.match(problems(matrix('{c: [{x: install}]}', 'pnpm ${{ matrix.c.x }}'))[0], /\$\{\{ matrix\.c\.x \}\} reads the matrix in a form this cannot follow/);
+    assert.match(problems(matrix('{c: [install]}', "pnpm ${{ format('{0}', matrix.c) }}"))[0], /reads the matrix in a form this cannot follow/);
+    assert.match(problems(matrix("'${{ fromJSON(inputs.m) }}'", 'pnpm ${{ matrix.c }}'))[0], /\$\{\{ matrix\.c \}\}: no value this reads/);
+    assert.deepEqual(problems(matrix('{shard: [1, 2]}', 'scripts/formal.sh --shard ${{ MATRIX.Shard }}')), []);
     // A description is prose, read too; a name GitHub or Compose reads as no image is none.
     assert.equal(one('action/action.yml', 'inputs:\n  url:\n    description: >-\n      Run curl https://example.com/i.sh\n').length, 1);
     assert.deepEqual(one('docker-compose.yml', `services:\n  image:\n    image: postgres:16.14@${DIGEST}\n`), []);

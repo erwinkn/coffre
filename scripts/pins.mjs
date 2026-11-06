@@ -65,8 +65,17 @@ const COREPACK_FETCH = new RegExp(`${word('corepack')}${AT_VERSION}\\s+(?:instal
 // `docker run`, and its management command's spelling, `docker container run`;
 // `docker buildx create`'s image is its `--driver-opt image=`, read below.
 const DOCKER_PULLS = command('docker(?!\\s+buildx\\b)', `(?:(?:image|container|service)${THEN})?(?:run|create|pull)`);
+// Commands that read a Dockerfile or a compose file `-f` or `--file` names.
+const NAMES_FILE = [
+    { pattern: command('docker', `(?:(?:buildx|image|builder)${THEN})?build`), kind: 'dockerfile' },
+    { pattern: new RegExp(`(?:${word('docker')}${THEN}compose(?=[\\s"';&|)]|$)|${word('docker-compose')})`), kind: 'compose' },
+];
+const DOCKERFILE_NAMES = 'Dockerfile, Dockerfile.<name>, <name>.Dockerfile or the same of Containerfile';
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}(?![0-9a-f])/;
 const URL = /[a-z][a-z0-9+.-]*:\/\/[^\s"'`)]*/gi;
+// What Compose fetches rather than reads from here: a URL, or a repository
+// by its short names (`git@…`, `github.com/o/r.git`).
+const REMOTE = /^[a-z][a-z0-9+.-]*:\/\/|^git@|^github\.com\//i;
 const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)/;
 
 /** The kinds of file whose contents fetch or run something. */
@@ -74,7 +83,7 @@ export function kindOf(path) {
     const name = path.split('/').at(-1);
     if (/(^|\/)\.github\/(workflows|actions)\/.+\.ya?ml$/.test(path) || /^action\.ya?ml$/.test(name)) return 'workflow';
     if (/^(docker-)?compose(\.[\w-]+)*\.ya?ml$/.test(name)) return 'compose';
-    if (name === 'Dockerfile' || name.endsWith('.Dockerfile') || name.startsWith('Dockerfile.')) return 'dockerfile';
+    if (/^(?:Dockerfile|Containerfile)(?:\..+)?$|\.(?:Dockerfile|Containerfile)$/.test(name)) return 'dockerfile';
     if (name.endsWith('.sh')) return 'shell';
     if (path === '.cursor/environment.json') return 'json';
     if (name === 'pnpm-workspace.yaml') return 'workspace';
@@ -161,6 +170,16 @@ function fetches(line, index, report, pnpm) {
     if (DOCKER_PULLS.test(line) && !PINNED_IMAGE.test(line)) {
         report(index, 'docker run, create or pull of an image this line does not name by @sha256:<index digest>');
     }
+    // A Dockerfile or compose file a command names (`docker build -f
+    // Containerfile`) is one check:pins reads, by its name.
+    for (const { pattern, kind } of NAMES_FILE) {
+        for (const match of line.matchAll(new RegExp(pattern.source + REST + String.raw`(?=[;&|)]|\\n|$)`, 'g'))) {
+            for (const file of match[0].matchAll(/(?<![\w-])(?:-f|--file)(?:=|\s+)("[^"]*"|'[^']*'|[^\s;&|)]+)/g)) {
+                const name = unquoted(file[1]);
+                if (kindOf(name) !== kind) report(index, `${file[0]}: name it ${kind === 'dockerfile' ? DOCKERFILE_NAMES : 'compose.yaml, docker-compose.<name>.yml or the like'}, which check:pins reads`);
+            }
+        }
+    }
     // Corepack fetches the package manager it is named: the workspace's alone,
     // by its version (`corepack install -g pnpm` takes the latest).
     for (const match of line.matchAll(new RegExp(COREPACK_FETCH.source + REST + String.raw`(?=[;&|)]|\\n|$)`, 'g'))) {
@@ -215,7 +234,8 @@ function dockerfileLine(line, index, lines, report) {
     const instruction = line.match(/^\s*([A-Za-z]+)\s+(.*)$/);
     if (!instruction) return;
     const name = instruction[1].toUpperCase();
-    const named = stages(lines);
+    // A stage is named once its FROM is read: `FROM alpine AS alpine` pulls alpine.
+    const named = stages(lines.slice(0, index));
     const image = (ref, what) => {
         if (ref === 'scratch' || /^\d+$/.test(ref) || named.has(ref.toLowerCase()) || IMAGE.test(ref)) return;
         // A stage per platform (`FROM node-${TARGETARCH}`): each platform's is a stage above.
@@ -254,7 +274,10 @@ function stages(lines) {
 
 const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isScalar = (value) => ['string', 'number', 'boolean'].includes(typeof value);
-const MATRIX = /\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g;
+// `${{ matrix.key }}` or `${{ matrix['key'] }}`, whatever their case, as GitHub reads them.
+const MATRIX = /\$\{\{\s*matrix\s*(?:\.\s*([\w-]+)|\[\s*'([^']*)'\s*\])\s*\}\}/gi;
+const EXPRESSION = /\$\{\{(?:[^}]|\}(?!\}))*\}\}/g;
+const matrixKey = (match) => match[1] ?? match[2];
 
 // A workflow, an action, a compose file or .cursor/environment.json, as the
 // data it is: every string is what a shell runs, a list of words the command
@@ -297,17 +320,27 @@ function at(path, ...pattern) {
 // gives what it names (`run: pnpm ${{ matrix.command }}`).
 function commands(text, where, job, report, options) {
     const multiline = text.includes('\n');
-    for (const each of expanded(text, job)) {
+    // A matrix value only a lookup of its own names (`matrix.node.version`,
+    // `format('{0}', matrix.cmd)`) is one this cannot read.
+    for (const [expression] of text.matchAll(EXPRESSION)) {
+        if (/(?<![\w.-])matrix(?![\w-])/i.test(expression) && !new RegExp(`^${MATRIX.source}$`, 'i').test(expression)) {
+            report(where, `${expression} reads the matrix in a form this cannot follow: name the value, \${{ matrix.<key> }}`);
+        }
+    }
+    for (const each of expanded(text, job, where, report)) {
         scan(each, 'shell', (index, message) => report(multiline ? `${where}, line ${index + 1}` : where, message), options);
     }
 }
 
-function expanded(text, job) {
+function expanded(text, job, where, report) {
     let texts = [text];
-    for (const key of new Set([...text.matchAll(MATRIX)].map((match) => match[1]))) {
-        const values = matrixValues(job, key) ?? [];
-        const pattern = new RegExp(String.raw`\$\{\{\s*matrix\.${key}\s*\}\}`, 'g');
-        texts = texts.flatMap((each) => [each, ...values.map((value) => each.replace(pattern, String(value)))]);
+    const lookups = new Map([...text.matchAll(MATRIX)].reverse().map((match) => [matrixKey(match).toLowerCase(), match[0]]));
+    for (const [key, lookup] of lookups) {
+        const values = matrixValues(job, key);
+        // The same words as an image's or a version's lookup, which may be this string too.
+        if (values === null) report(where, `${lookup}: no value this reads; write the job's matrix out, its values in it`);
+        const put = (each, value) => each.replace(MATRIX, (whole, dotted, quoted) => ((dotted ?? quoted).toLowerCase() === key ? value : whole));
+        texts = texts.flatMap((each) => [each, ...(values ?? []).map((value) => put(each, isScalar(value) ? String(value) : JSON.stringify(value)))]);
     }
     return texts;
 }
@@ -316,21 +349,24 @@ function expanded(text, job) {
 // entry's. null when the matrix is not written out (`${{ fromJSON(…) }}`).
 function matrixValues(job, key) {
     const matrix = isMapping(job) && isMapping(job.strategy) ? job.strategy.matrix : undefined;
+    // No matrix gives none: `${{ matrix.x }}` is empty.
+    if (matrix === undefined) return [];
     if (!isMapping(matrix)) return null;
-    const own = matrix[key];
-    const values = own === undefined ? [] : [own].flat();
-    const include = matrix.include ?? [];
-    if (!Array.isArray(include) || !include.every(isMapping)) return null;
-    for (const entry of include) if (key in entry) values.push(entry[key]);
+    // GitHub looks a key up whatever its case (`Command:` is `matrix.command`).
+    const of = (mapping) => Object.entries(mapping).filter(([name]) => name.toLowerCase() === key.toLowerCase() && !['include', 'exclude'].includes(name.toLowerCase())).flatMap(([, value]) => [value].flat());
+    const values = of(matrix);
+    const include = Object.entries(matrix).filter(([name]) => name.toLowerCase() === 'include').flatMap(([, value]) => [value].flat());
+    if (!include.every(isMapping)) return null;
+    for (const entry of include) values.push(...of(entry));
     return values;
 }
 
 // What one value names, read through the job's matrix when it is one of its
 // values (`${{ matrix.node }}`): each value it takes, and whether a matrix gave it.
 function named(value, job, where, report) {
-    const matrix = typeof value === 'string' && value.match(/^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/);
+    const matrix = typeof value === 'string' && value.match(new RegExp(`^${MATRIX.source}$`, 'i'));
     if (!matrix) return [{ value: String(value), fromMatrix: false }];
-    const values = matrixValues(job, matrix[1]) ?? [];
+    const values = matrixValues(job, matrixKey(matrix)) ?? [];
     if (values.length === 0) report(where, `${value}: no value this reads; write the job's matrix out, its values in it`);
     return values.map((each) => ({ value: isScalar(each) ? String(each) : JSON.stringify(each), fromMatrix: true }));
 }
@@ -364,6 +400,19 @@ function held(value, path, where, job, { kind, text, report }) {
             : build('additional_contexts') && Array.isArray(value) ? value.map((each) => (typeof each === 'string' ? each.replace(/^[^=]*=/, '') : each))
             : [];
         for (const each of contexts) context(each, where, report);
+        // The Dockerfile a build names, under a name check:pins reads.
+        if (build('dockerfile') && (!isScalar(value) || kindOf(String(value)) !== 'dockerfile')) {
+            report(where, `dockerfile ${JSON.stringify(value)}: name it ${DOCKERFILE_NAMES}, which check:pins reads`);
+        }
+        // Another compose file this one reads: here, not a registry's or a
+        // repository's, whose contents move under it.
+        const imported = at(path, 'include', '#') && !isMapping(value) ? [value].flat()
+            : at(path, 'include', '#', 'path') ? [value].flat()
+            : at(path, 'services', '*', 'extends', 'file') ? [value]
+            : [];
+        for (const each of imported) {
+            if (!isScalar(each) || REMOTE.test(String(each))) report(where, `${JSON.stringify(each)} is a compose file Compose fetches: copy it into this repository`);
+        }
     }
     if (kind !== 'workflow') return;
     if (at(path, 'jobs', '*', 'uses') || step('uses')) uses(value, where, text, report);
@@ -399,8 +448,8 @@ function context(value, where, report) {
         if (!IMAGE.test(source.slice('docker-image://'.length))) report(where, `build context ${source} is not docker-image://name:tag@sha256:<index digest>`);
         return;
     }
-    if (!/^[a-z][a-z0-9+.-]*:\/\/|^git@/i.test(source)) return;
-    const git = /^git@|^git:\/\/|\.git(?:#|$)/.test(source);
+    if (!REMOTE.test(source)) return;
+    const git = /^git@|^git:\/\/|^github\.com\/|\.git(?:#|$)/.test(source);
     if (!git || !/#[0-9a-f]{40}(?::[^#]*)?$/.test(source)) report(where, `build context ${source} is what its server has today: name a repository's commit (#<sha>)`);
 }
 
