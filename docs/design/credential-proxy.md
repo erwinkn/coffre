@@ -1038,6 +1038,15 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   `A`), gets the app's segment back, so the app follows it through the
   proxy with its placeholder
   (`/bot123456789:AAE…/getMe` → `…/use/market/dev/telegram/botcoffre_use_…/getMe`).
+  A relative `Location` whose first segment holds a raw colon is read as
+  a scheme, as every client reads it: `bot123456789:AAE…/getMe` is the
+  scheme `bot123456789:`, nowhere under the upstream, so it is a 502, not
+  a path (`./bot123456789:AAE…/getMe` is one). A colon written `%3A` or
+  `%3a` is a path, and `%253A`, a colon encoded twice, decodes once to
+  `%3A`, which is not the value: the check below refuses it in a path
+  and in a query alike (502, nothing of the answer). The check errs shut: a
+  value made only of escapes (`%2F%2F%2F%2F`) makes a redirect to `////`
+  a 502 too, as that path reads as the value once decoded.
   Only the path's segments: swapped in the text before it is read,
   `bot123456789%3AAAE…/getMe` would become the scheme `bot123456789:`,
   and a value that is the upstream's own `host:port` would replace its
