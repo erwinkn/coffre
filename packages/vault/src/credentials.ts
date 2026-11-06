@@ -23,7 +23,7 @@ import {
   type ServiceSetting,
 } from '@coffre/core/access';
 import { EXCHANGED_CREDENTIAL_MS, MAX_SESSION_HOURS, POLICY_DEFAULTS, POLICY_FIELDS, SESSION_MS, type BindingPolicy, type WorkloadProfile } from '@coffre/core/identity';
-import { isConfirmation } from '@coffre/core/vault';
+import { CLOCK_SKEW_MS, isConfirmation } from '@coffre/core/vault';
 import type { BindingColumns, ChangeBindingsInput, CredentialColumns, IssueTokenInput, MadeBinding, IssueTokenRefusal, RequestTrace, RevokeCredentialInput, SignInCredential, SignInInput, SignInRefusal } from '@coffre/core/vault';
 import type { Database } from '@coffre/db';
 import { engineOf } from '@coffre/db/dialect';
@@ -135,7 +135,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): SignInC
     longest = SESSION_MS;
     const fields: readonly string[] = POLICY_FIELDS[binding.profile as WorkloadProfile] ?? [];
     const hours = fields.includes('sessionHours') ? policy.sessionHours ?? POLICY_DEFAULTS.sessionHours : MAX_SESSION_HOURS;
-    if (credential.notAfter > at + hours * 3_600_000 + 60_000) throw new SignInRefused('expired');
+    if (credential.notAfter > at + hours * 3_600_000 + CLOCK_SKEW_MS) throw new SignInRefused('expired');
   }
   if (credential.scope !== scope) throw new Error('a credential a binding makes reaches what its binding does: its scope, as the vault makes it from the binding');
   const id = credential.id;
@@ -329,13 +329,6 @@ function isTrace(trace: unknown): trace is RequestTrace | null | undefined {
 }
 
 /**
- * How far past its longest a token's end may be: the app sets it by its own
- * clock, the vault weighs it by the database's, and a host a minute or two
- * ahead should not have every longest token refused (Fable on PR 2).
- */
-const CLOCK_SLACK_MS = 5 * 60_000;
-
-/**
  * Whether the issuer, as the vault read them (`holder`, its credential's
  * scope and kind through it), may give `principal` a token of this kind,
  * scope and end: null if so, or why not. The app's own checks, made
@@ -380,12 +373,12 @@ export function weighIssue(
   const scoped = holder.credentialScope != null;
   switch (credential.kind) {
     case 'service':
-      if (credential.expiresAt > at + MAX_SERVICE_TOKEN_DAYS * 86_400_000 + CLOCK_SLACK_MS) return `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days`;
+      if (credential.expiresAt > at + MAX_SERVICE_TOKEN_DAYS * 86_400_000 + CLOCK_SKEW_MS) return `a service token lasts at most ${MAX_SERVICE_TOKEN_DAYS} days`;
       return weighService(actor, principal, scope, holder, at_, service);
     case 'personal': {
       if (principal !== actor || !actor.startsWith('user:')) return 'a personal token is its person\'s own';
       if (scoped) return 'a personal token is made on a session: a token never makes another';
-      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + CLOCK_SLACK_MS) return 'a personal token lasts at most a week';
+      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + CLOCK_SKEW_MS) return 'a personal token lasts at most a week';
       if (scope.some((grant) => !delegable(grant.role, policy))) return 'a personal token never manages access';
       if (scope.some((grant, i) => !held(grant, at_[i]!, policy))) return 'a personal token reaches at most what its role and its person hold';
       return null;
@@ -394,7 +387,7 @@ export function weighIssue(
       if (principal !== actor || !actor.startsWith('user:')) return 'a handle is its person\'s own';
       // A scoped credential's end bounds it (the app makes one on a personal token alone); a session's does not: a
       // handle a run holds outlives the sign-in that made it.
-      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + CLOCK_SLACK_MS || (scoped && via !== null && via.expiresAt !== null && credential.expiresAt > via.expiresAt)) {
+      if (credential.expiresAt > at + MAX_PERSONAL_TOKEN_MINUTES * 60_000 + CLOCK_SKEW_MS || (scoped && via !== null && via.expiresAt !== null && credential.expiresAt > via.expiresAt)) {
         return 'a handle lasts at most a week, and never past the token that made it';
       }
       if (scope.some((grant) => grant.role !== 'viewer' && grant.role !== 'contributor')) return 'a handle reads or uses, as a viewer or a contributor';
