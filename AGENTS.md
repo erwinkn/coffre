@@ -346,10 +346,12 @@ unsupported diff select full validation.
   runners, `npm exec` or `install`, `pnpm dlx` or `add`, `gh release
   download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
   a message too, options between a command's words included (`gh release
-  --repo o/r download`). A YAML value folded over lines (`run: >-`, or a plain
-  one continued below its key) is read as the lines YAML makes of it: a blank
-  line, or one indented past a `>` block's, ends a line. A
-  pnpm setting written in any style but block fails. A fetch
+  --repo o/r download`). It reads YAML in the forms whose lines are what YAML
+  reads: block style, each value on its key's line or in a `|` block (a
+  `description`'s `>` too, prose). A `>` block elsewhere, a value continued
+  below its key, an indentation indicator (`|2`) and a flow mapping outside a
+  matrix (`with: {node-version: '24'}`) fail, as does a pnpm setting written
+  in any style but block. A fetch
   hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
   A health check of this machine is curl marked `# pins: local`, every URL
   on the line 127.0.0.1, localhost or [::1]; a line that cannot be pinned

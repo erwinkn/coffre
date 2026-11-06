@@ -91,7 +91,7 @@ export function problemsIn(path, text, { root = false, pnpm } = {}) {
         workspace(lines, report, root);
         return problems;
     }
-    for (const { index, line, exempt } of logicalLines(lines, kind)) {
+    for (const { index, line, exempt } of logicalLines(lines, kind, report)) {
         if (exempt) continue;
         // A Dockerfile's frontend is an image BuildKit pulls.
         const syntax = kind === 'dockerfile' && line.match(/^#\s*syntax\s*=\s*(\S+)/i);
@@ -158,86 +158,70 @@ function localOnly(line) {
 
 // Shell's and Dockerfiles' backslash continuations joined into one line, each
 // at the index of its first, with whether a `# unpinned: <reason>` covers it.
-// YAML's folded scalars are one line first (`yamlLines`).
-function logicalLines(lines, kind) {
-    const items = kind === 'workflow' || kind === 'compose' ? yamlLines(lines) : lines.map((line, index) => ({ index, line }));
+// A YAML file's lines are checked for the forms this reads first (`yamlLines`).
+function logicalLines(lines, kind, report) {
+    if (kind === 'workflow' || kind === 'compose') yamlLines(lines, report);
     const joined = [];
-    for (let k = 0; k < items.length; k++) {
-        const { index: start } = items[k];
-        let { line } = items[k];
-        while (/\\\s*$/.test(line) && k + 1 < items.length) {
+    for (let k = 0; k < lines.length; k++) {
+        const start = k;
+        let line = lines[k];
+        while (/\\\s*$/.test(line) && k + 1 < lines.length) {
             k++;
             // A Dockerfile's comment inside a continued RUN is no part of it.
-            if (kind === 'dockerfile' && /^\s*#/.test(items[k].line)) {
+            if (kind === 'dockerfile' && /^\s*#/.test(lines[k])) {
                 line = line.replace(/\\\s*$/, '\\');
                 continue;
             }
-            line = line.replace(/\\\s*$/, ' ') + items[k].line;
+            line = line.replace(/\\\s*$/, ' ') + lines[k];
         }
         joined.push({ index: start, line, exempt: exempted(lines, start, line) });
     }
     return joined;
 }
 
-// YAML folds every scalar but a `|` block: `run: >-` over `pnpm --dir app`
-// and `install` runs `pnpm --dir app install`, and so does a plain or quoted
-// value continued on the lines below its key. A blank line breaks the fold,
-// and in a `>` block a line indented past the block's keeps its breaks on both
-// sides (yaml.org/spec/1.2.2, 8.1.3, 6.5): `pnpm --dir cli install`, a blank
-// line, then `pnpm --dir web install --frozen-lockfile` are two commands. Each
-// folded run of lines is one line here, at its first's index (its key's, for
-// the first); a `|` block keeps its lines, as the shell reads them. An anchor
-// or a tag before the header (`run: &install |`) is no part of it.
-function yamlLines(lines) {
+// The YAML this reads line by line, where each line is what YAML reads: block
+// mappings and lists, each value on its key's line, and `|` blocks, whose
+// lines are the shell's own (and a `description`'s `>`, prose). Every other
+// form YAML has is a problem here, never a value this misreads: a `>` block
+// that is not a description's, or a value continued below its key
+// (YAML folds them into lines this would have to rebuild), an indentation
+// indicator (`|2`), a flow mapping (`with: {node-version: '24'}`) but a
+// matrix's, which `matrixValues` reads.
+function yamlLines(lines, report) {
     const indent = (line) => line.match(/^\s*/)[0].length;
-    const below = (i, column) => {
-        let end = i;
-        while (end + 1 < lines.length && (lines[end + 1].trim() === '' || indent(lines[end + 1]) > column)) end++;
-        while (end > i && lines[end].trim() === '') end--;
-        return end;
-    };
-    // A key (`- run:`, `"on":`) or a sequence entry's dash.
-    const NODE = /^(\s*)((?:-\s+)*)(?:((?:"[^"]*"|'[^']*'|[^\s#'"-][^:#]*?|-[^\s:#][^:#]*?)):(?=\s|$))?\s*(.*)$/;
-    const items = [];
+    const content = (line) => line.trim() !== '' && !/^\s*#/.test(line);
+    // A key (`- run:`, `"on":`) or a sequence entry's dash, then the value.
+    // A flow collection (`{`, `[`) is a value, never the start of a key.
+    const NODE = /^(\s*)((?:-(?:\s+|$))*)(?:((?:"[^"]*"|'[^']*'|[^\s#'"{[-][^:#]*?|-[^\s:#][^:#]*?)):(?=\s|$))?\s*(.*)$/;
     for (let i = 0; i < lines.length; i++) {
+        if (!content(lines[i])) continue;
         const [, space, dashes, key, rest] = lines[i].match(NODE);
         if (key === undefined && dashes === '') {
-            items.push({ index: i, line: lines[i] });
+            report(i, 'a YAML value continued below its key: write it on one line, or as a `|` block');
             continue;
         }
         // A key's value is past its column; an entry's, past its dash.
         const column = space.length + (key === undefined ? 0 : dashes.length);
+        let end = i;
+        while (end + 1 < lines.length && (!content(lines[end + 1]) || indent(lines[end + 1]) > column)) end++;
+        while (end > i && lines[end].trim() === '') end--;
         const value = rest.replace(/(^|\s)#.*$/, '').trim().replace(/^(?:[&!]\S*(?:\s+|$))*/, '');
-        const block = /^([|>])[1-9+-]*$/.exec(value)?.[1];
-        const end = below(i, column);
-        const next = lines.slice(i + 1, end + 1).find((line) => line.trim() !== '' && !/^\s*#/.test(line));
-        // A `|` block, or a mapping or list beneath: those lines are read on their own.
-        const structure = next !== undefined && NODE.exec(next)[3] !== undefined || /^\s*-(\s|$)/.test(next ?? '');
-        if (end === i || block === '|' || (value === '' && structure)) {
-            items.push({ index: i, line: lines[i] });
-            if (block === '|') {
-                for (let j = i + 1; j <= end; j++) items.push({ index: j, line: lines[j] });
-                i = end;
-            }
+        const block = /^[|>][0-9+-]*$/.test(value);
+        if (block) {
+            // A `>` block folds its lines, which only prose may: a description runs nothing.
+            const prose = key === 'description' && /^>[+-]?$/.test(value);
+            if (!prose && !/^\|[+-]?$/.test(value)) report(i, `a YAML ${value} block: write it as \`|\`, \`|-\` or \`|+\`, its lines as the shell reads them`);
+            i = end;
             continue;
         }
-        const content = indent(next ?? '');
-        let run = { index: i, parts: [lines[i]] };
-        const close = () => {
-            if (run) items.push({ index: run.index, line: run.parts.join(' ') });
-            run = undefined;
-        };
-        for (let j = i + 1; j <= end; j++) {
-            if (lines[j].trim() === '') close();
-            else if (block === '>' && indent(lines[j]) > content) {
-                close();
-                items.push({ index: j, line: lines[j] });
-            } else (run ??= { index: j, parts: [] }).parts.push(lines[j].trim());
+        if (/^[[{]/.test(value) && /(?<!\$)\{/.test(value) && !inMatrix(lines, i)) {
+            report(i, 'a YAML flow mapping: write it as a block, one key a line');
         }
-        close();
-        i = end;
+        if (value === '') continue;
+        // A value on the key's line: what is past its column continues it.
+        const below = lines.slice(i + 1, end + 1).findIndex(content);
+        if (below >= 0) report(i + 1 + below, 'a YAML value continued below its key: write it on one line, or as a `|` block');
     }
-    return items;
 }
 
 // The marker on the line, or on any line of the comment block right above it.

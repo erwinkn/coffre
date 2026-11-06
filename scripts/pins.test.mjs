@@ -204,35 +204,53 @@ test('docker run, create or pull names its image by digest on the line', () => {
     assert.deepEqual(one('scripts/a.sh', "# unpinned: compose's image, pinned there\ndocker run --rm \"$image\"\n"), []);
 });
 
-test('a YAML scalar YAML folds into one line is read as that line', () => {
+test('YAML is read in the forms whose lines are what YAML reads; every other form fails', () => {
     const step = (run) => `jobs:\n  a:\n    steps:\n      - name: Install\n        run: ${run}\n      - run: pnpm build\n`;
-    for (const run of [
-        '>-\n          pnpm --dir app\n          install',
-        '>\n          gh release\n          download v1.0.0',
-        'pnpm --dir app\n          install',
-        '"pnpm --dir app\n          install"',
-        '\n          pnpm --dir app\n          install',
-    ]) assert.equal(one('.github/workflows/a.yml', step(run)).length, 1, run);
-    assert.match(one('.github/workflows/a.yml', step('>-\n          pnpm --dir app\n          install'))[0], /a\.yml:5: pnpm install without --frozen-lockfile/);
-    // Folded, frozen: nothing; a `|` block's lines are the shell's own.
-    assert.deepEqual(one('.github/workflows/a.yml', step('>-\n          pnpm --dir app\n          install --frozen-lockfile')), []);
-    assert.deepEqual(one('.github/workflows/a.yml', step('|\n          pnpm --dir app\n          install --frozen-lockfile')), []);
-    assert.equal(one('.github/workflows/a.yml', step('|\n          pnpm --dir app install\n          echo --frozen-lockfile')).length, 1);
-    // A blank line, or a line indented past a `>` block's, breaks the fold:
-    // the first install is a command of its own, unfrozen.
-    for (const run of [
-        '>-\n          pnpm --dir cli install\n\n          pnpm --dir web install --frozen-lockfile',
-        '>\n          pnpm --dir cli install\n            echo --frozen-lockfile',
-        'pnpm --dir cli install\n\n          pnpm --dir web install --frozen-lockfile',
-    ]) assert.equal(one('.github/workflows/a.yml', step(run)).length, 1, run);
-    assert.deepEqual(one('.github/workflows/a.yml', step('>-\n          pnpm --dir cli install --frozen-lockfile\n\n          pnpm --dir web install --frozen-lockfile')), []);
-    // An anchor or a tag before the header: still a `|` block, line by line.
-    for (const header of ['&install |', '!!str |-', '&install !!str >-']) {
-        assert.equal(one('.github/workflows/a.yml', step(`${header}\n          pnpm --dir app install\n          echo --frozen-lockfile`)).length, header.includes('>') ? 0 : 1, header);
+    const problems = (text) => one('.github/workflows/a.yml', text);
+    // A `|` block's lines are the shell's own, an anchor or a tag before it included.
+    assert.deepEqual(problems(step('|\n          pnpm --dir app install --frozen-lockfile\n          pnpm build')), []);
+    for (const header of ['|', '|-', '|+', '&install |', '!!str |-']) {
+        assert.match(problems(step(`${header}\n          pnpm --dir app install\n          echo --frozen-lockfile`))[0], /a\.yml:6: pnpm install without --frozen-lockfile/, header);
     }
-    // Keys beneath a key are no scalar of it.
-    assert.deepEqual(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - uses: actions/checkout@${SHA} # v4.4.0\n        with:\n          persist-credentials: false\n`), []);
-    assert.equal(one('docker-compose.yml', 'services:\n  pg:\n    command: >\n      sh -c "npm\n      install"\n').length, 1);
+    // Folded, continued or indented by an indicator: YAML rebuilds the lines, so it fails as a form.
+    const form = /a YAML (?:value continued below its key|\S+ block)/;
+    for (const run of [
+        '>-\n          pnpm --dir app\n          install --frozen-lockfile',
+        '>\n          gh release\n          download v1.0.0',
+        // r8: YAML keeps these two lines apart; one install's flag is not the other's.
+        '>2-\n            pnpm --dir cli install\n            pnpm --dir web install --frozen-lockfile',
+        '|2\n            pnpm --dir web install --frozen-lockfile',
+        '&install !!str >-\n          pnpm --dir app install',
+        'pnpm --dir app\n          install --frozen-lockfile',
+        '"pnpm --dir app\n          install --frozen-lockfile"',
+        '\n          pnpm --dir app install --frozen-lockfile',
+        '[pnpm --dir app,\n          install --frozen-lockfile]',
+    ]) {
+        const found = problems(step(run));
+        assert.ok(found.some((problem) => form.test(problem)), `${run}: ${found}`);
+    }
+    assert.match(one('docker-compose.yml', 'services:\n  pg:\n    command: >\n      sh -c "npm\n      install"\n')[0], form);
+    // A description is prose: its `>` folds no command, and its lines are read one by one.
+    assert.deepEqual(one('action/action.yml', 'inputs:\n  url:\n    description: >-\n      The coffre to read,\n      its base URL.\n    required: true\n'), []);
+    assert.equal(one('action/action.yml', 'inputs:\n  url:\n    description: >-\n      Run curl https://example.com/i.sh\n').length, 1);
+    // Keys beneath a key, and a list beneath one, are no value of it.
+    assert.deepEqual(problems(`jobs:\n  a:\n    steps:\n      - uses: actions/checkout@${SHA} # v4.4.0\n        with:\n          persist-credentials: false\n      -\n        run: pnpm build\n`), []);
+});
+
+test('a YAML flow mapping is a matrix entry or a problem', () => {
+    const flow = /a YAML flow mapping/;
+    // r8: an image and a version in flow style passed unread.
+    assert.match(one('.github/workflows/a.yml', "jobs:\n  a:\n    services:\n      redis: {image: 'redis:7'}\n")[0], flow);
+    assert.match(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with: {node-version: '24'}\n`)[0], flow);
+    assert.match(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps: [{uses: 'actions/checkout@v4'}]\n`)[0], flow);
+    assert.match(one('docker-compose.yml', 'services: {pg: {image: postgres:16}}\n')[0], flow);
+    assert.match(one('.github/workflows/a.yml', 'jobs:\n  a:\n    steps:\n      - {uses: actions/checkout@v4}\n')[0], flow, 'a list entry');
+    assert.match(one('.github/workflows/a.yml', 'jobs:\n  a:\n    strategy:\n      matrix: {node: [24]}\n')[0], flow);
+    // A flow list of plain values, an expression, and a matrix's include entries are read.
+    assert.deepEqual(one('.github/workflows/a.yml', "on:\n  push:\n    branches: [main]\njobs:\n  a:\n    if: ${{ github.event_name == 'push' }}\n    runs-on: ubuntu-24.04\n"), []);
+    const matrix = (entry) => `jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - ${entry}\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with:\n          node-version: \${{ matrix.node }}\n`;
+    assert.deepEqual(one('.github/workflows/a.yml', matrix('{ node: 24.22.1, shard: 1/2 }')), []);
+    assert.match(one('.github/workflows/a.yml', matrix('{ node: 24, shard: 1/2 }'))[0], /node-version 24 is not an exact version/);
 });
 
 test('a line that cannot be pinned says why, on itself or right above it', () => {
