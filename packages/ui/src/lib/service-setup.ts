@@ -74,3 +74,12 @@ export function tokenLifetimes(maxDays: number): number[] {
   const offered = [30, 90, 180, 365, serviceTokenDefaultDays(maxDays), maxDays].filter((days) => days <= maxDays);
   return [...new Set(offered)].sort((a, b) => a - b);
 }
+
+/**
+ * The lifetime the token form shows and sends: the one picked (`null` before any is), while the deployment still offers
+ * it, else the default. The maximum can drop under a mounted form (a refresh of `/api/me`), and a pick it no longer
+ * offers would be sent anyway and refused (review r2 of #516).
+ */
+export function tokenLifetime(picked: number | null, maxDays: number): number {
+  return picked !== null && tokenLifetimes(maxDays).includes(picked) ? picked : serviceTokenDefaultDays(maxDays);
+}

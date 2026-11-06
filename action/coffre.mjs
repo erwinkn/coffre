@@ -1815,7 +1815,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-BQXeHiBv.js
+//#region ../core/dist/access-DgGI1ZPz.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.

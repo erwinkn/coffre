@@ -1,11 +1,11 @@
 import type { TokenRow } from '@coffre/client';
-import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, serviceTokenDefaultDays } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, credentialScopeInWords } from '@coffre/core/access';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { affects, queries } from '../lib/queries';
-import { tokenLifetimes, withheldInWords } from '../lib/service-setup';
+import { tokenLifetime, tokenLifetimes, withheldInWords } from '../lib/service-setup';
 import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from './row-state';
@@ -140,7 +140,8 @@ export function ServiceTokens({ serviceId, tokens, grants, maxDays }: { serviceI
 function IssueToken({ serviceId, grants, maxDays }: { serviceId: string; grants: HeldGrant[]; maxDays: number }) {
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState('');
-  const [days, setDays] = useState<number>(() => serviceTokenDefaultDays(maxDays));
+  const [picked, setPicked] = useState<number | null>(null);
+  const days = tokenLifetime(picked, maxDays);
   const [scope, setScope] = useState(() => wholeScope(grants));
   const [issued, setIssued] = useState<{ token: string; expiresAt: string } | null>(null);
   const coffre = useCoffre();
@@ -154,6 +155,7 @@ function IssueToken({ serviceId, grants, maxDays }: { serviceId: string; grants:
     setOpen(false);
     setIssued(null);
     setLabel('');
+    setPicked(null);
     setScope(wholeScope(grants));
     setError(null);
   }
@@ -201,7 +203,7 @@ function IssueToken({ serviceId, grants, maxDays }: { serviceId: string; grants:
               </label>
               <label className="field" style={{ flex: '0 0 9rem' }}>
                 <span className="label">Expires after</span>
-                <select className="select" value={days} onChange={(event) => setDays(Number(event.target.value))}>
+                <select className="select" value={days} onChange={(event) => setPicked(Number(event.target.value))}>
                   {tokenLifetimes(maxDays).map((lifetime) => (
                     <option key={lifetime} value={lifetime}>
                       {lifetime} days
