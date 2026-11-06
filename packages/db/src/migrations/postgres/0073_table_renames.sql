@@ -64,12 +64,12 @@ DECLARE
 BEGIN
     FOR t IN SELECT * FROM (VALUES ('principals', 'vault_members'), ('grants', 'vault_grants'), ('device_logins', 'device_authorizations'), ('enrollment_codes', 'enrollments'), ('spent_id_tokens', 'consumed_tokens'), ('bulk_cap', 'log_bulk'), ('checkpoint_fence', 'log_fence')) AS v (name, old) LOOP
         EXECUTE format('CREATE VIEW public.%I WITH (security_invoker = true) AS SELECT * FROM public.%I', t.old, t.name);
-        FOR g IN SELECT a.privilege_type, a.grantee::regrole AS grantee
+        FOR g IN SELECT a.privilege_type, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee
                    FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
                   WHERE c.oid = format('public.%I', t.name)::regclass AND a.grantee <> c.relowner LOOP
             EXECUTE format('GRANT %s ON public.%I TO %s', g.privilege_type, t.old, g.grantee);
         END LOOP;
-        FOR g IN SELECT a.privilege_type, a.grantee::regrole AS grantee, c.attname
+        FOR g IN SELECT a.privilege_type, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END AS grantee, c.attname
                    FROM pg_attribute c CROSS JOIN LATERAL aclexplode(c.attacl) a
                   WHERE c.attrelid = format('public.%I', t.name)::regclass AND c.attnum > 0 AND NOT c.attisdropped LOOP
             EXECUTE format('GRANT %s (%I) ON public.%I TO %s', g.privilege_type, g.attname, t.old, g.grantee);

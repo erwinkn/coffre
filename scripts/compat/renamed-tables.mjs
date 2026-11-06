@@ -7,13 +7,15 @@
 // Its code needs nothing: it reads and writes the old names, which 0.16.0
 // keeps one release as views of the renamed tables. Its harness does: it
 // requires `vault_members`, `vault_grants` and `device_authorizations` among
-// the database's base tables, and holds the vault's login to writing no base
-// table but `vault_members`, `vault_grants` and the log's two. Renamed, those
-// are views, and `principals` and `grants` base tables the vault writes, so
-// the harness fails before it checks anything else. Two edits, nothing more:
-// the shared tables it requires by their new names, and `principals` and
-// `grants` among the vault's own. Every other base table stays under its
-// vault-must-not-write check.
+// the database's base tables, holds the vault's login to writing no base
+// table but `vault_members`, `vault_grants` and the log's two, and the app's
+// login to writing no base table whose name starts with `vault_`. Renamed,
+// those are views, and `principals` and `grants` base tables the vault
+// writes, so the harness fails before it checks anything else, and its app
+// check would quietly stop covering them. Three edits, nothing more: the
+// shared tables it requires by their new names, `principals` and `grants`
+// among the vault's own, and the same two among those the app may not write.
+// Every other base table stays under both checks.
 //
 // Each edit must match the release's source exactly once, or this fails: a
 // release whose harness reads otherwise is never held unchecked. The file is
@@ -71,6 +73,11 @@ const EDITS = [
 \t\t"audit_log",
 \t\t"audit_chain_head"
 \t].includes(name));`,
+  },
+  {
+    what: "the tables its app login may not write (logins.ts, appLogin)",
+    from: `.filter((name) => name.startsWith("vault_"));`,
+    to: `.filter((name) => name === "principals" || name === "grants" || name.startsWith("vault_"));`,
   },
 ];
 
