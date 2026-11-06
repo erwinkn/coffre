@@ -99,6 +99,8 @@ export type SigninOptions = {
   browserSessionHours?: number;
   /** Absolute lifetime of a CLI session; 30 days unless set, at most a year. */
   cliSessionDays?: number;
+  /** The longest a service account's token may last, in whole days; a year unless set lower (R76). */
+  serviceTokenMaxDays?: number;
   /** Lets CI runs sign in as services with their platform's ID token: `{}` turns it on. */
   workloads?: WorkloadsOptions;
   /** Lets MCP clients, Claude among them, act as the people who connect them (docs/mcp.md). */
@@ -134,6 +136,7 @@ function toSignin(options: SigninOptions) {
     page: { title: options.title, note: options.note },
     browserSessionHours: options.browserSessionHours,
     cliSessionDays: options.cliSessionDays,
+    serviceTokenMaxDays: options.serviceTokenMaxDays,
     workloads: options.workloads,
     mcp: options.mcp,
     passkeys: options.passkeys,

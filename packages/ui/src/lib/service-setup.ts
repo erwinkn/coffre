@@ -1,4 +1,4 @@
-import { inScope, PROJECT_ONLY_PERMISSIONS, type Permission, type Role, type Scope } from '@coffre/core/access';
+import { inScope, PROJECT_ONLY_PERMISSIONS, serviceTokenDefaultDays, type Permission, type Role, type Scope } from '@coffre/core/access';
 import type { RoleView } from '@coffre/client';
 
 import type { ProjectSummary } from '../shared/models';
@@ -64,4 +64,22 @@ export function withheldInWords(withheld: readonly string[] | undefined, what: '
   const projects = [...new Set(withheld.map((path) => path.split('/')[0]!))];
   const by = projects.length === 1 ? `an Owner of ${projects[0]}` : 'an Owner of their project';
   return `This ${what} will not read the sensitive values of ${withheld.join(', ')}: only one ${by} ${what === 'token' ? 'issues' : 'saves'} does.`;
+}
+
+/**
+ * The lifetimes the token form offers, in days, where tokens last at most `maxDays` (`serviceTokenMaxDays`): a month,
+ * a quarter, half a year and a year, those within it, and always the default and the maximum.
+ */
+export function tokenLifetimes(maxDays: number): number[] {
+  const offered = [30, 90, 180, 365, serviceTokenDefaultDays(maxDays), maxDays].filter((days) => days <= maxDays);
+  return [...new Set(offered)].sort((a, b) => a - b);
+}
+
+/**
+ * The lifetime the token form shows and sends: the one picked (`null` before any is), while the deployment still offers
+ * it, else the default. The maximum can drop under a mounted form (a refresh of `/api/me`), and a pick it no longer
+ * offers would be sent anyway and refused (review r2 of #516).
+ */
+export function tokenLifetime(picked: number | null, maxDays: number): number {
+  return picked !== null && tokenLifetimes(maxDays).includes(picked) ? picked : serviceTokenDefaultDays(maxDays);
 }

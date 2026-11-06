@@ -18,7 +18,7 @@ import {
   type PasskeyAlgorithm,
   type StoredPasskey,
 } from '@coffre/core/identity';
-import { allows, CREDENTIAL_LABEL_MAX, DEFAULT_POLICY, ownsInstance, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, MAX_SERVICE_TOKEN_DAYS, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { allows, CREDENTIAL_LABEL_MAX, DEFAULT_POLICY, ownsInstance, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -1641,9 +1641,7 @@ export class SigninService {
     input: { label: string | null; expiresInDays: number; scope?: ScopeByPath },
   ): Promise<IssuedToken> {
     this.#bearersIssued();
-    if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > MAX_SERVICE_TOKEN_DAYS) {
-      throw badRequest(`tokens last between 1 and ${MAX_SERVICE_TOKEN_DAYS} days`);
-    }
+    this.#serviceTokenLifetime(input.expiresInDays);
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const service = { type: 'service' as const, id: serviceId };
@@ -1695,9 +1693,20 @@ export class SigninService {
     }
   }
 
+  /**
+   * A service token's lifetime, held to the deployment's maximum (`serviceTokenMaxDays`), never above
+   * `MAX_SERVICE_TOKEN_DAYS`, which the vault holds. Issuing checks it, and so does planning: an approval MCP shows
+   * from a plan is one issuing then accepts.
+   */
+  #serviceTokenLifetime(days: number): void {
+    const most = this.#deps.signin.serviceTokenMaxDays;
+    if (!Number.isInteger(days) || days < 1 || days > most) throw badRequest(`tokens last between 1 and ${most} days here`);
+  }
+
   /** What a token issued now would reach, checked as issuing one is (`issueServiceToken`); issues nothing. */
-  async planServiceToken(ctx: Asker, serviceId: string, input: { label: string | null; scope?: ScopeByPath }): Promise<TokenPlan> {
+  async planServiceToken(ctx: Asker, serviceId: string, input: { label: string | null; expiresInDays: number; scope?: ScopeByPath }): Promise<TokenPlan> {
     this.#bearersIssued();
+    this.#serviceTokenLifetime(input.expiresInDays);
     const details = { kind: 'service', principalType: 'service', principalId: serviceId, label: input.label };
     return withRefusals(this.#deps, async () => {
       const { byPath, withheld } = await this.#tokenScope(ctx, serviceId, input.scope, details);

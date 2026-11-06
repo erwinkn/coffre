@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { assignableToEnvironment, EVERYWHERE, ROLES, type Permission } from '@coffre/core/access';
 
-import { givable } from '../src/lib/service-setup.ts';
+import { givable, tokenLifetime, tokenLifetimes } from '../src/lib/service-setup.ts';
 import type { ProjectSummary } from '../src/shared/models.ts';
 
 const roles = Object.entries(ROLES).map(([id, role]) => ({ id, permissions: [...role.permissions], assignableToEnvironment: assignableToEnvironment(id) }));
@@ -50,4 +50,20 @@ test('a role that holds nothing is offered only where you manage access, as the 
   assert.ok(!givable(holder, holder.projects[0]!, 'dev').includes('pending'));
   const manager = { ...holder, projects: [{ ...holder.projects[0]!, permissions: [...holder.projects[0]!.permissions, 'grant.manage'] as Permission[] }] };
   assert.ok(givable(manager, manager.projects[0]!, null).includes('pending'));
+});
+
+test('the token form offers lifetimes up to the deployment maximum, its default within it', () => {
+  assert.deepEqual(tokenLifetimes(365), [30, 90, 180, 365]);
+  assert.deepEqual(tokenLifetimes(200), [30, 90, 180, 200]);
+  assert.deepEqual(tokenLifetimes(60), [30, 60]);
+  assert.deepEqual(tokenLifetimes(7), [7]);
+});
+
+test('the token form sends a lifetime the deployment still offers, whatever was picked before its maximum dropped', () => {
+  assert.equal(tokenLifetime(null, 365), 90);
+  assert.equal(tokenLifetime(180, 365), 180);
+  assert.equal(tokenLifetime(90, 30), 30);
+  assert.equal(tokenLifetime(null, 30), 30);
+  assert.equal(tokenLifetime(60, 60), 60);
+  assert.equal(tokenLifetime(45, 365), 90);
 });

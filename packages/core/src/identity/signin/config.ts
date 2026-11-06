@@ -17,6 +17,7 @@
  * Each returns a `SigninProvider`, and a provider that speaks neither can be
  * one of the deployment's own, in the same list.
  */
+import { MAX_SERVICE_TOKEN_DAYS } from '../../access.ts';
 import { GitHubApp, pkcs8Of, type GitHubAppOptions } from '../github-app.ts';
 import type { WorkloadAlert } from '../workloads.ts';
 import { GitHubSigninProvider } from './github.ts';
@@ -70,6 +71,8 @@ export type SigninConfig = {
   browserSessionHours: number;
   /** Absolute lifetime of a CLI session. */
   cliSessionDays: number;
+  /** The longest a service account's token may last here, in whole days: `MAX_SERVICE_TOKEN_DAYS` unless set lower (R76). */
+  serviceTokenMaxDays: number;
   /** CI runs signing in as services with their platform's ID token, when on (`workloads.ts`). */
   workloads: WorkloadsConfig | null;
   /** MCP clients acting as the people who connect them, when on (docs/design/mcp.md). */
@@ -400,6 +403,8 @@ export function defineSignin(options: {
   page?: { title?: string; note?: string };
   browserSessionHours?: number;
   cliSessionDays?: number;
+  /** The longest a service token may last, in whole days, 1 to `MAX_SERVICE_TOKEN_DAYS` (a year), which it is unless set. */
+  serviceTokenMaxDays?: number;
   workloads?: WorkloadsOptions;
   mcp?: McpOptions;
   /** The passkey policy, `optional` unless set, and the RP ID (sections 2 and 7.1 of docs/design/passkeys.md). */
@@ -423,6 +428,7 @@ export function defineSignin(options: {
     },
     browserSessionHours: lifetime(options.browserSessionHours, 'browserSessionHours', 12, 24 * 7),
     cliSessionDays: lifetime(options.cliSessionDays, 'cliSessionDays', 30, 365),
+    serviceTokenMaxDays: wholeDays(options.serviceTokenMaxDays, 'serviceTokenMaxDays', MAX_SERVICE_TOKEN_DAYS),
     workloads: options.workloads === undefined ? null : workloadsConfig(options.workloads, publicOrigin(options.publicUrl)),
     mcp: options.mcp === undefined ? null : mcpConfig(options.mcp, publicOrigin(options.publicUrl)),
     passkeys: passkeysConfig(options.passkeys, publicOrigin(options.publicUrl)),
@@ -539,6 +545,15 @@ function checkProvider(provider: SigninProvider): void {
   if (typeof provider.start !== 'function' || typeof provider.finish !== 'function') {
     throw new Error(`sign-in provider ${provider.id} needs start() and finish()`);
   }
+}
+
+/** A whole number of days, 1 to `max`, which it is unless set. */
+function wholeDays(value: number | undefined, name: string, max: number): number {
+  if (value === undefined) return max;
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    throw new Error(`${name} must be a whole number of days, 1 to ${max}`);
+  }
+  return value;
 }
 
 function lifetime(value: number | undefined, name: string, fallback: number, max: number): number {

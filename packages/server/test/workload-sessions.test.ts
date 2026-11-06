@@ -709,7 +709,7 @@ test('useOnly: no service token is issued or taken, and /api/auth/oidc answers 4
   assert.deepEqual([refused.status, refused.body.reason], [401, 'use_only']);
   const ctx = await contextFor(deps, ROOT);
   await assert.rejects(runtime.signin!.issueServiceToken(ctx, SERVICE, { label: 'ci', expiresInDays: 1 }), { reason: 'use_only' });
-  await assert.rejects(runtime.signin!.planServiceToken(ctx, SERVICE, { label: 'ci' }), { reason: 'use_only' });
+  await assert.rejects(runtime.signin!.planServiceToken(ctx, SERVICE, { label: 'ci', expiresInDays: 1 }), { reason: 'use_only' });
   const gone = await read(await answer(new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }), runtime, ui, IP));
   assert.equal(gone.status, 410);
   assert.match(gone.body.message as string, /\/api\/auth\/workload/);

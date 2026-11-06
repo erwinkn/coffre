@@ -2,6 +2,7 @@ import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 
+import { MAX_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
 import { defineSignin, generateToken, github, google, oidc, hashToken, isCoffreToken } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { count, eq, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
@@ -835,7 +836,7 @@ test('owners issue service tokens that verify as the service', async () => {
   });
   assert.deepEqual([access.principal, access.status], [`token:${SERVICE}`, 'active']);
 
-  const byRoot = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: 366 });
+  const byRoot = await signin.issueServiceToken(root, SERVICE, { label: null, expiresInDays: MAX_SERVICE_TOKEN_DAYS });
   assert.equal((await signin.verify(byRoot.token)).id, SERVICE);
 
   const row = await credentialRow(issued.id);
@@ -877,7 +878,7 @@ test('owners issue service tokens that verify as the service', async () => {
   assert.deepEqual(await signin.listSessions(lead, null), []);
 });
 
-test('only those who manage a service account issue its tokens, for active services, for 1 to 366 whole days', async () => {
+test('only those who manage a service account issue its tokens, for active services, for 1 to 365 whole days', async () => {
   await assert.rejects(
     signin.issueServiceToken(dev, SERVICE, { label: null, expiresInDays: 30 }),
     { status: 403 },
@@ -900,13 +901,21 @@ test('only those who manage a service account issue its tokens, for active servi
     { status: 404 },
     'a person is not a service',
   );
-  for (const days of [0, 367, 1.5, Number.NaN]) {
+  for (const days of [0, MAX_SERVICE_TOKEN_DAYS + 1, 1.5, Number.NaN]) {
     await assert.rejects(
       signin.issueServiceToken(lead, SERVICE, { label: null, expiresInDays: days }),
       { status: 400 },
       String(days),
     );
   }
+  assert.equal(await countRows(credentials), 0);
+
+  // A deployment may hold tokens to fewer days (R76): its maximum, never a day more.
+  const shorter = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: { ...CONFIG, serviceTokenMaxDays: 30 } });
+  await assert.rejects(shorter.issueServiceToken(lead, SERVICE, { label: null, expiresInDays: 31 }), { status: 400, message: /between 1 and 30 days/ });
+  // Planned too (`?dryRun=1`, which MCP's approvals ask first): a plan it offers is one issuing accepts.
+  await assert.rejects(shorter.planServiceToken(lead, SERVICE, { label: null, expiresInDays: 31 }), { status: 400, message: /between 1 and 30 days/ });
+  await shorter.planServiceToken(lead, SERVICE, { label: null, expiresInDays: 30 });
   assert.equal(await countRows(credentials), 0);
 
   const rows = await auditRows();

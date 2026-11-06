@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
+import { MAX_SERVICE_TOKEN_DAYS, runsInstance, UNWRITTEN_FORK_MS, type InstanceRole, type Permission, type Scope } from '@coffre/core/access';
 import type { PasskeyPolicy } from '@coffre/core/identity';
 import type { Queryable, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -75,8 +75,10 @@ export type Me = {
    * `https://secrets.acme.example/mcp`, or null when it serves none; and CI
    * runs signing in by their ID tokens (`workloads`). Read here, never
    * inferred from a route answering 404 or from where a page was served.
+   * And the longest a service token may last here, in days
+   * (`serviceTokenMaxDays`), which the token form offers up to.
    */
-  features: { mcp: string | null; workloads: boolean };
+  features: { mcp: string | null; workloads: boolean; serviceTokenMaxDays: number };
   /**
    * The personal token the request came in on: its label, when it ends and
    * what it reaches, by path. Null for a session, or anything else.
@@ -186,7 +188,7 @@ export async function me(ctx: ApiContext): Promise<Me> {
     setsUpServices: setsUp(caller, setting, known),
     // A scope names projects the caller may not see (D95): those they do, by slug.
     serviceSetup: setting === null ? null : scopeView(setting, runsInstance(caller) ? known : known.filter((project) => seesProject(caller, project))),
-    features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null },
+    features: { mcp: ctx.mcp?.resource ?? null, workloads: ctx.workloads !== null, serviceTokenMaxDays: ctx.signin?.config.serviceTokenMaxDays ?? MAX_SERVICE_TOKEN_DAYS },
     personalToken: ctx.personalToken === null ? null : { ...ctx.personalToken, scope: scopeByPath(caller.credentialScope ?? [], known)! },
     credentialExpiresAt: ctx.credentialExpiresAt,
     credentialId: ctx.credentialExpiresAt === null ? null : ctx.credentialId,

@@ -46,10 +46,11 @@ const limiter = (which: 'other' | 'connection'): RateLimiter => ({
     return { success: which === 'other' || calls.open === true };
   },
 });
-const deployment = (passkeys?: PasskeyPolicy) => signin({
+const deployment = (passkeys?: PasskeyPolicy, serviceTokenMaxDays?: number) => signin({
   providers: [github({ clientId: 'gh-id', clientSecret: 'gh-secret' })],
   mcp: { limits: { perSource: limiter('other'), perConnection: limiter('connection'), total: limiter('other') } },
   ...(passkeys === undefined ? {} : { passkeys }),
+  ...(serviceTokenMaxDays === undefined ? {} : { serviceTokenMaxDays }),
 }).resolve(ORIGIN);
 
 export let db: Awaited<ReturnType<typeof openTestDatabase>>;
@@ -59,13 +60,14 @@ export let runtime: CoffreRuntime;
 /**
  * The suite's hooks: the instance once, and a clean database before each
  * test, which `seed` then fills. `approvalWaitMs` is how long a call waits
- * on its approval before saying it still waits.
+ * on its approval before saying it still waits; `serviceTokenMaxDays`, the
+ * deployment's lower maximum for a service token's lifetime.
  */
-export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: number; passkeys?: PasskeyPolicy } = {}): void {
+export function useMcp(seed: () => Promise<void>, options: { approvalWaitMs?: number; passkeys?: PasskeyPolicy; serviceTokenMaxDays?: number } = {}): void {
   before(async () => {
     db = await openTestDatabase();
     deps = testDeps(db.runtime, [ROOT]);
-    const auth = deployment(options.passkeys);
+    const auth = deployment(options.passkeys, options.serviceTokenMaxDays);
     if (auth.mode !== 'signin') throw new Error('unreachable');
     const service = new SigninService({ ...deps, signin: auth.signin });
     const mcp = new McpService({ ...deps, config: auth.signin.mcp!, signin: auth.signin, publicUrl: ORIGIN, transport, approvalWaitMs: options.approvalWaitMs });

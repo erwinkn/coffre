@@ -13,7 +13,7 @@ const member = {
   setsUpServices: true,
   canReadAudit: true,
   environments: [],
-  features: { mcp: 'https://coffre.example/mcp', workloads: false },
+  features: { mcp: 'https://coffre.example/mcp', workloads: false, serviceTokenMaxDays: 365 },
 };
 
 const shell = (me: Partial<typeof member> = {}) =>
@@ -31,7 +31,7 @@ test('a removed user has none, so /apps sends the loader to their offboarding', 
 
 test('nobody is shown the tab for someone unknown, or without MCP, or unless they run the instance', () => {
   assert.equal(hasAppsTab(shell(), { ok: true, report: null } as never), false);
-  assert.equal(hasAppsTab(shell({ features: { mcp: null as never, workloads: false } }), report('active')), false);
+  assert.equal(hasAppsTab(shell({ features: { mcp: null as never, workloads: false, serviceTokenMaxDays: 365 } }), report('active')), false);
   assert.equal(hasAppsTab(shell({ instanceRole: 'member', runsInstance: false }), null), false);
   // Nor to an admin whose scope narrows anything: the report is the instance's.
   assert.equal(hasAppsTab(shell({ scope: { projects: { only: ['market'] }, environments: 'all' } as never, runsInstance: false }), report('active')), false);

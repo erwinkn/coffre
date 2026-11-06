@@ -1,5 +1,5 @@
 import { CoffreError, type AuthInfo, type CoffreClient, type Member } from '@coffre/client';
-import { EVERYWHERE, INSTANCE_ROLES } from '@coffre/core/access';
+import { EVERYWHERE, INSTANCE_ROLES, MAX_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
 import { QueryClient, queryOptions, type FetchQueryOptions, type QueryKey } from '@tanstack/react-query';
 
 import { deriveUiCapabilities } from './capabilities.ts';
@@ -537,8 +537,8 @@ export function shellOf(
     passkeyRequired: asked === 'passkey_required',
     /** A member the vault refuses: their record failed its integrity check. */
     accessTampered: me?.tampered === true,
-    /** What the deployment's configuration turns on: MCP clients, as their endpoint's URL, and CI runs signing in by their ID tokens. */
-    features: member?.features ?? { mcp: null, workloads: false },
+    /** What the deployment's configuration turns on: MCP clients, as their endpoint's URL, and CI runs signing in by their ID tokens; and how long a service token may last. */
+    features: member?.features ?? { mcp: null, workloads: false, serviceTokenMaxDays: MAX_SERVICE_TOKEN_DAYS },
     /** Every environment you hold something in, and what: what you may give a service account there (`givable`). */
     environments: member?.environments ?? [],
     /** Where you set up service accounts yourself, the instance's setting, projects by slug. */
