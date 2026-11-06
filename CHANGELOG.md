@@ -31,6 +31,22 @@
   `write_request` and `admit_read`; the previous release's calls, which
   pass no policy, are answered as before.
 
+- **A method override in a header or the query no longer takes a request
+  past a credential's allow list (T189).** Many upstreams act on a POST
+  that says `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as on
+  a DELETE, so a route that took POST and not DELETE could still be made
+  to delete. Each method a request names in `X-HTTP-Method-Override`,
+  `X-HTTP-Method` or `X-Method-Override`, or in a `_method` query
+  parameter, must now be one the allow list (or a narrowed session's
+  `methods`) takes on its path, or the request is a 405 (a 403
+  `narrowed`), before its body is read or any value opens. An override
+  the list takes goes on as it came. Where an entry takes any method on
+  the path, or there is no list, nothing changes. **Not covered:** a
+  `_method` field in a POST's form or multipart body, which Rails,
+  Laravel and Spring honour, goes on unchecked, so a method limit does
+  not hold against such an upstream; hold its credential to paths
+  instead (`docs/design/credential-proxy.md`, section 3, `allow`).
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

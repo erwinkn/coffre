@@ -1376,7 +1376,10 @@ accepted, with their 0.15 meaning, as one entry `{ methods, path }` for
 each path: `*` is itself, never a glob (a startup warning says so),
 `methods: []` takes no method, and `paths: []` no path, its methods still
 answering first: `methods: ['POST'], paths: []` is a 405 to a GET and a 403
-to a POST (review round 9).
+to a POST (review round 9). A method override in a header or the query
+(`X-HTTP-Method-Override`, `?_method=`) is held to the list as the request's
+own method is; one in a body is not read (T189, D179,
+[credential-proxy.md](credential-proxy.md), section 3, `allow`).
 
 ### Several inject rules
 

@@ -1440,3 +1440,26 @@ test('a UI route with a path rule: saved as code writes it, its token in the seg
     await assert.rejects(save({ telegram: { ...telegram, inject: [{ kind: 'path', template }] } as ProxyDefinition }), /one path segment naming one key once/, template);
   }
 });
+
+test("a UI route's allow list holds a method override too (T189): refused on the item the one use decided, sent nothing; one it takes goes, in one vault call", ON_015, async () => {
+  deploy(proxyOf({ cacheSeconds: 0 }));
+  await save({ openai: uiRoute('openai', '/openai/v1') });
+  const token = await handle();
+  await countingVault(async (calls) => {
+    const before = reached.length;
+    for (const [path, headers] of [
+      ['/use/openai/chat/completions?stream=false', { 'x-http-method-override': 'DELETE' }],
+      ['/use/openai/chat/completions?stream=false&_method=DELETE', {}],
+    ] as const) {
+      const refused = await route(path, as(token, { method: 'POST', headers, body: '{}' }));
+      assert.equal(refused.status, 405, path);
+      assert.match(await refused.text(), /openai does not take DELETE on \/chat\/completions, which this request asks for/);
+      assert.deepEqual(calls(), { useRoute: 1 }, 'the one use that decided the item');
+    }
+    assert.equal(reached.length, before);
+    const sent = await route('/use/openai/chat/completions', as(token, { method: 'POST', headers: { 'content-type': 'application/json', 'x-http-method-override': 'POST' }, body: '{"model":"gpt"}' }));
+    assert.equal(sent.status, 200, await sent.clone().text());
+    assert.deepEqual(calls(), { useRoute: 1 });
+    assert.deepEqual([reached.at(-1)!.method, reached.at(-1)!.body], ['POST', '{"model":"gpt"}']);
+  });
+});

@@ -494,6 +494,40 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   the list. A
   request no entry takes is a 405 when no entry takes its method, on its
   path or any, and a 403 otherwise; an empty list takes nothing, a 403.
+  A method override in a header or the query is held to the list too
+  (T189): many upstreams act on a POST that says
+  `X-HTTP-Method-Override: DELETE`, or `?_method=DELETE`, as on a DELETE
+  (Google's and ASP.NET's APIs; OData's `X-HTTP-Method`; Express's
+  `method-override`). So each method a request names in
+  `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` (or
+  the same with `_`, as Rack and PHP read them), or in a `_method` query
+  parameter, must be one the list takes on its path, or the request is a
+  405 naming it, before its body is read or any value opens. A name is
+  `_method` as PHP and Tomcat read one too (`.method`, `_method[]`,
+  `_method `, any case), and a parameter named as one of those headers
+  counts as one, as ServiceStack reads them. An override the list takes
+  goes on as it came (Google's `PATCH` through a POST): the upstream acts
+  on a method the list allows either way, so refusing what it does not
+  take closes the gap and breaks no client that stays inside the list,
+  where stripping the override would quietly change what such a client
+  asked for. Where an entry takes any method on the path, nothing is
+  looked for. A narrowed session's `methods` hold the override the same
+  way (a 403, `narrowed`). The check reads the headers that go upstream:
+  one a workload's proof does not sign is dropped on the way, so an
+  override header it leaves unsigned is no override.
+
+  **A body is not read for one** (D179). A method-limited
+  credential does not stop an override hidden in a POST's body: a
+  `_method` field of a form or multipart body, which Rails, Laravel,
+  Symfony and Spring honour (Laravel reads one in JSON too), goes on as
+  it came. `allow: [{ methods: ['POST'], path: '/items/**' }]` refuses a
+  POST with `X-HTTP-Method-Override: DELETE` or `?_method=DELETE`, but
+  lets `_method=DELETE` in its form through, and such an upstream deletes.
+  Reading bodies the way every framework parses them proved a contest
+  coffre cannot win (two review rounds found fifteen parser differences:
+  multipart framing, header folding, encoded names, compression), so
+  against such an upstream a method limit is not a boundary: hold its
+  credential to paths, or to a key whose own scope holds what it may do.
   `methods` and `paths`, as before, are one entry per path, and keep what
   they meant: `/` takes every path, `/companies/` what is below
   `/companies` and not it, a `*` is itself, never a glob (with a warning
