@@ -37,7 +37,7 @@ Rules R75 and R76 record two of them.
 | D3 | **Clock skews: on hold.** Erwin asked what clock skew is and why it is needed | nothing; C15, V9, V31, V32, S3's `SKEW_MS` and S65 keep their values | – |
 | D4 | **Service tokens (R76).** At most 365 days (from 366, C14); a deployment may set a lower maximum | `MAX_SERVICE_TOKEN_DAYS = 365`; `signin({ serviceTokenMaxDays })`, whole days 1 to 365. The default lifetime stays 90 days (`DEFAULT_SERVICE_TOKEN_DAYS`), or the maximum where that is lower | #516 |
 | D5 | **CI sign-in limits (R76).** "We should have one or two settings here and agreed put them much higher." No 60 a minute per binding, no 300 a minute in all | the proposal in [§3.6](#36-ci-sign-in-limits-the-proposal-for-erwins-numbers), for Erwin to confirm its numbers before anything is built; `formal/Credentials.tla` changes first | #520 (Erwin's D177) |
-| D7 | **A removal's revoke batch: 50 ms of the fence, final (Erwin's D178).** Dropping D5's per-binding count also dropped what bounded a binding's live credentials, which an unbind revokes under the fence every use shares | the batch derived from the budget and the measured cost, no setting: on Node `UNBIND_BATCH` = 50 ms ÷ 0.08 ms = 625; on Workers min(that, the credentials a vault call's 10 ms of CPU fits) = 114. 500 ms rejected: every use beside a removal waits out up to one batch's fence | [§3.6](#36-ci-sign-in-limits-the-proposal-for-erwins-numbers), "A binding's removal"; #520 |
+| D7 | **A removal's revoke batch: 50 ms of the fence (Erwin's D178); 10 ms proposed in its place, for Erwin to confirm.** Dropping D5's per-binding count also dropped what bounded a binding's live credentials, which an unbind revokes under the fence every use shares. Measured through the whole app, a 50 ms hold refuses uses, not only delays them: each use past the 10 a process takes in flight is refused `overloaded` | the batch derived, no setting: the fence held no longer than the uses in flight (`DEFAULT_CONNECTIONS`, 10) take to arrive at R44's 1,000 a second, 10 ms, so on Node `UNBIND_BATCH` = 10 ms ÷ 0.08 ms = 125 (625 at 50 ms); on Workers min(that, what a vault call's 10 ms of CPU fits) = 114. Until Q1. 500 ms rejected: every use beside a removal waits out up to one batch's fence | [§3.6](#36-ci-sign-in-limits-the-proposal-for-erwins-numbers), "A binding's removal"; #520, merged only once Erwin confirms 10 ms |
 | D6 | **The unsealed-entry check cap (V11, §3.2 #18): yes**, resized from the measured CPU per entry | `ABOVE_NEWEST` from the check's CPU budget ÷ its measured cost per entry, the derivation beside it | PR to come (W331 2b, verifier bound) |
 
 Still open: Q1 (the refusal rule, A or B), Q2 (Node pool split), Q3 (where
@@ -691,7 +691,7 @@ Not settings, and what each needs:
   which refuses its sign-ins and, at the door, every credential it issued,
   revoked yet or not, and every renewal (`standingBinding`); each step
   revokes a batch, and the last ends the binding. The batch is the
-  fence's: 50 ms (D178) ÷ 0.08 ms = 625 on Node. On Workers it is also
+  fence's: 10 ms ÷ 0.08 ms = 125 on Node (below). On Workers it is also
   held to a call's 10 ms of CPU (the Free plan's hard limit: a call over
   it is killed, 1102, on every try): (10 − 4.85 ms fixed) ÷ 0.045 ms =
   114, and a request makes two such calls ((10 − 5.05 ms) ÷ 2.0 ms per
@@ -705,6 +705,45 @@ Not settings, and what each needs:
   how fast the vault's records catch up: a plan's CPU limit as a setting
   (Workers Paid allows more than 10 ms), or a one-minute cron for the
   scheduled run.
+
+  *The fence budget, measured (W331, 2026-11-06).* The fence is the
+  instance's one advisory lock, which every use of every credential takes
+  shared, so a batch's hold stalls every use, of any service. Each use
+  past the 10 a process has in flight (the vault pool's,
+  `DEFAULT_CONNECTIONS`) is refused at once as `overloaded`, so uses are
+  refused once rate × hold passes 10: at D178's 50 ms, above 200 a second.
+  One Node process, Postgres, reveals beside the removal of 5,000:
+
+  | uses/s | refused at 50 ms (625) | refused at 10 ms (125) | p99 at 125, beside (alone) |
+  |---|---|---|---|
+  | 100 | 0 | 0 | 28 ms (18) |
+  | 200 | 10% | 0 | 50 ms (24) |
+  | 400 | 43% | 11% (0.5% alone) | 41 ms (23) |
+  | 800 | 68% | harness saturated | 43 ms |
+
+  So #520 holds a batch to 10 ms: the 10 uses in flight ÷ R44's 1,000 a
+  second, until Q1 decides the admission rule. At 400 a second the
+  removal's own CPU, in the same process, still fills the slots.
+
+  *Why the batches after the close keep the fence (option (d), rejected
+  for #520).* With the fence on the close alone, TLC finds a 16-state
+  trace (`formal/Unbinding.tla`, without BatchFenced): a request passes
+  the app's check before the close, its vault statement reads its
+  credential live after it, an unfenced batch revokes that credential,
+  and the use commits numbered after the revoke (`RevokeOrdersUses`). The
+  app's close check cannot stop a request whose check ran first. What
+  would free the batches: the vault's use statement refusing a credential
+  whose binding is closed, under the fence shared (VaultChecksClosed: every
+  scenario holds with the batches unfenced), a join on the hot path, with
+  `decide.ts`, the Lean model and `request-cost.alone.ts`: a PR of its
+  own, if Erwin wants it. Or a time bound instead of the join (the
+  lead's idea, not built): a use admitted before the close carries a
+  deadline at most `USE_DEADLINE_MS` ahead, which the vault refuses past
+  (with `USE_AHEAD_MS` of skew), so none commits later than the close plus
+  deadline, skew and statement timeout (about 65 s); unfenced batches that
+  start after that cannot race it, at the cost of a minute's wait for
+  large removals, already 202-and-resume. Whether the vault holds the
+  deadline on its own clock so must be checked in code and modelled.
 - **AWS fleets.** Each AWS-proof sign-in is one `GetCallerIdentity` at STS,
   signed by the workload, so it counts against the workload's own account:
   600 a second per account and Region at a regional endpoint, the global
