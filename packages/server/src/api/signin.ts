@@ -34,6 +34,7 @@ import {
   findBinding,
   findCredential,
   findDeviceAuthorizations,
+  openDeviceSources,
   findIdentity,
   passkeyCredentialTaken,
   signinMembers,
@@ -1934,8 +1935,8 @@ export class SigninService {
   async startDevice(input: { clientLabel: string | null; sourceIp: string | null }): Promise<DeviceStart> {
     const { db } = this.#deps;
     const now = new Date();
-    const open = await findDeviceAuthorizations(db, this.#deps.chainKey, { openAt: now });
-    const fromIp = open.filter((row) => row.clientIp === input.sourceIp).length;
+    const open = await openDeviceSources(db, this.#deps.chainKey, now);
+    const fromIp = open.filter((source) => source === input.sourceIp).length;
     if (fromIp >= DEVICE_PENDING_PER_IP || open.length >= DEVICE_PENDING_TOTAL) {
       throw new ApiError('too_many_requests', 'too many sign-in requests are waiting; try again in a few minutes');
     }

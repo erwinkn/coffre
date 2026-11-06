@@ -37,6 +37,7 @@ import {
   type FixtureDeps,
 } from './api-fixture.ts';
 import { actorParts } from '../src/db/audit.ts';
+import { openDeviceSources } from '../src/db/queries.ts';
 
 const ROOT = 'admin@acme.example';
 const LEAD = 'lead@acme.example';
@@ -1164,6 +1165,19 @@ test('device flow: the client label is kept as given, however long: the body tha
   const credential = await approvedCliSession(dev, 'x'.repeat(500));
   const row = await credentialRow(credential.id);
   assert.equal(row.label, 'x'.repeat(500));
+});
+
+test("a device login's admission reads the open logins' addresses, never their labels, which may each be a body's size", async () => {
+  for (let i = 0; i < 3; i++) await signin.startDevice({ clientLabel: 'l'.repeat(100_000), sourceIp: IP });
+  // What admission reads, its columns as asked of the database: every one the MAC covers and the address, no label.
+  const asked: string[][] = [];
+  const watched = new Proxy(db.runtime, {
+    get: (target, name, receiver) => (name === 'select' ? (columns?: Record<string, unknown>) => (asked.push(Object.keys(columns ?? {})), target.select(columns as never)) : Reflect.get(target, name, receiver)),
+  });
+  assert.deepEqual(await openDeviceSources(watched, deps.chainKey, new Date()), [IP, IP, IP]);
+  assert.equal(asked.length, 1);
+  assert.ok(asked[0]!.includes('clientIp') && asked[0]!.includes('authMac'), asked[0]!.join(', '));
+  assert.ok(!asked[0]!.includes('clientLabel'), asked[0]!.join(', '));
 });
 
 // --- pending state ------------------------------------------------------------------

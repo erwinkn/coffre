@@ -24,7 +24,7 @@
  * no GitHub binding matches `sub`: `ref` and `workflow_ref` stay as they were.
  */
 
-import { shownMember } from '../schemas.ts';
+import { READ_CPU_US, REQUEST_CPU_US, shownMember } from '../schemas.ts';
 import type { Constraints } from './constraints.ts';
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
@@ -408,11 +408,13 @@ function checkGitLab(claims: BindingClaims): void {
  * `kubernetes.io.serviceaccount.uid` is `4f1c…`, `kubernetes.io` an object,
  * and `kubernetes.io.pod` nothing.
  */
-export function claimAt(claims: Record<string, unknown>, name: string): unknown {
+export function claimAt(claims: Record<string, unknown>, name: string, work: MatchWork = { left: MATCH_CHARS }): unknown {
   // Read by the token's own keys at each step, each matched where the name is at: a key that the name continues with,
   // to its end or to a dot. So the work is the token's keys, never every way a long name's dots can split it, which
   // the name's length alone would make quadratic; and each object at each place in the name is read once, its readings
-  // kept (two meaning several), however many ways lead to it.
+  // kept (two meaning several), however many ways lead to it. What it compares is spent from `work`: once that is
+  // gone, the name reads nothing, nor does any other that shares it.
+  if (work.left < 0) return undefined;
   type Reading = { count: number; value: unknown };
   const none: Reading = { count: 0, value: undefined };
   const read = new Map<object, Map<number, Reading>>();
@@ -423,6 +425,8 @@ export function claimAt(claims: Record<string, unknown>, name: string): unknown 
     if (kept !== undefined) return kept;
     let reading: Reading = none;
     for (const key of Object.keys(at)) {
+      work.left -= Math.min(key.length, name.length - start) + 1;
+      if (work.left < 0) return none;
       if (!name.startsWith(key, start)) continue;
       const end = start + key.length;
       if (end !== name.length && name.charCodeAt(end) !== 0x2e) continue;
@@ -437,8 +441,24 @@ export function claimAt(claims: Record<string, unknown>, name: string): unknown 
     return reading;
   };
   const reading = from(claims, 0);
-  return reading.count === 1 ? reading.value : undefined;
+  return reading.count === 1 && work.left >= 0 ? reading.value : undefined;
 }
+
+/**
+ * What matching a token's claims may compare, in characters, for all of a
+ * binding's claims together (`differingClaims`): what is left of a request's
+ * CPU once the largest body is read (`REQUEST_CPU_US` less `READ_CPU_US`,
+ * 16 ms: a sign-in's own body is small), at a compared character's cost,
+ * 2.2 ns (`String.prototype.startsWith` over 1,400-character keys, Node 24,
+ * the median of seven). 7.3 million: a real binding compares a few
+ * thousand; one of hundreds of long names, against a token of as many long
+ * keys sharing their start, would compare hundreds of millions, and is
+ * refused, as matching nothing, once these are spent.
+ */
+export const MATCH_CHARS = Math.floor(((REQUEST_CPU_US - READ_CPU_US) * 1000) / 2.2);
+
+/** What is left of a match's characters (`MATCH_CHARS`), spent as `claimAt` compares. */
+export type MatchWork = { left: number };
 
 /**
  * The claims of a verified token that differ from what a binding expects,
@@ -456,14 +476,17 @@ export function claimAt(claims: Record<string, unknown>, name: string): unknown 
 export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>): string[] {
   const github = profile.startsWith('github');
   const claims = github ? atBaseBranch(token) : token;
-  return Object.entries(expected)
+  // One budget for all of them: a binding that costs more to match than a sign-in may spend matches nothing.
+  const work: MatchWork = { left: MATCH_CHARS };
+  const differing = Object.entries(expected)
     .filter(([name, value]) => {
-      const actual = claimAt(claims, name);
+      const actual = claimAt(claims, name, work);
       if (typeof actual !== 'string') return true;
       if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
       return !claimValues(value).includes(actual);
     })
     .map(([name]) => name);
+  return work.left < 0 ? Object.keys(expected) : differing;
 }
 
 function atBaseBranch(claims: Record<string, unknown>): Record<string, unknown> {

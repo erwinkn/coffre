@@ -87,12 +87,15 @@ async function form(request: Request): Promise<URLSearchParams> {
   if (!/^application\/x-www-form-urlencoded\b/i.test(type)) {
     throw new OAuthError('invalid_request', 'send the request as application/x-www-form-urlencoded');
   }
-  const params = new URLSearchParams(await readLimitedText(request, API_BODY_BYTES));
-  // Its fields held to the values a JSON body may hold (`MAX_BODY_NODES`), and each looked at once: a mebibyte of
-  // short fields is refused, never searched for each name again.
+  const text = await readLimitedText(request, API_BODY_BYTES);
+  // Its fields held to the values a JSON body may hold (`MAX_BODY_NODES`), counted on the text, before
+  // `URLSearchParams` makes any: it takes seconds over a mebibyte of empty ones. Then each name looked at once.
+  let fields = text.length === 0 ? 0 : 1;
+  for (let at = text.indexOf('&'); at !== -1 && fields <= MAX_BODY_NODES; at = text.indexOf('&', at + 1)) fields += 1;
+  if (fields > MAX_BODY_NODES) throw new OAuthError('invalid_request', `the form holds more than ${MAX_BODY_NODES} fields`);
+  const params = new URLSearchParams(text);
   const seen = new Set<string>();
   for (const name of params.keys()) {
-    if (seen.size >= MAX_BODY_NODES) throw new OAuthError('invalid_request', `the form holds more than ${MAX_BODY_NODES} fields`);
     if (seen.has(name)) throw new OAuthError('invalid_request', `${name} appears more than once`);
     seen.add(name);
   }

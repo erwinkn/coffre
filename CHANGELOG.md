@@ -38,9 +38,13 @@
   deeply to read`, at the API, sign-in, MCP and the vault's Node socket.
   What no longer had a length to hide behind now costs its own size: a
   workload token's parts are counted as a body's values before they are
-  parsed, an OAuth form's fields are held to the same count and each
-  looked at once, and a claim's lookup reads the token's keys rather than
-  every way a long dotted name can split.
+  parsed, an OAuth form's fields are held to the same count on its text
+  before it is parsed, a device login's admission reads the open logins'
+  addresses and never their labels, and a claim's lookup reads the token's
+  keys rather than every way a long dotted name can split, all of a
+  binding's claims within `MATCH_CHARS` compared characters (7.3 million,
+  what R27's 20 ms leaves after the largest read, at 2.2 ns each): past
+  them the binding matches nothing.
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

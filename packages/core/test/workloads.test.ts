@@ -13,6 +13,7 @@ import {
   githubWorkflow,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
+  MATCH_CHARS,
   MAX_ISSUER_BYTES,
   type BindingClaims,
 } from '@coffre/core/identity';
@@ -267,6 +268,25 @@ test("a claim's lookup costs the token's keys, not the ways a long name splits: 
   for (let i = 0; i < 1000; i++) chain = { a: chain };
   assert.equal(claimAt(chain as Record<string, unknown>, `${'a.'.repeat(999)}a`), 'deep');
   assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
+});
+
+test("matching a binding's claims spends at most MATCH_CHARS compared characters, all its claims together; past them it matches nothing", () => {
+  // Hundreds of long names against as many long keys sharing their start: hundreds of millions of characters to
+  // compare, which once cost half a second a sign-in (review r2 of #533). Now refused once the budget is spent.
+  const prefix = 'p'.repeat(1400);
+  const token: Record<string, unknown> = { sub: 'x', ...Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`${prefix}${i}`, 'v'])) };
+  const expected: BindingClaims = { sub: 'x', ...Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`${prefix}${i}`, 'v'])) };
+  const started = process.cpuUsage();
+  const differing = differingClaims('custom', expected, token);
+  const spent = process.cpuUsage(started);
+  assert.equal(differing.length, 501, 'all of them, as none could be read within the budget');
+  assert.ok((spent.user + spent.system) / 1000 < 100, `took ${(spent.user + spent.system) / 1000} ms of CPU`);
+  assert.equal(MATCH_CHARS, 7_272_727);
+  // What a real binding compares is nothing beside it: matched, every claim read.
+  assert.deepEqual(differingClaims('custom', { sub: 'x', [`${prefix}7`]: 'v' }, token), []);
+  // Spent, a reading is none, though the token holds it.
+  assert.equal(claimAt({ sub: 'x' }, 'sub', { left: 0 }), undefined);
+  assert.equal(claimAt({ sub: 'x' }, 'sub', { left: 10 }), 'x');
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

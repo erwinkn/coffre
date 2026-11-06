@@ -208,13 +208,19 @@ test("the token endpoint's form: each field once, as many as a body holds values
   const twice = await said(await form('grant_type=refresh_token&grant_type=authorization_code'));
   assert.equal(twice.status, 400);
   assert.match(twice.body.error_description, /grant_type appears more than once/);
-  // 200,000 short fields, 1.4 MB under the mebibyte's bound: refused past the count, in a pass, not a search per name.
-  const many = Array.from({ length: 150_000 }, (_, i) => `f${i}=`).join('&');
-  const started = performance.now();
-  const refused = await said(await form(many.slice(0, 1024 * 1024 - 1)));
-  assert.equal(refused.status, 400);
-  assert.match(refused.body.error_description, new RegExp(`more than ${MAX_BODY_NODES} fields`));
-  assert.ok(performance.now() - started < 500, `took ${performance.now() - started} ms`);
+  // A mebibyte of fields, distinct or empty: refused by their count on the text, before any is parsed or looked at.
+  for (const many of [Array.from({ length: 150_000 }, (_, i) => `f${i}=`).join('&').slice(0, 1024 * 1024 - 1), 'x&'.repeat(512 * 1024 - 1)]) {
+    const started = process.cpuUsage();
+    const refused = await said(await form(many));
+    const spent = process.cpuUsage(started);
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error_description, new RegExp(`more than ${MAX_BODY_NODES} fields`));
+    assert.ok((spent.user + spent.system) / 1000 < 50, `took ${(spent.user + spent.system) / 1000} ms of CPU`);
+  }
+  // As many as a body holds values is a form still: read, and refused for what it lacks.
+  const most = await said(await form(Array.from({ length: MAX_BODY_NODES }, (_, i) => `f${i}=`).join('&')));
+  assert.equal(most.status, 400);
+  assert.doesNotMatch(most.body.error_description, /more than/);
 });
 
 test('/mcp answers 401, and where to sign in, without a good token; a request from another site, 403', async () => {
