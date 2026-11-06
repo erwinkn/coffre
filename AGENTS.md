@@ -330,8 +330,34 @@ unsupported diff select full validation.
   SHA-256 and downloaded once. A change to a route the provider calls (the
   secrets list and write, `POST /api/auth/oidc`) runs it in the same pull
   request.
-- `pnpm lint`, `pnpm check:pins`, `pnpm check:contrast` and `pnpm check:docs`
-  (every path, script and link the docs name exists) do not need Postgres.
+- `pnpm lint`, `pnpm check:pins`, `pnpm check:workflows`, `pnpm check:contrast`
+  and `pnpm check:docs` (every path, script and link the docs name exists) do
+  not need Postgres. `check:pins` holds, beside the manifests, every tracked
+  workflow, action, compose file, Dockerfile, shell script and
+  `pnpm-workspace.yaml` to a short list of plain rules, which
+  `scripts/pins.mjs`'s header lists: an action by its commit
+  (`owner/repo@<sha> # vX.Y.Z`; the same repository's through `$/`); an image
+  in compose, a workflow's `container` or `services`, or a Dockerfile's `FROM`
+  by its digest (`name:tag@sha256:<index digest>`); a Dockerfile's `ADD` of a
+  URL with `--checksum=sha256:…`; every other download through
+  `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only if its
+  SHA-256 is the pinned one, with curl and wget banned everywhere else; no
+  package runner or install outside the lockfile (npx, `npm install`, `pnpm
+  dlx` or `add`, `gh … download`, `git clone`, `nvm install`, `apt-get
+  install`, …), and `pnpm install` with `--frozen-lockfile`; an action's
+  `*-version` input and Corepack's pnpm exact; pnpm's 7-day age gate and
+  `strictDepBuilds`. YAML it reads with js-yaml (a root dependency), each
+  string's lines as a shell's. A health check of this machine is curl marked
+  `# pins: local`, every URL on the line 127.0.0.1, localhost or [::1]; a
+  line no rule can hold carries `# unpinned: <reason>`, on itself or right
+  above it (in YAML, a shell comment inside the string). That is all it
+  checks: anything else (an image `docker run` pulls, a build context, a
+  fetch through another program or hidden from those names) is the
+  maintainer's, and review's, and is not enforced. `check:workflows` runs zizmor
+  (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
+  against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
+  GitHub whether each pinned commit is its repository's. Validate runs both
+  on every change, a release's bump included (`Pins`).
 - `scripts/restore-drill.sh` (after `pnpm build`) backs up a seeded Workers
   stack with `coffre backup`, restores it with `coffre restore --keys`, and
   checks it came back, then the wrong-key cases, on ports 3400 to 3402 and 8481
@@ -348,8 +374,11 @@ unsupported diff select full validation.
   with `--dir`: each example has its own `pnpm-workspace.yaml` (as `init` output
   needs), so pnpm would treat it as a separate, uninstalled workspace.
 
-**Dependencies.** `pnpm install` enforces exact pins, `ignore-scripts`, and a 7-day
-`minimumReleaseAge` (`pnpm-workspace.yaml`). Add deps with `pnpm run add:dep`
+**Dependencies.** `pnpm install` enforces exact pins, no install script but
+those `allowBuilds` names `true` with its reason (none: esbuild, Koffi and
+workerd are named `false`, and `strictDepBuilds` fails an install on one
+nobody named), and a 7-day `minimumReleaseAge` (`pnpm-workspace.yaml`), which
+`check:pins` refuses to shorten. Add deps with `pnpm run add:dep`
 (`--save-exact`), never a bare `pnpm add` (it writes caret ranges).
 The examples pin `@coffre/*` at the packages' version, and `linkWorkspacePackages` links
 them to the workspace; `pnpm bump` keeps them in step. `@coffre/ui`'s peers (React, react-dom,

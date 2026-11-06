@@ -11,6 +11,9 @@ importers:
       '@coffre/db':
         specifier: workspace:*
         version: link:packages/db
+      js-yaml:
+        specifier: 4.3.0
+        version: 4.3.0
     devDependencies:
       '@hegeldev/hegel':
         specifier: 0.4.7

@@ -105,7 +105,7 @@ test("the Workers deployment's deploy workflow pins its actions by commit, as co
     assert.match(action!, /@[0-9a-f]{40}$/, `${action} is pinned by commit`);
     assert.ok(ours.includes(line), `${line}: as .github/workflows/validate.yml pins it`);
   }
-  assert.match(workflow, /node-version: 24\n/);
+  assert.match(workflow, /node-version: 24\.\d+\.\d+\n/);
   assert.match(workflow, /run: corepack enable && pnpm install --frozen-lockfile\n/);
   // The URL on the migrate step alone, handed to the CLI on stdin.
   assert.equal(workflow.match(/DATABASE_OWNER_URL: \$\{\{ secrets\.DATABASE_OWNER_URL \}\}/g)?.length, 1);

@@ -28,7 +28,9 @@ jobs:
     steps:
       - name: Check out main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: ./.github/actions/prepare
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/prepare
         with:
           build: 'false'
       - name: Draw the seed
@@ -40,15 +42,22 @@ jobs:
           if ! [[ "$seed" =~ ^[0-9]+$ ]]; then echo "::error::the seed must be an unsigned integer, not $seed"; exit 2; fi
           echo "seed=$seed" >> "$GITHUB_OUTPUT"
           echo "::notice title=Seed ${seed}::replay with: COFFRE_TEST_ENGINE=${{ matrix.engine }} pnpm test:properties:server --long --seed=${seed}"
+      # The seed reaches the shell as a variable, never spliced into its script.
       - name: Core properties
         if: matrix.engine == 'postgres'
-        run: pnpm test:properties --long --seed=${{ steps.seed.outputs.seed }}
+        env:
+          SEED: ${{ steps.seed.outputs.seed }}
+        run: pnpm test:properties --long --seed="$SEED"
       - name: Server properties
         env:
           COFFRE_TEST_ENGINE: ${{ matrix.engine }}
-        run: pnpm test:properties:server --long --seed=${{ steps.seed.outputs.seed }}
+          SEED: ${{ steps.seed.outputs.seed }}
+        run: pnpm test:properties:server --long --seed="$SEED"
       - name: Name the seed that failed
         if: failure() && steps.seed.outputs.seed != ''
+        env:
+          ENGINE: ${{ matrix.engine }}
+          SEED: ${{ steps.seed.outputs.seed }}
         run: |
-          echo "::error title=Properties failed on seed ${{ steps.seed.outputs.seed }}::replay with: pnpm test:properties --long --seed=${{ steps.seed.outputs.seed }}, and COFFRE_TEST_ENGINE=${{ matrix.engine }} pnpm test:properties:server --long --seed=${{ steps.seed.outputs.seed }}; Hegel's shrunk operations are in the log above"
+          echo "::error title=Properties failed on seed ${SEED}::replay with: pnpm test:properties --long --seed=${SEED}, and COFFRE_TEST_ENGINE=${ENGINE} pnpm test:properties:server --long --seed=${SEED}; Hegel's shrunk operations are in the log above"
           exit 1

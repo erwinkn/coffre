@@ -138,6 +138,7 @@ for kind in "${kinds[@]}"; do
     } >>"$project/pnpm-workspace.yaml"
 
     echo "==> install, typecheck and build coffre-$kind"
+    # unpinned: init writes no lockfile; this installs what a new deployment's first install does, under its own minimumReleaseAge.
     pnpm --dir "$project" install --store-dir "$consumer_store" --silent
     if [[ -L "$project/node_modules/@coffre/server" && "$(readlink -f "$project/node_modules/@coffre/server")" == "$root"/* ]]; then
         echo "consumer-test: @coffre/server resolved into the workspace" >&2

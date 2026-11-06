@@ -22,11 +22,6 @@ if [ "$(cat "$project/lean-toolchain")" != "leanprover/lean4:v$LEAN_VERSION" ]; 
   exit 1
 fi
 
-# A file's SHA-256: sha256sum on Linux, shasum on macOS.
-sha256() {
-  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
-}
-
 if ! command -v lake >/dev/null || [ "$(lean --version 2>/dev/null | awk '{print $3}' | tr -d ,)" != "$LEAN_VERSION" ]; then
   # Each platform's release archive and its SHA-256, from the release's own metadata. macOS's tar may lack zstd: a zip.
   case "$(uname -s)-$(uname -m)" in
@@ -40,17 +35,7 @@ if ! command -v lake >/dev/null || [ "$(lean --version 2>/dev/null | awk '{print
   home="$cache/lean-$LEAN_VERSION-$platform"
   if [ ! -x "$home/bin/lake" ]; then
     file="$cache/lean-$LEAN_VERSION-$platform.$archive"
-    if [ ! -f "$file" ] || [ "$(sha256 "$file")" != "$digest" ]; then
-      mkdir -p "$cache"
-      curl -fsSL --retry 3 -o "$file.part" \
-        "https://github.com/leanprover/lean4/releases/download/v$LEAN_VERSION/lean-$LEAN_VERSION-$platform.$archive"
-      if [ "$(sha256 "$file.part")" != "$digest" ]; then
-        echo "lean-$LEAN_VERSION-$platform.$archive does not match its pinned SHA-256" >&2
-        rm -f "$file.part"
-        exit 1
-      fi
-      mv "$file.part" "$file"
-    fi
+    "$root/scripts/fetch.sh" "https://github.com/leanprover/lean4/releases/download/v$LEAN_VERSION/lean-$LEAN_VERSION-$platform.$archive" "$digest" "$file"
     rm -rf "$home.part"
     mkdir -p "$home.part"
     if [ "$archive" = zip ]; then

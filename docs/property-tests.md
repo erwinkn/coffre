@@ -184,8 +184,9 @@ or reproduce the Rust build.
 
 The lockfile resolves Hegel's FFI dependency to Koffi 3.3.1. Koffi declares
 an install script, but its optional `@koromix/koffi-linux-x64` package supplies
-the prebuilt Node addon. The native tests run with `ignoreScripts: true`,
-without running that script or compiling Koffi.
+the prebuilt Node addon. `pnpm-workspace.yaml` names it `false` under
+`allowBuilds`: the native tests run without running that script or
+compiling Koffi.
 
 ## Server operation sequences
 

@@ -134,7 +134,7 @@ log "starting coffre and its vault on :$port"
 rm -rf "$state_dir/v3/do/coffre-dev-vault-CoffreCheckpointer"
 # The packages' sources, for the Vite config's own imports (@coffre/ui/vite) as for the app's.
 NODE_OPTIONS="--conditions=coffre:source ${NODE_OPTIONS:-}" ./dev/node_modules/.bin/vite dev dev/deployment/app --port "$port" --strictPort >"$logs/web.log" 2>&1 &
-until curl -sf "$COFFRE_DEV_URL/livez" >/dev/null 2>&1; do sleep 1; done
+until curl -sf "http://127.0.0.1:$port/livez" >/dev/null 2>&1; do sleep 1; done # pins: local
 
 log 'seeding'
 DATABASE_URL="$owner_url" node --conditions=coffre:source dev/seed.mjs

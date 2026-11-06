@@ -2,7 +2,8 @@ services:
   postgres:
     # Debian (glibc), not Alpine: managed Postgres behind Hyperdrive is glibc,
     # and musl's malloc costs a use 2-3x the Postgres CPU (W242). Benchmark here.
-    image: postgres:16.14
+    # The digest is the tag's multi-arch index: the tag is rebuilt in place.
+    image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
     environment:
       POSTGRES_USER: coffre_owner
       POSTGRES_PASSWORD: local-dev-only

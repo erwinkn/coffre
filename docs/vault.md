@@ -241,7 +241,7 @@ It takes paths as Vault does, `data/` included. Its `secrets` input
 separates entries with `;`:
 
 ```yaml
-- uses: hashicorp/vault-action@v3
+- uses: hashicorp/vault-action@4c06c5ccf5c0761b6029f56cfb1dcf5565918a3b # v3.4.0
   with:
     url: https://secrets.acme.example
     method: token

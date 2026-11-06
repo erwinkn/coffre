@@ -37,17 +37,22 @@ jobs:
     steps:
       - name: Check out the tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
 
+      # No cache: what a release builds and publishes comes from the lockfile
+      # and the registry alone, never from a cache another run could have
+      # written. setup-node 4.4.0 caches nothing unasked and warns of the
+      # input; from 5 on, it would cache unless told not to.
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.22.1
           registry-url: https://registry.npmjs.org
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+          package-manager-cache: false
 
       - name: Install frozen dependencies
         run: pnpm install --frozen-lockfile
@@ -84,11 +89,14 @@ jobs:
     steps:
       - name: Check out the workflow's revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.22.1
+          package-manager-cache: false
 
       - name: Name the version and the commit it was released from
         id: release
@@ -137,6 +145,7 @@ jobs:
           tarball="$RUNNER_TEMP/context/coffre-cli-$VERSION.tgz"
           # Its tarball, too, may be served a moment after its document.
           for _ in $(seq 30); do
+            # unpinned: our own release at its exact version, which npm never serves changed; its integrity is checked below.
             npm pack "@coffre/cli@$VERSION" --pack-destination "$RUNNER_TEMP/context" && break
             sleep 10
           done

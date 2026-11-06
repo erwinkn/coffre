@@ -124,7 +124,8 @@ pnpm conformance:node      # examples/node, its two processes, on SQLite
 pnpm test:consumer     # pack the packages, init both examples outside the repo, run them
                        # --kind workers or --kind node selects one deployment
 pnpm test:image        # the CLI's image for amd64 and arm64, and coffre serve run in it (needs Docker)
-pnpm check:pins        # every dependency pinned exactly
+pnpm check:pins        # every dependency, action, image, download and install pinned
+pnpm check:workflows   # zizmor over every workflow and action, each pinned to its commit
 pnpm check:contrast    # every colour pair in the UI meets WCAG AA
 pnpm check:docs        # every path and script the docs name exists
 ```
@@ -595,9 +596,24 @@ database ([deploy.md](docs/deploy.md#from-a-release-before-040)). From
 0.4.0 on, each release migrates before it deploys, and serves nothing until
 its migrations have run.
 
-Install scripts are off, every dependency is pinned exactly, and a version
+No dependency's install script runs unless `pnpm-workspace.yaml` names it,
+with its reason (none does), every dependency is pinned exactly, and a version
 must be seven days old before it can be installed. That last rule blocked
 `jose@6.2.4` the first week, published six days before we tried it.
+
+The rest of what CI and the scripts fetch is pinned too: each action to its
+commit, its version in a comment beside it; each image to its index digest,
+written `name:tag@sha256:<digest>`; each tool downloaded (TLC, Lean, Go,
+Terraform, OpenTofu, zizmor, the Cursor image's nvm and Node) to its version
+and SHA-256, through the one script that downloads, `scripts/fetch.sh`, or
+a Dockerfile's `ADD --checksum`; each install to the lockfile. On every pull
+request, `pnpm check:workflows` (zizmor) holds the actions to their commits,
+and `pnpm check:pins` holds the files to a short list of plain rules (the
+header of `scripts/pins.mjs`): curl, wget and the package runners banned
+outside `scripts/fetch.sh`, images and actions by digest and commit, installs
+frozen. It checks only what those rules name; the rest is the maintainer's. A line that cannot be pinned says why, `# unpinned: <reason>`: the
+Cursor image's apt packages, and the fresh installs of what `coffre init`
+writes, which has no lockfile yet.
 
 Two traps, both noted in `pnpm-workspace.yaml`:
 
