@@ -1,3 +1,4 @@
+import { CACHE_SLICE_BYTES, Lru } from '@coffre/core/memory';
 import type { Access, Vault } from '@coffre/core/vault';
 
 /**
@@ -19,7 +20,8 @@ import type { Access, Vault } from '@coffre/core/vault';
  *   her role changed meanwhile                              access_changed, no read                 asked again: access, unwrap
  */
 export class Accesses {
-  readonly #kept = new Map<string, Access>();
+  /** The least recently used out first, past its slice of the isolate's caches (`@coffre/core/memory`). */
+  readonly #kept = new Lru<string, Access>(CACHE_SLICE_BYTES);
 
   /**
    * The answer kept about `principal`, an active member's from a vault that
@@ -35,13 +37,9 @@ export class Accesses {
   remember(access: Access): void {
     this.#kept.delete(access.principal);
     if (access.status !== 'active' || access.revision === undefined) return;
-    // The oldest goes first: a few hundred principals is far more than an isolate serves between deploys.
-    if (this.#kept.size >= KEPT) this.#kept.delete(this.#kept.keys().next().value!);
     this.#kept.set(access.principal, access);
   }
 }
-
-const KEPT = 1000;
 
 /**
  * A request decided on an answer that was not the vault's now: nothing was

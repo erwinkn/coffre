@@ -770,10 +770,14 @@ request sent on:
    the environment lacks is a 409.
 4. **Sent on.** Every header but those about the hop, coffre's caller,
    its cookies and the handle; then the rule's header, parameter or
-   Basic authorization, filled in, or the body's field (section 5). The body is read up to 16 MiB and no
-   further, unless it declares its digest and says its length, which
-   streams (below, "Declared bodies stream"); a body whose field coffre
-   fills, up to 64 KiB, and never streamed. If the handle is still anywhere in the
+   Basic authorization, filled in, or the body's field (section 5). The body is read up to 1 MiB and no
+   further (`@coffre/core/memory`), unless it says its length and either
+   declares its digest (below, "Declared bodies stream") or goes through a
+   credential nothing of which signs its hash (a header, Basic, a query
+   parameter or a path segment), which streams it as it came past 1 MiB;
+   a body whose field coffre fills, up to 64 KiB, and never streamed. The
+   bodies an isolate reads whole are held to 16 MiB together: past that,
+   503 with `Retry-After: 1`, before a byte is read. If the handle is still anywhere in the
    request (a header, inside another header's Basic base64, the URL, the
    body), it is refused rather than leaked to a third party. The request
    goes out with `redirect: 'manual'`, through the global `fetch` or the
@@ -852,7 +856,7 @@ Workers, the length goes with the body through `FixedLengthStream`; on
 Node, fetch sends the header as given and errors the request when the body
 does. A `Content-Digest` whose `sha-256` member is no SHA-256 is a 400; one
 with no `sha-256` member (an app's own `sha-512`) declares nothing, and its
-body is read whole. A body read whole, under 16 MiB, must be what its
+body is read whole. A body read whole, up to 1 MiB, must be what its
 `Content-Digest` says too.
 
 What this leaves: an upstream that acts on a request before it ends, such
@@ -860,9 +864,11 @@ as a multipart part stored as soon as it is read, may act on a body whose
 digest then fails. The request that does it carries other bytes than its
 proof signed, so it comes from the session's holder, who could have signed
 those bytes, or from a copy of a proof read on its way to coffre and sent
-first. Bodies with no digest keep the 16 MiB they are read whole to: an
-older SDK's, and a person's app, which `coffre run` gives a handle and
-which sends none of its own.
+first. Bodies with no digest are read whole up to 1 MiB: an older SDK's,
+and a person's app, which `coffre run` gives a handle and which sends none
+of its own. Past it, a workload's (whose proof signs the body's hash) or
+an AWS-signed one's is refused, 413, naming the digest to send; any other
+streams, if it says its length.
 
 ## 5. The other shapes
 
@@ -911,7 +917,7 @@ signature needs no byte of it. It is checked as it passes: a handle
 anywhere in it, a chunk boundary included, or a length other than the one
 it declared, and it stops, so the upstream stores nothing. What a handle
 could still begin, and its last bytes, are held back until that is known. Other bodies are
-read whole, up to 16 MiB, unless they declare a `Content-Digest` (section 4). Equisafe's PutObject past 16 MiB failed on that
+read whole, up to 1 MiB (16 MiB before 0.16), unless they declare a `Content-Digest` (section 4). Equisafe's PutObject past 16 MiB failed on that
 limit (a 413), not on Workers' own request limit, which Cloudflare sets
 by plan (100 MB on Free and Pro, 200 MB on Business, 500 MB on
 Enterprise): past that, a Workers deployment needs multipart uploads,
@@ -1736,8 +1742,8 @@ run` calls the same `credential(name).verify` from
   2,013. `hmac(…, { maxBytes })` takes up to 1 MiB for a provider whose
   bodies run longer. coffre reads a request up to what the longest of its
   signers and verifiers takes, before it knows who asks, and refuses past
-  it with 413, before anything is opened. The cap keeps that read far
-  below the 16 MiB a request through a credential is read up to. On a
+  it with 413, before anything is opened. That read counts against the
+  16 MiB of bodies an isolate holds read whole, as any other. On a
   413 the client's `verify` throws, and the app answers the provider
   4xx, so that it stops retrying. The CPU is the body's: about 0.2 ms at
   4 KiB, 3 ms at 512 KiB and 5 ms at 1 MiB on Node, within a Worker's
@@ -1990,9 +1996,10 @@ is reversible.
    address (W157).
 10. **Redaction of values 8 characters or longer**, in headers and text
     bodies; never a plain value's (0.9).
-11. **Bodies read whole, up to 16 MiB**, so the upstream gets a
-    `Content-Length`. Uploads larger than that go through S3's own path
-    (PR 2) or a presigned URL.
+11. **Bodies read whole, up to 1 MiB** (16 MiB until 0.16), so the
+    upstream gets a `Content-Length`. Larger ones stream with the length
+    they say, through a credential that signs no hash of them, S3's own
+    path (PR 2), a declared `Content-Digest`, or go by a presigned URL.
 
 Taken in 0.9 (W127), each for Erwin to review, each reversible:
 

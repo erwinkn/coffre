@@ -18,6 +18,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { bodyDigest, bodyLine, contentDigest, createProof, generateProofKey, thumbprint, UNSIGNED_BODY, type ProofKey } from '@coffre/client/dpop';
 import { keyAudience, workload } from '@coffre/client/workload';
 import { github, hashToken, signin, type WorkloadAlert } from '@coffre/core/identity';
+import { BODY_READ_WHOLE_BYTES } from '@coffre/core/memory';
 import type { Database } from '@coffre/db';
 import { eq } from 'drizzle-orm';
 import { WebSocket } from 'ws';
@@ -419,7 +420,7 @@ test('a 55 MB document that declares its Content-Digest streams through the SDK 
   try {
     const { type, body } = document(55_000_000);
     const sha256 = createHash('sha256').update(body).digest('hex');
-    // Read whole by the SDK, which declares its digest: coffre streams it on all the same, past the 16 MiB it reads whole.
+    // Read whole by the SDK, which declares its digest: coffre streams it on all the same, past the 1 MiB it reads whole.
     const whole = await coffre.fetch(`${coffre.url('yousign')}/v3/signature_requests/sr-1/documents`, { method: 'POST', headers: { 'content-type': type }, body });
     assert.equal(whole.status, 200, await whole.text());
     assert.deepEqual([reached.at(-1)!.length, reached.at(-1)!.sha256], [body.length, sha256]);
@@ -505,13 +506,13 @@ test('a body other than its Content-Digest says, short of its length, past it, o
   assert.equal(s3.status, 200, JSON.stringify(s3.body));
   assert.deepEqual([reached.at(-1)!.headers['x-amz-content-sha256'], reached.at(-1)!.sha256], [digest, digest]);
   assert.match(reached.at(-1)!.headers.authorization as string, new RegExp(`^AWS4-HMAC-SHA256 Credential=${AWS.AWS_ACCESS_KEY_ID}/`));
-  // An app's own digest of another algorithm declares nothing: read whole, under 16 MiB, and sent on as it is.
+  // An app's own digest of another algorithm declares nothing: read whole, under 1 MiB, and sent on as it is.
   const sha512 = `sha-512=:${createHash('sha512').update(bytes).digest('base64')}:`;
   const own = await use(held, 'POST', '/use/yousign/v3/documents', { headers: { 'content-digest': sha512 }, body: 'a small body' });
   assert.equal(own.status, 200, JSON.stringify(own.body));
   assert.equal(reached.at(-1)!.headers['content-digest'], sha512);
-  // Past 16 MiB with no digest declared: the refusal names the way through.
-  const big = new Uint8Array(randomBytes(17 * 1024 * 1024));
+  // Past 1 MiB with no digest declared, which the proof signs the hash of: the refusal names the way through.
+  const big = new Uint8Array(randomBytes(BODY_READ_WHOLE_BYTES + 1));
   const proof = await createProof(held.key, { method: 'POST', url, token: held.token, nonce: await gates(MEMBER).nonce(), content: { headers: {}, body: createHash('sha256').update(big).digest('hex') } });
   const refused = await read((await pluginRoute(new Request(url, { method: 'POST', headers: { authorization: `DPoP ${held.token}`, dpop: proof }, body: big }), runtime, IP))!);
   assert.equal(refused.status, 413);
