@@ -54,6 +54,12 @@ export const PERSONAL_TOKEN_ROUTES: { [K in RouteKey]: boolean } = {
   'POST /handles': true,
   // Ending a handle of its own ends nothing it does not outlive: `coffre run` revokes its own when its command ends.
   'DELETE /handles/:id': true,
+  // A person's passkeys are theirs to manage signed in, never through a token (passkeys.md, section 3.6).
+  'GET /members/:member/passkeys': false,
+  'POST /members/:member/passkeys/options': false,
+  'POST /members/:member/passkeys': false,
+  'PATCH /members/:member/passkeys/:id': false,
+  'DELETE /members/:member/passkeys': false,
   'GET /members/:member/bindings': false,
   'POST /members/:member/bindings': false,
   'POST /members/:member/bindings/keys': false,

@@ -2724,8 +2724,12 @@ wait, READ COMMITTED:
   `n`. Her first passkey when she had none, a removal of `pa` keeping `pb`,
   or an Owner's reset. The first is built (PR 4b: the enrollment at sign-in,
   `audited`'s `factor` taking the lock before the head; the member's row is
-  `app_change`'s, as its prepared changes commit), the other two come with
-  Account → Passkeys (PR 6).
+  `app_change`'s, as its prepared changes commit), and the other two in PR
+  6a, the same way: a removal at the passkey page's door
+  (`SigninService.removePasskey`), whose new session is `n`, and a reset
+  (`resetPasskeys`, `DELETE /api/members/:member/passkeys`), which issues
+  none. Each reads under the head every row of the person's passkeys and
+  every credential of theirs it ends.
 
 `FactorApp` (PR 4a) puts the app's side beside the change instead:
 

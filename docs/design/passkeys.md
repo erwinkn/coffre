@@ -6,8 +6,10 @@ building it for 0.16 on 2026-11-03; section 14's PRs land in order, and
 he answered section 15's questions on 2026-11-03 (D170), which this
 document now follows. Built so far: the verifier (PR 1, section 9), the
 storage (PR 2, section 5), the vault's issue under the factor lock
-(PR 3, section 6.3), and what holds a credential to its passkey, at every
-request and every issue (PR 4a, sections 6.1, 6.2 and 6.4).
+(PR 3, section 6.3), what holds a credential to its passkey, at every
+request and every issue (PR 4a, sections 6.1, 6.2 and 6.4), the sign-in
+(PR 4b), the fresh checks (PR 5), and managing passkeys, the API's side
+(PR 6a, sections 3.6 and 3.7).
 
 Erwin's decisions, from a team request on 2026-10-31:
 
@@ -450,8 +452,8 @@ changes, and approved device codes not yet redeemed that name none,
 denied), and issues the session, with `account.link`, `passkey.add` and
 `sign_in` entries. A configured Owner the vault has not admitted is
 admitted at the post, by `completeSignin`'s question to the vault, once
-the attestation has verified. The passkey's name is "Passkey <n>" until
-Account → Passkeys (PR 6) names them by their AAGUID. It reads the rows,
+the attestation has verified. The passkey's name is its provider's, where
+its AAGUID names one, else "Passkey <n>" (PR 6a, section 3.6). It reads the rows,
 not a count, for their MACs: a removal written in the database alone
 (`removed_at` set, the MAC as the app signed the live row) refuses the
 sign-in, `tampered`, where a count read it as no passkey and let another
@@ -548,7 +550,13 @@ provider signs in again with `?passkey=add` (`/auth/signin/<provider>?passkey=ad
 whose sign-in asks to add one as an Owner's does (`PendingState.addPasskey`),
 and comes back to the page. The ten-minute rule of section 3.3 holds by
 construction: the provider vouched for the person a moment before. Adding
-one from the session, in Account → Passkeys, is PR 6's.
+one from the session, in Account → Passkeys, is the same sign-in (PR 6a):
+a first passkey is never added from a session, so the ten-minute rule of
+section 3.3 is never a rule of its own. Signing in again costs a
+provider's redirect, which a provider already signed in to answers at
+once, and the one code path that adds a first passkey and ends what none
+stood behind (section 6.1) stays the one reviews held, rather than a
+second beside it.
 
 ### 3.5 The CLI
 
@@ -645,6 +653,56 @@ Rename and Remove.
   the provider alone.
 - **At most 10** per person: a list a person can still read.
 
+**As built (PR 6a).** The API's side; the pages are PR 6b's.
+
+- `GET /api/members/:member/passkeys` lists the person's live passkeys,
+  their own (any session of theirs) or, for an Owner of the whole
+  instance, anyone's, whose reset they weigh: `{ passkeys, ends, reset,
+  max }`. Each passkey's name, its provider (from its AAGUID), whether it
+  syncs, when it was added and last used. `ends` counts what removing one
+  ends, the session asking left out, or a reset: sessions and terminals,
+  personal tokens, handles, connected apps. `reset` is section 3.7's
+  notice. A row that fails its MAC refuses the read, `409 tampered`,
+  rather than list as fewer (R64).
+- **Add another** is two requests, both **always** (section 4.1): `POST
+  …/passkeys/options` answers `create()`'s options, bound to the browser
+  session that asked, with a user handle drawn for that `create()` alone
+  (as at sign-in, section 3.2) and the live ones excluded; `POST
+  …/passkeys { state, response }` checks the attestation, then, under the
+  person's factor lock and the head, that the session still stands and
+  their passkeys are as they were when it was asked (none added or
+  removed since: a state answers one `create()`), and adds it, with a
+  `passkey.add` entry naming what confirmed the session. It ends
+  nothing: every credential of theirs names a passkey already. A person
+  with none is refused `add_passkey` by the router and signs in to add a
+  first one (section 3.4). From a browser session only, and never under
+  `off`.
+- **Ten at most** (`MAX_PASSKEYS`), the number above.
+- **Rename**, `PATCH …/passkeys/:id { name }`: one to 64 characters, no
+  control character, no check, a `passkey.rename` entry.
+- **Remove** replaces the browser's session (rule 1), so it goes through
+  the passkey page's door, as the step-up does, not an API route: `GET
+  /api/auth/passkey?remove=<id>` answers the touch to ask, bound to the
+  session, of the person's other live passkeys, or, for their last under
+  `optional`, of that one, or none under `off` (`options: null`); under
+  `required` their last one answers `409 last_passkey`. `POST
+  /api/auth/passkey { state, response }` checks the touch, then, under
+  the factor lock and the head, the passkey is still live and still not
+  their last under `required`, ends the session it came in on first (of
+  two removals on one session, one goes), moves the touch's replay mark,
+  removes the passkey, ends every other credential, connection and
+  approved terminal code of theirs, and issues the new session: confirmed
+  now by the passkey touched, or naming none. `passkey.remove` entries,
+  `passkey.check` denials. A state asked under one policy answers nothing
+  under another.
+- **Names**: a new passkey takes its provider's name, from a list of the
+  AAGUIDs passkey providers publish (`packages/server/src/passkey-names.ts`:
+  1Password, Apple Passwords, Google Password Manager, Windows Hello and
+  the like), else "Passkey <n>", `n` one more than every passkey row the
+  person has had. Security keys publish theirs in FIDO's metadata
+  service, which coffre does not read, so a YubiKey is "Passkey <n>"
+  until renamed.
+
 ### 3.7 Recovery
 
 **One of two lost.** Ada signs in with iCloud Keychain and removes the
@@ -689,6 +747,19 @@ service tokens issued, bindings made, access changed. The recovery steps in
 
 `off` keeps the rows. Passkeys are not deleted when a deployment turns
 them off, so turning them back on restores everyone's.
+
+**As built (PR 6a): the reset.** `DELETE /api/members/:member/passkeys`,
+**always**: an Owner of the whole instance, signed in as themselves (not
+a token's scope, nor an MCP connection), for someone else, who holds a
+live passkey (`409 no_passkeys` otherwise). Under the target's factor lock
+and the head, it removes every live passkey of theirs (`removed_by`, the
+Owner) and ends everything they are signed in with, as a removal does,
+issuing nothing; `passkey.reset` names the passkeys and how much ended.
+The notice is read from the rows: while the person holds no live
+passkey, a newest removal by someone else is a reset, `{ by, at }`,
+which the Passkeys tab's read and the sign-in's enroll step answer. Each
+removal is dated by the app's clock that wrote it, so the rule compares
+no row's `created_at`, the database's.
 
 ## 4. What needs a fresh check
 
@@ -1794,7 +1865,8 @@ New actions, in the shared log as `account.link` and `device.approve` are:
 | `passkey.add` | a passkey is added: at a first sign-in, from Account | passkey ID, name, AAGUID, synced |
 | `passkey.remove` | its person removes one | passkey ID, credentials and apps ended |
 | `passkey.reset` | an Owner resets someone's | target, passkey IDs, credentials and apps ended |
-| `passkey.check` | a fresh check or a step-up, allowed or denied | passkey ID, purpose, the session ended and the one issued; on deny, the reason: the verifier's (section 9), or `unknown_credential`, `replay` or `counter` |
+| `passkey.rename` | its person renames one (PR 6a) | passkey ID, name |
+| `passkey.check` | a fresh check or a step-up, allowed or denied; a removal's touch, denied | passkey ID, purpose, the session ended and the one issued; on deny, the reason: the verifier's (section 9), or `unknown_credential`, `replay` or `counter` |
 
 Changed:
 
@@ -1953,7 +2025,8 @@ running `passkeys: 'required'`:
    to add a first passkey (`?passkey=add`), which an act asks of a person
    with none under `optional` until Account → Passkeys adds one in place.
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
-   `optional`.
+   `optional`. Built in two: 6a (built), the API's side, as sections 3.6
+   and 3.7 say; 6b, the pages.
 7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
    case) and `docs/offboarding.md`.
 

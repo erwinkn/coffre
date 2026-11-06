@@ -236,6 +236,9 @@ function mcp(ctx: ApiContext) {
  */
 const touchAnswer = z.object({ state: z.string().min(1), response: z.record(z.string(), z.unknown()) }).strict();
 
+/** A passkey's name, as its person gives it (section 3.6): shown in lists and the log, so no control character. */
+const passkeyLabel = z.string().trim().min(1).max(64).refine((name) => !/\p{Cc}/u.test(name), 'a name cannot hold a control character');
+
 const authorizationRequest = z.object({
   client_id: z.string().max(2048).optional(),
   redirect_uri: z.string().max(2048).optional(),
@@ -575,6 +578,27 @@ export const routes = {
       const managed = member.type === 'service' && (await managedAccount(ctx, ctx.caller, member.id)).managed;
       return signin(ctx).revokeCredential(ctx, params.id, { member: formatMember(member), managed });
     },
+  }),
+  // A person's passkeys (passkeys.md, section 3.6): their own, to list, add another and rename. Removing one replaces
+  // the browser's session (rule 1), so it goes through the passkey page's door instead, as a step-up does
+  // (`/api/auth/passkey?remove=<id>`). An Owner of the whole instance lists anyone's, and resets them (section 3.7).
+  ...route('GET /members/:member/passkeys', {
+    run: (ctx, { params }) => signin(ctx).listPasskeys(ctx, parseMember(params.member)),
+  }),
+  // What the browser's `create()` takes for another passkey, and its sealed state; the answer is the POST below.
+  ...route('POST /members/:member/passkeys/options', {
+    run: (ctx, { params }) => signin(ctx).addStep(ctx, parseMember(params.member)),
+  }),
+  ...route('POST /members/:member/passkeys', {
+    input: touchAnswer,
+    run: (ctx, { params, input }) => signin(ctx).addPasskey(ctx, parseMember(params.member), input),
+  }),
+  ...route('PATCH /members/:member/passkeys/:id', {
+    input: z.object({ name: passkeyLabel }).strict(),
+    run: (ctx, { params, input }) => signin(ctx).renamePasskey(ctx, parseMember(params.member), params.id, input.name),
+  }),
+  ...route('DELETE /members/:member/passkeys', {
+    run: (ctx, { params }) => signin(ctx).resetPasskeys(ctx, parseMember(params.member)),
   }),
   ...route('GET /members/:member/bindings', {
     run: async (ctx, { params }) => ({

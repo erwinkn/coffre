@@ -62,7 +62,8 @@ test('every route of the API is a command of the CLI, or a browser\'s, with why'
   // What only a browser does, as coffre help does not offer it.
   const browser = Object.entries(PARITY).filter(([, reach]) => 'browser' in reach).map(([route]) => route);
   // The Proxy tab's (0.16): its page reviews each change before it is made, and code defines the rest.
-  assert.deepEqual(browser, ['GET /projects/:project/:environment/proxy', 'PUT /projects/:project/:environment/proxy', 'PUT /proxy/reserved', 'GET /workloads/repositories', 'GET /device-logins/:code', 'POST /device-logins/:code', 'GET /oauth/authorizations', 'POST /oauth/authorizations', 'GET /approvals/:id', 'POST /approvals/:id']);
+  // A person's passkeys (0.16): a terminal cannot touch one.
+  assert.deepEqual(browser, ['GET /projects/:project/:environment/proxy', 'PUT /projects/:project/:environment/proxy', 'PUT /proxy/reserved', 'GET /workloads/repositories', 'GET /device-logins/:code', 'POST /device-logins/:code', 'GET /oauth/authorizations', 'POST /oauth/authorizations', 'GET /approvals/:id', 'POST /approvals/:id', 'GET /members/:member/passkeys', 'POST /members/:member/passkeys/options', 'POST /members/:member/passkeys', 'PATCH /members/:member/passkeys/:id', 'DELETE /members/:member/passkeys']);
 });
 
 test("a command's own flag named like a session flag reaches it: grant --service is grant's", () => {

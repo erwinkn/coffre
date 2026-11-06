@@ -228,8 +228,26 @@
   (`/auth/signin/<provider>?passkey=add`). A touch for one act opens no
   window: approving a terminal leaves the browser's own five minutes as
   they were. `GET /api/me` says `passkeys: { policy, enrolled,
-  confirmedUntil }`. Under `off`, and for services, nothing is asked. To
-  come: Account → Passkeys and the Owner's reset
+  confirmedUntil }`. Under `off`, and for services, nothing is asked.
+  Managing passkeys, the API's side (PR 6a): `GET
+  /api/members/:member/passkeys` lists a person's own (name, provider,
+  synced, added, last used), what removing one ends, and an Owner's
+  reset of them while they hold none since; `POST …/passkeys/options`
+  then `POST …/passkeys` add another from a session a touch confirmed in
+  the last five minutes, ten at most (a first one is added at sign-in,
+  `?passkey=add`); `PATCH …/passkeys/:id` renames one, no check. A new
+  passkey is named by its provider where its AAGUID names one
+  ("1Password", "Google Password Manager"), else "Passkey <n>". Removing
+  one goes through the passkey page's door, as a step-up does (`GET
+  /api/auth/passkey?remove=<id>`, then the `POST`): a touch of one the
+  person keeps, or of the last one under `optional` (none under `off`;
+  under `required` the last one stays), and it ends everything they are
+  signed in with, the session it came in on included, and gives this
+  browser a new one. An Owner of the whole instance resets someone
+  else's, `DELETE /api/members/:member/passkeys`, from a fresh session:
+  every live passkey removed and everything that person is signed in
+  with ended, `passkey.reset` in the log. To come: the pages (Account →
+  Passkeys, the reset dialog, the prompt under `optional`)
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
   serves at `http://localhost:3000` now.
 
