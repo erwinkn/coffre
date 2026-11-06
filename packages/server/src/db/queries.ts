@@ -3245,24 +3245,6 @@ export async function holdingSensitive(db: Queryable, environmentIds: readonly s
   return new Set([...own, ...referred].map((row) => row.environmentId));
 }
 
-/**
- * Of these keys, those that hold no value of their own and whose newest
- * reference has not ended (`ended_at`), as their objects read them
- * (`secretObjects`), each with whether its source's current version is
- * sensitive: the nature it reads as, live (R23). By id, one statement, the
- * same seek per key as `secretObjects`.
- */
-export async function liveReferences(db: Queryable, ids: readonly string[]): Promise<Map<string, { sensitive: boolean }>> {
-  if (ids.length === 0) return new Map();
-  const { secrets, secretVersions, secretReferences } = tablesOf(db);
-  // The holder by its table's name: a statement of one table names its columns bare, which the subqueries would take as their own.
-  const holder = sql`${secrets}.id`;
-  const source = ofNewestReference(db, holder, sql`CASE WHEN ${secretReferences.endedAt} IS NULL THEN ${secretReferences.sourceSecretId} END`);
-  const sensitive = sql<boolean | number | null>`(SELECT version.sensitive FROM ${secretVersions} version WHERE version.id = (SELECT source.current_version_id FROM ${secrets} source WHERE source.id = ${source}))`;
-  const rows = await db.select({ id: secrets.id, source, sensitive }).from(secrets).where(and(inArray(secrets.id, [...new Set(ids)]), isNull(secrets.currentVersionId)));
-  return new Map(rows.filter((row) => row.source !== null).map((row) => [row.id, { sensitive: Boolean(row.sensitive) }]));
-}
-
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */
 export async function versionEnvelopes(db: Queryable, ids: readonly string[]): Promise<Map<string, { version: number; envelope: Envelope; sensitive: boolean; plaintext: string | null }>> {
   if (ids.length === 0) return new Map();

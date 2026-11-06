@@ -20,7 +20,6 @@ import { resolveConfig } from '../src/config.ts';
 import type { Gates } from '../src/gate.ts';
 import { checkPlugins, pluginRoute } from '../src/plugins.ts';
 import { credentialProxy, header } from '../src/plugins/credential-proxy.ts';
-import { liveReferences, places, secretHeads } from '../src/db/queries.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { forgetKeys } from '../src/workloads/keys.ts';
 import { processLimits } from '../src/workloads/limits.ts';
@@ -125,9 +124,9 @@ beforeEach(async () => {
 
 const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
 
-/** The service's GitHub binding, made by the Owner, with `policy`. */
-async function bind(policy: Record<string, unknown> = {}): Promise<void> {
-  const made = await runtime.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY as never, label: 'github', replaces: [], policy }, { dryRun: false });
+/** The service's GitHub binding, made by `by`, the Owner unless named, with `policy`. */
+async function bind(policy: Record<string, unknown> = {}, by = ROOT): Promise<void> {
+  const made = await runtime.workloads!.bind(await contextFor(deps, by), SERVICE, { profile: 'github', issuer: null, claims: DEPLOY as never, label: 'github', replaces: [], policy }, { dryRun: false });
   assert.ok('binding' in made, JSON.stringify(made));
 }
 
@@ -205,12 +204,20 @@ test('a workload listing both of landing/prod\'s references by name reads both; 
   const again = await session();
   assert.equal(await sessionReveal(again, 'landing/prod/CLERK_SECRET_KEY'), CLERK);
   assert.equal(await sessionReveal(again, 'landing/prod/STRIPE_SECRET_KEY'), STRIPE);
-  // A listed reference is as sensitive as its source is now (R23), which the binding's issuer must be an Owner to give (R32).
-  const [landing] = (await places(db.runtime)).filter((project) => project.slug === 'landing');
-  const heads = await secretHeads(db.runtime, landing!.environments.find((environment) => environment.slug === 'prod')!.id, { keys: ['CLERK_SECRET_KEY', 'STRIPE_SECRET_KEY'] });
-  const natures = await liveReferences(db.runtime, heads.map((row) => row.id));
-  assert.deepEqual(Object.fromEntries(heads.map((row) => [row.key, natures.get(row.id)])), { CLERK_SECRET_KEY: { sensitive: true }, STRIPE_SECRET_KEY: { sensitive: false } });
   await assert.rejects(bind({ reads: { 'landing/prod': ['MISSING'] } }), /does not hold: MISSING/);
+});
+
+test('a listed reference is as sensitive as its source is now (R23): a Developer of landing/prod lists the secret one, and only an Owner the sensitive one (R32)', async () => {
+  await root.access.set(`user:${LIN}`, { 'landing/prod': 'developer', 'landing': 'developer' });
+  await bind({ reads: { 'landing/prod': ['STRIPE_SECRET_KEY'] } }, LIN);
+  await assert.rejects(bind({ reads: { 'landing/prod': ['CLERK_SECRET_KEY'] } }, LIN), /only an Owner of landing lets a service read its sensitive values \(R32\): CLERK_SECRET_KEY/);
+});
+
+test('a broken reference holds nothing a binding can list, under either log', async () => {
+  await root.secrets.set('landing/prod', { BROKEN: { ref: 'backend/prod/STRIPE_SECRET_KEY' } });
+  await root.references.break('landing/prod/BROKEN');
+  await assert.rejects(bind({ reads: { 'landing/prod': ['BROKEN'] } }), /does not hold: BROKEN/);
+  await bind({ reads: { 'landing/prod': ['STRIPE_SECRET_KEY'] } });
 });
 
 test('a service token of landing/prod alone, issued by an Owner of landing, reads its references, sensitive and secret; one a Developer issued, the secret alone', async () => {
