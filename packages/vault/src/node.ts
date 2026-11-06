@@ -125,10 +125,11 @@ export type VaultServer = { socket: string; close(): Promise<void> };
  * a shared group, e.g. `/run/coffre/vault.sock`. One route, `POST /call`,
  * whose body is `{ release, method, args }`, the version gate's envelope,
  * answered whole: the entry it forwards to gates (`openLocalVault`), and
- * nothing here gates again.
+ * nothing here gates again. `options` are `localVault`'s, such as `uses`
+ * (how many calls in flight at once, by default the hot pool's size).
  */
-export async function serveVault(config: NodeVaultConfig & { socket: string }): Promise<VaultServer> {
-  const vault = await localVault(config);
+export async function serveVault(config: NodeVaultConfig & { socket: string }, options: VaultOptions = {}): Promise<VaultServer> {
+  const vault = await localVault(config, options);
   const server = createServer(async (req, res) => {
     const reply = (status: number, body: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
