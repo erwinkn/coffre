@@ -913,6 +913,9 @@ test('only those who manage a service account issue its tokens, for active servi
   // A deployment may hold tokens to fewer days (R76): its maximum, never a day more.
   const shorter = new SigninService({ db: deps.db, chainKey: deps.chainKey, vault: deps.vault, signin: { ...CONFIG, serviceTokenMaxDays: 30 } });
   await assert.rejects(shorter.issueServiceToken(lead, SERVICE, { label: null, expiresInDays: 31 }), { status: 400, message: /between 1 and 30 days/ });
+  // Planned too (`?dryRun=1`, which MCP's approvals ask first): a plan it offers is one issuing accepts.
+  await assert.rejects(shorter.planServiceToken(lead, SERVICE, { label: null, expiresInDays: 31 }), { status: 400, message: /between 1 and 30 days/ });
+  await shorter.planServiceToken(lead, SERVICE, { label: null, expiresInDays: 30 });
   assert.equal(await countRows(credentials), 0);
 
   const rows = await auditRows();

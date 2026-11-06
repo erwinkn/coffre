@@ -601,7 +601,8 @@ export const MAX_SERVICE_TOKEN_DAYS = 365;
 
 /**
  * How long a service account's token lives unless its maker says, in days: the CLI's and the UI's default, the API has
- * none. Where a deployment's maximum is lower, its maximum is the default instead (`serviceTokenDefaultDays`).
+ * none. Where a deployment's maximum is lower, the UI offers its maximum instead (`serviceTokenDefaultDays`); the CLI
+ * still sends 90, which that deployment refuses, so its makers say `--expires-in`.
  */
 export const DEFAULT_SERVICE_TOKEN_DAYS = 90;
 
