@@ -334,11 +334,29 @@ const OIDC: ProofKind = {
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, ctx.publicUrl));
     if (candidates.length === 0) return madeElsewhere(loaded[loaded.length - 1]!, ctx.publicUrl);
-    const accepted = (binding: BindingRow) => expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
+    // Each candidate's policy read once, and paid for from the sign-in's budget as its claims are (`SIGN_IN_WORK_NS`).
+    const audiences = new Map<BindingRow, string[]>();
+    const accepted = (binding: BindingRow): string[] => {
+      let held = audiences.get(binding);
+      if (held === undefined) {
+        work.left -= binding.policy!.length * CHAR_NS;
+        if (work.left < 0) throw new SignInWorkSpent();
+        held = expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
+        audiences.set(binding, held);
+      }
+      return held;
+    };
     // The audience the token names, if a binding takes it; else the instance's, which verifying it then refuses.
     const named = soleAudience(decoded.claims.aud);
-    const audience = named !== null && candidates.some((binding) => accepted(binding).includes(named)) ? named : ctx.publicUrl;
-    const taking = candidates.filter((binding) => accepted(binding).includes(audience));
+    let audience: string;
+    let taking: BindingRow[];
+    try {
+      audience = named !== null && candidates.some((binding) => accepted(binding).includes(named)) ? named : ctx.publicUrl;
+      taking = candidates.filter((binding) => accepted(binding).includes(audience));
+    } catch (error) {
+      if (error instanceof SignInWorkSpent) return new ExchangeRefused('no_match', error.message);
+      throw error;
+    }
     // A token its platform hands out again is as old as its platform's cache: its own `exp` ends it, not an hour after `iat`.
     const repeats = taking.some((binding) => REPEATING_PROFILES.includes(binding.profile as WorkloadProfile));
     const newest = candidates[candidates.length - 1]!;
@@ -1819,7 +1837,9 @@ async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRea
     }
     const names = [...new Set(keys as string[])];
     const held = (await secretHeads(db, environment.id, { keys: names })).filter((row) => row.archivedAt === null && row.current !== null);
-    const missing = names.filter((name) => !held.some((row) => row.key === name));
+    // By a set of what it holds, not each name against every row: both as long as a body and an environment let them be.
+    const holds = new Set(held.map((row) => row.key));
+    const missing = names.filter((name) => !holds.has(name));
     if (missing.length > 0) throw badRequest(`reads lists keys ${path} does not hold: ${missing.join(', ')}`);
     resolved.push({ environmentId: environment.id, path: `${project.slug}/${environment.slug}`, projectId: project.id, keys: held.map((row) => ({ id: row.id, key: row.key, sensitive: row.current!.sensitive })) });
   }
