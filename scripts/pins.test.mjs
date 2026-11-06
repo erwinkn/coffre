@@ -56,6 +56,8 @@ test('3. a Dockerfile’s ADD of a URL carries its SHA-256', () => {
     fails('Dockerfile', 'FROM scratch\nADD https://example.com/t.tgz /opt/\n', /Dockerfile:2: ADD of a URL without --checksum/);
     fails('Dockerfile', 'FROM scratch\nADD --checksum=sha256:abc https://example.com/t.tgz /opt/\n');
     fails('Dockerfile', 'FROM scratch\nADD ["https://example.com/t.tgz", "/opt/"]\n');
+    // Docker drops a comment or blank line inside an instruction, and reads on.
+    fails('Dockerfile', 'FROM scratch\nADD \\\n    # the tool\n\n    https://example.com/t.tgz /opt/\n', /Dockerfile:2: ADD of a URL without --checksum/);
 });
 
 test('4. only scripts/fetch.sh downloads; a health check of this machine is marked', () => {
@@ -77,11 +79,16 @@ test('4. only scripts/fetch.sh downloads; a health check of this machine is mark
     // A comment ends at its line, a trailing backslash's too.
     fails('scripts/a.sh', '# Download example \\\ncurl https://example.com/tool\n', /scripts\/a\.sh:2: curl downloads/);
     fails('Dockerfile', 'FROM scratch\n# fetch \\\nRUN curl https://example.com/tool\n', /Dockerfile:3: curl downloads/);
+    fails('Dockerfile', 'FROM scratch\nRUN apk add x \\\n    # then the tool\n    && curl -o /x https://example.com/x\n', /Dockerfile:2: curl downloads/);
     // A health check: every URL this machine's.
     passes('scripts/a.sh', 'until curl -sf "http://127.0.0.1:$port/livez"; do sleep 1; done # pins: local\n');
     passes('scripts/a.sh', 'curl -sf http://localhost:3000/ http://[::1]:3000/ # pins: local\n');
     fails('scripts/a.sh', 'curl -sf http://127.0.0.1:3000/ https://example.com/ # pins: local\n');
     fails('scripts/a.sh', 'curl -sf http://127.0.0.1.example.com/ # pins: local\n');
+    // Before an @ is a user and password: the host is example.com.
+    fails('scripts/a.sh', 'curl -sf https://localhost:443@example.com/tool # pins: local\n');
+    fails('scripts/a.sh', 'curl -sf http://localhost@example.com/ # pins: local\n');
+    passes('scripts/a.sh', 'curl -sf http://localhost:3000/@example.com # pins: local\n');
     fails('scripts/a.sh', 'curl -sf http://127.0.0.1/ # pins: local, and more\n');
     fails('scripts/a.sh', 'curl -sf "$url" # pins: local\n');
 });
@@ -93,6 +100,7 @@ test('5. nothing fetches a package outside the lockfile', () => {
         fails('scripts/a.sh', `${line}\n`, /fetches a package outside the lockfile/);
     }
     fails('Dockerfile', 'FROM scratch\nRUN ["npm", "install"]\n');
+    fails('Dockerfile', 'FROM scratch\nRUN npm \\\n    # dependencies\n    install -g example\n', /Dockerfile:2: .*fetches a package outside the lockfile/);
     fails('docker-compose.yml', `services:\n  a:\n    image: a:1@${DIGEST}\n    command: [npx, wrangler]\n`);
     fails('.github/workflows/a.yml', run('echo ok && pnpm add x'));
     // Each command apart; the words alone, or in a name, are none.

@@ -70,7 +70,8 @@ const PACKAGE_FETCHES = [
 const PNPM_INSTALL = runs('pnpm', 'install', 'i');
 const FROZEN = new RegExp(word('--frozen-lockfile(?:=true)?'));
 const URL = /[a-z][a-z0-9+.-]*:\/\/[^\s"'`)]*/gi;
-const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?:[:/]|$)/;
+// The host itself, then at most a port: `https://localhost:443@example.com` is example.com's.
+const LOOPBACK = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::[^/?#@\\]*)?(?:[/?#]|$)/;
 
 /** The kinds of file this reads. */
 export function kindOf(path) {
@@ -118,7 +119,14 @@ function lines(text, kind, report, { path, pnpm }) {
         // A comment ends at its line, backslash or not.
         if (/^\s*#/.test(raw[k])) continue;
         let line = raw[k];
-        while (/\\\s*$/.test(line) && k + 1 < raw.length) line = line.replace(/\\\s*$/, ' ') + raw[++k];
+        while (/\\\s*$/.test(line) && k + 1 < raw.length) {
+            // Docker drops comment and blank lines inside an instruction; a shell does not.
+            if (kind === 'dockerfile' && /^\s*(?:#.*)?$/.test(raw[k + 1])) {
+                k++;
+                continue;
+            }
+            line = line.replace(/\\\s*$/, ' ') + raw[++k];
+        }
         const skip = exempt(raw, index, line);
         if (kind === 'dockerfile') {
             // An exempt FROM still names its stage.
