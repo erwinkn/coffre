@@ -1,30 +1,37 @@
 # Cursor Cloud base image for coffre.
 #
 # Provides the system-level toolchain the repo needs: Node 24 (via nvm),
-# pnpm 11.8.0 (via corepack), and a Docker engine configured to run inside the
-# Cloud Agent VM (fuse-overlayfs, no containerd snapshotter, legacy iptables) so
-# the Postgres service in docker-compose.yml works. Repo dependencies are
+# pnpm 11.28.9 (npm's tarball of it, no Corepack), and a Docker engine
+# configured to run inside the Cloud Agent VM (fuse-overlayfs, no containerd
+# snapshotter, legacy iptables) so the Postgres service in docker-compose.yml
+# works. Repo dependencies are
 # installed later by the environment `install` command, after checkout.
 #
 # Everything it fetches is pinned: the base by its index digest, Docker's
-# signing key, nvm and Node by their SHA-256 (`ADD --checksum`, which BuildKit
+# signing key, nvm, Node and pnpm by their SHA-256 (`ADD --checksum`, which BuildKit
 # checks before the file reaches a layer). Ubuntu's and Docker's apt packages
 # are not: an apt archive serves its current versions only, each checked
 # against the archive's signed index. Rebuilding the image takes the security
 # fixes of the day.
 
-# Node 24.22.1, the workspace's, for each architecture: its tarball and the
-# SHA-256 nodejs.org's SHASUMS256.txt gives. Only the stage of the platform
-# being built is fetched.
+# Node 24.22.2, the workspace's (.node-version), for each architecture: its
+# tarball and the SHA-256 nodejs.org's SHASUMS256.txt gives. Only the stage
+# of the platform being built is fetched.
 ARG TARGETARCH
 FROM scratch AS node-amd64
-ADD --chmod=644 --checksum=sha256:6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 \
-    https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-x64.tar.xz /node.tar.xz
+ADD --chmod=644 --checksum=sha256:48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75 \
+    https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz /node.tar.xz
 FROM scratch AS node-arm64
-ADD --chmod=644 --checksum=sha256:dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e \
-    https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-arm64.tar.xz /node.tar.xz
+ADD --chmod=644 --checksum=sha256:eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8 \
+    https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-arm64.tar.xz /node.tar.xz
 # unpinned: one of the two stages above, the platform's.
 FROM node-${TARGETARCH} AS node
+
+# pnpm 11.28.9, the workspace's packageManager: npm's tarball of it, which
+# runs on any architecture, held to its SHA-256.
+FROM scratch AS pnpm
+ADD --chmod=644 --checksum=sha256:e54b07e5634b7bf4352153e0c8c25bcef2930a29e3d1bdc42a9eaf2ffd4436df \
+    https://registry.npmjs.org/pnpm/-/pnpm-11.28.9.tgz /pnpm.tgz
 
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 
@@ -80,9 +87,11 @@ USER ubuntu
 WORKDIR /home/ubuntu
 ENV NVM_DIR=/home/ubuntu/.nvm
 
-# Node 24 via nvm + pinned pnpm through corepack. nvm is v0.40.3's nvm.sh, at
-# its commit and held to its SHA-256; Node is the tarball above, unpacked
-# where nvm keeps the versions it installs, so that `nvm use 24` finds it. The Cloud runtime injects its
+# Node 24 via nvm, and pnpm beside it. nvm is v0.40.3's nvm.sh, at its commit
+# and held to its SHA-256; Node is the tarball above, unpacked where nvm keeps
+# the versions it installs, so that `nvm use 24` finds it; pnpm is its
+# tarball above, unpacked where `npm install -g` would put it, its command
+# linked in Node's bin. The Cloud runtime injects its
 # own Node 22 ahead of us on PATH, so we must prepend the nvm-managed Node 24
 # bin. The runtime sources ~/.bashrc even for non-interactive shells (via
 # BASH_ENV), so put the prepend ABOVE the stock interactive-guard early return,
@@ -90,19 +99,21 @@ ENV NVM_DIR=/home/ubuntu/.nvm
 # at build time from `nvm which`) avoids sourcing nvm on every command. Node 24
 # is required because the CLI, dev IdP, migrations, and test runner execute .ts
 # files directly via node (native type-stripping, Node 23.6+/24 only).
-ARG NODE_VERSION=24.22.1
+ARG NODE_VERSION=24.22.2
 RUN mkdir -p "$NVM_DIR"
 ADD --chown=ubuntu:ubuntu --checksum=sha256:390260ab9eb1da20e8bc0ebea2ee90f528d53e5e9f6e13b16717db4af454df9d \
     https://raw.githubusercontent.com/nvm-sh/nvm/977563e97ddc66facf3a8e31c6cff01d236f09bd/nvm.sh /home/ubuntu/.nvm/nvm.sh
 RUN --mount=type=bind,from=node,source=/node.tar.xz,target=/tmp/node.tar.xz \
+    --mount=type=bind,from=pnpm,source=/pnpm.tgz,target=/tmp/pnpm.tgz \
     mkdir -p "$NVM_DIR/versions/node/v$NODE_VERSION" \
     && tar -xJf /tmp/node.tar.xz -C "$NVM_DIR/versions/node/v$NODE_VERSION" --strip-components=1 \
+    && mkdir "$NVM_DIR/versions/node/v$NODE_VERSION/lib/node_modules/pnpm" \
+    && tar -xzf /tmp/pnpm.tgz -C "$NVM_DIR/versions/node/v$NODE_VERSION/lib/node_modules/pnpm" --strip-components=1 \
+    && ln -s ../lib/node_modules/pnpm/bin/pnpm.mjs "$NVM_DIR/versions/node/v$NODE_VERSION/bin/pnpm" \
     && printf '%s\n' 'export NVM_DIR="$HOME/.nvm"' '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> "$HOME/.bashrc" \
     && . "$NVM_DIR/nvm.sh" \
     && nvm alias default "$NODE_VERSION" \
     && nvm use default \
-    && corepack enable \
-    && corepack prepare pnpm@11.8.0 --activate \
     && NODE_BIN="$(dirname "$(nvm which default)")" \
     && printf '%s\n' "export PATH=\"$NODE_BIN:\$PATH\"" | cat - "$HOME/.bashrc" > "$HOME/.bashrc.new" \
     && mv "$HOME/.bashrc.new" "$HOME/.bashrc" \

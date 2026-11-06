@@ -15,7 +15,9 @@
 //      PACKAGE_FETCHES below are banned.
 //   6. A pnpm install (`pnpm … install`, or `pnpm i`) carries
 //      `--frozen-lockfile`.
-//   7. `pnpm@<version>` (Corepack's) is the workspace's packageManager pnpm.
+//   7. Nothing runs Corepack (`corepack`), which Node drops: pnpm comes from
+//      pnpm/action-setup in a workflow, a checksummed tarball in a
+//      Dockerfile, and switches itself to package.json's packageManager.
 //   8. A step's `with: <tool>-version` is an exact version, or `${{
 //      matrix.<key> }}` whose list in the job's `strategy.matrix` holds only
 //      exact versions (and `runner`, the runner's own); `runs-on` names no
@@ -57,6 +59,7 @@ const word = (names) => String.raw`(?<![\w.-])(?:${names})(?=$|[\s'"\`)])`;
 const runs = (program, later, alias) => new RegExp(`${word(program)}(?:.*\\s${word(later)}${alias ? `|\\s+${word(alias)}` : ''})`);
 
 const DOWNLOADERS = new RegExp(word('curl|wget'));
+const COREPACK = new RegExp(word('corepack'));
 const PACKAGE_FETCHES = [
     new RegExp(word('npx|pnpx|bunx')),
     runs('npm', 'exec|install|ci|install-test|add|update', 'i|x|it|up'),
@@ -87,15 +90,14 @@ export function kindOf(path) {
 
 /**
  * Every problem in one file: `path:line: what` in a script or a Dockerfile,
- * `path: <where in its data>: what` in YAML or JSON. `pnpm` is the
- * workspace's packageManager version.
+ * `path: <where in its data>: what` in YAML or JSON.
  */
-export function problemsIn(path, text, { root = false, pnpm } = {}) {
+export function problemsIn(path, text, { root = false } = {}) {
     const kind = kindOf(path);
     if (kind === null) return [];
     const problems = new Set();
     if (kind === 'shell' || kind === 'dockerfile') {
-        lines(text, kind, (index, message) => problems.add(`${path}:${index + 1}: ${message}`), { path, pnpm });
+        lines(text, kind, (index, message) => problems.add(`${path}:${index + 1}: ${message}`), { path });
         return [...problems];
     }
     let documents;
@@ -106,12 +108,12 @@ export function problemsIn(path, text, { root = false, pnpm } = {}) {
     }
     const report = (where, message) => problems.add(`${path}: ${where}: ${message}`);
     if (kind === 'workspace') workspace(documents, report, root);
-    else for (const document of documents) data(document, kind, report, { path, pnpm });
+    else for (const document of documents) data(document, kind, report, { path });
     return [...problems];
 }
 
 // Rules 3 to 7, line by line.
-function lines(text, kind, report, { path, pnpm }) {
+function lines(text, kind, report, { path }) {
     const raw = text.split('\n');
     const stages = new Set();
     for (let k = 0; k < raw.length; k++) {
@@ -138,7 +140,7 @@ function lines(text, kind, report, { path, pnpm }) {
             // An argument list is the command its words make.
             line = line.replace(/"\s*,\s*"/g, ' ');
         }
-        if (!skip) commands(line, pnpm, (message) => report(index, message), { downloads: path === FETCHER });
+        if (!skip) commands(line, (message) => report(index, message), { downloads: path === FETCHER });
     }
 }
 
@@ -167,7 +169,7 @@ function dockerfile(line, stages, report) {
 
 // Rules 4 to 7 on one line.
 // scripts/fetch.sh may run a downloader; nothing else in it is exempt.
-function commands(line, pnpm, report, { downloads = false } = {}) {
+function commands(line, report, { downloads = false } = {}) {
     const downloader = line.match(DOWNLOADERS);
     if (downloader && !downloads && !localOnly(line)) {
         report(`${downloader[0]} downloads: use scripts/fetch.sh <url> <sha256> <file> (a Dockerfile: ADD --checksum=sha256:…), or mark a health check of this machine \`# pins: local\``);
@@ -176,9 +178,7 @@ function commands(line, pnpm, report, { downloads = false } = {}) {
         if (PACKAGE_FETCHES.some((pattern) => pattern.test(command))) report(`${command.trim()}: fetches a package outside the lockfile (add a dependency with pnpm run add:dep)`);
         if (PNPM_INSTALL.test(command) && !FROZEN.test(command)) report(`${command.trim()}: pnpm install without --frozen-lockfile`);
     }
-    for (const match of line.matchAll(/(?<![\w./-])pnpm@([^\s"'`;&|)]*)/g)) {
-        if (match[1] !== pnpm) report(`${match[0]} is not pnpm@${pnpm}, the workspace's`);
-    }
+    if (COREPACK.test(line)) report("corepack: Node drops it; pnpm switches itself to package.json's packageManager (in a workflow, pnpm/action-setup; in a Dockerfile, npm's tarball by its SHA-256)");
 }
 
 // `# pins: local` at the end of a line whose every URL is this machine's.

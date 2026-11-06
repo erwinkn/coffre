@@ -385,7 +385,7 @@ jobs:
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 24.22.1
+          node-version: 24.22.2
       - name: Verify the live instance
         run: |
           printf '%s' "$PROBE_TOKEN" | npx --yes @coffre/cli login https://secrets.example.com --token

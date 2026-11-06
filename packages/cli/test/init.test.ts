@@ -100,13 +100,16 @@ test("the Workers deployment's deploy workflow pins its actions by commit, as co
   const workflow = readFileSync(join(root, 'examples/workers/.github/workflows/deploy.yml'), 'utf8');
   const ours = readFileSync(join(root, '.github/workflows/validate.yml'), 'utf8');
   const uses = [...workflow.matchAll(/uses: (\S+@\S+)(?: # (\S+))?/g)];
-  assert.deepEqual(uses.map(([, action]) => action!.split('@')[0]), ['actions/checkout', 'actions/setup-node']);
+  assert.deepEqual(uses.map(([, action]) => action!.split('@')[0]), ['actions/checkout', 'pnpm/action-setup', 'actions/setup-node']);
   for (const [line, action] of uses) {
     assert.match(action!, /@[0-9a-f]{40}$/, `${action} is pinned by commit`);
     assert.ok(ours.includes(line), `${line}: as .github/workflows/validate.yml pins it`);
   }
-  assert.match(workflow, /node-version: 24\.\d+\.\d+\n/);
-  assert.match(workflow, /run: corepack enable && pnpm install --frozen-lockfile\n/);
+  // pnpm and Node as the deployment pins them, which coffre update moves: no Corepack, which Node drops.
+  assert.match(workflow, /node-version-file: \.node-version\n/);
+  assert.equal(readFileSync(join(root, 'examples/workers/.node-version'), 'utf8'), readFileSync(join(root, '.node-version'), 'utf8'));
+  assert.match(workflow, /run: pnpm install --frozen-lockfile\n/);
+  assert.doesNotMatch(workflow, /corepack/i);
   // The URL on the migrate step alone, handed to the CLI on stdin.
   assert.equal(workflow.match(/DATABASE_OWNER_URL: \$\{\{ secrets\.DATABASE_OWNER_URL \}\}/g)?.length, 1);
   assert.match(workflow, /run: printenv DATABASE_OWNER_URL \| pnpm exec coffre migrate --yes\n {8}env:\n {10}DATABASE_OWNER_URL: /);

@@ -18,8 +18,9 @@ export function deploymentKind(dir: string): Kind | 'empty' | 'other' {
 }
 
 /**
- * Install a deployment's packages, as its README says: pnpm, through
- * corepack when pnpm itself is missing. `purge`, when the person has said
+ * Install a deployment's packages, as its README says: with pnpm, which
+ * switches itself to the version the deployment's packageManager pins.
+ * `purge`, when the person has said
  * yes already: a pnpm of another major than the one that installed
  * node_modules removes it first, and without a terminal it would ask, and
  * stop. `frozen`: exactly as the lockfile says, changing nothing.
@@ -27,8 +28,7 @@ export function deploymentKind(dir: string): Kind | 'empty' | 'other' {
 export function install(dir: string, { purge = false, frozen = false }: { purge?: boolean; frozen?: boolean } = {}): Promise<void> {
   const attempt = (command: string, args: string[]) =>
     new Promise<{ code: number | null; output: string } | null>((resolve) => {
-      // Corepack would otherwise ask, on a stdin nobody types into, before fetching pnpm.
-      const child = spawn(command, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' } });
+      const child = spawn(command, args, { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
       let output = '';
       child.stdout.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
       child.stderr.setEncoding('utf8').on('data', (chunk: string) => (output += chunk));
@@ -43,8 +43,8 @@ export function install(dir: string, { purge = false, frozen = false }: { purge?
       ...(purge ? ['--config.confirm-modules-purge=false'] : []),
       ...(frozen ? ['--frozen-lockfile'] : []),
     ];
-    const ran = (await attempt('pnpm', args)) ?? (await attempt('corepack', ['pnpm', ...args]));
-    if (ran === null) throw new Error('pnpm is not installed: corepack enable, or npm install -g pnpm, then run setup again');
+    const ran = await attempt('pnpm', args);
+    if (ran === null) throw new Error('pnpm is not installed: install it (https://pnpm.io/installation), then run setup again');
     if (ran.code !== 0) {
       const held = heldBack(ran.output);
       throw held.length > 0 ? new HeldBack(held, installFailure(ran.output)) : new Error(installFailure(ran.output));

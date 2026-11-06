@@ -3,13 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.8.0",
+  "packageManager": "pnpm@11.28.9",
   "engines": {
     "node": ">=24"
   },
   "scripts": {
-    "build": "pnpm -r --filter ./packages/core --filter ./packages/client run build && pnpm -r --filter \"./packages/*\" --filter \"!./packages/core\" --filter \"!./packages/client\" run build",
-    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./examples/*\" --filter ./dev run typecheck",
+    "build": "pnpm -r --filter ./packages/core --filter ./packages/client run build && pnpm --filter ./packages/db run build && pnpm --filter ./packages/cli run build && pnpm -r --filter \"./packages/*\" --filter \"!./packages/core\" --filter \"!./packages/client\" --filter \"!./packages/db\" --filter \"!./packages/cli\" run build",
+    "typecheck": "pnpm -r --no-sort --filter \"./packages/*\" --filter \"./examples/*\" --filter ./dev run typecheck",
     "dev": "./dev/start.sh",
     "test": "pnpm lint && ./scripts/test-suite.sh",
     "test:sqlite": "pnpm lint && COFFRE_TEST_ENGINE=sqlite ./scripts/test-suite.sh",

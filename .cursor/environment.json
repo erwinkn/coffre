@@ -4,7 +4,7 @@
   "build": {
     "dockerfile": "Dockerfile"
   },
-  "install": ". \"$HOME/.nvm/nvm.sh\"\nnvm use 24\ncorepack pnpm install --frozen-lockfile",
+  "install": ". \"$HOME/.nvm/nvm.sh\"\nnvm use default\npnpm install --frozen-lockfile",
   "start": "bash .cursor/start.sh",
   "ports": [
     { "name": "web", "port": 3000 },
