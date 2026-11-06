@@ -500,12 +500,16 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   (Google's and ASP.NET's APIs; OData's `X-HTTP-Method`; Express's
   `method-override`). So each method a request names in
   `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override` (or
-  the same with `_`, as Rack and PHP read them), or in a `_method` query
-  parameter, must be one the list takes on its path, or the request is a
-  405 naming it, before its body is read or any value opens. A name is
-  `_method` as PHP and Tomcat read one too (`.method`, `_method[]`,
-  `_method `, any case), and a parameter named as one of those headers
-  counts as one, as ServiceStack reads them. An override the list takes
+  the same with `_` or `.`, as Rack and PHP read them), or in a `_method`
+  query parameter, must be one the list takes on its path, or the request
+  is a 405 naming it, before anything goes upstream: through a handle,
+  before its body is read or any value opens; through a UI route, after
+  its one vault call, which opens them; a workload's, after its signed
+  body is checked. A name is `_method` as PHP and Tomcat read one too
+  (`.method`, `_method[]`, `_method `, any case), and a parameter named
+  as one of those headers counts as one, as ServiceStack and ASP.NET MVC
+  read them, ASP.NET's `%uXXXX` decoded too (`%u0058-HTTP-Method-Override`).
+  An empty value names no method and changes nothing (`?_method=`). An override the list takes
   goes on as it came (Google's `PATCH` through a POST): the upstream acts
   on a method the list allows either way, so refusing what it does not
   take closes the gap and breaks no client that stays inside the list,

@@ -39,7 +39,8 @@
   `X-HTTP-Method` or `X-Method-Override`, or in a `_method` query
   parameter, must now be one the allow list (or a narrowed session's
   `methods`) takes on its path, or the request is a 405 (a 403
-  `narrowed`), before its body is read or any value opens. An override
+  `narrowed`), before anything goes upstream (through a handle, before
+  its body is read or any value opens). An override
   the list takes goes on as it came. Where an entry takes any method on
   the path, or there is no list, nothing changes. **Not covered:** a
   `_method` field in a POST's form or multipart body, which Rails,

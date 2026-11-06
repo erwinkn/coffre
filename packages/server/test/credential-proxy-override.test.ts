@@ -66,8 +66,9 @@ function multipart(parts: [disposition: string, value: string][]): { headers: Re
 test('a request whose override asks for a method the allow list does not take on its path is refused, 405, before anything opens, however it asks', async () => {
   const { reached, opened, ask } = proxy({ allow: [{ methods: ['GET', 'POST'], path: '/items/**' }, { methods: ['DELETE'], path: '/trash/**' }] });
   const asks: [string, RequestInit][] = [
-    // Each header, in any case, a list's each, and as a CGI-style server reads one written with `_`.
+    // Each header, in any case, a list's each, and as a CGI-style server reads one written with `_` or, PHP, `.`.
     ['/items/1', { headers: { 'x-http-method-override': 'DELETE' } }],
+    ['/items/1', { headers: { 'X.HTTP.Method.Override': 'DELETE' } }],
     ['/items/1', { headers: { 'X-HTTP-Method': 'delete' } }],
     ['/items/1', { headers: { 'x-method-override': ' Delete ' } }],
     ['/items/1', { headers: { x_http_method_override: 'DELETE' } }],
@@ -86,8 +87,11 @@ test('a request whose override asks for a method the allow list does not take on
     ['/items/1?%5Fmethod=DELETE', {}],
     ['/items/1?_method=DEL%45TE', {}],
     ['/items/1?_method%20=DELETE', {}],
-    // ServiceStack reads an override header's name from a query too.
+    // ServiceStack and ASP.NET MVC read an override header's name from a query too; ASP.NET decodes `%uXXXX`.
     ['/items/1?X-HTTP-Method-Override=DELETE', {}],
+    ['/items/1?%u0058-HTTP-Method-Override=DELETE', {}],
+    ['/items/1?%u005Fmethod=DELETE', {}],
+    ['/items/1?_method=%u0044ELETE', {}],
     // DELETE is the list's on /trash alone, never on /items.
     ['/items/1', { headers: { 'x-http-method-override': 'DELETE' }, body: '' }],
   ];
@@ -113,6 +117,11 @@ test('an override the allow list takes goes on as it came; nothing is looked for
   assert.equal(reached.at(-1)!.url.search, '?_method=patch');
   // An entry of any method on the path: an override of any.
   assert.equal((await ask('/market/dev/api/open/1?_method=DELETE', { method: 'POST', headers: { 'x-http-method-override': 'DELETE' } })).status, 200);
+  // An empty override names no method: the request's own stands, as Express's method-override leaves it.
+  for (const path of ['/items/1?_method=', '/items/1?_method=+', '/items/1?X-HTTP-Method-Override=&_method']) {
+    assert.equal((await ask(`/market/dev/api${path}`, { method: 'POST', headers: { 'x-http-method-override': '' } })).status, 200, path);
+    assert.equal(reached.at(-1)!.url.search, path.slice('/items/1'.length));
+  }
   const unlisted = proxy({});
   assert.equal((await unlisted.ask('/market/dev/api/x?_method=DELETE', { method: 'POST', headers: { 'x-http-method-override': 'DELETE' } })).status, 200);
   assert.equal(unlisted.reached.length, 1);
@@ -127,6 +136,15 @@ test('what is no override goes on: a parameter named otherwise, a JSON-RPC metho
   ];
   for (const [path, init] of asks) assert.equal((await ask(`/market/dev/api${path}`, init)).status, 200, `${path} ${JSON.stringify(init)}`);
   assert.equal(reached.length, asks.length);
+});
+
+test('a query name of a long run of spaces is read in linear time, before a handle is checked', async () => {
+  const { ask } = proxy({ allow: [{ methods: ['POST'], path: '/items/**' }] });
+  // Trimming such a name with a regular expression retried the run from each of its spaces: 14,000 took 180 ms.
+  const started = performance.now();
+  const answer = await ask(`/market/dev/api/items/1?x${'+'.repeat(200_000)}z=method`, { method: 'POST' });
+  assert.equal(answer.status, 200, answer.body);
+  assert.ok(performance.now() - started < 1_000, `${Math.round(performance.now() - started)} ms`);
 });
 
 test('a POST that streams, its digest declared, is refused for its override header before its body is read, and streams as before without one', async () => {
@@ -147,6 +165,7 @@ test("a narrowed session's methods hold an override too, with no allow list; a w
   const refusals: [string, RequestInit][] = [
     ['/items/1', { headers: { 'x-http-method-override': 'DELETE' } }],
     ['/items/1?_method=DELETE', {}],
+    ['/items/1?%u0058-HTTP-Method-Override=DELETE', {}],
   ];
   for (const [path, init] of refusals) {
     const answer = await ask(`/market/dev/api${path}`, { method: 'POST', as: 'workload', ...init });

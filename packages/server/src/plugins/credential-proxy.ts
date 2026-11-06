@@ -2267,37 +2267,67 @@ function segmentsOf(entries: readonly AllowEntry[], relative: string): string[] 
 
 /**
  * The headers an upstream may take a request's method from instead of its own (T189): Google's and ASP.NET's
- * `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, and `X-Method-Override`. Named as a CGI-style server reads them
- * too, `_` for `-`: Rack and PHP read `X_HTTP_METHOD_OVERRIDE` as `HTTP_X_HTTP_METHOD_OVERRIDE`, the dashed one's name.
+ * `X-HTTP-Method-Override`, OData's `X-HTTP-Method`, and `X-Method-Override`; as `overrideHeader` reads a name.
  */
 const OVERRIDE_HEADERS = new Set(['x-http-method-override', 'x-http-method', 'x-method-override']);
 
 /**
+ * Whether a header's name, lowercase, is an override header's (`OVERRIDE_HEADERS`) as a CGI-style server reads it:
+ * every character but a letter or a digit is a `-` to it, as each is the `_` of an `HTTP_` variable. Rack and PHP read
+ * `X_HTTP_METHOD_OVERRIDE`, and PHP `X.HTTP.Method.Override` too, as `HTTP_X_HTTP_METHOD_OVERRIDE`, which Symfony
+ * takes for the dashed one (review r3 of #526).
+ */
+function overrideHeader(name: string): boolean {
+  return OVERRIDE_HEADERS.has(name.replace(/[^a-z0-9]/g, '-'));
+}
+
+/** `text` without the characters up to a space at either end, as Java's `trim`; a loop, linear however long the run. */
+function trimmed(text: string): string {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text.charCodeAt(start) <= 0x20) start++;
+  while (end > start && text.charCodeAt(end - 1) <= 0x20) end--;
+  return text.slice(start, end);
+}
+
+/**
  * Whether a query parameter's name, decoded, is `_method` to some framework that takes a request's method from it
  * (Rails, Laravel and Symfony, Spring's `HiddenHttpMethodFilter`, gorilla's, Express's `method-override`), or an
- * override header's, which ServiceStack reads from a query too: as PHP reads a name, up to a NUL or a `[`
- * (`_method[]`), leading spaces dropped, `.` and spaces as `_` (`.method`), or as Tomcat does, trimmed of every
+ * override header's, which ServiceStack and ASP.NET MVC read from a query too: as PHP reads a name, up to a NUL or a
+ * `[` (`_method[]`), leading spaces dropped, `.` and spaces as `_` (`.method`), or as Tomcat does, trimmed of every
  * character up to a space at both ends, as Java's `trim` is (`_method `); in any ASCII case.
  */
 function namesMethod(name: string): boolean {
-  return [name, name.replace(/^[\0- ]+|[\0- ]+$/g, '')].some((each) => {
+  return [name, trimmed(name)].some((each) => {
     const read = each.split(/[\0[]/, 1)[0]!.replace(/^ +/, '').replace(/[. ]/g, '_').replace(/[A-Z]/g, (char) => char.toLowerCase());
-    return read === '_method' || OVERRIDE_HEADERS.has(read.replaceAll('_', '-'));
+    return read === '_method' || overrideHeader(read);
   });
 }
 
 /**
- * The value of each method pair of a query (`namesMethod`): pairs split at `&` and `;`, as Rack before 3.0 splits
- * them, each name and value decoded as a form's, `+` a space and `%XX` a byte.
+ * A query's name or value as frameworks decode one: as a form's, `+` a space and `%XX` a byte; and where it holds a
+ * `%uXXXX`, as ASP.NET's decoder reads that too, one UTF-16 unit (`%u0058` an `X`, review r3 of #526), in the same pass.
+ */
+function readingsOf(part: string): string[] {
+  if (!/[%+]/.test(part)) return [part];
+  const spaced = part.replace(/\+/g, ' ');
+  const plain = bytesOf(spaced);
+  if (!/%u[0-9a-f]{4}/i.test(spaced)) return [plain];
+  const wide = spaced.replace(/%u([0-9a-f]{4})|%([0-9a-f]{2})/gi, (_, unit: string | undefined, byte: string | undefined) => String.fromCharCode(parseInt(unit ?? byte!, 16)));
+  return wide === plain ? [plain] : [plain, wide];
+}
+
+/**
+ * The values of a query's method pairs (`namesMethod`), each as any reading of it says (`readingsOf`): pairs split at
+ * `&` and `;`, as Rack before 3.0 splits them.
  */
 function methodPairs(text: string): string[] {
   const found: string[] = [];
   // Most queries hold neither: no pair is decoded then, however many there are.
   if (!/method|%/i.test(text)) return found;
-  const decoded = (part: string) => (/[%+]/.test(part) ? bytesOf(part.replace(/\+/g, ' ')) : part);
   for (const [pair] of text.matchAll(/[^&;]+/g)) {
     const equals = pair.indexOf('=');
-    if (namesMethod(decoded(equals === -1 ? pair : pair.slice(0, equals)))) found.push(decoded(equals === -1 ? '' : pair.slice(equals + 1)));
+    if (readingsOf(equals === -1 ? pair : pair.slice(0, equals)).some(namesMethod)) found.push(...readingsOf(equals === -1 ? '' : pair.slice(equals + 1)));
   }
   return found;
 }
@@ -2321,10 +2351,11 @@ function overridden(credential: Resolved, aimed: Aim, headers: Headers, session:
   if (!narrowed && (entries === null || entries.some((entry) => entry.methods === null && (entry.path === null || matches(entry.path, segments))))) return null;
   const asked: { method: string; via: string }[] = [];
   for (const [name, value] of headers) {
-    if (!OVERRIDE_HEADERS.has(name.replaceAll('_', '-'))) continue;
+    if (!overrideHeader(name)) continue;
     for (const each of value.split(',')) if (each.trim() !== '') asked.push({ method: each, via: `its ${name} header` });
   }
-  for (const each of methodPairs(aimed.target.search.slice(1))) asked.push({ method: each, via: 'a method query parameter' });
+  // An empty value names no method: Express's `method-override` leaves the request's own then, as for an empty header.
+  for (const each of methodPairs(aimed.target.search.slice(1))) if (each.trim() !== '') asked.push({ method: each, via: 'a method query parameter' });
   for (const { method: raw, via } of asked) {
     const method = raw.trim().replace(/[a-z]/g, (char) => char.toUpperCase());
     if (entries !== null && allows(entries, method, segments) !== 'allowed') {
