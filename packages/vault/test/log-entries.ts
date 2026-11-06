@@ -60,6 +60,23 @@ export function logWriter(owner: Database, macKey: LogMacKey) {
       return append((number) => sql`INSERT INTO log_changes (number, at, request_id, object, actor, payload, seal, mac)
         VALUES (${number}, ${row.at}, ${row.requestId}, ${row.object}, ${row.actor}, ${row.payload}, ${row.seal}, ${mac})`);
     },
+    /**
+     * `n` uses stamped now, 1,000 a statement, under the fence as one: for a log grown to size, Postgres alone (the
+     * verifier's cost test and bench).
+     */
+    async uses(n: number): Promise<void> {
+      if (ENGINE !== 'postgres') throw new Error('uses(n) numbers from the sequence: Postgres only');
+      for (let done = 0; done < n; done += 1000) {
+        const batch = Array.from({ length: Math.min(1000, n - done) }, () => {
+          const row = { at: Date.now(), requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
+          return sql`(nextval('log_number'), ${row.at}, ${row.requestId}, ${row.credential}, ${row.secret}, ${row.purpose}, ${entryMac(macKey, { tree: 'uses', row })}, NULL)`;
+        });
+        await owner.transaction(async (tx) => {
+          await run(tx, sql`SELECT pg_advisory_xact_lock_shared(1668244070, 0)`);
+          await run(tx, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ${sql.join(batch, sql`, `)}`);
+        });
+      }
+    },
     /** `forged`: a random MAC, or the one `forged` makes of the row's columns (another key's, say). */
     async use(at = Date.now(), forged: boolean | ((row: Omit<UseRow, 'number' | 'mac'>) => Buffer) = false): Promise<bigint> {
       const row = { at, requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };

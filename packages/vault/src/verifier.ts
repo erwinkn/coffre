@@ -54,12 +54,42 @@ export type VerifyOptions = {
 };
 
 /**
- * The most entries above the newest pair a check reads: four ticks' worth
- * at R44's 1,000 uses a second, 14 ms measured on a developer's machine
- * (verifier-cost.test.ts). More is a checkpointer behind, or rows a writer
- * planted, and is said (`capped`), never read (reviews r1, r4).
+ * The most entries above the newest pair a check reads: a bound on its work
+ * (a defensive bound, W331's limits audit, #18), not on a rate. More is a
+ * checkpointer behind, or rows a writer planted, and is said (`capped`),
+ * never read (reviews r1, r4).
+ *
+ * Its budget, a policy: the check at the cap within 20 ms of a Worker's CPU,
+ * R27's p99 bound, at the median, and at about that bound at p90; only a
+ * log past honest operation reaches the cap. Not at p99, an exception to
+ * R27: 40 checks show none, and their most at 1,000 was 27 to 42 ms; a cap
+ * that held the most under 20 ms would sit below the floor (the most at 500
+ * was 15 to 24 ms).
+ * The rest of the audit page (the app's render, 0.14's chain) is not in it.
+ * Measured on 2026-11-06 with test/bench/verifier.ts, the cap lifted: local
+ * workerd, its isolate's thread less a request that does nothing, Postgres
+ * 16.14 on Debian, an AMD EPYC 9454P shared with other work (load 19 to 33),
+ * 50,000 uses sealed below, the median of three runs of 40 checks: 4.3 ms at
+ * 0 entries (a new connection, its login and three statements), 8.1 at 250,
+ * 11.3 at 500, 17.0 at 1,000 (p90 20.2), 31.4 at 2,000. A line through the
+ * medians (4.5 ms fixed, 13.4 µs an entry) fits 1,150 in 20 ms; 1,000 is
+ * below it, where the p90 reaches 20 ms (20.0 to 20.8 in the three runs). V8's helper threads (concurrent GC,
+ * compilation) add to the tail, 38 ms at p90 at 1,000 with them; Cloudflare
+ * does not say whether it counts them. Of an entry's cost, HMAC-SHA256 is
+ * 3.4 µs and the encoding of its MAC data 3.1 µs; reading the row (some 144
+ * bytes on the wire) most of the rest. Memory does not bind: some 300 bytes
+ * of heap an entry held while checked (Node), 0.3 MB at the cap, beside a
+ * Worker's 128 MB.
+ *
+ * Its floor, a check of the budget's answer, not its source: an honest log
+ * holds a tick's worth above the pair (`TICK_MS`), 500 entries at R44's
+ * 1,000 uses a second, 1,000 when one tick is late; a cap below that would
+ * call a checkpointer on time behind. On Workers Free (10 ms an invocation)
+ * a check past some 400 entries fails instead (the page: "Sealed log not
+ * checked"), which a burst of uses or a late tick can bring; the cap does
+ * not change that.
  */
-export const ABOVE_NEWEST = 2_000;
+export const ABOVE_NEWEST = 1_000;
 
 /** The verdict as the vault gives it, and whether the database ended behind a pair held outside (`Verdict.behind`). */
 export type Walked = Extract<TreeVerification, { kept: true }> & { behind: boolean };

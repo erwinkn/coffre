@@ -1,23 +1,24 @@
 // A page's check of 0.15's log (verifier.ts) costs a tick's worth of entries, however long the log (R25, R27, R48). At
 // 1,000 uses a second, with 5k and 50k sealed below: the newest pair and the entries above it, 250 at a moment picked
 // at random (half a 500 ms tick), 500 just before the tick, 1,000 when it is late, and `ABOVE_NEWEST`, the most it
-// reads. Its statements are the same whatever lies below. Its CPU, in the vault's process, is logged, and held only to
+// reads (sized from a Worker's CPU, bench/verifier.ts). Its statements are the same whatever lies below. Its CPU, in the vault's process, is logged, and held only to
 // R27's p99 bound (20 ms) at a tick's worth: CI's machines are slower than a developer's. Measured on one
 // (docs/design/0.15-plan.md, "As built: PR 8"). Postgres, as a deployment runs it.
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 
 import { decodePair } from '@coffre/core/merkle';
 import { createDatabase, type Database } from '@coffre/db';
 import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
-import { entryMac, logMacKey, type LogMacKey } from '../src/log-entry.ts';
+import { logMacKey } from '../src/log-entry.ts';
 import { openLogCheckpointer } from '../src/log-checkpointer.ts';
 import { logStore } from '../src/log-store.ts';
 import { ABOVE_NEWEST, verifierKeys, verifyTrees } from '../src/verifier.ts';
 import { variableMemory } from './audit-tree.ts';
+import { logWriter } from './log-entries.ts';
 import { openTestDatabase, postgresOnly, rows, run, VAULT_URL, type TestDatabase } from './database.ts';
 
 let db: TestDatabase;
@@ -25,17 +26,6 @@ before(async () => {
   db = await openTestDatabase();
 });
 after(() => db.close());
-
-/** `n` uses, MAC'd as the use path writes them, numbered from the log's sequence, `at` now: inserted 1,000 a statement. */
-async function uses(n: number, mac: LogMacKey): Promise<void> {
-  for (let done = 0; done < n; done += 1000) {
-    const batch = Array.from({ length: Math.min(1000, n - done) }, () => {
-      const row = { at: Date.now(), requestId: BigInt.asIntN(64, randomBytes(8).readBigUInt64BE()), credential: randomUUID(), secret: randomUUID(), purpose: 1, place: null };
-      return sql`(nextval('log_number'), ${row.at}, ${row.requestId}, ${row.credential}, ${row.secret}, ${row.purpose}, ${entryMac(mac, { tree: 'uses', row })}, NULL)`;
-    });
-    await run(db.owner, sql`INSERT INTO log_uses (number, at, request_id, credential, secret, purpose, mac, place) VALUES ${sql.join(batch, sql`, `)}`);
-  }
-}
 
 /** The vault's database, each statement counted as it is sent, those of its transactions too. */
 function counting(): { db: Database; statements: () => number; close: () => Promise<void> } {
@@ -70,7 +60,7 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
   await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
 
   const seed = randomBytes(32);
-  const mac = logMacKey(seed);
+  const log = logWriter(db.owner, logMacKey(seed));
   const memory = variableMemory();
   const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
@@ -81,12 +71,12 @@ test('R25, R27: a page\'s check at 1,000 uses a second reads a tick\'s worth, it
     for (const below of [5_000, 50_000]) {
       // History, sealed a tick at a time; then a tick's worth above the newest pair, and a late tick's.
       for (; sealedBelow < below; sealedBelow += 5_000) {
-        await uses(5_000, mac);
+        await log.uses(5_000);
         assert.ok((await cp.tick()).signed);
       }
       let above = 0;
-      for (const target of [250, 500, 1_000, ABOVE_NEWEST]) {
-        await uses(target - above, mac);
+      for (const target of [...[250, 500, 1_000].filter((n) => n < ABOVE_NEWEST), ABOVE_NEWEST]) {
+        await log.uses(target - above);
         above = target;
         const anchors = [decodePair(memory.record!)!];
         const check = () => verifyTrees(vault, keys, { anchors });
@@ -124,14 +114,14 @@ test('review r4 (W240): more than `ABOVE_NEWEST` entries above the newest pair a
   const today = new Date().toISOString().slice(0, 10);
   await run(db.owner, sql`SELECT make_day(${today}::date - 1), make_day(${today}::date), make_day(${today}::date + 1)`);
   const seed = randomBytes(32);
-  const mac = logMacKey(seed);
+  const log = logWriter(db.owner, logMacKey(seed));
   const memory = variableMemory();
   const cp = await openLogCheckpointer({ store: logStore(db.vault), signingKeys: [seed], memory });
   const keys = await verifierKeys([seed]);
-  await uses(100, mac);
+  await log.uses(100);
   assert.ok((await cp.tick()).signed);
   // A checkpointer stalled while uses go on: one more than a check reads.
-  await uses(ABOVE_NEWEST + 1, mac);
+  await log.uses(ABOVE_NEWEST + 1);
   const anchors = [decodePair(memory.record!)!];
   const behind = await verifyTrees(db.vault, keys, { anchors });
   assert.deepEqual([behind.ok, behind.capped, behind.problems, behind.unsealed], [false, true, [], ABOVE_NEWEST]);
