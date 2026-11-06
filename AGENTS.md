@@ -333,37 +333,27 @@ unsupported diff select full validation.
 - `pnpm lint`, `pnpm check:pins`, `pnpm check:workflows`, `pnpm check:contrast`
   and `pnpm check:docs` (every path, script and link the docs name exists) do
   not need Postgres. `check:pins` holds, beside the manifests, every tracked
-  workflow, Dockerfile, compose file, shell script and pnpm setting to what it
-  fetches being pinned (`scripts/pins.mjs`): an action by its commit, `owner/repo@<sha>
-  # vX.Y.Z`, the same repository's through `$/`; an image as
-  `name:tag@sha256:<index digest>`, on the line that pulls it; a Compose
-  build from a directory, a repository at its commit (`….git#<sha>`) or an
-  image by its digest, its `dockerfile_inline` read as a Dockerfile, a compose
-  file it includes or extends here; a Dockerfile a build or `docker build -f`
-  names, and a compose file `docker compose -f` does, under a name it reads
-  (`Dockerfile`, `Containerfile`, `<name>.Dockerfile`, …); a download
-  through `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only
-  if its SHA-256 is the pinned one, or a Dockerfile's `ADD
-  --checksum=sha256:…`; a toolchain an action installs at an exact version,
-  and Corepack only the workspace's pnpm; an install by the lockfile
-  (`--frozen-lockfile`). It parses no shell: every other fetcher is banned by
-  name on any line but a comment (curl, wget, npx and the other package
-  runners, `npm exec` or `install`, `pnpm dlx` or `add`, `gh release
-  download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
-  a message too, options between a command's words included (`gh release
-  --repo o/r download`), and an argument list read as the command its words
-  make (`RUN ["npm", "install"]`, compose's `command: [pnpm, install]`).
-  YAML (workflows, actions, compose, pnpm's settings) it reads with
-  js-yaml, a root dependency, as the data GitHub, Compose and pnpm make of
-  it, whatever the style: every string checked as the
-  lines a shell runs, once per value of a matrix it names (`matrix.key`,
-  `matrix['key']`, whatever its case; any other read of the matrix fails), and each image,
-  action, runner and toolchain where they read one. A fetch
-  hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
-  A health check of this machine is curl marked `# pins: local`, every URL
-  on the line 127.0.0.1, localhost or [::1]; a line that cannot be pinned
-  carries `# unpinned: <reason>`, on itself or right above it, in YAML a
-  comment of the shell's inside the string (YAML drops its own). `check:workflows` runs zizmor
+  workflow, action, compose file, Dockerfile, shell script and
+  `pnpm-workspace.yaml` to a short list of plain rules, which
+  `scripts/pins.mjs`'s header lists: an action by its commit
+  (`owner/repo@<sha> # vX.Y.Z`; the same repository's through `$/`); an image
+  in compose, a workflow's `container` or `services`, or a Dockerfile's `FROM`
+  by its digest (`name:tag@sha256:<index digest>`); a Dockerfile's `ADD` of a
+  URL with `--checksum=sha256:…`; every other download through
+  `scripts/fetch.sh <url> <sha256> <file>`, which keeps the file only if its
+  SHA-256 is the pinned one, with curl and wget banned everywhere else; no
+  package runner or install outside the lockfile (npx, `npm install`, `pnpm
+  dlx` or `add`, `gh … download`, `git clone`, `nvm install`, `apt-get
+  install`, …), and `pnpm install` with `--frozen-lockfile`; an action's
+  `*-version` input and Corepack's pnpm exact; pnpm's 7-day age gate and
+  `strictDepBuilds`. YAML it reads with js-yaml (a root dependency), each
+  string's lines as a shell's. A health check of this machine is curl marked
+  `# pins: local`, every URL on the line 127.0.0.1, localhost or [::1]; a
+  line no rule can hold carries `# unpinned: <reason>`, on itself or right
+  above it (in YAML, a shell comment inside the string). That is all it
+  checks: anything else (an image `docker run` pulls, a build context, a
+  fetch through another program or hidden from those names) is the
+  maintainer's, and review's, and is not enforced. `check:workflows` runs zizmor
   (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
   against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
   GitHub whether each pinned commit is its repository's. Validate runs both

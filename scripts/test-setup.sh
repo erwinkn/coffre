@@ -15,7 +15,6 @@ image="$(docker compose config --format json | node -e 'let input=""; for await 
 for container in "${containers[@]}"; do
     settings=()
     if [[ "$container" == *-small ]]; then settings=(-c max_connections=15); fi
-    # unpinned: compose's postgres image, which check:pins holds to its digest (docker-compose.yml).
     docker run --rm -d --name "$container" -e POSTGRES_PASSWORD=local-setup-only \
         -e POSTGRES_INITDB_ARGS='--locale=C --encoding=UTF8' \
         -p 127.0.0.1::5432 "$image" "${settings[@]}" >/dev/null

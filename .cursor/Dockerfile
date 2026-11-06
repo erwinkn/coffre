@@ -23,6 +23,7 @@ ADD --chmod=644 --checksum=sha256:6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a0
 FROM scratch AS node-arm64
 ADD --chmod=644 --checksum=sha256:dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e \
     https://nodejs.org/dist/v24.22.1/node-v24.22.1-linux-arm64.tar.xz /node.tar.xz
+# unpinned: one of the two stages above, the platform's.
 FROM node-${TARGETARCH} AS node
 
 FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852

@@ -12,7 +12,6 @@ cleanup() {
 }
 trap cleanup EXIT
 image="$(docker compose config --format json | node -e 'let input=""; for await (const chunk of process.stdin) input+=chunk; console.log(JSON.parse(input).services.postgres.image)')"
-# unpinned: compose's postgres image, which check:pins holds to its digest (docker-compose.yml).
 docker run --rm -d --name "$container" -e POSTGRES_PASSWORD=local-bootstrap-only \
     -e POSTGRES_INITDB_ARGS='--locale=C --encoding=UTF8' \
     -p 127.0.0.1::5432 "$image" >/dev/null
