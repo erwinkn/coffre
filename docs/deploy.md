@@ -208,6 +208,11 @@ every migration lets it ([expand, then contract](architecture.md#expand-then-con
    own, and a lockfile one pnpm wrote can fail another's check. Moving to
    another pnpm major makes pnpm rebuild `node_modules` from scratch, which
    `coffre update` lets it do without asking again.
+   A CLI from 0.15.0 or before knows no `.node-version`: it moves the
+   packages and pnpm as the new release's CLI says, and leaves Node
+   alone. Run `pnpm exec coffre update` once more, now the new release's
+   own CLI, and it pins Node too (or update with `npx
+   @coffre/cli@latest update` the first time).
 
    If pnpm holds a package back, as when a lockfile an older pnpm wrote has
    `pg-protocol@1.16.1`, a day old, `coffre update` first resolves the

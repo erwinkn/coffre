@@ -776,6 +776,26 @@ test('the release itself moves a deployment by its own template, asking no other
   }
 });
 
+test("a deployment an earlier CLI moved to this release, which knew no .node-version, gets its Node pin from this release's own update", async () => {
+  // 0.15.0's CLI takes a plan as it knows it (above): its packages and pnpm moved, the plan's Node dropped.
+  const { dir, env, close } = await heldDeployment(cliVersion());
+  try {
+    bumpPins(dir, cliVersion());
+    pinPackageManager(dir, (JSON.parse(readFileSync(join(templateDir('workers'), 'package.json'), 'utf8')) as { packageManager: string }).packageManager);
+    rmSync(join(dir, '.node-version'));
+    writeFileSync(join(dir, '.bin', 'pnpm'), '#!/bin/sh\nexit 0\n');
+    const run = await updateIn(dir, env);
+    assert.equal(run.code, 0, run.stderr);
+    assert.ok(!existsSync(join(dir, 'npm-asked')), 'no other CLI was asked');
+    const node = readFileSync(join(templateDir('workers'), '.node-version'), 'utf8');
+    assert.equal(readFileSync(join(dir, '.node-version'), 'utf8'), node);
+    assert.match(run.stderr, new RegExp(`Pinned this deployment to Node ${node.trim().replaceAll('.', '\\.')}, and installed its packages`));
+  } finally {
+    close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- with pnpm itself ----------------------------------------------------------------
 
 /** What `pnpm …` says in a project pinning pnpm `version`, which pnpm switches itself to (online, or from its cache). */

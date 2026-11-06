@@ -700,7 +700,7 @@ export async function update(args: string[]): Promise<void> {
         return {
           text: atLatest
             ? on !== ''
-              ? `Pinned ${on}, and installed it`
+              ? `Pinned this deployment to ${on}, and installed its packages`
               : `Brought this deployment to coffre ${latest}'s pages and pins, and installed it`
             : `Moved this deployment from ${was} to ${latest}, and installed it`,
           details,

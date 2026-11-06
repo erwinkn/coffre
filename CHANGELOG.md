@@ -59,10 +59,12 @@
   the deploy workflow installs pnpm with pnpm/action-setup, pinned by
   commit, where it ran `corepack enable`. `coffre update` pins both to its
   release's, as it already did pnpm; a plan from an earlier release names
-  no Node and leaves `.node-version` alone. Setup and update no longer fall
-  back to `corepack pnpm` when pnpm is missing: install pnpm
-  (https://pnpm.io/installation), and it switches itself to the version a
-  deployment pins. A deployment `init` wrote before this keeps its
+  no Node and leaves `.node-version` alone, and an earlier CLI drops the
+  Node a later plan names: after updating from 0.15.0 or before, run
+  `coffre update` again, now this release's CLI, to pin Node. Setup and
+  update no longer fall back to `corepack pnpm` when pnpm is missing:
+  install pnpm (https://pnpm.io/installation), and it switches itself to
+  the version a deployment pins. A deployment `init` wrote before this keeps its
   `deploy.yml`: replace its `corepack enable && ` with the template's
   pnpm/action-setup step, and its `node-version` with `node-version-file:
   .node-version`.
