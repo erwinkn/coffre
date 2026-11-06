@@ -327,8 +327,13 @@ test("an Owner of the whole instance resets someone's passkeys from a fresh sess
   const adding = await ada.step();
   assert.equal(adding.body.purpose, 'enroll');
   assert.equal((await ada.answer(await register(await SoftAuthenticator.create('ES256'), adding.body))).status, 200);
-  assert.deepEqual(refused(await act(ada, 'GET', `/api/members/user:${DANA}/passkeys`)), [403, 'forbidden', 'not_owner']);
+  const logged = (await entries('passkey.reset')).length;
+  // Reading someone's list is no attempt at a reset: refused, and nothing logged as one.
+  assert.deepEqual((await act(ada, 'GET', `/api/members/user:${DANA}/passkeys`)).status, 403);
+  assert.equal((await entries('passkey.reset')).length, logged);
   assert.deepEqual(refused(await act(ada, 'DELETE', `/api/members/user:${DANA}/passkeys`)), [403, 'forbidden', 'not_owner']);
+  const refusals = await entries('passkey.reset');
+  assert.deepEqual([refusals.length, refusals.at(-1)!.decision, refusals.at(-1)!.metadata.reason], [logged + 1, 'deny', 'not_owner']);
   assert.equal((await listed(bob, DANA)).passkeys.length, 1);
 });
 
@@ -383,6 +388,30 @@ test('a passkey row failing its MAC refuses adding another and removing one, 409
   assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys/options`)), [409, 'conflict', 'tampered']);
   assert.deepEqual(await bob.step(`?remove=${backing!.id}`), { status: 409, body: { error: 'tampered' } });
   assert.deepEqual(await bob.step(`?remove=${other!.id}`), { status: 409, body: { error: 'tampered' } });
+  assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${BOB}`))).filter((row) => row.removedAt === null).length, 2);
+  assert.equal(await me(bob), 'ok');
+});
+
+test('a passkey row that fails its MAC by the time an add, a removal or a reset commits refuses it, 409 `tampered`, changing nothing', async (t) => {
+  const { later } = clock(t);
+  const key = await SoftAuthenticator.create('ES256');
+  const bob = await enroll(runtime, BOB, key);
+  assert.equal((await add(bob, BOB, await SoftAuthenticator.create('ES256'))).status, 200);
+  later(1);
+  const [, other] = (await listed(bob, BOB)).passkeys;
+  // Both asked while every row is whole: another passkey's `create()`, and the removal of one with a touch of the other.
+  const asked = await act(bob, 'POST', `/api/members/user:${BOB}/passkeys/options`);
+  const created = await (await SoftAuthenticator.create('ES256')).register({ ...RP, challenge: bytes(asked.body.options.challenge), userHandle: bytes(asked.body.options.user.id) });
+  const step = await bob.step(`?remove=${other!.id}`);
+  assert.equal(step.status, 200);
+  const touched = await assertion(key, step.body.options);
+  // Then a row's signature stops matching, before either answer arrives.
+  await db.owner.update(passkeys).set({ algorithm: -257 }).where(eq(passkeys.id, other!.id));
+  assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys`, { state: asked.body.state, response: created })), [409, 'conflict', 'tampered']);
+  assert.deepEqual(await bob.answer({ state: step.body.state, response: touched }), { status: 409, body: { error: 'tampered' } });
+  // Dana, an Owner, resets Bob's: refused the same.
+  const dana = await enroll(runtime, DANA, await SoftAuthenticator.create('ES256'));
+  assert.deepEqual(refused(await act(dana, 'DELETE', `/api/members/user:${BOB}/passkeys`)), [409, 'conflict', 'tampered']);
   assert.equal((await db.owner.select().from(passkeys).where(eq(passkeys.principal, `user:${BOB}`))).filter((row) => row.removedAt === null).length, 2);
   assert.equal(await me(bob), 'ok');
 });

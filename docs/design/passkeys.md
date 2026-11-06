@@ -764,12 +764,17 @@ backed: demoted meanwhile, they reset no one (`409 access_changed`, then
 naming no passkey. The removals and revocations are asked together, so
 a reset costs the same round trips for one passkey as for ten
 (`change-cost.test.ts`). A passkey row failing its MAC refuses the
-reset, an add's options and the removal door alike, `409 tampered`.
+reset, an add and a removal, at their first step or at their commit,
+`409 tampered`. Reading someone's passkeys is the Owner's alone too, but
+a refused read is no attempted reset and logs nothing (`403 forbidden`).
 The notice is read from the rows: while the person holds no live
 passkey, a newest removal by someone else is a reset, `{ by, at }`,
 which the Passkeys tab's read and the sign-in's enroll step answer. Each
 removal is dated by the app's clock that wrote it, so the rule compares
-no row's `created_at`, the database's.
+no row's `created_at`, the database's. `removed_at` is under the row's
+MAC, `removed_by` is not (section 5.3, `auth-rows.ts`): an edit of that one column could
+turn a removal of one's own into a reset by someone else, or hide one.
+So the notice informs and the log's `passkey.reset` records (R64).
 
 ## 4. What needs a fresh check
 

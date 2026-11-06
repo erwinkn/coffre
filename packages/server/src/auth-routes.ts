@@ -540,7 +540,10 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
   if (remove !== null) {
     if (token === null) return refused('session_ended');
     // Back to the Passkeys tab, on the session the removal issued.
-    return answered(await signin.removePasskey(body.state!, token, body.response, meta), '/account', []);
+    const result = await signin.removePasskey(body.state!, token, body.response, meta);
+    // A tampered row refuses a removal with 409, as the GET and the API do; a sign-in's own `tampered` stays 400.
+    if (result.ok !== true && result.reason === 'tampered') return jsonResponse({ error: 'tampered' }, 409);
+    return answered(result, '/account', []);
   }
   // Every other answer is a passkey's.
   if (body.response === undefined) return errorResponse(badRequest('response: the passkey\'s answer is required'));

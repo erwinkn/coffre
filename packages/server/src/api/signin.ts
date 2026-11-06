@@ -1043,7 +1043,9 @@ export class SigninService {
    */
   async listPasskeys(ctx: Asker, member: PrincipalRef): Promise<PasskeyList> {
     const self = ownPasskeys(ctx, member);
-    if (!self) await withRefusals(this.#deps, async () => mayReset(ctx, member));
+    // A read: a refusal is no attempt at a reset, and the log records none (review: Fable, #529).
+    if (!self && !instanceOwner(ctx)) throw forbidden("only an Owner of the whole instance sees someone's passkeys");
+    if (!self && member.type !== 'user') throw notFound('only people hold passkeys');
     const standing = self ? null : await this.#standing(member);
     if (standing !== null && standing.status !== 'active') throw notFound('no such member');
     const generation = standing?.generation ?? ctx.caller.generation;
@@ -1109,8 +1111,8 @@ export class SigninService {
         if (!verified.ok) throw fail(verified.reason);
         const standing = await this.#standing(member);
         return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
-          if ((await this.#currentCaller(tx, ctx, standing)) === null) throw fail('session_ended');
-          const rows = await passkeysOf(tx, this.#deps.chainKey, principal);
+          const [caller, rows] = await Promise.all([this.#currentCaller(tx, ctx, standing), passkeysOf(tx, this.#deps.chainKey, principal)]);
+          if (caller === null) throw fail('session_ended');
           if (rows.length !== state.passkeysEver) throw new ApiError('conflict', 'your passkeys changed meanwhile: add it again', 'state_mismatch');
           addable(rows.filter((row) => row.generation === state.generation && row.removedAt === null).length);
           const row = {
@@ -1299,9 +1301,10 @@ export class SigninService {
             if (live.length === 1 && this.config.passkeys.policy === 'required') throw new Refusal(new SigninRefused('last_passkey'), entry('passkey.remove', 'deny', { reason: 'last_passkey' }));
             if ((state.touch === 'last') !== (live.length === 1) && state.touch !== 'none') throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.remove', 'deny', { reason: 'passkeys_changed' }));
             const now = new Date();
-            // Three compare-and-sets asked together, one round trip, each checked after, in this order: the session it
-            // replaces ended, once (section 6.5: of two removals on one session, one goes); the touch taken, once, on a
-            // passkey still live (section 7.3); the passkey removed. Any of them not moving rolls everything back.
+            // Three compare-and-sets asked together (two round trips: the session's revoke reads its row first), each
+            // checked after, in this order: the session it replaces ended, once (section 6.5: of two removals on one
+            // session, one goes); the touch taken, once, on a passkey still live (section 7.3); the passkey removed. Any
+            // of them not moving rolls everything back.
             const [replaced, took, moved] = await Promise.all([
               revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.id(session.id), { revokedAt: now, revokedBy: principal.id }),
               touched === null ? 1 : touchPasskey(tx, { id: touched.passkey.id, principal: state.principal, generation: state.generation, issuedAt: new Date(state.issuedAt), signCount: touched.signCount }),
@@ -1452,9 +1455,14 @@ export class SigninService {
    * names (passkeys.md, section 6.1), as what it issues names the same. A change to the person's passkeys revokes under the same head.
    */
   async #currentCaller(tx: Transaction, ctx: Asker, standing: Access): Promise<Access | null> {
-    if (standing.generation !== ctx.caller.generation || !(await this.#stillMember(tx, ctx.caller.principal, standing))) return null;
+    if (standing.generation !== ctx.caller.generation) return null;
+    // Read together, one round trip: the member's row, and the credential's.
+    const [member, row] = await Promise.all([
+      this.#stillMember(tx, ctx.caller.principal, standing),
+      ctx.credentialId === null ? null : findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId }),
+    ]);
+    if (!member) return null;
     if (ctx.credentialId !== null) {
-      const row = await findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId });
       if (!this.#liveCredential(row, standing, new Date()) || row?.principal !== principalOf(ctx.caller.principal)) return null;
       if (passkeyChecked(row.kind) && !this.#backed(row, row.passkeyRead!)) return null;
     } else if (ctx.via !== null && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
@@ -2607,10 +2615,14 @@ function ownPasskeys(ctx: Asker, member: PrincipalRef): boolean {
     && ctx.caller.credentialScope === null && ctx.via === null && ctx.credentialId !== null;
 }
 
-/** Only an Owner of the whole instance, signed in as themselves, weighs or resets anyone's passkeys (section 3.7). */
+/** An Owner of the whole instance, signed in as themselves: who sees and resets anyone's passkeys (section 3.7). */
+function instanceOwner(ctx: Asker): boolean {
+  return ctx.caller.principal.type === 'user' && ctx.caller.credentialScope === null && ctx.via === null && ownsInstance(ctx.caller);
+}
+
+/** Only an Owner of the whole instance resets anyone's passkeys, and a refusal is logged as an attempt (section 3.7). */
 function mayReset(ctx: Asker, member: PrincipalRef): void {
-  const owner = ctx.caller.principal.type === 'user' && ctx.caller.credentialScope === null && ctx.via === null && ownsInstance(ctx.caller);
-  if (!owner) {
+  if (!instanceOwner(ctx)) {
     throw new Refusal(forbidden("only an Owner of the whole instance resets someone's passkeys"), denied(ctx, 'passkey.reset', 'not_owner', { metadata: { principalType: member.type, principalId: member.id } }));
   }
   if (member.type !== 'user') throw notFound('only people hold passkeys');
