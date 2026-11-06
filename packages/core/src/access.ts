@@ -592,11 +592,23 @@ export const HANDLE_POLICY: Policy = { ...DEFAULT_POLICY, roles: { ...ROLES, vie
  */
 export const MAX_PERSONAL_TOKEN_MINUTES = 7 * 24 * 60;
 
-/** The longest a service account's token lives, in days. The vault holds an issue to it (T149). */
-export const MAX_SERVICE_TOKEN_DAYS = 366;
+/**
+ * The longest a service account's token lives, in days: a year, Erwin's policy (R76). A deployment may set a lower
+ * maximum (`signin({ serviceTokenMaxDays })`), which the app holds tokens to; the vault holds an issue to this one
+ * (T149).
+ */
+export const MAX_SERVICE_TOKEN_DAYS = 365;
 
-/** How long a service account's token lives unless its maker says, in days: the CLI's and the UI's default, the API has none. */
+/**
+ * How long a service account's token lives unless its maker says, in days: the CLI's and the UI's default, the API has
+ * none. Where a deployment's maximum is lower, its maximum is the default instead (`serviceTokenDefaultDays`).
+ */
 export const DEFAULT_SERVICE_TOKEN_DAYS = 90;
+
+/** The lifetime offered unless its maker says, in days, where a deployment's tokens last at most `maxDays`. */
+export function serviceTokenDefaultDays(maxDays: number): number {
+  return Math.min(DEFAULT_SERVICE_TOKEN_DAYS, maxDays);
+}
 
 /**
  * The longest a credential's label may be, a token's, a binding's or a device login's, in characters. An input bound

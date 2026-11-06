@@ -36,7 +36,7 @@ export function ServiceAccountSignInPage() {
       {bindings !== null &&
         (bindings.ok ? <TrustedWorkloads serviceId={account} bindings={bindings.bindings} grants={grants} /> : <Notice tone="bad">{bindings.error}</Notice>)}
       {credentials !== null &&
-        (credentials.ok ? <ServiceTokens serviceId={account} tokens={credentials.tokens} grants={grants} /> : <Notice tone="bad">{credentials.error}</Notice>)}
+        (credentials.ok ? <ServiceTokens serviceId={account} tokens={credentials.tokens} grants={grants} maxDays={shell.features.serviceTokenMaxDays} /> : <Notice tone="bad">{credentials.error}</Notice>)}
     </>
   );
 }

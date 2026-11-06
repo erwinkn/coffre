@@ -127,7 +127,7 @@ as the app weighed it and the policy it weighed on. The vault:
    the protected environments' slugs the app named;
 3. weighs the issue (`weighIssue`): what the issuer holds through that
    credential, what the account holds, the token's kind, scope and end (a
-   service token at most 366 days and given by a person, a personal one a
+   service token at most 365 days and given by a person, a personal one a
    week, a handle no later than the scoped credential it was made on, if
    one); each grant's columns, which a use decides on, within its role as
    defined (the policy's for a service or personal token,

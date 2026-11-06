@@ -1,11 +1,11 @@
 import type { TokenRow } from '@coffre/client';
-import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, DEFAULT_SERVICE_TOKEN_DAYS } from '@coffre/core/access';
+import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, serviceTokenDefaultDays } from '@coffre/core/access';
 import { useQuery } from '@tanstack/react-query';
 import { Fragment, useState } from 'react';
 import { revokeCredential } from '../lib/changes';
 import { memberRef, useCoffre } from '../lib/coffre';
 import { affects, queries } from '../lib/queries';
-import { withheldInWords } from '../lib/service-setup';
+import { tokenLifetimes, withheldInWords } from '../lib/service-setup';
 import { useAction } from '../lib/use-action';
 import { useChange, useChangeStatus } from '../lib/use-change';
 import { RowFailure, RowPending, rowClass } from './row-state';
@@ -14,15 +14,13 @@ import { ScopePicker, wholeScope, type HeldGrant } from './scope-picker';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Modal, Notice, Spinner, Timestamp } from './ui';
 import { Key, Plus, X } from './icons';
 
-/** The lifetimes the form offers, in days: a month, a quarter, half a year and a year, and always the default. */
-const LIFETIMES = [...new Set([30, 90, 180, 365, DEFAULT_SERVICE_TOKEN_DAYS])].sort((a, b) => a - b);
 
 /**
  * The bearer tokens a service account presents to the API, for CI without
  * OIDC. A value exists in exactly
  * one place, this dialog, for as long as it stays open: coffre keeps a hash.
  */
-export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string; tokens: TokenRow[]; grants: HeldGrant[] }) {
+export function ServiceTokens({ serviceId, tokens, grants, maxDays }: { serviceId: string; tokens: TokenRow[]; grants: HeldGrant[]; maxDays: number }) {
   const change = revokeCredential(useCoffre(), memberRef('service', serviceId));
   const revoke = useChange(change);
   const { status, dismiss } = useChangeStatus(change.list.queryKey);
@@ -133,16 +131,16 @@ export function ServiceTokens({ serviceId, tokens, grants }: { serviceId: string
         )}
       </Card>
       <div className="table-actions">
-        <IssueToken serviceId={serviceId} grants={grants} />
+        <IssueToken serviceId={serviceId} grants={grants} maxDays={maxDays} />
       </div>
     </>
   );
 }
 
-function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGrant[] }) {
+function IssueToken({ serviceId, grants, maxDays }: { serviceId: string; grants: HeldGrant[]; maxDays: number }) {
   const [open, setOpen] = useState(false);
   const [label, setLabel] = useState('');
-  const [days, setDays] = useState<number>(DEFAULT_SERVICE_TOKEN_DAYS);
+  const [days, setDays] = useState<number>(() => serviceTokenDefaultDays(maxDays));
   const [scope, setScope] = useState(() => wholeScope(grants));
   const [issued, setIssued] = useState<{ token: string; expiresAt: string } | null>(null);
   const coffre = useCoffre();
@@ -204,7 +202,7 @@ function IssueToken({ serviceId, grants }: { serviceId: string; grants: HeldGran
               <label className="field" style={{ flex: '0 0 9rem' }}>
                 <span className="label">Expires after</span>
                 <select className="select" value={days} onChange={(event) => setDays(Number(event.target.value))}>
-                  {LIFETIMES.map((lifetime) => (
+                  {tokenLifetimes(maxDays).map((lifetime) => (
                     <option key={lifetime} value={lifetime}>
                       {lifetime} days
                     </option>

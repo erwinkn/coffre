@@ -68,11 +68,11 @@ test('tokens issue --output-file writes a new 0600 file, prints no token, and ne
   assert.equal(existsSync(other), false);
 });
 
-test('tokens issue takes 1 to 366 days, 90 unless told', async () => {
+test('tokens issue takes 1 to 365 days, 90 unless told', async () => {
   const { connect, calls, io } = fixture(() => ({ id: 't', token: TOKEN, expiresAt: '2027-01-01T00:00:00.000Z', scope: {} }));
   await manage.tokensIssue(connect, ['token:deploy'], io);
   assert.deepEqual(calls[0]!.body, { expiresInDays: 90, label: null });
-  for (const bad of ['0', '367', '1.5', 'soon']) {
+  for (const bad of ['0', '366', '1.5', 'soon']) {
     await assert.rejects(manage.tokensIssue(connect, ['deploy', '--expires-in', bad], io), manage.UsageError);
   }
 });

@@ -176,7 +176,7 @@ test('the public URL must be an HTTPS origin, or loopback HTTP', () => {
 });
 
 test('session lifetimes are positive and bounded', () => {
-  const define = (lifetimes: { browserSessionHours?: number; cliSessionDays?: number }) =>
+  const define = (lifetimes: { browserSessionHours?: number; cliSessionDays?: number; serviceTokenMaxDays?: number }) =>
     defineSignin({ publicUrl: 'https://secrets.acme.example', providers: [github(CREDENTIALS)], ...lifetimes });
   for (const value of [0, -1, NaN, Infinity, 169]) {
     assert.throws(
@@ -189,6 +189,12 @@ test('session lifetimes are positive and bounded', () => {
   assert.equal(define({ cliSessionDays: 7.5 }).cliSessionDays, 7.5);
   assert.throws(() => define({ cliSessionDays: 366 }), /cliSessionDays must be a number above 0 and at most 365/);
   assert.equal(define({ cliSessionDays: 365 }).cliSessionDays, 365);
+  // A service token lasts a year at most (R76); a deployment may say fewer whole days.
+  assert.equal(define({}).serviceTokenMaxDays, 365);
+  assert.equal(define({ serviceTokenMaxDays: 30 }).serviceTokenMaxDays, 30);
+  for (const value of [0, 366, 1.5, NaN]) {
+    assert.throws(() => define({ serviceTokenMaxDays: value }), /serviceTokenMaxDays must be a whole number of days, 1 to 365/, String(value));
+  }
 });
 
 test('defineSignin needs a provider, and each needs a client id and secret', () => {
@@ -217,6 +223,7 @@ test('defineSignin needs a provider, and each needs a client id and secret', () 
       page: { title: 'Acme secrets', note: null },
       browserSessionHours: 4,
       cliSessionDays: 30,
+      serviceTokenMaxDays: 365,
       workloads: null,
       mcp: null,
       // Passkeys default to `optional` (docs/design/passkeys.md, section 2).

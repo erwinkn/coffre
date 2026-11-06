@@ -96,7 +96,7 @@ holds `audit.read` in. `coffre logout`, signed in with it, revokes it.
 `--expires-in 30m`, `4h` or `2d`: a minute to a week, an hour unless told.
 An hour suits a script or an agent's task; a week is the most, so a token
 never quietly becomes a standing credential. Whoever needs one longer
-makes another, as a person. Service tokens keep their days (1 to 366).
+makes another, as a person. Service tokens keep their days (1 to 365, or fewer where the deployment says).
 
 ## Label, and the log
 

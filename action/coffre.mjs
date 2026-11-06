@@ -1815,7 +1815,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-DDn9zAHY.js
+//#region ../core/dist/access-BQXeHiBv.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -9243,7 +9243,7 @@ function lifetime(text, personal) {
 	const count = match === null ? NaN : Number(match[1]);
 	const unit = match?.[2] || "d";
 	if (!personal) {
-		if (unit !== "d" || !Number.isInteger(count) || count < 1 || count > 366) throw new UsageError(`--expires-in takes days for a service token, 1 to 366, as 90 or 90d; not "${text}"`);
+		if (unit !== "d" || !Number.isInteger(count) || count < 1 || count > 365) throw new UsageError(`--expires-in takes days for a service token, 1 to 365, as 90 or 90d; not "${text}"`);
 		return count;
 	}
 	const minutes = count * {

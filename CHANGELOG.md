@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Service tokens last a year at most, and a deployment may say fewer (W331,
+  R76).** The longest a service token may be issued for is 365 days, from
+  366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a
+  lower maximum, in whole days, 1 to 365; the token form offers lifetimes up
+  to it and defaults to 90 days, or to the maximum where that is lower. The
+  CLI's default stays 90 days: under a lower maximum, pass `--expires-in`.
+  Tokens already issued keep their end.
+
 - **`serveVault` passes its options to the vault it runs (T230).** On Node
   a vault in a process of its own ignored a deployment's `uses`
   (`inFlight`, `connections`, `coverMs`, `names`, `batch`) and kept the

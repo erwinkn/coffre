@@ -171,7 +171,7 @@ combined apply trades its ID token itself (`POST /api/auth/oidc`) and passes
 the five-minute `coffre_svc_` credential through `token`, from a variable,
 never a file: nothing outlives the job.
 
-**A bearer token** is `coffre_svc_…` (a service token, 1 to 366 days) or
+**A bearer token** is `coffre_svc_…` (a service token, 1 to 365 days) or
 `coffre_pat_…` (a person's token, at most 7 days, scope required). A
 person's token acts as that person within its scope, and never counts as an
 Owner. It suits an apply run from a laptop. The provider

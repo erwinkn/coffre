@@ -44,6 +44,7 @@ export type Api = {
       features: {
         mcp: string | null;
         workloads: boolean;
+        serviceTokenMaxDays: number;
       };
       personalToken: null | {
         id: string;
@@ -2668,6 +2669,7 @@ export type Me = {
   features: {
     mcp: string | null;
     workloads: boolean;
+    serviceTokenMaxDays: number;
   };
   personalToken: null | {
     id: string;
