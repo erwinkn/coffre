@@ -118,7 +118,12 @@ the holder's grants, a workload's `reads` at the holder by the
 reference's own id, and, for a sensitive value, a service credential an
 Owner of the holder's project issued (R32 at the holder). The source is
 asked nothing after creation or a repoint (R24): it lends its value and
-nature (R23), never its permissions. Erwin makes
+nature (R23), never its permissions. So marking the source sensitive
+later re-checks no reference into it: the reference turns sensitive with
+it, and the holder's Owner-issued service credentials keep reading it,
+though its maker only needed read on what was then a secret. The source
+side's lever is to break those references, which its access managers
+may (`canBreak`). Erwin makes
 `landing/prod/CLERK_SECRET_KEY` a reference to `backend/prod`'s
 sensitive key; then:
 

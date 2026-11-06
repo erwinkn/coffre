@@ -154,7 +154,6 @@ type Credential = {
   token: string;
   repository: string;
 };
-/** Where a value is served: read at `env`, held at `holder` (itself, or the parent it inherits from), from `project`. */
 /** A value as served where it is read: `holder`, where it is held (a reference's own environment); `project`, the value's own (a reference's source's). */
 type Serving = { env: Env; holder: Env; key: string; text: string; nature: Nature; project: string; version: number | null };
 type Reader = { label: string; person: string | null; credential: Credential | null };

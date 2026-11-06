@@ -2005,13 +2005,12 @@ class VaultService implements Vault {
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
       let codes = keyRefusals(reader, { principal, permission: call.permission, secrets, at, environments, needs, owns: call.owns });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) codes = await call.vet(d.tx, d.reads);
-      // Where each key is held, the secret itself, a fork's parent or a reference's holder, by its own key: what a
-      // workload lists, and the project whose Owners give a service its sensitive values (R71).
-      const held = secrets.map((secret, i) => call.places?.[i] ?? secret);
-      codes = useOnlyRefusals(codes, reader, { action, purpose: call.input.purpose, secrets: held });
+      // `at` is also where each key is held, the secret itself, a fork's parent or a reference's holder, by its own
+      // key: what a workload lists, and the project whose Owners give a service its sensitive values (R71).
+      codes = useOnlyRefusals(codes, reader, { action, purpose: call.input.purpose, secrets: at });
       codes = sensitiveRefusals(codes, reader, {
         action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive,
-        secrets: held.map((place, i) => ({ projectId: place.projectId, sensitive: secrets[i]!.sensitive })),
+        secrets: at.map((place, i) => ({ projectId: place.projectId, sensitive: secrets[i]!.sensitive })),
       });
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
