@@ -287,7 +287,8 @@ export function InstanceRole({ principal }: { principal: DirectoryPrincipal }) {
         label={
           <>
             Their record was changed outside coffre, so the vault refuses them
-            everything. To start over, remove them and add them again.
+            everything, and removing them does not clear it. Whoever runs this
+            deployment can put the record back from a backup.
           </>
         }
       >
