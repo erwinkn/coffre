@@ -393,7 +393,7 @@ function workspace(documents, text, report, root) {
     const settings = documents[0];
     const age = settings.minimumReleaseAge;
     // The policy's floor is 3 days (4320); coffre waits the week it always has.
-    if (!(typeof age === 'number' && age >= 10080)) report('minimumReleaseAge', `minimumReleaseAge ${age ?? 'missing'} is under 10080 (7 days)`);
+    if (!(typeof age === 'number' && age >= 10080)) report('minimumReleaseAge', `minimumReleaseAge ${JSON.stringify(age) ?? 'missing'} is under 10080 (7 days)`);
     if (settings.strictDepBuilds !== true) report('strictDepBuilds', 'strictDepBuilds is not true: an install script nobody decided on must fail the install');
     if ('dangerouslyAllowAllBuilds' in settings) report('dangerouslyAllowAllBuilds', 'dangerouslyAllowAllBuilds runs every install script');
     for (const legacy of ['onlyBuiltDependencies', 'onlyBuiltDependenciesFile', 'neverBuiltDependencies']) {

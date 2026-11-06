@@ -332,7 +332,7 @@ test("pnpm waits a week, runs no install script nobody decided on, and saves exa
     assert.match(one('pnpm-workspace.yaml', root.replace('allowBuilds:\n  esbuild: false\n', 'allowBuilds: { esbuild: true }\n'), { root: true })[0], /allowBuilds esbuild: true needs/);
     assert.match(one('pnpm-workspace.yaml', root.replace("savePrefix: ''", "'savePrefix': '^'"), { root: true })[0], /savePrefix is not ''/);
     assert.equal(one('pnpm-workspace.yaml', root.replace('  esbuild: false', '  esbuild: false\n  ? koffi\n'), { root: true }).length, 1, 'neither true nor false');
-    assert.match(one('pnpm-workspace.yaml', root.replace('10080', "'10080'"), { root: true })[0], /minimumReleaseAge 10080 is under/, 'a string');
+    assert.match(one('pnpm-workspace.yaml', root.replace('10080', "'10080'"), { root: true })[0], /minimumReleaseAge "10080" is under/, 'a string');
     assert.match(one('pnpm-workspace.yaml', `${root}minimumReleaseAge: 0\n`, { root: true })[0], /duplicated mapping key/);
     assert.match(one('pnpm-workspace.yaml', `${root}onlyBuiltDependencies:\n  - esbuild\n`, { root: true })[0], /allowBuilds is the one place/);
 });
