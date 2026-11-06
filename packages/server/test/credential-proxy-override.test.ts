@@ -208,6 +208,29 @@ test('an override is held as it came as well as uppercased: a session or list ta
   assert.deepEqual(listed.reached.map((each) => each.headers.get('x-http-method-override')), ['PATCH', 'delete'], 'what goes on goes as it came');
 });
 
+// ASP.NET MVC and ServiceStack read `?X-HTTP-Method-Override=` as they read the header, its case kept: a query pair
+// named as a header is held as it came too (review r5 of #526). Rails' `_method=patch` is PATCH: what reads `_method`
+// uppercases it.
+test('a query pair named as an override header is held as it came as well; _method is uppercased alone', async () => {
+  const session = proxy({}, { methods: ['POST', 'PATCH'] });
+  const narrowed = await session.ask('/market/dev/api/items/1?X-HTTP-Method-Override=pAtCh', { method: 'POST', as: 'workload' });
+  assert.equal(narrowed.status, 403, narrowed.body);
+  assert.match(narrowed.body, /may not pAtCh \/items\/1/);
+  assert.deepEqual(session.opened, []);
+  assert.equal((await session.ask('/market/dev/api/items/1?_method=patch', { method: 'POST', as: 'workload' })).status, 200);
+  const listed = proxy({ allow: [{ methods: ['POST', 'PATCH'], path: '/items/**' }] });
+  for (const query of ['X-HTTP-Method-Override=pAtCh', 'x_http_method=pAtCh', 'X-Method-Override=pAtCh']) {
+    const refused = await listed.ask(`/market/dev/api/items/1?${query}`, { method: 'POST' });
+    assert.equal(refused.status, 405, `${query}: ${refused.body}`);
+    assert.match(refused.body, /does not take pAtCh/);
+  }
+  assert.deepEqual(listed.opened, []);
+  for (const query of ['X-HTTP-Method-Override=PATCH', '_method=patch', '_method=pAtCh']) {
+    assert.equal((await listed.ask(`/market/dev/api/items/1?${query}`, { method: 'POST' })).status, 200, query);
+  }
+  assert.deepEqual(listed.reached.map((each) => each.url.search), ['?X-HTTP-Method-Override=PATCH', '?_method=patch', '?_method=pAtCh']);
+});
+
 // D179 (Erwin's choice): coffre reads no body for an override. A `_method` field of a POST's form, multipart or JSON
 // body, which Rails, Laravel and Spring honour, goes on through a list that takes POST alone, as it came
 // (docs/design/credential-proxy.md, section 3, `allow`). Should coffre ever read bodies for one, this test changes

@@ -515,8 +515,10 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   header's value is held as written as well as uppercased, as ASP.NET
   Core sets the request's method to it: a list that takes `PATCH` refuses
   `X-HTTP-Method-Override: pAtCh`, as it would a request whose own method
-  is `pAtCh`; a query's `_method=patch`, which what reads it uppercases,
-  is PATCH. An override the list takes
+  is `pAtCh`, and so does a query parameter named as one of those
+  headers (`?X-HTTP-Method-Override=pAtCh`), whose case ASP.NET MVC and
+  ServiceStack keep; a query's `_method=patch`, which what reads it
+  uppercases, is PATCH. An override the list takes
   goes on as it came (Google's `PATCH` through a POST): the upstream acts
   on a method the list allows either way, so refusing what it does not
   take closes the gap and breaks no client that stays inside the list,

@@ -2297,11 +2297,14 @@ function trimmed(text: string): string {
  * `[` (`_method[]`), leading spaces dropped, `.` and spaces as `_` (`.method`), or as Tomcat does, trimmed of every
  * character up to a space at both ends, as Java's `trim` is (`_method `); in any ASCII case.
  */
-function namesMethod(name: string): boolean {
-  return [name, trimmed(name)].some((each) => {
+function namesMethod(name: string): 'header' | 'field' | null {
+  let named: 'field' | null = null;
+  for (const each of [name, trimmed(name)]) {
     const read = each.split(/[\0[]/, 1)[0]!.replace(/^ +/, '').replace(/[. ]/g, '_').replace(/[A-Z]/g, (char) => char.toLowerCase());
-    return read === '_method' || overrideHeader(read);
-  });
+    if (overrideHeader(read)) return 'header';
+    if (read === '_method') named = 'field';
+  }
+  return named;
 }
 
 /**
@@ -2319,15 +2322,19 @@ function readingsOf(part: string): string[] {
 
 /**
  * The values of a query's method pairs (`namesMethod`), each as any reading of it says (`readingsOf`): pairs split at
- * `&` and `;`, as Rack before 3.0 splits them.
+ * `&` and `;`, as Rack before 3.0 splits them. `header`, for a pair named as an override header is, which ASP.NET MVC
+ * and ServiceStack read from a query as they read the header, its case kept (review r5 of #526).
  */
-function methodPairs(text: string): string[] {
-  const found: string[] = [];
+function methodPairs(text: string): { value: string; header: boolean }[] {
+  const found: { value: string; header: boolean }[] = [];
   // Most queries hold neither: no pair is decoded then, however many there are.
   if (!/method|%/i.test(text)) return found;
   for (const [pair] of text.matchAll(/[^&;]+/g)) {
     const equals = pair.indexOf('=');
-    if (readingsOf(equals === -1 ? pair : pair.slice(0, equals)).some(namesMethod)) found.push(...readingsOf(equals === -1 ? '' : pair.slice(equals + 1)));
+    const names = readingsOf(equals === -1 ? pair : pair.slice(0, equals)).map(namesMethod);
+    if (!names.some((named) => named !== null)) continue;
+    const header = names.includes('header');
+    for (const value of readingsOf(equals === -1 ? '' : pair.slice(equals + 1))) found.push({ value, header });
   }
   return found;
 }
@@ -2355,12 +2362,13 @@ function overridden(credential: Resolved, aimed: Aim, headers: Headers, session:
     for (const each of value.split(',')) if (each.trim() !== '') asked.push({ method: each, via: `its ${name} header`, asIs: true });
   }
   // An empty value names no method: Express's `method-override` leaves the request's own then, as for an empty header.
-  for (const each of methodPairs(aimed.target.search.slice(1))) if (each.trim() !== '') asked.push({ method: each, via: 'a method query parameter', asIs: false });
+  for (const { value, header } of methodPairs(aimed.target.search.slice(1))) if (value.trim() !== '') asked.push({ method: value, via: 'a method query parameter', asIs: header });
   for (const { method: raw, via, asIs } of asked) {
     // Uppercased, as Express, Rack, Laravel and Symfony read an override; and a header's as it came too, as ASP.NET
     // Core's middleware sets `Request.Method` (`pAtCh`, review r4 of #526), held as the request's own method would be:
-    // a list or session that takes `PATCH` takes no `pAtCh`. A query's `_method=patch`, as Rails writes it, is PATCH:
-    // what reads one uppercases it.
+    // a list or session that takes `PATCH` takes no `pAtCh`. So too a query pair named as a header,
+    // `?X-HTTP-Method-Override=pAtCh`, which ASP.NET MVC and ServiceStack read as it came (review r5). A query's
+    // `_method=patch`, as Rails writes it, is PATCH: what reads one uppercases it.
     const value = raw.trim();
     const readings = new Set([value.replace(/[a-z]/g, (char) => char.toUpperCase())]);
     if (asIs && METHOD_TOKEN.test(value)) readings.add(fetchMethod(value));

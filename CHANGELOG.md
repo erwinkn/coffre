@@ -42,7 +42,8 @@
   `narrowed`), before anything goes upstream (through a handle, before
   any value opens, and before its body is read unless the handle is in
   it). A header's value counts as written as well as uppercased, as
-  ASP.NET Core reads it: a list taking `PATCH` refuses `pAtCh`. An override
+  ASP.NET Core reads it: a list taking `PATCH` refuses `pAtCh`, in the
+  header or in a query parameter of its name. An override
   the list takes goes on as it came. Where an entry takes any method on
   the path, or there is no list, nothing changes. **Not covered:** a
   `_method` field in a POST's form or multipart body, which Rails,
