@@ -6,12 +6,17 @@ import { authenticateRequest, refusedByKind, type AuthenticatedIdentity } from '
 import { namesMany, uses015 } from './api/changes.ts';
 import { refusedUse, type Decided, type DecidedMany } from './api/keys.ts';
 import { namedAhead, namedManyAhead, type ReadAhead } from './db/read-ahead.ts';
-import { passkeyAhead } from './passkey-check.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
-/** What the deployment's config accepts of a credential, as the named call carries it (`NamedUseInput.accepts`). */
+/**
+ * What the deployment's config accepts of a credential, as the named call carries it (`NamedUseInput.accepts`): its
+ * passkey policy among it (T216), which the vault's named call holds a person's credential to as the app's own check
+ * does (`passkeyStands`), and a key write's or an add's first call answers the rows of.
+ */
 export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): CredentialAcceptance {
-  return runtime.auth.mode === 'signin' && runtime.signin != null ? { signin: true, issuers: runtime.signin.acceptedIssuers } : { signin: false, issuers: [] };
+  return runtime.auth.mode === 'signin' && runtime.signin != null
+    ? { signin: true, issuers: runtime.signin.acceptedIssuers, passkeys: runtime.auth.signin.passkeys.policy }
+    : { signin: false, issuers: [], passkeys: 'off' };
 }
 
 /**
@@ -40,7 +45,10 @@ export function acceptance(runtime: Pick<CoffreRuntime, 'auth' | 'signin'>): Cre
  * Every check the app makes of a credential is one of (formal/Probing.tla, AcceptedFirst; docs/formal.md):
  * - what its config accepts, which the call carries (`accepts`) and the vault's statement holds the credential to before
  *   it reads anything else: the deployment signs in through coffre's own sign-in (under Cloudflare Access no coffre
- *   token is one; review r7 of D153), and a browser session's identity names a provider it configures (review r6);
+ *   token is one; review r7 of D153), a browser session's identity names a provider it configures (review r6), and a
+ *   person's session or token has a live passkey behind it, as the policy says (T216; docs/design/passkeys.md, section
+ *   6.4): the vault answers what it read of their passkeys with the rows, whose MACs the app's check holds them to, so
+ *   that a person's reveal is one call too;
  * - the token's kind, decided here before any call (`kinds`, never a workload's; `refusedByKind`: a strict instance's
  *   service token, an enrollment code);
  * - a fact the vault decides on itself, before any lock: the credential revoked, expired or of an earlier generation
@@ -68,12 +76,6 @@ export async function useByName(
   // Refused on its kind alone (a service's bearer token on a strict instance): by the credential's own check, as ever,
   // with nothing asked of the vault, nor written in its log or its cap (review r3 of #412).
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
-  // The passkey check first, as the vault's call releases values and logs their use, and answers nothing of passkeys.
-  // Refused, or unanswered, the request goes the ordinary way, whose credential check refuses it, 401 `passkey_required`
-  // (or 401, 503, as it answers any), before anything reads the key: the same answer, at the same cost, whatever it asked
-  // for (conformance check 19).
-  const passkey = await passkeyAhead(runtime, token, kind);
-  if (passkey === 'ordinary') return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamed({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, key: asked.key, accepts: acceptance(runtime), purpose: asked.purpose,
@@ -85,7 +87,9 @@ export async function useByName(
   // or its map. Busy: nothing decided, and nothing read first, whatever the request names (StandingSharesAdmission).
   if (answered.route === 'busy') throw refusedUse(answered.outcome);
   // No credential its seals bear out (unknown, ended, its account's row put back or written around the log, or a token
-  // of 0.10's yet to be sealed): the credential's own check answers, as ever (401), the token sealed first.
+  // of 0.10's yet to be sealed), or one the app's config does not accept, no live passkey behind a person's among it:
+  // the credential's own check answers, as ever (401, 401 `passkey_required`), the token sealed first, before anything
+  // reads the key: the same answer, at the same cost, whatever it asked for (conformance check 19).
   if (answered.route === 'credential') return null;
   const { outcome } = answered;
   const ahead = namedAhead(runtime.db, answered.app, { personal: asked.place !== null && personalOf(asked.place.environment) !== null });
@@ -94,7 +98,6 @@ export async function useByName(
   // row's MAC is not decided above or by the vault (D154; the comment above).
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
-    ...(passkey === undefined ? {} : { passkey }),
   });
   return { identity, ahead, decided: { secretId: answered.secretId, outcome, at: answered.at }, place: answered.place };
 }
@@ -125,9 +128,6 @@ export async function useManyByName(
   if (kind === null || !asked.kinds.includes(kind) || runtime.vault.useNamedMany === undefined || !(await namesMany(runtime.vault))) return null;
   // Refused on its kind alone: by the credential's own check, as ever, nothing asked of the vault (`useByName`).
   if (refusedByKind(runtime, token, { handle: kind === 'handle' }) !== null) return null;
-  // The passkey check first, as for one key (`useByName`).
-  const passkey = await passkeyAhead(runtime, token, kind);
-  if (passkey === 'ordinary') return null;
   const at = Date.now();
   const answered = await runtime.vault.useNamedMany({
     tokenHash: hashToken(token).toString('base64'), place: asked.place, keys: asked.keys, accepts: acceptance(runtime), purpose: asked.purpose,
@@ -141,7 +141,6 @@ export async function useManyByName(
   const ahead = namedManyAhead(runtime.db, answered.app, answered.stands ? answered.keys : null, { personal });
   const identity = await authenticateRequest(request, runtime, crypto.randomUUID(), token, sourceIp, {
     handle: kind === 'handle', standing: answered.standing, at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
-    ...(passkey === undefined ? {} : { passkey }),
   });
   return { identity, ahead, decided: { keys: answered.keys, stands: answered.stands, outcome: answered.outcome, at: answered.at }, place: answered.place };
 }

@@ -1571,32 +1571,6 @@ async function passkeyOf(
   }
 }
 
-/**
- * What stands behind the credential a token is, on its own: for the requests whose credential the vault reads in its own
- * call (a named use, a key write, an admit), which answers no passkey (section 6.4). It reads the credential, its
- * passkey and the person's, nothing about what the request asks for, so that what it answers says nothing of that. Null
- * for no such credential.
- */
-export async function passkeyByToken(db: Queryable, chainKey: Buffer, tokenHash: Buffer): Promise<(PasskeyRead & { holder: PasskeyHolder }) | null> {
-  const [row] = await passkeyStatement(db, { tokenHash });
-  return row === undefined ? null : { ...(await passkeyOf(db, chainKey, row.holder, row))!, holder: row.holder };
-}
-
-/** Whose credential `passkeyByToken` read: what the check decides on (`passkeyStands`). Its MAC is the vault's call's to answer, and the app's to check after. */
-export type PasskeyHolder = { kind: string; principal: string; generation: number; passkeyId: string | null };
-
-const passkeyStatement = prepared((db) => {
-  const { credentials, passkeys } = tablesOf(db);
-  return db
-    .select({
-      holder: { kind: credentials.kind, principal: credentials.principal, generation: credentials.generation, passkeyId: credentials.passkeyId },
-      passkey: passkeys, passkeyHeld: heldSql(sql`${credentials.principal}`, sql`${credentials.generation}`), now: clock(db),
-    })
-    .from(credentials)
-    .leftJoin(passkeys, eq(passkeys.id, credentials.passkeyId))
-    .where(eq(credentials.tokenHash, sql.placeholder('tokenHash')));
-});
-
 // --- passkeys: the ceremonies' reads and writes (docs/design/passkeys.md, sections 3 and 7) --------------------------
 
 /**
@@ -1761,7 +1735,10 @@ export type CredentialRead = {
   policySeq: string | number | null;
   answer?: unknown;
   settings?: string | null;
-  /** The passkey it names and whether its person holds one, when the read had them (`credentialRow`); not `app_read`'s, nor the vault's. */
+  /**
+   * The passkey it names and whether its person holds one (`HELD`), when the read had them: `credentialRow`'s, and the
+   * vault's named call's, key write's and add's (T216, migration 0073); not `app_read`'s.
+   */
   passkey?: PasskeyRow | null;
   passkeyHeld?: number | null;
 };

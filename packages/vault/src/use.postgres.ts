@@ -54,7 +54,8 @@ async function useText(db: Queryable, call: UseCall): Promise<string> {
     ${call.names === undefined ? null : GATE_ROLES}::jsonb,
     ${call.way}::smallint, ${call.principal}::text,
     ${call.names?.forks === true}::boolean,
-    ${call.route ?? null}::text
+    ${call.route ?? null}::text,
+    p_passkeys => ${call.names?.accepts.passkeys ?? null}::text
   )::text AS use`);
   return row!.use;
 }
@@ -110,7 +111,7 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
     ${list((call) => call.known?.newest ?? null)}::bigint[], ${list((call) => call.known?.newestMac ?? null)}::bytea[],
     ${list((call) => call.known?.cap.count ?? null)}::integer[], ${list((call) => (call.known === undefined ? null : String(call.known.cap.windowMs)))}::bigint[],
     ${first?.call.way ?? 0}::smallint, ${first?.call.principal ?? null}::text,
-    ${limit}::integer
+    ${limit}::integer, ${names.accepts.passkeys}::text
   )::text AS uses`);
   type Read = { gate: Record<string, unknown>; keys: string[] | null; rows: (Record<string, unknown> | null)[]; by_ids: boolean[]; aheads: (NamedAhead | null)[] };
   let read = JSON.parse(row!.uses) as Read;

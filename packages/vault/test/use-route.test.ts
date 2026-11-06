@@ -393,7 +393,7 @@ test("the place itself reads no definition, in either engine's statement: the re
   const at = Date.now();
   // As the vault asks it on a miss: the handle's names, the place reading's route, the stable one, no ids.
   const ask = (named: string): RouteCall => ({
-    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [] }, project: w.slug, environment: 'dev', named, stable: w.slug, reading: null,
+    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, project: w.slug, environment: 'dev', named, stable: w.slug, reading: null,
     credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
     mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: true, light: false,
   });
@@ -440,7 +440,7 @@ test("T205: the route's named call at a reading of the URL the map picked wrong 
   const call = (names: Partial<Names>): UseCall => ({
     credential: w.credentialId, secretId: null, requestId: '1', at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), place: null,
     mac: Buffer.alloc(16), deadline: at + 3000, way: 0, principal: null, route: 'openai',
-    names: { tokenHash: w.tokenHash, project: null, environment: null, key: null, handle: false, unless: [], accepts: { signin: true, issuers: [] }, forks: true, ...names },
+    names: { tokenHash: w.tokenHash, project: null, environment: null, key: null, handle: false, unless: [], accepts: { signin: true, issuers: [], passkeys: 'off' as const }, forks: true, ...names },
   });
   const named = ENGINE === 'postgres' ? postgresNamed : sqliteNamed;
   const state = async (names: Partial<Names>) => {
@@ -460,7 +460,7 @@ test("T205: the route's named call at a reading of the URL the map picked wrong 
   // only through `chainFault` or `editorOf` (Fable's review of #507).
   const { route: read } = await named(hot, call({ project: w.slug, environment: 'dev', unless: [w.slug] }));
   const routed = await (ENGINE === 'postgres' ? postgresRoute : sqliteRoute)(hot, {
-    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [] }, project: w.slug, environment: 'dev', named: 'openai', stable: w.slug, reading: 1,
+    tokenHash: w.tokenHash, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, project: w.slug, environment: 'dev', named: 'openai', stable: w.slug, reading: 1,
     credential: null, way: 0, principal: null, place: null, at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), deadline: at + 3000,
     mac: Buffer.alloc(16), keys: null, offset: 0, limit: 100, lock: null, use: false, light: false,
   });
@@ -493,7 +493,7 @@ test('proxyItem: the item a use would find, or every item the place serves, deci
   await w.save({ maps: { definition: route('maps', [name], 'eu.maps.example'), editor: ada } }, eu);
   const { vault, cache } = await isolate();
   const at = Date.now();
-  const caller = { kind: 'handle' as const, tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [] } };
+  const caller = { kind: 'handle' as const, tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [], passkeys: 'off' as const } };
   const one = await vault.proxyItem({ caller, place: { project: w.slug, environment: 'dev-eu' }, name: 'openai', at, deadline: at + 3000 });
   assert.ok(one.ok && 'item' in one && one.item !== null, JSON.stringify(one));
   assert.equal(one.item.level, 1);
@@ -606,7 +606,7 @@ test("T205: a route of one key given a second while the map holds the one: the r
   const call: UseCall = {
     credential: w.credentialId, secretId: one, requestId: '1', at, purpose: purposeCode({ purpose: 'use', keepsSensitive: false, way: 'credential' }), place: null,
     mac: Buffer.alloc(16), deadline: at + 3000, way: 0, principal: null, route: 'pair', decided: true,
-    names: { tokenHash: w.tokenHash, project: w.slug, environment: 'dev', key: null, handle: false, unless: [], accepts: { signin: true, issuers: [] }, forks: true },
+    names: { tokenHash: w.tokenHash, project: w.slug, environment: 'dev', key: null, handle: false, unless: [], accepts: { signin: true, issuers: [], passkeys: 'off' as const }, forks: true },
   };
   const after = await count('log_uses');
   const { row, route: read } = await (ENGINE === 'postgres' ? postgresNamed : sqliteNamed)(hot, call);
@@ -888,7 +888,7 @@ test("T190: a level's definitions put back from before an edit, the edit's entry
   for (const one of [vault, (await isolate()).vault]) {
     assert.deepEqual(refused(await one.useRoute(w.askRoute('openai'))), { code: 'stale', key: null });
     const at = Date.now();
-    const caller = { kind: 'handle' as const, tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [] } };
+    const caller = { kind: 'handle' as const, tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [], passkeys: 'off' as const } };
     const item = await one.proxyItem({ caller, place: { project: w.slug, environment: 'dev' }, name: 'openai', at, deadline: at + 3000 });
     assert.ok(item.ok && 'fault' in item && item.fault === 'stale' && item.item === null, JSON.stringify(item));
   }
@@ -1083,15 +1083,17 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
         asked.push({ label: `${label} ${name}`, call: calls.at(-1)! });
       }
     }
-    // Where the map was warm, the route's named call (T205): `use_credential`, its route its last argument, which read
-    // no route for one who stands nowhere; where cold, `use_route`, its gate asked whole.
-    assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && typeof call.args.at(-1) === 'string'), 'the warm map asked the route\'s named call');
+    // Where the map was warm, the route's named call (T205): `use_credential`, its route its last argument but the
+    // passkey policy (`p_passkeys`, T216, named after it), which read no route for one who stands nowhere; where cold,
+    // `use_route`, its gate asked whole.
+    const routeAt = (call: HotCall): number => (call.query.includes('use_route') ? 3 : call.args.length - 2);
+    assert.ok(asked.slice(0, 3).every(({ call }) => call.query.includes('use_credential') && call.query.includes('p_passkeys =>') && typeof call.args[routeAt(call)] === 'string'), 'the warm map asked the route\'s named call');
     assert.ok(asked.slice(3).every(({ call }) => call.query.includes('use_route') && call.args.at(-1) === false), 'the cold map asked use_route, its gate whole');
     await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
     // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
       const args = [...call.args];
-      args[call.query.includes('use_route') ? 3 : args.length - 1] = 'nothing-saved';
+      args[routeAt(call)] = 'nothing-saved';
       return { query: call.query, args };
     };
     const read: { label: string; buffers: number; keyBlocks: number; beyond: number }[] = [];

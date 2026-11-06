@@ -303,17 +303,14 @@ const seals = new Map<number, string | null>();
 const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   // A key write decided on one read (T179; docs/design/two-trips.md): the vault's statement, then the app's one Sync, the
   // head (a lock alone) and everything with the COMMIT, however many keys. No 0.14 entry since 0.16.0's contraction:
-  // the changes record the write, in 0.15's log alone. One more of the app's, on purpose: what stands behind the
-  // person's credential (`passkeyAhead`, docs/design/passkeys.md, section 6.4), read beside the vault's statement on
-  // the request's own connection, so it costs a round trip but no wait. Not under `passkeys: 'off'`, nor for a
-  // service's token.
-  'key set, one': { app: 2, vault: 1 },
-  'key set, existing': { app: 2, vault: 1 },
-  'key set, five': { app: 2, vault: 1 },
+  // the changes record the write, in 0.15's log alone. What stands behind the person's credential comes with the
+  // vault's read, as its passkey rows (T216; docs/design/passkeys.md, section 6.4), so the app reads nothing first.
+  'key set, one': { app: 1, vault: 1 },
+  'key set, existing': { app: 1, vault: 1 },
+  'key set, five': { app: 1, vault: 1 },
   // Refused on the vault's read (PR 6): the read, then the vault's record of the refusal, which stands for 0.14's deny
-  // entry; the app answers it as today's path would, from what the read answered, reading nothing but the passkey
-  // beside the read.
-  'key set, refused': { app: 1, vault: 2 },
+  // entry; the app answers it as today's path would, from what the read answered, reading nothing itself.
+  'key set, refused': { app: 0, vault: 2 },
   'key archived': { app: 12, vault: 2 },
   'key restored (a version)': { app: 13, vault: 8 },
   'key renamed': { app: 9, vault: 1 },
@@ -330,12 +327,12 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'environment archived': { app: 10, vault: 2 },
   // A first add decided on one read (T179; docs/design/two-trips.md, "A member add"): the vault's read; then its write,
   // one Sync: the members' rows and 0.14's head (a lock alone), the hold, the row, the change and the COMMIT. No 0.14
-  // `member.add` entry since 0.16.0's contraction: the change records the add. The app's one statement, on purpose:
-  // the passkey read beside the vault's read, as a key write's (`passkeyAhead`): a round trip, no wait.
-  'member added': { app: 1, vault: 2 },
-  'member added, a role': { app: 1, vault: 2 },
-  'service account added': { app: 1, vault: 2 },
-  'member added, refused': { app: 1, vault: 2 },
+  // `member.add` entry since 0.16.0's contraction: the change records the add. The passkey rows come with the vault's
+  // read, as a key write's (T216): the app reads nothing itself.
+  'member added': { app: 0, vault: 2 },
+  'member added, a role': { app: 0, vault: 2 },
+  'service account added': { app: 0, vault: 2 },
+  'member added, refused': { app: 0, vault: 2 },
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },

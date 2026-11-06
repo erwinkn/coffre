@@ -9,7 +9,7 @@ import { ApiError } from './api/errors.ts';
 import type { McpVia, SessionOf } from './api/context.ts';
 import { CredentialUncheckable, SigninService, type HandlePlace, type PersonalToken, type Touch } from './api/signin.ts';
 import { answerShown, policySeqAndSettings, shownActive, type Shows } from './db/answers.ts';
-import type { CredentialRead, PasskeyRead } from './db/queries.ts';
+import type { CredentialRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
 import { logged } from './logged.ts';
 import { passkeyRequired, PasskeyRequired } from './passkey-check.ts';
@@ -198,8 +198,6 @@ export async function authenticateRequest(
    */
   options: {
     handle?: boolean; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number; touch?: (touched: Touch) => void;
-    /** What stands behind the credential, read on its own before the vault's call that read it (`passkeyByToken`): a named use's, a key write's. */
-    passkey?: PasskeyRead | null;
   } = {},
 ): Promise<AuthenticatedIdentity | Response> {
   if (token === null) return unauthenticated(runtime.auth);
@@ -232,7 +230,6 @@ export async function authenticateRequest(
       sourceIp, recall: options.recall === true, ...(options.shows === undefined ? {} : { shows: options.shows }), ...(options.standing === undefined ? {} : { standing: options.standing }),
       ...(options.at === undefined ? {} : { at: options.at }),
       ...(options.touch === undefined ? {} : { touch: options.touch }),
-      ...(options.passkey === undefined ? {} : { passkey: options.passkey }),
     };
     // Only coffre's own credentials are read ahead: Access's verifier reads none.
     const verifying = options.ahead !== undefined && runtime.verifier instanceof SigninService

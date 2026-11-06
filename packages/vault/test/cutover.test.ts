@@ -272,7 +272,7 @@ test("a cutover committed and not yet sealed serves no use: a use by ids and one
     const byIds = await second.use!({ credential: id, secretId: secret.secretId, place: null, purpose: 'reveal', requestId: String(900_000 + Math.floor(Math.random() * 1e6)), at, deadline: at + deadlineMs });
     const namedAt = Date.now();
     const byName = await second.useNamed!({
-      tokenHash: tokenHash.toString('base64'), place: { project: named!.project, environment: named!.environment }, key: named!.key, accepts: { signin: true, issuers: [] },
+      tokenHash: tokenHash.toString('base64'), place: { project: named!.project, environment: named!.environment }, key: named!.key, accepts: { signin: true, issuers: [], passkeys: 'off' as const },
       purpose: 'reveal', requestId: String(900_000 + Math.floor(Math.random() * 1e6)), at: namedAt, deadline: namedAt + deadlineMs,
     });
     return { byIds, byName };
