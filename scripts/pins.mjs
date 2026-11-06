@@ -119,12 +119,16 @@ function lines(text, kind, report, { path, pnpm }) {
         // A comment ends at its line, backslash or not.
         if (/^\s*#/.test(raw[k])) continue;
         let line = raw[k];
-        while (/\\\s*$/.test(line) && k + 1 < raw.length) {
-            // Docker drops comment and blank lines inside an instruction; a shell does not.
+        // In a shell, a backslash inside a comment continues nothing: `# note \` and
+        // `cmd # note \` both end at their line, and a comment line ends the command.
+        const continues = () => /\\\s*$/.test(line) && (kind === 'dockerfile' || !/(?:^|\s)#/.test(raw[k]));
+        while (continues() && k + 1 < raw.length) {
+            // Docker drops comment and blank lines inside an instruction.
             if (kind === 'dockerfile' && /^\s*(?:#.*)?$/.test(raw[k + 1])) {
                 k++;
                 continue;
             }
+            if (/^\s*#/.test(raw[k + 1])) break;
             line = line.replace(/\\\s*$/, ' ') + raw[++k];
         }
         const skip = exempt(raw, index, line);

@@ -80,6 +80,9 @@ test('4. only scripts/fetch.sh downloads; a health check of this machine is mark
     fails('scripts/a.sh', '# Download example \\\ncurl https://example.com/tool\n', /scripts\/a\.sh:2: curl downloads/);
     fails('Dockerfile', 'FROM scratch\n# fetch \\\nRUN curl https://example.com/tool\n', /Dockerfile:3: curl downloads/);
     fails('Dockerfile', 'FROM scratch\nRUN apk add x \\\n    # then the tool\n    && curl -o /x https://example.com/x\n', /Dockerfile:2: curl downloads/);
+    // In a shell, a comment's own backslash continues nothing, and a comment line ends the command.
+    fails('scripts/a.sh', 'echo one # note \\\ncurl https://example.com/tool\n', /scripts\/a\.sh:2: curl downloads/);
+    fails('scripts/a.sh', 'echo one \\\n# note \\\ncurl https://example.com/tool\n', /scripts\/a\.sh:3: curl downloads/);
     // A health check: every URL this machine's.
     passes('scripts/a.sh', 'until curl -sf "http://127.0.0.1:$port/livez"; do sleep 1; done # pins: local\n');
     passes('scripts/a.sh', 'curl -sf http://localhost:3000/ http://[::1]:3000/ # pins: local\n');
@@ -117,6 +120,11 @@ test('6. pnpm install carries --frozen-lockfile, each command its own', () => {
     }
     fails('docker-compose.yml', `services:\n  a:\n    image: a:1@${DIGEST}\n    command: [pnpm, install]\n`);
     fails('.github/workflows/a.yml', run('pnpm install'), /steps\[0\]\.run: pnpm install: pnpm install without/);
+    // The second install is a command of its own: bash ends the first at the comment.
+    fails('scripts/a.sh', 'pnpm install --frozen-lockfile \\\n# note \\\npnpm install\n', /scripts\/a\.sh:3: pnpm install: pnpm install without/);
+    fails('scripts/a.sh', 'pnpm install --frozen-lockfile # note \\\npnpm install\n', /scripts\/a\.sh:2: pnpm install: pnpm install without/);
+    fails('.github/workflows/a.yml', run('pnpm install --frozen-lockfile \\\n# note \\\npnpm install'), /line 3: pnpm install: pnpm install without/);
+    passes('scripts/a.sh', 'pnpm install \\\n  --frozen-lockfile\n');
 });
 
 test('7. Corepack’s pnpm is the workspace’s', () => {
