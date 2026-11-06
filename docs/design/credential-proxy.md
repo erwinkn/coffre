@@ -503,13 +503,20 @@ replica: { upstream: 'https://replica.acme.example', inject: header('x-api-key',
   the same with `_` or `.`, as Rack and PHP read them), or in a `_method`
   query parameter, must be one the list takes on its path, or the request
   is a 405 naming it, before anything goes upstream: through a handle,
-  before its body is read or any value opens; through a UI route, after
+  before any value opens, and before its body is read unless the handle
+  is in it (a stable URL's `form` or `json` field, which is read first to
+  find the handle); through a UI route, after
   its one vault call, which opens them; a workload's, after its signed
   body is checked. A name is `_method` as PHP and Tomcat read one too
   (`.method`, `_method[]`, `_method `, any case), and a parameter named
   as one of those headers counts as one, as ServiceStack and ASP.NET MVC
   read them, ASP.NET's `%uXXXX` decoded too (`%u0058-HTTP-Method-Override`).
-  An empty value names no method and changes nothing (`?_method=`). An override the list takes
+  An empty value names no method and changes nothing (`?_method=`). A
+  header's value is held as written as well as uppercased, as ASP.NET
+  Core sets the request's method to it: a list that takes `PATCH` refuses
+  `X-HTTP-Method-Override: pAtCh`, as it would a request whose own method
+  is `pAtCh`; a query's `_method=patch`, which what reads it uppercases,
+  is PATCH. An override the list takes
   goes on as it came (Google's `PATCH` through a POST): the upstream acts
   on a method the list allows either way, so refusing what it does not
   take closes the gap and breaks no client that stays inside the list,

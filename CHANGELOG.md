@@ -40,7 +40,9 @@
   parameter, must now be one the allow list (or a narrowed session's
   `methods`) takes on its path, or the request is a 405 (a 403
   `narrowed`), before anything goes upstream (through a handle, before
-  its body is read or any value opens). An override
+  any value opens, and before its body is read unless the handle is in
+  it). A header's value counts as written as well as uppercased, as
+  ASP.NET Core reads it: a list taking `PATCH` refuses `pAtCh`. An override
   the list takes goes on as it came. Where an entry takes any method on
   the path, or there is no list, nothing changes. **Not covered:** a
   `_method` field in a POST's form or multipart body, which Rails,

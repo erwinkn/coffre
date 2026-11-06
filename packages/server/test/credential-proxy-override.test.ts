@@ -187,6 +187,27 @@ test("a narrowed session's methods hold an override too, with no allow list; a w
   assert.equal(unsigned.reached[0]!.headers.get('x-method-override'), null);
 });
 
+// ASP.NET Core's middleware sets `Request.Method` to the override as it came, and its routing reads `pAtCh` as PATCH:
+// coffre holds that spelling as it would a request's own method, which a list or session taking `PATCH` does not take
+// (review r4 of #526). `delete` is DELETE either way, as fetch reads one.
+test('an override is held as it came as well as uppercased: a session or list taking PATCH takes no pAtCh', async () => {
+  const session = proxy({}, { methods: ['POST', 'PATCH'] });
+  const narrowed = await session.ask('/market/dev/api/items/1', { method: 'POST', as: 'workload', headers: { 'x-http-method-override': 'pAtCh' } });
+  assert.equal(narrowed.status, 403, narrowed.body);
+  assert.match(narrowed.body, /may not pAtCh \/items\/1/);
+  assert.deepEqual(session.opened, []);
+  assert.equal((await session.ask('/market/dev/api/items/1', { method: 'POST', as: 'workload', headers: { 'x-http-method-override': 'PATCH' } })).status, 200);
+  const listed = proxy({ allow: [{ methods: ['POST', 'PATCH', 'DELETE'], path: '/items/**' }] });
+  const refused = await listed.ask('/market/dev/api/items/1', { method: 'POST', headers: { 'x-http-method-override': 'pAtCh' } });
+  assert.equal(refused.status, 405, refused.body);
+  assert.match(refused.body, /does not take pAtCh/);
+  for (const each of ['PATCH', 'delete']) {
+    assert.equal((await listed.ask('/market/dev/api/items/1', { method: 'POST', headers: { 'x-http-method-override': each } })).status, 200, each);
+  }
+  assert.equal(listed.reached.length, 2);
+  assert.deepEqual(listed.reached.map((each) => each.headers.get('x-http-method-override')), ['PATCH', 'delete'], 'what goes on goes as it came');
+});
+
 // D179 (Erwin's choice): coffre reads no body for an override. A `_method` field of a POST's form, multipart or JSON
 // body, which Rails, Laravel and Spring honour, goes on through a list that takes POST alone, as it came
 // (docs/design/credential-proxy.md, section 3, `allow`). Should coffre ever read bodies for one, this test changes

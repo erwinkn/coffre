@@ -43,7 +43,7 @@
 import { createHash } from 'node:crypto';
 
 import { CoffreError } from '@coffre/client';
-import { bodyDigest, bodyLine, contentDigest, declaredDigest, MAX_DIGESTED_BODY, UNSIGNED_BODY } from '@coffre/client/dpop';
+import { bodyDigest, bodyLine, contentDigest, declaredDigest, fetchMethod, MAX_DIGESTED_BODY, METHOD_TOKEN, UNSIGNED_BODY } from '@coffre/client/dpop';
 import { constraintsAllow, CREDENTIAL_NAME, type Constraints, type GateCount } from '@coffre/core/identity';
 import { recipeProblem } from '@coffre/core/recipe';
 import { isUnavailable } from '@coffre/db/dialect';
@@ -2349,20 +2349,28 @@ function overridden(credential: Resolved, aimed: Aim, headers: Headers, session:
   const segments = entries === null ? [] : segmentsOf(entries, aimed.relative);
   const narrowed = session !== null && session.constraints !== null && session.constraints.methods !== undefined;
   if (!narrowed && (entries === null || entries.some((entry) => entry.methods === null && (entry.path === null || matches(entry.path, segments))))) return null;
-  const asked: { method: string; via: string }[] = [];
+  const asked: { method: string; via: string; asIs: boolean }[] = [];
   for (const [name, value] of headers) {
     if (!overrideHeader(name)) continue;
-    for (const each of value.split(',')) if (each.trim() !== '') asked.push({ method: each, via: `its ${name} header` });
+    for (const each of value.split(',')) if (each.trim() !== '') asked.push({ method: each, via: `its ${name} header`, asIs: true });
   }
   // An empty value names no method: Express's `method-override` leaves the request's own then, as for an empty header.
-  for (const each of methodPairs(aimed.target.search.slice(1))) if (each.trim() !== '') asked.push({ method: each, via: 'a method query parameter' });
-  for (const { method: raw, via } of asked) {
-    const method = raw.trim().replace(/[a-z]/g, (char) => char.toUpperCase());
-    if (entries !== null && allows(entries, method, segments) !== 'allowed') {
-      return failure(405, `${credential.name} does not take ${method} on ${aimed.relative}, which this request asks for in ${via}: an upstream may act on it as that method`);
-    }
-    if (session !== null && !constraintsAllow(session.constraints, { place: session.place, credential: credential.name, request: { method, url: aimed.target } })) {
-      return failure(403, `this narrowed session may not ${method} ${aimed.relative} through ${credential.name}, which this request asks for in ${via}`, 'narrowed');
+  for (const each of methodPairs(aimed.target.search.slice(1))) if (each.trim() !== '') asked.push({ method: each, via: 'a method query parameter', asIs: false });
+  for (const { method: raw, via, asIs } of asked) {
+    // Uppercased, as Express, Rack, Laravel and Symfony read an override; and a header's as it came too, as ASP.NET
+    // Core's middleware sets `Request.Method` (`pAtCh`, review r4 of #526), held as the request's own method would be:
+    // a list or session that takes `PATCH` takes no `pAtCh`. A query's `_method=patch`, as Rails writes it, is PATCH:
+    // what reads one uppercases it.
+    const value = raw.trim();
+    const readings = new Set([value.replace(/[a-z]/g, (char) => char.toUpperCase())]);
+    if (asIs && METHOD_TOKEN.test(value)) readings.add(fetchMethod(value));
+    for (const method of readings) {
+      if (entries !== null && allows(entries, method, segments) !== 'allowed') {
+        return failure(405, `${credential.name} does not take ${method} on ${aimed.relative}, which this request asks for in ${via}: an upstream may act on it as that method`);
+      }
+      if (session !== null && !constraintsAllow(session.constraints, { place: session.place, credential: credential.name, request: { method, url: aimed.target } })) {
+        return failure(403, `this narrowed session may not ${method} ${aimed.relative} through ${credential.name}, which this request asks for in ${via}`, 'narrowed');
+      }
     }
   }
   return null;
