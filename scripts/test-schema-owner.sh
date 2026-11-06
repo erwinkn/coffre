@@ -188,8 +188,14 @@ expected+=" use_stands_personal=migration_member"
 [[ "$(owners)" == "$expected" ]] || { echo "after 0058, the use functions' owners: $(owners)" >&2; exit 1; }
 # use_route calls use_credential too.
 use_grants member 8
-migrate_through member migration_member local-member-only
+migrate_through member migration_member local-member-only 0072_passkeys_principal
 [[ "$(owners)" == "$expected" ]] || { echo "after 0059, the use functions' owners: $(owners)" >&2; exit 1; }
+use_grants member 8
+# 0073 makes `use_credential` and `use_named_batch` again, with `p_passkeys` (T216): both the member's now, while
+# 0048's `use_batch` stays the owner's and must be granted the new `use_credential`, which the drop took from it.
+migrate_through member migration_member local-member-only
+expected="${expected/use_named_batch=migration_owner/use_named_batch=migration_member}"
+[[ "$(owners)" == "$expected" ]] || { echo "after 0073, the use functions' owners: $(owners)" >&2; exit 1; }
 use_grants member 8
 # 0064 makes `issue_token`'s overload, the member's, and replaces 0036's signature with a wrapper calling it, which keeps
 # its owner and runs as it (T176 PR 3). The previous release's vault, which calls that signature during a rollout, must

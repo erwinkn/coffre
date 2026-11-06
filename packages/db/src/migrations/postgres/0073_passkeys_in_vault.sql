@@ -1737,3 +1737,31 @@ BEGIN
     RETURN json_build_object('state', 'read', 'inputs', v_inputs, 'digest', encode(sha256(convert_to(v_inputs, 'UTF8')), 'hex'), 'app', v_app);
 END
 $$;
+--> statement-breakpoint
+-- As 0060's: each use function runs as its owner, and each it calls must be that owner's to execute, granted by name,
+-- caller to callee. The two made again here are the login's that runs this, a member of the owner where the owner
+-- migrated before (`scripts/test-schema-owner.sh`), and the drop took each grant made to the old ones: `use_batch`,
+-- 0048's, would lose `use_credential`, and every batch read, the previous release's included, would fail.
+DO $$
+DECLARE
+    v_credential regprocedure := 'public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text)';
+    v_call record;
+    v_owner name;
+BEGIN
+    FOR v_call IN SELECT * FROM (VALUES
+        (v_credential, 'public.use_covered(bigint, bigint, bigint, uuid, uuid, smallint, uuid, text)'::regprocedure),
+        (v_credential, 'public.use_stands(uuid, uuid, smallint, bigint, jsonb)'::regprocedure),
+        (v_credential, 'public.use_stands_personal(uuid, uuid, bigint, jsonb)'::regprocedure),
+        (v_credential, 'public.use_admits(jsonb, text)'::regprocedure),
+        (v_credential, 'public.use_scope_holds(uuid, uuid, text, jsonb)'::regprocedure),
+        ('public.use_batch(uuid, uuid[], bigint[], bigint, smallint, uuid[], bytea[], bigint, bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], boolean[], smallint, text, text)'::regprocedure, v_credential),
+        ('public.use_named_batch(bytea, text, text, boolean, text[], boolean, text[], jsonb, bigint, smallint, bigint, bytea, text[], uuid[], uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], bigint[], bytea[], integer[], bigint[], smallint, text, integer, text)'::regprocedure, v_credential),
+        ('public.use_route(bytea, text, text, text, text, smallint, boolean, text[], jsonb, uuid, smallint, text, uuid, bigint, smallint, bigint, bytea, uuid[], uuid[], bigint[], bytea[], bigint[], bigint[], bigint[], boolean[], integer, integer, text, boolean, boolean)'::regprocedure, v_credential)
+    ) AS calls(caller, callee) LOOP
+        v_owner := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_call.caller);
+        IF NOT has_function_privilege(v_owner, v_call.callee, 'EXECUTE') THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_call.callee, v_owner);
+        END IF;
+    END LOOP;
+END
+$$;
