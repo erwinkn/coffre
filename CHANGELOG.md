@@ -47,8 +47,12 @@
   sign-in has one budget, `SIGN_IN_WORK_NS` (16 ms, what R27's 20 ms leaves
   after the largest read, spent at measured costs), for its token's tries
   against its issuer's keys, each paid for with the token's size, and for
-  matching its claims against every binding it weighs: past it, the
-  sign-in is refused.
+  matching its claims against every binding it weighs, and for checking
+  each candidate binding's MAC before it is read: past it, the sign-in is
+  refused. A string a request turns into a list (a path, a scope list, a
+  sealed state) is counted before it is split and holds no more parts than
+  a body holds values, and a narrowed session's path constraints are
+  reduced by a sort rather than by comparing every pair.
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

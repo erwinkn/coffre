@@ -1,5 +1,5 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
-import { BEARER_PROFILES } from '@coffre/core/identity';
+import { BEARER_PROFILES, ROW_BYTE_NS, SignInWorkSpent, type SignInWork } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
@@ -1900,6 +1900,7 @@ export async function exchangeCandidates(
   issuer: string,
   max: number,
   token: Buffer,
+  work?: SignInWork,
 ): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null }> {
   const { consumedTokens, serviceBindings, vaultMembers } = tablesOf(db);
   const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
@@ -1929,11 +1930,29 @@ export async function exchangeCandidates(
   }
   const seq = rows[0]?.policySeq ?? null;
   return {
-    bindings: rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row)),
+    bindings: checkedCandidates(chainKey, rows.map((row) => row.binding), work),
     // Null where nothing was read: no binding, so no row to read it with.
     spent: rows[0]?.spent ?? null,
     policySeq: seq === null ? null : BigInt(seq),
   };
+}
+
+/**
+ * A sign-in's candidate bindings that pass their MACs, each check paid for
+ * from the sign-in's budget before it is made (`ROW_BYTE_NS`, its claims'
+ * bytes mostly). Spent, it throws `SignInWorkSpent` and checks none further:
+ * never a shorter list, whose newest would then name another binding's keys.
+ */
+export function checkedCandidates(chainKey: Buffer, rows: readonly BindingRow[], work?: SignInWork): BindingRow[] {
+  const checked: BindingRow[] = [];
+  for (const row of rows) {
+    if (work !== undefined) {
+      work.left -= (row.claims.length + row.issuer.length + (row.jwksUri?.length ?? 0)) * ROW_BYTE_NS;
+      if (work.left < 0) throw new SignInWorkSpent();
+    }
+    if (checkAuthRow(chainKey, 'service_bindings', row)) checked.push(row);
+  }
+  return checked;
 }
 
 /**

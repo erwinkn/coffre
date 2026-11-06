@@ -36,7 +36,6 @@ export class ConstraintsInvalid extends Error {
 
 const PLACE = /^[a-z0-9][a-z0-9-]{0,62}\/[a-z0-9][a-z0-9-]{0,62}(@me)?$/;
 /** A path segment as a constraint names one: no escape, no `;`, no dot segment. */
-const SEGMENT = /^[A-Za-z0-9\-_~!$&'()*+,=:@.]+$/;
 
 /**
  * What a path may not hold for a constrained session, since an upstream
@@ -55,10 +54,11 @@ function list(value: unknown, what: string, valid: (item: string) => boolean): s
   return [...new Set(value as string[])].sort();
 }
 
+/** Segments of the characters a constraint's path takes, none a dot segment: one pass over the whole path, never split, however many it holds. */
+const PREFIX = /^(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9\-_~!$&'()*+,=:@.]+)+$/;
+
 function isPrefix(path: string): boolean {
-  if (path === '/') return true;
-  if (!path.startsWith('/') || path.endsWith('/')) return false;
-  return path.slice(1).split('/').every((segment) => SEGMENT.test(segment) && segment !== '.' && segment !== '..');
+  return path === '/' || PREFIX.test(path);
 }
 
 /** Whether `path` is `prefix` or below it, by whole segments. */
@@ -90,14 +90,48 @@ export function checkConstraints(input: unknown): Constraints {
 }
 
 /** The prefixes no other one is above. */
+/**
+ * Paths in the order of their segments, each `/` sorting before any other
+ * character: so every path below one comes right after it, before a
+ * sibling such as `/a-b` of `/a`, and what is under a path is found by its
+ * neighbours alone, never by comparing every pair of a list as long as a
+ * body lets one be.
+ */
+function bySegments(paths: Iterable<string>): string[] {
+  return [...new Set(paths)]
+    .map((path) => [path.replaceAll('/', '\0'), path] as const)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, path]) => path);
+}
+
+/** Those of `paths` under no other, sorted: each kept unless it is under the last one kept, its nearest ancestor if any. */
 function outermost(paths: readonly string[]): string[] {
-  return paths.filter((path) => !paths.some((other) => other !== path && under(path, other)));
+  const kept: string[] = [];
+  for (const path of bySegments(paths)) if (kept.length === 0 || !under(path, kept[kept.length - 1]!)) kept.push(path);
+  return kept.sort();
+}
+
+/** Those of `paths` under one of `prefixes`: each under the nearest of the outermost prefixes before it, or under none. */
+function inside(paths: readonly string[], prefixes: readonly string[]): string[] {
+  const outer = bySegments(outermost(prefixes));
+  const keys = outer.map((prefix) => prefix.replaceAll('/', '\0'));
+  return paths.filter((path) => {
+    const key = path.replaceAll('/', '\0');
+    let low = 0;
+    for (let high = keys.length; low < high;) {
+      const middle = (low + high) >> 1;
+      if (keys[middle]! <= key) low = middle + 1;
+      else high = middle;
+    }
+    return low > 0 && under(path, outer[low - 1]!);
+  });
 }
 
 function both(a: readonly string[] | undefined, b: readonly string[] | undefined): readonly string[] | undefined {
   if (a === undefined) return b;
   if (b === undefined) return a;
-  return a.filter((item) => b.includes(item));
+  const held = new Set(b);
+  return a.filter((item) => held.has(item));
 }
 
 /**
@@ -119,10 +153,7 @@ export function intersect(parent: Constraints | null, child: Constraints): Const
     const paths = parent.paths ?? child.paths;
     if (paths !== undefined) result.paths = paths;
   } else {
-    const kept = [
-      ...child.paths.filter((path) => parent.paths!.some((prefix) => under(path, prefix))),
-      ...parent.paths.filter((path) => child.paths!.some((prefix) => under(path, prefix))),
-    ];
+    const kept = [...inside(child.paths, parent.paths), ...inside(parent.paths, child.paths)];
     result.paths = outermost([...new Set(kept)].sort());
   }
   return result;

@@ -1,4 +1,4 @@
-import type { WorkloadProfile } from '@coffre/core/identity';
+import type { SignInWork, WorkloadProfile } from '@coffre/core/identity';
 import { prepared, tablesOf, type Queryable } from '@coffre/db';
 import { newestSeqQuery } from '@coffre/db/log';
 import * as dialect from '@coffre/db/dialect';
@@ -6,8 +6,8 @@ import { changedRows, clockMillis, truth } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
-import { authMac, checkAuthRow } from '../auth-rows.ts';
-import { hasTombstone, insert, type BindingRow } from './queries.ts';
+import { authMac } from '../auth-rows.ts';
+import { checkedCandidates, hasTombstone, insert, type BindingRow } from './queries.ts';
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
 // 5): the one statement every request runs, the bindings an exchange reads,
@@ -223,6 +223,7 @@ export async function workloadCandidates(
   issuer: string,
   profiles: readonly WorkloadProfile[],
   max: number,
+  work?: SignInWork,
 ): Promise<BindingRow[]> {
   const { serviceBindings, vaultMembers } = tablesOf(db);
   if (profiles.length === 0) return [];
@@ -243,7 +244,7 @@ export async function workloadCandidates(
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
     return [];
   }
-  return rows.filter((row) => !row.tombstoned).map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  return checkedCandidates(chainKey, rows.filter((row) => !row.tombstoned).map((row) => row.binding), work);
 }
 
 /** Which of these freeze targets are frozen now, in one statement: the exchange's check, under the log's head. */

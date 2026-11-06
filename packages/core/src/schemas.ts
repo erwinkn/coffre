@@ -192,3 +192,20 @@ export function countValues(text: string, cap = Infinity): number {
   }
   return count;
 }
+
+/**
+ * `text` split on `separator`, or null when it holds more than `max` parts:
+ * its separators counted first, by index, and nothing split past the count.
+ * A string a request turns into a list holds no more items than a body may
+ * hold values (`MAX_BODY_NODES`), or than the list's own shape takes (a path
+ * of three parts, a sealed state of two), so one field of a mebibyte of
+ * separators costs a count, never a million parts (about 13 ns each).
+ */
+export function splitAtMost(text: string, separator: string, max: number = MAX_BODY_NODES): string[] | null {
+  let parts = 1;
+  for (let at = text.indexOf(separator); at !== -1; at = text.indexOf(separator, at + separator.length)) {
+    parts += 1;
+    if (parts > max) return null;
+  }
+  return text.split(separator);
+}

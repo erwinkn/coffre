@@ -20,7 +20,7 @@ import {
   type WorkloadProfile,
 } from '@coffre/core/identity';
 import type { McpScope } from '@coffre/core/mcp';
-import { instanceRole, roleId, scopeInput, secretKey, slug } from '@coffre/core/schemas';
+import { instanceRole, roleId, scopeInput, secretKey, slug, splitAtMost } from '@coffre/core/schemas';
 import { z } from 'zod';
 
 import { trimSlashes } from '../api/paths.ts';
@@ -92,7 +92,7 @@ const name = z.string().trim().min(1).optional().describe('Ignored: it goes by i
 
 /** `market/prod/KEY` as its environment and key, or why not. */
 function splitSecret(path: string): { environment: string; key: string } {
-  const parts = trimSlashes(path).split('/');
+  const parts = splitAtMost(trimSlashes(path), '/', 3) ?? [];
   if (parts.length !== 3 || !slug.safeParse(parts[0]).success || !slug.safeParse(parts[1]).success || !secretKey.safeParse(parts[2]).success) {
     throw new CoffreError(400, 'bad_request', `"${path}" is not a secret: name one as project/environment/KEY`);
   }
@@ -100,7 +100,7 @@ function splitSecret(path: string): { environment: string; key: string } {
 }
 
 function splitEnvironment(path: string): { project: string; environment: string } {
-  const parts = trimSlashes(path).split('/');
+  const parts = splitAtMost(trimSlashes(path), '/', 2) ?? [];
   if (parts.length !== 2 || !slug.safeParse(parts[0]).success || !slug.safeParse(parts[1]).success) {
     throw new CoffreError(400, 'bad_request', `"${path}" is not an environment: name one as project/environment`);
   }
@@ -646,7 +646,7 @@ export const CHANGE_TOOLS: readonly Tool[] = [
       // A service account's manager gives it what they hold, which the API decides on Approve.
       check: async (ctx, { member, changes }) => {
         const places = Object.keys(changes).map(placeOf);
-        if (places.some((place) => place.split('/')[0] === '*')) {
+        if (places.some((place) => place === '*' || place.startsWith('*/'))) {
           throw new CoffreError(400, 'bad_request', 'grants are on a project or an environment: a person reaches every project by their instance role (admit_member)');
         }
         if (apiMember(member).startsWith('token:') && !runsInstance(ctx.connection.caller)) return manages(ctx.api, apiMember(member));

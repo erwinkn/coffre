@@ -35,6 +35,17 @@ export const KEY_TRY_NS = 170_000;
 /** A token's byte, decoded and hashed again by each signature check (6.8 ns over 130 KB and 930 KB tokens). */
 export const TOKEN_BYTE_NS = 7;
 
+/** A candidate binding's row checked against its MAC, a byte of what the MAC covers (its claims, mostly): 2.67 ns over a 900 KiB row. */
+export const ROW_BYTE_NS = 3;
+
+/** A sign-in that would spend more than its budget before it could match: refused, as matching nothing. */
+export class SignInWorkSpent extends Error {
+  constructor() {
+    super("this service's bindings on the token's issuer cost more to check than a sign-in may spend");
+    this.name = 'SignInWorkSpent';
+  }
+}
+
 /** What is left of a sign-in's budget (`SIGN_IN_WORK_NS`), spent as it works, and the keys it listed of each object of the token. */
 export type SignInWork = { left: number; keys: WeakMap<object, { keys: string[]; chars: number }> };
 

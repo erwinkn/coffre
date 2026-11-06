@@ -15,6 +15,7 @@ import {
   CHAR_NS,
   differingClaims,
   signInWork,
+  SignInWorkSpent,
   TOKEN_BYTE_NS,
   type SignInWork,
   generateToken,
@@ -317,8 +318,18 @@ const OIDC: ProofKind = {
     }
     const issuer = decoded.claims.iss;
     const unbound = new ExchangeRefused('no_match', `no workload binding of ${shownMember(ctx.service)} trusts tokens from ${issuer}`);
+    // One budget for the sign-in (`SIGN_IN_WORK_NS`): the token's decoding above, its candidates' checks, its key tries
+    // and its claims, all paid from it.
+    const work = signInWork();
+    work.left -= input.length * TOKEN_BYTE_NS;
     // The bindings first, so that a token none can take costs this one read.
-    const loaded = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
+    let loaded: BindingRow[];
+    try {
+      loaded = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS, work);
+    } catch (error) {
+      if (error instanceof SignInWorkSpent) return new ExchangeRefused('no_match', error.message);
+      throw error;
+    }
     if (loaded.length === 0) return unbound;
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, ctx.publicUrl));
@@ -331,9 +342,6 @@ const OIDC: ProofKind = {
     // A token its platform hands out again is as old as its platform's cache: its own `exp` ends it, not an hour after `iat`.
     const repeats = taking.some((binding) => REPEATING_PROFILES.includes(binding.profile as WorkloadProfile));
     const newest = candidates[candidates.length - 1]!;
-    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`), the token's decoding above paid from it.
-    const work = signInWork();
-    work.left -= input.length * TOKEN_BYTE_NS;
     const expected = { issuer, audience, now: new Date(), work, ...(repeats ? { maxAge: null } : {}) };
     let claims: Record<string, unknown>;
     try {
@@ -1199,17 +1207,25 @@ export class WorkloadService {
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
+    // One budget for the sign-in (`SIGN_IN_WORK_NS`): the token's decoding above, its candidates' checks, its key tries
+    // and its claims, all paid from it.
+    const work = signInWork();
+    work.left -= token.length * TOKEN_BYTE_NS;
     // The bindings first, so that a token none can take costs this one read.
-    const { bindings: loaded, spent, policySeq } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
+    let candidatesRead: Awaited<ReturnType<typeof exchangeCandidates>>;
+    try {
+      candidatesRead = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash, work);
+    } catch (error) {
+      if (error instanceof SignInWorkSpent) throw new ExchangeRefused('no_match', error.message);
+      throw error;
+    }
+    const { bindings: loaded, spent, policySeq } = candidatesRead;
     if (loaded.length === 0 || spent === null) throw unbound();
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, this.#deps.publicUrl));
     if (candidates.length === 0) throw madeElsewhere(loaded[loaded.length - 1]!, this.#deps.publicUrl);
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
-    // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`), the token's decoding above paid from it.
-    const work = signInWork();
-    work.left -= token.length * TOKEN_BYTE_NS;
     const expected = { issuer, audience: this.#deps.publicUrl, now: new Date(), work };
     let claims: Record<string, unknown>;
     try {

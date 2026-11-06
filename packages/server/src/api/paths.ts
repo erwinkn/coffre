@@ -1,3 +1,5 @@
+import { splitAtMost } from '@coffre/core/schemas';
+
 import { badRequest } from './errors.ts';
 
 export type { ResolvedPath } from '../db/queries.ts';
@@ -20,7 +22,8 @@ export function trimSlashes(path: string): string {
 
 /** Split `market/prod/KEY`; the depth says what it names. */
 export function parsePath(path: string, depths: readonly (1 | 2 | 3)[] = [1, 2, 3]): Path {
-  const parts = trimSlashes(path.trim()).split('/');
+  // Three parts at most, counted before it is split.
+  const parts = splitAtMost(trimSlashes(path.trim()), '/', 3) ?? [];
   if (parts.some((part) => part === '') || !depths.includes(parts.length as 1 | 2 | 3)) {
     const shapes = { 1: 'project', 2: 'project/environment', 3: 'project/environment/KEY' };
     throw badRequest(`name a ${depths.map((depth) => shapes[depth]).join(' or ')}`);

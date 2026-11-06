@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ownsProject, readsSensitive, useOnly, type Permission } from '@coffre/core/access';
 import { encrypt, type Envelope } from '@coffre/core/envelope';
 import { formatRecipe, parseRecipe, recipeProblem, type Generation } from '@coffre/core/recipe';
-import { isTombstone } from '@coffre/core/schemas';
+import { isTombstone, splitAtMost } from '@coffre/core/schemas';
 import { handsBack, type HolderRef, type SecretColumns, type SecretRef } from '@coffre/core/vault';
 import type { Queryable, Transaction } from '@coffre/db';
 import { laterHead } from '@coffre/db/log';
@@ -1294,7 +1294,7 @@ async function referenceTargets(
     throw refused(refs[0]!.key, `a personal config holds values only, no reference: copy the value of ${refs[0]!.ref} instead`, 'personal');
   }
   const resolved = await Promise.all(refs.map(async ({ key, ref }) => {
-    const parts = ref.split('/');
+    const parts = splitAtMost(ref, '/', 3) ?? [];
     const found = parts.length === 3 ? await resolvePath(ctx.db, { project: parts[0]!, environment: parts[1]!, key: parts[2]! }) : null;
     if (found?.environment == null || found.secret === null || found.project.archivedAt !== null || found.environment.archivedAt !== null || found.secret.archivedAt !== null) {
       // A key a fork only inherits is its parent's: the reference goes to where the value is held. Said only to
