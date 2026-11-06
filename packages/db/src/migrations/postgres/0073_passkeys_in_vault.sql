@@ -1765,3 +1765,25 @@ BEGIN
     END LOOP;
 END
 $$;
+--> statement-breakpoint
+-- The three that now read `passkeys` run as their owners too, and each must be able to read it. `write_request` and
+-- `admit_read` keep 0061's and 0062's owner, which need not be the login that made `passkeys` in 0063: where the owner
+-- migrated through 0062 and a member of it ran the rest (`scripts/test-schema-owner.sh`), the table is the member's,
+-- the old owner may not read it, and every key write and member add, the previous release's included, would fail.
+DO $$
+DECLARE
+    v_reader regprocedure;
+    v_owner name;
+BEGIN
+    FOREACH v_reader IN ARRAY ARRAY[
+        'public.use_credential(uuid, uuid, bigint, bigint, smallint, uuid, bytea, bigint, bigint, bigint, bigint, bigint, bytea, integer, bigint, bytea, text, text, text, boolean, boolean, text[], boolean, text[], jsonb, smallint, text, boolean, text, boolean, text)'::regprocedure,
+        'public.write_request(bigint, bytea, text, text, text[])'::regprocedure,
+        'public.admit_read(bigint, bytea, text, text[])'::regprocedure
+    ] LOOP
+        v_owner := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_reader);
+        IF NOT has_table_privilege(v_owner, 'public.passkeys', 'SELECT') THEN
+            EXECUTE format('GRANT SELECT ON public.passkeys TO %I', v_owner);
+        END IF;
+    END LOOP;
+END
+$$;

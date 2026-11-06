@@ -209,6 +209,38 @@ answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
         gen_random_uuid(), 'personal', '\x00', '\x00', 'h', 'l', 'nobody', 'all', NULL, 0) ->> 'state'")"
 [[ "$answer" == moved ]] || { echo "the previous release's issue_token answered: $answer" >&2; exit 1; }
 
+# The same split one step later: the owner migrates through 0062, so `write_request` (0061) and `admit_read` (0062)
+# are its, and the member runs the rest, so `passkeys` (0063) is the member's. 0073 has the two read it (T216), as
+# they run, as their owner: each must be granted it, or every key write and member add fails with a permission error.
+psql_owner -d postgres -c "CREATE DATABASE split"
+migrate_through split migration_owner local-owner-only 0062_admit_inputs
+migrate_through split migration_member local-member-only
+psql_owner -d split <<'SQL'
+DO $$
+DECLARE
+    v_missing text;
+BEGIN
+    -- Every function that runs as its owner and reads `passkeys`, read from their bodies.
+    SELECT string_agg(format('%s, running as %s', oid::regprocedure, pg_get_userbyid(proowner)), E';\n') INTO v_missing
+      FROM pg_proc
+     WHERE pronamespace = 'public'::regnamespace AND prosecdef AND prosrc ~ 'public\.passkeys[^a-z_]'
+       AND NOT has_table_privilege(proowner, 'public.passkeys', 'SELECT');
+    IF v_missing IS NOT NULL THEN RAISE EXCEPTION 'cannot read passkeys: %', v_missing; END IF;
+    IF pg_get_userbyid((SELECT proowner FROM pg_proc WHERE oid = 'public.write_request(bigint, bytea, text, text, text[])'::regprocedure))
+       <> 'migration_owner' THEN
+        RAISE EXCEPTION 'write_request is no longer the owner''s: the split tests nothing';
+    END IF;
+END $$;
+SQL
+# And both answer the vault, as the previous release's calls them.
+now="(extract(epoch FROM clock_timestamp()) * 1000)::bigint"
+token="'\x$(printf '00%.0s' {1..32})'::bytea"
+for call in "write_request($now, $token, 'p', 'e', '{k}')" "admit_read($now, $token, 'user:nobody', '{}')"; do
+    answer="$(docker exec -i -e PGPASSWORD=local-vault-only "$container" \
+        psql -X -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d split -c "SELECT $call ->> 'state'")"
+    [[ "$answer" == read ]] || { echo "after 0073, ${call%%(*} answered: $answer" >&2; exit 1; }
+done
+
 # Unsafe groups must fail clearly, rather than trying a forbidden ALTER ROLE.
 for attribute in SUPERUSER REPLICATION BYPASSRLS; do
     database="unsafe_${attribute,,}"
