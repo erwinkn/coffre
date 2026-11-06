@@ -255,8 +255,8 @@ def keyOf (v : UseView) (r : UseReq) (ids : List String) : Except String KeyRead
         else
           let reader := readerOf (v.principal.bind (·.row)) c (v.roles.row.getD noEdits) (rows.map (·.2)) r.time
           let envRows : Table EnvRow := rows.map fun (id, e) => (id, ⟨e.project, e.slug, e.owner, e.parent, e.deleted⟩)
-          .ok ⟨reader, c.principal, some r.purpose, r.keepsSensitive, ⟨x.project, x.env⟩, x.id, ⟨s.project, s.env⟩, envRows,
-            x.sensitive, s.source.isSome⟩
+          .ok ⟨reader, c.principal, some r.purpose, r.keepsSensitive, ⟨x.project, x.env⟩, ⟨s.project, s.env⟩, s.id, envRows,
+            x.sensitive⟩
 
 /-- What refuses a use by its rows: before the rules, or by them. -/
 def rowsRefusal (v : UseView) (r : UseReq) (ids : List String) : Code :=

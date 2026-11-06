@@ -59,6 +59,33 @@
   options)` takes `localVault`'s options, as `localVault(config, options)`
   does. No default or value changes.
 
+- **A reference is read as its holder's own key, its sensitive value too
+  (R71, A516).** Once made, a reference was decided where it lives, but
+  three checks still asked its source's project: a service read its
+  sensitive value only on a credential an Owner of the source's project
+  issued, a workload's `reads` had to list it at its source, and only an
+  Owner of the source's project routed it in the Proxy tab. So a token
+  for `landing/prod` alone that an instance Owner issued could not read
+  `landing/prod/CLERK_SECRET_KEY`, a reference to `backend/prod`'s, and
+  the error named "the project each value is from". Each is now decided
+  at the holder, as any key held there: a credential an Owner of
+  `landing` issued reads it, a workload listing `"*"` at `landing/prod`
+  reads it, and an Owner of `landing` routes it. One a Developer of
+  `landing` issued still reads no sensitive value there (R32, at the
+  holder), and its refusal names the key, its source and who can issue
+  one: "landing/prod holds CLERK_SECRET_KEY (a reference to
+  backend/prod/CLERK_SECRET_KEY), sensitive: a service account reads it
+  only on a token or trust binding an Owner of landing issued". Making or
+  repointing a reference still takes reading its source, and using it if
+  sensitive (R24), and a workload still makes none of a value it only
+  uses. Existing references follow the new rule at once: nothing is
+  migrated. A fork copies a sensitive value read through a reference, kept
+  sensitive, as any key of the holder's, where it used to force a
+  reference to the source. The Secrets list's `reference.ownsSource` is
+  gone; `withheld` on a new token or binding, and the CLI's line for it,
+  now name only the holder's project. `formal/WorkloadReads.tla` and the
+  Lean model decide a reference at its holder too.
+
 - **A migration no longer holds up requests for minutes while it waits for
   a table (W331, limits D2).** `coffre migrate` set `lock_timeout = 5min`
   for its whole session, so a migration statement waiting for a table that

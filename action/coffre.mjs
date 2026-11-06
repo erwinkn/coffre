@@ -1815,7 +1815,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-DgGI1ZPz.js
+//#region ../core/dist/access-D8zVqMN8.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -6990,12 +6990,16 @@ function describePlan(member, plan, applied) {
 }
 /**
 * What a service's new token or binding will not read, as the server said
-* (`withheld`): the sensitive values of these places, which only one an
-* Owner of their project issues reads. Null when there are none.
+* (`withheld`): the sensitive values of these places, references' included,
+* which only one an Owner of their project issues reads (R32, R71), each
+* project named. Null when there are none.
+*
+*   ['landing/prod']   reads no sensitive value of landing/prod: only one an Owner of landing issues does
 */
 function withheldLine(withheld) {
 	if (withheld === void 0 || withheld.length === 0) return null;
-	return `reads no sensitive value of ${withheld.join(", ")}: only one an Owner of ${withheld.length === 1 ? "its project" : "their projects"} issues does`;
+	const projects = [...new Set(withheld.map((path) => path.split("/")[0]))];
+	return `reads no sensitive value of ${withheld.join(", ")}: only one an Owner of ${projects.join(" or ")} issues does`;
 }
 /** `refs/heads/main` as `branch main`, `refs/tags/v1` as `tag v1`; anything else as it is. */
 function refName(ref) {

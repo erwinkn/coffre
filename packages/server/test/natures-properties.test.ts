@@ -155,6 +155,7 @@ type Credential = {
   repository: string;
 };
 /** Where a value is served: read at `env`, held at `holder` (itself, or the parent it inherits from), from `project`. */
+/** A value as served where it is read: `holder`, where it is held (a reference's own environment); `project`, the value's own (a reference's source's). */
 type Serving = { env: Env; holder: Env; key: string; text: string; nature: Nature; project: string; version: number | null };
 type Reader = { label: string; person: string | null; credential: Credential | null };
 
@@ -327,11 +328,12 @@ async function scenario(world: World, policy: Policy, ops: readonly Op[], note: 
    * Whether a reader may be handed a value as it is served: plain to whoever
    * lists (reads or uses) where it is read and where it is held, a secret to
    * whoever reads both, a sensitive one only to a service, on a credential
-   * an Owner of the value's project issued; a personal config's own values
-   * to its owner alone.
+   * an Owner of the project it is held in issued (a reference's holder's,
+   * not its source's: R71); a personal config's own values to its owner
+   * alone.
    */
   function receives(reader: Reader, serving: Serving): boolean {
-    if (serving.nature === 'sensitive' && (reader.credential === null || reader.credential.kind === 'personal' || !reader.credential.sensitive.has(serving.project))) return false;
+    if (serving.nature === 'sensitive' && (reader.credential === null || reader.credential.kind === 'personal' || !reader.credential.sensitive.has(serving.holder.projectId))) return false;
     const enough = (held: ReadonlySet<Permission>) => held.has(READ) || (serving.nature === 'plain' && held.has(USE));
     if (serving.env.owner !== null) {
       if (!ownsOverlay(reader, serving.env)) return false;
@@ -1029,7 +1031,7 @@ test('a fixed world: who receives each nature of value, on each credential, and 
   assert.deepEqual(got(`session of ${ADA}`), [database, stripe, region, token, mine]);
   assert.deepEqual(got(`session of ${BO}`), [region]);
   // Credentials: the service token an Owner of market issued reads its sensitive value, and prod's through staging; the
-  // Developer's reads dev's secret, and its sensitive value only once loosened; ROOT's binding for billing lends nothing of market's sensitive one; Ada's personal token
+  // Developer's reads dev's secret, and its sensitive value only once loosened; ROOT's binding for billing reads market's sensitive one through billing's reference, ROOT owning billing (R71); Ada's personal token
   // reads dev and her own `@me` values.
   const label = (prefix: string) => [...outcome.received.keys()].find((each) => each.startsWith(prefix))!;
   assert.deepEqual(got(label(`service token 0 of ${CI} by ${CY}`)), [database, stripe, region, token]);

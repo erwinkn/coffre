@@ -112,6 +112,23 @@ has no grant in `market`. Creating it took read on the source (Ada has
 it) and write where it is created. Market rotates the value, and billing
 reads the new one at its next `coffre run`.
 
+**Once made, it is read as the holder's own key (R71).** Every read and
+use of it is decided where it lives, exactly as for a key held there:
+the holder's grants, a workload's `reads` at the holder by the
+reference's own id, and, for a sensitive value, a service credential an
+Owner of the holder's project issued (R32 at the holder). The source is
+asked nothing after creation or a repoint (R24): it lends its value and
+nature (R23), never its permissions. Erwin makes
+`landing/prod/CLERK_SECRET_KEY` a reference to `backend/prod`'s
+sensitive key; then:
+
+| Reader of `landing/prod` alone | `CLERK_SECRET_KEY` |
+|---|---|
+| a service token an Owner of `landing` issued | read |
+| a service token a Developer of `landing` issued | used through the proxy, not read (`not_owner_issued`) |
+| a workload whose binding lists `"*"` at `landing/prod`, bound by an Owner of `landing` | read |
+| a person, any role | used, never read (R16) |
+
 The danger is plain: whoever can write a reference row reads any secret.
 So the app's word is not enough. The vault creates every reference,
 checks it at each read, and refuses one it did not create.
@@ -157,7 +174,8 @@ The vault then checks, besides what it checks for any read:
 3. **The version belongs to the source the entry names,** and is that
    secret's current version.
 4. **The reader holds `secret.read` on the holder's environment,** the one
-   the entry names, not one the app says.
+   the entry names, not one the app says, and is decided there in every
+   other way too, as for a key held there (R71).
 
 If any fails, it refuses, logs the refusal, and releases nothing. The bulk
 limit counts these reads like any other.

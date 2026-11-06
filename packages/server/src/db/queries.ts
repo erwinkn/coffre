@@ -3208,14 +3208,14 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
 }
 
 /**
- * The sensitive values these environments hold now, as the projects they
- * are from, by environment: a live key's own current version, its
- * project's; or, a live key with no version of its own, the source its
- * newest reference names, whose current version it reads as (R23), the
- * source's project's: so not the source of a reference repointed, given a
- * value of its own or archived since. A hint for whoever issues a service's
- * credential that will not read them, so a reference broken since still
- * counts: 0.14's log keeps its end in the vault's entry alone
+ * Which of these environments hold a sensitive value now: a live key's own
+ * current version; or, a live key with no version of its own, the source its
+ * newest reference names, whose current version it reads as (R23): so not
+ * the source of a reference repointed, given a value of its own or archived
+ * since. Each is the environment's own project's to give a service, a
+ * reference's as any key held there (R71). A hint for whoever issues a
+ * service's credential that will not read them, so a reference broken since
+ * still counts: 0.14's log keeps its end in the vault's entry alone
  * (`referenceRows`), 0.15's in `ended_at` too, and the hint reads alike on
  * both.
  *
@@ -3227,33 +3227,22 @@ export async function sensitiveVersions(db: Queryable, ids: readonly string[]): 
  * the holder's environment), of `secrets` or of `secret_versions` against
  * the lookups, and picked by the statistics of the day.
  */
-export async function sensitiveFrom(db: Queryable, environmentIds: readonly string[]): Promise<Map<string, Set<string>>> {
-  if (environmentIds.length === 0) return new Map();
+export async function holdingSensitive(db: Queryable, environmentIds: readonly string[]): Promise<Set<string>> {
+  if (environmentIds.length === 0) return new Set();
   const { secrets, secretVersions, secretReferences } = tablesOf(db);
   const ids = [...new Set(environmentIds)];
   const live = and(inArray(secrets.environmentId, ids), isNull(secrets.archivedAt));
   const sensitive = (versionId: SQL | AnyColumn) => sql`(SELECT ${secretVersions.sensitive} FROM ${secretVersions} WHERE ${secretVersions.id} = ${versionId})`;
   // The holder's newest reference's source, ended or not (above).
   const newest = ofNewestReference(db, secrets.id, sql`${secretReferences.sourceSecretId}`);
-  // The source's project, if its current version is sensitive. `source` names the source's row, so `secrets` in
-  // `newest` is still the holder's.
-  const sourceProject = sql<string | null>`(SELECT source.project_id FROM ${secrets} source
-    WHERE source.id = ${newest} AND ${sensitive(sql`source.current_version_id`)})`;
+  // Whether that source's current version is sensitive. `source` names the source's row, so `secrets` in `newest` is
+  // still the holder's.
+  const sourceSensitive = sql`EXISTS (SELECT 1 FROM ${secrets} source WHERE source.id = ${newest} AND ${sensitive(sql`source.current_version_id`)})`;
   const [own, referred] = await Promise.all([
-    db
-      .selectDistinct({ environmentId: secrets.environmentId, projectId: secrets.projectId })
-      .from(secrets)
-      .where(and(live, sensitive(secrets.currentVersionId))),
-    db
-      .selectDistinct({ environmentId: secrets.environmentId, projectId: sourceProject })
-      .from(secrets)
-      .where(and(live, isNull(secrets.currentVersionId))),
+    db.selectDistinct({ environmentId: secrets.environmentId }).from(secrets).where(and(live, sensitive(secrets.currentVersionId))),
+    db.selectDistinct({ environmentId: secrets.environmentId }).from(secrets).where(and(live, isNull(secrets.currentVersionId), sourceSensitive)),
   ]);
-  const from = new Map<string, Set<string>>();
-  for (const { environmentId, projectId } of [...own, ...referred]) {
-    if (projectId !== null) from.set(environmentId, (from.get(environmentId) ?? new Set()).add(projectId));
-  }
-  return from;
+  return new Set([...own, ...referred].map((row) => row.environmentId));
 }
 
 /** These versions' numbers and envelopes, by id: what a read through a reference opens. */

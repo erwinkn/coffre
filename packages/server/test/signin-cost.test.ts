@@ -31,6 +31,8 @@ const ORIGIN = 'https://secrets.acme.example';
 const ROOT = 'admin@acme.example';
 const SERVICE = 'ci-web';
 const DEVELOPER = 'dev@acme.example';
+/** A Developer of market/dev, who owns no project: a token they issue there is told what it withholds. */
+const ISSUING_DEVELOPER = 'issuer@acme.example';
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const KEYS = `${ISSUER}/.well-known/jwks`;
 const CLAIMS = { repository_owner_id: '9919', repository_id: '41532', workflow_ref: 'acme/market/.github/workflows/build.yml@refs/heads/main', ref: 'refs/heads/main', event_name: 'push' };
@@ -91,6 +93,8 @@ before(async () => {
   await root.secrets.set('market/dev', { API_KEY: 'fake-api-key' });
   await root.members.add(`token:${SERVICE}`);
   await root.access.set(`token:${SERVICE}`, { 'market/dev': 'viewer' });
+  await root.members.add(`user:${ISSUING_DEVELOPER}`);
+  await root.access.set(`user:${ISSUING_DEVELOPER}`, { 'market/dev': 'developer' });
 
   // A CI run's ID token, from an issuer of the test's own, for the binding of its workflow.
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -231,8 +235,8 @@ test("a sign-in's statements read as many rows and pages however many credential
 });
 
 /** A service token's issue by the Owner, through the counted pools, one run before: its statements by pool, and its vault calls. */
-async function issueStatements(): Promise<{ app: Statement[]; vault: Statement[]; vaultCalls: number }> {
-  const issue = async () => runtime.signin!.issueServiceToken(await contextFor(deps, ROOT), SERVICE, { label: 'deploys', expiresInDays: 30 });
+async function issueStatements(issuer = ROOT): Promise<{ app: Statement[]; vault: Statement[]; vaultCalls: number }> {
+  const issue = async () => runtime.signin!.issueServiceToken(await contextFor(deps, issuer), SERVICE, { label: 'deploys', expiresInDays: 30 });
   await issue();
   for (const pool of [app, vaultPool]) pool.recording = [];
   vaultCalls = 0;
@@ -252,17 +256,30 @@ function freshIssue(values: unknown[]): unknown[] {
   return next;
 }
 
+/** A statement of `holdingSensitive`: which of the scope's environments hold a sensitive value, for what an issue withholds. */
+const holding = ({ text }: Statement) => /^\s*select distinct "environment_id" from "secrets"/i.test(text);
+
 test("a service token's issue: the app's reads and the vault's two answers, as before; then one vault call, its write one statement, no 0.14 head (T149, PR 2)", POSTGRES, async () => {
   const ran = await issueStatements();
-  // The issuer's newest policy and access entries, the places, and what sensitive values and references they hold: the
-  // scope as the app works it out, by path, with what it withholds.
-  assert.equal(ran.app.length, 5);
+  // The issuer's newest policy and access entries, and the places: the scope as the app works it out, by path. An Owner
+  // of every project in it withholds nothing (R71: a reference's sensitive value is its holder's project's to give, R32),
+  // so the app reads nothing of what those places hold; a Developer's issue does, below.
+  assert.equal(ran.app.length, 3);
+  assert.equal(ran.app.filter(holding).length, 0);
   assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
   // `access` for the issuer and for the account (the app's checks), a snapshot each; then the issue: one snapshot (the
   // members, their grants, the policy, the setting, and the places their grants are on, each with what 0.15's log holds
   // it to: T159), and its one write.
   assert.equal(ran.vaultCalls, 3);
   assert.deepEqual(shown(ran.vault), ['WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', 'WITH policy AS ( SELECT * FR', '/* writes */ SELECT issue_to']);
+});
+
+test("a service token's issue by someone who owns no project of its scope: the app reads too what sensitive values its places hold, its own and its references', for what it withholds (R71)", POSTGRES, async () => {
+  const ran = await issueStatements(ISSUING_DEVELOPER);
+  // As an Owner's, and the settings and places a non-Owner's issue checks; then the two statements of `holdingSensitive`.
+  assert.equal(ran.app.length, 6);
+  assert.equal(ran.app.filter(holding).length, 2);
+  assert.ok(ran.app.every(({ text }) => /^\s*select/i.test(text)), 'the app writes nothing');
 });
 
 test("an issue's write reads as many rows and pages however long the logs and the account's history grow (R48)", POSTGRES, async () => {

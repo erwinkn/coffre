@@ -324,15 +324,14 @@ repeat(10000, () => {
   const keepsSensitive = chance(0.3) ? undefined : chance(0.5);
   const codes = secrets.map(() => pick(CODES));
   const flagged = secrets.map((secret) => ({ projectId: secret.projectId, ...(chance(0.3) ? {} : { sensitive: chance(0.6) }) }));
-  const viaReference = chance(0.3) ? undefined : secrets.map(() => chance(0.4));
   add(
     {
       op: 'sensitiveRefusals', codes, reader: who, action, principal, ...(purpose === undefined ? {} : { purpose }),
-      ...(keepsSensitive === undefined ? {} : { keepsSensitive }), secrets: flagged, ...(viaReference === undefined ? {} : { viaReference }),
+      ...(keepsSensitive === undefined ? {} : { keepsSensitive }), secrets: flagged,
     },
-    sensitiveRefusals(codes, who, { action, principal, purpose, keepsSensitive, secrets: flagged, viaReference }),
+    sensitiveRefusals(codes, who, { action, principal, purpose, keepsSensitive, secrets: flagged }),
   );
-  // A workload's list, at where each value is held.
+  // A workload's list, at where each key is held.
   const held = secrets.map((secret) => ({ ...secret, secretId: pick(KEYS) }));
   const listing: Reader = chance(0.5) ? who : { ...who, live: workload(held.length === 0 ? heldKey() : pick(held)) };
   add(
