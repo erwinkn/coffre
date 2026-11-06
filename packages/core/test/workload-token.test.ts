@@ -96,7 +96,8 @@ test('the shape is checked before anything is trusted', () => {
     assert.throws(() => decodeWorkloadToken(token(claims)), why);
   }
   assert.throws(() => decodeWorkloadToken('a.b'), /not a compact JWS/);
-  assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /longer than 8192 bytes/);
+  // No length of its own: the body's bound (`API_BODY_BYTES`) holds a token, and a long one is read as any other.
+  assert.throws(() => decodeWorkloadToken(`${'a'.repeat(9000)}.b.c`), /not JSON/);
 });
 
 test('with a lifetime given, a token that lives longer, iat to exp, is refused, however recently issued', async () => {

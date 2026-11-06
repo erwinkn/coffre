@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { CREDENTIAL_LABEL_MAX, isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
+import { isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
 import {
   EXCHANGED_CREDENTIAL_MS,
   SESSION_MS,
@@ -22,8 +22,6 @@ import {
   keySummaries,
   KeysInvalid,
   MAX_BINDINGS,
-  MAX_READ_KEYS,
-  MAX_READ_PLACES,
   MAX_TOKEN_AGE_SECONDS,
   OIDC_PROFILES,
   POLICY_DEFAULTS,
@@ -673,7 +671,7 @@ export class WorkloadService {
           const row = {
             id: randomUUID(), principal: member, generation: standing.generation, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
             jwks: uploaded?.jwks ?? null, claims: canonicalClaims(planned.claims), scope: storedScope(scope), policy: rules === null ? null : policyText(rules),
-            label: input.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
+            label: input.label ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
           };
           const ending = live.filter((candidate) => planned.replaces.some(({ id }) => id === candidate.id));
           const entries = [
@@ -729,7 +727,7 @@ export class WorkloadService {
           scope: storedScope(scope),
           // None on a bearer binding, which `/api/auth/oidc` takes; canonical JSON on a workload's, under the MAC (`policed_`).
           policy: rules === null ? null : policyText(rules),
-          label: input.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null,
+          label: input.label ?? null,
           createdAt: now,
           createdBy: ctx.caller.principal.id,
         };
@@ -1775,12 +1773,11 @@ function checked<T>(check: () => T): T {
 async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRead[]> {
   if (typeof wanted !== 'object' || wanted === null || Array.isArray(wanted)) throw badRequest('reads maps each environment, by path, to its key names or "*"');
   const entries = Object.entries(wanted as Record<string, unknown>);
-  if (entries.length > MAX_READ_PLACES) throw badRequest(`reads names at most ${MAX_READ_PLACES} environments`);
   const known = await places(db);
   const resolved: ResolvedRead[] = [];
   for (const [path, keys] of entries) {
-    if (keys !== '*' && !(Array.isArray(keys) && keys.length <= MAX_READ_KEYS && keys.every((key) => typeof key === 'string' && key.length <= 256))) {
-      throw badRequest(`reads lists ${path}'s keys by name, at most ${MAX_READ_KEYS}, or "*" for every one`);
+    if (keys !== '*' && !(Array.isArray(keys) && keys.every((key) => typeof key === 'string'))) {
+      throw badRequest(`reads lists ${path}'s keys by name, or "*" for every one`);
     }
     const at = parsePath(path, [2]);
     const project = known.find((candidate) => candidate.slug === at.project);

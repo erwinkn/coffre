@@ -10,8 +10,6 @@ export type { JSONWebKeySet };
  * refusal says which, as a reason a CI user can act on.
  */
 
-/** A compact JWS is three base64url parts; the whole token at most this long. */
-export const MAX_TOKEN_BYTES = 8 * 1024;
 /** Each side of every time check. */
 export const CLOCK_TOLERANCE_SECONDS = 30;
 /** The oldest token accepted, by its `iat`: tokens handed to a job at its start fit, day-old ones do not. */
@@ -65,7 +63,6 @@ const PART = /^[A-Za-z0-9_-]+$/;
 export function decodeWorkloadToken(token: string): DecodedToken {
   const malformed = (why: string) => new WorkloadTokenRefused('malformed', `the token ${why}`);
   if (typeof token !== 'string' || token.length === 0) throw malformed('is empty');
-  if (token.length > MAX_TOKEN_BYTES) throw malformed(`is longer than ${MAX_TOKEN_BYTES} bytes`);
   const parts = token.split('.');
   if (parts.length !== 3 || !parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
   const json = (part: string): Record<string, unknown> => {
@@ -189,7 +186,15 @@ function refusalOf(error: unknown): WorkloadTokenRefused {
   return new WorkloadTokenRefused('signature', 'the token does not verify');
 }
 
-/** At most this many keys in a set, fetched or uploaded. */
+/**
+ * At most this many keys in a set, fetched or uploaded: a bound on a CI
+ * sign-in's work, not on a field. A token that names no key, or one several
+ * share, is tried against each (`anyKey`), and a failed check costs 77 µs
+ * of CPU for RS256 and 133 µs for ES256 (Node 24, jose, the median of 1,400
+ * on the machine that measured `MAX_BODY_NODES`): 32 tries are 4.3 ms at
+ * worst, under half the 10 ms R27 gives a request at p50, on the hot path
+ * CI sign-in is (R44).
+ */
 export const MAX_KEYS = 32;
 
 /** One key of an uploaded set, as an owner sees it: its `kid`, its algorithm, and its RFC 7638 thumbprint. */

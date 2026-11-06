@@ -52,12 +52,25 @@ export function tombstoneOf(slug: string, day: Date, n = 1): string {
 export function deletedWithProject(slug: string): string {
   return `${slug}${TOMBSTONE}deleted`;
 }
-export const displayName = z.string().trim().min(1).max(120);
+/** A name for people to read, such as a place's label from before 0.6.2: anything but blank. */
+export const displayName = z.string().trim().min(1);
 /** A folder: 1 to 64 characters, no `/`, no control character, no space at either end (the tables check it too). */
 export const folderName = z.string().min(1).max(64)
   .refine((name) => name === name.trim(), 'a folder name cannot start or end with a space')
   .refine((name) => !/[/\p{Cc}]/u.test(name), 'a folder name cannot hold "/" or a control character');
 export const secretKey = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
+
+/**
+ * The most a secret's value may be, in bytes of UTF-8: 64 KiB. `coffre run`
+ * hands each value to its command as an environment variable, and Linux
+ * holds each such string, `NAME=value` and its NUL, to `MAX_ARG_STRLEN`,
+ * 32 pages, 128 KiB on 4 KiB pages (execve(2), "Limits on size of arguments
+ * and environment"; `include/uapi/linux/binfmts.h`), else the command does
+ * not start (`E2BIG`). Half of that, so the name (at most 128 bytes,
+ * `secretKey`) always fits beside it (W331, 2026-11-06).
+ */
+export const MAX_VALUE_BYTES = 64 * 1024;
+
 /**
  * A member as people read it, in a message or on a page: a service account
  * as `service:<name>`, though the API, the vault and the log keep the
@@ -68,6 +81,7 @@ export function shownMember(member: string): string {
 }
 
 export const principalType = z.enum(['user', 'service']);
+/** At most 320 characters: an email address's longest, its local part's 64 and its domain's 255 (RFC 5321, section 4.5.3.1). */
 export const principalId = z.string().trim().min(1).max(320);
 export const instanceRole = z.enum(INSTANCE_ROLE_NAMES as [InstanceRole, ...InstanceRole[]]);
 
@@ -77,11 +91,12 @@ export const roleId = z.string().regex(ROLE_ID, ROLE_ID_RULE);
 /** Which projects or environments a scope takes in, by slug: `all`, `{ only: [...] }` or `{ except: [...] }`. */
 export const scopeFilter = z.union([
   z.literal('all'),
-  z.object({ only: z.array(slug).max(200) }).strict(),
-  z.object({ except: z.array(slug).min(1).max(200) }).strict(),
+  z.object({ only: z.array(slug) }).strict(),
+  z.object({ except: z.array(slug).min(1) }).strict(),
 ]);
 
 /** Where an instance role applies, as the API takes it: either filter left out is `all`. */
 export const scopeInput = z.object({ projects: scopeFilter.optional(), environments: scopeFilter.optional() }).strict();
 export const grantId = z.string().uuid();
+/** As `principalId`: 320 characters at most (RFC 5321, section 4.5.3.1). */
 export const emailAddress = z.string().email().max(320);

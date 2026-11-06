@@ -6,12 +6,13 @@ import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { RELEASE, versioned } from '@coffre/core/vault';
+import { isStackOverflow, RELEASE, STACK_OVERFLOW, versioned } from '@coffre/core/vault';
 import { isUnavailable } from '@coffre/db/dialect';
 import { sql } from 'drizzle-orm';
 
 import { failureOf } from '../src/failure.ts';
 import { resolveVaultConfig } from '../src/config.ts';
+import { METHODS } from '../src/local.ts';
 import { connectVault, localVault, serveVault } from '../src/node.ts';
 import { prepareVault } from '../src/vault.ts';
 import { openTestDatabase, rows, sealed } from './database.ts';
@@ -130,6 +131,57 @@ test("the vault's database not answering crosses the socket as the outage it is,
     assert.match(String((gone as Error).message), /is unreachable/);
     assert.equal(isUnavailable(gone), true);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a call nested deeper than the vault can walk is refused, 400 with a plain message, at every method; the app reads it as such', async () => {
+  const db = await openTestDatabase();
+  const dir = mkdtempSync(join(tmpdir(), 'coffre-vault-socket-'));
+  const served = await serveVault({
+    socket: join(dir, 'vault.sock'),
+    database: db.vault,
+    hotDatabase: await db.hot(),
+    checkpointer: { memory: join(dir, 'memory') },
+    kek: { id: 'test-kek-1', key: Buffer.alloc(32, 7).toString('base64') },
+    owners: ['root@acme.example'],
+  });
+  // 100,000 levels, 600 KB: within the socket's bound (8 MiB), and far past what any walk of it holds.
+  const deep = `${'{"a":'.repeat(100_000)}0${'}'.repeat(100_000)}`;
+  const post = (body: string) => new Promise<{ status: number; body: { error: string } }>((resolve, reject) => {
+    const req = request({ socketPath: served.socket, method: 'POST', path: '/call', headers: { 'content-type': 'application/json' } }, (res) => {
+      let text = '';
+      res.on('data', (chunk: Buffer) => (text += chunk.toString()));
+      res.on('end', () => resolve({ status: res.statusCode!, body: JSON.parse(text) as { error: string } }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+  try {
+    const entries = async () => (await rows<{ n: string | number }>(db.vault, sql`SELECT count(*) AS n FROM audit_log`))[0]!.n;
+    const before = await entries();
+    for (const method of METHODS) {
+      const answer = await post(`{"release":${JSON.stringify(RELEASE)},"method":"${method}","args":[${deep}]}`);
+      assert.equal(answer.status, 400, method);
+      assert.match(answer.body.error, /^the call is nested too deeply to read/, method);
+    }
+    assert.equal(await entries(), before, 'nothing written');
+    // The app's side of the socket: the refusal as the error it raises, which the app answers 400 (`isStackOverflow`).
+    const refused = failureOf(new RangeError(STACK_OVERFLOW));
+    assert.equal(refused.status, 400);
+    const server = createServer((_req, res) => res.writeHead(refused.status, { 'content-type': 'application/json' }).end(JSON.stringify(refused.body)));
+    const socket = join(dir, 'refusing.sock');
+    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    try {
+      const error = await versioned(connectVault(socket)).about().then(() => assert.fail('answered'), (error: unknown) => error);
+      assert.equal(isStackOverflow(error), true);
+      assert.equal(isUnavailable(error), false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  } finally {
+    await served.close();
+    await db.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -1,3 +1,5 @@
+import { PUBLISHED_BYTES } from '@coffre/core/identity';
+
 import type { Connect } from '../plugins.ts';
 
 /**
@@ -31,8 +33,8 @@ export type WorkloadTransport = {
 
 /** Everything, from DNS to the last byte. */
 export const FETCH_DEADLINE_MS = 5_000;
-/** Discovery documents and key sets are a few kilobytes. */
-export const MAX_BODY_BYTES = 64 * 1024;
+/** Discovery documents and key sets are a few kilobytes: `PUBLISHED_BYTES`, sign-in's own bound on them, with its share of an isolate's memory. */
+export const MAX_BODY_BYTES = PUBLISHED_BYTES;
 /** GitHub's API refuses a request that names no client. */
 export const USER_AGENT = 'coffre';
 

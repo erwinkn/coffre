@@ -1,5 +1,6 @@
 import * as oauth from 'oauth4webapi';
 
+import { boundedFetch } from '../fetched.ts';
 import type { OidcProviderConfig } from './config.ts';
 import {
   SigninError,
@@ -70,7 +71,8 @@ export class OidcSigninProvider implements SigninProvider {
     const issuer = new URL(this.config.issuer);
     let server: oauth.AuthorizationServer;
     try {
-      const response = await oauth.discoveryRequest(issuer, { ...this.#http<'GET'>(), algorithm: 'oidc' });
+      // The document read to `PUBLISHED_BYTES` at most.
+      const response = await oauth.discoveryRequest(issuer, { ...this.#http<'GET'>(), [oauth.customFetch]: boundedFetch(this.#fetch), algorithm: 'oidc' });
       server = await oauth.processDiscoveryResponse(issuer, response);
     } catch (error) {
       throw unavailable(this.config.label, error);

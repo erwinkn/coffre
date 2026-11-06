@@ -180,18 +180,15 @@ const EVENT_CLAIM: Record<WorkloadProfile, { name: string; values: readonly stri
   cloudflare: null,
 };
 
-/** At most this many live bindings per service, and claims per binding. */
+/** At most this many live bindings per service. */
 export const MAX_BINDINGS = 16;
-export const MAX_CLAIMS = 16;
-/** The longest claim value, in bytes. */
-export const MAX_CLAIM_BYTES = 256;
 
 /** Claims a binding never names: the issuer is its own field, and the audience, times and ID are the exchange's. */
 const RESERVED = new Set(['iss', 'aud', 'exp', 'iat', 'nbf', 'jti']);
-const CLAIM_NAME = /^[A-Za-z0-9_.:/-]{1,64}$/;
+const CLAIM_NAME = /^[A-Za-z0-9_.:/-]+$/;
 const DIGITS = /^[1-9][0-9]{0,19}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const REF = /^refs\/(heads|tags)\/\S{1,200}$/;
+const REF = /^refs\/(heads|tags)\/\S+$/;
 const WORKFLOW = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/[^@\s]+\.ya?ml@\S+$/;
 /**
  * A GitHub environment's name, as GitHub takes one: at most 255 characters,
@@ -249,8 +246,19 @@ export function defaultIssuer(profile: WorkloadProfile): string | null {
   return profile === 'gcp' ? GOOGLE_ISSUER : null;
 }
 
-/** The longest issuer a binding with uploaded keys names, in bytes. */
-export const MAX_ISSUER_BYTES = 400;
+/**
+ * The longest issuer a binding names, in bytes of UTF-8: what fits in a
+ * Postgres index entry, where the issuer is kept beside its service
+ * (`service_bindings_live_idx`: principal, issuer, generation, created_at,
+ * id). A btree entry is at most 2,704 bytes on 8 KiB pages (`BTMaxItemSize`,
+ * `src/include/access/nbtree.h`), and past it the insert fails ("index row
+ * size exceeds btree version 4 maximum 2704"). The rest of the entry takes
+ * 394 at most: its 8-byte header, the principal (`token:` and an id of 320,
+ * `principalId`, with a 4-byte length), the issuer's own length (4), the
+ * generation (4), the time (8), the id (16), and up to 24 of alignment. No
+ * issuer's URL comes near it; an uploaded binding's issuer is any string.
+ */
+export const MAX_ISSUER_BYTES = 2704 - (8 + 4 + 6 + 320 + 4 + 4 + 8 + 16 + 24);
 
 /**
  * Check a binding against its profile, and return it as stored: the
@@ -282,8 +290,8 @@ export function checkBinding(
     throw new BindingInvalid(`${issuer} signs only for the ${forced[0]} profile${forced.length > 1 ? 's' : ''}`);
   }
 
+  if (new TextEncoder().encode(issuer).length > MAX_ISSUER_BYTES) throw new BindingInvalid(`the issuer is longer than ${MAX_ISSUER_BYTES} bytes`);
   const entries = Object.entries(input.claims);
-  if (entries.length > MAX_CLAIMS) throw new BindingInvalid(`a binding names at most ${MAX_CLAIMS} claims`);
   const event = EVENT_CLAIM[profile];
   const claims: BindingClaims = {};
   for (const [name, value] of entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -302,9 +310,6 @@ export function checkBinding(
     }
     if (typeof value !== 'string' || value.length === 0) {
       throw new BindingInvalid(`claim ${name} must be a nonempty string${Array.isArray(value) && event !== null ? `: only ${event.name} lists several` : ''}`);
-    }
-    if (new TextEncoder().encode(value).length > MAX_CLAIM_BYTES) {
-      throw new BindingInvalid(`claim ${name} is longer than ${MAX_CLAIM_BYTES} bytes`);
     }
     claims[name] = value;
   }
@@ -330,7 +335,6 @@ function checkIssuerName(issuer: string): void {
   if (issuer === '' || /^\s|\s$/.test(issuer) || /\p{Cc}/u.test(issuer)) {
     throw new BindingInvalid('the issuer is its tokens\' iss, exactly: no control character, no space at either end');
   }
-  if (new TextEncoder().encode(issuer).length > MAX_ISSUER_BYTES) throw new BindingInvalid(`the issuer is longer than ${MAX_ISSUER_BYTES} bytes`);
   if (issuer === GITHUB_ISSUER || issuer === GITLAB_ISSUER) {
     throw new BindingInvalid(`${issuer} publishes its keys and rotates them: coffre fetches them, so upload none`);
   }
@@ -701,11 +705,6 @@ export const POLICY_DEFAULTS = {
   unsignedUploads: false,
 } as const;
 
-/** The most environments, and keys in each, a binding's `reads` lists; the most `sources`. */
-export const MAX_READ_PLACES = 64;
-export const MAX_READ_KEYS = 256;
-export const MAX_SOURCES = 16;
-
 type PolicyField = keyof BindingPolicy;
 
 const SESSION_FIELDS: readonly PolicyField[] = ['reads', 'sources', 'sessionHours', 'unsignedUploads'];
@@ -755,9 +754,9 @@ function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-function uuidList(value: unknown, what: string, max: number): string[] {
-  if (!Array.isArray(value) || value.length > max || value.some((id) => typeof id !== 'string' || !UUID.test(id.toLowerCase()))) {
-    throw new BindingInvalid(`${what} lists at most ${max} IDs`);
+function uuidList(value: unknown, what: string): string[] {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !UUID.test(id.toLowerCase()))) {
+    throw new BindingInvalid(`${what} lists IDs`);
   }
   return sortedUnique(value.map((id: string) => id.toLowerCase()));
 }
@@ -765,7 +764,6 @@ function uuidList(value: unknown, what: string, max: number): string[] {
 function checkReads(value: unknown): BindingReads | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new BindingInvalid('reads maps environment IDs to { keys, mints }');
   const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length > MAX_READ_PLACES) throw new BindingInvalid(`reads names at most ${MAX_READ_PLACES} environments`);
   const reads: Record<string, { keys?: readonly string[] | '*'; mints?: readonly string[] }> = {};
   const seen = new Set<string>();
   for (const [environment, entry] of entries) {
@@ -778,11 +776,11 @@ function checkReads(value: unknown): BindingReads | undefined {
     if (Object.keys(rest).length > 0) throw new BindingInvalid(`each environment of reads holds keys and mints, not ${Object.keys(rest).join(', ')}`);
     const read: { keys?: readonly string[] | '*'; mints?: readonly string[] } = {};
     if (keys !== undefined) {
-      const listed = keys === '*' ? '*' : uuidList(keys, 'reads.keys', MAX_READ_KEYS);
+      const listed = keys === '*' ? '*' : uuidList(keys, 'reads.keys');
       if (listed === '*' || listed.length > 0) read.keys = listed;
     }
     if (mints !== undefined) {
-      if (!Array.isArray(mints) || mints.length > MAX_READ_KEYS || mints.some((name) => typeof name !== 'string' || !CREDENTIAL_NAME.test(name))) {
+      if (!Array.isArray(mints) || mints.some((name) => typeof name !== 'string' || !CREDENTIAL_NAME.test(name))) {
         throw new BindingInvalid('reads.mints lists minters by name');
       }
       if (mints.length > 0) read.mints = sortedUnique(mints as string[]);
@@ -831,7 +829,7 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
     if (reads !== undefined) policy.reads = reads;
   }
   if (given.sources !== undefined) {
-    if (!Array.isArray(given.sources) || given.sources.length > MAX_SOURCES) throw new BindingInvalid(`sources lists at most ${MAX_SOURCES} CIDRs`);
+    if (!Array.isArray(given.sources)) throw new BindingInvalid('sources lists CIDRs');
     const sources = sortedUnique(given.sources.map((source: unknown) => {
       const block = typeof source === 'string' ? parseCidr(source) : null;
       if (block === null) throw new BindingInvalid(`sources lists CIDRs, such as 162.220.232.0/24 or 2001:db8::/32: ${String(source)} is none`);

@@ -26,9 +26,6 @@ export type Constraints = {
   readonly paths?: readonly string[];
 };
 
-/** The most entries in each list. */
-export const MAX_CONSTRAINTS = 32;
-
 /** A constraint that does not parse, said so the caller can fix it. */
 export class ConstraintsInvalid extends Error {
   constructor(message: string) {
@@ -52,8 +49,8 @@ const AMBIGUOUS = /%2e|%2f|%5c|%25|%3b|;/i;
 
 function list(value: unknown, what: string, valid: (item: string) => boolean): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > MAX_CONSTRAINTS || value.some((item) => typeof item !== 'string' || !valid(item))) {
-    throw new ConstraintsInvalid(`${what} lists at most ${MAX_CONSTRAINTS} of them`);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !valid(item))) {
+    throw new ConstraintsInvalid(`${what} is a list of them`);
   }
   return [...new Set(value as string[])].sort();
 }
