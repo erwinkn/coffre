@@ -347,17 +347,17 @@ unsupported diff select full validation.
   download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
   a message too, options between a command's words included (`gh release
   --repo o/r download`), and an argument list read as the command its words
-  make (`RUN ["npm", "install"]`, compose's `command: [pnpm, install]` or
-  one word a line). It reads YAML in the forms whose lines are what YAML
-  reads: block style, each value on its key's line or in a `|` block (a
-  `description`'s `>` too, prose). A `>` block elsewhere, a value continued
-  below its key, an indentation indicator (`|2`) and a flow mapping outside a
-  matrix (`with: {node-version: '24'}`) fail, as does a pnpm setting written
-  in any style but block. A fetch
+  make (`RUN ["npm", "install"]`, compose's `command: [pnpm, install]`).
+  YAML (workflows, actions, compose, pnpm's settings) it reads with
+  js-yaml, a root dependency, as the data GitHub, Compose and pnpm make of
+  it, whatever the style: every string checked as the
+  lines a shell runs, once per value of a matrix it names, and each image,
+  action, runner and toolchain where they read one. A fetch
   hidden from that list (`eval`, `node -e 'fetch(…)'`) is review's to catch.
   A health check of this machine is curl marked `# pins: local`, every URL
   on the line 127.0.0.1, localhost or [::1]; a line that cannot be pinned
-  carries `# unpinned: <reason>`, on itself or right above it. `check:workflows` runs zizmor
+  carries `# unpinned: <reason>`, on itself or right above it, in YAML a
+  comment of the shell's inside the string (YAML drops its own). `check:workflows` runs zizmor
   (`scripts/zizmor.sh`, `.github/zizmor.yml`), downloaded once and checked
   against its pinned SHA-256; with `GH_TOKEN` set, as in CI, it also asks
   GitHub whether each pinned commit is its repository's. Validate runs both

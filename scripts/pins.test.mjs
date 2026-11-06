@@ -15,7 +15,7 @@ test('an action is pinned by its commit, its version beside it; the repositoryâ€
     assert.deepEqual(one('.github/workflows/a.yml', workflow(`actions/checkout@${SHA} # v4.4.0`)), []);
     assert.deepEqual(one('.github/workflows/a.yml', workflow('$/.github/actions/prepare')), []);
     assert.deepEqual(one('.github/workflows/a.yml', workflow('./action')), []);
-    assert.match(one('.github/workflows/a.yml', workflow('actions/checkout@v4'))[0], /a\.yml:4: uses actions\/checkout@v4 is not owner\/repo@<commit SHA>/);
+    assert.match(one('.github/workflows/a.yml', workflow('actions/checkout@v4'))[0], /a\.yml: jobs\.a\.steps\[0\]\.uses: uses actions\/checkout@v4 is not owner\/repo@<commit SHA>/);
     assert.equal(one('.github/workflows/a.yml', workflow(`actions/checkout@${SHA}`)).length, 1, 'no version beside it');
     assert.equal(one('examples/workers/.github/workflows/deploy.yml', workflow('actions/setup-node@main')).length, 1);
     assert.equal(one('action/action.yml', `runs:\n  steps:\n    - uses: actions/cache@v4\n`).length, 1);
@@ -23,6 +23,11 @@ test('an action is pinned by its commit, its version beside it; the repositoryâ€
     assert.deepEqual(one('.github/workflows/a.yml', workflow(`"actions/checkout@${SHA}" # v4.4.0`)), []);
     assert.deepEqual(one('.github/workflows/a.yml', workflow(`'actions/checkout@${SHA}' # v4.4.0`)), []);
     assert.equal(one('.github/workflows/a.yml', workflow('"actions/checkout@v4" # v4.4.0')).length, 1);
+    // A reusable workflow, by its commit too; a step's `uses` in a flow mapping, its comment after it.
+    assert.equal(one('.github/workflows/a.yml', 'jobs:\n  a:\n    uses: o/r/.github/workflows/b.yml@main\n').length, 1);
+    assert.deepEqual(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - {uses: actions/checkout@${SHA}} # v4.4.0\n`), []);
+    // A key named `uses` elsewhere is an input, a step's name or a job's: no action.
+    assert.deepEqual(one('.github/workflows/a.yml', 'jobs:\n  uses:\n    steps:\n      - with:\n          uses: v4\n'), []);
 });
 test('an image is name:tag@sha256:<digest>, in compose, a workflow, a Dockerfile or a command', () => {
     assert.deepEqual(one('docker-compose.yml', `services:\n  postgres:\n    image: postgres:16.14@${DIGEST}\n`), []);
@@ -222,53 +227,52 @@ test('docker run, create or pull names its image by digest on the line', () => {
     assert.deepEqual(one('scripts/a.sh', "# unpinned: compose's image, pinned there\ndocker run --rm \"$image\"\n"), []);
 });
 
-test('YAML is read in the forms whose lines are what YAML reads; every other form fails', () => {
+test('YAML is read as the data GitHub and Compose make of it, by js-yaml', () => {
+    const workflow = (path) => (text) => one(path, text, { pnpm: '11.8.0' });
+    const problems = workflow('.github/workflows/a.yml');
     const step = (run) => `jobs:\n  a:\n    steps:\n      - name: Install\n        run: ${run}\n      - run: pnpm build\n`;
-    const problems = (text) => one('.github/workflows/a.yml', text);
-    // A `|` block's lines are the shell's own, an anchor or a tag before it included.
     assert.deepEqual(problems(step('|\n          pnpm --dir app install --frozen-lockfile\n          pnpm build')), []);
-    for (const header of ['|', '|-', '|+', '&install |', '!!str |-']) {
-        assert.match(problems(step(`${header}\n          pnpm --dir app install\n          echo --frozen-lockfile`))[0], /a\.yml:6: pnpm install without --frozen-lockfile/, header);
-    }
-    // Folded, continued or indented by an indicator: YAML rebuilds the lines, so it fails as a form.
-    const form = /a YAML (?:value continued below its key|\S+ block)/;
+    // Each line of a block is the shell's, wherever it is in the string.
+    assert.match(problems(step('|\n          pnpm --dir app install\n          echo --frozen-lockfile'))[0], /a\.yml: jobs\.a\.steps\[0\]\.run, line 1: pnpm install without --frozen-lockfile/);
+    // Folded, continued, indented by an indicator, anchored or tagged: the string YAML makes is read.
     for (const run of [
-        '>-\n          pnpm --dir app\n          install --frozen-lockfile',
+        '>-\n          pnpm --dir app\n          install',
         '>\n          gh release\n          download v1.0.0',
         // r8: YAML keeps these two lines apart; one install's flag is not the other's.
         '>2-\n            pnpm --dir cli install\n            pnpm --dir web install --frozen-lockfile',
-        '|2\n            pnpm --dir web install --frozen-lockfile',
+        '|2\n            pnpm --dir web install',
         '&install !!str >-\n          pnpm --dir app install',
-        'pnpm --dir app\n          install --frozen-lockfile',
-        '"pnpm --dir app\n          install --frozen-lockfile"',
-        '\n          pnpm --dir app install --frozen-lockfile',
-        '[pnpm --dir app,\n          install --frozen-lockfile]',
-    ]) {
-        const found = problems(step(run));
-        assert.ok(found.some((problem) => form.test(problem)), `${run}: ${found}`);
-    }
-    assert.match(one('docker-compose.yml', 'services:\n  pg:\n    command: >\n      sh -c "npm\n      install"\n')[0], form);
-    // A description is prose: its `>` folds no command, and its lines are read one by one.
-    assert.deepEqual(one('action/action.yml', 'inputs:\n  url:\n    description: >-\n      The coffre to read,\n      its base URL.\n    required: true\n'), []);
+        'pnpm --dir app\n          install',
+        '"pnpm --dir app\n          install"',
+        '\n          pnpm --dir app install',
+    ]) assert.ok(problems(step(run)).length >= 1, run);
+    assert.deepEqual(problems(step('>-\n          pnpm --dir app\n          install --frozen-lockfile')), [], 'one command, folded');
+    // r9: a quoted key is the key.
+    assert.match(problems('jobs:\n  a:\n    steps:\n      - "uses": actions/checkout@v4\n')[0], /steps\[0\]\.uses: uses actions\/checkout@v4 is not/);
+    assert.match(problems("jobs:\n  a:\n    'runs-on': ubuntu-latest\n")[0], /runs-on ubuntu-latest moves/);
+    assert.match(problems('jobs:\n  a:\n    steps:\n      - "run": pnpm install\n')[0], /pnpm install without --frozen-lockfile/);
+    // r9: an implicit pair in a flow list is a mapping, and a matrix's include entry.
+    const node = (include) => `jobs:\n  a:\n    strategy:\n      matrix:\n        include: ${include}\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with:\n          node-version: \${{ matrix.node }}\n`;
+    assert.match(problems(node("[node: '22']"))[0], /node-version 22 is not an exact version/);
+    assert.match(problems(node("[node: '24.22.1', node: lts/*]"))[0], /node-version lts\/\* is not/);
+    assert.deepEqual(problems(node("[node: '24.22.1', {node: 22.23.4, shard: 1/2}]")), []);
+    // r8: flow mappings, wherever they are.
+    assert.match(problems("jobs:\n  a:\n    services:\n      redis: {image: 'redis:7'}\n")[0], /services\.redis\.image: image redis:7 is not/);
+    assert.match(problems(`jobs:\n  a:\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with: {node-version: '24'}\n`)[0], /node-version 24 is not an exact version/);
+    assert.match(problems("jobs:\n  a:\n    steps: [{uses: 'actions/checkout@v4'}]\n")[0], /uses actions\/checkout@v4 is not/);
+    assert.match(one('docker-compose.yml', 'services: {pg: {image: postgres:16}}\n')[0], /services\.pg\.image: image postgres:16 is not/);
+    // Anchors, aliases and merge keys are what they point at.
+    assert.match(problems('x: &install pnpm install\njobs:\n  a:\n    steps:\n      - run: *install\n').find((p) => p.includes('steps[0].run')), /without --frozen-lockfile/);
+    assert.match(one('docker-compose.yml', 'x-base: &base\n  image: redis:7\nservices:\n  r:\n    <<: *base\n')[0], /services\.r\.image: image redis:7 is not/);
+    // A string a matrix completes is read with each of its values.
+    assert.match(problems('jobs:\n  a:\n    strategy:\n      matrix:\n        command: [build, install]\n    steps:\n      - run: pnpm ${{ matrix.command }}\n')[0], /pnpm install without --frozen-lockfile/);
+    // A description is prose, read too; a name GitHub or Compose reads as no image is none.
     assert.equal(one('action/action.yml', 'inputs:\n  url:\n    description: >-\n      Run curl https://example.com/i.sh\n').length, 1);
-    // Keys beneath a key, and a list beneath one, are no value of it.
-    assert.deepEqual(problems(`jobs:\n  a:\n    steps:\n      - uses: actions/checkout@${SHA} # v4.4.0\n        with:\n          persist-credentials: false\n      -\n        run: pnpm build\n`), []);
-});
-
-test('a YAML flow mapping is a matrix entry or a problem', () => {
-    const flow = /a YAML flow mapping/;
-    // r8: an image and a version in flow style passed unread.
-    assert.match(one('.github/workflows/a.yml', "jobs:\n  a:\n    services:\n      redis: {image: 'redis:7'}\n")[0], flow);
-    assert.match(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with: {node-version: '24'}\n`)[0], flow);
-    assert.match(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps: [{uses: 'actions/checkout@v4'}]\n`)[0], flow);
-    assert.match(one('docker-compose.yml', 'services: {pg: {image: postgres:16}}\n')[0], flow);
-    assert.match(one('.github/workflows/a.yml', 'jobs:\n  a:\n    steps:\n      - {uses: actions/checkout@v4}\n')[0], flow, 'a list entry');
-    assert.match(one('.github/workflows/a.yml', 'jobs:\n  a:\n    strategy:\n      matrix: {node: [24]}\n')[0], flow);
-    // A flow list of plain values, an expression, and a matrix's include entries are read.
-    assert.deepEqual(one('.github/workflows/a.yml', "on:\n  push:\n    branches: [main]\njobs:\n  a:\n    if: ${{ github.event_name == 'push' }}\n    runs-on: ubuntu-24.04\n"), []);
-    const matrix = (entry) => `jobs:\n  a:\n    strategy:\n      matrix:\n        include:\n          - ${entry}\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with:\n          node-version: \${{ matrix.node }}\n`;
-    assert.deepEqual(one('.github/workflows/a.yml', matrix('{ node: 24.22.1, shard: 1/2 }')), []);
-    assert.match(one('.github/workflows/a.yml', matrix('{ node: 24, shard: 1/2 }'))[0], /node-version 24 is not an exact version/);
+    assert.deepEqual(one('docker-compose.yml', `services:\n  image:\n    image: postgres:16.14@${DIGEST}\n`), []);
+    assert.deepEqual(problems('jobs:\n  image:\n    runs-on: ubuntu-24.04\n    env:\n      image: whatever\n'), []);
+    // What YAML cannot read, or reads twice, fails.
+    assert.match(problems('jobs:\n  a:\n    runs-on: ubuntu-24.04\n    runs-on: ubuntu-latest\n')[0], /a\.yml: duplicated mapping key/);
+    assert.match(problems('jobs:\n  a: [\n')[0], /a\.yml: unexpected end of the stream/);
 });
 
 test('a line that cannot be pinned says why, on itself or right above it', () => {
@@ -280,9 +284,11 @@ test('a line that cannot be pinned says why, on itself or right above it', () =>
 });
 
 test('a toolchain an action installs is an exact version, and a runner a named image', () => {
-    assert.deepEqual(one('.github/workflows/a.yml', '        with:\n          node-version: 24.22.1\n          java-version: 17.0.9+9\n'), []);
-    assert.match(one('.github/workflows/a.yml', '        with:\n          node-version: 24\n')[0], /node-version 24 is not an exact version/);
-    assert.equal(one('.github/workflows/a.yml', '        with:\n          node-version: lts/*\n').length, 1);
+    const setup = (with_) => `jobs:\n  a:\n    steps:\n      - uses: actions/setup-node@${SHA} # v4.4.0\n        with:\n${with_}`;
+    assert.deepEqual(one('.github/workflows/a.yml', setup('          node-version: 24.22.1\n          java-version: 17.0.9+9\n')), []);
+    assert.match(one('.github/workflows/a.yml', setup('          node-version: 24\n'))[0], /node-version 24 is not an exact version/);
+    assert.equal(one('.github/workflows/a.yml', setup('          node-version: lts/*\n')).length, 1);
+    assert.equal(one('action/action.yml', 'runs:\n  steps:\n    - with:\n        go-version: 1.25\n').length, 1, 'a composite actionâ€™s step');
     const matrix = (values) => `jobs:\n  a:\n    strategy:\n      matrix:\n        node: [${values}]\n    steps:\n      - with:\n          node-version: \${{ matrix.node }}\n`;
     assert.deepEqual(one('.github/workflows/a.yml', matrix("'runner', '20.0.0', '24.22.1'")), []);
     assert.equal(one('.github/workflows/a.yml', matrix("'20.0.0', '20'")).length, 1);
@@ -290,7 +296,7 @@ test('a toolchain an action installs is an exact version, and a runner a named i
     const block = (values) => `jobs:\n  a:\n    strategy:\n      matrix:\n        node:\n${values.map((v) => `          - ${v}\n`).join('')}    steps:\n      - with:\n          node-version: \${{ matrix.node }}\n`;
     assert.deepEqual(one('.github/workflows/a.yml', block(['24.22.1', "'22.23.4'"])), []);
     assert.match(one('.github/workflows/a.yml', block(['24.22.1', '24']))[0], /node-version 24 is not an exact version/);
-    assert.match(one('.github/workflows/a.yml', 'jobs:\n  a:\n    steps:\n      - with:\n          node-version: ${{ matrix.node }}\n')[0], /has no values this reads/);
+    assert.match(one('.github/workflows/a.yml', 'jobs:\n  a:\n    steps:\n      - with:\n          node-version: ${{ matrix.node }}\n')[0], /no value this reads/);
     // An include adds its own jobs; each value is held too, block or flow.
     const job = (strategy) => `jobs:\n  a:\n    strategy:\n      matrix:\n${strategy}    steps:\n      - with:\n          node-version: \${{ matrix.node }}\n`;
     assert.match(one('.github/workflows/a.yml', job("        include:\n          - node: 24\n"))[0], /node-version 24 is not an exact version/);
@@ -301,8 +307,10 @@ test('a toolchain an action installs is an exact version, and a runner a named i
     assert.deepEqual(one('.github/workflows/a.yml', "jobs:\n  a:\n    container: ${{ matrix.image }}\n    strategy:\n      matrix:\n        image: ['node:24@" + DIGEST + "']\n"), []);
     assert.equal(one('.github/workflows/a.yml', "jobs:\n  a:\n    strategy:\n      matrix:\n        node: ['24.22.1']\n  b:\n    steps:\n      - with:\n          node-version: ${{ matrix.node }}\n").length, 1);
     assert.equal(one('.github/workflows/a.yml', "jobs:\n  a:\n    strategy:\n      matrix: ${{ fromJSON(needs.x.outputs.m) }}\n    steps:\n      - with:\n          node-version: ${{ matrix.node }}\n").length, 1, 'a matrix not written out');
-    assert.equal(one('.github/workflows/a.yml', '    runs-on: ubuntu-latest\n').length, 1);
-    assert.deepEqual(one('.github/workflows/a.yml', '    runs-on: ubuntu-24.04\n'), []);
+    assert.equal(one('.github/workflows/a.yml', 'jobs:\n  a:\n    runs-on: ubuntu-latest\n').length, 1);
+    assert.equal(one('.github/workflows/a.yml', 'jobs:\n  a:\n    runs-on: [self-hosted, ubuntu-latest]\n').length, 1);
+    assert.equal(one('.github/workflows/a.yml', 'jobs:\n  a:\n    strategy:\n      matrix:\n        os: [ubuntu-24.04, macos-latest]\n    runs-on: ${{ matrix.os }}\n').length, 1);
+    assert.deepEqual(one('.github/workflows/a.yml', 'jobs:\n  a:\n    runs-on: ubuntu-24.04\n'), []);
 });
 
 test("pnpm waits a week, runs no install script nobody decided on, and saves exact versions", () => {
@@ -318,11 +326,14 @@ test("pnpm waits a week, runs no install script nobody decided on, and saves exa
     const example = "strictDepBuilds: true\nminimumReleaseAge: 10080\nminimumReleaseAgeExclude:\n  - '@coffre/*'\n";
     assert.deepEqual(one('examples/node/pnpm-workspace.yaml', example), []);
     assert.equal(one('examples/node/pnpm-workspace.yaml', `${example}  - 'wrangler'\n`).length, 1);
-    // Block style alone: a setting written another way is a problem, never skipped.
-    assert.match(one('pnpm-workspace.yaml', `${root}minimumReleaseAgeExclude: ['*']\n`, { root: true })[0], /write it as a block/);
-    assert.match(one('pnpm-workspace.yaml', root.replace('allowBuilds:\n  esbuild: false\n', 'allowBuilds: { esbuild: true }\n'), { root: true })[0], /write it as a block/);
-    assert.equal(one('pnpm-workspace.yaml', root.replace('  esbuild: false', '  esbuild: false\n  ? koffi\n'), { root: true }).length, 1, 'an entry this cannot read');
-    assert.match(one('pnpm-workspace.yaml', `${root}minimumReleaseAge: 0\n`, { root: true })[0], /set twice/);
+    // Any style YAML has is read as pnpm reads it.
+    assert.match(one('pnpm-workspace.yaml', `${root}minimumReleaseAgeExclude: ['*']\n`, { root: true })[0], /lets \* in younger than a week/);
+    assert.match(one('examples/node/pnpm-workspace.yaml', "{strictDepBuilds: true, minimumReleaseAge: 10080, minimumReleaseAgeExclude: ['@coffre/*', wrangler]}\n")[0], /lets wrangler in/);
+    assert.match(one('pnpm-workspace.yaml', root.replace('allowBuilds:\n  esbuild: false\n', 'allowBuilds: { esbuild: true }\n'), { root: true })[0], /allowBuilds esbuild: true needs/);
+    assert.match(one('pnpm-workspace.yaml', root.replace("savePrefix: ''", "'savePrefix': '^'"), { root: true })[0], /savePrefix is not ''/);
+    assert.equal(one('pnpm-workspace.yaml', root.replace('  esbuild: false', '  esbuild: false\n  ? koffi\n'), { root: true }).length, 1, 'neither true nor false');
+    assert.match(one('pnpm-workspace.yaml', root.replace('10080', "'10080'"), { root: true })[0], /minimumReleaseAge 10080 is under/, 'a string');
+    assert.match(one('pnpm-workspace.yaml', `${root}minimumReleaseAge: 0\n`, { root: true })[0], /duplicated mapping key/);
     assert.match(one('pnpm-workspace.yaml', `${root}onlyBuiltDependencies:\n  - esbuild\n`, { root: true })[0], /allowBuilds is the one place/);
 });
 

@@ -49,7 +49,9 @@ jobs:
         run: pnpm check:action
 
   # On every change, a release's bump included: nothing CI, a Dockerfile or a
-  # script fetches may move under it. Needs no install and no Postgres.
+  # script fetches may move under it. Needs no Postgres, and of the install
+  # only the root's own dependencies: js-yaml, which check:pins reads YAML
+  # with, and @coffre/db's few.
   pins:
     name: Pins
     runs-on: ubuntu-24.04
@@ -59,10 +61,25 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.22.1
+      - name: Find pnpm's store
+        id: store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      # A cache of its own: setup-node's, which the other jobs share, is keyed
+      # on the lockfile alone, and this job's few packages saved under that key
+      # first would leave every other job downloading the rest.
+      - name: Restore pnpm's store for these packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pins-pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install the root's dependencies from the lockfile
+        run: pnpm install --frozen-lockfile --filter coffre --prod
       - name: Hold manifests, images, downloads, installs and pnpm's settings to their pins
         run: node scripts/check-pins.mjs
       - name: Hold every action to its commit, with zizmor's other audits

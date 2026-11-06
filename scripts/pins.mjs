@@ -12,6 +12,8 @@
 // line that is not a comment, however it is called. Its words in a message
 // are banned too: reword the message. A fetch it has no name for, or one
 // built to hide (`eval "$cmd"`, `node -e 'fetch(…)'`), is review's to catch.
+// YAML is no text to it: js-yaml reads it into the data GitHub, Compose and
+// pnpm read, and the checks walk that.
 //
 // Two markers, each on the line it covers:
 //   `# pins: local`        curl or wget of this machine (127.0.0.1, localhost
@@ -19,6 +21,8 @@
 //   `# unpinned: <reason>` anything that cannot be pinned, on the line or in
 //                          the comment block right above it. The reason is
 //                          the review.
+
+import { loadAll } from 'js-yaml';
 
 // `name:tag@sha256:<digest>`: the tag for people, the digest for Docker.
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::\d+)?\/?[a-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9._-]*@sha256:[0-9a-f]{64}$/;
@@ -78,38 +82,43 @@ export function kindOf(path) {
 }
 
 /**
- * Every problem in one file, as `path:line: what`. `pnpm` is the workspace's
- * packageManager version, the one pnpm Corepack may fetch.
+ * Every problem in one file: `path:line: what` in a script or a Dockerfile,
+ * `path: <where in its data>: what` in YAML or JSON. `pnpm` is the
+ * workspace's packageManager version, the one pnpm Corepack may fetch.
  */
 export function problemsIn(path, text, { root = false, pnpm } = {}) {
     const kind = kindOf(path);
     if (kind === null) return [];
-    const lines = text.split('\n');
-    const problems = [];
-    const report = (index, message) => problems.push(`${path}:${index + 1}: ${message}`);
-    if (kind === 'workspace') {
-        workspace(lines, report, root);
-        return problems;
+    const problems = new Set();
+    if (kind === 'shell' || kind === 'dockerfile') {
+        scan(text, kind, (index, message) => problems.add(`${path}:${index + 1}: ${message}`), { path, pnpm });
+        return [...problems];
     }
-    for (const { index, line, exempt } of logicalLines(lines, kind, report)) {
+    // YAML is read by js-yaml, as GitHub, Compose and pnpm read it: anchors,
+    // quoted keys, flow collections and folded blocks are the data they make.
+    let documents;
+    try {
+        documents = kind === 'json' ? [JSON.parse(text)] : loadAll(text);
+    } catch (error) {
+        return [`${path}: ${error.message.split('\n')[0]}`];
+    }
+    const report = (where, message) => problems.add(`${path}: ${where}: ${message}`);
+    if (kind === 'workspace') workspace(documents, text, report, root);
+    else for (const document of documents) data(document, kind, text, report, { path, pnpm });
+    return [...problems];
+}
+
+// What a shell or Docker runs, line by line: a script, a Dockerfile, or a
+// string in a workflow, compose file or JSON (a `run:`, a `command:`).
+function scan(text, kind, report, { path, pnpm }) {
+    const lines = text.split('\n');
+    for (const { index, line, exempt } of logicalLines(lines, kind)) {
         if (exempt) continue;
         // A Dockerfile's frontend is an image BuildKit pulls.
         const syntax = kind === 'dockerfile' && line.match(/^#\s*syntax\s*=\s*(\S+)/i);
         if (syntax && !IMAGE.test(syntax[1])) report(index, `syntax ${syntax[1]} is not name:tag@sha256:<index digest>`);
         // Comments name commands without running them.
         if (/^\s*#/.test(line)) continue;
-        if (kind === 'workflow') workflowLine(line, index, lines, report);
-        if (kind === 'workflow' || kind === 'compose') {
-            const image = line.match(/^\s*(?:-\s+)?(?:image|container):\s*(.*?)\s*(?:#.*)?$/)?.[1].replace(/^(['"])(.*)\1$/, '$2');
-            // A mapping's (`container:` above its `image:`) is on the lines below;
-            // a matrix's `image:` is a value, held where it is used.
-            if (image && !inMatrix(lines, index)) {
-                const matrix = image.match(/^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/);
-                const values = matrix ? matrixValues(lines, index, matrix[1]) : [image];
-                if (values.length === 0) report(index, `image ${image}: no value this reads; name the image, or list it under the job's matrix`);
-                for (const value of values) if (!IMAGE.test(value)) report(index, `image ${value} is not name:tag@sha256:<index digest>`);
-            }
-        }
         if (kind === 'dockerfile') dockerfileLine(line, index, lines, report);
         // BuildKit in a container is an image too, and its default moves.
         if (/\bbuildx\s+create\b/.test(line) && !/image=/.test(line)) report(index, 'docker buildx create without a pinned --driver-opt image=');
@@ -118,13 +127,10 @@ export function problemsIn(path, text, { root = false, pnpm } = {}) {
         }
         if (path !== FETCHER) fetches(argv(line), index, report, pnpm);
     }
-    return problems;
 }
 
-// An argument list is the command its words make: `RUN ["npm", "install"]`,
-// compose's `command: [pnpm, install]` and `test: ['CMD', 'curl', …]` read as
-// `npm install`, `pnpm install` and `CMD curl …`. A block list of them
-// (`command:` then `- pnpm`, `- install`) is joined by `argumentLists`.
+// A Dockerfile's argument list is the command its words make: `RUN ["npm",
+// "install"]` reads as `npm install`. (YAML's are lists in its data.)
 const ARG = String.raw`"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s,[\]"'#{}]+`;
 const ARGV = new RegExp(String.raw`\[\s*(?:${ARG})(?:\s*,\s*(?:${ARG}))+\s*,?\s*\]`, 'g');
 function argv(line) {
@@ -136,26 +142,6 @@ function unquoted(word) {
         try { return JSON.parse(word); } catch { return word.slice(1, -1); }
     }
     return word.startsWith("'") ? word.slice(1, -1).replaceAll("''", "'") : word;
-}
-
-// A key whose value is an argument list written one word a line (compose's
-// `command:`, `entrypoint:` and healthcheck `test:`, a Docker action's
-// `args:`), as one line of those words, at the key's index.
-function argumentLists(lines) {
-    const joined = [];
-    lines.forEach((line, index) => {
-        const key = line.match(/^(\s*(?:-\s+)?)(?:command|entrypoint|args|test):\s*(?:#.*)?$/);
-        if (!key) return;
-        const words = [];
-        for (let i = index + 1; i < lines.length; i++) {
-            if (lines[i].trim() === '' || /^\s*#/.test(lines[i])) continue;
-            const item = lines[i].match(/^(\s*)-\s+(.*?)\s*(?:\s#.*)?$/);
-            if (!item || item[1].length < key[1].length) break;
-            words.push(unquoted(item[2]));
-        }
-        if (words.length > 0) joined.push({ index, line: `${line.trim()} ${words.join(' ')}`, exempt: exempted(lines, index, line) });
-    });
-    return joined;
 }
 
 // What a line fetches by name: a banned fetcher, an unfrozen install, an
@@ -195,9 +181,7 @@ function localOnly(line) {
 
 // Shell's and Dockerfiles' backslash continuations joined into one line, each
 // at the index of its first, with whether a `# unpinned: <reason>` covers it.
-// A YAML file's lines are checked for the forms this reads first (`yamlLines`).
-function logicalLines(lines, kind, report) {
-    if (kind === 'workflow' || kind === 'compose') yamlLines(lines, report);
+function logicalLines(lines, kind) {
     const joined = [];
     for (let k = 0; k < lines.length; k++) {
         const start = k;
@@ -213,53 +197,7 @@ function logicalLines(lines, kind, report) {
         }
         joined.push({ index: start, line, exempt: exempted(lines, start, line) });
     }
-    if (kind === 'workflow' || kind === 'compose') joined.push(...argumentLists(lines));
     return joined;
-}
-
-// The YAML this reads line by line, where each line is what YAML reads: block
-// mappings and lists, each value on its key's line, and `|` blocks, whose
-// lines are the shell's own (and a `description`'s `>`, prose). Every other
-// form YAML has is a problem here, never a value this misreads: a `>` block
-// that is not a description's, or a value continued below its key
-// (YAML folds them into lines this would have to rebuild), an indentation
-// indicator (`|2`), a flow mapping (`with: {node-version: '24'}`) but a
-// matrix's, which `matrixValues` reads.
-function yamlLines(lines, report) {
-    const indent = (line) => line.match(/^\s*/)[0].length;
-    const content = (line) => line.trim() !== '' && !/^\s*#/.test(line);
-    // A key (`- run:`, `"on":`) or a sequence entry's dash, then the value.
-    // A flow collection (`{`, `[`) is a value, never the start of a key.
-    const NODE = /^(\s*)((?:-(?:\s+|$))*)(?:((?:"[^"]*"|'[^']*'|[^\s#'"{[-][^:#]*?|-[^\s:#][^:#]*?)):(?=\s|$))?\s*(.*)$/;
-    for (let i = 0; i < lines.length; i++) {
-        if (!content(lines[i])) continue;
-        const [, space, dashes, key, rest] = lines[i].match(NODE);
-        if (key === undefined && dashes === '') {
-            report(i, 'a YAML value continued below its key: write it on one line, or as a `|` block');
-            continue;
-        }
-        // A key's value is past its column; an entry's, past its dash.
-        const column = space.length + (key === undefined ? 0 : dashes.length);
-        let end = i;
-        while (end + 1 < lines.length && (!content(lines[end + 1]) || indent(lines[end + 1]) > column)) end++;
-        while (end > i && lines[end].trim() === '') end--;
-        const value = rest.replace(/(^|\s)#.*$/, '').trim().replace(/^(?:[&!]\S*(?:\s+|$))*/, '');
-        const block = /^[|>][0-9+-]*$/.test(value);
-        if (block) {
-            // A `>` block folds its lines, which only prose may: a description runs nothing.
-            const prose = key === 'description' && /^>[+-]?$/.test(value);
-            if (!prose && !/^\|[+-]?$/.test(value)) report(i, `a YAML ${value} block: write it as \`|\`, \`|-\` or \`|+\`, its lines as the shell reads them`);
-            i = end;
-            continue;
-        }
-        if (/^[[{]/.test(value) && /(?<!\$)\{/.test(value) && !inMatrix(lines, i)) {
-            report(i, 'a YAML flow mapping: write it as a block, one key a line');
-        }
-        if (value === '') continue;
-        // A value on the key's line: what is past its column continues it.
-        const below = lines.slice(i + 1, end + 1).findIndex(content);
-        if (below >= 0) report(i + 1 + below, 'a YAML value continued below its key: write it on one line, or as a `|` block');
-    }
 }
 
 // The marker on the line, or on any line of the comment block right above it.
@@ -314,130 +252,171 @@ function stages(lines) {
     return names;
 }
 
-function workflowLine(line, index, lines, report) {
-    const uses = line.match(/^\s*(?:-\s+)?uses:\s*(.+?)\s*$/);
-    if (uses) {
-        // The scalar, quoted or not, then its comment.
-        const [, , quoted, plain, comment = ''] = uses[1].match(/^(?:(['"])(.*?)\1|([^\s#]+))\s*(#.*)?$/) ?? [];
-        const target = quoted ?? plain ?? uses[1];
-        const local = target.startsWith('./') || target.startsWith('$/');
-        const image = target.startsWith('docker://') && IMAGE.test(target.slice('docker://'.length));
-        const pinned = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/.test(target) && /^# v\d+(?:\.\d+)*\S*$/.test(comment);
-        if (!local && !image && !pinned) report(index, `uses ${target} is not owner/repo@<commit SHA> # v<version>`);
-    }
-    const runner = line.match(/^\s*runs-on:\s*(.+?)\s*$/);
-    if (runner && /-latest\b/.test(runner[1])) report(index, `runs-on ${runner[1]} moves: name the image's version (ubuntu-24.04)`);
-    // A toolchain an action installs: an exact version, or a matrix of them,
-    // where `runner` names the runner's own (a step that installs none).
-    const version = line.match(/^\s*([a-z]+)-version:\s*['"]?(\$\{\{[^}]*\}\}|[^'"#\s]+)/);
-    if (version) {
-        const matrix = version[2].match(/^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/);
-        const values = matrix ? matrixValues(lines, index, matrix[1]) : [version[2]];
-        if (values.length === 0) report(index, `${version[1]}-version matrix.${matrix[1]} has no values this reads: write them as a list under matrix`);
-        for (const value of values) {
-            if (matrix && value === 'runner') continue;
-            if (!EXACT_VERSION.test(value)) report(index, `${version[1]}-version ${value} is not an exact version`);
+const isMapping = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const isScalar = (value) => ['string', 'number', 'boolean'].includes(typeof value);
+const MATRIX = /\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g;
+
+// A workflow, an action, a compose file or .cursor/environment.json, as the
+// data it is: every string is what a shell runs, a list of words the command
+// they make (`command: [pnpm, install]`, a healthcheck's `test:`, an action's
+// `args:`), and what names an action, an image, a runner or a toolchain, in
+// the place GitHub or Compose reads it, is held to its pin. A `# unpinned:
+// <reason>` is the shell's own comment, in the string it covers: YAML's
+// comments are no part of its data.
+function data(document, kind, text, report, options) {
+    const visit = (node, path, job) => {
+        const where = path.map((part, i) => (typeof part === 'number' ? `[${part}]` : i === 0 ? part : `.${part}`)).join('') || '(file)';
+        if (kind !== 'json') held(node, path, where, job, { kind, text, report });
+        if (typeof node === 'string') return commands(node, where, job, report, options);
+        if (Array.isArray(node)) {
+            if (node.length > 1 && node.every(isScalar)) return commands(node.join(' '), where, job, report, options);
+            return node.forEach((item, i) => visit(item, [...path, i], job));
         }
+        if (!isMapping(node)) return;
+        // Each job reads its own matrix.
+        for (const [key, value] of Object.entries(node)) visit(value, [...path, key], kind === 'workflow' && path.length === 1 && path[0] === 'jobs' ? value : job);
+    };
+    visit(document, [], undefined);
+}
+
+// Whether a path is the place a pattern names: `*` any key, `#` any index.
+function at(path, ...pattern) {
+    return path.length === pattern.length && pattern.every((part, i) => {
+        if (part === '*') return typeof path[i] === 'string';
+        if (part === '#') return typeof path[i] === 'number';
+        if (part instanceof RegExp) return typeof path[i] === 'string' && part.test(path[i]);
+        return part === path[i];
+    });
+}
+
+// A string checked as the lines a shell runs, once for each value a matrix
+// gives what it names (`run: pnpm ${{ matrix.command }}`).
+function commands(text, where, job, report, options) {
+    const multiline = text.includes('\n');
+    for (const each of expanded(text, job)) {
+        scan(each, 'shell', (index, message) => report(multiline ? `${where}, line ${index + 1}` : where, message), options);
     }
 }
 
-// Whether the line is in a `matrix:`, one of the keys it sits under.
-function inMatrix(lines, index) {
-    let indent = lines[index].match(/^\s*/)[0].length;
-    for (let i = index - 1; i >= 0 && indent > 0; i--) {
-        if (lines[i].trim() === '' || /^\s*#/.test(lines[i])) continue;
-        const own = lines[i].match(/^\s*/)[0].length;
-        if (own >= indent) continue;
-        if (/^\s*matrix:\s*(#.*)?$/.test(lines[i])) return true;
-        indent = own;
+function expanded(text, job) {
+    let texts = [text];
+    for (const key of new Set([...text.matchAll(MATRIX)].map((match) => match[1]))) {
+        const values = matrixValues(job, key) ?? [];
+        const pattern = new RegExp(String.raw`\$\{\{\s*matrix\.${key}\s*\}\}`, 'g');
+        texts = texts.flatMap((each) => [each, ...values.map((value) => each.replace(pattern, String(value)))]);
     }
-    return false;
+    return texts;
 }
 
-// Every value the matrix key takes in the job of the line that uses it: its
-// list, flow (`node: ['runner', '24.22.1']`) or one per line, and every
-// `include:` entry's, block or flow. None, when the matrix is not written out
-// (`matrix: ${{ fromJSON(…) }}`): then the caller reports it.
-function matrixValues(lines, index, key) {
-    const unquote = (value) => value.trim().replace(/^(['"])(.*)\1$/, '$2');
-    const indent = (line) => line.match(/^\s*/)[0].length;
-    const content = (line) => line.trim() !== '' && !/^\s*#/.test(line);
-    // The job: from its key, the nearest line above at the jobs' indent, to the next.
-    const jobs = lines.findIndex((line) => /^jobs:\s*(#.*)?$/.test(line));
-    if (jobs < 0 || index < jobs) return [];
-    const level = indent(lines.slice(jobs + 1).find(content) ?? '');
-    let start = index;
-    while (start > jobs && !(content(lines[start]) && indent(lines[start]) === level)) start--;
-    let end = start + 1;
-    while (end < lines.length && !(content(lines[end]) && indent(lines[end]) <= level)) end++;
-    const matrix = lines.slice(start, end).findIndex((line) => /^\s*matrix:\s*(#.*)?$/.test(line)) + start;
-    if (matrix < start) return [];
-    const values = [];
-    const entry = new RegExp(`^(\\s*(?:-\\s+)?)${key}:\\s*(.*?)\\s*(#.*)?$`);
-    const inFlow = new RegExp(`[{,]\\s*${key}:\\s*([^,}]+)`, 'g');
-    for (let i = matrix + 1; i < end && (!content(lines[i]) || indent(lines[i]) > indent(lines[matrix])); i++) {
-        for (const flow of lines[i].matchAll(inFlow)) values.push(unquote(flow[1]));
-        const own = lines[i].match(entry);
-        if (!own) continue;
-        const list = own[2].match(/^\[(.*)\]$/);
-        if (list) values.push(...list[1].split(',').map(unquote).filter(Boolean));
-        else if (own[2] !== '') values.push(unquote(own[2]));
-        else {
-            for (let j = i + 1; j < end && (!content(lines[j]) || indent(lines[j]) > own[1].length); j++) {
-                const item = lines[j].match(/^\s*-\s+(.*?)\s*(#.*)?$/);
-                if (item) values.push(unquote(item[1]));
-                else if (content(lines[j])) values.push(lines[j].trim());
-            }
-        }
-    }
+// Every value the job's matrix gives `key`: its own, and each `include:`
+// entry's. null when the matrix is not written out (`${{ fromJSON(…) }}`).
+function matrixValues(job, key) {
+    const matrix = isMapping(job) && isMapping(job.strategy) ? job.strategy.matrix : undefined;
+    if (!isMapping(matrix)) return null;
+    const own = matrix[key];
+    const values = own === undefined ? [] : [own].flat();
+    const include = matrix.include ?? [];
+    if (!Array.isArray(include) || !include.every(isMapping)) return null;
+    for (const entry of include) if (key in entry) values.push(entry[key]);
     return values;
 }
 
-// pnpm's supply-chain settings, in the workspace's and each example's. This
-// reads block style, the form pnpm writes; a setting written another way is a
-// problem, never a setting this skips.
-function workspace(lines, report, root) {
-    const keys = new Map();
-    lines.forEach((line, index) => {
-        const key = line.match(/^(['"]?)([A-Za-z][\w-]*)\1:(.*)$/);
-        if (!key) return;
-        if (keys.has(key[2])) report(index, `${key[2]} is set twice: pnpm reads the last`);
-        keys.set(key[2], { index, value: key[3].replace(/\s+#.*$/, '').trim() });
-    });
-    const at = (key) => keys.get(key)?.index ?? -1;
-    const value = (key) => keys.get(key)?.value;
-    const age = Number(value('minimumReleaseAge'));
-    // The policy's floor is 3 days (4320); coffre waits the week it always has.
-    if (!(age >= 10080)) report(Math.max(at('minimumReleaseAge'), 0), `minimumReleaseAge ${value('minimumReleaseAge') ?? 'missing'} is under 10080 (7 days)`);
-    if (value('strictDepBuilds') !== 'true') report(Math.max(at('strictDepBuilds'), 0), 'strictDepBuilds is not true: an install script nobody decided on must fail the install');
-    if (at('dangerouslyAllowAllBuilds') >= 0) report(at('dangerouslyAllowAllBuilds'), 'dangerouslyAllowAllBuilds runs every install script');
-    for (const legacy of ['onlyBuiltDependencies', 'onlyBuiltDependenciesFile', 'neverBuiltDependencies']) {
-        if (at(legacy) >= 0) report(at(legacy), `${legacy}: allowBuilds is the one place a build is decided`);
+// What one value names, read through the job's matrix when it is one of its
+// values (`${{ matrix.node }}`): each value it takes, and whether a matrix gave it.
+function named(value, job, where, report) {
+    const matrix = typeof value === 'string' && value.match(/^\$\{\{\s*matrix\.([\w-]+)\s*\}\}$/);
+    if (!matrix) return [{ value: String(value), fromMatrix: false }];
+    const values = matrixValues(job, matrix[1]) ?? [];
+    if (values.length === 0) report(where, `${value}: no value this reads; write the job's matrix out, its values in it`);
+    return values.map((each) => ({ value: isScalar(each) ? String(each) : JSON.stringify(each), fromMatrix: true }));
+}
+
+// What GitHub and Compose read as an image, an action, a runner or a toolchain.
+function held(value, path, where, job, { kind, text, report }) {
+    const step = (...rest) => at(path, 'jobs', '*', 'steps', '#', ...rest) || at(path, 'runs', 'steps', '#', ...rest);
+    const image = kind === 'compose'
+        ? at(path, 'services', '*', 'image')
+        : at(path, 'jobs', '*', 'container') && !isMapping(value) || at(path, 'jobs', '*', 'container', 'image')
+            || at(path, 'jobs', '*', 'services', '*') && !isMapping(value) || at(path, 'jobs', '*', 'services', '*', 'image')
+            || at(path, 'runs', 'image') || step('with', 'image');
+    if (image) {
+        for (const each of [value].flat()) {
+            if (!isScalar(each)) { report(where, `image ${JSON.stringify(each)} is not name:tag@sha256:<index digest>`); continue; }
+            for (const { value: name } of named(each, job, where, report)) {
+                // A Docker action's own Dockerfile, which check:pins reads too, or a registry's image.
+                if (at(path, 'runs', 'image') && (/(^|\/)Dockerfile$/.test(name) || IMAGE.test(name.replace(/^docker:\/\//, '')))) continue;
+                if (!IMAGE.test(name)) report(where, `image ${name} is not name:tag@sha256:<index digest>`);
+            }
+        }
     }
-    if (at('ignoreScripts') >= 0 && value('ignoreScripts') !== 'true') report(at('ignoreScripts'), 'ignoreScripts is not true');
-    if (root && value('savePrefix') !== "''") report(Math.max(at('savePrefix'), 0), "savePrefix is not ''");
-    for (const key of ['minimumReleaseAgeExclude', 'allowBuilds']) {
-        if (value(key)) report(at(key), `${key}: ${value(key)}: write it as a block, one entry a line`);
+    if (kind !== 'workflow') return;
+    if (at(path, 'jobs', '*', 'uses') || step('uses')) uses(value, where, text, report);
+    if (at(path, 'jobs', '*', 'runs-on')) {
+        const labels = isMapping(value) ? [value.group, value.labels].flat().filter((label) => label !== undefined) : [value].flat();
+        for (const label of labels) {
+            for (const { value: runner } of named(label, job, where, report)) {
+                if (/-latest\b/.test(runner) || runner.includes('${{')) report(where, `runs-on ${runner} moves: name the image's version (ubuntu-24.04)`);
+            }
+        }
     }
-    // The examples, which `coffre init` writes, let coffre's own fixes in the
-    // day they are published (AGENTS.md, "Dependencies"); nothing else waits less.
-    for (const { index, line } of block(lines, at('minimumReleaseAgeExclude'))) {
-        const name = line.match(/^\s*-\s+(['"]?)([^'"\s#]+)\1\s*(#.*)?$/)?.[2];
-        if (root || name !== '@coffre/*') report(index, `minimumReleaseAgeExclude lets ${name ?? line.trim()} in younger than a week`);
-    }
-    for (const { index, line } of block(lines, at('allowBuilds'))) {
-        const entry = line.match(/^\s+(['"]?)([^:'"\s]+)\1:\s*([^\s#]*)\s*(#.*)?$/);
-        if (entry?.[3] === 'false') continue;
-        const reason = /^\s*#\s*\S/.test(lines[index - 1] ?? '');
-        if (entry?.[3] !== 'true' || !reason) report(index, `allowBuilds ${entry ? `${entry[2]}: ${entry[3]}` : line.trim()} needs \`true\` and its reason in a comment right above, or \`false\``);
+    // A toolchain an action installs: an exact version, or a matrix of them,
+    // where `runner` names the runner's own (a step that installs none).
+    if (step('with', /^[a-z]+-version$/)) {
+        const key = path.at(-1);
+        if (!isScalar(value)) return report(where, `${key} ${JSON.stringify(value)} is not an exact version`);
+        for (const { value: version, fromMatrix } of named(value, job, where, report)) {
+            if (fromMatrix && version === 'runner') continue;
+            if (!EXACT_VERSION.test(version)) report(where, `${key} ${version} is not an exact version`);
+        }
     }
 }
 
-function block(lines, start) {
-    if (start < 0) return [];
-    const entries = [];
-    for (let i = start + 1; i < lines.length && (/^\s/.test(lines[i]) || lines[i] === ''); i++) {
-        if (/^\s+[^\s#]/.test(lines[i])) entries.push({ index: i, line: lines[i] });
+// An action by its commit, `owner/repo@<sha> # v<version>`, the version for
+// people: a comment, which YAML drops, so read on each line that names it.
+function uses(value, at, text, report) {
+    if (typeof value !== 'string') return report(at, `uses ${JSON.stringify(value)} is not owner/repo@<commit SHA> # v<version>`);
+    if (value.startsWith('./') || value.startsWith('$/')) return;
+    if (value.startsWith('docker://')) {
+        if (!IMAGE.test(value.slice('docker://'.length))) report(at, `uses ${value} is not docker://name:tag@sha256:<index digest>`);
+        return;
     }
-    return entries;
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+@[0-9a-f]{40}$/.test(value)) return report(at, `uses ${value} is not owner/repo@<commit SHA> # v<version>`);
+    const escaped = value.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+    const lines = text.split('\n').filter((line) => new RegExp(String.raw`uses['"]?\s*:\s*['"]?${escaped}`).test(line));
+    const commented = new RegExp(String.raw`${escaped}['"]?\s*[}\]]*\s*#\s*v\d+(?:\.\d+)*\S*\s*$`);
+    if (lines.length === 0 || !lines.every((line) => commented.test(line))) report(at, `uses ${value} has no # v<version> beside it, on its line`);
+}
+
+// pnpm's supply-chain settings, in the workspace's and each example's.
+function workspace(documents, text, report, root) {
+    if (documents.length !== 1 || !isMapping(documents[0])) return report('(file)', 'one mapping of pnpm settings');
+    const settings = documents[0];
+    const age = settings.minimumReleaseAge;
+    // The policy's floor is 3 days (4320); coffre waits the week it always has.
+    if (!(typeof age === 'number' && age >= 10080)) report('minimumReleaseAge', `minimumReleaseAge ${age ?? 'missing'} is under 10080 (7 days)`);
+    if (settings.strictDepBuilds !== true) report('strictDepBuilds', 'strictDepBuilds is not true: an install script nobody decided on must fail the install');
+    if ('dangerouslyAllowAllBuilds' in settings) report('dangerouslyAllowAllBuilds', 'dangerouslyAllowAllBuilds runs every install script');
+    for (const legacy of ['onlyBuiltDependencies', 'onlyBuiltDependenciesFile', 'neverBuiltDependencies']) {
+        if (legacy in settings) report(legacy, `${legacy}: allowBuilds is the one place a build is decided`);
+    }
+    if ('ignoreScripts' in settings && settings.ignoreScripts !== true) report('ignoreScripts', 'ignoreScripts is not true');
+    if (root && settings.savePrefix !== '') report('savePrefix', "savePrefix is not ''");
+    // The examples, which `coffre init` writes, let coffre's own fixes in the
+    // day they are published (AGENTS.md, "Dependencies"); nothing else waits less.
+    const exclude = settings.minimumReleaseAgeExclude ?? [];
+    if (!Array.isArray(exclude)) report('minimumReleaseAgeExclude', 'minimumReleaseAgeExclude is not a list');
+    else exclude.forEach((name, i) => {
+        if (root || name !== '@coffre/*') report(`minimumReleaseAgeExclude[${i}]`, `minimumReleaseAgeExclude lets ${name} in younger than a week`);
+    });
+    const builds = settings.allowBuilds ?? {};
+    if (!isMapping(builds)) return report('allowBuilds', 'allowBuilds is not a mapping of package to true or false');
+    const lines = text.split('\n');
+    for (const [name, allowed] of Object.entries(builds)) {
+        if (allowed === false) continue;
+        // Its reason is a comment right above its entry, which YAML drops: read on the lines.
+        const escaped = name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+        const line = lines.findIndex((each) => new RegExp(String.raw`^\s+(['"]?)${escaped}\1\s*:\s*true\s*(#.*)?$`).test(each));
+        const reason = line > 0 && /^\s*#\s*\S/.test(lines[line - 1]);
+        if (allowed !== true || !reason) report(`allowBuilds.${name}`, `allowBuilds ${name}: ${allowed} needs \`true\` and its reason in a comment right above, or \`false\``);
+    }
 }

@@ -47,7 +47,8 @@
     "add:dep": "pnpm add --save-exact"
   },
   "dependencies": {
-    "@coffre/db": "workspace:*"
+    "@coffre/db": "workspace:*",
+    "js-yaml": "4.3.0"
   },
   "devDependencies": {
     "@hegeldev/hegel": "0.4.7",

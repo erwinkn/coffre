@@ -25,8 +25,12 @@ function checkout(t) {
         cpSync(join(root, file), join(dir, file));
     }
     symlinkSync(join(root, 'packages/cli/node_modules'), join(dir, 'packages/cli/node_modules'), 'dir');
+    // check:pins reads YAML with the workspace's js-yaml.
+    mkdirSync(join(dir, 'node_modules'));
+    symlinkSync(join(root, 'node_modules/js-yaml'), join(dir, 'node_modules/js-yaml'), 'dir');
     // check:pins reads the files Git tracks.
     execFileSync('git', ['init', '--quiet'], { cwd: dir });
+    writeFileSync(join(dir, '.git/info/exclude'), 'node_modules\n');
     execFileSync('git', ['add', '--all'], { cwd: dir });
     return dir;
 }
