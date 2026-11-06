@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`serveVault` passes its options to the vault it runs (T230).** On Node
+  a vault in a process of its own ignored a deployment's `uses`
+  (`inFlight`, `connections`, `coverMs`, `names`, `batch`) and kept the
+  default admission, the hot pool's size, so a burst of 50 uses refused
+  40 whatever `uses: { inFlight: 5000 }` said. `serveVault(config,
+  options)` takes `localVault`'s options, as `localVault(config, options)`
+  does. No default or value changes.
+
 - **A migration no longer holds up requests for minutes while it waits for
   a table (W331, limits D2).** `coffre migrate` set `lock_timeout = 5min`
   for its whole session, so a migration statement waiting for a table that
