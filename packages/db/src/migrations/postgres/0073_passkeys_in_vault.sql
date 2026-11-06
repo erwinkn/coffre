@@ -1783,6 +1783,10 @@ BEGIN
         v_owner := (SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE oid = v_reader);
         IF NOT has_table_privilege(v_owner, 'public.passkeys', 'SELECT') THEN
             EXECUTE format('GRANT SELECT ON public.passkeys TO %I', v_owner);
+            -- A login that may not grant it only gets a warning: stop here rather than leave every key write failing.
+            IF NOT has_table_privilege(v_owner, 'public.passkeys', 'SELECT') THEN
+                RAISE EXCEPTION '% runs as %, who cannot read passkeys and cannot be granted it by %', v_reader, v_owner, current_user;
+            END IF;
         END IF;
     END LOOP;
 END
