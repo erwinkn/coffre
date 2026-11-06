@@ -289,6 +289,12 @@ test('a toolchain an action installs is an exact version, and a runner a named i
     assert.match(one('.github/workflows/a.yml', setup('          node-version: 24\n'))[0], /node-version 24 is not an exact version/);
     assert.equal(one('.github/workflows/a.yml', setup('          node-version: lts/*\n')).length, 1);
     assert.equal(one('action/action.yml', 'runs:\n  steps:\n    - with:\n        go-version: 1.25\n').length, 1, 'a composite action’s step');
+    // GitHub reads an input's name whatever its case; pnpm/action-setup's is `version`.
+    assert.match(one('.github/workflows/a.yml', setup("          Node-Version: '24'\n"))[0], /Node-Version 24 is not an exact version/);
+    assert.match(one('.github/workflows/a.yml', setup('          NODE-VERSION: lts/*\n'))[0], /NODE-VERSION lts\/\* is not/);
+    assert.match(one('.github/workflows/a.yml', setup('          version: 11\n'))[0], /version 11 is not an exact version/);
+    assert.deepEqual(one('.github/workflows/a.yml', setup('          version: 11.8.0\n')), []);
+    assert.match(one('.github/workflows/a.yml', `jobs:\n  a:\n    steps:\n      - uses: docker/x@${SHA} # v1.0.0\n        with:\n          Image: postgres:16\n`)[0], /image postgres:16 is not/);
     const matrix = (values) => `jobs:\n  a:\n    strategy:\n      matrix:\n        node: [${values}]\n    steps:\n      - with:\n          node-version: \${{ matrix.node }}\n`;
     assert.deepEqual(one('.github/workflows/a.yml', matrix("'runner', '20.0.0', '24.22.1'")), []);
     assert.equal(one('.github/workflows/a.yml', matrix("'20.0.0', '20'")).length, 1);

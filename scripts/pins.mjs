@@ -338,7 +338,7 @@ function held(value, path, where, job, { kind, text, report }) {
         ? at(path, 'services', '*', 'image')
         : at(path, 'jobs', '*', 'container') && !isMapping(value) || at(path, 'jobs', '*', 'container', 'image')
             || at(path, 'jobs', '*', 'services', '*') && !isMapping(value) || at(path, 'jobs', '*', 'services', '*', 'image')
-            || at(path, 'runs', 'image') || step('with', 'image');
+            || at(path, 'runs', 'image') || step('with', /^image$/i);
     if (image) {
         for (const each of [value].flat()) {
             if (!isScalar(each)) { report(where, `image ${JSON.stringify(each)} is not name:tag@sha256:<index digest>`); continue; }
@@ -361,7 +361,9 @@ function held(value, path, where, job, { kind, text, report }) {
     }
     // A toolchain an action installs: an exact version, or a matrix of them,
     // where `runner` names the runner's own (a step that installs none).
-    if (step('with', /^[a-z]+-version$/)) {
+    // GitHub reads an input's name whatever its case (`Node-Version`), and
+    // pnpm/action-setup's is `version`.
+    if (step('with', /^(?:[a-z0-9_]+-)?version$/i)) {
         const key = path.at(-1);
         if (!isScalar(value)) return report(where, `${key} ${JSON.stringify(value)} is not an exact version`);
         for (const { value: version, fromMatrix } of named(value, job, where, report)) {
