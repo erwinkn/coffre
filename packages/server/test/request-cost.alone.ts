@@ -1329,7 +1329,10 @@ test("a project's audit page reads as many pages however many keys the project h
  * key, so as many pages however many the instance holds (T221). A count of them read every live key of the places, a
  * page for each when Postgres picked an index scan for each environment (1,184 pages for 1,282 keys), 30 to 48 when it
  * picked one bitmap scan, and which it picked followed the statistics of `secrets` (T166's flake): with keys counted,
- * these grow with the keys, whichever plan runs.
+ * these grow with the keys, whichever plan runs. The log's and the members' statistics are settled with the keys': the
+ * earlier tests leave the log due for an auto-analyze, which landed now and then between the two counts, and the
+ * missing members' read then looked for an access entry of every principal, 155 pages to 370, until it named its
+ * order (`missingMembers`, T233).
  */
 test("a member's report, `me` and the members list read as many pages however many keys the instance holds (T221)", POSTGRES, async () => {
   const someone = (await root.members.list()).members.find((entry) => entry.member.startsWith('user:'))!.member;
@@ -1354,7 +1357,7 @@ test("a member's report, `me` and the members list read as many pages however ma
     }
     return read;
   };
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects`);
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, audit_log, vault_members`);
   await settle();
   const small = await pages();
   try {
