@@ -186,6 +186,24 @@ test('pnpm install carries --frozen-lockfile, each command its own', () => {
     assert.equal(one('.cursor/environment.json', '{ "install": "corepack pnpm install\\necho --frozen-lockfile" }\n').length, 1);
 });
 
+test('an argument list is the command its words make', () => {
+    for (const [path, text] of [
+        ['Dockerfile', 'RUN ["npm", "install"]\n'],
+        ['Dockerfile', 'RUN ["pnpm","install"]\n'],
+        ['Dockerfile', 'CMD ["sh", "-c", "npm ci && node a.js"]\n'],
+        ['docker-compose.yml', 'services:\n  a:\n    command: [pnpm, install]\n'],
+        ['docker-compose.yml', "services:\n  a:\n    entrypoint: ['npm', 'exec', 'wrangler']\n"],
+        ['docker-compose.yml', 'services:\n  a:\n    command:\n      - pnpm\n      - install\n'],
+        ['docker-compose.yml', 'services:\n  a:\n    command:\n    - npx\n    - wrangler\n'],
+        ['docker-compose.yml', 'services:\n  a:\n    healthcheck:\n      test: ["CMD", "curl", "-f", "https://example.com"]\n'],
+        ['action/action.yml', "runs:\n  using: docker\n  args:\n    - 'pnpm'\n    - 'install'\n"],
+    ]) assert.ok(one(path, text, { pnpm: '11.8.0' }).length >= 1, text);
+    assert.deepEqual(one('Dockerfile', 'RUN ["pnpm", "install", "--frozen-lockfile"]\nENTRYPOINT ["coffre"]\n'), []);
+    assert.deepEqual(one('docker-compose.yml', 'services:\n  a:\n    command:\n    - pnpm\n    - install\n    - --frozen-lockfile\n'), []);
+    assert.deepEqual(one('docker-compose.yml', "services:\n  a:\n    healthcheck:\n      test: ['CMD-SHELL', 'pg_isready -U coffre_owner -d coffre']\n"), []);
+    assert.deepEqual(one('scripts/a.sh', 'jq ".[0,1]" a.json\nif [ -f a ]; then echo; fi\n'), []);
+});
+
 test('docker run, create or pull names its image by digest on the line', () => {
     assert.deepEqual(one('scripts/a.sh', `docker run --rm --name pg -it postgres:16.14@${DIGEST} psql\n`), []);
     assert.deepEqual(one('scripts/a.sh', `docker run --rm -d \\\n    -p 127.0.0.1::5432 \\\n    postgres:16.14@${DIGEST}\n`), [], 'a continued line');

@@ -116,9 +116,46 @@ export function problemsIn(path, text, { root = false, pnpm } = {}) {
         for (const option of line.matchAll(/\b(?:image|generator)=([^\s,"']+)/g)) {
             if (!IMAGE.test(option[1])) report(index, `image ${option[1]} is not name:tag@sha256:<index digest>`);
         }
-        if (path !== FETCHER) fetches(line, index, report, pnpm);
+        if (path !== FETCHER) fetches(argv(line), index, report, pnpm);
     }
     return problems;
+}
+
+// An argument list is the command its words make: `RUN ["npm", "install"]`,
+// compose's `command: [pnpm, install]` and `test: ['CMD', 'curl', …]` read as
+// `npm install`, `pnpm install` and `CMD curl …`. A block list of them
+// (`command:` then `- pnpm`, `- install`) is joined by `argumentLists`.
+const ARG = String.raw`"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^\s,[\]"'#{}]+`;
+const ARGV = new RegExp(String.raw`\[\s*(?:${ARG})(?:\s*,\s*(?:${ARG}))+\s*,?\s*\]`, 'g');
+function argv(line) {
+    return line.replace(ARGV, (list) => [...list.matchAll(new RegExp(ARG, 'g'))].map(([word]) => unquoted(word)).join(' '));
+}
+
+function unquoted(word) {
+    if (word.startsWith('"')) {
+        try { return JSON.parse(word); } catch { return word.slice(1, -1); }
+    }
+    return word.startsWith("'") ? word.slice(1, -1).replaceAll("''", "'") : word;
+}
+
+// A key whose value is an argument list written one word a line (compose's
+// `command:`, `entrypoint:` and healthcheck `test:`, a Docker action's
+// `args:`), as one line of those words, at the key's index.
+function argumentLists(lines) {
+    const joined = [];
+    lines.forEach((line, index) => {
+        const key = line.match(/^(\s*(?:-\s+)?)(?:command|entrypoint|args|test):\s*(?:#.*)?$/);
+        if (!key) return;
+        const words = [];
+        for (let i = index + 1; i < lines.length; i++) {
+            if (lines[i].trim() === '' || /^\s*#/.test(lines[i])) continue;
+            const item = lines[i].match(/^(\s*)-\s+(.*?)\s*(?:\s#.*)?$/);
+            if (!item || item[1].length < key[1].length) break;
+            words.push(unquoted(item[2]));
+        }
+        if (words.length > 0) joined.push({ index, line: `${line.trim()} ${words.join(' ')}`, exempt: exempted(lines, index, line) });
+    });
+    return joined;
 }
 
 // What a line fetches by name: a banned fetcher, an unfrozen install, an
@@ -176,6 +213,7 @@ function logicalLines(lines, kind, report) {
         }
         joined.push({ index: start, line, exempt: exempted(lines, start, line) });
     }
+    if (kind === 'workflow' || kind === 'compose') joined.push(...argumentLists(lines));
     return joined;
 }
 

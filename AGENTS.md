@@ -346,7 +346,9 @@ unsupported diff select full validation.
   runners, `npm exec` or `install`, `pnpm dlx` or `add`, `gh release
   download`, `git clone`, `nvm install`, `apt-get install`, …), its words in
   a message too, options between a command's words included (`gh release
-  --repo o/r download`). It reads YAML in the forms whose lines are what YAML
+  --repo o/r download`), and an argument list read as the command its words
+  make (`RUN ["npm", "install"]`, compose's `command: [pnpm, install]` or
+  one word a line). It reads YAML in the forms whose lines are what YAML
   reads: block style, each value on its key's line or in a `|` block (a
   `description`'s `>` too, prose). A `>` block elsewhere, a value continued
   below its key, an indentation indicator (`|2`) and a flow mapping outside a
