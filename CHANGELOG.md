@@ -7,7 +7,7 @@
   its query, is a 502 with nothing of the answer, and a relative one whose
   first segment has a raw colon parses as a scheme and is a 502 too; the
   proxy's docs say so, with the one accepted cost: a key made only of escapes
-  can make a redirect to `////` fail shut.
+  can make a redirect to `/tg/keep////next` fail shut.
 
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from

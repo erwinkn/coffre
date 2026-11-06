@@ -1045,8 +1045,9 @@ GET  /use/telegram/file/botcoffre_use_…/photos/file_0.jpg → https://api.tele
   `%3a` is a path, and `%253A`, a colon encoded twice, decodes once to
   `%3A`, which is not the value: the check below refuses it in a path
   and in a query alike (502, nothing of the answer). The check errs shut: a
-  value made only of escapes (`%2F%2F%2F%2F`) makes a redirect to `////`
-  a 502 too, as that path reads as the value once decoded.
+  value made only of escapes (`%2F%2F%2F%2F`, set through a `query()` rule,
+  as `path()` refuses `%`) makes a redirect to `/tg/keep////next` a 502 too,
+  as that path reads as the value once decoded.
   Only the path's segments: swapped in the text before it is read,
   `bot123456789%3AAAE…/getMe` would become the scheme `bot123456789:`,
   and a value that is the upstream's own `host:port` would replace its
