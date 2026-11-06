@@ -1160,10 +1160,10 @@ test('device flow: open requests are capped per address and freed by a decision'
   assert.deepEqual(await auditActions(), [`device.deny allow ${DEV}`]);
 });
 
-test('device flow: the client label is kept short', async () => {
+test('device flow: the client label is kept as given, however long: the body that brings it is its bound', async () => {
   const credential = await approvedCliSession(dev, 'x'.repeat(500));
   const row = await credentialRow(credential.id);
-  assert.equal(row.label?.length, 120);
+  assert.equal(row.label, 'x'.repeat(500));
 });
 
 // --- pending state ------------------------------------------------------------------

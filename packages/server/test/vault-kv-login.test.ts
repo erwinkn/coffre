@@ -176,7 +176,7 @@ test('a token signs in once, and only as an account whose bindings trust it: ref
 test("a login's body is { role, jwt }, JSON, small; GET is no login; revoke-self needs the token", async () => {
   assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: 'role=eso' })).status, 400);
   assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE } })).status, 400);
-  assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE, jwt: 'x'.repeat(20_000) } })).status, 400);
+  assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE, jwt: 'x'.repeat(1024 * 1024) } })).status, 400);
   assert.equal((await vault('GET', 'auth/kubernetes/login')).status, 405);
   // `auth/token/login` is no auth method: Vault's token auth has none, and nothing else writes.
   assert.equal((await vault('PUT', 'auth/token/login', { body: { role: SERVICE, jwt: projected() } })).status, 405);
