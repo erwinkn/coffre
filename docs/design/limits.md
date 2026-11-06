@@ -27,7 +27,7 @@ This document has four parts:
 
 ## Decisions, 2026-11-06
 
-Erwin answered six of the proposals (via the coordinator, W331 phase 2b).
+Erwin answered seven of the proposals (via the coordinator, W331 phase 2b).
 Rules R75 and R76 record two of them.
 
 | # | Decision | What it builds | Where |
@@ -36,7 +36,8 @@ Rules R75 and R76 record two of them.
 | D2 | **KMS and write locks (R75).** "Writes can take longer, but they shouldn't lock concurrent operations. Otherwise bring down the timeout and prefer retries. KMS can likely get a lower limit, but also shouldn't take a lock. The only real hot path are uses." | First an audit: which locks a write and a KMS call hold, and whether a `/use` or another operation can wait on them. Then: no KMS call under any lock; KMS's timeout lowered (1 s × 3 or lower, from a measurement; C1 is 5 s × 3 today); the 15 s write-lock wait (V17) replaced by a short timeout and retries. TLA+ first (R45). Supersedes §3.1 #4's "not yet" | audit under way, then a PR |
 | D3 | **Clock skews: on hold.** Erwin asked what clock skew is and why it is needed | nothing; C15, V9, V31, V32, S3's `SKEW_MS` and S65 keep their values | – |
 | D4 | **Service tokens (R76).** At most 365 days (from 366, C14); a deployment may set a lower maximum | `MAX_SERVICE_TOKEN_DAYS = 365`; `signin({ serviceTokenMaxDays })`, whole days 1 to 365. The default lifetime stays 90 days (`DEFAULT_SERVICE_TOKEN_DAYS`), or the maximum where that is lower | #516 |
-| D5 | **CI sign-in limits (R76).** "We should have one or two settings here and agreed put them much higher." No 60 a minute per binding, no 300 a minute in all | the proposal in [§3.6](#36-ci-sign-in-limits-the-proposal-for-erwins-numbers), for Erwin to confirm its numbers before anything is built; `formal/Credentials.tla` changes first | proposal |
+| D5 | **CI sign-in limits (R76).** "We should have one or two settings here and agreed put them much higher." No 60 a minute per binding, no 300 a minute in all | the proposal in [§3.6](#36-ci-sign-in-limits-the-proposal-for-erwins-numbers), for Erwin to confirm its numbers before anything is built; `formal/Credentials.tla` changes first | #520 (Erwin's D177) |
+| D7 | **A removal's revoke batch: 50 ms of the fence, final (Erwin's D178).** Dropping D5's per-binding count also dropped what bounded a binding's live credentials, which an unbind revokes under the fence every use shares | the batch derived from the budget and the measured cost, no setting: on Node `UNBIND_BATCH` = 50 ms ÷ 0.08 ms = 625; on Workers min(that, the credentials a vault call's 10 ms of CPU fits) = 114. 500 ms rejected: every use beside a removal waits out up to one batch's fence | [§3.6](#36-ci-sign-in-limits-the-proposal-for-erwins-numbers), "A binding's removal"; #520 |
 | D6 | **The unsealed-entry check cap (V11, §3.2 #18): yes**, resized from the measured CPU per entry | `ABOVE_NEWEST` from the check's CPU budget ÷ its measured cost per entry, the derivation beside it | PR to come (W331 2b, verifier bound) |
 
 Still open: Q1 (the refusal rule, A or B), Q2 (Node pool split), Q3 (where
@@ -677,6 +678,33 @@ Not settings, and what each needs:
   (`… WHERE last_used_at < now() - interval '1 minute'`), or moves to the
   log, so concurrent sign-ins do not queue on one row's update. Measured
   before and after: one binding's sign-ins a second on the reference rig.
+- **A binding's removal, in batches (D7, Erwin's D178; built in #520).**
+  The 60 a minute per binding also bounded a removal's work, which nobody
+  had written down: an unbind names every live credential of its binding
+  in one vault call and revokes them under the fence, and 60 a minute ×
+  five-minute credentials kept that near 300. At 1,000 a second one
+  binding holds 300,000; Node's vault message (8 MiB) carries about
+  15,000, and each revoke makes every use wait about 0.08 ms a credential.
+  It never bounded workload sessions either (an hour each, renewed up to
+  the binding's `sessionHours`). Now a removal goes in steps
+  (`formal/Unbinding.tla`): the first closes the binding (`closed_at`),
+  which refuses its sign-ins and, at the door, every credential it issued,
+  revoked yet or not, and every renewal (`standingBinding`); each step
+  revokes a batch, and the last ends the binding. The batch is the
+  fence's: 50 ms (D178) ÷ 0.08 ms = 625 on Node. On Workers it is also
+  held to a call's 10 ms of CPU (the Free plan's hard limit: a call over
+  it is killed, 1102, on every try): (10 − 4.85 ms fixed) ÷ 0.045 ms =
+  114, and a request makes two such calls ((10 − 5.05 ms) ÷ 2.0 ms per
+  batch) within its 32 invocations, counted, then answers 202
+  `{ removing: { left } }`; the client asks again until it is done, and
+  the scheduled run finishes one abandoned. Measured with a removal of
+  20,000 on the compose Postgres beside uses at 1,000 a second: p99 9.5
+  → 64.8 ms, no throughput lost, no pause needed. Since the close refuses
+  every use, a removal left to the scheduled run (228 a beat, every five
+  minutes) costs no revocation latency; what remains reversible is only
+  how fast the vault's records catch up: a plan's CPU limit as a setting
+  (Workers Paid allows more than 10 ms), or a one-minute cron for the
+  scheduled run.
 - **AWS fleets.** Each AWS-proof sign-in is one `GetCallerIdentity` at STS,
   signed by the workload, so it counts against the workload's own account:
   600 a second per account and Region at a regional endpoint, the global
