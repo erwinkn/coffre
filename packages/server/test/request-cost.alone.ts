@@ -1586,13 +1586,22 @@ test("the audit pages' records of 0.15's log read as many pages however many oth
   };
   /**
    * `count` changes numbered from `from`, each asked at the millisecond `at` + its place (`from`'s by default), long
-   * before any checkpoint's floor: of `actor`, one kind's, each its own object or `object`'s.
+   * before any checkpoint's floor: of `actor`, one kind's, each its own object or `object`'s. After a VACUUM, so that
+   * the batch lies where it would however autovacuum ran meanwhile (T227): a page a batch fills keeps room smaller than
+   * its rows, which a smaller kind's row may fit (a page of key writes keeps one refused add's), and the free space map
+   * offers such room across the table only once a VACUUM has filled it in. An autovacuum landing near the end of the
+   * 50,000 refused adds gave each of the newest a page of its own, and their first page read 103 pages, 101 of heap,
+   * where it read 8 before. After a VACUUM a batch takes every room it fits first, then new pages, its newest rows
+   * together.
    */
-  const plant = (from: number, count: number, actor: string, kind: keyof typeof payloads, options: { object?: SQL; at?: number } = {}) => db.owner.execute(sql`
+  const plant = async (from: number, count: number, actor: string, kind: keyof typeof payloads, options: { object?: SQL; at?: number } = {}) => {
+    await db.owner.execute(sql`VACUUM (PARALLEL 0) log_changes`);
+    await db.owner.execute(sql`
     INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac)
     SELECT ${from} + g, ${options.at ?? from} + g, 'planted-' || (${from} + g), ${options.object ?? sql`gen_random_uuid()`}, ${actor}, ${payloads[kind](actor)},
       decode(repeat('00', 16), 'hex')
     FROM generate_series(1, ${count}) g`);
+  };
   /**
    * The log as autovacuum leaves it once its rounds have caught up: every page all-visible, so that an index-only scan
    * reads no heap, and its statistics fresh. VACUUM marks a page all-visible only once no snapshot in the database may
