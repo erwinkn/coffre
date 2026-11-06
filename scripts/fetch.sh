@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fetch.sh <https url> <sha256> <file>: the file, downloaded once and held to
 # its pinned SHA-256. A file already there with that hash is kept; otherwise
-# the download goes to <file>.part, and becomes <file> only if its hash is the
-# pinned one. A mismatch removes it and fails.
+# the download goes to a temporary file of its own beside it, and becomes
+# <file> only if its hash is the pinned one: a rename, so a run beside it
+# never sees a partial or unchecked file. A mismatch removes it and fails.
 #
 # This is the one place in the repository that downloads: `pnpm check:pins`
 # fails on curl, wget or any other fetcher anywhere else (scripts/pins.mjs).
@@ -26,12 +27,13 @@ sha256() {
 
 if [ -f "$file" ] && [ "$(sha256 "$file")" = "$want" ]; then exit 0; fi
 mkdir -p "$(dirname "$file")"
-rm -f "$file.part"
-curl -fsSL --proto '=https' --retry 3 -o "$file.part" "$url"
-got="$(sha256 "$file.part")"
+part="$(mktemp "$file.XXXXXX")"
+trap 'rm -f "$part"' EXIT
+curl -fsSL --proto '=https' --retry 3 -o "$part" "$url"
+got="$(sha256 "$part")"
 if [ "$got" != "$want" ]; then
-    rm -f "$file.part"
     echo "$url: SHA-256 $got, not the pinned $want" >&2
     exit 1
 fi
-mv "$file.part" "$file"
+chmod 644 "$part"
+mv -f "$part" "$file"

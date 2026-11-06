@@ -32,7 +32,9 @@ const FETCHER = 'scripts/fetch.sh';
 const word = (name) => `(?<![\\w.-])${name}(?![\\w./-])`;
 // The rest of a command: up to the next `;`, `&`, `|`, `)` or `\n`.
 const REST = String.raw`(?:(?![;&|)]|\\n).)*?`;
-const command = (program, subcommands) => new RegExp(`${word(program)}\\s+(?:${REST}\\s)?(?:${subcommands})(?=[\\s"';&|)]|\\\\n|$)`);
+// A program's version beside it, as Corepack runs one (`corepack pnpm@11.8.0 dlx`).
+const AT_VERSION = String.raw`(?:@[^\s"'\`;&|)]*)?`;
+const command = (program, subcommands) => new RegExp(`${word(program)}${AT_VERSION}\\s+(?:${REST}\\s)?(?:${subcommands})(?=[\\s"';&|)]|\\\\n|$)`);
 
 // What fetches something no lockfile, digest or checksum holds.
 const BANNED = [
@@ -50,6 +52,8 @@ const BANNED = [
     { pattern: command('go', 'install|get'), say: (m) => `${m} fetches modules outside go.sum` },
 ];
 const PNPM_INSTALL = command('pnpm', 'install|i');
+// Corepack's own subcommands that fetch, right after it (`corepack pnpm install` is pnpm's).
+const COREPACK_FETCH = new RegExp(`${word('corepack')}${AT_VERSION}\\s+(?:install|prepare|hydrate)(?=[\\s"';&|)]|\\\\n|$)`);
 // `docker run`, and its management command's spelling, `docker container run`.
 const DOCKER_PULLS = new RegExp(`${word('docker')}\\s+(?:(?:image|container|service)\\s+)?(?:run|create|pull)(?=\\s|$)`);
 const PINNED_IMAGE = /@sha256:[0-9a-f]{64}(?![0-9a-f])/;
@@ -129,7 +133,12 @@ function fetches(line, index, report, pnpm) {
     if (DOCKER_PULLS.test(line) && !PINNED_IMAGE.test(line)) {
         report(index, 'docker run, create or pull of an image this line does not name by @sha256:<index digest>');
     }
-    // Corepack fetches the package manager it is named: the workspace's alone.
+    // Corepack fetches the package manager it is named: the workspace's alone,
+    // by its version (`corepack install -g pnpm` takes the latest).
+    for (const match of line.matchAll(new RegExp(COREPACK_FETCH.source + REST + String.raw`(?=[;&|)]|\\n|$)`, 'g'))) {
+        const bare = match[0].match(/(?<![\w./@-])(?:pnpm|yarn|npm)(?![\w./@-])/g);
+        if (bare) report(index, `${match[0].trim().replace(/\s+/g, ' ')} names no version: name pnpm@${pnpm ?? '<the workspace packageManager version>'}`);
+    }
     for (const match of line.matchAll(/(?<![\w./-])(pnpm|yarn|npm)@([^\s"'`;&|)]*)/g)) {
         if (match[1] !== 'pnpm' || match[2] !== pnpm) report(index, `${match[0]} is not pnpm@${pnpm ?? '<the workspace packageManager version>'}, the workspace's`);
     }

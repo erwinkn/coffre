@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync, chmodSync, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { problemsIn } from './pins.mjs';
@@ -141,6 +141,20 @@ test('Corepack fetches the workspace’s pnpm alone', () => {
     assert.equal(one('scripts/a.sh', 'corepack install -g yarn@4.5.0\n', pnpm).length, 1);
     assert.equal(one('scripts/a.sh', 'corepack prepare pnpm@11 --activate\n', pnpm).length, 1);
     assert.deepEqual(one('scripts/a.sh', 'corepack pnpm@11.8.0 install --frozen-lockfile\n', pnpm), []);
+    // A name with no version is the latest.
+    assert.match(one('scripts/a.sh', 'corepack install -g pnpm\n', pnpm)[0], /names no version: name pnpm@11\.8\.0/);
+    assert.equal(one('scripts/a.sh', 'corepack prepare pnpm --activate\n', pnpm).length, 1);
+    assert.equal(one('scripts/a.sh', 'corepack hydrate yarn\n', pnpm).length, 1);
+    // packageManager's own, and pnpm's commands through Corepack, name none.
+    assert.deepEqual(one('scripts/a.sh', 'corepack install\ncorepack enable pnpm\ncorepack pnpm install --frozen-lockfile\ncorepack install -g pnpm@11.8.0\n', pnpm), []);
+    // pnpm at its version is pnpm: its bans and the frozen install hold.
+    for (const line of [
+        'corepack pnpm@11.8.0 dlx wrangler',
+        'corepack pnpm@11.8.0 --dir app add jose',
+        'corepack pnpm@11.8.0 install --no-frozen-lockfile',
+        'corepack pnpm@11.8.0 install',
+        'corepack npm@10.9.0 exec wrangler',
+    ]) assert.equal(one('scripts/a.sh', `${line}\n`, pnpm).length >= 1, true, line);
 });
 
 test('pnpm install carries --frozen-lockfile, each command its own', () => {
@@ -235,7 +249,7 @@ test('scripts/fetch.sh keeps a download only if its SHA-256 is the pinned one', 
         const bin = join(dir, 'bin');
         writeFileSync(join(dir, 'calls'), '');
         spawnSync('mkdir', [bin]);
-        writeFileSync(join(bin, 'curl'), `#!/bin/sh\necho call >> "${join(dir, 'calls')}"\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac; done\nprintf '%s' "$BODY" > "$out"\n`);
+        writeFileSync(join(bin, 'curl'), `#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac; done\necho "$out" >> "${join(dir, 'calls')}"\nprintf '%s' "$BODY" > "$out"\n`);
         chmodSync(join(bin, 'curl'), 0o755);
         const hello = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
         const fetch = (args, body = 'hello') => spawnSync('bash', [new URL('./fetch.sh', import.meta.url).pathname, ...args], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BODY: body }, encoding: 'utf8' });
@@ -245,7 +259,8 @@ test('scripts/fetch.sh keeps a download only if its SHA-256 is the pinned one', 
         const ok = fetch(['https://example.com/tool.tgz', hello, file]);
         assert.equal(ok.status, 0, ok.stderr);
         assert.equal(readFileSync(file, 'utf8'), 'hello');
-        assert.equal(existsSync(`${file}.part`), false);
+        // Nothing left beside it.
+        assert.deepEqual(readdirSync(join(dir, 'cache')), ['tool.tgz']);
         // Kept, once its hash is the pinned one: no second download.
         assert.equal(fetch(['https://example.com/tool.tgz', hello, file]).status, 0);
         assert.equal(calls(), 1);
@@ -256,7 +271,7 @@ test('scripts/fetch.sh keeps a download only if its SHA-256 is the pinned one', 
         assert.equal(bad.status, 1);
         assert.match(bad.stderr, /not the pinned 2cf24dba/);
         assert.equal(existsSync(other), false);
-        assert.equal(existsSync(`${other}.part`), false);
+        assert.deepEqual(readdirSync(dir).filter((name) => name.startsWith('other')), []);
         // A file there with another hash is fetched again, and refused again.
         writeFileSync(other, 'stale');
         assert.equal(fetch(['https://example.com/tool.tgz', hello, other], 'tampered').status, 1);
@@ -267,6 +282,33 @@ test('scripts/fetch.sh keeps a download only if its SHA-256 is the pinned one', 
         assert.equal(fetch(['https://example.com/tool.tgz', hello.toUpperCase(), other]).status, 2);
         assert.equal(fetch(['https://example.com/tool.tgz', hello]).status, 2);
         assert.equal(calls(), 3);
+        // Each run downloads to a file of its own beside the target, never a shared one.
+        const outs = readFileSync(join(dir, 'calls'), 'utf8').split('\n').filter(Boolean);
+        assert.equal(new Set(outs).size, outs.length);
+        for (const out of outs) assert.equal(out.startsWith(`${file}.`) || out.startsWith(`${other}.`), true, out);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('scripts/fetch.sh beside itself keeps only the pinned bytes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coffre-fetch-'));
+    try {
+        // A curl that writes its body in two halves, a moment apart.
+        const bin = join(dir, 'bin');
+        spawnSync('mkdir', [bin]);
+        writeFileSync(join(bin, 'curl'), `#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac; done\nprintf '%s' "\${BODY%???}" > "$out"\nsleep 0.05\nprintf '%s' "\${BODY#\${BODY%???}}" >> "$out"\n`);
+        chmodSync(join(bin, 'curl'), 0o755);
+        const hello = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824';
+        const file = join(dir, 'cache', 'tool.tgz');
+        const run = (body) => new Promise((resolve) => {
+            const child = spawn('bash', [new URL('./fetch.sh', import.meta.url).pathname, 'https://example.com/tool.tgz', hello, file], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BODY: body }, stdio: 'ignore' });
+            child.on('exit', (code) => resolve({ body, code }));
+        });
+        const runs = await Promise.all(Array.from({ length: 12 }, (_, i) => run(i % 2 ? 'hello' : 'tampered')));
+        for (const { body, code } of runs) assert.equal(code, body === 'hello' ? 0 : 1, body);
+        assert.equal(readFileSync(file, 'utf8'), 'hello');
+        assert.deepEqual(readdirSync(join(dir, 'cache')), ['tool.tgz']);
     } finally {
         rmSync(dir, { recursive: true, force: true });
     }
