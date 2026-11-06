@@ -1,0 +1,397 @@
+#!/usr/bin/env node
+// `pnpm smoke`: runs the probe under `wrangler dev` against a Postgres 17 of
+// its own in Docker (127.0.0.1:56145, SCRAM, TLS on then off), and checks the
+// gate, the three routes, holds, and the failures it must report by stage; then
+// runs the wire code from Node against two hostile fake servers. It removes
+// its container however it ends.
+import { spawn, execFileSync } from 'node:child_process';
+import assert from 'node:assert/strict';
+import { createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { once } from 'node:events';
+import net from 'node:net';
+import { Duplex } from 'node:stream';
+import { probe } from '../src/pg.ts';
+import { holdSockets } from '../src/sockets.ts';
+
+const here = new URL('.', import.meta.url).pathname;
+const container = `vpc-probe-smoke-${process.pid}`;
+const password = 'local-smoke-password-not-a-secret';
+const key = 'local-smoke-probe-key-0123456789abcdef';
+const base = 'http://127.0.0.1:8145';
+
+const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+// Over TCP: the entrypoint's init server listens on its Unix socket only, so a TCP answer is the real server.
+const sql = (statement) => docker('exec', '-e', 'PGPASSWORD=owner', container, 'psql', '-h', '127.0.0.1', '-U', 'postgres', '-tAc', statement);
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+let wrangler;
+const seen = [];
+// Interrupted, it still stops wrangler and removes the container.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    cleanUp();
+    process.exit(1);
+  });
+}
+async function get(path, headers = { authorization: `Bearer ${key}` }, method = 'GET') {
+  const response = await fetch(`${base}${path}`, { method, headers });
+  const text = await response.text();
+  seen.push(text);
+  return { status: response.status, text, json: text.trim() ? JSON.parse(text) : null };
+}
+
+const int32 = (value) => {
+  const bytes = Buffer.alloc(4);
+  bytes.writeInt32BE(value);
+  return bytes;
+};
+const frame = (type, body) => Buffer.concat([Buffer.from(type), int32(body.length + 4), body]);
+
+/** A Dial from Node's own sockets. */
+function nodeDial(address) {
+  const [host, port] = address.split(':');
+  const socket = net.connect(Number(port), host);
+  return { ...Duplex.toWeb(socket), opened: once(socket, 'connect'), close: async () => void socket.destroy() };
+}
+
+/**
+ * `dial`, with at most `limit` sockets let through: past it, a socket's `opened` waits for one of
+ * those to close, as Workers holds back a connection past six. The TCP connection underneath
+ * is made at once; only `opened` is held back, which is all the probe waits on.
+ */
+function capped(dial, limit) {
+  let active = 0;
+  const waiting = [];
+  return (address) => {
+    const socket = dial(address);
+    let holding = false;
+    let go;
+    const slot = new Promise((resolve) => {
+      go = () => {
+        active++;
+        holding = true;
+        resolve();
+      };
+    });
+    if (active < limit) go();
+    else waiting.push(go);
+    return {
+      ...socket,
+      opened: slot.then(() => socket.opened),
+      close: async () => {
+        const queued = waiting.indexOf(go);
+        if (queued >= 0) waiting.splice(queued, 1);
+        if (holding) {
+          holding = false;
+          active--;
+          waiting.shift()?.();
+        }
+        await socket.close();
+      },
+    };
+  };
+}
+
+/** `dial`, with at most `limit` sockets open: past it, the oldest is destroyed to make room, as Workers' deadlock breaker cancels a connection. */
+function evicting(dial, limit) {
+  const open = [];
+  return (address) => {
+    const socket = dial(address);
+    if (open.length >= limit) open.shift().destroy();
+    const entry = { destroy: () => void socket.close() };
+    open.push(entry);
+    return {
+      ...socket,
+      close: async () => {
+        const at = open.indexOf(entry);
+        if (at >= 0) open.splice(at, 1);
+        await socket.close();
+      },
+    };
+  };
+}
+
+/** The probe, from Node, against a fake server that answers SSLRequest with N and then does `misbehave` after StartupMessage. */
+async function hostile(misbehave) {
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on('error', () => {});
+    socket.once('data', () => {
+      socket.write('N');
+      socket.once('data', () => misbehave(socket));
+    });
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  // Bounded here too, so a regressed deadline fails the check instead of hanging the run.
+  let timer;
+  const hung = new Promise((_, reject) => (timer = setTimeout(() => reject(new Error('the probe hung past 20 s')), 20_000)));
+  try {
+    return await Promise.race([probe(nodeDial, { host: '127.0.0.1', port: String(server.address().port), database: 'x', user: 'x', password }, 0), hung]);
+  } finally {
+    clearTimeout(timer);
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  }
+}
+
+async function check(name, run) {
+  await run();
+  console.log(`ok - ${name}`);
+}
+
+try {
+  docker('run', '-d', '--rm', '--name', container, '-p', '127.0.0.1:56145:5432',
+    '-e', 'POSTGRES_PASSWORD=owner', '-e', 'POSTGRES_HOST_AUTH_METHOD=scram-sha-256',
+    'postgres:17');
+  for (let i = 0; ; i++) {
+    try {
+      sql('select 1');
+      break;
+    } catch (error) {
+      if (i > 60) throw error;
+      await wait(500);
+    }
+  }
+  sql(`create role dev_readonly login password '${password}'`);
+  // TLS on through ALTER SYSTEM, not the command line, so a later reload can turn it off.
+  sql("alter system set ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'");
+  sql("alter system set ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'");
+  sql('alter system set ssl = on');
+  sql('select pg_reload_conf()');
+
+  wrangler = spawn('pnpm', ['exec', 'wrangler', 'dev', '-c', `${here}wrangler.jsonc`, '--ip', '127.0.0.1', '--port', '8145'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  let log = '';
+  wrangler.stdout.on('data', (chunk) => (log += chunk));
+  wrangler.stderr.on('data', (chunk) => (log += chunk));
+  for (let i = 0; ; i++) {
+    try {
+      await fetch(`${base}/`);
+      break;
+    } catch (error) {
+      if (i > 120) throw new Error(`wrangler dev did not start:\n${log}`);
+      await wait(500);
+    }
+  }
+
+  await check('the gate answers an empty 404 to everything without the key, and to unknown routes with it', async () => {
+    for (const [path, headers, method] of [
+      ['/worker', {}],
+      ['/do', { authorization: 'Bearer wrong' }],
+      ['/do', { authorization: key }],
+      ['/do', { authorization: `Bearer ${key}x` }],
+      ['/sockets', {}],
+      ['/', {}],
+      ['/other', {}],
+      ['/worker', {}, 'POST'],
+      // With the key, an unknown path or method looks the same.
+      ['/other', undefined],
+      ['/worker', undefined, 'POST'],
+    ]) {
+      const response = await get(path, headers, method);
+      assert.equal(response.status, 404, `${method ?? 'GET'} ${path}`);
+      assert.equal(response.text, '');
+    }
+  });
+
+  await check('hold past 600 s, or not whole seconds, is refused', async () => {
+    for (const hold of ['601', '1.5', '-1', 'x']) assert.equal((await get(`/do?hold=${hold}`)).status, 400);
+    assert.equal((await get('/sockets?hold=601')).status, 400);
+  });
+
+  await check('/sockets refuses n outside 1 to 20', async () => {
+    for (const n of ['0', '21', '1.5', 'x', '']) assert.equal((await get(`/sockets?n=${n}`)).status, 400, n);
+  });
+
+  for (const route of ['worker', 'do']) {
+    await check(`/${route}: TLS on, the probe redials in plaintext, logs in with SCRAM and queries`, async () => {
+      const { json } = await get(`/${route}`);
+      assert.equal(json.ok, true, JSON.stringify(json));
+      assert.equal(json.route, route);
+      assert.equal(json.sslRequest, 'S');
+      assert.equal(json.redialedPlaintext, true);
+      assert.deepEqual(json.authOffered, ['SCRAM-SHA-256']);
+      assert.equal(json.loginOk, true);
+      assert.equal(json.select1, '1');
+      assert.equal(json.session.current_user, 'dev_readonly');
+      assert.equal(json.session.ssl, 'f');
+      assert.match(json.serverVersion, /^17/);
+    });
+  }
+
+  await check('/do?hold=25: the socket survives an idle hold, with heartbeats before the JSON', async () => {
+    const { text, json } = await get('/do?hold=25');
+    assert.ok(text.startsWith(' '), 'a heartbeat byte came first');
+    assert.equal(json.ok, true, JSON.stringify(json));
+    assert.equal(json.afterHold.seconds, 25);
+    assert.equal(json.afterHold.select1, '1');
+  });
+
+  await check('a connection that dies during a hold is reported at the hold stage', async () => {
+    const pending = get('/do?hold=4');
+    await wait(2000);
+    sql("select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'vpc-postgres-probe'");
+    const { json } = await pending;
+    assert.equal(json.ok, false);
+    assert.equal(json.stage, 'hold', JSON.stringify(json));
+  });
+
+  await check('/sockets?n=8&hold=3: holds every session, and a fresh fetch and connect go through beside them', async () => {
+    const { json } = await get('/sockets?n=8&hold=3');
+    assert.equal(json.ok, true, JSON.stringify(json));
+    assert.equal(json.route, 'sockets');
+    assert.equal(json.count, 8);
+    assert.equal(json.openedOk, 8, JSON.stringify(json.opened));
+    for (const check of [json.beside, json.afterHold]) {
+      assert.equal(check.fetch.ok, true, JSON.stringify(check.fetch));
+      assert.equal(check.connect.ok, true, JSON.stringify(check.connect));
+      assert.equal(check.alive, 8);
+      assert.deepEqual(check.dead, []);
+      assert.deepEqual(check.evicted, []);
+    }
+    assert.equal(json.release.closedSocket, 0);
+    assert.equal(json.release.heldAtClose, 8);
+    assert.ok(json.release.closedAtMs >= 5000, JSON.stringify(json.release));
+    assert.equal(json.release.connect.ok, true);
+    // Locally nothing caps connections, so the release check's connect did not wait for the close.
+    assert.ok(json.release.connect.ms < json.release.closedAtMs, JSON.stringify(json.release));
+  });
+
+  await check('/sockets: held sessions killed during the hold are reported dead, not evicted', async () => {
+    // The kill lands mid-hold with a wide margin: `beside` (a fetch over the internet and a connect) has 9 s.
+    const pending = get('/sockets?n=2&hold=20');
+    await wait(10_000);
+    sql("select pg_terminate_backend(pid) from pg_stat_activity where application_name = 'vpc-postgres-probe'");
+    const { json } = await pending;
+    assert.equal(json.ok, true, JSON.stringify(json));
+    assert.ok(json.beside.fetch.ms < 9000, `beside's fetch took ${json.beside.fetch.ms} ms: the kill may have raced it`);
+    assert.equal(json.beside.alive, 2);
+    assert.equal(json.afterHold.alive, 0, JSON.stringify(json.afterHold));
+    assert.deepEqual(json.afterHold.dead.map((dead) => [dead.socket, dead.stage]), [[0, 'query'], [1, 'query']]);
+    assert.deepEqual(json.afterHold.evicted, []);
+    assert.equal(json.afterHold.connect.ok, true);
+    assert.deepEqual([json.release.closedSocket, json.release.heldAtClose], [null, 0]);
+    assert.equal(json.release.connect.ok, true);
+  });
+
+  await check('/sockets with no session opened is not ok', async () => {
+    sql("alter role dev_readonly password 'not-the-configured-one'");
+    const { json } = await get('/sockets?n=2&hold=0');
+    sql(`alter role dev_readonly password '${password}'`);
+    assert.equal(json.ok, false);
+    assert.equal(json.openedOk, 0);
+    assert.deepEqual(json.opened.map((attempt) => attempt.stage), ['auth', 'auth']);
+  });
+
+  sql('alter system set ssl = off');
+  sql('select pg_reload_conf()');
+  await check('TLS off: the server answers N and the probe stays on its first socket', async () => {
+    const { json } = await get('/worker');
+    assert.equal(json.ok, true, JSON.stringify(json));
+    assert.equal(json.sslRequest, 'N');
+    assert.equal(json.redialedPlaintext, undefined);
+  });
+
+  await check('/sockets under a cap of 3: the 4th socket and a fresh connect stall, and a release lets one through', async () => {
+    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'dev_readonly', password };
+    const report = await holdSockets(capped(nodeDial, 3), target, 4, 0);
+    assert.equal(report.ok, true, JSON.stringify(report));
+    assert.equal(report.openedOk, 3, JSON.stringify(report.opened));
+    const stalled = report.opened.filter((attempt) => !attempt.ok);
+    assert.deepEqual(stalled.map((attempt) => attempt.stage), ['dial']);
+    assert.match(stalled[0].error, /no answer within 15 s/);
+    assert.equal(report.beside.fetch.ok, true, JSON.stringify(report.beside.fetch));
+    assert.equal(report.beside.connect.ok, false);
+    assert.equal(report.beside.connect.stage, 'dial');
+    assert.equal(report.beside.alive, 3);
+    assert.deepEqual([report.release.dead, report.release.closedSocket, report.release.heldAtClose], [[], 0, 3]);
+    assert.equal(report.release.connect.ok, true, JSON.stringify(report.release));
+    assert.ok(report.release.connect.ms >= report.release.closedAtMs - 50, JSON.stringify(report.release));
+  });
+
+  await check('/sockets under an evicting cap of 3: the session closed for a fresh connect is evicted, not dead', async () => {
+    const target = { host: '127.0.0.1', port: '56145', database: 'postgres', user: 'dev_readonly', password };
+    const report = await holdSockets(evicting(nodeDial, 3), target, 3, 0);
+    assert.equal(report.ok, true, JSON.stringify(report));
+    assert.equal(report.openedOk, 3);
+    assert.deepEqual(report.beside.dead, []);
+    assert.equal(report.beside.connect.ok, true);
+    assert.deepEqual(report.beside.evicted.map((evicted) => evicted.socket), [0]);
+    assert.equal(report.beside.alive, 2);
+  });
+
+  sql("alter role dev_readonly password 'not-the-configured-one'");
+  await check('a wrong password fails at the auth stage with the server error', async () => {
+    const { json } = await get('/do');
+    assert.equal(json.ok, false);
+    assert.equal(json.stage, 'auth');
+    assert.match(json.error, /28P01/);
+  });
+  sql(`alter role dev_readonly password '${password}'`);
+
+  docker('exec', container, 'sh', '-c', "sed -i 's/scram-sha-256$/password/' /var/lib/postgresql/data/pg_hba.conf");
+  sql('select pg_reload_conf()');
+  await check('a server that asks for a cleartext password gets none', async () => {
+    const { json } = await get('/worker');
+    assert.equal(json.ok, false);
+    assert.equal(json.stage, 'auth');
+    assert.deepEqual(json.authOffered, ['cleartext password']);
+  });
+
+  docker('stop', container);
+  await check('nothing listening fails at the dial or SSLRequest stage', async () => {
+    const { json } = await get('/worker');
+    assert.equal(json.ok, false);
+    assert.ok(['dial', 'ssl-request'].includes(json.stage), JSON.stringify(json));
+  });
+
+  await check('no response ever held the password', async () => {
+    for (const text of seen) assert.ok(!text.includes(password));
+  });
+
+  await check('an ErrorResponse without a terminator fails at once, not in a loop', async () => {
+    const report = await hostile((socket) => socket.write(frame('E', Buffer.from('SFATAL'))));
+    assert.equal(report.stage, 'auth', JSON.stringify(report));
+    assert.ok(report.totalMs < 5000, JSON.stringify(report));
+  });
+
+  await check('a server that never stops sending messages hits the stage deadline', async () => {
+    // A SCRAM login that verifies, then ParameterStatus every 100 ms and never ReadyForQuery.
+    const report = await hostile((socket) => {
+      socket.write(frame('R', Buffer.concat([int32(10), Buffer.from('SCRAM-SHA-256\0\0')])));
+      socket.once('data', (initial) => {
+        // SASLInitialResponse: 'p', length, the mechanism's C string, the response's length, then client-first.
+        const clientFirstBare = initial.subarray(initial.indexOf(0, 5) + 5).toString().slice('n,,'.length);
+        const salt = randomBytes(16);
+        const serverFirst = `r=${clientFirstBare.slice('n=,r='.length)}server,s=${salt.toString('base64')},i=4096`;
+        socket.write(frame('R', Buffer.concat([int32(11), Buffer.from(serverFirst)])));
+        socket.once('data', (final) => {
+          const withoutProof = final.subarray(5).toString().split(',p=')[0];
+          const serverKey = createHmac('sha256', pbkdf2Sync(password, salt, 4096, 32, 'sha256')).update('Server Key').digest();
+          const signature = createHmac('sha256', serverKey).update(`${clientFirstBare},${serverFirst},${withoutProof}`).digest('base64');
+          socket.write(frame('R', Buffer.concat([int32(12), Buffer.from(`v=${signature}`)])));
+          socket.write(frame('R', int32(0)));
+          const timer = setInterval(() => socket.write(frame('S', Buffer.from('spam\0spam\0'))), 100);
+          socket.on('close', () => clearInterval(timer));
+        });
+      });
+    });
+    assert.equal(report.stage, 'auth', JSON.stringify(report));
+    assert.match(report.error, /no answer within 15 s/);
+  });
+} finally {
+  cleanUp();
+}
+
+function cleanUp() {
+  try {
+    if (wrangler) process.kill(-wrangler.pid);
+  } catch {}
+  try {
+    docker('rm', '-f', container);
+  } catch {}
+}

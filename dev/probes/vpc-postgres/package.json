@@ -1,0 +1,18 @@
+{
+  "name": "vpc-postgres-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && wrangler deploy --dry-run --outdir dist",
+    "smoke": "node local/smoke.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260926.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.142.0"
+  }
+}

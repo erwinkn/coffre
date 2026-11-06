@@ -1,0 +1,5 @@
+# A workspace of its own, outside coffre's: the probe depends on no coffre
+# package, and coffre's install, lint, typecheck and CI never see it.
+ignoreScripts: true
+savePrefix: ''
+minimumReleaseAge: 10080
