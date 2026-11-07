@@ -129,7 +129,7 @@ try {
   fail(`no revision ${opt.base} (fetch it, or name another with --base)`)
 }
 if (!opt.list) {
-  if (git('status', '--porcelain')) fail('the tree is not clean: commit or stash first, so the summary names what ran.')
+  if (git('status', '--porcelain', '--untracked-files=all')) fail('the tree is not clean: commit or stash first, so the summary names what ran.')
   try {
     git('merge-base', '--is-ancestor', base, head)
   } catch {
@@ -261,6 +261,9 @@ let interrupted = null
 // its group misses: the processes below it are signalled one by one, and any that
 // outlive the step are killed when it ends.
 const strays = new Set()
+// Process groups of steps that were interrupted: their leader may exit while a
+// cleanup child it started is still running, so they are awaited until empty.
+const groups = new Set()
 const below = (pid) => {
   let table = ''
   try {
@@ -284,6 +287,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     interrupted ??= signal
     if (!active) return
+    groups.add(active.pid)
     for (const pid of below(active.pid)) {
       strays.add(pid)
       kill(pid, signal)
@@ -292,18 +296,28 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     // A step that handles the signal but hangs while shutting down must not hold the
     // run: three seconds on, whatever is left of it is killed, so teardown and the
     // summary are reached.
-    const stuck = active
     setTimeout(() => {
-      if (active === stuck) kill(-stuck.pid, 'SIGKILL')
+      for (const group of groups) kill(-group, 'SIGKILL')
       for (const pid of strays) kill(pid, 'SIGKILL')
     }, 3000).unref()
   })
 }
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
 const reap = async () => {
-  if (!strays.size) return
-  await new Promise((ok) => setTimeout(ok, 3000))
+  if (!strays.size && !groups.size) return
+  // Wait for the interrupted groups and strays to go (at most 3 s), then kill what is left.
+  for (const end = Date.now() + 3000; Date.now() < end && ([...groups].some((g) => alive(-g)) || [...strays].some(alive)); ) await new Promise((ok) => setTimeout(ok, 100))
+  for (const group of groups) kill(-group, 'SIGKILL')
   for (const pid of strays) kill(pid, 'SIGKILL')
   strays.clear()
+  groups.clear()
 }
 const sh = (command, extra = {}) =>
   new Promise((ok) => {
@@ -401,7 +415,7 @@ try {
 
 // The summary vouches for HEAD's tree: it must be what the steps ran on.
 const headAfter = git('rev-parse', 'HEAD')
-const dirty = git('status', '--porcelain')
+const dirty = git('status', '--porcelain', '--untracked-files=all')
 if (headAfter !== head || dirty) results.push({ name: 'tree', status: 'FAIL', why: headAfter !== head ? `HEAD moved to ${headAfter.slice(0, 10)}` : 'files changed or appeared during the run' })
 if (teardownFailed) results.push({ name: 'postgres', status: 'FAIL', why: 'not removed' })
 
