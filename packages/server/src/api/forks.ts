@@ -9,7 +9,7 @@ import { badRequest, conflict, forbidden, notFound, vaultRefused } from './error
 import { openValues, plain } from './keys.ts';
 import { putEnvironment, type EnvironmentView } from './projects.ts';
 import { protectedFor, protectIds, refuseWorkloadAccessChange, rowWritten } from './roles.ts';
-import { readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
+import { heldKey, readableValues, resolveValues, unreadParents, type Readable } from './references.ts';
 import { checkEnvironment, setSecrets, type SecretValue } from './secrets.ts';
 
 /**
@@ -73,27 +73,12 @@ export async function forkEnvironment(
     }
     if (readable.unreadable.length > 0) throw conflict(readable.unreadable.map((unread) => unread.reason).join('; '));
     const plan = input.references ? referencesFor(ctx, readable.items) : new Map<string, string>();
-    // A sensitive value reached through a reference is never copied into the fork by value: a copy would hold it under
-    // the fork's own project, where R16 and R32 decide who reads it, so an Owner of this project could then reveal it,
-    // or read it through a service token of theirs, though the value is another project's. It stays a reference to its
-    // source, which keeps the value's project. Carrying it is making a reference (R24): the forker needs read on the
-    // source, and use of it. Checked here, with the other reads, before anything is made: a key whose sensitive source
-    // the forker cannot read stops the fork, never copied (the vault refuses that copy too), and the environment that
-    // would hold it is not created, so the fork is not left half-made.
-    const unreferenceable: string[] = [];
-    for (const item of readable.items) {
-      if (item.via === undefined || item.secret.sensitive !== true || plan.has(item.key)) continue;
-      const at = { projectId: item.secret.projectId, environmentId: item.secret.environmentId, environmentSlug: item.secret.path.split('/')[1]! };
-      if (can(ctx.caller, 'secret.read', at) && can(ctx.caller, 'secret.use', at)) plan.set(item.key, item.secret.path);
-      else unreferenceable.push(`${item.key} (${item.secret.path})`);
-    }
-    if (unreferenceable.length > 0) {
-      throw forbidden(`${project.slug}/${from} holds ${unreferenceable.join(', ')}: a reference to a sensitive value you cannot read, which a fork keeps a reference and never copies, so you cannot fork it`);
-    }
-    // A workload forks only values it is handed back, plain ones and those it lists where each is held (`useOnly`): a
-    // copy, or a reference, would move a value it only uses to a place whose keys it may read. The vault refuses each
-    // copy and reference of one too; refused here, the fork makes nothing.
-    const usedOnly = readable.items.filter((item) => !plain(item) && useOnly(ctx.caller, item.secret)).map((item) => `${item.key} (${item.secret.path})`);
+    // A workload forks only values it is handed back, plain ones and those it lists (`useOnly`): a copy, or a reference,
+    // would move a value it only uses to a place whose keys it may read. A copy is read where its key is held, a
+    // reference's at its holder (R71); a reference the fork makes, at its source, which it refers to (`referencesFor`).
+    // The vault refuses each copy and reference of one too; refused here, the fork makes nothing.
+    const usedOnly = readable.items.filter((item) => !plain(item) && useOnly(ctx.caller, plan.has(item.key) ? item.secret : heldKey(item)))
+      .map((item) => `${item.key} (${item.secret.path})`);
     if (usedOnly.length > 0) {
       throw new Refusal(
         forbidden(`${project.slug}/${from} holds ${usedOnly.join(', ')}, which this workload uses only through coffre: a fork would copy or refer to ${usedOnly.length === 1 ? 'it' : 'them'}, so it cannot fork it`),

@@ -763,39 +763,42 @@ function scopeHolds(holder: Holdings, permission: Permission, place: Place): boo
  * `holder` (R32): never to a person, Owners included (R16); to a service
  * account, only on a credential an Owner of that project issued, as a
  * grant of its scope in the project says (`ScopeGrant`'s `sensitive`).
- * The project is the value's own, wherever it is read: a reference's
- * source's, which lends its value and nature (R23), while whoever reads it
- * is decided where it is held. A person who could not read the value gets
- * it through no account they set up, nor through a value made sensitive
- * after they issued its token, nor through a reference into a project
- * they do not own:
+ * The project is the one the key is held in: a reference's holder's, as
+ * any key held there, whatever project its source is in (R71), which takes
+ * only its value and nature from the source (R23); its source was checked
+ * once, when its maker made it, who read the value there (R24). A person
+ * who could not read the value gets it through no account they set up, nor
+ * through a value made sensitive after they issued its token:
  *
  *   ci, a Viewer of backend/dev, which holds STRIPE_SECRET_KEY, sensitive
  *   its token, issued by Ada, a Developer     reads every other value there
  *   its token, issued by an Owner of backend  reads STRIPE_SECRET_KEY too
- *   billing/dev/LEAK, a reference to it; a token for billing/dev
- *     issued by an Owner of billing alone     reads every other value there
+ *   billing/dev/STRIPE_SECRET_KEY, a reference to it; a token for billing/dev
+ *     issued by an Owner of billing           reads it, as billing's own
  */
 export function readsSensitive(holder: Holdings, projectId: string): boolean {
   return holder.service === true && (holder.credentialScope ?? []).some((grant) => grant.sensitive === true && grant.projectId === projectId);
 }
 
-/** A key, by its id and where its value is held: a reference's source's, an inherited key's parent's. */
+/** A key, by its id and where it is held: an inherited key's parent's; a reference's own, at its holder (R71). */
 export type HeldKey = { projectId: string; environmentId: string; secretId: string };
 
 /**
  * Whether a value is use-only to `holder` (docs/design/workload-access.md,
  * section 6.1): a workload is handed back no secret or sensitive value but
  * one its credential's scope lists, by the key's id, on a grant that covers
- * the place where the value is held, never the place a request names. A
- * rename therefore moves no listing, and no reference, fork or copy moves a
- * value under one. Nobody else's: their roles and the value's nature decide.
- * A plain value is no secret, use-only to nobody, so it is never asked of.
+ * the place where the key is held, never the place a request names: an
+ * inherited key's parent; a reference's holder, by the reference's own id,
+ * as any key held there (R71). A rename therefore moves no listing, nor
+ * does a fork; a reference or a copy lands its value where it is made,
+ * which only someone who reads it there may do (`referenceRefusal`). Nobody
+ * else's: their roles and the value's nature decide. A plain value is no
+ * secret, use-only to nobody, so it is never asked of.
  *
- *   api-prod lists STRIPE_WEBHOOK_SECRET's id at market/prod
+ *   api-prod lists STRIPE_WEBHOOK_SECRET's id at market/prod, and "*" at market/dev
  *   market/prod/STRIPE_WEBHOOK_SECRET                              read
  *   STRIPE_SECRET_KEY, renamed STRIPE_WEBHOOK_SECRET once that moved   use only: another id
- *   market/dev/S, a reference to it, with "*" at market/dev        use only: held in market/prod
+ *   market/dev/S, a reference to market/prod/STRIPE_SECRET_KEY     read: held in market/dev
  */
 export function useOnly(holder: Holdings, key: HeldKey): boolean {
   if (holder.kind !== 'workload') return false;

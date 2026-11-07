@@ -165,7 +165,7 @@ test('a plan and a list show every claim in full', () => {
   // A Developer's binding, where market/prod holds sensitive values: told before it is saved (R32).
   assert.match(
     describePlan('token:api-deploy', { ...plan, withheld: ['market/prod'] }, null),
-    /\n  reads no sensitive value of market\/prod: only one an Owner of its project issues does\n$/,
+    /\n  reads no sensitive value of market\/prod: only one an Owner of market issues does\n$/,
   );
   assert.equal(describeBindings('token:api-deploy', []), "service:api-deploy trusts no CI runs or workloads: none signs in as it by OIDC or a platform's proof\n");
   const listed = describeBindings('token:api-deploy', [
@@ -198,7 +198,7 @@ test('uploaded keys show by kid, or by thumbprint without one; replacing them na
   );
   assert.match(describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }, { id: 'new-2' }] as BindingView[], replaced: ['old-1', 'old-2'] }), /\n  new-1 replaces old-1\n  new-2 replaces old-2\n/);
   // Bindings an Owner made, re-keyed by someone else: told what the new ones will not read.
-  assert.match(describeKeys('token:api', { ...plan, withheld: ['market/prod'] }, null), /\n  replaces old-2\n  reads no sensitive value of market\/prod: only one an Owner of its project issues does\nCredentials/);
+  assert.match(describeKeys('token:api', { ...plan, withheld: ['market/prod'] }, null), /\n  replaces old-2\n  reads no sensitive value of market\/prod: only one an Owner of market issues does\nCredentials/);
   // One of those planned was removed before the save: what the server answered, not the plan.
   const raced = describeKeys('token:api', plan, { bindings: [{ id: 'new-1' }] as BindingView[], replaced: ['old-1'] });
   assert.match(raced, /^Gave service:api's binding on .*\n  keys .*\n  new-1 replaces old-1\nCredentials/);

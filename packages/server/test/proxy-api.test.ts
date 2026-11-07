@@ -205,17 +205,15 @@ test("a fork's inherited item is marked where the fork resolves its keys: its ow
   assert.match((await inherited())!.openai!.reason, /its editor does not read it in dev-eu/);
 });
 
-test("a reference is decided where it lives, its source's sensitive value only by an Owner of the source's project", ON_015, async () => {
+test("a reference is decided where it lives (R71): its sensitive value is routed by an Owner of the holder's project, whatever project its source is in", ON_015, async () => {
   await root.access.set(LIN, { 'market/dev': 'router' });
   // BILLING_REF reads billing/prod's secret: her read of market/dev covers it (R20).
   const seal = (await lin.proxy.save('market/dev', { seal: null, items: { billing: route('billing', ['BILLING_REF']) } })).seal;
-  // SENSITIVE_REF reads billing's sensitive value: an Owner of market alone may not route it; an Owner of the instance may.
-  assert.equal((await refusal(pat.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } }))).reason, 'route_not_cleared');
-  const instance = await root.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } });
-  assert.deepEqual(instance.items.map((item) => item.definition.name), ['billing', 'leak']);
-  // What the tab checks first: the Secrets list says, of each reference, whether you own its source's project.
-  const ownsSource = async (client: CoffreClient) => (await client.secrets.list('market/dev')).keys.find((one) => one.key === 'SENSITIVE_REF')!.reference!.ownsSource;
-  assert.deepEqual([await ownsSource(pat), await ownsSource(root)], [false, true]);
+  // SENSITIVE_REF reads billing's sensitive value: a router who owns nothing may not route it; Pat, an Owner of market
+  // and of nothing of billing's, may, as any sensitive key of market/dev.
+  assert.equal((await refusal(lin.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } }))).reason, 'route_not_cleared');
+  const owners = await pat.proxy.save('market/dev', { seal, items: { leak: route('leak', ['SENSITIVE_REF']) } });
+  assert.deepEqual(owners.items.map((item) => item.definition.name), ['billing', 'leak']);
 });
 
 test('who may save at all: the tab writes only where the deployment says, a person on a session of theirs, never a name code defines', ON_015, async () => {

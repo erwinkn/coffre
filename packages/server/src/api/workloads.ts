@@ -73,6 +73,7 @@ import {
   liveCredentialsWhere,
   revokeLiveCredentials,
   secretHeads,
+  sensitiveVersions,
   standingBinding,
   tokenConsumed,
   update,
@@ -87,6 +88,7 @@ import { expectedAudiences, PROFILE_RULES } from '../workloads/profiles.ts';
 import { IssuerUnavailable, verifyWithKeys } from '../workloads/keys.ts';
 import { FetchRefused, type WorkloadTransport } from '../workloads/transport.ts';
 import { newestPolicySeq, type Caller } from './caller.ts';
+import { currentReferences } from './references.ts';
 import { endedBinding, madeBinding, sealedBinding, vaultBinds, AppChanges, credentialChange, keeps015, ObjectMoved, retrying, revokes, vaultMakesCredentials, type CredentialsVault } from './changes.ts';
 import type { Asker, SigninService } from './signin.ts';
 import { allowed, audited, credentialStill, denied, POLICY_CHANGED, Refusal, withRefusals, type ApiContext } from './context.ts';
@@ -1768,9 +1770,10 @@ function checked<T>(check: () => T): T {
 /**
  * `reads` as asked, by path and name, each environment and key found as it
  * is now: an environment that is not there, or a key it does not hold, is
- * refused by name, since listing a key needs the key to exist. Its own
- * keys only: a reference reads what its source holds, where the vault
- * checks `reads`, by its source's ID.
+ * refused by name, since listing a key needs the key to exist. A
+ * reference held there is listed as any key it holds, by its own ID, which
+ * is what the vault checks `reads` against (R71), and is as sensitive as its
+ * source is now (R23).
  */
 async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRead[]> {
   if (typeof wanted !== 'object' || wanted === null || Array.isArray(wanted)) throw badRequest('reads maps each environment, by path, to its key names or "*"');
@@ -1791,10 +1794,23 @@ async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRea
       continue;
     }
     const names = [...new Set(keys as string[])];
-    const held = (await secretHeads(db, environment.id, { keys: names })).filter((row) => row.archivedAt === null && row.current !== null);
+    const live = (await secretHeads(db, environment.id, { keys: names })).filter((row) => row.archivedAt === null);
+    // A key with no value of its own holds one through its reference while that reads (`live`: not ended, broken
+    // included, by the vault's `reference.end` under either log), of its source's nature now (R23).
+    const references = await currentReferences(db, live.filter((row) => row.current === null).map((row) => row.id));
+    const sourceOf = (id: string) => {
+      const reference = references.get(id);
+      return reference?.state === 'live' ? reference.source!.currentVersionId! : undefined;
+    };
+    const sensitiveSources = await sensitiveVersions(db, live.flatMap((row) => sourceOf(row.id) ?? []));
+    const held = live.flatMap((row) => {
+      const source = sourceOf(row.id);
+      const sensitive = row.current?.sensitive ?? (source === undefined ? undefined : sensitiveSources.has(source));
+      return sensitive === undefined ? [] : [{ id: row.id, key: row.key, sensitive }];
+    });
     const missing = names.filter((name) => !held.some((row) => row.key === name));
     if (missing.length > 0) throw badRequest(`reads lists keys ${path} does not hold: ${missing.join(', ')}`);
-    resolved.push({ environmentId: environment.id, path: `${project.slug}/${environment.slug}`, projectId: project.id, keys: held.map((row) => ({ id: row.id, key: row.key, sensitive: row.current!.sensitive })) });
+    resolved.push({ environmentId: environment.id, path: `${project.slug}/${environment.slug}`, projectId: project.id, keys: held });
   }
   return resolved;
 }

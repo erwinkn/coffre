@@ -327,6 +327,24 @@ change that does nothing, a seal that is not its object's, numbers out of
 order. PR 8's verifier checks the checkpoints and the entries above the
 newest; it replays nothing and reads no row (D145).
 
+**Under whose rules.** The log names no release, so `replay` decides every
+use with the release running it, under that release's rules. When a release
+changes a rule, uses logged before the change replay under the new one.
+R71 (0.16) is the first change that shows it: a reference is read by its
+holder's permissions alone. So two uses logged under 0.15 replay otherwise:
+
+- A service token issued by an Owner of `landing` alone, using
+  `landing/prod`'s reference to `backend/prod`'s sensitive
+  `CLERK_SECRET_KEY`: refused `not_owner_issued` then, allowed in replay.
+- A workload whose `reads` listed the source, `backend/prod`'s
+  `CLERK_SECRET_KEY`, reading it through `landing/prod`'s reference:
+  served then, refused `use_only` in replay.
+
+Today no production path replays decisions, and the verifier
+(`verifier.ts`) does not either: only the tests call `replayStored`. T232
+adds a rules version to the log, and each interval's own rules to the
+replay, before any verifier relies on replayed outcomes.
+
 `readUse` is the use's statement, written over maps: which rows it reads,
 in which order, and how it moves the cap. PR 5's `use_credential` must read
 the same.

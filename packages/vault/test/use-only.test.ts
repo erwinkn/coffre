@@ -126,13 +126,13 @@ test('a sensitive key a workload lists still needs an Owner to have issued its s
   assert.equal(await read(w, notOwners.map(({ reads: _, ...grant }) => grant), 'reveal', [database]), 'use_only', 'unlisted, it is used first');
 });
 
-test('through a reference, the source is where its value is held: a list at the holder reads nothing of it', async () => {
+test('a reference is held where it lives: a list at its holder reads it, one at its source alone does not (R71)', async () => {
   const w = await world();
   const via = await referred(w, w.stripe.secret);
-  // market/dev/S, a reference to market/prod/STRIPE_SECRET_KEY, is not readable through a "*" listed for market/dev.
-  assert.equal(await read(w, w.scope(undefined, '*'), 'reveal', [{ secretVersionId: w.stripe.secretVersionId, via }]), 'use_only');
-  assert.equal(await read(w, w.scope(undefined, '*'), 'use', [{ secretVersionId: w.stripe.secretVersionId, via }]), true);
-  assert.equal(await read(w, w.scope([w.stripe.secret.secretId]), 'reveal', [{ secretVersionId: w.stripe.secretVersionId, via }]), true, 'listed at its source');
+  // market/dev/S, a reference to market/prod/STRIPE_SECRET_KEY, is read through a "*" listed for market/dev, as any key there.
+  assert.equal(await read(w, w.scope(undefined, '*'), 'reveal', [{ secretVersionId: w.stripe.secretVersionId, via }]), true);
+  assert.equal(await read(w, w.scope([w.stripe.secret.secretId]), 'reveal', [{ secretVersionId: w.stripe.secretVersionId, via }]), 'use_only', 'listed at its source alone');
+  assert.equal(await read(w, w.scope([w.stripe.secret.secretId]), 'use', [{ secretVersionId: w.stripe.secretVersionId, via }]), true);
 });
 
 test("a fork's inherited key is read at its parent: a list at the fork reads nothing of it", async () => {

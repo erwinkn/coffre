@@ -296,62 +296,53 @@ test("a reference counts toward what a credential will not read while it is its 
   assert.deepEqual(await withheld(), ['backend/staging']);
 });
 
-test("a reference into another project lends its sensitive value only on a credential an Owner of that project issued: an Owner of the holder's project is not enough", async () => {
+test("a reference into another project is read as its holder's own key (R71): an Owner of the holder's project gives a service its sensitive value, a Developer there does not", async () => {
   // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key, as a reader of it may (R24).
   await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
   await bo.members.add('token:bo-ci');
   await bo.access.set('token:bo-ci', { 'billing/dev': 'viewer' });
   const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
-  assert.deepEqual(his.withheld, ['billing/dev'], "billing/dev lends a value of backend's, which no Owner of backend issued it");
-  assert.equal(await read(his.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789', "billing's own, which its Owner issued it");
-  assert.equal(await read(his.token, 'billing/dev/LEAK'), '404 not_owner_issued');
-  await assert.rejects(bearer(his.token).secrets.reveal('billing/dev'), {
-    status: 403,
-    message: 'billing/dev holds LEAK, sensitive: a service account reads it only on a token or trust binding an Owner of the project each value is from issued',
-  });
-  // An Owner of the whole instance issues it one that reaches backend too: it reads it, decided where it is held.
-  await root.access.set('token:bo-ci', { 'backend/staging': 'viewer' });
-  const owners = await root.tokens.issue('token:bo-ci', { expiresInDays: 30 });
-  assert.deepEqual(owners.withheld, []);
-  assert.equal(await read(owners.token, 'billing/dev/LEAK'), STRIPE);
-  // Scoped to billing alone, even an Owner of the whole instance's says nothing for backend.
+  assert.deepEqual(his.withheld, [], "billing/dev's values are its Owner's to give, its reference's as its own");
+  assert.equal(await read(his.token, 'billing/dev/BILLING_KEY'), 'bk_0123456789');
+  assert.equal(await read(his.token, 'billing/dev/LEAK'), STRIPE, 'backend/dev need not be in its scope');
+  // Scoped to billing alone, an Owner of the whole instance's reads it too.
   const narrow = await root.tokens.issue('token:bo-ci', { expiresInDays: 30, scope: { 'billing/dev': 'viewer' } });
-  assert.deepEqual(narrow.withheld, ['billing/dev']);
-  assert.equal(await read(narrow.token, 'billing/dev/LEAK'), '404 not_owner_issued');
+  assert.deepEqual(narrow.withheld, []);
+  assert.equal(await read(narrow.token, 'billing/dev/LEAK'), STRIPE);
+  // A Developer of billing gives it no sensitive value there, billing's own or a reference's, and is told so, naming the source.
+  await root.access.set(`user:${ADA}`, { backend: 'developer', billing: 'developer' });
+  const theirs = await ada.tokens.issue('token:bo-ci', { expiresInDays: 30, scope: { 'billing/dev': 'viewer' } });
+  assert.deepEqual(theirs.withheld, ['billing/dev']);
+  assert.equal(await read(theirs.token, 'billing/dev/LEAK'), '404 not_owner_issued');
+  await assert.rejects(bearer(theirs.token).secrets.reveal('billing/dev'), {
+    status: 403,
+    message: 'billing/dev holds BILLING_KEY, LEAK (a reference to backend/dev/STRIPE_SECRET_KEY), sensitive: a service account reads them only on a token or trust binding an Owner of billing issued',
+  });
+  // An Owner of backend alone, who is none of billing's, gives it nothing there either: the holder decides.
+  await root.access.set(`user:${OWEN}`, { backend: 'owner', billing: 'viewer' });
+  await root.access.set('token:bo-ci', { 'billing/dev': 'viewer', 'backend/dev': 'viewer' });
+  const backends = await owen.tokens.issue('token:bo-ci', { expiresInDays: 30, scope: { 'billing/dev': 'viewer', 'backend/dev': 'viewer' } });
+  assert.deepEqual(backends.withheld, ['billing/dev']);
+  assert.equal(await read(backends.token, 'backend/dev/STRIPE_SECRET_KEY'), STRIPE);
+  assert.equal(await read(backends.token, 'billing/dev/LEAK'), '404 not_owner_issued');
 });
 
-test("forking a reference to another project's sensitive value keeps it a reference: a copy would move it into the fork's project, past R16/R32", async () => {
-  // Bo, an Owner of billing and a Developer of backend, refers billing/dev to backend's sensitive key (R24), then forks.
-  await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
-  const made = await bo.environments.create('billing/dev2', { from: 'dev' });
-  // A copy would have made billing/dev2/LEAK billing's own sensitive value; instead it stays a reference to backend.
-  assert.equal(made.forked?.references, 1, 'the sensitive reference is carried as a reference, not copied by value');
-  // R16: Bo cannot loosen it in place (it is a reference, its nature is its source's, R23) and cannot reveal it as a person.
-  await assert.rejects(bo.secrets.set('billing/dev2', { LEAK: { sensitivity: 'secret' } }), /reference/);
-  await assert.rejects(bo.secrets.reveal('billing/dev2/LEAK'), { status: 404, code: 'not_available' });
-  // R32: a service token of billing's, issued by Bo, does not read it: the value is still backend's.
-  await bo.members.add('token:bo-ci');
-  await bo.access.set('token:bo-ci', { 'billing/dev2': 'viewer' });
-  const his = await bo.tokens.issue('token:bo-ci', { expiresInDays: 30 });
-  assert.deepEqual(his.withheld, ['billing/dev2']);
-  assert.equal(await read(his.token, 'billing/dev2/LEAK'), '404 not_owner_issued');
-  // The value is still backend's: a credential an Owner of backend issued, with backend in scope, reads it through the reference.
-  await root.access.set('token:bo-ci', { 'billing/dev2': 'viewer', 'backend/dev': 'viewer' });
-  const owners = await root.tokens.issue('token:bo-ci', { expiresInDays: 30 });
-  assert.equal(await read(owners.token, 'billing/dev2/LEAK'), STRIPE);
-});
-
-test("forking cannot copy a sensitive value out of a reference the forker cannot read at its source", async () => {
+test("forking a reference to another project's sensitive value copies it, still sensitive, as any key of the holder's (R71)", async () => {
   // Carla owns billing, and cannot read backend at all. Bo makes the reference; Carla forks the environment.
-  await root.members.add(`user:carla@acme.example`);
-  await root.access.set(`user:carla@acme.example`, { billing: 'owner' });
+  await root.members.add('user:carla@acme.example');
+  await root.access.set('user:carla@acme.example', { billing: 'owner' });
   const carla = clientFor(deps, 'carla@acme.example');
   await bo.secrets.set('billing/dev', { LEAK: { ref: 'backend/dev/STRIPE_SECRET_KEY' } });
-  // The fork would carry LEAK as a reference to backend, which Carla cannot read: refused, never copied by value.
-  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
-  // Refused before anything is made: no half-made environment is left behind, so the message stays the same on a retry.
-  await assert.rejects(carla.secrets.list('billing/dev2'), { status: 404 });
-  await assert.rejects(carla.environments.create('billing/dev2', { from: 'dev' }), { status: 403 });
+  const made = await carla.environments.create('billing/dev2', { from: 'dev' });
+  assert.equal(made.forked?.references, 0, 'copied, as every key of a fork that asks for no references');
+  const listed = (await carla.secrets.list('billing/dev2')).keys.find((key) => key.key === 'LEAK')!;
+  assert.deepEqual([listed.reference, listed.sensitivity], [null, 'sensitive']);
+  // R16: nobody reveals it as a person; R32: a service token of billing's that an Owner of billing issued reads it.
+  await assert.rejects(carla.secrets.reveal('billing/dev2/LEAK'), { status: 404, code: 'not_available' });
+  await carla.members.add('token:carla-ci');
+  await carla.access.set('token:carla-ci', { 'billing/dev2': 'viewer' });
+  const hers = await carla.tokens.issue('token:carla-ci', { expiresInDays: 30 });
+  assert.equal(await read(hers.token, 'billing/dev2/LEAK'), STRIPE);
 });
 
 test("a fork's inherited sensitive value is decided where it is held, its parent: an Owner's token there reads it, a Developer's does not", async () => {

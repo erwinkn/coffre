@@ -18,8 +18,8 @@ import {
 /** The most names one `proxy.code` reserves at once: far more than any deployment's code defines. */
 export const MAX_RESERVED = 1000;
 
-/** A key of an item as the save resolved it: where it is held (nearest first), and its value's nature and project, a reference's source's. */
-export type ResolvedKey = { name: string; holder: EnvironmentInput; nature: SecretInput['nature']; projectId: string };
+/** A key of an item as the save resolved it: where it is held (nearest first), which decides it (R71), and its value's nature, a reference's source's. */
+export type ResolvedKey = { name: string; holder: EnvironmentInput; nature: SecretInput['nature'] };
 
 /**
  * What a save freezes of its editor (decision 5): their instance role, its
@@ -64,16 +64,16 @@ export function frozenOwns(frozen: FrozenHoldings, projectId: string): boolean {
 /**
  * Why `reader` may not route `key`, or null (section 8): read it where it is
  * held (a fork's parent for an inherited key, R8; a reference's holder, R20),
- * and, for a sensitive value, own its project, the source's for a reference
- * (R66, as R32 has it for service tokens). A deleted or archived holder
- * routes nothing.
+ * and, for a sensitive value, own the project it is held in, a reference's
+ * holder's as any key's there (R66, R71, as R32 has it for service tokens).
+ * A deleted or archived holder routes nothing.
  */
 export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly EnvironmentInput[]): string | null {
   const places = new Map(chain.map((environment) => [environment.id, environment]));
   const { holder } = key;
   const code = refuses(reader, 'secret.read', placeIn({ projectId: holder.projectId, environmentId: holder.id }, places), holder.deleted || holder.archived || holder.projectArchived);
   if (code !== null) return `${key.name}: its editor does not read it in ${holder.slug} (${code})`;
-  if (key.nature === 'sensitive' && !ownsProject(reader.live, key.projectId)) return `${key.name} is sensitive: an Owner of its project may route sensitive keys`;
+  if (key.nature === 'sensitive' && !ownsProject(reader.live, holder.projectId)) return `${key.name} is sensitive: an Owner of its project may route sensitive keys`;
   return null;
 }
 
@@ -274,7 +274,7 @@ export function editorRefusal(frozen: FrozenHoldings, now: Reader, key: Resolved
   const { holder } = key;
   const place = placeIn({ projectId: holder.projectId, environmentId: holder.id }, places);
   if (!frozenAllows(frozen, 'secret.read', place, { policy: now.live.policy, service: false })) return `${key.name}: what its editor held when they saved it does not read it in ${holder.slug}`;
-  if (key.nature === 'sensitive' && !frozenOwns(frozen, key.projectId)) return `${key.name} is sensitive, and its editor was no Owner of its project when they saved it`;
+  if (key.nature === 'sensitive' && !frozenOwns(frozen, holder.projectId)) return `${key.name} is sensitive, and its editor was no Owner of its project when they saved it`;
   return null;
 }
 
@@ -295,5 +295,5 @@ export function routeEditorRefusal(
   const holder = secret === null ? undefined : view.environments.get(secret.environmentId)?.row ?? undefined;
   if (secret === null || value === null || holder === undefined) return `${name}: not held where the route serves it`;
   const reader = readerOf(editor, credential, roles, chain, at);
-  return editorRefusal(item.holdings, reader, { name, holder, nature: value.nature, projectId: value.projectId }, chain);
+  return editorRefusal(item.holdings, reader, { name, holder, nature: value.nature }, chain);
 }

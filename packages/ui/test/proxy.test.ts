@@ -212,18 +212,16 @@ test('code may give a route and a signer one name: each its own row', () => {
   assert.equal(new Set(ids).size, 2);
 });
 
-test('a sensitive reference is routed by an Owner of its source\'s project, not of the place\'s', () => {
-  const reference = (ownsSource: boolean) =>
-    key('BILLING_KEY', { sensitivity: 'sensitive', readable: false, reference: { id: 'r', holder: 'market/dev/BILLING_KEY', source: 'billing/prod/STRIPE_KEY', state: 'live', version: 1, createdBy: 'user:ada@acme.example', createdAt: '', endedBy: null, endedAt: null, canOpenSource: true, ownsSource } });
-  // Ada owns market, not billing: the vault would refuse, and the page says so first.
-  const market = { keys: [...KEYS, reference(false)], routesSensitive: true };
-  assert.deepEqual(keyStanding(['BILLING_KEY'], market), { blocked: ['BILLING_KEY'], routed: [], missing: [] });
-  assert.equal(blockedInWords(['BILLING_KEY'], DEV, market.keys), 'BILLING_KEY is sensitive, from billing: only an Owner of billing routes it.');
-  // An Owner of billing who is no Owner of market routes it, and is told whose Owner they route it as.
-  const billing = { keys: [...KEYS, reference(true)], routesSensitive: false };
-  assert.deepEqual(keyStanding(['BILLING_KEY'], billing).routed, ['BILLING_KEY']);
-  assert.equal(routedInWords(['BILLING_KEY'], DEV, billing.keys), 'BILLING_KEY is sensitive: as an Owner of billing you may route it, and the save is audited.');
-  assert.equal(routedInWords(['STRIPE_KEY'], DEV, KEYS), 'STRIPE_KEY is sensitive: as an Owner of this project you may route it, and the save is audited.');
+test('a sensitive reference is routed as any sensitive key of the place, by an Owner of its project (R71)', () => {
+  const reference = key('BILLING_KEY', { sensitivity: 'sensitive', readable: false, reference: { id: 'r', holder: 'market/dev/BILLING_KEY', source: 'billing/prod/STRIPE_KEY', state: 'live', version: 1, createdBy: 'user:ada@acme.example', createdAt: '', endedBy: null, endedAt: null, canOpenSource: true } });
+  // Ada owns market, not billing: she routes it, and is told she routes it as an Owner of this project.
+  const owner = { keys: [...KEYS, reference], routesSensitive: true };
+  assert.deepEqual(keyStanding(['BILLING_KEY'], owner), { blocked: [], routed: ['BILLING_KEY'], missing: [] });
+  assert.equal(routedInWords(['BILLING_KEY']), 'BILLING_KEY is sensitive: as an Owner of this project you may route it, and the save is audited.');
+  // A router who owns nothing here may not, and is told who may: an Owner of market, whatever project its source is in.
+  const router = { keys: [...KEYS, reference], routesSensitive: false };
+  assert.deepEqual(keyStanding(['BILLING_KEY'], router), { blocked: ['BILLING_KEY'], routed: [], missing: [] });
+  assert.equal(blockedInWords(['BILLING_KEY'], DEV, router.keys), 'BILLING_KEY is sensitive: only an Owner of market routes it.');
 });
 
 test('an edit outlives another save removing its item: it stays, over the item that now has its name', () => {

@@ -293,9 +293,9 @@ export function rowsOf(items: readonly ProxyItem[], drafts: Drafts, editor: Edit
 /**
  * How the keys an item sends stand for its editor, as the vault clears them
  * at save (section 8): a key they read is theirs to route; a sensitive one,
- * which no person reads, only an Owner of the project routes, audited (R66);
- * any other they cannot read, they may not. A key the place lacks yet is
- * accepted: the route serves once it is set.
+ * which no person reads, only an Owner of the project routes, audited (R66),
+ * a reference as any key here (R71); any other they cannot read, they may
+ * not. A key the place lacks yet is accepted: the route serves once it is set.
  */
 export function keyStanding(names: readonly string[], editor: Pick<Editor, 'keys' | 'routesSensitive'>): KeyStanding {
   const standing: KeyStanding = { blocked: [], routed: [], missing: [] };
@@ -303,20 +303,10 @@ export function keyStanding(names: readonly string[], editor: Pick<Editor, 'keys
     const entry = editor.keys.find((one) => one.key === name && !one.archived);
     if (entry === undefined) standing.missing.push(name);
     else if (entry.readable) continue;
-    else if (entry.sensitivity === 'sensitive' && (entry.reference === null ? editor.routesSensitive : entry.reference.ownsSource)) standing.routed.push(name);
+    else if (entry.sensitivity === 'sensitive' && editor.routesSensitive) standing.routed.push(name);
     else standing.blocked.push(name);
   }
   return standing;
-}
-
-/**
- * The project a sensitive key's value is from, whose Owners alone route it:
- * a reference's source's, `billing` for `billing/prod/STRIPE_KEY`; null for
- * a value of the place's own project.
- */
-export function sourceProjectOf(name: string, keys: readonly SecretKey[], place: Place): string | null {
-  const source = keys.find((one) => one.key === name && !one.archived)?.reference?.source.split('/')[0];
-  return source === undefined || source === place.project ? null : source;
 }
 
 /** The pending changes, counted. */
@@ -468,33 +458,24 @@ export function fieldOf(problem: string, name: string, kind: ProxyKind): { field
 
 /**
  * The refusal, in words, of keys the editor may not route: those they cannot
- * read, and sensitive ones from another project, which only its Owners route.
+ * read, and sensitive ones, which only an Owner of the project routes, a
+ * reference to another project's as any key here (R71).
  *
- *   "STRIPE_KEY is sensitive, from billing: only an Owner of billing routes it."
+ *   "BILLING_KEY is sensitive: only an Owner of market routes it."
  */
 export function blockedInWords(keys: readonly string[], place: Place, all: readonly SecretKey[] = []): string {
+  const sensitive = (name: string) => all.some((one) => one.key === name && !one.archived && one.sensitivity === 'sensitive');
+  const unread = keys.filter((key) => !sensitive(key));
+  const owned = keys.filter(sensitive);
   const sentences: string[] = [];
-  const unread = keys.filter((key) => !foreignSensitive(key, all, place));
   if (unread.length > 0) sentences.push(`You can't read ${unread.join(', ')} in ${place.project}/${place.environment}, so you can't route ${unread.length === 1 ? 'it' : 'them'}.`);
-  for (const key of keys.filter((one) => foreignSensitive(one, all, place))) {
-    const project = sourceProjectOf(key, all, place)!;
-    sentences.push(`${key} is sensitive, from ${project}: only an Owner of ${project} routes it.`);
-  }
+  if (owned.length > 0) sentences.push(`${owned.join(', ')} ${owned.length === 1 ? 'is' : 'are'} sensitive: only an Owner of ${place.project} routes ${owned.length === 1 ? 'it' : 'them'}.`);
   return sentences.join(' ');
 }
 
-const foreignSensitive = (name: string, keys: readonly SecretKey[], place: Place) =>
-  keys.some((one) => one.key === name && !one.archived && one.sensitivity === 'sensitive') && sourceProjectOf(name, keys, place) !== null;
-
-/**
- * What routing sensitive keys means for an Owner, said where it happens:
- * an Owner of the project each value is from, the place's or a
- * reference's source's.
- */
-export function routedInWords(keys: readonly string[], place: Place, all: readonly SecretKey[] = []): string {
-  const projects = [...new Set(keys.map((key) => sourceProjectOf(key, all, place) ?? place.project))];
-  const owner = projects.length === 1 && projects[0] === place.project ? 'this project' : projects.join(' and ');
-  return `${keys.join(', ')} ${keys.length === 1 ? 'is' : 'are'} sensitive: as an Owner of ${owner} you may route ${keys.length === 1 ? 'it' : 'them'}, and the save is audited.`;
+/** What routing sensitive keys means for an Owner, said where it happens. */
+export function routedInWords(keys: readonly string[]): string {
+  return `${keys.join(', ')} ${keys.length === 1 ? 'is' : 'are'} sensitive: as an Owner of this project you may route ${keys.length === 1 ? 'it' : 'them'}, and the save is audited.`;
 }
 
 /**

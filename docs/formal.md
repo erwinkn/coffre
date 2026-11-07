@@ -1062,13 +1062,14 @@ explores every sequence of them.
 
 | Protection, in the design | Turned off, TLC finds |
 |---|---|
-| The vault checks `reads` at the place where the value is held: a reference's source, a fork's parent | dev's inherited `STRIPE_SECRET_KEY` read through dev's `"*"` (`NoLaundering`) |
+| The vault checks `reads` where the key is held: a fork's parent for an inherited key (a reference is held where it lives, R71) | dev's inherited `STRIPE_SECRET_KEY` read through dev's `"*"` (`NoLaundering`) |
 | `reads` holds environment and key IDs | the webhook secret deleted and made again under its name, and the new key read (`NoLaundering`) |
-| A workload may not make a reference or a copy from a source it may not read | the workload's copy of `STRIPE_SECRET_KEY` into dev read through dev's `"*"` (`NoLaundering`) |
+| A workload may not make a reference or a copy from a source it may not read | the workload's copy or reference of `STRIPE_SECRET_KEY` into dev read through dev's `"*"` (`NoLaundering`) |
 
-A person's copy is that person's choice, so the model never counts it as
-laundered. A copy the workload made of a value it could not read is
-laundered, and so is any copy of that copy.
+A person's copy or reference is that person's choice, so the model never
+counts it as laundered: a reference is read where it lives, as any key there
+(R71). One the workload made of a value it could not read is laundered, a
+reference as a copy, and so is any copy or reference of that one.
 
 ### Their invariants
 
@@ -1088,7 +1089,7 @@ laundered, and so is any copy of that copy.
 | `TripwireFires` | A thief whose excess beside the deployment passes the threshold since the newest lift, in any number of sessions with any gaps, or who makes more than `4 × replicas` roots since, has frozen the code |
 | `LiftHolds` | Every freeze counts from the newest lift before it: a lift is not undone by the history before it |
 | `CopyCaught` | Every copy that has been in, in one session, for longer than the threshold is frozen out, under the assumption above |
-| `NoLaundering` | A workload reads a value only if `reads` lists the key, by ID, where the value is held, and the value reached that key through no copy the workload could not read |
+| `NoLaundering` | A workload reads a value only if `reads` lists the key, by ID, where the key is held (a fork's parent for an inherited key; a reference where it lives), and the value reached that key through no copy or reference the workload could not read |
 
 ### Their scenarios
 
@@ -2956,10 +2957,10 @@ the code.
 | `protected_never_widens` | Under valid roles (`definitionProblem`), a person holds no more in an environment once it is protected. |
 | `owner_issued_only` | A request reads a project's sensitive values only as a service, on a credential with a grant in that project whose own issuer owned the project when they issued it (R32). One from before 0.11 reads them if its own issuer owns the project when it is sealed (`sealCredentials`), which the model leaves out. |
 | `no_person_reads_sensitive` | No person, Owner or not, on a session or any token of theirs, is handed back a sensitive value: directly, through a reference, in a fork or in a personal config. |
-| `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the value's own project, the source's for a reference, whose issuer owned that project. |
-| `copy_keeps_sensitive`, `copy_never_through_reference` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive, and never one read through a reference: it keeps the reference. |
+| `service_sensitive_from_owner` | A service is handed back a sensitive value only on a grant in the project the key is held in, a reference's holder's as any key's there (R71), whose issuer owned that project. |
+| `copy_keeps_sensitive` | A fork copies a sensitive value, for anyone, only where it keeps it sensitive, one read through a reference as any. |
 | `personal_owner_only`, `personal_holds_no_reference` | A personal config's key opens for its owner alone, and no reference reads into or out of one. |
-| `no_laundering` | A workload is handed back a value, for any purpose but the proxy's use, a fork's copy included, only if its scope lists the key, by ID, on a grant covering where the value is held: a reference's source, a fork's parent, never the place the read names (docs/design/workload-access.md, section 6.1). |
+| `no_laundering` | A workload is handed back a value, for any purpose but the proxy's use, a fork's copy included, only if its scope lists the key, by ID, on a grant covering where the key is held: a reference's holder, by its own ID (R71), a fork's parent, never the place the read names (docs/design/workload-access.md, section 6.1). |
 | `reference_made_by_reader` | A reference is made only by someone who writes where it is held and reads its source, and uses the source too if it is sensitive (R24); by a workload, only to a plain source or one its scope lists. |
 | `reference_shares_by_design` | A reference does let someone read what they cannot at its source: Bo, a Viewer of `web/dev`, reads `api/dev/KEY` through `web/dev/API`. That is what R20 asks; the guarantee is the one above. |
 | `allowed_sealed`, `allowed_credential_sealed` | A 0.15 use is allowed only if every input it weighs (credential, principal, roles, policy, key, a reference's source, each environment) was read as its object's newest change left it, under the vault's seal. |

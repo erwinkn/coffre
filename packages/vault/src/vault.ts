@@ -31,6 +31,7 @@ import {
   ROLES,
   runsInstance,
   setsUpServices,
+  type HeldKey,
   type Holdings,
   type InstanceRole,
   type Permission,
@@ -1720,10 +1721,8 @@ class VaultService implements Vault {
         // The proxy's use opens a value for coffre to use for its reader, never to hand back: `secret.use`. Anything else reads.
         permission: input.purpose === 'use' ? 'secret.use' : 'secret.read',
         secrets: items.map((item) => item.secret),
-        // Through a reference, the reader's grants on the holder's environment decide.
+        // Through a reference, the holder decides, as for any key held there (R71).
         places: sealed.map((seal, i) => seal?.holder ?? items[i]!.secret),
-        // Which items are read through a reference: a sensitive one is never copied, which would move it out of its project.
-        viaReference: sealed.map((seal) => seal !== null),
         references: ends,
         vet: ends.length === 0 ? undefined : async (_, reads) => sealed.map((seal) => (seal !== null && reads.ended.has(seal.seq) ? 'ended' : null)),
         remote,
@@ -1942,8 +1941,8 @@ class VaultService implements Vault {
       principal: string;
       permission: Permission;
       secrets: readonly SecretRef[];
-      /** Where each secret's permission is checked, when not where it is: a reference's holder. */
-      places?: readonly SecretPlace[];
+      /** Where each secret is decided, when not where it is: a reference's holder, by its own key (R71). */
+      places?: readonly HeldKey[];
       /** The `reference.create` entries `vet` asks about: read with the decision (`Snapshot`'s `ended`). */
       references?: readonly bigint[];
       /**
@@ -1959,8 +1958,6 @@ class VaultService implements Vault {
       needs?: (db: Queryable) => Promise<(readonly Permission[] | null)[]>;
       /** Each secret that takes besides its reader being an Owner of its project (`ownsProject`): a sensitive value made a secret. */
       owns?: readonly boolean[];
-      /** Which secrets are read through a reference, by index: a sensitive one of these is never copied (it would leave its project). */
-      viaReference?: readonly boolean[];
       remote: boolean;
       entry: (secret: SecretRef, decision: 'allow' | 'deny', code: string | null) => NewEntry;
       /** Entries appended with the release, after its own, only once the keys are released: the app's record of a use. */
@@ -2008,10 +2005,12 @@ class VaultService implements Vault {
       const needs = call.needs === undefined ? [] : await call.needs(d.tx);
       let codes = keyRefusals(reader, { principal, permission: call.permission, secrets, at, environments, needs, owns: call.owns });
       if (call.vet !== undefined && !codes.some((code) => code !== null)) codes = await call.vet(d.tx, d.reads);
-      // Where each value is held, the secret itself, a reference's source or a fork's parent: what a workload lists.
-      codes = useOnlyRefusals(codes, reader, { action, purpose: call.input.purpose, secrets });
+      // `at` is also where each key is held, the secret itself, a fork's parent or a reference's holder, by its own
+      // key: what a workload lists, and the project whose Owners give a service its sensitive values (R71).
+      codes = useOnlyRefusals(codes, reader, { action, purpose: call.input.purpose, secrets: at });
       codes = sensitiveRefusals(codes, reader, {
-        action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive, secrets, viaReference: call.viaReference,
+        action, principal, purpose: call.input.purpose, keepsSensitive: call.input.keepsSensitive,
+        secrets: at.map((place, i) => ({ projectId: place.projectId, sensitive: secrets[i]!.sensitive })),
       });
       let first = codes.find((code) => code !== null) ?? null;
       if (first === null && action === 'secret.read' && this.#overBulkLimit(d)) first = 'bulk_limit';
@@ -4768,7 +4767,7 @@ class VaultService implements Vault {
   /**
    * Each key name's nearest holder in a fork chain, nearest first, as a use
    * finds it (values inherit, up to three parents), its object as its log
-   * has it, and a reference's source's nature and project. A key no place
+   * has it, and a reference's source's nature. A key no place
    * holds, or one archived, is left out: decided at each use.
    */
   async #proxyKeys(
@@ -4791,7 +4790,7 @@ class VaultService implements Vault {
         if (source.log !== 'live' || source.object.kind !== 'secret') return;
         secret = source.object;
       }
-      resolved.set(name, { name, holder, nature: secret.nature, projectId: secret.projectId });
+      resolved.set(name, { name, holder, nature: secret.nature });
     }));
     return resolved;
   }

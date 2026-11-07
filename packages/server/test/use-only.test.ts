@@ -129,13 +129,16 @@ test('renaming a key onto a listed name leaves it unreadable: reads list IDs, no
   assert.deepEqual((await api.secrets.reveal('market/prod')).useOnly, ['DATABASE_URL', 'STRIPE_WEBHOOK_SECRET']);
 });
 
-test('a reference is read where its value is held: "*" where it lives reads nothing of its source', async () => {
+test('a reference is read where it lives, as any key there (R71): "*" there reads it, a listing of its source alone does not', async () => {
   await root.secrets.set('market/dev', { S: { ref: 'market/prod/STRIPE_SECRET_KEY' }, T: { ref: 'market/prod/TWILIO_SID' } });
   const api = client(await byId({ 'market/dev': '*' }));
   const read = await api.secrets.reveal('market/dev');
-  assert.deepEqual([read.values, read.useOnly], [{ T: 'AC0123' }, ['S']]);
-  assert.equal(await outcome(api.secrets.reveal('market/dev/S')), '404 use_only');
-  assert.deepEqual((await client(await byId({ 'market/dev': '*', 'market/prod': ['STRIPE_SECRET_KEY'] })).secrets.reveal('market/dev/S')).values, { S: 'sk_live_0123' });
+  assert.deepEqual([read.values, read.useOnly], [{ S: 'sk_live_0123', T: 'AC0123' }, []]);
+  assert.deepEqual((await api.secrets.reveal('market/dev/S')).values, { S: 'sk_live_0123' });
+  // Listed where its source is, and not where it lives: used only.
+  const source = client(await byId({ 'market/prod': ['STRIPE_SECRET_KEY'] }));
+  assert.equal(await outcome(source.secrets.reveal('market/dev/S')), '404 use_only');
+  assert.deepEqual((await source.secrets.reveal('market/dev')).useOnly, ['S']);
 });
 
 test('a workload makes no reference to a value it only uses', async () => {

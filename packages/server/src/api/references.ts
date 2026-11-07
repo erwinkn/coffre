@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { allows, guarded, type Holdings, type Permission, type Place } from '@coffre/core/access';
+import { allows, guarded, type HeldKey, type Holdings, type Permission, type Place } from '@coffre/core/access';
 import type { Envelope } from '@coffre/core/envelope';
 import { isTombstone } from '@coffre/core/schemas';
 import type { SecretRef, Via } from '@coffre/core/vault';
@@ -294,6 +294,14 @@ export type Readable = {
   through?: string;
   parent?: { environmentId: string; slug: string };
 };
+
+/**
+ * The key a read of `item` is decided as, as the vault decides it: where it is held, by its own id, a reference's at
+ * its holder as any key held there (R71), never at its source; an inherited key at its parent.
+ */
+export function heldKey(item: Pick<Readable, 'secret' | 'holder' | 'holderAt'>): HeldKey {
+  return item.holder === undefined || item.holderAt === undefined ? item.secret : { ...item.holderAt, secretId: item.holder };
+}
 
 /** What a read cannot open, and why; and the parent it would be inherited from, which the reader must read to be told. */
 export type Unreadable = { reason: string; key?: string; parent?: { environmentId: string; slug: string } };

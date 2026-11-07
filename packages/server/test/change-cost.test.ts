@@ -36,6 +36,8 @@ const VIEWER = 'viewer@acme.example';
  * removed passkey behind them: nothing behind the credential is read, as nothing decides on it (review r1 of #528).
  */
 const ADMIN = 'admin-off@acme.example';
+/** A Developer of market/dev, who owns no project: a token they issue there is told what it withholds. */
+const DEVELOPER = 'developer@acme.example';
 
 /** A client whose statements go to the pool of the request under way: on Workers, each request opens its own. */
 class PerRequest {
@@ -65,6 +67,7 @@ let runtime: CoffreRuntime;
 let owner: CoffreClient;
 let viewer: CoffreClient;
 let admin: CoffreClient;
+let developer: CoffreClient;
 let calls = 0;
 let statements: string[] = [];
 const background: Promise<unknown>[] = [];
@@ -88,6 +91,8 @@ before(async () => {
   await root.members.add(`user:${ADMIN}`, { role: 'admin' });
   await root.access.set(`user:${ADMIN}`, { 'market/dev': 'developer' });
   await removePasskey(db.owner, deps.chainKey, await addPasskey(db.owner, deps.chainKey, ADMIN));
+  await root.members.add(`user:${DEVELOPER}`);
+  await root.access.set(`user:${DEVELOPER}`, { 'market/dev': 'developer' });
 
   // Each Sync's statements, in the trace a failure prints; with `COFFRE_CHANGE_COST_RTT_MS`, each held that long, as
   // Hyperdrive far from its database holds it, for what a change takes end to end.
@@ -145,6 +150,7 @@ before(async () => {
   owner = await browser('root', ROOT);
   viewer = await browser('viewer', VIEWER);
   admin = await browser('admin-off', ADMIN, off);
+  developer = await browser('developer', DEVELOPER);
 });
 
 after(async () => {
@@ -286,6 +292,7 @@ const CASES: Case[] = [
     run: (i) => owner.members.remove(`user:leaving-${i}@acme.example`),
   },
   { name: 'token issued', run: () => owner.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
+  { name: 'token issued, by a Developer', run: () => developer.tokens.issue(SERVICE, { label: 'ci', expiresInDays: 1 }) },
   // An environment's proxy definitions (0.16, T186): its first save, and one more item on top of the page it loaded.
   {
     name: 'proxy definitions, first save',
@@ -356,7 +363,11 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'access granted': { app: 3, vault: 8 },
   // Its answer is their report, which asks the vault for the proxy items they saved (T186 PR D): one read, after the commit.
   'member removed': { app: 10, vault: 9 },
-  'token issued': { app: 4, vault: 6 },
+  // By an Owner of every project in its scope, it withholds nothing (R71: a reference's sensitive value is its holder's
+  // project's to give, R32), so the app asks nothing of what those places hold. By a Developer, as before R71: the
+  // settings and places a non-Owner's issue checks, then what sensitive values its places hold, one round trip.
+  'token issued': { app: 3, vault: 6 },
+  'token issued, by a Developer': { app: 5, vault: 7 },
   'token revoked': { app: 2, vault: 3 },
   'proxy definitions, first save': { app: 2, vault: 5 },
   'proxy definitions, an item added': { app: 2, vault: 5 },

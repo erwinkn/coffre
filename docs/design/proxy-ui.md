@@ -1494,7 +1494,7 @@ What that gives, with examples:
 | Lin routes `{STRIPE_SECRET_KEY}`, sensitive | refused at save, naming who may: "an Owner of market may route sensitive keys" |
 | Lin's route saved while `STRIPE_KEY` was secret; an Owner marks it sensitive later | each use refused, `route_not_cleared`, naming the route and the key. The page marks the item: "an Owner of market must save it again" |
 | Lin, in fork `market/dev-eu`, routes an inherited key she cannot read in `market/dev` | refused (R8: inherited values take read on the parent) |
-| Lin routes `{API_KEY}`, a reference into `billing/prod` | decided where it lives (R20): her read of `market/dev` covers it; sensitive takes an Owner of `billing` too, as R32 has it for service tokens |
+| Lin routes `{API_KEY}`, a reference into `billing/prod` | decided where it lives (R20, R71): her read of `market/dev` covers it; sensitive, it takes an Owner of `market`, as any sensitive key there, whatever project its source is in |
 | Ada, an Owner of market, routes `{STRIPE_SECRET_KEY}` | allowed, and the entry says `routes sensitive` (R66) |
 | Lin saved `openai`; she is later demoted to Viewer, or leaves | each use refused, `route_not_cleared`, until someone who reads its keys saves it again (decision 5) |
 
@@ -2367,10 +2367,9 @@ is fixed in this document, within PR C.
   resolves the keys: dev's `openai`, saved by someone who reads dev's
   OPENAI_API_KEY, does not route in dev-eu once dev-eu sets its own value
   they do not read, though it still routes in dev.
-- **A sensitive reference** is routed by an Owner of its source's project
-  (section 8). The Secrets list says, of each reference, whether you own
-  that project (`reference.ownsSource`, beside `canOpenSource`), so the page
-  checks each key where its value comes from, not by `routesSensitive`.
+- **A sensitive reference** is routed as any sensitive key of the place, by
+  an Owner of its project (`routesSensitive`; R71): its source was checked
+  when it was made (R24), never at a route.
 - **Edits against another save**: the page keeps the seal it began editing
   from, so a save that came since, even one a background read already
   shows, is a 409 whose review says what changed. An edit whose item that
