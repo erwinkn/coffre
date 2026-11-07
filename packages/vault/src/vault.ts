@@ -1673,22 +1673,39 @@ class VaultService implements Vault {
     const lifetime = 2 * CALL_DEADLINE_MS + Math.max(KEY_BUDGET_MS, this.#prepared.options.keyBudgetMs);
     const entries = await store.recentIntents(tx, at - lifetime);
     const accounting = new KeyAccounting();
-    for (const entry of entries) if (this.#authentic(entry)) accounting.add(entry);
-    return accounting.state().intents.filter((intent) => intent.expiresAt > at).flatMap((intent) =>
-      intent.keys.filter((key) => !intent.seen.includes(key.item)).map((key): NewEntry => ({
-        actor: intent.actor,
-        action: intent.operation,
-        decision: 'deny',
-        code: 'wrong_kek',
-        // A wrap's secret may have no row yet (a new key is wrapped before the app writes it): named in the metadata,
-        // as `keyEntry` names it, never in the column, whose foreign key would refuse it (review r6).
-        secretId: intent.operation === 'key.wrap' ? null : key.secretId,
-        relatedSeq: BigInt(intent.seq),
-        metadata: JSON.stringify({
-          subject: key.subject, ...(intent.operation === 'key.wrap' ? { secretId: key.secretId } : {}), version: key.version,
-          intent: intent.intentId, item: key.item, uncertain: true, closedBy: KEY_ROTATE,
-        }),
-      })));
+    const logged = new Map<bigint, StoredEntry>();
+    for (const entry of entries) {
+      if (!this.#authentic(entry)) continue;
+      accounting.add(entry);
+      if (entry.action === 'key.intent') logged.set(entry.seq, entry);
+    }
+    return accounting.state().intents.filter((intent) => intent.expiresAt > at).flatMap((intent) => {
+      const raw = logged.get(BigInt(intent.seq))!;
+      const keys = (JSON.parse(raw.metadata) as { keys: { logged?: Logged }[] }).keys;
+      return intent.keys.filter((key) => !intent.seen.includes(key.item)).map((key): NewEntry => {
+        // As the call would have logged it (`loggedAs`, in its intent): its place, its holder's (`also`), its version.
+        // A wrap's secret may have no row yet (a new key is wrapped before the app writes it), so it is named in the
+        // metadata alone, as `keyEntry` names it, never in the column, whose foreign key would refuse it (review r6).
+        const as = keys[key.item]?.logged ?? {
+          projectId: null, environmentId: null, secretId: intent.operation === 'key.wrap' ? null : key.secretId, secretVersionId: null,
+          detail: { subject: key.subject, ...(intent.operation === 'key.wrap' ? { secretId: key.secretId } : {}), version: key.version },
+        };
+        return {
+          actor: intent.actor,
+          action: intent.operation,
+          decision: 'deny',
+          code: 'wrong_kek',
+          projectId: as.projectId,
+          environmentId: as.environmentId,
+          secretId: intent.operation === 'key.wrap' ? null : as.secretId,
+          secretVersionId: as.secretVersionId,
+          operationId: raw.operationId,
+          requestId: raw.requestId,
+          relatedSeq: BigInt(intent.seq),
+          metadata: JSON.stringify({ ...as.detail, intent: intent.intentId, item: key.item, uncertain: true, closedBy: KEY_ROTATE }),
+        };
+      });
+    });
   }
 
   /**
@@ -2145,7 +2162,9 @@ class VaultService implements Vault {
             expiresAt: at + budget + CALL_DEADLINE_MS,
             ...(call.input.purpose === undefined ? {} : { purpose: call.input.purpose }),
             ...traced(call.input),
-            keys: secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version })),
+            // Each key with where its outcome is logged, as `entry` writes it: what a rotation that closes the intent for a
+            // vault on a retired key logs it as (`#closeIntents`), so that a place's audit finds it (review r7).
+            keys: secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version, logged: loggedAs(entry(secret, 'deny', null)) })),
           }),
         }], [], d.reads);
         return { seq: appended.seqStart };
@@ -5714,6 +5733,16 @@ function viaDetail(via: Via, seal: Sealed | null): Record<string, unknown> {
  * An entry about a key. A new secret's row is not committed when its key is
  * wrapped, so a wrap names the secret in its payload; the others name it.
  */
+/** Where a key's outcome is logged, as its intent keeps it for a rotation to log it as (`#closeIntents`). */
+type Logged = { projectId: string | null; environmentId: string | null; secretId: string | null; secretVersionId: string | null; detail: Record<string, unknown> };
+
+function loggedAs(entry: NewEntry): Logged {
+  return {
+    projectId: entry.projectId ?? null, environmentId: entry.environmentId ?? null, secretId: entry.secretId ?? null,
+    secretVersionId: entry.secretVersionId ?? null, detail: JSON.parse(entry.metadata ?? '{}') as Record<string, unknown>,
+  };
+}
+
 function keyEntry(
   action: KeyAction,
   principal: string,

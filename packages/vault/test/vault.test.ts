@@ -1130,7 +1130,8 @@ test('a vault moved to a new signing key while a read is at the key service logs
   let answer = () => {};
   const until = new Promise<void>((resolve) => (answer = resolve));
   const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
-  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items }).catch((error: unknown) => error);
+  const operationId = randomUUID();
+  const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items, requestId: 'req-rotated', operationId }).catch((error: unknown) => error);
   await reached;
   // A deploy's new vault, given a new signing key with the old one after it, rotates as it starts: nothing it waits
   // for is held across the key service, so it lands while the read is there.
@@ -1147,6 +1148,15 @@ test('a vault moved to a new signing key while a read is at the key service logs
   const rotation = log.find((entry) => entry.action === 'key.rotate')!;
   const outcome = log.find((entry) => entry.action === 'secret.read' && entry.detail.relatedSeq === String(intent.seq))!;
   assert.ok(outcome.seq > rotation.seq && outcome.outcome === 'refuse' && outcome.code === 'wrong_kek', 'its outcome logged by the rotation, refused');
+  // Where the read would have logged it, so that its place's audit finds it (review r7): the place, the version and the
+  // purpose, and the request and the action it was part of; what `auditPage`'s filters read (server db/queries.ts).
+  const [row] = await rows<{ project_id: string | null; environment_id: string | null; secret_id: string | null; secret_version_id: string | null; request_id: string | null; operation_id: string | null }>(db.owner,
+    sql`SELECT project_id, environment_id, secret_id, secret_version_id, request_id, operation_id FROM audit_log WHERE seq = ${outcome.seq}`);
+  assert.deepEqual(row, {
+    project_id: w.project, environment_id: w.dev, secret_id: secret.secretId, secret_version_id: items[0]!.secretVersionId,
+    request_id: 'req-rotated', operation_id: operationId,
+  });
+  assert.equal(outcome.detail.purpose, 'reveal');
   // Long after the intent's deadline, verification finds every key it named accounted for.
   const later = await openLocalVault(await db.connect(), config, { clockOffset: () => 3_600_000 });
   const verified = await later.verifyLog({});
