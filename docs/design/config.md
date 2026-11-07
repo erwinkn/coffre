@@ -29,7 +29,7 @@ Four parts:
 Today a deployment's choices sit in six places: `signin({…})` (passkeys,
 session lifetimes, the longest service token), `vault({…})` on Workers and
 `serveVault({…})` on Node (the bulk read cap, the `uses` block),
-`credentialProxy({…})` (two revocation delays), `createCoffre({…})` (when a
+`credentialProxy({…})` (two revocation delays, whether definitions are editable), `createCoffre({…})` (when a
 value is flagged for rotation), five rate-limiting bindings in
 `app/wrangler.jsonc`, and a retention setting no standard deployment can
 reach. Most deployments set none of them, so the defaults are the policy.
@@ -46,8 +46,8 @@ import { definePolicy } from '@coffre/core/policy';
 export const policy = definePolicy({
   people: {
     passkeys: 'optional', // 'off' | 'optional' | 'required'
-    browserSessionHours: 12, // 1 to 168
-    cliSessionDays: 30, // 1 to 365
+    browserSessionHours: 12, // above 0, at most 168
+    cliSessionDays: 30, // above 0, at most 365
   },
   services: {
     tokenMaxDays: 365, // 1 to 365 (R76)
@@ -59,11 +59,12 @@ export const policy = definePolicy({
   values: {
     rotateAfterDays: 365, // null: never flag
   },
-  proxy: {
-    revokedWithinSeconds: 60, // 0 to 3,600; read only with the credential proxy
+  proxy: { // read only with the credential proxy
+    revokedWithinSeconds: 60, // 1 to 3,600
+    editable: false, // Owners may add and change definitions in the UI
   },
   audit: {
-    keepUsesDays: 30, // null: every day kept (Q6)
+    keepUsesDays: null, // null: every day kept; else days of uses kept (Q6)
   },
 });
 ```
@@ -88,25 +89,42 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | Field | Default | Enforced by | Today | Why it is a choice |
 |---|---|---|---|---|
 | `people.passkeys` | `'optional'` | app | `signin({ passkeys })` | how much a person proves beyond the provider ([passkeys.md](passkeys.md)). `rpId` stays in `signin`: it names a domain, it is wiring |
-| `people.browserSessionHours` | 12, at most 168 | app | `signin({ browserSessionHours })` | how often a person signs in again in a browser |
-| `people.cliSessionDays` | 30, at most 365 | app | `signin({ cliSessionDays })` | the same for `coffre login` |
+| `people.browserSessionHours` | 12; above 0, at most 168, as today | app | `signin({ browserSessionHours })` | how often a person signs in again in a browser |
+| `people.cliSessionDays` | 30; above 0, at most 365, as today | app | `signin({ cliSessionDays })` | the same for `coffre login` |
 | `services.tokenMaxDays` | 365, 1 to 365 | app **and vault** | `signin({ serviceTokenMaxDays })`, app only (#516) | R76. New: the vault holds an issue to the deployment's number too, where today it holds only the 365. The default lifetime offered stays min(90, this) |
 | `services.signInsPerAddress` | 10,000 per 10 s | app | Workers: `SIGN_IN_PER_SOURCE` in `app/wrangler.jsonc` (#520); Node: `processLimits({ perSource })` | R76 asked for one or two settings. The default is R44's 1,000 sign-ins a second over one window, since a fleet behind one NAT is one address. A deployment with no such fleet may set it lower |
 | `reads.bulkLimit` | 1,000 keys per 15 min | vault | `vault({ bulkLimit })` | R28, R52 |
 | `values.rotateAfterDays` | 365, or `null` | app | `createCoffre({ rotateAfterDays })` | when the UI and `coffre list` flag a value nobody changed |
-| `proxy.revokedWithinSeconds` | 60, 0 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
-| `audit.keepUsesDays` | 30 (proposed; `null` today) | vault | `retainDays`, reachable only by a Node deployment that runs its own checkpointer | Q6 |
+| `proxy.revokedWithinSeconds` | 60, 1 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
+| `proxy.editable` | `false` | app | `credentialProxy({ editable })` | whether an Owner may add and change proxy definitions in the UI, beside those the deployment's code names |
+| `audit.keepUsesDays` | `null`, every day kept, as today | vault | `retainDays`, reachable only by a Node deployment that runs its own checkpointer | Q6 |
 
 **`proxy.revokedWithinSeconds` merges two settings that mean one thing.**
 Both bound how long a revoked credential keeps working through the proxy:
 `cacheSeconds` is how long its opened values serve requests from memory,
 `recheckSeconds` how often an open database tunnel checks it still stands.
-Example: an Owner revokes a CI token at 12:00:00. At 60, its last request
-through the proxy leaves by 12:01:00, and its open Postgres tunnel closes by
-12:01:00. With two settings a deployment could make them 60 and 600 and get
-an answer nobody meant. At 0, every request asks the vault and a tunnel
-checks every second, its smallest step. A workload's tunnel keeps its own
-15 s (`WORKLOAD_RECHECK_MS`, design section 8.2), or this if less, as today.
+With two settings a deployment could make them 60 and 600 and get an answer
+nobody meant.
+
+Today the two are not even one bound at 60. A tunnel checks every
+`recheckSeconds`, and each check has min(`recheckSeconds`, 10 s)
+(`RECHECK_DEADLINE_MS`) to answer, so a revoked handle's tunnel can carry
+bytes for 60 + 10 = 70 s. The proposal derives both from the one number R:
+
+- values served from memory: R;
+- a handle's tunnel: each check given d = min(R ÷ 2, 10 s), the checks
+  R − d apart, so that a check's interval and its deadline add up to R.
+
+*Example:* an Owner revokes a CI token at 12:00:00. At R = 60, its last
+request through the proxy leaves by 12:01:00; its open Postgres tunnel
+checks every 50 s, each check given 10 s, and closes by 12:01:00. At R = 4,
+the tunnel checks every 2 s with 2 s to answer.
+
+The range is 1 to 3,600. Today `cacheSeconds: 0` (no cache) is allowed and
+`recheckSeconds: 0` is refused; one number cannot be both, and a tunnel
+cannot check continuously, so 0 goes: a deployment that wants no cache sets
+1. A workload's tunnel keeps its own 15 s bound (`WORKLOAD_RECHECK_MS`,
+design section 8.2), or R if less, as today.
 
 **`services.signInsPerAddress` on Workers.** Cloudflare reads a rate limit's
 number from the binding in `wrangler.jsonc` and nowhere else; the code cannot
@@ -125,8 +143,13 @@ Access, which owns their sessions: the `people` fields do not apply there.
 - **Wiring**, which says where things are, not how much is allowed: the
   public URL, the databases, every key (`kek`, `signingKey`,
   `auditChainKey` and the keys they replaced), the providers, the plugins
-  and their features (`editable`, `generate`, `insecureUpstreams`, the
-  credentials), witnesses, `passkeys.rpId`.
+  and what they define (`generate`, the credentials, tunnels, signers),
+  witnesses, `passkeys.rpId`.
+- **`credentialProxy({ insecureUpstreams })`**, though it is a policy: it
+  lets the proxy's upstreams be plain HTTP and private addresses. Default
+  `false`, which is the right default. It stays beside the credentials
+  because it differs per environment, as `owners` does: a dev deployment's
+  upstreams are `http://localhost`, production's must not be.
 - **`owners`** (R3): who owns the instance, not how much anyone may do. It
   differs per environment (dev, prod) and comes from its environment, so it
   stays in the vault's wiring.
@@ -156,7 +179,7 @@ which the questions in section 3 or a later PR settle.
 | Input | Value | Source |
 |---|---|---|
 | A Worker isolate's memory | 128 MB, read as 128,000,000 bytes (the smaller reading) | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) |
-| A Workers invocation's CPU on Free | 10 ms, hard: an invocation over it is killed (1102) | Workers limits; R25 and R27 hold every request to it |
+| A Workers invocation's CPU on Free | 10 ms. Cloudflare tolerates an occasional overrun and ends invocations that cross it consistently (1102), so coffre sizes to it as if it were hard | Workers limits; R25 and R27 hold every request to it |
 | Worker invocations per request | 32 | Workers service bindings |
 | A URL on Workers | 16 KB | Workers limits |
 | A request body through Cloudflare | 100 MB (Free, Pro) | Cloudflare |
@@ -209,18 +232,24 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The bulk cap's refresh | 60 s at 15 min | min(60 s, window ÷ 10) | decision 9 |
 | The bulk window's maximum | 1 day | releases kept a day and an hour | R52 |
 | Keys a statement uses at once (`uses.batch`) | 100 | about 0.4 ms a key under the lock every use shares, so about 40 ms | measured (review of #433) |
+| How long a use's cover serves repeats (`uses.coverMs`) | 60 s | none written | ⚠ a choice, `useLimits` (`packages/vault/src/use.ts`) |
+| Names a vault's use map keeps (`uses.names`) | 10,000 | none written | ⚠ a choice, `useLimits` |
+| Entries a use cache holds (`UseCache`'s `max`) | 10,000 | none written; a second number beside `names`, though they bound the same map's growth | ⚠ a choice |
 
 ### 2.4 Lock waits and deadlines (#538, #508)
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| Every lock wait but a use's (`LOCK_WAIT_MS`) | 500 ms | the uses' 1 s ÷ 2 | R75: a writer that waits in Postgres's queue holds back every use behind it, so it leaves within half a use's wait |
+| A write's lock wait (`LOCK_WAIT_MS`) | 500 ms | the uses' 1 s ÷ 2 | R75: a writer that waits in Postgres's queue holds back every use behind it, so it leaves within half a use's wait. Not every wait: reads and `sign_in`/`issue_token` below keep longer ones |
 | The migrator's wait per statement | 500 ms, 5 tries, 1 s apart | `LOCK_WAIT_MS` | #508 |
-| The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 |
+| The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
-| A vault call, retries included (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s | a choice: "a caller hears within it" | #356 ⚠ not derived |
+| A read call, from start to answer (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s | a choice: "a caller hears within it" | #356 ⚠ not derived |
+| A read call with a key service | 10 s | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
+| A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
-| A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s | a choice | #347 ⚠ |
+| A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s, or what is left of the call's deadline if less | a choice | #347 ⚠ |
+| The app's first ask of the vault's `about()` and the proxy's gate: take over a call after (`TAKE_OVER_MS`); give up with 503 after (`WAIT_MS`) | 3 s; 6 s | "longer than a deploy's write and its seal take"; 2 × `TAKE_OVER_MS` | T201 (`packages/server/src/asked-once.ts`) ⚠ the 3 s is not measured |
 | Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's connections − 2 | Q3 |
 | A plain 503's `Retry-After` | 1 s (from 5) | `LOCK_WAIT_MS` rounded up to whole seconds | #538 |
 | An app write's lock wait | 500 ms (from unbounded) | `LOCK_WAIT_MS`; then 503 at once | #538 |
@@ -273,10 +302,11 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| Values served from memory; a tunnel's check | 60 s | the object's `revokedWithinSeconds` | policy |
+| Values served from memory | 60 s | R, the object's `revokedWithinSeconds` | policy |
+| A handle's tunnel: a check's deadline; the checks' interval | 10 s; 50 s | d = min(R ÷ 2, 10 s); R − d (today 10 s and 60 s, a 70 s bound) | policy |
 | A workload's tunnel check | 15 s | design section 8.2 | policy |
 | The refresh window before values lapse | min(cache ÷ 4, 15 s) | none written ⚠ | limits.md S25 |
-| A message to sign or verify | 64 KiB | 12 × Equisafe's largest in 90 days | measured |
+| A message to sign or verify | 64 KiB by default; an `hmac()`'s `maxBytes` up to 1 MiB; editable definitions are counted at 1 MiB | 12 × Equisafe's largest in 90 days; 1 MiB costs about 5 ms of CPU | measured |
 | A presigned URL | 1 s to 1 h | "an hour at most" | policy |
 | The upstream request | no time bound | – | Q7 |
 
@@ -287,10 +317,11 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The seal tick; a witness's wait | 500 ms; 2 s | – | R51, R54 |
 | A change waits for its seal | 5 s | – | T169 |
 | A seal is stale after | 5 s | 10 ticks | derived |
-| Unsealed entries a check reads (`ABOVE_NEWEST`) | 2,000 | resized from the check's measured CPU per entry | D6, PR to come |
+| Unsealed entries a check reads (`ABOVE_NEWEST`) | 1,000, on `main` | 4.5 ms fixed + 13.4 µs an entry fits 1,150 in R27's 20 ms at the median; 1,000 below it, where the p90 reaches 20 ms. Its floor: one late tick's entries at R44, 1,000 | D6, measured (`packages/vault/src/verifier.ts`). An exception to R27 at p99: the slowest check at 1,000 took 27 to 42 ms, and a cap that held it under 20 ms would sit below the floor. On Free, a check past about 400 entries fails instead |
 | Days of uses made ahead | 3 | – | a use with no day's table fails |
-| The uses log's growth | about 12.2 GB a day at a steady 1,000 uses a second (13.6 estimated before it was built); far less when repeats are covered | 141 bytes a row and WAL, measured | [hot-path-one.md](hot-path-one.md) (W211) |
-| Days of uses kept | **every day** today; 30 proposed | the object's `keepUsesDays` | Q6 |
+| The uses log's stored size | 141 bytes a use (heap and index): about 12.2 GB a day at a steady 1,000 uses a second; far less when repeats are covered | measured | [hot-path-one.md](hot-path-one.md) (W211) |
+| The uses log's WAL | 248 bytes a use: about 21.4 GB a day at 1,000 a second, written, then recycled or archived as the database's own WAL settings say | measured | the same |
+| Days of uses kept | **every day**, as today | the object's `keepUsesDays` | Q6 |
 | The audit watch's staleness | 11 min | 2 × the 5 min schedule + 1 | #503 |
 
 ## 3. Open questions
@@ -348,13 +379,18 @@ batches stop needing that lock at all. TLC holds every scenario so
 removal's latency shows up in a real p99.
 
 **Step 2, fast refusal from recent outcomes, A or B:** B, adaptive
-throttling. It has one number, K = 2, with a published source (Google SRE
-book, "Handling Overload"), and its refusal probability stays below 1, so it
-never shuts and needs no reopening rule. A needs three numbers nobody has
-measured (window, percentile, reopening rate) and risks every isolate
-shutting at once. *Example:* 2,500 uses a second offered against W208's
-ceiling of 1,040. An isolate refuses each new use with probability
-(2,500 − 2 × 1,040) ÷ 2,501 ≈ 17%. The rest of the excess still goes
+throttling (Google SRE book, "Handling Overload"). Each isolate counts, over
+a trailing window, the uses it was asked (`requests`) and those the vault
+answered in time (`accepts`), and refuses a new use with probability
+max(0, (requests − K × accepts) ÷ (requests + 1)). It has two numbers, both
+from the source: K = 2 and a 2-minute window. The window decides how fast
+refusals fade once the overload ends: two minutes of history must roll out.
+The probability stays below 1, so it never shuts and needs no reopening
+rule. A needs three numbers nobody has measured (window, percentile,
+reopening rate) and risks every isolate shutting at once. *Example:* 2,500
+uses a second offered against W208's ceiling of 1,040, for two minutes:
+300,000 requests, 124,800 accepts. A new use is refused with probability
+(300,000 − 2 × 124,800) ÷ 300,001 ≈ 17%. The rest of the excess still goes
 `late`, so K = 2 trades some lateness for never refusing during a short
 blip. Either rule needs one run on Erwin's Cloudflare (R34, under $5, about
 an hour) before it ships. Without that run, there is no step 2: the excess
@@ -399,46 +435,81 @@ connections than it has: the formula assumes setup set the config.
 ### Q5. Statement timeouts for the app's and the vault's logins
 
 **Facts.** Only the uses' login has a `statement_timeout` (2 s). #538 (R75)
-already bounds every lock wait but a use's to 500 ms, and the vault's
-transactions that carry a deadline set a statement bound from what is left
-of it (`SET LOCAL`). What is left
-unbounded: every app statement, and vault statements outside a transaction.
-Postgres runs such a statement until it ends or Hyperdrive gives up at 60 s.
+bounds a write's lock waits to 500 ms (section 2.4 lists the longer ones:
+reads 3 s, `sign_in` and `issue_token` 1 s), and the vault's transactions
+that carry a deadline bound their statements by what is left of it (`SET
+LOCAL`). What is left unbounded: every app statement, and vault statements
+outside a deadline's transaction. Postgres runs such a statement until it
+ends or Hyperdrive gives up at 60 s.
 
-**Recommendation:** a timeout per login, as a role setting in a migration,
-equal to a vault call's deadline, 5 s (`CALL_DEADLINE_MS`), for both
-`coffre_runtime` and `coffre_vault_runtime`. Transactions keep tightening it
-from their own remaining deadline, as the vault's reads do. Not "from each
-call's remaining deadline" for every statement: a statement outside a
-transaction cannot carry a `SET LOCAL`, and a session `SET` does not hold
-under Hyperdrive, which pools connections per transaction. Before the
-migration, run the suites with the timeout on, to find any statement that
-legitimately runs longer. Backups and migrations use logins of their own,
-untouched. *Example:* today a slow vault statement on a small database holds
-one of its config's 6 connections for up to Hyperdrive's 60 s; with the
-role's 5 s, Postgres ends it at 5 s and the connection is free again.
+Two ways to bound them:
+
+- **Per call, from its remaining deadline.** Hyperdrive pools by
+  transaction and `RESET`s a connection it takes back, so a `SET` sent on
+  its own does not reach the next query. But it applies a `SET` sent in the
+  same transaction, or in the same query (`SET X; SELECT …`)
+  ([Hyperdrive, pooling mode](https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/#pooling-mode)).
+  So a statement can carry its bound: `BEGIN; SET LOCAL statement_timeout
+  = <left>; <statement>; COMMIT`, sent under one Sync, is still one round
+  trip, as the vault's transactions already are (T206's grouping). It
+  needs each app call to carry a deadline to subtract from, and touches
+  every query path.
+- **Per login, a ceiling.** `ALTER ROLE … SET statement_timeout`, in a
+  migration. It catches every statement whatever path sent it, and needs
+  no code. Postgres applies it at the next login, though: a connection
+  Hyperdrive already holds keeps its old setting until it is replaced
+  ([`ALTER ROLE`](https://www.postgresql.org/docs/16/sql-alterrole.html),
+  [Hyperdrive's connection lifecycle](https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/#how-connections-are-managed)).
+  The migration can end that login's idle backends
+  (`pg_terminate_backend`), and the rollout is tested against a warmed
+  pool, not a fresh one.
+
+**Recommendation: the ceiling now, per-call bounds where a call has a
+deadline.** A role setting of 5 s for `coffre_runtime` and
+`coffre_vault_runtime`. The 5 s is a chosen ceiling, not a derived one: it
+equals a read call's deadline (`CALL_DEADLINE_MS`), and no statement of a
+caller who hears within 5 s needs longer. Writes may take longer (R75), so
+before the migration the suites run with it on, to find any write
+statement that legitimately does. The vault's transactions keep tightening
+it from their remaining deadline, as today. Backups and migrations use
+logins of their own, untouched. *Example:* today a slow vault statement on
+a small database holds one of its config's 6 connections for up to
+Hyperdrive's 60 s; with the role's 5 s, Postgres ends it at 5 s and the
+connection is free again.
 
 ### Q6. Retention in the standard setup
 
 **Facts.** `retainDays` exists, but neither Workers' `checkpointer()` nor
 `serveVault` passes it, so every standard deployment keeps every day of
-uses. Retention drops only uses; changes are kept forever. Measured when
-retention was built ([0.15-plan.md, "As built: PR 7"](0.15-plan.md#as-built-pr-7-w229)):
-a use's plan covers every day attached. At 95 days attached, 40 new
-connections at once take 2.0-2.1 s for their first use, past the uses'
-2 s `statement_timeout`, and each day's new table stalls uses about 460 ms.
-At 35 days, neither shows.
+uses. Retention drops only uses; changes are kept forever.
 
-**Recommendation:** expose it as `audit.keepUsesDays`, **default 30** (about
-34 days attached, counting today and the 3 made ahead), not "every day".
-Keeping every day is not neutral: somewhere between 35 and 95 days
-attached, an instance on 0.15 starts failing uses whenever a burst opens
-many new connections at once, and it reaches 95 days about three months
-after it starts. A deployment that must keep uses
-longer (an audit requirement) needs days kept detached, as tables of their
-own, outside the plan: later work, not 0.16. *Example:* at a steady 1,000
-uses a second, 30 days is about 370 GB of uses; every day kept is about
-4.5 TB a year, with the failures above from about the fourth month.
+Days kept no longer cost a use anything. When retention was built, a use's
+plan named every day attached, and at 95 days 40 new connections at once
+passed the uses' 2 s `statement_timeout`. Migration 0057 (T187) fixed that:
+the cover check names only its own day. Measured since, at 5 and at 109
+days, 23 locks a use at either, and a new day costs one call, not every
+connection a replan; at 500 days, 1,000 uses a second at 0.63 ms of CPU
+([0.15-plan.md, "As built: PR 7"](0.15-plan.md#as-built-pr-7-w229), the
+paragraph on T187). `use-days.alone.ts` holds it.
+
+So the days kept are a choice between storage and evidence, nothing else.
+Each use stores 141 bytes (section 2.9), and a backup carries them too.
+
+| uses a second, steady | a day | 30 days | a year |
+|---|---|---|---|
+| 1,000 (R44) | 12.2 GB | 365 GB | 4.45 TB |
+| 10 | 122 MB | 3.7 GB | 44.5 GB |
+
+Far less when repeats are covered (80% on covers: about a quarter).
+
+**Recommendation:** expose it as `audit.keepUsesDays`, **default `null`,
+every day kept**, as today. The uses are the record of who read which
+secret, which an audit may ask for years later; dropping them should be a
+deployment's decision, with its numbers in front of it, not a default. A
+deployment at R44's rate sets a number, and `docs/deploy.md` shows the
+table above. *Example:* a deployment that must keep a year of evidence and
+runs at 10 uses a second sets nothing and holds 45 GB after a year; one
+at 1,000 a second that keeps 30 days sets 30 and holds about 365 GB.
 
 ### Q7. A bound on the proxy's upstream request
 
@@ -453,7 +524,18 @@ own default, 300 s for the headers.
 **Recommendation:** no time bound of coffre's own (R70), and end the
 upstream request when the app's request ends: pass the incoming request's
 signal to the upstream `fetch`. The app's own timeout is then the bound, as
-it would be without coffre in the path. *Example:* an app with a 30 s
+it would be without coffre in the path.
+
+Passing the signal is not enough on Workers today. An incoming request's
+signal fires on a disconnect only with the `enable_request_signal`
+compatibility flag, or a compatibility date of 2026-11-17 or later
+([compatibility flags](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#enable-requestsignal-for-incoming-requests)).
+The examples' app pins `2026-08-06` with `nodejs_compat` alone
+(`examples/workers/app/wrangler.jsonc`). So the change adds the flag to the
+app's `wrangler.jsonc` in the examples and in what `coffre init` writes, and
+a deployment that does not update its file keeps today's behavior. On Node,
+a test shows srvx's request signal fires when the client disconnects before
+the change relies on it. *Example:* an app with a 30 s
 client timeout calls a hung upstream through the proxy. Today, on Node, the
 proxy holds the request for up to 300 s after the app left; with the signal,
 it ends at 30 s with the app's.
@@ -471,7 +553,7 @@ it ends at 30 s with the app's.
 
 | Knob | Before | After |
 |---|---|---|
-| The vault's `uses` block on Workers (`inFlight`, `connections`, `coverMs`, `names`, `batch`) | five settings, none set by any deployment | gone: the in-flight count derived (Q1), the rest internal constants |
+| The vault's `uses` block on Workers (`inFlight`, `connections`, `coverMs`, `names`, `batch`) | five settings, none set by any deployment | gone: the in-flight count derived (Q1), the rest internal constants at today's defaults (60 s, 10,000, 100; section 2.3) |
 | `DEFAULT_CONNECTIONS` and Node's pool probe | 10 per isolate or process; the probe always reads nothing | gone, with Q1's step 1 |
 | `USES_AT_ONCE` (4 per request) | "leaves the isolate's admission room" | gone with the count it protects |
 | Node pool size (`max ?? 10`) | 10 per pool; a deployment passing a URL cannot change it | derived from the database at start (Q2) |
@@ -479,13 +561,14 @@ it ends at 30 s with the app's.
 | `READ_HEAD_WAITERS` | 16, whatever the database | min(16, share − 2), the share computed (Q3) |
 | `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | in the vault's config | `policy.reads.bulkLimit` |
 | `signin({ passkeys, browserSessionHours, cliSessionDays, serviceTokenMaxDays })` | in `signin` | `policy.people.*`, `policy.services.tokenMaxDays`; `passkeys.rpId` stays in `signin` |
-| `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60 | one, `policy.proxy.revokedWithinSeconds` |
+| `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60: a tunnel's bound 70 s | one, `policy.proxy.revokedWithinSeconds`, the tunnel's checks derived to fit it |
+| `credentialProxy({ editable })` | in the plugin's options | `policy.proxy.editable` |
 | `createCoffre({ rotateAfterDays })` | in `createCoffre` | `policy.values.rotateAfterDays` |
-| `retainDays` | only through `runCheckpointer`/`keepCheckpointer` on Node | `policy.audit.keepUsesDays`, default 30 (Q6) |
+| `retainDays` | only through `runCheckpointer`/`keepCheckpointer` on Node | `policy.audit.keepUsesDays`, default every day, as today (Q6) |
 | Sign-in rate limits | five Workers bindings (per address and in all, for workloads and MCP; MCP per connection), 30 / 300 / 120 a minute; `processLimits` the same | one, per address, 10,000 per 10 s (#520), its number in the policy |
 | The per-binding count | 60 sign-ins a minute, in the app, the vault and `sign_in` | gone (#520, R76) |
 | `exchangeLimit.inFlight` | 32, unsourced | a memory bound, once a sign-in has a deadline (limits.md #35) |
-| The vault's 15 s write lock wait (`LOCK_TIMEOUT_MS`) | 15 s | `LOCK_WAIT_MS`, 500 ms, with retries within a 5 s call (#538) |
+| The vault's 15 s write lock wait (`LOCK_TIMEOUT_MS`) | 15 s | `LOCK_WAIT_MS`, 500 ms, retried for up to 5 s from the first attempt (#538) |
 | A plain 503's `Retry-After` | 5 | 1 (#538) |
 | `MAX_BODY_KEYS` and the field bounds | 2,000 top-level entries; labels 120, role names 40, descriptions 200, claims, scopes and the rest | gone (#533): one 1 MiB body bound, its values counted |
 | The pre-sign-in body bounds | 4 KiB, 16 KiB, 256 KiB by entry point | the API's 1 MiB (#533); ~32 KiB pending |
@@ -494,4 +577,4 @@ it ends at 30 s with the app's.
 | KMS's 8 calls at once | slots handed from one request to the next | pending the KMS measurement (placeholder in 2.4) |
 
 What a deployment writes after all of this: its wiring, as today, and
-`policy.ts`, nine fields, each with a default it can leave alone.
+`policy.ts`, ten fields, each with a default it can leave alone.
