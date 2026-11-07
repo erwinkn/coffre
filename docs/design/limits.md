@@ -7,6 +7,11 @@ lock waits) landed in #503 and #508. Erwin's answers of 2026-11-06 are in
 the rest of the document is the proposal as reviewed, marked where a
 decision changed it.
 
+**For Erwin's config review (D172), read [config.md](config.md) first:** the
+one config object a deployment writes, every value derived from it or fixed,
+the questions still open with a recommendation each, and what goes. This
+file stays the audit behind it.
+
 Rule R70 (Erwin, 2026-11-04): every cap, queue, timeout or rate limit
 traces to a real constraint (platform, database pool or timeouts,
 protocol) or to a policy Erwin set, with its source written beside it.
@@ -789,9 +794,12 @@ what a caller sends.
   every app and vault isolate holds and parses then reaches ~29.5 MB per
   isolate, out of Workers' 128 MB. Documented in [roles.md](roles.md).
 
-#533 also replaces the CI sign-in's CPU accounting (`SIGN_IN_WORK_NS` and the
-claim-matching budget, as of its head `b8dc8c73`) with one bound of ~32 KiB
-on the bytes read before sign-in.
+One pre-sign-in byte bound of ~32 KiB, in place of the CI sign-in's CPU
+accounting (`SIGN_IN_WORK_NS`, 16 ms, and the claim-matching budget), was
+agreed for #533. Its head `b8dc8c73` does not have it yet: there, every body
+read before sign-in takes the API's 1 MiB (`API_BODY_BYTES`), and a sign-in
+spends from `SIGN_IN_WORK_NS`. [config.md](config.md) section 2.7 carries it
+as pending.
 
 ## 4. The inventory
 
