@@ -31,7 +31,7 @@ test('--all selects every step, and each is a job of validate.yml', () => {
 test('a diff-free change selects only what every change needs', () => {
   const steps = list('--base', 'HEAD')
   for (const name of ['action', 'pins', 'checks']) assert.equal(steps[name], 'every change')
-  for (const name of ['tests', 'matrices', 'formal', 'workers', 'terraform']) assert.match(steps[name], /not needed/)
+  for (const name of ['tests', 'matrices', 'formal', 'workers', 'terraform']) assert.match(steps[name], /not run: diff does not touch it/)
 })
 
 test('--only and --skip name known steps', () => {
@@ -70,22 +70,22 @@ const selected = (change) => {
 test('a change to the script a step runs selects the step', () => {
   const terraform = selected((dir) => writeFileSync(join(dir, 'scripts/terraform-provider.sh'), '# changed'))
   assert.match(terraform.terraform, /terraform-provider\.sh changed/)
-  assert.match(terraform.consumer, /not needed/)
+  assert.match(terraform.consumer, /not run: diff does not touch it/)
   for (const file of ['consumer-test.sh', 'client-smoke.cjs']) {
     const steps = selected((dir) => writeFileSync(join(dir, 'scripts', file), '# changed'))
     assert.match(steps.consumer, new RegExp(`${file.replace('.', '\\.')} changed`))
-    assert.match(steps.terraform, /not needed/)
+    assert.match(steps.terraform, /not run: diff does not touch it/)
   }
 })
 
 test('a change to a root package.json entry selects the steps that name it, the rest of it every package step', () => {
   const entry = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ 'test:terraform': './scripts/terraform-provider.sh --unit' })))
   assert.match(entry.terraform, /root script test:terraform changed/)
-  assert.match(entry.consumer, /not needed/)
+  assert.match(entry.consumer, /not run: diff does not touch it/)
   const build = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ build: 'false' })))
   assert.match(build.consumer, /root script build changed/)
   assert.match(build.terraform, /root script build changed/)
-  assert.match(build.schema, /not needed/)
+  assert.match(build.schema, /not run: diff does not touch it/)
   const deps = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ top: { dependencies: { a: '1.0.0' } } })))
   for (const name of ['terraform', 'consumer', 'schema', 'compat', 'matrices']) assert.match(deps[name], /package\.json changed/)
 })

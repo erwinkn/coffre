@@ -10,8 +10,9 @@
 //   pnpm validate --all            every step but the image
 //   pnpm validate --full-formal    also TLC, even when no model changed
 //   pnpm validate --base <rev>     the revision the change is on (default origin/main)
-//   pnpm validate --skip a,b       leave steps out (reported as skipped, so the summary says so)
-//   pnpm validate --only a,b       just these steps
+//   pnpm validate --skip a,b       leave steps out; one the diff needs is OMITTED and the
+//                                  summary reads PARTIAL (exit 1), never pass
+//   pnpm validate --only a,b       just these steps (the others are left out the same way)
 //   pnpm validate --list           the steps and why each runs, running none
 //   pnpm validate --out <file>     also write the summary there
 //   pnpm validate --keep-db        leave the Postgres it started running
@@ -28,7 +29,7 @@
 // the release's (Validate on the tagged commit runs it).
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -38,7 +39,9 @@ const root = resolve(import.meta.dirname, '..')
 /** What a diff has to touch for a step to run; the rest is the diff's own. */
 const code = (f) => !/\.md$/.test(f) && !f.startsWith('docs/')
 const anyOf = (...prefixes) => (f) => prefixes.some((p) => f.startsWith(p))
-const packages = anyOf('packages/', 'examples/', 'dev/', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.node-version')
+// What every install and every step that runs workspace code depends on.
+const manifests = anyOf('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.node-version')
+const packages = (f) => anyOf('packages/', 'examples/', 'dev/')(f) || manifests(f)
 const formalModel = (f) =>
   /^formal\/[^/]+\.(tla|cfg)$/.test(f) ||
   ['scripts/formal.sh', 'scripts/formal-trace.mjs'].includes(f)
@@ -74,19 +77,19 @@ const STEPS = [
     name: 'matrices',
     job: 'matrices-shard',
     postgres: true,
-    needs: (f) => anyOf('packages/vault/', 'packages/server/', 'packages/core/', 'packages/db/', 'package.json', 'scripts/matrix')(f),
+    needs: (f) => anyOf('packages/vault/', 'packages/server/', 'packages/core/', 'packages/db/', 'scripts/matrix', 'docker-compose.yml')(f) || manifests(f),
     // CI splits these over eight runners; one machine runs them whole (about three quarters of an hour on Postgres).
     run: ['pnpm test:matrices', 'pnpm test:matrices:sqlite'],
   },
-  { name: 'schema', job: 'schema', postgres: true, needs: anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'package.json', 'scripts/setup-test-database', 'scripts/test-setup', 'scripts/test-backup-role', 'docker-compose.yml'), run: ['pnpm test:schema'] },
+  { name: 'schema', job: 'schema', postgres: true, needs: (f) => anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'scripts/setup-test-database', 'scripts/test-setup', 'scripts/test-backup-role', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:schema'] },
   { name: 'formal', job: 'formal', needs: formalModel, run: ['./scripts/formal.sh --workers 4 --heap 4g'], full: true },
-  { name: 'proofs', job: 'proofs', needs: leanInputs, run: ['pnpm formal:lean'] },
+  { name: 'proofs', job: 'proofs', needs: (f) => leanInputs(f) || manifests(f), run: ['pnpm formal:lean'] },
   { name: 'workers', job: 'workers', build: true, postgres: true, browser: true, needs: packages, run: [`pnpm conformance:workers --browser ${BROWSER}`] },
   { name: 'node', job: 'node', build: true, browser: true, needs: packages, run: [`pnpm conformance:node --browser ${BROWSER}`] },
-  { name: 'terraform', job: 'terraform', build: true, needs: (f) => anyOf('terraform-provider/', 'packages/server/', 'packages/conformance/', 'package.json')(f), run: ['pnpm test:terraform'] },
+  { name: 'terraform', job: 'terraform', build: true, needs: (f) => anyOf('terraform-provider/', 'packages/server/', 'packages/conformance/')(f) || manifests(f), run: ['pnpm test:terraform'] },
   // The consumer script starts Postgres itself (ensure-postgres.sh), so it gets this run's.
   { name: 'consumer', job: 'consumer', build: true, postgres: true, needs: (f) => packages(f) || f === 'scripts/client-smoke.cjs', run: ['pnpm test:consumer'] },
-  { name: 'compat', job: 'compat', postgres: true, needs: anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'packages/conformance/', 'package.json', 'scripts/compat'), run: ['pnpm test:compat'] },
+  { name: 'compat', job: 'compat', postgres: true, needs: (f) => anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'packages/conformance/', 'scripts/compat', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:compat'] },
 ]
 
 const { values: opt } = parseArgs({
@@ -152,36 +155,88 @@ if (diffFiles.includes('package.json')) {
   for (const name of new Set([...Object.keys(before), ...Object.keys(after)])) if (before[name] !== after[name]) changed.push(`root script ${name}`)
 }
 
-// What a step runs: the pnpm scripts its commands name and the script files those
-// (and the commands themselves) call.
+// What a step runs: the pnpm scripts its commands name (and those they name), the
+// script files all of these call, and the files those call in turn (a wrapper runs
+// test-databases.mjs without the step's command naming it). A file counts as called
+// when another's text holds its name; reading too much only runs a step more often.
 const scriptFiles = (text) => [...text.matchAll(/(?:^|[\s'"=])(?:\.\/)?(scripts\/[A-Za-z0-9_./-]+)/g)].map((m) => m[1])
 const rootScripts = manifest(head).scripts ?? {}
+const tracked = git('ls-files', 'scripts').split('\n').filter(Boolean)
+const readTracked = (file) => {
+  try {
+    return readFileSync(resolve(root, file), 'utf8')
+  } catch {
+    return ''
+  }
+}
 const inputsOf = (step) => {
   const scripts = new Set(step.build ? ['build'] : [])
-  const files = new Set()
-  for (const command of step.run) {
-    for (const m of command.matchAll(/\bpnpm ([a-z][\w:-]*)/g)) if (rootScripts[m[1]]) scripts.add(m[1])
-    for (const file of scriptFiles(command)) files.add(file)
+  const texts = [...step.run]
+  const queue = [...texts]
+  while (queue.length) {
+    for (const m of queue.pop().matchAll(/\bpnpm (?:run )?([a-z][\w:-]*)/g)) {
+      if (rootScripts[m[1]] && !scripts.has(m[1])) {
+        scripts.add(m[1])
+        queue.push(rootScripts[m[1]])
+      }
+    }
   }
-  for (const name of scripts) for (const file of scriptFiles(rootScripts[name])) files.add(file)
+  for (const name of scripts) texts.push(rootScripts[name])
+  const files = new Set(texts.flatMap(scriptFiles))
+  const pending = [...files]
+  while (pending.length) {
+    const text = readTracked(pending.pop())
+    for (const other of tracked) {
+      if (files.has(other)) continue
+      const name = other.slice('scripts/'.length)
+      const escaped = [name, name.split('/').pop()].map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      if (escaped.some((n) => new RegExp(`(^|[^\\w.-])${n}($|[^\\w-])`).test(text))) {
+        files.add(other)
+        pending.push(other)
+      }
+    }
+  }
   return { scripts, files }
 }
 
-const decide = (step) => {
-  if (only.size) return only.has(step.name) ? 'only' : null
-  if (skip.has(step.name)) return null
-  if (opt.all) return '--all'
-  if (step.full && opt['full-formal']) return '--full-formal'
+// Whether the diff needs a step, apart from what the flags choose.
+const needed = (step) => {
   if (!step.needs) return 'every change'
   const { scripts, files } = inputsOf(step)
   const hit = changed.find((f) => step.needs(f) || files.has(f) || (f.startsWith('root script ') && scripts.has(f.slice(12))))
   return hit ? `${hit} changed` : null
 }
-const plan = STEPS.map((step) => ({ step, why: decide(step) }))
+const decide = (step) => {
+  if (only.size) return only.has(step.name) ? 'only' : null
+  if (skip.has(step.name)) return null
+  if (opt.all) return '--all'
+  if (step.full && opt['full-formal']) return '--full-formal'
+  return needed(step)
+}
+const plan = STEPS.map((step) => ({ step, why: decide(step), need: needed(step) }))
+// Why a step is not run: left out by a flag (and the diff needs it, or not), or the diff does not touch it.
+const omission = ({ step, need }) => {
+  const flag = skip.has(step.name) ? '--skip' : only.size ? '--only' : null
+  if (!flag) return { status: 'skipped', why: 'diff does not touch it' }
+  return need ? { status: 'OMITTED', why: `${flag}, though ${need}` } : { status: 'skipped', why: `${flag}; the diff does not touch it` }
+}
 
 if (opt.list) {
-  for (const { step, why } of plan) console.log(`${step.name.padEnd(10)} ${why ?? 'not needed by this diff'}`)
+  for (const entry of plan) console.log(`${entry.step.name.padEnd(10)} ${entry.why ?? `not run: ${omission(entry).why}`}`)
   process.exit(0)
+}
+
+// The client is smoke-tested on each Node binary COFFRE_CLIENT_NODES lists (space-separated;
+// unset, this one alone). CI covers 20, 22, 24 and 26: say which of them this run did not.
+const clientNodes = () => {
+  const majors = new Set()
+  for (const bin of (env.COFFRE_CLIENT_NODES || 'node').split(/\s+/).filter(Boolean)) {
+    try {
+      majors.add(Number(execFileSync(bin, ['--version'], { encoding: 'utf8' }).trim().replace(/^v/, '').split('.')[0]))
+    } catch {}
+  }
+  const missing = [20, 22, 24, 26].filter((n) => !majors.has(n))
+  return missing.length ? `; client smoke on Node ${[...majors].join(', ') || 'none'} only, not ${missing.join(', ')} (CI runs 20, 22, 24, 26)` : ''
 }
 
 const results = []
@@ -202,22 +257,53 @@ env.COFFRE_VALIDATE_BROWSER = browser
 // process group of its own, and the signal goes to the whole group.
 let active = null
 let interrupted = null
+// A step may start servers in groups of their own (conformance does), which a signal to
+// its group misses: the processes below it are signalled one by one, and any that
+// outlive the step are killed when it ends.
+const strays = new Set()
+const below = (pid) => {
+  let table = ''
+  try {
+    table = execFileSync('ps', ['-e', '-o', 'pid=,ppid='], { encoding: 'utf8' })
+  } catch {}
+  const children = new Map()
+  for (const line of table.split('\n')) {
+    const [p, pp] = line.trim().split(/\s+/).map(Number)
+    if (p) children.set(pp, [...(children.get(pp) ?? []), p])
+  }
+  const found = []
+  for (const queue = [pid]; queue.length; ) for (const c of children.get(queue.pop()) ?? []) found.push(c), queue.push(c)
+  return found
+}
+const kill = (pid, signal) => {
+  try {
+    process.kill(pid, signal)
+  } catch {}
+}
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(signal, () => {
     interrupted ??= signal
-    if (active) {
-      try {
-        process.kill(-active.pid, signal)
-      } catch {}
+    if (!active) return
+    for (const pid of below(active.pid)) {
+      strays.add(pid)
+      kill(pid, signal)
     }
+    kill(-active.pid, signal)
   })
+}
+const reap = async () => {
+  if (!strays.size) return
+  await new Promise((ok) => setTimeout(ok, 3000))
+  for (const pid of strays) kill(pid, 'SIGKILL')
+  strays.clear()
 }
 const sh = (command, extra = {}) =>
   new Promise((ok) => {
     const child = spawn('bash', ['-c', command], { cwd: root, stdio: 'inherit', env: { ...env, ...extra }, detached: true })
     active = child
-    child.on('exit', (code, signal) => {
+    child.on('exit', async (code, signal) => {
       active = null
+      await reap()
       ok(code ?? (signal ? 128 : 1))
     })
   })
@@ -269,9 +355,10 @@ try {
   }
 
   let built = false
-  for (const { step, why } of plan) {
+  for (const entry of plan) {
+    const { step, why } = entry
     if (!why) {
-      results.push({ name: step.name, status: 'skipped', why: skip.has(step.name) ? '--skip' : 'diff does not touch it' })
+      results.push({ name: step.name, ...omission(entry) })
       continue
     }
     if (interrupted) {
@@ -294,8 +381,7 @@ try {
       code = await sh(command, step.env)
       if (code !== 0) break
     }
-    // The client is smoke-tested on each Node COFFRE_CLIENT_NODES names; unset, on this one alone.
-    const partial = step.name === 'consumer' && !env.COFFRE_CLIENT_NODES ? `; client on Node ${process.version} only (CI: 20, 22, 24, 26)` : ''
+    const partial = step.name === 'consumer' ? clientNodes() : ''
     results.push({ name: step.name, status: interrupted ? 'interrupted' : code === 0 ? 'pass' : 'FAIL', why: `${why}${partial}`, seconds: Math.round((Date.now() - at) / 1000) })
   }
 } catch (error) {
@@ -312,8 +398,10 @@ if (headAfter !== head || dirty) results.push({ name: 'tree', status: 'FAIL', wh
 if (teardownFailed) results.push({ name: 'postgres', status: 'FAIL', why: 'not removed' })
 
 const ok = !interrupted && results.every((r) => r.status === 'pass' || r.status === 'skipped')
+const omitted = results.filter((r) => r.status === 'OMITTED').map((r) => r.name)
+const verdict = ok ? 'pass' : !interrupted && results.every((r) => r.status !== 'FAIL' && r.status !== 'interrupted') ? `PARTIAL, left out: ${omitted.join(', ')}` : 'FAIL'
 const summary = [
-  `## validate: ${ok ? 'pass' : 'FAIL'}${interrupted ? ` (${interrupted})` : ''}`,
+  `## validate: ${verdict}${interrupted ? ` (${interrupted})` : ''}`,
   '',
   `- commit \`${head}\``,
   `- tree \`${tree}\``,
