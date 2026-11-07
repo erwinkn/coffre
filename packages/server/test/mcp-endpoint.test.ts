@@ -13,7 +13,7 @@ import { decodeHeaderValue } from '../src/mcp/endpoint.ts';
 import { TOOL_BY_NAME, type Tool } from '../src/mcp/tools.ts';
 import { clientFor, contextFor } from './api-fixture.ts';
 import { auditLog } from './db/tables.ts';
-import { callRaw, calls, CLAUDE_CODE, client, connect, db, deps, DEV, entries, envelope, ORIGIN, raw, type Result, ROOT, route, sent, useMcp } from './mcp-fixture.ts';
+import { callRaw, CLAUDE_CODE, client, connect, db, deps, DEV, entries, envelope, ORIGIN, raw, type Result, ROOT, route, sent, useMcp } from './mcp-fixture.ts';
 
 useMcp(async () => {
   const root = clientFor(deps, ROOT);
@@ -118,25 +118,12 @@ test('the headers must say what the body does, or -32020; an unknown revision -3
   assert.equal(decodeHeaderValue('café'), null, 'a raw non-ASCII value is no header value');
 });
 
-test("a connection's calls pass its own limit", async () => {
+test("a connection's calls pass no limit of their own: 121 in a row, past 0.15's 120 a minute, each answered (W331, D177)", async () => {
   const token = await connect();
-  calls.open = false;
-  const limited = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope() } }, { 'mcp-name': 'whoami' });
-  assert.equal(limited.status, 429);
-  assert.equal(limited.headers.get('retry-after'), '60');
-  assert.equal((await raw(token, { method: 'tools/list', params: { _meta: envelope() } })).status, 200, 'listing is not a call');
-});
-
-test("a connection's limiter that fails refuses the call, and the log says so with the request's id", async (t) => {
-  const token = await connect();
-  const report = t.mock.method(console, 'error', () => {});
-  calls.open = 'broken';
-  const refused = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope() } }, { 'mcp-name': 'whoami' });
-  assert.equal(refused.status, 429);
-  const [message, detail] = report.mock.calls.at(-1)!.arguments as [string, { requestId: string; connectionId: string; error: { message: string } }];
-  assert.equal(message, 'mcp limiter failed');
-  assert.match(detail.requestId, /^[0-9a-f-]{36}$/);
-  assert.match(detail.error.message, /rate limiter unreachable/);
+  for (let i = 0; i < 121; i++) {
+    const called = await raw(token, { method: 'tools/call', params: { name: 'whoami', arguments: {}, _meta: envelope() } }, { 'mcp-name': 'whoami' });
+    assert.equal(called.status, 200, `call ${i + 1}`);
+  }
 });
 
 test("bad arguments are the tool's error, not a crash; an unknown tool is invalid params", async () => {

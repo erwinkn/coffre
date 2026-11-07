@@ -18,7 +18,7 @@ import {
   type GitHubAppOptions,
 } from '../src/identity/index.ts';
 
-const LIMITS = { perSource: { limit: async () => ({ success: true }) }, total: { limit: async () => ({ success: true }) } };
+const LIMITS = { perSource: { limit: async () => ({ success: true }) } };
 
 let idp: DevIdp;
 /** Every request the app made, by method and path. */

@@ -175,6 +175,7 @@ import {
   type SaveProxyInput,
   isConfirmation,
   type Confirmation,
+  DEFAULT_CONNECTIONS,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
 import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
@@ -377,8 +378,6 @@ async function keysOf(seeds: readonly Uint8Array[]) {
   return { signer: signers[0], signers, logKey: logKeys[0], logKeys, rowKey: rowKeys[0], rowKeys };
 }
 
-/** A pool's connections, unless its transport says (pg's default). */
-const DEFAULT_CONNECTIONS = 10;
 
 /**
  * The vault over `db`, and, for 0.15's uses, over `hot`, the hot path's own
@@ -3699,7 +3698,7 @@ class VaultService implements Vault {
       // For an app of 0.5 while it runs beside this vault: there are none, and its lists and checks need the field.
       rootAdmins: [],
       // With it, the vault makes sign-ins through bindings and revokes credentials itself (credentials.ts).
-      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, sealing: true as const, credentials: true as const, issues: true as const, binds: true as const }),
+      ...(this.#prepared.log015 === null ? {} : { log: '0.15' as const, sealing: true as const, credentials: true as const, issues: true as const, binds: true as const, sweeps: true as const }),
       // 0.15's uses need its log and the hot path's login: the app opens values through them only then (`use`).
       // A request's several keys in one call too (`useMany`, T167), said so that an app newer than its vault asks for it
       // only of a vault that has it.
@@ -4555,8 +4554,10 @@ class VaultService implements Vault {
     if ('refused' in call) return { ok: false, refused: call.refused };
     const answer = await changeBindings(this.#db, call);
     if (answer.number == null) return { ok: false, refused: answer.state as ChangeBindingsRefusal };
-    // Only rows the log never held were ended: no change of the log's to wait for.
-    if (answer.number === '0') return { ok: true, number: '0', witnessed: null };
+    // Only rows the log never held were ended: no change of the log's to wait for. A sweep waits for no seal either: the
+    // end that follows it waits for its own, which seals the log's prefix, these changes with it (R51; Unbinding.tla). But
+    // one that makes a replacement's binding, which its request answers made, waits for that.
+    if (answer.number === '0' || (call.sweep && call.make === null)) return { ok: true, number: answer.number, witnessed: null };
     const sealedAt = await log015.sealThrough(BigInt(answer.number));
     return { ok: true, number: answer.number, witnessed: sealedAt.witnessed ?? null };
   }

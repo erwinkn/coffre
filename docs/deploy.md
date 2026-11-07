@@ -1086,19 +1086,26 @@ ProjectsPage })`; coffre has no helper of its own for it.
 A service can be trusted to sign in with the ID token a CI platform signs
 for each run, instead of a token kept in the CI's secrets
 ([design](design/oidc.md)). A deployment `coffre init` writes has it on,
-and trusts no run until an owner makes a binding for it. An exchange always
-passes two limits first, per source address and in total, which the
-deployment provides. An older deployment adds them as below;
-leaving `workloads` out turns it off. `ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT`,
+and trusts no run until an owner makes a binding for it. A sign-in always
+passes one limit first, the requests its source address made to that entry
+point (`/api/auth/oidc`, `/api/auth/workload`, each counted apart), which
+the deployment provides: 10,000 per 10 seconds, 1,000 a second, the CI
+sign-in rate coffre is built for, which a fleet behind one NAT sends from
+one address. An older deployment adds it as below; leaving `workloads` out
+turns it off. Nothing else counts sign-ins: a binding takes as many as its
+runs ask, each ID token buying one session. AWS-proof sign-ins also spend
+the workload's own STS quota, 600 a second per account and Region (each is
+one `GetCallerIdentity`, signed by the workload): a fleet that signs in
+faster from one account and Region asks AWS to raise it. `ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT`,
 in the examples, is for conformance: an instance whose public URL is not
 loopback refuses to start with it set.
 
-On Workers, two rate-limiting bindings in `app/wrangler.jsonc`:
+On Workers, a rate-limiting binding in `app/wrangler.jsonc`, which MCP's
+OAuth requests pass too:
 
 ```jsonc
 "ratelimits": [
-  { "name": "WORKLOADS_PER_SOURCE", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
-  { "name": "WORKLOADS_TOTAL", "namespace_id": "1002", "simple": { "limit": 300, "period": 60 } }
+  { "name": "SIGN_IN_PER_SOURCE", "namespace_id": "1006", "simple": { "limit": 10000, "period": 10 } }
 ],
 ```
 
@@ -1107,16 +1114,20 @@ and in `app/src/coffre.ts`:
 ```ts
 auth: signin({
   providers: [/* … */],
-  workloads: { limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL } },
+  workloads: { limits: { perSource: env.SIGN_IN_PER_SOURCE } },
 }),
 ```
 
-Cloudflare counts each limit per location, so a flood from many places can
-reach the limit times the locations it comes through. On Node,
-`processLimits()` from `@coffre/server/node` counts per process:
+Cloudflare counts the limit per location, approximately, and takes a
+`period` of 10 or 60 seconds; a flood from many places can reach the limit
+times the locations it comes through. On Node, `processLimits()` from
+`@coffre/server/node` counts per process, 10,000 per 10 seconds unless
+`perSource` says otherwise:
 
 ```ts
-workloads: { limits: processLimits({ perSource: 30, total: 300 }) },
+const limits = processLimits();
+// …
+workloads: { limits },
 ```
 
 Then an owner trusts a workflow on a service's page, under "Trusted
@@ -1434,32 +1445,25 @@ does not hold. Escrow it with the vault keys.
 Claude and other MCP clients connect at `<PUBLIC_URL>/mcp` as the people
 who approve them ([mcp.md](mcp.md), [design](design/mcp.md)). A deployment
 `coffre init` writes has it on; leaving `mcp` out turns it off, and `/mcp`
-and its metadata then answer 404. It needs coffre's own sign-in, and three
-limits: OAuth's token and registration requests pass one per source address
-and one in total before any work, as CI runs' exchanges do, and each
-connection's calls pass one of their own. A deployment from before 0.4
-gains MCP's route files from `coffre update`, and adds these itself.
+and its metadata then answer 404. It needs coffre's own sign-in, and the
+limit per source address CI sign-ins pass ([above](#ci-runs-without-a-stored-token)):
+OAuth's registration, token and revocation requests, and an authorization
+that fetches a client's metadata, pass it before any work, each endpoint
+counted apart. A connection's tool calls pass none: it acts as the person
+who approved it. A deployment from before 0.4 gains MCP's route files from
+`coffre update`, and adds this itself.
 
-On Workers, three more rate-limiting bindings in `app/wrangler.jsonc`:
-
-```jsonc
-{ "name": "MCP_PER_SOURCE", "namespace_id": "1003", "simple": { "limit": 30, "period": 60 } },
-{ "name": "MCP_PER_CONNECTION", "namespace_id": "1004", "simple": { "limit": 120, "period": 60 } },
-{ "name": "MCP_TOTAL", "namespace_id": "1005", "simple": { "limit": 300, "period": 60 } }
-```
-
-and in `app/src/coffre.ts`, beside `workloads`:
+On Workers, the same `SIGN_IN_PER_SOURCE` binding, in `app/src/coffre.ts`
+beside `workloads`:
 
 ```ts
-mcp: {
-  limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
-},
+mcp: { limits: { perSource: env.SIGN_IN_PER_SOURCE } },
 ```
 
-On Node:
+On Node, the same `processLimits()`:
 
 ```ts
-mcp: { limits: processLimits({ perSource: 30, perConnection: 120, total: 300 }) },
+mcp: { limits },
 ```
 
 claude.ai and Claude Desktop connect from Anthropic's servers, which must

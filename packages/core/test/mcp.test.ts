@@ -89,15 +89,18 @@ test('a registration keeps what coffre accepts and drops the rest, unless nothin
   assert.throws(() => registrationRedirects('https://a.example/cb'), ClientInvalid);
 });
 
-test('signin({ mcp }) needs its three limits, and loopback clients only on a loopback instance', () => {
+test('signin({ mcp }) needs its limit per source, and loopback clients only on a loopback instance', () => {
   const limiter: RateLimiter = { limit: async () => ({ success: true }) };
-  const limits = { perSource: limiter, perConnection: limiter, total: limiter };
+  const limits = { perSource: limiter };
   const providers = [github({ clientId: 'id', clientSecret: 'secret' })];
   const on = signin({ providers, mcp: { limits } }).resolve('https://secrets.acme.example');
   assert.equal(on.mode === 'signin' && on.signin.mcp?.allowLoopback, false);
   const none = signin({ providers }).resolve('https://secrets.acme.example');
   assert.equal(none.mode === 'signin' && none.signin.mcp, null);
-  assert.throws(() => signin({ providers, mcp: { limits: { perSource: limiter, total: limiter } as never } }), /mcp needs its limits/);
+  assert.throws(() => signin({ providers, mcp: { limits: { total: limiter } as never } }), /mcp needs its limit per source/);
+  // 0.15's other two limits are still taken, for a deployment not yet changed (W331, D177), and read no more.
+  const old = signin({ providers, mcp: { limits: { perSource: limiter, perConnection: limiter, total: limiter } } }).resolve('https://secrets.acme.example');
+  assert.deepEqual(old.mode === 'signin' && old.signin.mcp?.limits, { perSource: limiter });
   assert.throws(
     () => signin({ providers, mcp: { limits, allowLoopbackClientsForDevelopment: true } }).resolve('https://secrets.acme.example'),
     /allowLoopbackClientsForDevelopment is for an instance on loopback/,

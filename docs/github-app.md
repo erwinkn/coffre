@@ -114,7 +114,7 @@ const app = env.GITHUB_APP_ID ? githubApp({ ...client, appId: env.GITHUB_APP_ID,
 
 auth: signin({
   providers: [app ? github({ app }) : github(client)],
-  workloads: { limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL }, github: app },
+  workloads: { limits: { perSource: env.SIGN_IN_PER_SOURCE }, github: app },
 }),
 ```
 

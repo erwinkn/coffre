@@ -32,6 +32,8 @@ import { pluginRoute } from './plugins.ts';
 import { ObjectMoved, vaultSaysSealing } from './api/changes.ts';
 import { watchOf, type CoffreRuntime } from './runtime.ts';
 import { cspNonce, setSecurityHeaders } from './security-headers.ts';
+import { SCHEDULE_MINUTES } from './schedule.ts';
+import { SIGN_INS_PER_SECOND } from './workloads/limits.ts';
 
 
 type Handler = (request: Request, runtime: CoffreRuntime, sourceIp: string | null) => Promise<Response>;
@@ -344,10 +346,14 @@ function refusedKey(runtime: CoffreRuntime, reason: string): void {
 }
 
 /**
- * Spent tokens forgotten a beat: a beat every five minutes forgets up to
- * 60,000 an hour, where one binding's exchanges spend at most 3,600.
+ * Spent tokens forgotten a beat, in one call: twice what R44's 1,000
+ * sign-ins a second spend in one (600,000 a five-minute beat), so a beat
+ * keeps up and a backlog from beats missed drains. One scan of the table
+ * finds them and they go by `ctid` (migration 0077): on the 7.5 million
+ * records two hours at that rate leaves, measured on the compose
+ * Postgres, under a second. The table then holds 1.4 GB with its index.
  */
-export const SPENT_TOKENS_PER_BEAT = 5000;
+export const SPENT_TOKENS_PER_BEAT = 2 * SIGN_INS_PER_SECOND * SCHEDULE_MINUTES * 60;
 
 /**
  * Readiness: the database migrated, and, with an audit watch, what it says
@@ -444,10 +450,17 @@ export async function runScheduled(runtime: CoffreRuntime): Promise<void> {
   );
   // After the beat, which a failed prune never holds back, and reported as the run's failure too.
   const pruned = await pruneSpentTokens(runtime.db, SPENT_TOKENS_PER_BEAT).then(() => null, (error: Error) => error);
+  // A removal a request left under way, gone on with (W331, A'): a closed binding signs nobody in, but what it issued
+  // serves until revoked. On a Worker, as far as this run's own budget goes (removal.ts); the next beat goes on.
+  const removed = runtime.workloads === null ? null : await runtime.workloads.resumeRemovals().then(
+    ({ failed }) => (failed.length === 0 ? null : new Error(failed.map(({ id, error }) => `${id}: ${error}`).join('; '))),
+    (error: Error) => error,
+  );
   if (!watched) throw new Error('scheduled audit heartbeat failed');
   // An empty log has nothing to sign: no failure without a watch, whose beat is an entry.
   if (signed !== null && watch === null && !(await logIsEmpty(runtime))) throw new Error(`the vault did not checkpoint the audit log: ${signed}`);
   if (pruned !== null) throw new Error(`spent tokens could not be pruned: ${pruned.message}`);
+  if (removed !== null) throw new Error(`a binding's removal could not be gone on with: ${removed.message}`);
 }
 
 const told = new WeakSet<object>();

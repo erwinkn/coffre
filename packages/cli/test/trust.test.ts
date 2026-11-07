@@ -169,9 +169,14 @@ test('a plan and a list show every claim in full', () => {
   );
   assert.equal(describeBindings('token:api-deploy', []), "service:api-deploy trusts no CI runs or workloads: none signs in as it by OIDC or a platform's proof\n");
   const listed = describeBindings('token:api-deploy', [
-    { ...plan, id: 'b1', label: 'prod', createdAt: '2026-10-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
-    { ...plan, scope: null, id: 'b0', label: null, createdAt: '2026-09-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null },
+    { ...plan, id: 'b1', label: 'prod', createdAt: '2026-10-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null, removing: null },
+    {
+      ...plan, scope: null, id: 'b0', label: null, createdAt: '2026-09-03T22:00:00.000Z', createdBy: 'lead@acme.example', lastUsedAt: null,
+      removing: { since: '2026-11-06T09:30:12.000Z', by: 'lead@acme.example' },
+    },
   ]);
+  // A removal longer than one request, its binding closed (W331): said under its head.
+  assert.match(listed, /\nb0  \(added by lead@acme.example 2026-09-03, never used\)\nbeing removed since 2026-11-06 09:30: refused already, its credentials still being revoked\n  profile/);
   assert.match(listed, /^b1  prod  \(added by lead@acme.example 2026-10-03, never used\)\n  profile  github\n/);
   assert.match(listed, /\n  reaches  all its account holds\n$/, 'one of 0.4 the app has not sealed yet');
 });

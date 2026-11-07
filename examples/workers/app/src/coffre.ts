@@ -19,15 +19,10 @@ export type Env = {
   /** The GitHub App's ID, a var, and private key, a secret: with them, it lists your repositories too (docs/github-app.md). */
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
-  /** What every CI run's exchange passes first: app/wrangler.jsonc's rate-limiting bindings. */
-  WORKLOADS_PER_SOURCE: RateLimit;
-  WORKLOADS_TOTAL: RateLimit;
+  /** What every sign-in that takes anyone passes first, a CI run's and an MCP client's: app/wrangler.jsonc's rate-limiting binding. */
+  SIGN_IN_PER_SOURCE: RateLimit;
   /** Set by conformance only: a binding's issuer may then be plain HTTP on loopback. Refused unless PUBLIC_URL is loopback too. */
   ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT?: string;
-  /** What MCP clients' OAuth requests pass first, and each connection's tool calls: the same file's bindings. */
-  MCP_PER_SOURCE: RateLimit;
-  MCP_PER_CONNECTION: RateLimit;
-  MCP_TOTAL: RateLimit;
   /** The Durable Object that hosts plugins' WebSockets, `CoffreSockets` (src/server.ts): the credential proxy's database tunnel. */
   SOCKETS: SocketsNamespace;
   /** The Durable Object that holds each workload's gate, `CoffreGates` (src/server.ts). */
@@ -54,14 +49,14 @@ export const coffre = createCoffre((env: Env) => {
       // leaves them key-bound sessions only (docs/design/workload-access.md,
       // section 6.3).
       workloads: {
-        limits: { perSource: env.WORKLOADS_PER_SOURCE, total: env.WORKLOADS_TOTAL },
+        limits: { perSource: env.SIGN_IN_PER_SOURCE },
         allowLoopbackIssuersForDevelopment: env.ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT === 'true',
         github: app,
       },
       // MCP clients, Claude among them, may connect at <PUBLIC_URL>/mcp as the
       // people who approve them (docs/mcp.md). Remove this to turn it off.
       mcp: {
-        limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL },
+        limits: { perSource: env.SIGN_IN_PER_SOURCE },
       },
     }),
     auditChainKey: env.APP_KEY,

@@ -5,9 +5,11 @@
 (* issue and a revoke are each one vault call, beside the uses.            *)
 (*                                                                         *)
 (*   sign-in  one statement: the account's row shared, the binding's row   *)
-(*            exclusive, the binding, the account, the rate and the ID     *)
-(*            token weighed on them, the token spent, the credential       *)
-(*            written and numbered under the issue lock, the commit.       *)
+(*            shared too (FOR KEY SHARE), the binding, the account and the *)
+(*            ID token weighed on them, the token spent, the credential    *)
+(*            written, the binding's last use stamped at most once a       *)
+(*            minute, the change numbered under the issue lock, the        *)
+(*            commit. No count of the binding's sign-ins (W331, D177).     *)
 (*   issue    a token a person gives a service account: the vault reads    *)
 (*            the issuer's objects and the policy and decides (statement   *)
 (*            1, no lock), then writes only while they are still what it   *)
@@ -31,9 +33,8 @@
 (*           token that reads sensitive values (R32), on her session cA;   *)
 (*           or binding b3 for it, which signs its runs in to the same:    *)
 (*           the vault weighs and writes it as it does a token (PR 3a);    *)
-(*   s1, s2  two CI runs signing in as svc through binding "b", which      *)
-(*           makes at most Rate credentials a window, each with an ID      *)
-(*           token (the same one, replayed, or two);                       *)
+(*   s1, s2  two CI runs signing in as svc through binding "b", each with  *)
+(*           an ID token (the same one, replayed, or two), at once;        *)
 (*   ub      a manager unbinding "b";                                      *)
 (*   admin   demotes Ada, or removes svc, or removes and admits it again;  *)
 (*   pol     an Owner's policy change that takes from Ada, by her role,    *)
@@ -51,7 +52,6 @@ EXTENDS Naturals, FiniteSets, TLC
 CONSTANTS
     Procs,          \* the processes of the scenario (MCLifecycle.tla)
     Ops,            \* Ops[p]: what process p may do, one of them
-    Rate,           \* how many credentials the binding makes a window
     \* The bindings whose issuer publishes its keys, which the vault does not
     \* fetch (it asks no issuer anything): the app verifies their
     \* tokens, and the vault takes its word. A binding of keys uploaded with
@@ -93,10 +93,19 @@ CONSTANTS
     \* A use refuses a credential issued at an earlier generation of its
     \* account (W242, T145).
     UseChecksGeneration,
-    \* A sign-in holds the binding's row exclusive while it weighs the
-    \* binding and its rate: another sign-in through it, or its unbind,
-    \* waits.
+    \* A sign-in holds the binding's row while it weighs the binding, to its
+    \* commit: an unbind of it waits, or is seen.
     BindingLocked,
+    \* ... shared (FOR KEY SHARE), so another sign-in through it never waits
+    \* (R44; W331): off, exclusive (FOR UPDATE), as before W331.
+    SignInsShare,
+    \* An unbind takes the binding's row exclusive (FOR UPDATE), which waits
+    \* for every sign-in holding it: off, it takes the row as a sign-in does.
+    UnbindExclusive,
+    \* A sign-in stamps the binding's last use only when a minute old, and
+    \* skips it when another holds the row's update (SKIP LOCKED): off, it
+    \* waits for that one's commit, then finds the stamp fresh.
+    TouchSkipsLocked,
     \* An unbind sweeps what the binding issued only once it holds the
     \* binding's row (its update comes first).
     SweepAfterLock,
@@ -167,7 +176,9 @@ VARIABLES
     hd,         \* 0.14's head (an admin's change, an unbind)
     mx, ms,     \* members' rows: exclusive holder, shared holders
     cx, cs,     \* credentials' rows: exclusive holder, shared holders
-    bx,         \* binding b's row
+    bx, bs,     \* binding b's row: its exclusive holder (FOR UPDATE), its sharers (FOR KEY SHARE)
+    bu,         \* and the holder of its update (FOR NO KEY UPDATE: its last use stamped), which its sharers share
+    due,        \* whether b's last use is a minute old: its first sign-ins find it so; a minute passing again is the same race
     ix, is,     \* the issue lock (0026): its exclusive holder, its shared holders
     bindings,   \* the binding rows: b, b2 once evil writes it, b3 once Ada's bind commits
     bsealed,    \* the bindings the vault sealed: b, and b3 once Ada's bind commits
@@ -181,14 +192,14 @@ VARIABLES
     dems,       \* each policy change committed: Ada's demotion, her right narrowed by the policy, or the revoker's taken away; its number
     used        \* each use decided
 
-locks == <<fx, fs, hd, mx, ms, cx, cs, bx, ix, is>>
-vars == <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, pc, op, l, handed, answered, given, revs, dems, used>>
+locks == <<fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is>>
+vars == <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, pc, op, l, handed, answered, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 (* Locks *)
 
 Holds(p) ==
-    \/ fx = p \/ p \in fs \/ hd = p \/ bx = p \/ ix = p \/ p \in is
+    \/ fx = p \/ p \in fs \/ hd = p \/ bx = p \/ p \in bs \/ bu = p \/ ix = p \/ p \in is
     \/ \E m \in Members : mx[m] = p \/ p \in ms[m]
     \/ \E c \in Creds : cx[c] = p \/ p \in cs[c]
 
@@ -203,6 +214,8 @@ Release(p) ==
     /\ cx' = [c \in Creds |-> IF cx[c] = p THEN None ELSE cx[c]]
     /\ cs' = [c \in Creds |-> cs[c] \ {p}]
     /\ bx' = IF bx = p THEN None ELSE bx
+    /\ bs' = bs \ {p}
+    /\ bu' = IF bu = p THEN None ELSE bu
     /\ ix' = IF ix = p THEN None ELSE ix
     /\ is' = is \ {p}
 
@@ -243,7 +256,8 @@ Init ==
     /\ status = "active"
     /\ gen = 0
     /\ next = 1
-    /\ fx = None /\ fs = {} /\ hd = None /\ bx = None /\ ix = None /\ is = {}
+    /\ fx = None /\ fs = {} /\ hd = None /\ bx = None /\ bs = {} /\ bu = None /\ ix = None /\ is = {}
+    /\ due = TRUE
     /\ mx = [m \in Members |-> None] /\ ms = [m \in Members |-> {}]
     /\ cx = [c \in Creds |-> None] /\ cs = [c \in Creds |-> {}]
     /\ bindings = {"b"}
@@ -273,7 +287,7 @@ UseStart(u) ==
     /\ pc[u] = "start"
     /\ \E tok \in handed : l' = [l EXCEPT ![u].tok = tok]
     /\ Goto(u, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 \* Which revokes had answered when the use began: none of theirs may serve it.
 UseFence(u) ==
@@ -282,7 +296,7 @@ UseFence(u) ==
     /\ fs' = fs \cup {u}
     /\ l' = [l EXCEPT ![u].before = answered]
     /\ Goto(u, "read")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, hd, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseRead(u) ==
     /\ pc[u] = "read"
@@ -299,21 +313,21 @@ UseRead(u) ==
                     /\ "sens" \in row.scope
        IN l' = [l EXCEPT ![u] = [@ EXCEPT !.c = c, !.ok = allow, !.w = row, !.gen = GenOf(row.who)]]
     /\ Goto(u, "number")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseNumber(u) ==
     /\ pc[u] = "number"
     /\ l' = [l EXCEPT ![u].n = next]
     /\ next' = next + 1
     /\ Goto(u, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UseCommit(u) ==
     /\ pc[u] = "commit"
     /\ used' = used \cup {[c |-> l[u].c, tok |-> l[u].tok, row |-> l[u].w, seal |-> IF l[u].c = None THEN NoRow ELSE sealed[l[u].c],
                            gen |-> l[u].gen, n |-> l[u].n, allow |-> l[u].ok, before |-> l[u].before]}
     /\ Done(u)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems>>
 
 -----------------------------------------------------------------------------
 (* A token: Ada, on her session cA, gives svc sensitive reads; or the app's
@@ -328,7 +342,7 @@ IssueRead(p) ==
        THEN /\ l' = [l EXCEPT ![p] = [@ EXCEPT !.owner = owner, !.cA = rows["cA"], !.gen = gen]]
             /\ Goto(p, "rows")
        ELSE /\ Goto(p, "done") /\ UNCHANGED l
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, handed, answered, given, revs, dems, used>>
 
 \* Statement 2: Ada's row and her credential's, svc's, shared; then, with IssuePolicyHeld, the issue lock.
 IssueRows(p) ==
@@ -338,7 +352,7 @@ IssueRows(p) ==
     /\ ms' = [m \in Members |-> IF (m = "ada" /\ IssuerLocked) \/ (m = "svc" /\ MemberLocked) THEN ms[m] \cup {p} ELSE ms[m]]
     /\ cs' = [cs EXCEPT !["cA"] = IF IssuerLocked THEN @ \cup {p} ELSE @]
     /\ Goto(p, IF IssuePolicyHeld THEN "ilock" ELSE "check")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 \* The issue lock, shared, which a policy change takes exclusive (an issue's, or a sign-in's, just before its number).
 IssueLock(p) ==
@@ -346,7 +360,7 @@ IssueLock(p) ==
     /\ ix = None
     /\ is' = is \cup {p}
     /\ Goto(p, IF p \in Issuers /\ IssuePolicyHeld THEN "check" ELSE "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, ix, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 \* Still the objects it decided on? Else "moved": the statement ends, and the vault reads again. The policy is still
 \* the one it was weighed on, which the statement always compares (`issue_token`): with IssuePolicyHeld, under the
@@ -357,9 +371,9 @@ IssueCheck(p) ==
                    /\ rows["cA"] = l[p].cA /\ Sealed(sealed["cA"]) = Sealed(l[p].cA)
                    /\ status = "active" /\ gen = l[p].gen
        IN IF (IssuerCAS => same) /\ ~Narrowed
-          THEN Goto(p, IF IssuePolicyHeld THEN "fence" ELSE "ilock") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx, ix, is>>
+          THEN Goto(p, IF IssuePolicyHeld THEN "fence" ELSE "ilock") /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is>>
           ELSE Goto(p, "read") /\ Release(p)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 \* The fence, only if an issue takes it.
 IssueFence(p) ==
@@ -367,14 +381,14 @@ IssueFence(p) ==
     /\ IssueOffFence \/ FenceFree
     /\ fx' = IF IssueOffFence THEN fx ELSE p
     /\ Goto(p, "number")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 IssueNumber(p) ==
     /\ pc[p] = "number"
     /\ l' = [l EXCEPT ![p].n = next]
     /\ next' = next + 1
     /\ Goto(p, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, locks, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 IssueCommit(p) ==
     /\ pc[p] = "commit"
@@ -389,7 +403,7 @@ IssueCommit(p) ==
             /\ handed' = handed \cup {IssuedBy[p]}
             /\ UNCHANGED <<bindings, bsealed>>
     /\ Done(p)
-    /\ UNCHANGED <<owner, status, gen, next, unbound, spent, op, l, answered, revs, dems, used>>
+    /\ UNCHANGED <<owner, status, gen, next, due, unbound, spent, op, l, answered, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 (* A CI run's sign-in. At the app: the run's ID token, and the binding it
@@ -407,19 +421,23 @@ SignInStart(s) ==
             /\ IF o.evil \/ (o.tok \in SignedBy[o.b] /\ AudOf(o.tok) = "us") THEN Goto(s, "rows") ELSE Goto(s, "done")
        \/ \* Never asks.
           /\ Goto(s, "done") /\ UNCHANGED <<l, op>>
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, handed, answered, given, revs, dems, used>>
 
-\* svc's row shared, the binding's exclusive, in the vault's statement.
+\* svc's row shared, then the binding's, in the vault's statement: shared too (FOR KEY SHARE), which waits only for an
+\* unbind's FOR UPDATE; or, without SignInsShare, exclusive, which waits for every other sign-in through it as well.
+LocksBinding(s) == BindingLocked /\ l[s].b = "b"
 SignInRows(s) ==
     /\ pc[s] = "rows"
     /\ MemberLocked => mx["svc"] = None
-    /\ BindingLocked /\ l[s].b = "b" => bx = None
+    /\ LocksBinding(s) => bx = None /\ (~SignInsShare => bs = {} /\ bu = None)
     /\ ms' = [ms EXCEPT !["svc"] = IF MemberLocked THEN @ \cup {s} ELSE @]
-    /\ bx' = IF BindingLocked /\ l[s].b = "b" THEN s ELSE bx
+    /\ bs' = IF LocksBinding(s) /\ SignInsShare THEN bs \cup {s} ELSE bs
+    /\ bx' = IF LocksBinding(s) /\ ~SignInsShare THEN s ELSE bx
     /\ Goto(s, "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, cs, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, cx, cs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
-\* The binding, the account, the rate and the token weighed as they are now; the token spent.
+\* The binding, the account and the token weighed as they are now; the token spent. No count of the binding's
+\* sign-ins (W331, D177): each ID token its issuer signed buys one credential, which SpentChecked holds.
 SignInBody(s) ==
     /\ pc[s] = "body"
     /\ LET b == l[s].b
@@ -428,21 +446,36 @@ SignInBody(s) ==
                  /\ BindingSealed => b \in bsealed
                  /\ VaultVerifiesToken /\ b \notin Fetched => tok \in SignedBy[b] /\ AudOf(tok) = (IF AudienceSealed THEN "us" ELSE l[s].aud)
                  /\ status = "active" /\ gen = 0
-                 /\ Cardinality({g \in given : g.kind = "signin"}) < Rate
                  /\ SpentChecked => tok \notin spent
        IN IF ok
           THEN /\ l' = [l EXCEPT ![s].gen = gen]
                /\ spent' = spent \cup {tok}
-               /\ Goto(s, "ilock")
-               /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx, ix, is>>
+               /\ Goto(s, "touch")
+               /\ UNCHANGED <<fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is>>
           ELSE /\ Done(s) /\ UNCHANGED <<l, spent>>
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, unbound, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, bindings, bsealed, due, unbound, op, handed, answered, given, revs, dems, used>>
+
+\* Its credential written, the binding's last use stamped, if a minute old (`... WHERE last_used_at < now() - 1 minute`):
+\* the row's update lock, which its sharers share and an unbind's FOR UPDATE excludes. Held by another sign-in
+\* stamping it, uncommitted: skipped (SKIP LOCKED), as that one stamps it; or, without TouchSkipsLocked, waited for,
+\* and then the stamp is fresh. Until that commit, every other sign-in still reads the stamp as old.
+TouchFree(s) == bu \in {None, s} /\ bx \in {None, s}
+SignInTouch(s) ==
+    /\ pc[s] = "touch"
+    /\ IF l[s].b = "b" /\ due
+         THEN \/ TouchFree(s) /\ bu' = s
+              \/ ~TouchFree(s) /\ TouchSkipsLocked /\ UNCHANGED bu
+         ELSE UNCHANGED bu
+    /\ Goto(s, "ilock")
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, bs, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 SignInCommit(s) ==
     /\ pc[s] = "commit"
     /\ Write(IssuedBy[s], Row("svc", Sens, l[s].gen, l[s].b, IssuedBy[s]))
     /\ given' = given \cup {[kind |-> "signin", via |-> None, n |-> l[s].n, sens |-> FALSE, tok |-> l[s].tok, b |-> l[s].b]}
     /\ handed' = handed \cup {IssuedBy[s]}
+    \* Its stamp committed: fresh for every sign-in after.
+    /\ due' = (due /\ bu /= s)
     /\ Done(s)
     /\ UNCHANGED <<owner, status, gen, next, bindings, bsealed, unbound, spent, op, l, answered, revs, dems, used>>
 
@@ -455,7 +488,7 @@ EvilBinding(e) ==
     /\ "bind" \in Ops[e]
     /\ bindings' = bindings \cup {"b2"}
     /\ Goto(e, "done")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 (* An unbind of b, the vault's one statement (PR 3a; before it, the app's
@@ -470,27 +503,34 @@ UbStart(b) ==
     /\ pc[b] = "start"
     /\ op' = [op EXCEPT ![b] = [kind |-> "unbind"]]
     /\ Goto(b, IF SweepAfterLock THEN "lock" ELSE "sweep")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, l, handed, answered, given, revs, dems, used>>
 
+\* FOR UPDATE: it waits for every sign-in holding the row, shared or exclusive, and for a stamp; or, without
+\* UnbindExclusive, it shares the row as a sign-in does, and waits for none of them.
 UbLock(b) ==
     /\ pc[b] = "lock"
     /\ bx = None
-    /\ bx' = b
+    /\ IF UnbindExclusive
+         THEN /\ bs = {} /\ bu = None
+              /\ bx' = b
+              /\ UNCHANGED bs
+         ELSE /\ bs' = bs \cup {b}
+              /\ UNCHANGED bx
     /\ Goto(b, IF SweepAfterLock THEN "sweep" ELSE "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 UbSweep(b) ==
     /\ pc[b] = "sweep"
     /\ l' = [l EXCEPT ![b].set = {c \in Creds : rows[c] /= NoRow /\ rows[c].by = "b" /\ ~rows[c].revoked}]
     /\ Goto(b, IF SweepAfterLock THEN "fence" ELSE "lock")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 UbFence(b) ==
     /\ pc[b] = "fence"
     /\ FenceFree
     /\ fx' = b
     /\ Goto(b, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 UbCommit(b) ==
     /\ pc[b] = "commit"
@@ -503,7 +543,7 @@ UbCommit(b) ==
           /\ unbound' = n
     /\ next' = next + 1
     /\ Done(b)
-    /\ UNCHANGED <<owner, status, gen, bindings, bsealed, spent, op, l, handed, answered, given, dems, used>>
+    /\ UNCHANGED <<owner, status, gen, bindings, bsealed, due, spent, op, l, handed, answered, given, dems, used>>
 
 -----------------------------------------------------------------------------
 (* A revoke of one credential: one statement, its row, then the fence, the
@@ -516,14 +556,14 @@ RevStart(r) ==
         /\ op' = [op EXCEPT ![r] = [kind |-> "revoke", c |-> c]]
         /\ l' = [l EXCEPT ![r].c = c]
     /\ Goto(r, IF Manages THEN "rows" ELSE "done")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, handed, answered, given, revs, dems, used>>
 
 RevRow(r) ==
     /\ pc[r] = "rows"
     /\ cx[l[r].c] = None /\ cs[l[r].c] = {}
     /\ cx' = [cx EXCEPT ![l[r].c] = r]
     /\ Goto(r, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 RevFence(r) ==
     /\ pc[r] = "fence"
@@ -535,7 +575,7 @@ RevFence(r) ==
             /\ next' = next + 1
        ELSE UNCHANGED <<l, next>>
     /\ Goto(r, "commit")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, handed, answered, given, revs, dems, used>>
 
 RevCommit(r) ==
     /\ pc[r] = "commit"
@@ -546,14 +586,14 @@ RevCommit(r) ==
        ELSE UNCHANGED <<rows, sealed, history, revs>>
     /\ Goto(r, "answer")
     /\ Release(r)
-    /\ UNCHANGED <<owner, status, gen, next, bindings, bsealed, unbound, spent, op, l, handed, answered, given, dems, used>>
+    /\ UNCHANGED <<owner, status, gen, next, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, dems, used>>
 
 \* Sealed in a checkpoint (R51), then answered: whoever asked may tell the world.
 RevAnswer(r) ==
     /\ pc[r] = "answer"
     /\ answered' = answered \cup (IF l[r].ok THEN {l[r].c} ELSE {})
     /\ Goto(r, "done")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, op, l, handed, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, op, l, handed, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 (* The vault's own changes to a member (`change_input`): the member's row,
@@ -567,28 +607,28 @@ AdminStart(a) ==
     /\ pc[a] = "start"
     /\ \E o \in Ops[a] : op' = [op EXCEPT ![a] = [kind |-> o]]
     /\ Goto(a, "row")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, l, handed, answered, given, revs, dems, used>>
 
 AdminRow(a) ==
     /\ pc[a] = "row"
     /\ mx[Who(op[a].kind)] = None /\ ms[Who(op[a].kind)] = {}
     /\ mx' = [mx EXCEPT ![Who(op[a].kind)] = a]
     /\ Goto(a, "head")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 AdminHead(a) ==
     /\ pc[a] = "head"
     /\ hd = None
     /\ hd' = a
     /\ Goto(a, "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 AdminFence(a) ==
     /\ pc[a] = "fence"
     /\ FenceFree
     /\ fx' = a
     /\ Goto(a, "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 AdminBody(a) ==
     /\ pc[a] = "body"
@@ -617,7 +657,7 @@ AdminBody(a) ==
     /\ next' = next + 1
     /\ pc' = [pc EXCEPT ![a] = IF op'[a].kind = "restore" THEN "row" ELSE "done"]
     /\ Release(a)
-    /\ UNCHANGED <<bindings, bsealed, unbound, spent, l, handed, answered, given, used>>
+    /\ UNCHANGED <<bindings, bsealed, due, unbound, spent, l, handed, answered, given, used>>
 
 -----------------------------------------------------------------------------
 (* An Owner's policy change (`changePolicy`): a vault entry under 0.14's
@@ -632,28 +672,28 @@ PolStart(a) ==
     /\ hd' = a
     /\ op' = [op EXCEPT ![a] = [kind |-> "narrow"]]
     /\ Goto(a, IF IssuePolicyHeld /\ PolicyIssueFirst THEN "ilock" ELSE "fence")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, l, handed, answered, given, revs, dems, used>>
 
 PolIssueLock(a) ==
     /\ pc[a] = "ilock"
     /\ IssueLockFree
     /\ ix' = a
     /\ Goto(a, IF PolicyIssueFirst THEN "fence" ELSE "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fx, fs, hd, mx, ms, cx, cs, bx, bs, bu, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 PolFence(a) ==
     /\ pc[a] = "fence"
     /\ FenceFree
     /\ fx' = a
     /\ Goto(a, IF IssuePolicyHeld /\ ~PolicyIssueFirst THEN "ilock" ELSE "body")
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, ix, is, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, next, fs, hd, mx, ms, cx, cs, bx, bs, bu, ix, is, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 PolBody(a) ==
     /\ pc[a] = "body"
     /\ dems' = dems \cup {[n |-> next, kind |-> "narrow"]}
     /\ next' = next + 1
     /\ Done(a)
-    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, used>>
+    /\ UNCHANGED <<rows, sealed, history, owner, status, gen, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, used>>
 
 -----------------------------------------------------------------------------
 (* A database writer, holding no key: one write, or none. *)
@@ -675,7 +715,7 @@ WriterStep(w) ==
           /\ "move" \in Ops[w]
           /\ rows' = [rows EXCEPT !["cA"] = [@ EXCEPT !.hash = "cS"], !["cS"] = [@ EXCEPT !.hash = None]]
     /\ Goto(w, "done")
-    /\ UNCHANGED <<sealed, history, owner, status, gen, next, locks, bindings, bsealed, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
+    /\ UNCHANGED <<sealed, history, owner, status, gen, next, locks, bindings, bsealed, due, unbound, spent, op, l, handed, answered, given, revs, dems, used>>
 
 -----------------------------------------------------------------------------
 
@@ -683,7 +723,7 @@ Step(p) ==
     \/ p \in Uses /\ (UseStart(p) \/ UseFence(p) \/ UseRead(p) \/ UseNumber(p) \/ UseCommit(p))
     \/ p \in Issuers /\ (IssueRead(p) \/ IssueRows(p) \/ IssueLock(p) \/ IssueCheck(p) \/ IssueFence(p) \/ IssueNumber(p) \/ IssueCommit(p))
     \/ p = "eb" /\ EvilBinding(p)
-    \/ p \in SignIns /\ (SignInStart(p) \/ SignInRows(p) \/ SignInBody(p) \/ IssueLock(p) \/ IssueFence(p) \/ IssueNumber(p) \/ SignInCommit(p))
+    \/ p \in SignIns /\ (SignInStart(p) \/ SignInRows(p) \/ SignInBody(p) \/ SignInTouch(p) \/ IssueLock(p) \/ IssueFence(p) \/ IssueNumber(p) \/ SignInCommit(p))
     \/ p = "ub" /\ (UbStart(p) \/ UbLock(p) \/ UbSweep(p) \/ UbFence(p) \/ UbCommit(p))
     \/ p = "rev" /\ (RevStart(p) \/ RevRow(p) \/ RevFence(p) \/ RevCommit(p) \/ RevAnswer(p))
     \/ p = "admin" /\ (AdminStart(p) \/ AdminRow(p) \/ AdminHead(p) \/ AdminFence(p) \/ AdminBody(p))
@@ -704,6 +744,8 @@ TypeOK ==
     /\ fx \in Procs \cup {None}
     /\ hd \in Procs \cup {None}
     /\ bx \in Procs \cup {None}
+    /\ bs \subseteq Procs /\ (bx /= None => bs = {})
+    /\ bu \in Procs \cup {None} /\ (bu /= None => bx = None)
     /\ status \in {"active", "removed"}
     /\ handed \subseteq Creds
     /\ spent \subseteq IdTokens
@@ -745,9 +787,7 @@ IssuedByLiveCredential ==
 RevokesOnStandingRight ==
     \A r \in revs, d \in dems : (r.mgr /\ d.kind = "unmanage") => r.n < d.n
 
-\* The binding makes at most Rate credentials, and an ID token buys one.
-RateHeld ==
-    Cardinality({g \in given : g.kind = "signin"}) <= Rate
+\* An ID token buys one credential, however many runs present it at once.
 SpentOnce ==
     \A g, h \in given : (g.kind = "signin" /\ h.kind = "signin" /\ g.tok = h.tok) => g = h
 
@@ -783,6 +823,17 @@ UsesTakeNoIssueLock ==
 \* waits for Postgres, never for the vault's round trip.
 IssuesHoldNoLockBetween ==
     \A p \in Issuers : pc[p] = "read" => ~Holds(p)
+
+\* R44 (W331): one binding's sign-ins run together. A sign-in waits on its binding's row only for an unbind, never
+\* for another sign-in: not to hold the row, not to stamp its last use.
+WaitsFor(s) ==
+    CASE pc[s] = "rows" /\ LocksBinding(s) ->
+           ({bx} \cup (IF SignInsShare THEN {} ELSE bs \cup {bu})) \ {None, s}
+      [] pc[s] = "touch" /\ l[s].b = "b" /\ due /\ ~TouchSkipsLocked ->
+           {bu, bx} \ {None, s}
+      [] OTHER -> {}
+SignInsRunTogether ==
+    \A s \in SignIns : WaitsFor(s) \cap SignIns = {}
 
 \* R44: a sign-in never takes 0.14's head.
 SignInsTakeNoHead ==

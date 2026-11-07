@@ -94,7 +94,19 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
                           </span>
                         </td>
                         <td className="nowrap cell-muted">
-                          {binding.lastUsedAt === null ? 'Never' : <Timestamp iso={binding.lastUsedAt} display="relative" />}
+                          {binding.removing !== null ? (
+                            // Closed, its credentials still being revoked: a removal longer than one request (W331).
+                            <span className="cell-stack">
+                              <span>Being removed</span>
+                              <small>
+                                refused since <Timestamp iso={binding.removing.since} display="relative" />
+                              </small>
+                            </span>
+                          ) : binding.lastUsedAt === null ? (
+                            'Never'
+                          ) : (
+                            <Timestamp iso={binding.lastUsedAt} display="relative" />
+                          )}
                         </td>
                         <td className="col-actions">
                           {state.state === 'pending' ? (
@@ -104,7 +116,7 @@ export function TrustedWorkloads({ serviceId, bindings, grants }: { serviceId: s
                               trigger={
                                 <button className="act">
                                   <X size={13} />
-                                  Remove
+                                  {binding.removing === null ? 'Remove' : 'Finish removing'}
                                 </button>
                               }
                               title={<>Stop trusting {binding.label ?? title}?</>}

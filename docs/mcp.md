@@ -158,15 +158,15 @@ Claude Code connects from your machine.
 ## Turning it on
 
 A deployment turns MCP on in `app/src/coffre.ts`, under `signin({ mcp })`,
-with three limits: one per address and one in total for the OAuth requests
-that come before anyone is signed in, and one per connection for its
-calls. `coffre init` writes it on:
+with one limit: what one address may ask of each OAuth endpoint that comes
+before anyone is signed in, the one CI sign-ins pass too, 10,000 per 10
+seconds by default. A connection's tool calls pass none: it acts as the
+person who approved it. `coffre init` writes it on:
 
-- **Workers:** three rate-limiting bindings in `app/wrangler.jsonc`,
-  `MCP_PER_SOURCE`, `MCP_PER_CONNECTION` and `MCP_TOTAL`, passed as
-  `mcp: { limits: { perSource, perConnection, total } }`.
-- **Node:** `mcp: { limits: processLimits({ perSource: 30, perConnection:
-  120, total: 300 }) }`, counted in the process.
+- **Workers:** the rate-limiting binding `SIGN_IN_PER_SOURCE` in
+  `app/wrangler.jsonc`, passed as `mcp: { limits: { perSource } }`.
+- **Node:** `mcp: { limits: processLimits() }`, counted in the process
+  (the same value `workloads.limits` takes).
 
 Without `mcp`, `/mcp` and its metadata answer 404, and the account page has
 no Connected apps tab.

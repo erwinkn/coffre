@@ -320,7 +320,7 @@ and `apiMember`). The URL names the thing and the HTTP method is the verb:
 | a member's instance role and scope, and the grants you manage, in one query | `GET /api/members/user:ada@acme.example/access` |
 | list, issue (`?dryRun=1` to preview what it reaches) or revoke a token's credentials | `GET` / `POST /api/members/token:ci-deploy/tokens`, `DELETE …/tokens/:id` |
 | list, make or revoke your personal tokens, which act as you within their scope ([design](design/personal-tokens.md)); whoever runs the instance lists and revokes anyone's | `GET` / `POST /api/members/user:ada@acme.example/tokens {"label": "cursor-agent", "expiresInMinutes": 240, "scope": {"market/dev": "viewer"}}`, `DELETE …/tokens/:id` |
-| list, make (`?dryRun=1` to preview) or remove a token's trust bindings | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
+| list, make (`?dryRun=1` to preview) or remove a token's trust bindings; a removal (or a replacement of several bindings' keys) longer than one request, on Workers, answers 202 `{"removing": {"left": 4772}}` (what is left: credentials to revoke and bindings to end), the binding closed, and the same request asked again goes on with it, `left` falling (`@coffre/client` does; [credential-lifecycle.md](design/credential-lifecycle.md)) | `GET` / `POST /api/members/token:ci-deploy/bindings`, `DELETE …/bindings/:id` |
 | a GitHub repository's or GitLab project's IDs, for a binding: a public one, or one the deployment's GitHub App is installed on | `GET /api/workloads/lookup?github=acme/api` |
 | the repositories the deployment's GitHub App is installed on, private ones too ([github-app.md](github-app.md)) | `GET /api/workloads/repositories` |
 | change someone's access, in one transaction | `PATCH /api/access/user:ada@acme.example {"market": "developer", "market/prod": null}` |
@@ -1075,7 +1075,7 @@ this order, so that a stranger costs one bounded read at most:
 5. **Unspent**: a read of the token's signing input's SHA-256.
 6. **The member**: one `vault.access`, outside any transaction.
 7. **Commit**, holding the log's head: the member and the binding again,
-   the times again, at most 60 credentials a minute per binding, the token
+   the times again (no count of a binding's credentials since W331), the token
    spent (its hash's primary key decides a race), the credential issued,
    and `token.exchange` logged with the run the issuer asserts.
 
@@ -1114,7 +1114,7 @@ asserted, not proof of which run sent the request.
 Indexes keep what CI leaves behind out of the way: every run leaves an
 expired credential, and every replaced binding a retired one. Indexes on
 the live bindings, on a member's live credentials and on what a binding
-issued lately bound the exchange's first read, its rate count, a binding's
+issued lately bound the exchange's first read, a binding's
 removal and the members page by what is live, not by history.
 
 ## Deleting for good

@@ -103,7 +103,7 @@ before(async () => {
     runtime.plugins = checkPlugins(config.plugins);
     return runtime;
   };
-  own = runtimeOf(signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }) } }));
+  own = runtimeOf(signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }) } }));
   access = runtimeOf(cloudflareAccess({ teamDomain: 'acme.cloudflareaccess.com', audience: 'coffre-aud' }));
 
   // The Worker's Cloudflare binding, sealed by the vault as it makes one.

@@ -50,9 +50,6 @@ import { bindingObject, credentialObject } from './objects.ts';
  * next (Lifecycle.tla's VaultVerifiesToken, BindingSealed).
  */
 
-/** How many credentials a binding makes a window, and the window: `EXCHANGES_PER_BINDING_MINUTE`, as 0.14 counts them. */
-export const SIGN_INS_PER_WINDOW = 60;
-export const SIGN_IN_WINDOW_MS = 60_000;
 
 /**
  * A sign-in's statements in all, before it is refused `busy`, asked again shortly: each one after the first because the
@@ -63,6 +60,14 @@ export const SIGN_IN_TRIES = 3;
 
 
 
+/**
+ * How seldom a sign-in stamps its binding's `last_used_at`: when a minute
+ * old (Erwin, D177; W331), so one binding's sign-ins do not take turns on
+ * its row. `sign_in` holds the same minute (migration 0076), which
+ * test/sql-copies.test.ts holds to this.
+ */
+export const BINDING_LAST_USED_MS = 60_000;
+
 /** What the change of a sign-in records besides its op (D147): its binding, proof, issuer, the run's claims, and a session's key and hard end. */
 type SignInRecord = { binding: string; proof: string; issuer: string; run: Record<string, string | number>; jkt?: string; notAfter?: number };
 
@@ -71,8 +76,6 @@ export type SignInCall = {
   requestId: string; at: number; actor: string; payload: string; mac: Buffer; seal: Buffer;
   /** The binding's columns as the vault checked its seal (`bindingSeal`): the statement holds the row to both. */
   binding: BindingColumns; bindingSeal: Buffer; principal: string; appKey: string; spent: Buffer | null; validUntil: number | null; frozen: boolean; longest: number;
-  /** At most `rate` credentials a binding makes in `window` ms. */
-  rate: number; window: number;
   credential: SignInCredential & { createdBy: string; tokenHashBytes: Buffer; authMacBytes: Buffer };
   pins: SignInPins;
 };
@@ -224,7 +227,7 @@ function decideSignIn(keys: ChangeKeys, at: number, input: SignInInput): Omit<Si
   const row = { at, requestId: randomUUID(), object: objectKey(ref), actor: principal, payload, seal };
   return {
     ...row, mac: entryMac(keys.mac, { tree: 'changes', row }),
-    binding, bindingSeal, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest, rate: SIGN_INS_PER_WINDOW, window: SIGN_IN_WINDOW_MS,
+    binding, bindingSeal, principal, appKey, spent: spent === null ? null : Buffer.from(spent, 'base64'), validUntil, frozen: credential.kind === 'workload', longest,
     credential: { ...credential, createdBy: `binding:${binding.id}`, tokenHashBytes: Buffer.from(credential.tokenHash, 'base64'), authMacBytes: Buffer.from(credential.authMac, 'base64') },
   };
 }
@@ -562,6 +565,11 @@ export type BindingsCall = {
   credentials: { id: string; binding: string; macFrom: Buffer; sealFrom: Buffer | null; authMac: Buffer; seal: Buffer | null }[];
   live: string[] | null;
   reads: { id: string; key: string }[];
+  /**
+   * A sweep: `ends` closed, not ended, with no change of theirs; the credentials named revoked; and a replacement's binding
+   * made, if it carries one (0076; Unbinding.tla).
+   */
+  sweep: boolean;
   revokedAt: number;
   revokedBy: string;
   policy: { seq: string | null; slugs: { environmentId: string; slug: string | null }[] };
@@ -573,15 +581,20 @@ export type BindingsCall = {
 export function checkChangeBindings(input: ChangeBindingsInput): void {
   const { actor, via, actorAccess, make, live, reads, ends, reason, revokedAt, revokedBy, policy, appKey } = input ?? ({} as ChangeBindingsInput);
   const member = /^(user:[^\s]{1,320}|token:[a-z0-9][a-z0-9._-]{0,99})$/;
+  // The scheduled run going on with a removal a request left under way (W331): an unbind only, naming whom it continues.
+  const resumes = actor === 'system:schedule' && make === null && reason === 'unbound' && typeof input.continues?.by === 'string' && member.test(input.continues.by)
+    && Number.isSafeInteger(input.continues.at);
+  if (input?.continues !== undefined && !resumes) throw new Error('a change of bindings continues a removal only as the scheduled run, an unbind, naming its remover and when it closed them');
   const named = (before: { columns?: unknown; seal?: unknown } | undefined) => before !== undefined && isBase64(before.seal, 16);
-  if (typeof actor !== 'string' || !member.test(actor) || (via !== null && (typeof via !== 'string' || !UUID.test(via)))
+  if (typeof actor !== 'string' || !(member.test(actor) || resumes) || (via !== null && (typeof via !== 'string' || !UUID.test(via)))
     || (actorAccess !== null && (typeof actorAccess !== 'string' || !/^-?[0-9]{1,19}$/.test(actorAccess)))
     || !Array.isArray(ends) || (make === null && ends.length === 0) || !['replaced', 'keys_moved', 'unbound'].includes(reason)
     || typeof revokedAt !== 'number' || !Number.isSafeInteger(revokedAt) || typeof revokedBy !== 'string' || !isPolicy(policy) || policy === null
     || typeof appKey !== 'string' || !/^app:[A-Za-z0-9_-]{1,64}$/.test(appKey)
     || (make === null) !== (live === null) || (live !== null && (!Array.isArray(live) || !live.every((id) => typeof id === 'string' && UUID.test(id))))
     || !Array.isArray(reads) || !reads.every((read) => typeof read?.id === 'string' && UUID.test(read.id) && typeof read.key === 'string')
-    || (input.connection !== null && (typeof input.connection?.id !== 'string' || !UUID.test(input.connection.id) || !Number.isInteger(input.connection.generation)))) {
+    || (input.connection !== null && (typeof input.connection?.id !== 'string' || !UUID.test(input.connection.id) || !Number.isInteger(input.connection.generation)))
+    || (input.sweep !== undefined && typeof input.sweep !== 'boolean') || (input.sweep === true && ends.length === 0)) {
     throw new Error('a change of bindings names who makes it, on what, the binding it makes and those beside it, those it ends, why, when, the policy weighed, and the app\'s key');
   }
   // Each object once: a binding or a credential named twice would be two changes of it, the second one the replay refuses.
@@ -632,10 +645,13 @@ export function bindingsCall(
     const ref: Ref = { kind: 'binding', id: make.id };
     const value = bindingObject(make);
     const seal = sealOf(keys.seals[0]!, ref, value);
-    // What the change records besides (D147): who made it, on which credential, its label, and those it replaces.
+    // What the change records besides (D147): who made it, on which credential, its label, and those it replaces. A
+    // replacement's sweep makes it too, as it closes those it replaces (reviews r8, r9; Unbinding.tla's MakesAtClose).
     change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.make', value })), bind: { by: actor, via: input.via, label: make.label, replaces: ends.map((end) => end.before.columns.id) } }), seal);
     made = { row: make, authMac: Buffer.from(make.authMac, 'base64'), seal, read: read!, via: input.via, connection: input.connection };
   }
+  // Whom the scheduled run continues, in each change's record (W331): who asked for the removal, and when it closed.
+  const continuing = input.continues === undefined ? {} : { continues: { by: input.continues.by, at: input.continues.at } };
   const ended: BindingsCall['ends'] = [];
   const swept: BindingsCall['credentials'] = [];
   const sweeps: (() => void)[] = [];
@@ -643,7 +659,11 @@ export function bindingsCall(
     const { columns } = end.before;
     const ref: Ref = { kind: 'binding', id: columns.id };
     if (columns.principal !== principal || columns.revoked) return { refused: 'tampered' };
-    if (end.before.seal === null) {
+    if (input.sweep === true) {
+      // Closed, not ended: no change of it, its row held to its MAC and seal as read (its seal its newest change's).
+      if (end.before.seal !== null && !sealed(keys.seals, ref, bindingObject(columns), Buffer.from(end.before.seal, 'base64'))) return { refused: 'tampered' };
+      ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: end.before.seal === null ? null : Buffer.from(end.before.seal, 'base64'), authMac: Buffer.from(end.authMacFrom, 'base64'), seal: null });
+    } else if (end.before.seal === null) {
       // One 0.14 made, which the log never held: its row ended, with no change; the statement holds it to having none (review r2).
       ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom: null, authMac: Buffer.from(end.authMac, 'base64'), seal: null });
     } else {
@@ -651,7 +671,7 @@ export function bindingsCall(
       const before = bindingObject(columns);
       if (!sealed(keys.seals, ref, before, sealFrom)) return { refused: 'tampered' };
       const seal = sealOf(keys.seals[0]!, ref, applyOp(before, ref, { op: 'binding.revoke' })!);
-      change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' })), unbind: { by: actor, reason, replacedBy: make?.id ?? null } }), seal);
+      change(ref, canonical({ ...JSON.parse(payloadOf(ref, { op: 'binding.revoke' })), unbind: { by: actor, reason, replacedBy: make?.id ?? null, ...continuing } }), seal);
       ended.push({ id: columns.id, macFrom: Buffer.from(end.authMacFrom, 'base64'), sealFrom, authMac: Buffer.from(end.authMac, 'base64'), seal });
     }
     for (const credential of end.credentials) {
@@ -667,16 +687,17 @@ export function bindingsCall(
       if (!sealed(keys.seals, cref, now, cfrom)) return { refused: 'tampered' };
       const cseal = sealOf(keys.seals[0]!, cref, applyOp(now, cref, { op: 'credential.revoke' })!);
       // Each after the bindings', in the order named.
+      // `payloadOf`'s fields and the record beside them, encoded once (it would encode, and this parse, them first).
       sweeps.push(() => change(cref, canonical({
-        ...JSON.parse(payloadOf(cref, { op: 'credential.revoke' })),
-        revoke: { reason: 'unbound', via: null, kind: credential.before.columns.kind, principal, binding: columns.id },
+        op: 'credential.revoke', ref: { kind: cref.kind, id: cref.id },
+        revoke: { reason: 'unbound', via: null, kind: credential.before.columns.kind, principal, binding: columns.id, ...continuing },
       }), cseal));
       swept.push({ id: cref.id, binding: columns.id, macFrom: Buffer.from(credential.authMacFrom, 'base64'), sealFrom: cfrom, authMac: Buffer.from(credential.authMac, 'base64'), seal: cseal });
     }
   }
   for (const sweep of sweeps) sweep();
   return {
-    at, actor, principal, make: made, ends: ended, credentials: swept, live: input.live, reads: input.reads, revokedAt: input.revokedAt, revokedBy: input.revokedBy,
+    at, actor, principal, make: made, ends: ended, credentials: swept, live: input.live, reads: input.reads, sweep: input.sweep === true, revokedAt: input.revokedAt, revokedBy: input.revokedBy,
     policy: { seq: input.policy.seq, slugs: read?.slugs ?? input.policy.protected }, appKey: input.appKey, changes,
   };
 }

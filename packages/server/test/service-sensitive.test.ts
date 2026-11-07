@@ -75,7 +75,7 @@ beforeEach(async () => {
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }) } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }) } }),
     auditChainKey: deps.chainKey.toString('base64'),
   });
   runtime = createRuntime(config, deps.db, deps.vault, transport);

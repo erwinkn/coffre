@@ -87,7 +87,7 @@ function makeRuntime(cacheSeconds = 0, recheckSeconds?: number): CoffreRuntime {
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000, total: 1000 }), alert: () => {} } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1000 }), alert: () => {} } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins,
   });

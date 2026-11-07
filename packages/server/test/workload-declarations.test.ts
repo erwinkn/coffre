@@ -50,7 +50,7 @@ after(async () => {
 beforeEach(async () => {
   await resetDatabase(db.owner);
   deps = testDeps(db.runtime, [ROOT]);
-  const limits = processLimits({ perSource: 1000, total: 1000 });
+  const limits = processLimits({ perSource: 1000 });
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: deps.vault,
