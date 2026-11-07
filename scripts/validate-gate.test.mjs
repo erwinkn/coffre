@@ -111,16 +111,12 @@ test('Formal model passes on held shards or a hit, and on nothing else', () => {
     }
 });
 
-test('the shards partition formal.sh and the workflow runs each of them', () => {
-    const list = (...args) => spawnSync('scripts/formal.sh', ['--list', ...args], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname });
-    const all = list().stdout.trim().split('\n');
-    assert.ok(all.length > 100);
+// That the shards partition formal.sh, and that the workflow's matrix runs each of them, is formal-shards.test.mjs's.
+test('Tampering has a shard of its own, and only Tampering is in it', () => {
     const matrix = workflow.match(/shard: \[([a-z, -]+)\]/)[1].split(', ');
-    assert.deepEqual(matrix, ['tampering', 'large', 'rest', 'hotpath', 'hotpath-policy', 'hotpath-bulk', 'hotpath-skew', 'seal', 'seal-plugin', 'seal-retention']);
-    const sharded = matrix.flatMap((shard) => list('--shard', shard).stdout.trim().split('\n'));
-    assert.deepEqual([...sharded].sort(), [...all].sort());
-    const tampering = list('--shard', 'tampering').stdout.trim().split('\n');
-    assert.ok(tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
+    assert.ok(matrix.includes('tampering'));
+    const tampering = spawnSync('scripts/formal.sh', ['--list', '--shard', 'tampering'], { encoding: 'utf8', cwd: new URL('..', import.meta.url).pathname }).stdout.trim().split('\n');
+    assert.ok(tampering.length > 0 && tampering.every((line) => line.split(/\s+/)[1] === 'Tampering'));
 });
 
 // `Use matrices` answers for its shards: every one ran and held. That each case ran in exactly one is
