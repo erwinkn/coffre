@@ -106,7 +106,7 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | `proxy.cacheValues` | `true` | app | `credentialProxy({ cacheSeconds: 0 })` | whether opened values serve later requests at all. `false` keeps today's uncached mode: every request asks the vault, so each one is a fresh decision, and a revocation ends the next request, not one up to R later. It does not give each request an entry in the log: that is `audit.repeatsWithinSeconds`. R still bounds the send window and the tunnels |
 | `proxy.editable` | `false` | app | `credentialProxy({ editable })` | whether an Owner may add and change proxy definitions in the UI, beside those the deployment's code names |
 | `audit.keepUsesDays` | `null`, every day kept, as today | vault | `retainDays`, reachable only by a Node deployment that runs its own checkpointer | Q6 |
-| `audit.repeatsWithinSeconds` | 60, as today; 0 to the bulk refresh (60 s at the default window) | vault | Workers: `vault({ uses: { coverMs } })`; Node: `serveVault(config, { uses: { coverMs } })`, which T230 (#514) made reach the vault; set by no deployment | the longest a repeat may ride an earlier use's entry. A repeat (the same credential, key, place, purpose and route, in the same vault isolate or process) writes no entry while its cover is younger than this **and** its key has not crossed a bulk-refresh boundary since (`use.ts`, `ready` and the cover's `until`; 0074's `is_covered`: `bulk_last >= period`; `use.test.ts`, "covers", which stays inside one period). `0` gives every use an entry of its own, at about 790 bytes each (section 2.9). See below |
+| `audit.repeatsWithinSeconds` | 60, as today; 0 to 3,600 | vault | Workers: `vault({ uses: { coverMs } })`; Node: `serveVault(config, { uses: { coverMs } })`, which T230 (#514) made reach the vault; set by no deployment | the longest a repeat may ride an earlier use's entry. A repeat (the same credential, key, place, purpose and route, in the same vault isolate or process) writes no entry while its cover is younger than this **and** the principal's bulk row for that key is fresh for the current refresh period (`use.ts`, `ready` and the cover's `until`; 0074's `is_covered`: `bulk_last >= period`, on the row every caller of that principal and key shares; `use.test.ts`, "covers", which stays inside one period). `0` gives every use an entry of its own, at about 790 bytes each (section 2.9). See below |
 
 **`proxy.revokedWithinSeconds` merges two settings that mean one thing.**
 Both bound how long a revoked credential keeps working through the proxy:
@@ -178,26 +178,47 @@ out. A deployment that must count each use sets `0`; at a steady 1,000
 uses a second that is the full 68 GB a day of section 2.9, where today's
 60 s makes a hot loop's repeats nearly free.
 
-The field is a ceiling, not the grain itself. A cover also ends at its
-key's next bulk-refresh boundary: each principal's key moves on in the
-bulk cap once a refresh (60 s at the 15 min window, a tenth of a shorter
-one), at a phase of its own, and the first use after that boundary writes
-an entry, covered or not (0074, T204: `is_covered` needs `bulk_last >=
-period`; CoverFresh in `formal/HotPathOne.tla`). *Example:* a key whose
-phase puts its boundary at 12:00:11. Requests at 12:00:00 and 12:00:20
-write two entries, though nothing about them changed and the second is
-20 s after the first. So a lone hot caller logs about one entry per key a
-refresh, whatever the field says: at 3,600 it would still log every
-minute. That is why the range ends at the refresh, and `definePolicy`
-refuses more (the refresh derives from `reads.bulkLimit`'s window, so the
-check reads both). A coarser grain needs a design change, not a larger
+The field is a ceiling, not the grain itself. A cover is also refused
+while the principal's bulk row for its key is stale. That row is shared:
+one per principal and key, whatever the credential, purpose or route. Each
+refresh (60 s at the 15 min window, a tenth of a shorter one), at a phase
+of its own, the row goes stale, and the first use of that principal and
+key after the boundary writes an entry, covered or not, which freshens the
+row again (0074, T204: `is_covered` needs `bulk_last >= period`; CoverFresh
+in `formal/HotPathOne.tla`). After that, any older cover still younger than
+the field rides again: the check is the row's, not the cover's age.
+
+*Example, one caller:* a key whose boundary falls at 12:00:11. Requests at
+12:00:00 and 12:00:20 write two entries, though nothing about them changed
+and the second is 20 s after the first. A steady lone caller whose cover
+lasts at least a refresh logs about one entry per key a refresh; a longer
+field suppresses nothing more. A shorter field logs more often: at 1 s, a
+caller using the key every few milliseconds writes about one entry a
+second, 60 a minute; at `0`, one per use.
+
+*Example, two purposes:* the same principal uses a key for purpose A at
+12:00:00 (an entry, a cover until 12:01:00) and for purpose B at 12:00:12,
+just past the 12:00:11 boundary (an entry, the row fresh again). A's repeat
+at 12:00:20 rides its 12:00:00 cover and writes nothing. So the bulk row
+guarantees an entry for the principal and key each refresh, but which
+callers and purposes appear in it depends on who comes first after the
+boundary; a longer field lets more of the others stay silent across
+boundaries. This changes only what the log shows, not CoverFresh or the
+cap's replay, which read the row.
+
+So the range is 0 to 3,600, independent of the bulk window. One could also
+cap the field at the refresh, so that no cover outlives a period; that is a
+policy choice for Erwin, not a derived bound, and it makes the default
+depend on `reads.bulkLimit`: a 5 min window refreshes every 30 s, and a
+validator so tied would refuse today's 60. Not proposed. A grain coarser
+than the refresh for a lone caller needs a design change, not a larger
 number: a refresh that moves the key's `log_bulk` row without writing a
 `log_uses` entry, which drops CoverFresh's tie between the two and so
-changes the model and the cap's replay. Not proposed.
+changes the model and the cap's replay. Not proposed either.
 
-The alternative is to fix the cover at the refresh for everyone, which
-drops this field and needs Erwin's approval, since the log would then
-never count repeats.
+The alternative to the field is to fix the cover at today's 60 s for
+everyone, which needs Erwin's approval, since the log would then never
+count repeats.
 
 **`services.signInsPerAddress` on Workers.** Cloudflare reads a rate limit's
 number from the binding in `wrangler.jsonc` and nowhere else; the code cannot
@@ -328,7 +349,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | How long a key counts against a **new** key (`bulkRule`) | 17 min 3 s at 15 min | window + refresh + the use's deadline 3 s + a clock 60 s ahead, against the stored periods: a key may still be refused 17 minutes after the 1,000th entered | `packages/vault/src/bulk.ts` (TLC's HotPathOneClock, HotPathOneBulkSkew). The object's window is not the one a caller sees: `deploy.md` should say both |
 | The bulk window's maximum | 1 day | releases kept a day and an hour | R52 |
 | Keys a statement uses at once (`uses.batch`) | 100 | about 0.4 ms a key under the lock every use shares, so about 40 ms | measured (review of #433) |
-| How long a use's cover serves repeats (`uses.coverMs`) | 60 s, and never past its key's next bulk-refresh boundary | none written: it bounds how fine the log is, so it becomes policy, `audit.repeatsWithinSeconds`, at most the refresh | ⚠ a choice, `useLimits` (`packages/vault/src/use.ts`) |
+| How long a use's cover serves repeats (`uses.coverMs`) | 60 s, and refused while the principal's bulk row for its key is stale (the first use after each refresh boundary writes an entry) | none written: it bounds how fine the log is, so it becomes policy, `audit.repeatsWithinSeconds`, 0 to 3,600 | ⚠ a choice, `useLimits` (`packages/vault/src/use.ts`) |
 | Names the vault's isolate remembers (`uses.names`) | 10,000 in each of two maps: names to ids, and a key's name in an environment to its id | none written; least recently used out first | ⚠ a choice, `useLimits` |
 | Seals and covers the vault's isolate keeps (`UseCache`'s `max`) | 10,000 in each of two maps: each key's newest seals, and the covers repeats ride | none written; a full map is cleared whole | ⚠ a choice, `UseCache` |
 | A route use's maps (`madeFor`, `routeKeys`, T186) | 10,000 in each of two maps: a handle's made-for places by its token, and each route's keys' ids by place and route | bounded as `uses.names`, least recently used out first | ⚠ the same choice, `UseCache` (`use.ts`) |
