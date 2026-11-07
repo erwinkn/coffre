@@ -911,7 +911,26 @@ export type SignInInput = {
   idToken: { token: string; jwks: string } | null;
   /** A workload's DPoP proof, whose key the session is bound to, which the vault verifies; null for a CI run's sign-in. */
   dpop: string | null;
+  /**
+   * The account's and the binding's newest changes in 0.15's log, as the app
+   * read them in the statement that read the binding (T192). The vault
+   * checks each one's MAC over the object it derives (the account by
+   * `principal`, the binding by its id), and the statement holds each
+   * object's newest change, under its row's lock, to the one checked,
+   * whole (its number, every column its MAC covers, and the MAC): one vault
+   * statement. Absent (an app of an earlier
+   * release), null, or one that does not hold: the vault reads them itself,
+   * one statement more, as T190 made it.
+   */
+  newest?: { member: LoggedChange | null; binding: LoggedChange | null };
 };
+
+/**
+ * A change of 0.15's log as a reader outside the vault hands it back (T192):
+ * every column its MAC covers but its object, its number as text, its bytes
+ * in base64. Only its MAC makes it the vault's.
+ */
+export type LoggedChange = { number: string; at: number; requestId: string; actor: string; payload: string; seal: string | null; mac: string };
 
 /**
  * A trust binding's columns as its object takes them (T149, PR 3a): what a

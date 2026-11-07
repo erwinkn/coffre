@@ -5,16 +5,19 @@ import { sql } from 'drizzle-orm';
 
 import type { Answer, BindingsCall, IssueCall, RevokeCall, SignInCall } from './credentials.ts';
 
-/** `sign_in` (migration 0037): one statement, its own transaction, its answer one JSON value. */
+/** `sign_in` (migration 0075, 0037's with the pins): one statement, its own transaction, its answer one JSON value. */
 export async function signInOnPostgres(db: Queryable, c: SignInCall): Promise<Answer> {
   const k = c.credential;
+  const { member: m, binding: b } = c.pins;
   const [row] = await rowsOf<{ answer: string }>(db, sql`/* writes */ SELECT sign_in(
     ${c.requestId}::text, ${String(c.at)}::bigint, ${c.actor}::text, ${c.payload}::text, ${c.mac}::bytea, ${c.seal}::bytea,
     ${c.binding.id}::uuid, ${c.principal}::text, ${c.binding.generation}::integer, ${c.binding.profile}::text, ${c.binding.scope}::text, ${c.binding.policy}::text,
     ${c.binding.issuer}::text, ${c.binding.jwksUri}::text, ${c.binding.claims}::text, ${c.bindingSeal}::bytea,
     ${c.spent}::bytea, ${c.validUntil === null ? null : String(c.validUntil)}::bigint, ${c.frozen}::boolean, ${c.rate}::integer, ${String(c.window)}::bigint, ${String(c.longest)}::bigint,
     ${k.id}::uuid, ${k.kind}::text, ${k.authMacBytes}::bytea, ${k.tokenHashBytes}::bytea, ${k.tokenHint}::text, ${k.label}::text, ${k.createdBy}::text,
-    ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint, ${k.notAfter === null ? null : String(k.notAfter)}::bigint, ${k.jkt}::text, ${c.appKey}::text
+    ${k.scope}::text, ${k.places}::text, ${String(k.expiresAt)}::bigint, ${k.notAfter === null ? null : String(k.notAfter)}::bigint, ${k.jkt}::text, ${c.appKey}::text,
+    ${m.number.toString()}::bigint, ${String(m.at)}::bigint, ${m.requestId}::text, ${m.actor}::text, ${m.payload}::text, ${m.seal}::bytea, ${m.mac}::bytea,
+    ${b.number.toString()}::bigint, ${String(b.at)}::bigint, ${b.requestId}::text, ${b.actor}::text, ${b.payload}::text, ${b.mac}::bytea
   )::text AS answer`);
   return JSON.parse(row!.answer) as Answer;
 }

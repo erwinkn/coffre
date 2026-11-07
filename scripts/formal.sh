@@ -283,6 +283,12 @@ REMOVALS=(
   "HotPathOneForged ChangeMacChecked ReplaySound"
   "HotPathOneForged CacheVerified ReplaySound"
   "HotPathOneForged ChangeChecksMac EachChangeFlips"
+  # ... and who forges that seal only once a sign-in has checked its MAC (T192): without its statement holding the
+  # newest change to the one checked, it goes ahead on the writer's row all the same. That is also a write that pins
+  # nothing (`app_change`, `issue_token` outside T179's two trips): the scenario without the pin is theirs. And with the pin by number and seal alone, an app hands
+  # back an old, authentic change under the newest's number, whose seal the writer made the old one's (review r2).
+  "HotPathOneForgedGap ChangePinsChecked EachChangeFlips"
+  "HotPathOneForgedGap ChangePinsWhole EachChangeFlips"
   "HotPathOneRestore ChangeChecksSeal EachChangeFlips"
   "HotPathOneRestore ChangeChecksSeal ReplaySound"
   # A writer who lowers the floor of `at`: without the barrier's check, a use lands where no checkpoint reads.

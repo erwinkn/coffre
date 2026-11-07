@@ -1,7 +1,7 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
 import { BEARER_PROFILES } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
-import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type SecretColumns } from '@coffre/core/vault';
+import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
 import { deletedWithProject, isTombstone, personalOf, tombstoneOf } from '@coffre/core/schemas';
 import { later, own, prepared, tablesOf, type Queryable, type Transaction } from '@coffre/db';
@@ -1914,8 +1914,10 @@ export function hasTombstone(db: Queryable, id: SQL | string): SQL {
  * With them, so that a token one may take costs no read of its own: whether
  * the token, by its signing input's hash, was exchanged already, and the
  * newest `policy.change`, read before the vault is asked about the
- * service. Uncached, as `tokenConsumed` is. With no candidate, neither is
- * read: the token is refused.
+ * service; and the account's and each binding's newest change, which the
+ * vault checks and pins in its one statement (T192, `NewestChanges`).
+ * Uncached, as `tokenConsumed` is. With no candidate, none is read: the
+ * token is refused.
  */
 export async function exchangeCandidates(
   db: Queryable,
@@ -1924,7 +1926,7 @@ export async function exchangeCandidates(
   issuer: string,
   max: number,
   token: Buffer,
-): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null }> {
+): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null; newest: NewestChanges }> {
   const { consumedTokens, serviceBindings, vaultMembers } = tablesOf(db);
   const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
   const spent = db.select({ hash: consumedTokens.hash }).from(consumedTokens).where(eq(consumedTokens.hash, token));
@@ -1933,6 +1935,7 @@ export async function exchangeCandidates(
       binding: serviceBindings,
       spent: truth(exists(spent)),
       policySeq: sql<string | number | null>`(${newestSeqQuery(db, 'policy.change')})`,
+      ...newestChangeColumns(db, principal, serviceBindings.id),
       now: clock(db),
     })
     .from(serviceBindings)
@@ -1949,15 +1952,68 @@ export async function exchangeCandidates(
     .limit(max + 1);
   if (rows.length > max) {
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
-    return { bindings: [], spent: null, policySeq: null };
+    return { bindings: [], spent: null, policySeq: null, newest: NO_CHANGES };
   }
   const seq = rows[0]?.policySeq ?? null;
+  const bindings = rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
   return {
-    bindings: rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row)),
+    bindings,
     // Null where nothing was read: no binding, so no row to read it with.
     spent: rows[0]?.spent ?? null,
     policySeq: seq === null ? null : BigInt(seq),
+    newest: await newestChanges(db, principal, rows),
   };
+}
+
+/**
+ * The account's newest change in 0.15's log and each read binding's, by the
+ * binding's id, for the vault to check and pin (T192, `SignInInput.newest`):
+ * every column their MAC covers but their object, which the vault derives.
+ * None where the log holds no change of it.
+ */
+export type NewestChanges = { member: LoggedChange | null; bindings: ReadonlyMap<string, LoggedChange | null> };
+
+const NO_CHANGES: NewestChanges = { member: null, bindings: new Map() };
+
+/**
+ * `newestChanges`' columns, on Postgres: in the statement that reads the
+ * bindings, one probe of `log_changes_object_idx` each, the account's an
+ * uncorrelated subquery, read once. As text, a JSON array in `loggedChange`'s
+ * order. SQLite has no `log_object`: none here, read after (`newestChanges`).
+ */
+export function newestChangeColumns(db: Queryable, principal: string, binding: AnyColumn): { memberChange?: SQL<string | null>; bindingChange?: SQL<string | null> } {
+  if (dialect.engineOf(db) !== 'postgres') return {};
+  const newest = (object: SQL) => sql<string | null>`(SELECT json_build_array(c.number::text, c.at, c.request_id, c.actor, c.payload, encode(c.seal, 'base64'), encode(c.mac, 'base64'))::text
+    FROM log_changes c WHERE c.object = ${object} ORDER BY c.number DESC LIMIT 1)`;
+  return { memberChange: newest(sql`${logObject('principal', principal)}::uuid`), bindingChange: newest(sql`log_object('binding', ${binding}::text)`) };
+}
+
+/**
+ * `NewestChanges` of the rows a bindings read answered with
+ * `newestChangeColumns`; on SQLite, read now by their objects' keys, a
+ * statement of their own (SQLite deploys no app: its cost is no sign-in's).
+ */
+export async function newestChanges(db: Queryable, principal: string, rows: readonly { binding: { id: string }; memberChange?: string | null; bindingChange?: string | null }[]): Promise<NewestChanges> {
+  if (rows.length === 0) return NO_CHANGES;
+  if (dialect.engineOf(db) === 'postgres') {
+    return { member: loggedChange(rows[0]!.memberChange ?? null), bindings: new Map(rows.map((row) => [row.binding.id, loggedChange(row.bindingChange ?? null)])) };
+  }
+  const { logChanges } = tablesOf(db);
+  const read = async (object: string): Promise<LoggedChange | null> => {
+    const [row] = await db.select().from(logChanges).where(eq(logChanges.object, object)).orderBy(desc(logChanges.number)).limit(1);
+    if (row === undefined) return null;
+    const base64 = (bytes: Uint8Array | null) => (bytes === null ? null : Buffer.from(bytes).toString('base64'));
+    return { number: String(row.number), at: Number(row.at), requestId: row.requestId, actor: row.actor, payload: row.payload, seal: base64(row.seal ?? null), mac: base64(row.mac)! };
+  };
+  const [member, ...bindings] = await Promise.all([read(logObject('principal', principal)), ...rows.map((row) => read(logObject('binding', row.binding.id)))]);
+  return { member: member!, bindings: new Map(rows.map((row, i) => [row.binding.id, bindings[i]!])) };
+}
+
+/** A change as `newestChangeColumns` renders it, or none. */
+function loggedChange(text: string | null): LoggedChange | null {
+  if (text === null) return null;
+  const [number, at, requestId, actor, payload, seal, mac] = JSON.parse(text) as [string, number, string, string, string, string | null, string];
+  return { number, at, requestId, actor, payload, seal, mac };
 }
 
 /**

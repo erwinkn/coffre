@@ -1304,7 +1304,7 @@ export function loggedChangesQuery(refs: readonly Ref[], previous: readonly Ref[
 }
 
 /** A change as `loggedChanges` reads it: its number, its columns, and whether its MAC holds over them (T190). */
-export type CheckedChange = { number: bigint; at: number; object: string; payload: string; seal: Buffer | null; holds: boolean };
+export type CheckedChange = { number: bigint; at: number; requestId: string; object: string; actor: string; payload: string; seal: Buffer | null; mac: Buffer; holds: boolean };
 
 /**
  * Each of `refs`' newest change, and for each of `previous` (among `refs`) the one before it, by the object's key in
@@ -1313,9 +1313,11 @@ export type CheckedChange = { number: bigint; at: number; object: string; payloa
  *
  * What a write the vault seals goes on from where the statement that makes it holds a row to its object's newest
  * seal: SQL compares that seal, and cannot check a MAC, so the vault checks it here first (T190). A writer who edits
- * the seal of a change already checked here, between this read and that statement, is not seen: the statement would
- * have to hold the newest change's seal column to the seal this read checked, not its number alone, which an edit in
- * place keeps (T179's two-trip writes, which check it under the lock; sealed-inputs.md).
+ * the seal of a change already checked here, between this read and that statement, is not seen unless the statement
+ * holds the newest change to the one this read checked, every column its MAC covers and the MAC: not its number,
+ * which no MAC covers, nor its seal alone, which an old, authentic change shares with a forged newer one. `sign_in`
+ * does (T192), and T179's two-trip writes, their read set held whole (ReadByNumber); `app_change` and `issue_token`
+ * outside them do not yet (sealed-inputs.md).
  */
 export async function loggedChanges(db: Queryable, macs: readonly LogMacKey[], refs: readonly Ref[], previous: readonly Ref[] = []): Promise<Map<string, CheckedChange[]>> {
   const found = new Map<string, CheckedChange[]>();
@@ -1324,8 +1326,9 @@ export async function loggedChanges(db: Queryable, macs: readonly LogMacKey[], r
   for (const row of await rowsOf<Read>(db, loggedChangesQuery(refs, previous))) {
     const seal = bytes(row.seal);
     const at = Number(row.at);
-    const holds = changeHolds(macs, { at, requestId: row.request_id, object: row.object, actor: row.actor, payload: row.payload, seal, mac: Buffer.from(row.mac) });
-    found.set(row.object, [...(found.get(row.object) ?? []), { number: BigInt(row.number), at, object: row.object, payload: row.payload, seal, holds }]);
+    const mac = Buffer.from(row.mac);
+    const holds = changeHolds(macs, { at, requestId: row.request_id, object: row.object, actor: row.actor, payload: row.payload, seal, mac });
+    found.set(row.object, [...(found.get(row.object) ?? []), { number: BigInt(row.number), at, requestId: row.request_id, object: row.object, actor: row.actor, payload: row.payload, seal, mac, holds }]);
   }
   for (const changes of found.values()) changes.sort((x, y) => (x.number > y.number ? -1 : x.number < y.number ? 1 : 0));
   return found;

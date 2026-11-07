@@ -186,7 +186,7 @@ import { ADMIT_KINDS, admitStanding, callAdmit, decideAdmit, holdAdmit, openTick
 import { admitChange, Changes, changesHold, heldByLog, heldFrom, keptFrom, keptObjects, macsOf, Moved, NotLogged, prepareChanges, type ChangeKeys, type Held } from './changes.ts';
 import { signer, type Signer } from './checkpoint.ts';
 import { CutoverRefused, cutoverPayload, cutoverRow, genesisCalls, Moved as VouchMoved, planCutover } from './cutover.ts';
-import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, issueCall, issueToken, revokeCredential, signIn, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
+import { bindingsCall, changeBindings, checkBinding, checkChangeBindings, checkIssue, givenPins, issueCall, issueToken, readPins, revokeCredential, signIn, SIGN_IN_TRIES, weighIssue, weighService, type Answer, type IssueRead } from './credentials.ts';
 import { bindingObject, credentialObject } from './objects.ts';
 import { proveIn, type SealThrough } from './checkpointer.ts';
 import { keyRefusals, placeIn, readerOf, referenceRefusal, refuses, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from './decide.ts';
@@ -4211,7 +4211,17 @@ class VaultService implements Vault {
     return this.#prepared.log015 !== null && engineOf(this.#db) === 'postgres' && !this.#remote(this.#config.keks.primary);
   }
 
-  /** A sign-in through a trust binding, made by the vault (credentials.ts, T149): its newest changes' MACs checked (T190), one statement, then `sign_in`'s, then the seal wait (R51). */
+  /**
+   * A sign-in through a trust binding, made by the vault (credentials.ts, T149), then the seal wait (R51). `sign_in`
+   * holds the account's and the binding's rows to their objects' newest seals, which SQL cannot authenticate, so the
+   * vault checks those changes' MACs first (T190), else an account removed or a binding ended, put back with its newest
+   * change's seal written to match, signs a run in. The changes the app read beside the binding (T192), when they
+   * hold: one statement, `sign_in`'s, which holds each newest change to the one checked, whole (ChangePinsChecked,
+   * ChangePinsWhole), so that a seal column edited in place once the check is done, or an old change handed back under
+   * the newest's number, is `moved`. Otherwise, and on
+   * `moved`, the vault reads them itself, one statement more. Three tries in all, as a key write's (two-trips.md,
+   * "Retries"), then `busy`, asked again shortly: a churn fails fast (R44).
+   */
   async signIn(input: SignInInput): Promise<SignInOutcome> {
     const log015 = this.#log015();
     await this.#cutOverYet();
@@ -4219,31 +4229,37 @@ class VaultService implements Vault {
     // The proof, verified here on the sealed binding (D148): what the credential is held to comes of the token, not the app.
     const proven = await this.#proven(log015, input, at);
     if ('refused' in proven) return proven;
-    // `sign_in` holds the member's and the binding's rows to their objects' newest seals, which SQL cannot
-    // authenticate: their MACs first (T190), one statement, else a member removed or a binding ended, put back with
-    // its newest change's seal written to match, signs a run in. Refused as the statement refuses a stale row.
     const binding: Ref = { kind: 'binding', id: proven.binding.columns.id };
-    let found: Map<string, CheckedChange[]>;
-    try {
-      found = await changesHold(log015, this.#db, [{ kind: 'principal', id: proven.principal }, binding]);
-    } catch (error) {
-      if (!(error instanceof NotLogged)) throw error;
-      const reports: NewEntry[] = [];
-      this.#notLogged(reports, error);
-      await this.#record(reports);
-      return { ok: false, refused: 'unbound' };
+    // The seal `#proven` checked over the binding's columns, which must be its newest change's (review r3): else an
+    // ended binding put back, its old seal valid, would pass, its end's seal column written to match.
+    const bindingSeal = Buffer.from(proven.binding.seal!, 'base64');
+    let pins = givenPins(log015.macs, input, bindingSeal);
+    for (let tries = 1; ; tries += 1) {
+      if (pins === null) {
+        let found: Map<string, CheckedChange[]>;
+        try {
+          found = await changesHold(log015, this.#db, [{ kind: 'principal', id: proven.principal }, binding]);
+        } catch (error) {
+          if (!(error instanceof NotLogged)) throw error;
+          const reports: NewEntry[] = [];
+          this.#notLogged(reports, error);
+          await this.#record(reports);
+          return { ok: false, refused: 'unbound' };
+        }
+        // Nothing reported for a binding's seal other than its newest change's: an end that came between makes it so.
+        pins = readPins(found, proven, bindingSeal);
+        if (pins === null) return { ok: false, refused: 'unbound' };
+      }
+      const answer = await signIn(this.#db, log015, at, proven, pins);
+      if (answer.state === 'moved') {
+        if (tries === SIGN_IN_TRIES) return { ok: false, refused: 'busy' };
+        pins = null;
+        continue;
+      }
+      if (answer.number == null) return { ok: false, refused: answer.state as Exclude<SignInRefusal, 'proof'> };
+      const sealed = await log015.sealThrough(BigInt(answer.number));
+      return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
     }
-    // The binding as `#proven` checked its seal is its newest change's, the one whose MAC holds (review r3): else an
-    // ended binding put back, its old seal valid, would pass that check, and the end's seal column, written to match
-    // once this read is done, `sign_in`'s comparison. `sign_in` takes that seal (`p_binding_seal`): a forgery now needs
-    // an honest change of the binding between here and there. Nothing reported: an end that came between makes it so.
-    // The member's row `sign_in` reads itself, unpinned, until T179 hands it the seal checked here (sealed-inputs.md).
-    const newest = found.get(objectKey(binding))?.[0];
-    if (newest?.seal == null || !newest.seal.equals(Buffer.from(proven.binding.seal!, 'base64'))) return { ok: false, refused: 'unbound' };
-    const answer = await signIn(this.#db, log015, at, proven);
-    if (answer.number == null) return { ok: false, refused: answer.state as Exclude<SignInRefusal, 'proof'> };
-    const sealed = await log015.sealThrough(BigInt(answer.number));
-    return { ok: true, number: answer.number, witnessed: sealed.witnessed ?? null };
   }
 
   /**
