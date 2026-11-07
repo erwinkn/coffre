@@ -629,9 +629,10 @@ Two traps, both noted in `pnpm-workspace.yaml`:
 a PR, with no `pnpm install` and no hand edit: the bump moves every
 package's version, the examples' pins and their entries in
 `pnpm-lock.yaml`, and heads those notes `## 0.4.2 (<today>)`, under a new,
-empty `## Unreleased`. Validate proves that diff version-only and skips the
-full suite. Merged, then a pushed tag, `v0.4.2`: the release workflow
-publishes all eight packages with npm's trusted publishing (the workflow's
+empty `## Unreleased`. Merged, then Validate and the Action test dispatched on the merge
+commit (`gh workflow run validate.yml --ref main`, then `action-test.yml`),
+green, then a pushed tag, `v0.4.2`: the release refuses a commit without both.
+The release workflow publishes all eight packages with npm's trusted publishing (the workflow's
 OIDC token, no stored token) and provenance, so each version on npm names
 the commit and run that built it. It then publishes the CLI's image,
 `ghcr.io/erwinkn/coffre-cli`, from npm's tarball, with signed provenance
@@ -643,8 +644,7 @@ pulls it without signing in.
 **The Action's CLI.** `action/coffre.mjs` is the CLI, bundled into one file
 (`packages/cli/scripts/action.ts`), unminified, so that its diff reads as
 the sources' does. A change to the CLI or to what it bundles rebuilds it in
-the same PR: `pnpm build`, then `pnpm build:action`. Validate's
-`pnpm check:action` fails when the file is not what the sources build. It
+the same PR: `pnpm build`, then `pnpm build:action`. `pnpm check:action` (in `pnpm validate`) fails when the file is not what the sources build. It
 names no version, so a bump leaves it as it is.
 
 ## Not in scope

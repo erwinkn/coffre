@@ -1,7 +1,7 @@
 // The examples pin `@coffre/*` at the release's version, and pnpm-lock.yaml
 // records each pin as its importer's specifier, linked to the workspace
 // package. A release moves those specifiers and nothing else: `pnpm bump`
-// writes this edit, and the version-only gate expects exactly it.
+// writes this edit.
 //
 // `pins` names each moved pin as `<importer>/<section>/<name>`, e.g.
 // `examples/node/devDependencies/@coffre/cli`. Throws when one of them is

@@ -120,6 +120,15 @@
   holds the new order (`StandingRecheckUnderHead`, `RotationClosesIntents`,
   and any wait may give up, `GivesUp`).
 
+- **No pull request runs CI; `pnpm validate` and a release gate replace it
+  (R46).** A change merges on `pnpm validate`, which runs the jobs of
+  Validate that its diff against `origin/main` can change on a Postgres of
+  its own, and prints the commit, tree and each step's result.
+  `Validate` runs when dispatched on any ref and nightly on `main` (no
+  pull request, no version-only fast path, whose script is gone), and so
+  does the Action test; a release's publish refuses a tag whose commit has
+  no green run of both. Bump, merge, Validate green, tag.
+
 - **A token's end may run at most a minute past its longest by the app's
   clock, not five (W331, limits D3).** The vault held a service or
   personal token's end to its longest plus 5 minutes, the room for an app

@@ -4,6 +4,12 @@ name: Release
 # `git tag v0.2.0 && git push origin v0.2.0`) to publish it to npm, then the
 # CLI's image to ghcr.io/erwinkn/coffre-cli. The bump also heads the release
 # notes' Unreleased section with the version.
+#
+# No pull request runs CI (R46), so this is where a commit is held to the whole
+# suite: the publish below refuses a tag whose commit has no green run of
+# Validate and of the Action test. The flow:
+#   bump PR merged;  gh workflow run validate.yml --ref main;
+#   gh workflow run action-test.yml --ref main;  both green;  git tag, git push.
 on:
   push:
     tags: ['v*']
@@ -31,10 +37,35 @@ jobs:
     environment: npm
     permissions:
       contents: read
+      # The gate below reads the workflows' runs.
+      actions: read
       # Trusted publishing: npm takes GitHub's OIDC token instead of a stored one.
       id-token: write
 
     steps:
+      # By the API, not by calling Validate here as a reusable workflow: that would
+      # run the hour-long suite again on every tag, and the nightly and the runs
+      # dispatched before the tag would count for nothing. A run on the very commit
+      # the tag names (a dispatch on a branch or main, or the nightly's) is the
+      # proof, and the commit holds the workflow file that ran: a change to it
+      # was merged like any other.
+      - name: Require a full Validate run and Action test on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          missing=0
+          for workflow in validate.yml action-test.yml; do
+            runs="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" -f head_sha="$SHA" -f status=success -f per_page=1 --jq .total_count)" || runs=0
+            if [[ "$runs" =~ ^[0-9]+$ ]] && ((runs > 0)); then
+              echo "$workflow: a green run of $SHA."
+            else
+              echo "::error::no green run of $workflow on $SHA: gh workflow run $workflow --ref main, wait for it to pass, then re-run this workflow"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: Check out the tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

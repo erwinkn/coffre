@@ -1,28 +1,14 @@
 name: Test the GitHub Action
 
+# Not run on pull requests (R46): the release gate asks for it beside Validate (release.yml),
+# and a nightly run of main shows a breakage within a day.
+#
+#   gh workflow run action-test.yml --ref main
 on:
-  pull_request:
-    paths:
-      - 'action/**'
-      - '.github/workflows/action-test.yml'
-      - '.github/actions/prepare/**'
-      - 'packages/cli/**'
-      - 'packages/core/src/dotenv.ts'
-      - 'packages/server/**'
-      - 'packages/vault/**'
-      - 'packages/db/**'
-      - 'packages/conformance/**'
-      - 'examples/node/**'
-      - 'scripts/action.test.mjs'
-      - 'scripts/bump.mjs'
-      - 'scripts/check-pins.mjs'
-
-# A push to a pull request supersedes the run of its old head, and the account's
-# concurrent-job pool is shared by every pull request. Anything that is not a
-# pull request (a push to main, a tag) is keyed on its ref and never cancelled.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  workflow_dispatch:
+  schedule:
+    # Once a day, on main's head.
+    - cron: '47 3 * * *'
 
 permissions:
   contents: read

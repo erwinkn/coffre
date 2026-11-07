@@ -7,8 +7,7 @@
 // It edits package.json files, the examples' pnpm with them, their specifiers
 // in pnpm-lock.yaml, and the release notes, whose
 // `## Unreleased` it heads with the version and today's date (UTC), under a
-// new, empty one: exactly what the version-only gate accepts, so a release is
-// this, a commit and a PR. Building, tagging and publishing are separate
+// new, empty one, so a release is this, a commit and a PR. Building, tagging and publishing are separate
 // steps, and none of them happens here.
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';

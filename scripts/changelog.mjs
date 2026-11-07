@@ -1,7 +1,6 @@
 // The release notes gather what is not yet released under `## Unreleased`.
 // A release heads them with its version and day, under a new, empty
-// `## Unreleased`: `pnpm bump` makes this edit, and the version-only gate
-// accepts it, and no other edit of the notes.
+// `## Unreleased`: `pnpm bump` makes this edit.
 const unreleased = '## Unreleased';
 
 // Unchanged when the notes have no `## Unreleased` heading.

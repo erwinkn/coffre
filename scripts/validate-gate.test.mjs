@@ -5,15 +5,10 @@ import test from 'node:test';
 
 // Exercise the expression the real final job runs, including rejected states.
 const workflow = readFileSync(new URL('../.github/workflows/validate.yml', import.meta.url), 'utf8');
-const expression = workflow.match(/Require full validation[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
-const jobs = ['checks', 'tests', 'tests-014', 'matrices', 'schema', 'formal', 'proofs', 'workers', 'node', 'consumer', 'compat', 'image', 'terraform'];
-function needs(fast) {
-    return {
-        changes: { result: 'success', outputs: { version_only: String(fast) } },
-        action: { result: 'success' },
-        pins: { result: 'success' },
-        ...Object.fromEntries(jobs.map((name) => [name, { result: fast ? 'skipped' : 'success' }])),
-    };
+const expression = workflow.match(/Require every job[\s\S]*?jq -e '([\s\S]*?)' <<</)[1];
+const jobs = ['action', 'pins', 'checks', 'tests', 'tests-014', 'matrices', 'schema', 'formal', 'proofs', 'workers', 'node', 'terraform', 'consumer', 'compat', 'image'];
+function needs() {
+    return Object.fromEntries(jobs.map((name) => [name, { result: 'success' }]));
 }
 function accepted(input) {
     const result = spawnSync('jq', ['-e', expression], { input: JSON.stringify(input), encoding: 'utf8', timeout: 5000 });
@@ -22,64 +17,44 @@ function accepted(input) {
     return result.status === 0;
 }
 
-test('Validate accepts complete validation and only the explicitly proven fast path', () => {
-    assert.equal(accepted(needs(false)), true);
-    assert.equal(accepted(needs(true)), true);
+test('Validate accepts complete validation', () => {
+    assert.equal(accepted(needs()), true);
 });
 
-test('each failed, cancelled or unexpected skipped job makes normal Validate fail', () => {
-    for (const job of ['changes', 'action', 'pins', ...jobs]) {
-        for (const result of ['failure', 'cancelled', 'skipped']) {
-            const input = needs(false);
-            input[job].result = result;
-            assert.equal(accepted(input), false, `${job}: ${result}`);
-        }
-    }
-});
-
-test('fast Validate refuses a failed classifier, Action or pins check, or any unexpectedly run heavy job', () => {
-    for (const job of ['changes', 'action', 'pins']) {
-        for (const result of ['failure', 'cancelled', 'skipped']) {
-            const input = needs(true);
-            input[job].result = result;
-            assert.equal(accepted(input), false, `${job}: ${result}`);
-        }
-    }
+test('each failed, cancelled or skipped job makes Validate fail', () => {
     for (const job of jobs) {
-        for (const result of ['success', 'failure', 'cancelled']) {
-            const input = needs(true);
+        for (const result of ['failure', 'cancelled', 'skipped']) {
+            const input = needs();
             input[job].result = result;
             assert.equal(accepted(input), false, `${job}: ${result}`);
         }
     }
 });
 
-test('missing or unknown detector output requires every normal job to pass', () => {
-    for (const output of [undefined, 'unknown', 'false']) {
-        const input = needs(false);
-        input.changes.outputs.version_only = output;
-        assert.equal(accepted(input), true);
-        input.tests.result = 'skipped';
-        assert.equal(accepted(input), false);
+test('Validate waits for exactly the jobs this list names, each of them', () => {
+    const waits = workflow.match(/\n  validate:\n[\s\S]*?needs: \[([a-z0-9, -]+)\]/)[1].split(', ');
+    assert.deepEqual([...waits].sort(), [...jobs].sort());
+    // Every job of the workflow is waited on, or is a step of one: the Formal model's plan and shards.
+    const defined = [...workflow.matchAll(/\n  ([a-z0-9-]+):\n    (?:name|needs|if):/g)].map((match) => match[1]);
+    const inside = new Set(['validate', 'matrices-shard', 'formal-plan', 'formal-shard']);
+    assert.deepEqual(defined.filter((job) => !waits.includes(job) && !inside.has(job)), []);
+});
+
+// A job that judges the results of the ones before it runs even when they failed, or the failure would skip it
+// and not be seen. These are the Formal model and the use matrices.
+test('the jobs that judge shards run when a shard failed', () => {
+    for (const job of ['matrices', 'formal']) {
+        const block = workflow.match(new RegExp(`\\n  ${job}:\\n[\\s\\S]*?\\n    runs-on:`))[0];
+        assert.match(block, /\n    if: \$\{\{ !cancelled\(\) \}\}\n/, job);
     }
 });
 
-// These job predicates use only the shared JS/GitHub boolean operators and
-// string comparisons. Evaluate the actual expressions with known states: the
-// heavy jobs Validate waits on, and the Formal model's plan and the use
-// matrices' shards beside them.
-test('every heavy lane runs unless classification succeeds with a true output', () => {
-    const predicates = [...workflow.matchAll(/    if: \$\{\{ (always\(\).*?) \}\}/g)].map((match) => match[1]);
-    assert.equal(predicates.length, jobs.length + 2);
-    for (const expression of predicates) {
-        const run = new Function('needs', 'always', 'cancelled', `return (${expression});`);
-        assert.equal(run(needs(true), () => true, () => false), false);
-        assert.equal(run(needs(false), () => true, () => false), true);
-        const failed = needs(true);
-        failed.changes.result = 'failure';
-        assert.equal(run(failed, () => true, () => false), true);
-        assert.equal(run(needs(false), () => true, () => true), false);
-    }
+// Validate is run by hand and nightly, never by a pull request (R46).
+test('no pull request runs Validate', () => {
+    const triggers = workflow.match(/\non:\n([\s\S]*?)\npermissions:/)[1];
+    assert.match(triggers, /^ {2}workflow_dispatch:/m);
+    assert.match(triggers, /^ {2}schedule:/m);
+    assert.doesNotMatch(triggers, /pull_request|push:/);
 });
 
 // `Formal model` answers for its plan and shards: the shards ran and held, or
