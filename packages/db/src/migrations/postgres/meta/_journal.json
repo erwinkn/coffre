@@ -498,6 +498,13 @@
       "when": 1793820000000,
       "tag": "0073_passkeys_in_vault",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1793830000000,
+      "tag": "0074_short_fence_waits",
+      "breakpoints": true
     }
   ]
 }

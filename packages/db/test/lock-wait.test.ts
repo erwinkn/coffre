@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sql } from 'drizzle-orm';
 
-import { LOCK_WAIT_MS } from '@coffre/core/vault';
+import { HOT_LOCK_TIMEOUT_MS, LOCK_WAIT_MS } from '@coffre/core/vault';
 
 import { createDatabase } from '../src/database.ts';
 import { gaveUp } from '../src/dialect.ts';
@@ -48,5 +48,24 @@ test("a transaction of a database made with lockWaitMs gives up a lock after it,
   } finally {
     letGo();
     await Promise.allSettled([holder.end(), client.end()]);
+  }
+});
+
+test("the credential writes that take the fence wait LOCK_WAIT_MS for each lock, and the issues a use's whole wait (migration 0074)", { skip }, async () => {
+  const client = postgresClient(url, { max: 1 });
+  try {
+    const rows = await client.unsafe<{ name: string; config: string[] | null }[]>(
+      `SELECT proname AS name, proconfig AS config FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+         AND proname IN ('revoke_credential', 'change_bindings', 'sign_in', 'issue_token') ORDER BY proname`);
+    const waits = rows.map(({ name, config }) => [name, (config ?? []).find((setting) => setting.startsWith('lock_timeout='))]);
+    assert.deepEqual(waits, [
+      ['change_bindings', `lock_timeout=${LOCK_WAIT_MS}ms`],
+      ['issue_token', `lock_timeout=${HOT_LOCK_TIMEOUT_MS / 1000}s`],
+      ['issue_token', `lock_timeout=${HOT_LOCK_TIMEOUT_MS / 1000}s`],
+      ['revoke_credential', `lock_timeout=${LOCK_WAIT_MS}ms`],
+      ['sign_in', `lock_timeout=${HOT_LOCK_TIMEOUT_MS / 1000}s`],
+    ]);
+  } finally {
+    await client.end();
   }
 });

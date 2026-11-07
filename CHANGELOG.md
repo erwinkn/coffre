@@ -18,7 +18,11 @@
   a write waiting for the fence held back every use behind it in Postgres's
   queue. A vault change whose wait gave up is decided again, after a pause
   of 25 ms doubled up to 400 ms, for 5 s (`CALL_DEADLINE_MS`, formerly
-  `READ_DEADLINE_MS`); an app write answers 503 at once. Such a 503 says
+  `READ_DEADLINE_MS`); an app write answers 503 at once. The two credential
+  writes that take the fence in SQL, `revoke_credential` and
+  `change_bindings`, wait 500 ms too (migration 0074, from 1 s); `sign_in`
+  and `issue_token`, which take only the issue lock no use asks for, keep
+  their 1 s. Such a 503 says
   `Retry-After: 1`, not 5: one lock wait, in whole seconds, rounded up.
   A rotation to a new vault key no longer waits for reads at KMS, so it logs
   an outcome, refused, for each key service's intent still open, which the
