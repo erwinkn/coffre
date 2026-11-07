@@ -393,7 +393,7 @@
   both logs. The vault decides each read on its own, so the hint never
   let a value through.
 
-- **Passkeys at sign-in (T176, PR 4; in progress).** `signin({ passkeys
+- **Passkeys at sign-in (T176).** `signin({ passkeys
   })` takes the policy, `'off'`, `'optional'` (the default) or
   `'required'`, or `{ policy, rpId }` to make a parent of the public URL's
   host the relying party. Not `off`, the public URL's host must be a name:
@@ -499,7 +499,22 @@
   reads again what it touched and says its answer was lost, and
   conformance counts such a call as let through. A read so cut off read
   nothing, and a change that read first failed there. A passkey removal,
-  sign-in or step-up whose 200 was cut off is done, and the page goes on.
+  sign-in or step-up whose 200 was cut off is done, and the page goes on. `coffre init` writes
+  the policy as the app's `PASSKEYS` var (`app/wrangler.jsonc`, `.env`),
+  `optional`, so that recovering the last Owner (`off`, below) is a var
+  and a deploy; a deployment made before reads none and keeps the
+  default. Conformance holds a deployment to section 13 of the design
+  (PR 7): its first sign-in runs under `required` from cold, and its
+  checks of the ceremonies, of what a change to someone's passkeys ends,
+  of a session left alone past five minutes against every route that
+  takes a fresh check, of `required`, of a replaced issuer and of an IP
+  public URL restart it with `PASSKEYS`, GitHub's API URL or `PUBLIC_URL`
+  changed, and back ([docs/conformance.md](docs/conformance.md)).
+  [docs/deployment-auth.md](docs/deployment-auth.md#passkeys) says how to
+  set passkeys up, what they ask, how to recover lost ones, the last
+  Owner's included, and what to do when someone else added a passkey to
+  an account; [docs/offboarding.md](docs/offboarding.md), what removal
+  and a reset do to them.
 
 - **A Terraform provider that writes and never reads (T108).**
   `terraform-provider/` is a Go provider for Terraform and OpenTofu 1.11

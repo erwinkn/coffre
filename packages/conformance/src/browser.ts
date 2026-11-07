@@ -21,6 +21,13 @@ export class Browser {
     return [...this.#jar];
   }
 
+  /** Another browser holding this one's cookies as they are now: what a thief who copied them holds. */
+  copy(): Browser {
+    const copy = new Browser(this.origin);
+    for (const [name, value] of this.#jar) copy.#jar.set(name, value);
+    return copy;
+  }
+
   /** Whether coffre left this browser a cookie. */
   get hasCookies(): boolean {
     return this.#jar.size > 0;

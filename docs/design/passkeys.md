@@ -1992,7 +1992,9 @@ else again. Open question 6.
 
 `@coffre/conformance` holds every deployment to what it must never do. It
 gains a software authenticator and these checks, each against a deployment
-running `passkeys: 'required'`:
+running `passkeys: 'required'` (as built, most under `optional`, the
+default, with restarts under `required` where the check needs it: section
+14, PR 7):
 
 1. An assertion whose `clientDataJSON.origin` is another origin is refused.
 2. An assertion whose `rpIdHash` is another RP ID's is refused.
@@ -2107,8 +2109,38 @@ running `passkeys: 'required'`:
 6. **Management**: Account → Passkeys, the Owner reset, the prompt under
    `optional`. Built in two: 6a (built), the API's side, as sections 3.6
    and 3.7 say; 6b (built), the pages.
-7. **Conformance** checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
+7. **Conformance** (built) checks of section 13, and docs: `docs/deployment-auth.md` (the policy, `rpId`, recovery and its log review, the `optional` takeover
    case) and `docs/offboarding.md`.
+
+**As built (PR 7): conformance.** The deployment runs as booted,
+`optional`, as `coffre init` writes it, which now reads the policy from the
+app's `PASSKEYS` var (`app/wrangler.jsonc`, `.env`): the policy stays code
+(`signin({ passkeys })`), and the template hands it a var so that the last
+Owner's recovery (section 3.7) is a var and a deploy, and so that
+conformance can restart a deployment under another policy. The harness's
+`restart(settings)` and `refusesToStart(settings)` take `PASSKEYS`,
+`PUBLIC_URL` and GitHub's API URL, the issuer. The first sign-in runs
+under `required` from cold (22, 7, 27); the ceremonies (1 to 6, 10, 13,
+20, 21, 29), what changes to passkeys end (11, 12, 15, 17, 18, 23, 25, 30,
+31, 34, 35) and reads (26) run under `optional` with people who add
+passkeys; a browser session of the admin's, touched early and left alone,
+meets every **always** route five minutes on (9, 14, 24, 32); `required`
+again for 8, 16 and 19, the workload checks running under it too; then
+the issuer (28) and the IP public URL (33), each a restart and back.
+`packages/conformance/src/checks/passkeys.ts`, `docs/conformance.md`.
+Where the checks differ from the list above:
+
+- 8: under `required` the server answers `GET /api/me` too with `401
+  passkey_required`, so the session reaches nothing but signing out; the
+  check holds every API call to 401 and signing out to working.
+- 16: `/use` is checked through people's handles, live until a passkey
+  change ends them; services and the workload checks (CI and pod
+  sign-in) run under `required` unchanged.
+- 35 races three handles against three removals on one deployment; the
+  previous release's vault during a rollout is `formal/Factor.tla`'s
+  and the vault suite's, as conformance boots one release.
+- 34 is the MCP approval of `issue_service_token` with its touch, and the
+  same touch refused for the next approval.
 
 
 Each PR leaves `main` shippable: until PR 4, nothing is reachable.

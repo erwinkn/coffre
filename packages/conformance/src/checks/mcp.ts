@@ -58,7 +58,7 @@ function token(deployment: Deployment, fields: Record<string, string>): Promise<
  * they ticked: by default what the client asked for. The code comes back on
  * the redirect.
  */
-async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'read', ticked = scope.split(' ')): Promise<{ code: string; verifier: string }> {
+export async function connect(deployment: Deployment, person: Person, clientId: string, scope = 'read', ticked = scope.split(' ')): Promise<{ code: string; verifier: string }> {
   const verifier = base64url(randomBytes(32));
   const request = {
     client_id: clientId,
@@ -84,7 +84,7 @@ async function connect(deployment: Deployment, person: Person, clientId: string,
   return { code, verifier };
 }
 
-async function redeem(deployment: Deployment, clientId: string, { code, verifier }: { code: string; verifier: string }): Promise<Tokens> {
+export async function redeem(deployment: Deployment, clientId: string, { code, verifier }: { code: string; verifier: string }): Promise<Tokens> {
   const answer = await token(deployment, {
     grant_type: 'authorization_code',
     code,
@@ -218,7 +218,7 @@ export async function mcpConnect(deployment: Deployment, people: People): Promis
 }
 
 /** A 2026-07-28 request as a client sends it: its headers say what its body does; `capabilities` are the client's. */
-async function modern(deployment: Deployment, access: string, method: string, params: Record<string, unknown> = {}, name?: string, capabilities: Record<string, unknown> = {}) {
+export async function modern(deployment: Deployment, access: string, method: string, params: Record<string, unknown> = {}, name?: string, capabilities: Record<string, unknown> = {}) {
   const response = await mcp(deployment, {
     authorization: `Bearer ${access}`,
     'mcp-protocol-version': '2026-07-28',
@@ -229,7 +229,7 @@ async function modern(deployment: Deployment, access: string, method: string, pa
 }
 
 /** A client registered for one check, by the name every check's client has. */
-async function register(deployment: Deployment): Promise<string> {
+export async function register(deployment: Deployment): Promise<string> {
   const registered = await json(await fetch(`${deployment.origin}/api/oauth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

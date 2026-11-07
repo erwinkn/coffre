@@ -15,7 +15,10 @@
     "PUBLIC_URL": "https://secrets.example.com",
     // A GitHub App whose callback is <PUBLIC_URL>/auth/callback/github, with
     // read-only access to email addresses, or an OAuth app with that callback.
-    "GITHUB_CLIENT_ID": "replace-with-your-client-id"
+    "GITHUB_CLIENT_ID": "replace-with-your-client-id",
+    // A passkey after GitHub: "optional" (whoever holds one, and every
+    // Owner), "required" (everyone) or "off" (no one; docs/deployment-auth.md).
+    "PASSKEYS": "optional"
   },
   "secrets": {
     // APP_KEY is from `coffre setup`; the app never gets the vault's keys.

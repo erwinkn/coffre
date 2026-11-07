@@ -53,9 +53,22 @@ because their row or grants were changed outside the vault) is removed the
 same way. That starts them over from what the log says of them, and
 re-adding them gives them back nothing the tampering added.
 
-**Adding someone back starts from nothing.** No grants, no sessions, and their
-sign-in account binds again by email the next time they sign in. A CLI login
-they approved before being removed cannot be collected afterwards.
+**Adding someone back starts from nothing.** No grants, no sessions, no
+passkeys, and their sign-in account binds again by email the next time they
+sign in. A CLI login they approved before being removed cannot be collected
+afterwards. Their passkeys belonged to the membership that ended: added back,
+they sign in as someone who never had one, and under `required` add a new one
+first ([deployment-auth.md](deployment-auth.md#passkeys)).
+
+**Someone who stays, but whose account may not be theirs** (a stolen laptop,
+a GitHub account taken over, a passkey they did not add) needs no removal: an
+Owner of the whole instance opens **Users → ⋯ → Reset passkeys…**, which
+removes every passkey of theirs and ends every session, terminal, personal
+token, handle and MCP client they were signed in with, at once, as a removal
+does, but keeps their grants. Their next sign-in adds a passkey again (under
+`optional`, an Owner's, or whoever wants one). The log's `passkey.reset`
+names what ended; read what was done in their name before it, and rotate as
+below.
 
 **Removal does not reach outside coffre.** Remove them from your identity
 provider as well (the GitHub organisation, the Google Workspace). With

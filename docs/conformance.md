@@ -73,6 +73,15 @@ list `github(…)` among its `signin(…)` providers, as `init` writes it; one
 behind Access, or with only other providers, cannot be booted as it is. Nothing from the shell's
 `COFFRE_*` reaches it.
 
+The deployment runs with its own passkey policy, `optional` as `init`
+writes it. A few checks restart it with other settings and then as booted:
+`PASSKEYS=required` (the first sign-in, and from `passkeys required` to
+`back to optional`), GitHub's API under another name (`issuer replaced`),
+and a public URL that is an IP address (`IP public URL`). So a deployment
+must read `PASSKEYS` and `PUBLIC_URL` from its environment as `init`
+writes them; one whose policy is fixed in code fails the checks that
+change it.
+
 On Workers, wrangler runs the app's build behind an entry of the run's own,
 written beside it in `app/dist/server` and replaced by the next build. It
 reads a request's body before passing the app's answer on, when the app
@@ -92,6 +101,9 @@ The people:
 | service | `token:conformance-ci`, a viewer on dev with a token; removed along the way |
 | CI run | `token:conformance-run`, a viewer on dev with no token: a trust binding lets a GitHub workflow's runs sign in as it, by the ID token the dev IdP signs for them |
 | stranger | never admitted |
+| ada, cy, dee, fay | developers or viewers on dev, each signing in and adding passkeys for the passkey checks |
+| eve | made an Owner of the whole instance before her first sign-in, then removed |
+| hal | a contributor on `conformance/vaulted`, protected: may use its keys, not read them |
 
 Every value set is a canary, `coffre-canary-<random>`, never to be seen
 outside a reveal by someone allowed to.
@@ -109,13 +121,14 @@ In order, since each builds on the ones before:
 |---|---|
 | health | `/livez` answers. On Workers, `/readyz` fails before any heartbeat, and passes once the Cron trigger has run and the vault has checkpointed it |
 | browser bundle | Nothing of the server in what the browser loads: every text file of the build's `app/dist/client`, read as the browser gets it, holds no database layer, driver, table only the server knows or `COFFRE_*` read. A page importing across the line otherwise just grows by the database layer, with no error |
-| sign-in | The admin signs in through GitHub, the first to, and is the Owner of the whole instance |
+| sign-in | Under `required`, from cold (restarted so, on the empty database): the Owner's GitHub sign-in stopped at the passkey sets no session (`/api/me` 401) and writes no person, account, credential, passkey or terminal's code. Then the admin signs in through GitHub, the first to, adds a passkey and lands, the Owner of the whole instance, and signs in again with that passkey. The rest runs as booted |
 | setup, personas | The admin creates the project, its values and the people above |
 | pages in a browser | Signed in as the admin, `/projects`, the project and `/audit`, in headless Chrome, over the DevTools protocol: each shows its heading once its scripts have run and settled, with no uncaught error, console error or failed load. Run between setup and personas. It is what caught wrangler's `keep_names` wrapping the functions seroval writes into a signed-in page in an `__name` only the Worker has |
 | pasted values | In Chrome, a multi-line PEM key pasted into a new secret's value field, and over part of an existing value being edited: each time the field is a textarea after, focused, its caret right after the paste, and the values saved are the PEM byte for byte, and the old value with the paste in place of the selection, its `\r\n` saved as `\n`. A text input drops a paste's line breaks, so without the page's handling the key would be saved on one line. A value typed with Shift+Enter between two words turns the field into a focused textarea, its caret after the break, and saves as two lines. In an environment of its own, `conformance/pasted` |
 | sign-in error, once | A member's address that GitHub now gives another account is refused as `account_mismatch`, and sent back to `/login?error=account_mismatch&with=github&via=github`. The server's HTML says the address already signs in with another GitHub account; in Chrome, the page says it, then its address is `/login`, and a reload shows no error |
 | security headers | Twelve kinds of response, each with coffre's headers (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, the two cross-origin policies, `Cache-Control`) and a Content-Security-Policy whose nonce no other response had: the sign-in page, a signed-in page, a page's redirect to sign in, a page not found, an API read and an API refusal, a path under `/api` or `/auth` that is not one, a method refused with its body unread, sign-in's redirect to the provider, `/livez` and `/readyz`. Whatever answers each, Start's render or one of coffre's server routes, coffre's middleware must have secured it |
 | bodies | Every body is read to its bound, and refused 413 past it: a device login past 128 KiB, the bound of every body before sign-in, and a write past 1 MiB, the API's. A write of 1,600 keys, past the 1,600 values a body holds, is refused 400 before it is parsed. A body nested 1,580 deep, as deep as that count lets it, at a device login, a value written and a reveal, is answered 400, never 5xx, whatever walks it on the platform's stack (`SIGN_IN_BODY_BYTES`, `API_BODY_BYTES`, `MAX_BODY_NODES`) |
+| a session left alone | The admin signs in a second browser, which starts linking another GitHub account and is then left alone until `stale session` |
 | members only | The stranger's sign-in is refused and leaves no session; no one gets 401 reading, revealing or writing, and a made-up token is refused |
 | grant scoping | The reader reads dev and nothing else, and changes nothing: no write, no grant of their own, no member. So does the service, with its token. The bulk reader cannot read dev, nor give the service dev or a token for it; the reader cannot give it prod |
 | folders | A project and a secret filed in folders are listed in them, and the secret is read and run by its own name, with its own value, by the same reader; the reader files neither, and a folder name with a slash is refused |
@@ -127,6 +140,9 @@ In order, since each builds on the ones before:
 | missing keys | The admin adds a key to prod alone: dev's missing keys show it, by name and as prod's, to the admin and to the reader, a viewer on dev who cannot read prod, with nothing of its value; the reader cannot dismiss it; the admin's dismissal moves it to the dismissed list, and restoring brings it back. The key is archived after |
 | reveals audited, runs audited | A single-secret reveal or an environment read writes one `secret.read` of the vault's per value, under the reveal's operation and request, at the versions revealed |
 | cross-site | A write, a reveal and a sign-out with the admin's cookie, from another site or from no page at all: 403, no value in the answer, nothing changed |
+| passkey ceremonies | At a step-up and at a sign-in, an assertion for another origin, for another RP ID's hash, without user verification, backed up but not backup-eligible, or by another member's passkey: 401, the session as it was. One answer, sent again from a copy of the browser, is taken once, at a sign-in and at a step-up. A fresh check ends the session it came in on, and the new one expires when that one would have; two at once on one session: one new session, one 401. A sign-in's sealed state completes no step-up, a step-up's answer approves no terminal, and one terminal's touch no other. An enroll without user verification is refused; an enroll's state adds one passkey, nothing again, and nothing after an Owner's reset |
+| passkey changes | A developer's CLI session, a terminal they approved and a handle, all made before their first passkey, end with it (401, no token, 401 at `/use`), and stay ended after the passkey is reset. A Developer without a passkey signs in with GitHub alone; an Owner of the whole instance without one adds one first. A session touched a moment ago approves no terminal without its own touch; an MCP client's approval and consent each need a touch of their own, which approves that one act. Removing a passkey, touching another, ends every credential the first confirmed (CLI, personal token, another browser, a handle, an approved terminal's code), and it signs nobody in. Three handles issued while a removal runs are refused or revoked, never live after; a consent whose session a removal ended connects nothing |
+| reads stay reads | A contributor on a protected environment, who may use its keys but not read them, reveals nothing there from a session touched a moment ago or with a personal token |
 | live setup | The admin sets up what a token from CI needs: `conformance/live/CANARY`, and `token:conformance-live`, a viewer there and auditor on the project |
 | verify with a token | `coffre verify instance`, the built CLI in a home of its own, signed in with that token, piped to `coffre login --token`, and its canary's value piped in, as CI runs it: every check [as no one and with the token](#against-a-running-instance) passes, but the token's verification, which it skips. Neither the token nor the canary shows in what it prints |
 | login as a user, login as the admin | `coffre login`, in a CLI of each one's own, approved by the reader and by the admin in their browsers |
@@ -140,6 +156,8 @@ In order, since each builds on the ones before:
 | offboarding | Removing the leaver names the values they read, to rotate; their browser session, their CLI session and a new sign-in all stop at once. A removed service's token stops too |
 | instance roles | No grant is on every project, and a service account holds no instance role. A Developer scoped to `dev` reads and writes the `dev` of a project made after the role, and no `prod`. An Admin scoped to one environment grants there and nowhere else, sets no role and makes no project, and an Admin of the whole instance does not change its own role, nor demote or remove the Owner (403 `not_allowed`, not `last_owner`) |
 | bulk limit | One more value at once than the limit allows gets 403 `bulk_limit`, with reason `bulk_limit`; a single value still opens |
+| stale session | From the session left alone, five minutes or more after its touch: every route that takes a fresh check (a member added, removed or given access, a passkey added or reset, a service's token, the settings, accepting lost entries, a project or environment erased or unprotected, a role or instance role made or deleted, a freeze lifted), and `?dryRun=1` on two that take none, answers `403 fresh_check_required` and changes nothing. The link started while it was fresh is refused at its callback (`link_stale`), and another is sent to a fresh check. Making a sensitive value a secret is refused, and the same write keeping its nature taken |
+| passkeys required | Restarted under `required`: the bulk reader's session, which no passkey stands behind, answers 401 to every API call but signing out; a one-key reveal it asks answers alike for a key that exists, a sensitive one and one never made, and logs no use; the live service's token reads its value. The workload checks below run under `required` too, until `back to optional` |
 | trust a run | The admin trusts `deploy.yml`, pushed to `main` of `acme/api`, to sign in as `token:conformance-run`, from the dev IdP's CI issuer (`/workloads`). A deployment that trusts no workloads skips this and the checks after it, to tokens unlogged |
 | run signs in | That run's ID token buys a five-minute credential at `POST /api/auth/oidc`, which reads dev as the service. The vault's `secret.read` names the credential, and the audit log leads from the read to the run |
 | run token spent | A token is taken once: sent again, it is refused as `replayed`, and so is an ES256 token's twin, its signature's (r, n − s) in place of (r, s) |
@@ -149,6 +167,8 @@ In order, since each builds on the ones before:
 | run unbound | Removing the binding ends the credential it issued at once, and the next run's token buys none |
 | exchanges limited | Malformed tokens from one address get 429 `busy`, with `Retry-After: 60`, within 200 a minute: the limit counts before anything is read. Last of these, since it spends the address's minute |
 | tokens unlogged | No ID token or credential these checks used is in the processes' output, nor any service credential |
+| back to optional, issuer replaced | Restarted as booted. A sign-in pending at its passkey, GitHub's API renamed meanwhile (its issuer), completes nothing; with the name put back, the admin signs in |
+| IP public URL | Started at `http://127.0.0.1:<port>` with passkeys `optional`, it refuses to start, and says why |
 | checkpoints | Each Cron run has the vault sign the log up to its last entry, in an `audit.checkpoint` entry of its own that covers the one before, and the log verifies through it |
 | keys behind writes | Every `secret.write`, `secret.restore` and `secret.loosen` names, by `related_seq`, the vault's `key.wrap` (a new value) or `key.rewrap` (a restore, a mark, a loosening) for the same member, request, operation, secret and version; and no value read is logged by the app, only by the vault |
 | no audit, no value | With a trigger refusing `secret.read` appends, a reveal gets 500 `internal_error`, the injected cause appears in the process output, and no value leaves; it works again once the log does |

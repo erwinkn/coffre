@@ -2,7 +2,7 @@
 // src/server.ts, and so only on the server. The app reaches the database
 // through Hyperdrive and the keys only through the vault Worker's service
 // binding.
-import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type AnchorNamespace, type CoffreContext, type GatesNamespace, type SocketsNamespace, type VaultEntry } from '@coffre/server/cloudflare';
+import { createCoffre, durableAnchor, github, githubApp, postgres, signin, type AnchorNamespace, type CoffreContext, type GatesNamespace, type PasskeyPolicy, type SocketsNamespace, type VaultEntry } from '@coffre/server/cloudflare';
 import { auditWatch } from '@coffre/server/plugins/audit-watch';
 import { credentialProxy } from '@coffre/server/plugins/credential-proxy';
 
@@ -16,6 +16,8 @@ export type Env = {
   GITHUB_URL?: string;
   GITHUB_API_URL?: string;
   APP_KEY: string;
+  /** Who signs in with a passkey after GitHub: app/wrangler.jsonc's var (docs/deployment-auth.md, "Passkeys"). */
+  PASSKEYS: PasskeyPolicy;
   /** The GitHub App's ID, a var, and private key, a secret: with them, it lists your repositories too (docs/github-app.md). */
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
@@ -48,6 +50,10 @@ export const coffre = createCoffre((env: Env) => {
     vault: env.VAULT,
     auth: signin({
       providers: [app ? github({ app }) : github(client)],
+      // A passkey after GitHub: `optional` asks it of whoever holds one, and
+      // of every Owner; `required`, of everyone; `off`, of no one, the
+      // recovery when the last Owner lost theirs (docs/deployment-auth.md).
+      passkeys: env.PASSKEYS,
       // CI runs and apps may sign in as services with their platform's proof,
       // through the trust bindings owners make (docs/design/oidc.md), into
       // key-bound sessions or, for now, bearer credentials; `useOnly: true`
