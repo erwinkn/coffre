@@ -797,10 +797,13 @@ what a caller sends.
 
 One pre-sign-in byte bound replaces the CI sign-in's CPU accounting
 (`SIGN_IN_WORK_NS`, 16 ms, and the claim-matching budget) in #533's head
-`f3f43ba4`: `SIGN_IN_BODY_BYTES`, 16 KiB, derived from a token that names no
-key tried against each of 32 keys within 16 ms (the ~32 KiB first agreed
-measured past 16 ms in a third of the runs). [config.md](config.md) section
-2.7 gives its formula.
+`2d390835`: `SIGN_IN_BODY_BYTES`, 128 KiB, the smaller of what a token
+that names no key, tried against each of 32 keys, allows within 16 ms (145
+kB) and what a passkey's answer allows (200 kB), rounded down to a power of
+two. The worst measured at 128 KiB is 11.5 ms, once each key try checks the
+signature alone over a header parsed once (jose's whole verification at
+each try had held it to 16 KiB). [config.md](config.md) section 2.7 gives
+its formula.
 
 ## 4. The inventory
 

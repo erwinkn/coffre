@@ -3,7 +3,7 @@
 Status: **proposal, for Erwin's one-pass review (D172), for 0.16.** Written
 against `main` at `f9261451`, with the values of the open PRs that change
 limits at their heads: #519 (`f5d3eb02`, proxy memory), #520 (`66815898`,
-sign-in limits), #533 (`f3f43ba4`, body bounds), #538 (`231e66d1`, locks and
+sign-in limits), #533 (`2d390835`, body bounds), #538 (`231e66d1`, locks and
 key service). #516 (service tokens) is merged. The audit behind it, every
 limit and where it lives, is [limits.md](limits.md).
 
@@ -443,7 +443,8 @@ read call with a key service 11.2 s.
 | A binding's fleet size (`replicas`) | 1 to **64** ⚠ | none written | limits.md §3.6 proposes 1 to 1,000 |
 | A sign-in's CPU accounting (`SIGN_IN_WORK_NS`, 16 ms, and its unit costs) | gone | a stranger's body is bounded by its bytes instead (`SIGN_IN_BODY_BYTES`, 2.7) | #533 |
 | Keys in a key set, fetched or uploaded (`MAX_KEYS`) | 32 | none written: the pre-sign-in body bound is derived from it | #533 ⚠ the 32 itself is a choice |
-| A key tried against a token that does not verify (`KEY_TRY_CPU_US`), and each token byte per try (`TOKEN_BYTE_CPU_NS`) | 260 µs; 14 ns | measured over tokens of 1 to 32 KiB, ES256 and RS256, the dearest rounded up | #533 (its `sign-in-cost.ts` script) |
+| A key tried against a token that does not verify (`KEY_TRY_CPU_US`), and each token byte per try (`TOKEN_BYTE_CPU_NS`) | 210 µs; 2 ns | measured over tokens of 1 to 256 KiB, their bytes in the payload or the header, ES256 and RS256, the dearest rounded up. Each try checks the signature over a signing input made once, the header parsed once (it was 260 µs and 14 ns while each try ran jose's whole verification) | #533 (its `sign-in-cost.ts` script) |
+| A passkey's answer, per byte (`PASSKEY_BYTE_CPU_NS`) | 80 ns | measured, 53 to 77 over seven runs, rounded up | #533 (`sign-in-cost.ts`) |
 | A binding's issuer | 1,670 bytes (from 400) | 2,704 (index entry) − 1,034 (the entry's other columns) | #533 |
 | A provider fetch: discovery document, key set, GitHub's API (`FETCH_DEADLINE_MS`) | 5 s, DNS to last byte | none written | ⚠ a choice, `packages/server/src/workloads/transport.ts` (limits.md S64, which proposes the same deadline for the UI routes' fetches, today unbounded) |
 | A workload's gate | 1,000 a second per service | a Durable Object's soft limit | platform; on Node it stands in for a memory bound ⚠ (limits.md #5) |
@@ -457,7 +458,7 @@ read call with a key service 11.2 s.
 | A secret's value | 64 KiB of UTF-8 | half of Linux's 128 KiB, since `coffre run` makes each value one | platform |
 | OAuth's authorize parameters together | 16,000 bytes | a Workers URL's 16 KB | platform |
 | A provider's discovery document or key set | 64 KiB | about 1/2,000 of an isolate | #533 |
-| Every body before sign-in (`SIGN_IN_BODY_BYTES`): device login, CI and workload exchanges, a passkey's answer, MCP's OAuth token, revocation and registration | 16 KiB | the largest B with `MAX_KEYS` × (`KEY_TRY_CPU_US` + `TOKEN_BYTE_CPU_NS` × B) ≤ 20 ms − 4 ms: 32 × (260 µs + 14 ns × B) ≤ 16 ms gives B ≤ 17.1 kB, rounded down to a power of two | #533 (R27). Measured: 32 tries of a 16 KiB token cost 7.1 to 12.0 ms; of 32 KiB, up to 21.4 ms. ⚠ Not Free's: a stranger's worst sign-in at 16 KiB, up to 12 ms before the rest of the request, runs past Free's 10 ms. No body size fits 32 keys in Free's 10 ms less the 4 ms read: 32 × 260 µs is 8.3 ms before a byte, so a Free bound would also lower `MAX_KEYS` (to 23 at most). The device login's 4 KiB and MCP's 256 KiB go; the exchanges' 16 KiB stays |
+| Every body before sign-in (`SIGN_IN_BODY_BYTES`): device login, CI and workload exchanges, a passkey's answer, MCP's OAuth token, revocation and registration | 128 KiB | the largest B within 20 ms − 4 ms = 16 ms for both of a stranger's dearest bodies, rounded down to a power of two: a token naming no key, tried against each key, `MAX_KEYS` × (`KEY_TRY_CPU_US` + `TOKEN_BYTE_CPU_NS` × B), 32 × (210 µs + 2 ns × B) ≤ 16 ms, gives B ≤ 145 kB; a passkey's answer, 80 ns × B ≤ 16 ms, 200 kB. The smaller, 145 kB, rounds down to 128 KiB | #533 (R27). Measured at 128 KiB: 32 tries cost 4.2 to 11.5 ms whatever the token's shape, a passkey's answer 6.7 to 8.4 ms; at 256 KiB, up to 15.9 and 17.1. ⚠ Not Free's: a stranger's worst sign-in at 128 KiB, up to 11.5 ms before the rest of the request, runs past Free's 10 ms. No body size fits 32 keys in Free's 10 ms less the 4 ms read: 32 × 210 µs is 6.7 ms before a byte, so a Free bound would also lower `MAX_KEYS` (to 28 at most). The device login's 4 KiB, the exchanges' and MCP's OAuth 16 KiB, MCP's endpoint's 256 KiB and a workload token's own 8 KiB go; real bodies are a few kB (a GitHub Actions ID token about 1.2 kB) |
 | Field bounds with no source | gone | – | R70 (#533): labels, role names and descriptions, claims, scopes and the rest |
 | A field body's fields and depth, in the proxy (`MAX_FIELDS`, `MAX_DEPTH`) | 256; 32 | refused before parsing, so that a body made to cost the most (65,000 empty pairs in 64 KiB) costs no more than a real one, unauthenticated; a siteverify has four fields | `credential-proxy.ts`, kept by #533 (limits.md S27). The reason is written; the two numbers are not derived from it ⚠ |
 
@@ -868,7 +869,7 @@ it ends at 30 s with the app's.
 | The vault's 15 s write lock wait (`LOCK_TIMEOUT_MS`) | 15 s | `LOCK_WAIT_MS`, 500 ms, retried for up to 5 s from the first attempt (#538) |
 | A plain 503's `Retry-After` | 5 | 1 (#538) |
 | `MAX_BODY_KEYS` and the field bounds | 2,000 top-level entries; labels 120, role names 40, descriptions 200, claims, scopes and the rest | gone (#533): one 1 MiB body bound, its values counted |
-| The pre-sign-in body bounds | 4 KiB, 16 KiB, 256 KiB by entry point | one, 16 KiB, derived from a stranger's worst sign-in (#533) |
+| The pre-sign-in body bounds | 4 KiB, 16 KiB, 256 KiB by entry point | one, 128 KiB, derived from a stranger's worst sign-in (#533) |
 | A sign-in's CPU accounting (`SIGN_IN_WORK_NS`) | 16 ms, spent step by step | gone, the body bound holding the same 16 ms (#533) |
 | The proxy's caches | 1,000 or 10,000 entries, some cleared whole | least recently used, within a slice of 16 MiB (#519) |
 | The proxy's body read whole | 16 MiB | 1 MiB; larger bodies stream (#519) |
