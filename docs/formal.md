@@ -2873,6 +2873,11 @@ shards 10.9 (5.8 and 5.5 here).
 | seal-plugin | 5.8 min | 29 min | about 12 min (estimated) |
 | seal-retention | 6.5 min, Rotation's 2.6 of it | not measured | about 13 min (estimated) |
 
+A push to a pull request cancels the `Validate` run of its previous head
+(`concurrency` in `validate.yml`), so a superseded run's shards never hold
+the account's shared job pool; a cancelled run saves no key, as only a run
+whose every shard held does.
+
 Two things cut that, and `Formal model` is still the one job `Validate` asks about, on
 every pull request that is not a version-only bump:
 

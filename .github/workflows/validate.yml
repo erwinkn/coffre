@@ -3,6 +3,13 @@ name: Validate
 on:
   pull_request:
 
+# A push to a pull request supersedes the run of its old head, which would only
+# keep queueing ahead of the new one: the account's concurrent-job pool is shared
+# by every pull request, so a stale ~37-job run costs the current ones minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
