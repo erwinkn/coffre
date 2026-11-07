@@ -92,6 +92,7 @@ models' are [below](#credentials-issuing-and-the-bulk-limit).
 | Sign-in re-reads the member's generation under the head (`#stillMember`) | a credential issued at a generation a removal had moved past (`CredentialsAtCurrentGeneration`) | |
 | Member rows are locked in principal order (`lockMembers`) | two decisions waiting on each other (`NoWaitCycle`) | |
 | A read or a wrap with a key service checks its reader's standing again where it commits, under their row and the head, once the key service has answered: its first check, the intent's, holds no lock across the key service (`#keys`, the outcome's decision; R75, W331) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`, in `Members` and `Sharing`) | W331, which dropped the row held across the key service (`ReaderRowLocked`) |
+| A rotation to a new vault key logs, under the new key, an outcome for every key service's intent still open (`#rotate`, `#closeIntents`): no lock it waits for is held across the key service, and the vault on the retired key can log nothing after it | an intent with no outcome, which verification reports as missing once overdue (`IntentsAccounted`, in `Members`) | W331, review r2 |
 | A read through a reference checks again, under the head, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
 | Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
@@ -170,6 +171,7 @@ Traces are shortened here; the script prints every step.
 | `CredentialsAtCurrentGeneration` | A credential is issued to an active member, at the generation they hold when it commits |
 | `NothingReleasedAfterRevocation` | No `secret.read` for a member follows the `access.revoke` or `member.remove` that took their last grant covering where it was decided, unless an `access.grant` covering it again comes between |
 | `NothingReleasedThroughEndedReference` | No `secret.read` through a reference follows its `reference.end`, or the deletion of its source's place or its holder's, in the log |
+| `IntentsAccounted` | Every key service's `key.intent` logged before a rotation to a new vault key has its outcome in the log: its own release or refusal, or one the rotation logged for it |
 | `EveryReferenceBreakable` | A reference that has not ended is held in a standing place, where the API can name its holder, and so break it |
 | `OwnerStays` | Once the instance has an active Owner of all of it, it always has one |
 | `DeclaredStay` | Someone the deployment names, once the vault made them an Owner, stays one: nobody demotes or removes them, themselves included |

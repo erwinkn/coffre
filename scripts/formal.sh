@@ -49,6 +49,7 @@ REMOVALS=(
   "Locks SortedMemberLocks NoWaitCycle"
   "Members StandingRecheckUnderHead NothingReleasedAfterRevocation"
   "Sharing StandingRecheckUnderHead NothingReleasedAfterRevocation"
+  "Members RotationClosesIntents IntentsAccounted"
   "References EndRecheckUnderHead NothingReleasedThroughEndedReference"
   "Referencing SourceRecheckInReference ReferencedSourcesStayLive"
   "Referencing ArchiveRefusedWhileRead ReferencedSourcesStayLive"

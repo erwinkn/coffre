@@ -5,7 +5,7 @@ import { ACCESS_ACTIONS, type BindingColumns, type ConnectionColumns, type Crede
 import { later, laterRows, prepared, tablesOf, type Database, type Queryable, type Transaction } from '@coffre/db';
 import { changedRows, clockMillis, engineOf, forUpdate, rowsOf, tombstone, truth } from '@coffre/db/dialect';
 import { readGrants, roleColumns, storedRole, type GrantRow } from '@coffre/db/grants';
-import { entryColumns, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
+import { entryColumns, newestVaultEntries, numbersIn, recorded, strictly, withinBytes, type ChangeNumbers } from '@coffre/db/log';
 
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
@@ -991,6 +991,37 @@ export async function vaultEntriesOf(
     .limit(limit);
   return stored(rows);
 }
+
+/**
+ * The key services' intents logged at or after `since` (the database's clock), and every outcome naming one of them,
+ * oldest first: what a rotation reads to close those still open (`#rotate`). The intents newest first, a page at a
+ * time by `audit_log_action_idx`, until one is older; their outcomes by the same index, above the oldest of them.
+ */
+export async function recentIntents(db: Queryable, since: number): Promise<StoredEntry[]> {
+  const intents: StoredEntry[] = [];
+  for (let before: bigint | undefined; ;) {
+    const page = await newestVaultEntries(db, 'key.intent', INTENT_PAGE, before);
+    const recent = page.filter((entry) => entry.occurredAt >= since);
+    intents.push(...recent);
+    if (page.length < INTENT_PAGE || recent.length < page.length) break;
+    before = page.at(-1)!.seq;
+  }
+  if (intents.length === 0) return [];
+  const { auditLog } = tablesOf(db);
+  const oldest = intents.reduce((min, entry) => (entry.seq < min ? entry.seq : min), intents[0]!.seq);
+  const outcomes = await db
+    .select(entryColumns(db))
+    .from(auditLog)
+    .where(and(
+      eq(auditLog.author, 'vault'), inArray(auditLog.action, ['secret.read', 'key.wrap', 'key.rewrap']), gt(auditLog.seq, oldest),
+      inArray(auditLog.relatedSeq, intents.map((entry) => entry.seq)),
+    ))
+    .orderBy(asc(auditLog.seq));
+  return [...intents, ...stored(outcomes)].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0));
+}
+
+/** How many intents `recentIntents` reads a statement. */
+const INTENT_PAGE = 500;
 
 /** Which of these secrets' newest versions are sensitive, by the versions' own order. */
 export async function newestSensitive(db: Queryable, secretIds: readonly string[]): Promise<Set<string>> {

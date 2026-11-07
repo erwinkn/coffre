@@ -323,6 +323,12 @@ W331 the order is (a)'s, in `#keys`:
    `formal/Coffre.tla` holds it: without this check again
    (`StandingRecheckUnderHead`), TLC releases a value after a removal.
 
+A rotation to a new signing key, which locks every member's row, waited for
+every read at KMS under (b); now it waits for none, and a vault on the
+retired key can append nothing after it, its own outcomes included. So the
+rotation logs them, under the new key: each key of each intent still open,
+refused (`wrong_kek`, uncertain), as `IntentsAccounted` requires.
+
 The cost is (a)'s, accepted: when a removal lands while Ada's Decrypt is in
 flight, KMS has opened keys for a read that is then refused. CloudTrail
 shows the Decrypts, and the log explains them: the intent, then each key
