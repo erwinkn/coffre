@@ -275,7 +275,9 @@ test('a body past the bound, on a kept answer, is refused at once, its stream ca
     coffreRoute(request, runtime, '203.0.113.7'),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
   ]);
-  assert.equal(answered?.status, 400);
+  // Past the API's bound (`API_BODY_BYTES`): 413 `too_large`, on 0.14's log as on 0.15's.
+  assert.equal(answered?.status, 413);
+  assert.equal(((await answered!.json()) as { error: string }).error, 'too_large');
   assert.ok(cancelled, 'the body was cancelled');
 });
 
