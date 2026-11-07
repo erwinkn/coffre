@@ -794,12 +794,12 @@ what a caller sends.
   every app and vault isolate holds and parses then reaches ~29.5 MB per
   isolate, out of Workers' 128 MB. Documented in [roles.md](roles.md).
 
-One pre-sign-in byte bound of ~32 KiB, in place of the CI sign-in's CPU
-accounting (`SIGN_IN_WORK_NS`, 16 ms, and the claim-matching budget), was
-agreed for #533. Its head `b8dc8c73` does not have it yet: there, every body
-read before sign-in takes the API's 1 MiB (`API_BODY_BYTES`), and a sign-in
-spends from `SIGN_IN_WORK_NS`. [config.md](config.md) section 2.7 carries it
-as pending.
+One pre-sign-in byte bound replaces the CI sign-in's CPU accounting
+(`SIGN_IN_WORK_NS`, 16 ms, and the claim-matching budget) in #533's head
+`f3f43ba4`: `SIGN_IN_BODY_BYTES`, 16 KiB, derived from a token that names no
+key tried against each of 32 keys within 16 ms (the ~32 KiB first agreed
+measured past 16 ms in a third of the runs). [config.md](config.md) section
+2.7 gives its formula.
 
 ## 4. The inventory
 

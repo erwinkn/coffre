@@ -2,8 +2,8 @@
 
 Status: **proposal, for Erwin's one-pass review (D172), for 0.16.** Written
 against `main` at `f9261451`, with the values of the open PRs that change
-limits at their heads: #519 (`f5d3eb02`, proxy memory), #520 (`0e197735`,
-sign-in limits), #533 (`b8dc8c73`, body bounds), #538 (`c539928c`, locks and
+limits at their heads: #519 (`f5d3eb02`, proxy memory), #520 (`66815898`,
+sign-in limits), #533 (`f3f43ba4`, body bounds), #538 (`231e66d1`, locks and
 key service). #516 (service tokens) is merged. The audit behind it, every
 limit and where it lives, is [limits.md](limits.md).
 
@@ -286,8 +286,9 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | Spent sign-in tokens forgotten a beat | 600,000 | 2 × 1,000 a second × 300 s | R44 (#520; was 5,000) |
 | Open bindings per service (`MAX_BINDINGS`) | **16** ⚠ | none written | limits.md §3.6 proposes 256, once a sign-in reads only the bindings that can match |
 | A binding's fleet size (`replicas`) | 1 to **64** ⚠ | none written | limits.md §3.6 proposes 1 to 1,000 |
-| A sign-in's CPU budget (`SIGN_IN_WORK_NS`) | 16 ms | R27's 20 ms − 4 ms to read the largest body | #533 |
-| Keys in an uploaded key set | 32 | 32 failed checks ≈ 4.3 ms | #533 |
+| A sign-in's CPU accounting (`SIGN_IN_WORK_NS`, 16 ms, and its unit costs) | gone | a stranger's body is bounded by its bytes instead (`SIGN_IN_BODY_BYTES`, 2.7) | #533 |
+| Keys in a key set, fetched or uploaded (`MAX_KEYS`) | 32 | none written: the pre-sign-in body bound is derived from it | #533 ⚠ the 32 itself is a choice |
+| A key tried against a token that does not verify (`KEY_TRY_CPU_US`), and each token byte per try (`TOKEN_BYTE_CPU_NS`) | 260 µs; 14 ns | measured over tokens of 1 to 32 KiB, ES256 and RS256, the dearest rounded up | #533 (its `sign-in-cost.ts` script) |
 | A binding's issuer | 1,670 bytes (from 400) | 2,704 (index entry) − 1,034 (the entry's other columns) | #533 |
 | A workload's gate | 1,000 a second per service | a Durable Object's soft limit | platform; on Node it stands in for a memory bound ⚠ (limits.md #5) |
 
@@ -295,12 +296,12 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| Every control-plane body, before sign-in too (`API_BODY_BYTES`) | 1 MiB | about 5 MiB held while read, 4% of an isolate | #533. The device login's 4 KiB, the exchanges' 16 KiB and MCP's 16 and 256 KiB are gone |
+| Every control-plane body once its caller has a credential (`API_BODY_BYTES`) | 1 MiB | about 5 MiB held while read, 4% of an isolate | #533. Past it, 413 `too_large` (was 400), refused as it streams |
 | Values in a body (`MAX_BODY_NODES`) | 1,600 (from 20,000) | (20 ms − 4 ms) ÷ 10 µs a value, measured | R27; counted on the text before it is parsed |
 | A secret's value | 64 KiB of UTF-8 | half of Linux's 128 KiB, since `coffre run` makes each value one | platform |
 | OAuth's authorize parameters together | 16,000 bytes | a Workers URL's 16 KB | platform |
 | A provider's discovery document or key set | 64 KiB | about 1/2,000 of an isolate | #533 |
-| Before sign-in | **pending**: a ~32 KiB bound on what is read before anyone is signed in was agreed for #533 (W354), and is not in its head `b8dc8c73`, which reads those bodies to 1 MiB | – | see [limits.md §3.7](limits.md#37-accepted-costs-an-owner-controls) |
+| Every body before sign-in (`SIGN_IN_BODY_BYTES`): device login, CI and workload exchanges, a passkey's answer, MCP's OAuth token, revocation and registration | 16 KiB | the largest B with `MAX_KEYS` × (`KEY_TRY_CPU_US` + `TOKEN_BYTE_CPU_NS` × B) ≤ 20 ms − 4 ms: 32 × (260 µs + 14 ns × B) ≤ 16 ms gives B ≤ 17.1 kB, rounded down to a power of two | #533 (R27). Measured: 32 tries of a 16 KiB token cost 7.1 to 12.0 ms; of 32 KiB, up to 21.4 ms. The device login's 4 KiB and MCP's 256 KiB go; the exchanges' 16 KiB stays |
 | Field bounds with no source | gone | – | R70 (#533): labels, role names and descriptions, claims, scopes and the rest |
 
 ### 2.8 Proxy
@@ -625,7 +626,8 @@ it ends at 30 s with the app's.
 | The vault's 15 s write lock wait (`LOCK_TIMEOUT_MS`) | 15 s | `LOCK_WAIT_MS`, 500 ms, retried for up to 5 s from the first attempt (#538) |
 | A plain 503's `Retry-After` | 5 | 1 (#538) |
 | `MAX_BODY_KEYS` and the field bounds | 2,000 top-level entries; labels 120, role names 40, descriptions 200, claims, scopes and the rest | gone (#533): one 1 MiB body bound, its values counted |
-| The pre-sign-in body bounds | 4 KiB, 16 KiB, 256 KiB by entry point | the API's 1 MiB (#533); ~32 KiB pending |
+| The pre-sign-in body bounds | 4 KiB, 16 KiB, 256 KiB by entry point | one, 16 KiB, derived from a stranger's worst sign-in (#533) |
+| A sign-in's CPU accounting (`SIGN_IN_WORK_NS`) | 16 ms, spent step by step | gone, the body bound holding the same 16 ms (#533) |
 | The proxy's caches | 1,000 or 10,000 entries, some cleared whole | least recently used, within a slice of 16 MiB (#519) |
 | The proxy's body read whole | 16 MiB | 1 MiB; larger bodies stream (#519) |
 | KMS's 8 calls at once | slots handed from one request to the next | per call (#538's KMS PR) |
