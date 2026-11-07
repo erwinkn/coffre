@@ -11,6 +11,7 @@ import { generateKeyPairSync, randomBytes, sign as signWith, type KeyObject } fr
 import { github, signin, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 
+import { SIGN_IN_BODY_BYTES } from '../src/http.ts';
 import { coffreRoute } from '../src/app.ts';
 import { resolveConfig } from '../src/config.ts';
 import { vaultKv } from '../src/plugins/vault-kv.ts';
@@ -176,7 +177,8 @@ test('a token signs in once, and only as an account whose bindings trust it: ref
 test("a login's body is { role, jwt }, JSON, small; GET is no login; revoke-self needs the token", async () => {
   assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: 'role=eso' })).status, 400);
   assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE } })).status, 400);
-  assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE, jwt: 'x'.repeat(1024 * 1024) } })).status, 400);
+  // Past the bound of every body before sign-in (`SIGN_IN_BODY_BYTES`), as `/api/auth/oidc` reads it: 413.
+  assert.equal((await vault('PUT', 'auth/kubernetes/login', { body: { role: SERVICE, jwt: 'x'.repeat(SIGN_IN_BODY_BYTES) } })).status, 413);
   assert.equal((await vault('GET', 'auth/kubernetes/login')).status, 405);
   // `auth/token/login` is no auth method: Vault's token auth has none, and nothing else writes.
   assert.equal((await vault('PUT', 'auth/token/login', { body: { role: SERVICE, jwt: projected() } })).status, 405);
