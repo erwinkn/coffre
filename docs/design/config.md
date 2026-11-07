@@ -201,7 +201,7 @@ which the questions in section 3 or a later PR settle.
 | Input | Value | Source |
 |---|---|---|
 | A Worker isolate's memory | 128 MB, read as 128,000,000 bytes (the smaller reading) | [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) |
-| A Workers invocation's CPU on Free | 10 ms. Cloudflare tolerates an occasional overrun and ends invocations that cross it consistently (1102), so coffre sizes to it as if it were hard | Workers limits; R25 and R27 hold every request to it |
+| A Workers invocation's CPU on Free | 10 ms. Cloudflare tolerates an occasional overrun and ends invocations that cross it consistently (1102). coffre sizes a request to R27 below, 20 ms at p99 and 10 ms at the median, so Free's 10 ms holds at the median only: each bound derived from the 20 ms (bodies, a stranger's sign-in, `ABOVE_NEWEST`) says what it does on Free | Workers limits; R27 |
 | Worker invocations per request | 32 | Workers service bindings |
 | A URL on Workers | 16 KB | Workers limits |
 | A request body through Cloudflare | 100 MB (Free, Pro) | Cloudflare |
@@ -253,7 +253,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | Uses in flight per isolate or process | **10** ⚠ | node-postgres's default pool, where Workers has no pool | none: Q1 |
 | How long a use's place outlives its deadline (`HELD_PAST_DEADLINE_MS`) | 2 s | the uses' login's `statement_timeout` | R53 |
 | A use's time tolerance (`AT_SLACK_MS`) | 63 s | deadline 3 s + a clock 60 s ahead | R53, D3 |
-| The bulk cap's refresh | 60 s at 15 min | min(60 s, window ÷ 10) | decision 9 |
+| The bulk cap's refresh | 60 s at 15 min | in ms, max(1, min(60,000, ⌊window ÷ 10⌋)): a 1 ms window refreshes every 1 ms | decision 9 (`refreshMs`, `packages/vault/src/bulk.ts`) |
 | How long a key counts against a **new** key (`bulkRule`) | 17 min 3 s at 15 min | window + refresh + the use's deadline 3 s + a clock 60 s ahead, against the stored periods: a key may still be refused 17 minutes after the 1,000th entered | `packages/vault/src/bulk.ts` (TLC's HotPathOneClock, HotPathOneBulkSkew). The object's window is not the one a caller sees: `deploy.md` should say both |
 | The bulk window's maximum | 1 day | releases kept a day and an hour | R52 |
 | Keys a statement uses at once (`uses.batch`) | 100 | about 0.4 ms a key under the lock every use shares, so about 40 ms | measured (review of #433) |
@@ -268,7 +268,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
 | A write's lock wait (`LOCK_WAIT_MS`) | 500 ms | the uses' 1 s ÷ 2 | R75: a writer that waits in Postgres's queue holds back every use behind it, so it leaves within half a use's wait. Not every wait: reads and `sign_in`/`issue_token` below keep longer ones |
-| The migrator's wait per statement | 500 ms, 5 tries, 1 s apart | `LOCK_WAIT_MS` | #508 |
+| The migrator's lock waits | 500 ms for **each lock** a statement waits for, so one statement that waits for several may wait longer in all; then the run is tried again, up to 5 times, 1 s apart, and a try is the **whole transaction** of the pending migrations: one that gives up on its third migration applies the first two again | `LOCK_WAIT_MS` (Postgres's `lock_timeout` counts each wait); `MIGRATION_LOCK_ATTEMPTS`, `MIGRATION_LOCK_PAUSE_MS` | #508, #538 (`packages/db/src/migrate.ts`, `waitingBriefly`). The migration lock itself and the roles' last statements wait up to 5 min, for another run |
 | The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
 | A read's deadline (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s, **not from the call's start**: an ordinary decision's clock starts once the vault is settled and cut over (`#decideNow`); `unwrap`'s once it has loaded the versions, read the references, settled and read the environments, at `#keys`. That preparation has no bound of its own beyond each statement's | a choice: "a caller hears within it" | #356 ⚠ not derived. A bound from the call's start would move the clock to the call's entry, which #538 does not |
@@ -354,11 +354,11 @@ read call with a key service 11.2 s.
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
 | Every control-plane body once its caller has a credential (`API_BODY_BYTES`) | 1 MiB | about 5 MiB held while read, 4% of an isolate | #533. Past it, 413 `too_large` (was 400), refused as it streams |
-| Values in a body (`MAX_BODY_NODES`) | 1,600 (from 20,000) | (20 ms − 4 ms) ÷ 10 µs a value, measured | R27; counted on the text before it is parsed |
+| Values in a body (`MAX_BODY_NODES`) | 1,600 (from 20,000) | (20 ms − 4 ms) ÷ 10 µs a value, measured | R27; counted on the text before it is parsed. ⚠ Not Free's: the costliest body of 1,600 values takes up to 20 ms, past Free's 10 ms, where Cloudflare may end it (1102). Sized to 10 ms, the same formula gives (10 ms − 4 ms) ÷ 10 µs = 600 values |
 | A secret's value | 64 KiB of UTF-8 | half of Linux's 128 KiB, since `coffre run` makes each value one | platform |
 | OAuth's authorize parameters together | 16,000 bytes | a Workers URL's 16 KB | platform |
 | A provider's discovery document or key set | 64 KiB | about 1/2,000 of an isolate | #533 |
-| Every body before sign-in (`SIGN_IN_BODY_BYTES`): device login, CI and workload exchanges, a passkey's answer, MCP's OAuth token, revocation and registration | 16 KiB | the largest B with `MAX_KEYS` × (`KEY_TRY_CPU_US` + `TOKEN_BYTE_CPU_NS` × B) ≤ 20 ms − 4 ms: 32 × (260 µs + 14 ns × B) ≤ 16 ms gives B ≤ 17.1 kB, rounded down to a power of two | #533 (R27). Measured: 32 tries of a 16 KiB token cost 7.1 to 12.0 ms; of 32 KiB, up to 21.4 ms. The device login's 4 KiB and MCP's 256 KiB go; the exchanges' 16 KiB stays |
+| Every body before sign-in (`SIGN_IN_BODY_BYTES`): device login, CI and workload exchanges, a passkey's answer, MCP's OAuth token, revocation and registration | 16 KiB | the largest B with `MAX_KEYS` × (`KEY_TRY_CPU_US` + `TOKEN_BYTE_CPU_NS` × B) ≤ 20 ms − 4 ms: 32 × (260 µs + 14 ns × B) ≤ 16 ms gives B ≤ 17.1 kB, rounded down to a power of two | #533 (R27). Measured: 32 tries of a 16 KiB token cost 7.1 to 12.0 ms; of 32 KiB, up to 21.4 ms. ⚠ Not Free's: a stranger's worst sign-in at 16 KiB, up to 12 ms before the rest of the request, runs past Free's 10 ms. No body size fits 32 keys in Free's 10 ms less the 4 ms read: 32 × 260 µs is 8.3 ms before a byte, so a Free bound would also lower `MAX_KEYS` (to 23 at most). The device login's 4 KiB and MCP's 256 KiB go; the exchanges' 16 KiB stays |
 | Field bounds with no source | gone | – | R70 (#533): labels, role names and descriptions, claims, scopes and the rest |
 
 ### 2.8 Proxy
