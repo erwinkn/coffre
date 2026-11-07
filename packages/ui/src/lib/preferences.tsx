@@ -29,16 +29,16 @@ export function rememberSidebar(sidebar: Preferences['sidebar']) {
   remember(PREFERENCE_COOKIES.sidebar, sidebar === 'collapsed' ? 'collapsed' : null);
 }
 
-/** Not now, on the prompt to add a passkey: 30 days in this browser, after which the cookie lapses and it shows again. */
-export function rememberPasskeyLater() {
-  remember(PREFERENCE_COOKIES.passkeyPrompt, '1', 30 * 86_400);
+/** Not now, on the prompt to add a passkey, pressed `at`: 30 days in this browser, after which the cookie lapses and it shows again. */
+export function rememberPasskeyLater(at: number) {
+  remember(PREFERENCE_COOKIES.passkeyLater, String(at), 30 * 86_400);
 }
 
 type PreferencesValue = Preferences & {
   setTheme(theme: Theme): void;
   setSidebar(sidebar: Preferences['sidebar']): void;
   /** Put the prompt to add a passkey off, for 30 days. */
-  passkeyLater(): void;
+  putPasskeyOff(): void;
   /** coffre's element, which menus, dialogs and tooltips render into, so they are drawn in its theme. */
   portal: RefObject<HTMLDivElement | null>;
 };

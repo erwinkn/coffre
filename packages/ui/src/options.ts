@@ -46,6 +46,7 @@ import {
 } from './lib/queries';
 import type { Permission } from './shared/models';
 import { loginSearch } from './lib/signin-errors';
+import { readsForPrompt } from './lib/passkeys';
 
 /**
  * What coffre's routes read through the router: the API as the visitor
@@ -89,11 +90,16 @@ export const home = {
   },
 };
 
-/** `/projects`. */
+/**
+ * `/projects`, and, for a person its prompt may ask to add a passkey, their passkeys: an Owner's reset of them, which
+ * the prompt says, is in the page the server renders (section 3.7; review r1 of #539).
+ */
 export const projects = {
-  loader: ({ context }: Loader) => {
+  loader: async ({ context }: Loader) => {
     const { coffre, queryClient } = coffreOf(context);
-    return queryClient.fetchQuery(queries.projects(coffre));
+    // The shell reads the projects, which the page lists.
+    const shell = await loadShell(queryClient, coffre);
+    if (shell.principal?.type === 'user' && readsForPrompt(shell.passkeys)) await queryClient.fetchQuery(queries.passkeys(coffre, memberRef('user', shell.principal.id)));
   },
 };
 

@@ -16,6 +16,7 @@ import {
   kindOf,
   nameProblem,
   promptsForPasskey,
+  readsForPrompt,
   removable,
   removalSentence,
   resetSentence,
@@ -516,18 +517,19 @@ function RemovePasskeyDialog({
 /**
  * The Projects page's prompt, under `optional`, to a person holding no passkey (section 3.3): Add a passkey, which
  * signs in again to add it, or Not now, which puts it off in this browser for 30 days. An Owner's reset of theirs is
- * said first.
+ * said first, and shows it again after a Not now pressed before the reset (review r1 of #539).
  */
 export function PasskeyPrompt() {
   const { passkeys, principal, auth } = useShell();
-  const { passkeyPrompt, passkeyLater } = usePreferences();
-  const shown = principal?.type === 'user' && promptsForPasskey(passkeys, passkeyPrompt === 'later');
+  const { passkeyLater, putPasskeyOff } = usePreferences();
+  const reads = principal?.type === 'user' && readsForPrompt(passkeys);
   const member = principal?.type === 'user' ? memberRef('user', principal.id) : '';
-  const { data } = useQuery({ ...queries.passkeys(useCoffre(), member), enabled: shown });
-  if (!shown) return null;
+  // The loader read it (`projects`, options.ts), so the server renders the reset it says, and the browser asks nothing.
+  const { data } = useQuery({ ...queries.passkeys(useCoffre(), member), enabled: reads });
+  const reset = data?.ok === true ? data.reset : null;
+  if (!reads || !promptsForPasskey(passkeys, passkeyLater, reset)) return null;
   const providers = auth.signin?.providers ?? [];
   const provider = providers.length === 1 ? providers[0]!.label : 'your provider';
-  const reset = data?.ok === true ? data.reset : null;
   return (
     <div className="report-notice">
       <Notice tone="info">
@@ -542,7 +544,7 @@ export function PasskeyPrompt() {
         </p>
         <div className="notice-actions">
           <FirstPasskeyLinks next="/projects" primary />
-          <button className="btn" type="button" onClick={passkeyLater}>
+          <button className="btn" type="button" onClick={putPasskeyOff}>
             Not now
           </button>
         </div>

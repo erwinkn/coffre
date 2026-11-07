@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 
-import { addOutcome, addsInPlace, endsList, kindOf, nameProblem, promptsForPasskey, removable, removalSentence, resetSentence } from '../src/lib/passkeys.ts';
+import { addOutcome, addsInPlace, endsList, kindOf, nameProblem, promptsForPasskey, readsForPrompt, removable, removalSentence, resetSentence } from '../src/lib/passkeys.ts';
 
 const none = { sessions: 0, tokens: 0, handles: 0, apps: 0 };
 const optional = (enrolled: boolean) => ({ policy: 'optional' as const, enrolled, confirmedUntil: null });
@@ -25,13 +25,19 @@ test('what a removal or a reset ends, in words (docs/design/passkeys.md, section
   assert.equal(resetSentence('bob@acme.example', 1, none), 'Removes bob@acme.example’s 1 passkey. They are signed in nowhere right now.');
 });
 
-test('the prompt asks a person with none under optional, until Not now (section 3.3)', () => {
-  assert.equal(promptsForPasskey(optional(false), false), true);
-  assert.equal(promptsForPasskey(optional(false), true), false, 'Not now puts it off');
-  assert.equal(promptsForPasskey(optional(true), false), false, 'one held already');
-  assert.equal(promptsForPasskey({ policy: 'required', enrolled: false, confirmedUntil: null }, false), false, 'required asks at sign-in, not here');
-  assert.equal(promptsForPasskey({ policy: 'off', enrolled: false, confirmedUntil: null }, false), false);
-  assert.equal(promptsForPasskey(null, false), false, 'behind Cloudflare Access, coffre signs no one in');
+test('the prompt asks a person with none under optional, until Not now, and again after a reset since (sections 3.3, 3.7)', () => {
+  const pressed = Date.parse('2026-11-01T10:00:00Z');
+  assert.equal(promptsForPasskey(optional(false), null, null), true);
+  assert.equal(promptsForPasskey(optional(false), pressed, null), false, 'Not now puts it off');
+  assert.equal(promptsForPasskey(optional(false), pressed, { at: '2026-10-31T09:00:00Z' }), false, 'a reset Not now saw already');
+  assert.equal(promptsForPasskey(optional(false), pressed, { at: '2026-11-02T09:00:00Z' }), true, 'a reset since: news, said whatever Not now said');
+  assert.equal(promptsForPasskey(optional(true), null, null), false, 'one held already');
+  assert.equal(promptsForPasskey({ policy: 'required', enrolled: false, confirmedUntil: null }, null, null), false, 'required asks at sign-in, not here');
+  assert.equal(promptsForPasskey({ policy: 'off', enrolled: false, confirmedUntil: null }, null, null), false);
+  assert.equal(promptsForPasskey(null, null, null), false, 'behind Cloudflare Access, coffre signs no one in');
+  // Its passkeys are read, for the reset, whatever Not now said.
+  assert.equal(readsForPrompt(optional(false)), true);
+  assert.equal(readsForPrompt(optional(true)), false);
 });
 
 test('adding in place takes a passkey held, a policy that has them, and room; removing never takes the last under required', () => {

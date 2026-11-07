@@ -73,6 +73,7 @@ import {
   type PasskeyRead,
   type PasskeyRow,
 } from '../db/queries.ts';
+import { FRESH_MS } from './fresh-routes.ts';
 import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type Act, type ActState, type AddState, type CreateState, type RemoveState, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
 import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
@@ -1087,7 +1088,13 @@ export class SigninService {
     addable(live.length);
     const state: AddState = { purpose: 'add', credentialId: ctx.credentialId!, principal, generation: ctx.caller.generation, userHandle: userHandle(), passkeysEver: rows.length, ...challenge() };
     const person = { email: member.id, name: null, site: this.config.page.title };
-    return { options: creationOptions(this.config.passkeys, state, person, live), state: this.#ceremonies.seal(state) };
+    const options = creationOptions(this.config.passkeys, state, person, live);
+    // No longer than the session stays fresh, which its answer's POST is held to too: a `create()` answered after would
+    // reach a step-up, which replaces the session these options name, and leave on the device a passkey coffre never
+    // stored. When it lapses, the page asks for new options, after the step-up (review r1 of #539).
+    const confirmedAt = ctx.session?.confirmedAt;
+    if (confirmedAt != null) options.timeout = Math.min(options.timeout, Math.max(0, confirmedAt.getTime() + FRESH_MS - state.issuedAt));
+    return { options, state: this.#ceremonies.seal(state) };
   }
 
   /**
@@ -1113,6 +1120,12 @@ export class SigninService {
         return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
           const [caller, rows] = await Promise.all([this.#currentCaller(tx, ctx, standing), passkeysOf(tx, this.#deps.chainKey, principal)]);
           if (caller === null) throw fail('session_ended');
+          // This answer added already, its reply lost: said so before the count, which that add moved, would call it a
+          // change and have the page make another (review r1 of #539).
+          const credentialId = Buffer.from(verified.credentialId);
+          if (rows.some((row) => row.generation === state.generation && row.removedAt === null && row.credentialId.equals(credentialId))) {
+            throw new ApiError('conflict', 'that passkey is added already', 'passkey_exists');
+          }
           if (rows.length !== state.passkeysEver) throw new ApiError('conflict', 'your passkeys changed meanwhile: add it again', 'state_mismatch');
           addable(rows.filter((row) => row.generation === state.generation && row.removedAt === null).length);
           const row = {
@@ -1120,7 +1133,7 @@ export class SigninService {
             principal,
             generation: state.generation,
             userHandle: Buffer.from(state.userHandle, 'base64url'),
-            credentialId: Buffer.from(verified.credentialId),
+            credentialId,
             publicKey: Buffer.from(verified.publicKey),
             algorithm: verified.algorithm,
             signCount: verified.signCount,

@@ -54,11 +54,21 @@ export function resetSentence(person: string, count: number, ends: Ends): string
 }
 
 /**
- * Whether the Projects page asks you to add a passkey (section 3.3): a person under `optional` holding none, who has
- * not put it off in this browser (Not now, for 30 days).
+ * Whether the Projects page reads your passkeys, for an Owner's reset of them it says (section 3.7): a person under
+ * `optional` holding none, whom the prompt may ask. Its loader reads them too, so the page renders with it.
  */
-export function promptsForPasskey(standing: PasskeyStanding, later: boolean): boolean {
-  return standing !== null && standing.policy === 'optional' && !standing.enrolled && !later;
+export function readsForPrompt(standing: PasskeyStanding): boolean {
+  return standing !== null && standing.policy === 'optional' && !standing.enrolled;
+}
+
+/**
+ * Whether the Projects page asks you to add a passkey (sections 3.3 and 3.7): a person under `optional` holding none,
+ * who has not put it off in this browser (Not now, `later`, for 30 days), or whose passkeys an Owner reset since: the
+ * reset is news Not now did not see, and the prompt says it.
+ */
+export function promptsForPasskey(standing: PasskeyStanding, later: number | null, reset: { at: string } | null): boolean {
+  if (!readsForPrompt(standing)) return false;
+  return later === null || (reset !== null && Date.parse(reset.at) > later);
 }
 
 /** Whether Account › Passkeys adds one in place: from a passkey you hold, under a policy that has them, below the cap. */

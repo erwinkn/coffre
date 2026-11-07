@@ -135,9 +135,11 @@ test("a person lists their passkeys, adds another from a fresh session, and rena
   const [one] = (await listed(bob, BOB)).passkeys;
   assert.equal(one!.name, 'Passkey 1');
 
-  // Another, a moment after the touch: its options exclude the first, and its name is its provider's.
+  // Another, a moment after the touch: its options exclude the first, and its name is its provider's. They last as long
+  // as the session stays fresh, which the add is held to too, here the ceremony's whole five minutes.
   const asked = await act(bob, 'POST', `/api/members/user:${BOB}/passkeys/options`);
   assert.equal(asked.status, 200, JSON.stringify(asked.body));
+  assert.equal(asked.body.options.timeout, FRESH_MS);
   assert.deepEqual(asked.body.options.excludeCredentials.map((d: { id: string }) => d.id), [Buffer.from(first.credentialId).toString('base64url')]);
   const onePassword = await SoftAuthenticator.create('ES256', { synced: true, aaguid: new Uint8Array(Buffer.from('bada5566a7aa401fbd9645619a55120d', 'hex')) });
   const created = await onePassword.register({ ...RP, challenge: bytes(asked.body.options.challenge), userHandle: bytes(asked.body.options.user.id) });
@@ -147,11 +149,23 @@ test("a person lists their passkeys, adds another from a fresh session, and rena
   assert.deepEqual((await listed(bob, BOB)).passkeys.map((row) => row.name), ['Passkey 1', '1Password']);
   const entry = (await entries('passkey.add')).at(-1);
   assert.deepEqual([entry!.actor, entry!.metadata.passkeyId, typeof entry!.metadata.confirmedBy], [`user:${BOB}`, added.body.passkey.id, 'string']);
-  // The same answer again adds nothing: its state was for the passkeys as they were.
-  assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys`, { state: asked.body.state, response: created })), [409, 'conflict', 'state_mismatch']);
+  // The same answer again, as when the first reply was lost, adds nothing and says it was added (review r1 of #539).
+  assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys`, { state: asked.body.state, response: created })), [409, 'conflict', 'passkey_exists']);
+  assert.equal((await listed(bob, BOB)).passkeys.length, 2);
+  // Another answer to options asked before a passkey was added is a change's: new options, and a new `create()`.
+  const before = await act(bob, 'POST', `/api/members/user:${BOB}/passkeys/options`);
+  await rows.addPasskey(db.owner, deps.chainKey, BOB);
+  const stale = await (await SoftAuthenticator.create('ES256')).register({ ...RP, challenge: bytes(before.body.options.challenge), userHandle: bytes(before.body.options.user.id) });
+  assert.deepEqual(refused(await act(bob, 'POST', `/api/members/user:${BOB}/passkeys`, { state: before.body.state, response: stale })), [409, 'conflict', 'state_mismatch']);
+  // Asked a second before the session stops being fresh, options last that second: a `create()` answered after it would
+  // meet a step-up, which replaces the session they name, and leave a passkey on the device coffre never stored.
+  later(FRESH_MS - 1000);
+  const late = await act(bob, 'POST', `/api/members/user:${BOB}/passkeys/options`);
+  assert.equal(late.status, 200, JSON.stringify(late.body));
+  assert.equal(late.body.options.timeout, 1000);
+  later(1000);
 
   // Renaming takes no check, past the window too; a name with a control character is no name.
-  later(FRESH_MS);
   const renamed = await act(bob, 'PATCH', `/api/members/user:${BOB}/passkeys/${one!.id}`, { name: 'YubiKey 5C' });
   assert.deepEqual(renamed, { status: 200, body: { passkey: { id: one!.id, name: 'YubiKey 5C' } } });
   assert.equal((await act(bob, 'PATCH', `/api/members/user:${BOB}/passkeys/${one!.id}`, { name: 'a\u0007b' })).status, 400);
@@ -171,7 +185,12 @@ test("a person lists their passkeys, adds another from a fresh session, and rena
 
   // Ten at most.
   const dana = await enroll(runtime, DANA, await SoftAuthenticator.create('ES256'));
-  for (let held = 1; held < MAX_PASSKEYS; held++) await rows.addPasskey(db.owner, deps.chainKey, DANA);
+  for (let held = 2; held < MAX_PASSKEYS; held++) await rows.addPasskey(db.owner, deps.chainKey, DANA);
+  // The tenth, its reply lost: sent again, it is the one added, not one too many (review r1 of #539).
+  const tenth = await act(dana, 'POST', `/api/members/user:${DANA}/passkeys/options`);
+  const made = await (await SoftAuthenticator.create('ES256')).register({ ...RP, challenge: bytes(tenth.body.options.challenge), userHandle: bytes(tenth.body.options.user.id) });
+  assert.equal((await act(dana, 'POST', `/api/members/user:${DANA}/passkeys`, { state: tenth.body.state, response: made })).status, 200);
+  assert.deepEqual(refused(await act(dana, 'POST', `/api/members/user:${DANA}/passkeys`, { state: tenth.body.state, response: made })), [409, 'conflict', 'passkey_exists']);
   assert.deepEqual(refused(await act(dana, 'POST', `/api/members/user:${DANA}/passkeys/options`)), [409, 'conflict', 'too_many_passkeys']);
 });
 
