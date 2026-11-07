@@ -13,7 +13,6 @@ import type { Touch } from './api/signin.ts';
 import { findCredential } from './db/queries.ts';
 import { namedAhead } from './db/read-ahead.ts';
 import { acceptance } from './named-use.ts';
-import { passkeyAhead } from './passkey-check.ts';
 import { RefusalRecord } from './refused.ts';
 import type { CoffreRuntime } from './runtime.ts';
 
@@ -166,22 +165,19 @@ export async function admitAhead(
     if (answer.served) return answer;
     return 'ticket' in answer ? { refused: new RefusalRecord(runtime.vault, answer, 'member.add') } : answer.why;
   };
-  // What stands behind a person's credential, read beside the vault's call, which only reads (`passkeyAhead`, as a key write's).
-  const [first, passkey] = await Promise.all([ask(), passkeyAhead(runtime, token, kind)]);
+  const first = await ask();
   // The caller's credential not as its log has it, or ended: 401, never down today's path (as a key write's, `writeAhead`).
   if (first === 'forged') return { identity: unauthenticated(runtime.auth), admission: null };
   if (first === 'ended') return { identity: endedCredential(), admission: null };
   if (typeof first === 'string') return null;
-  // No live passkey behind it, or no answer: today's path, which decides again and refuses it before it writes (`writeAhead`).
-  if (passkey === 'ordinary') return null;
   const rows = (tried: AdmitTried) => namedAhead(runtime.db, answerOf(tried).app);
   const ahead = rows(first);
   let touched: Touch | null = null;
   // The credential checked on the rows the vault answered, its MAC and token's hash among them (AuthChecked: before
-  // anything is written), its expiry at the vault's `at`, its standing as the vault decided it.
+  // anything is written), its expiry at the vault's `at`, its standing as the vault decided it, and the passkey rows the
+  // read answered with it (T216, as a key write's: `writeAhead`).
   const identity = await authenticateRequest(request, runtime, requestId, token, sourceIp, {
     standing: answerOf(first).standing, at: answerOf(first).at, ...(ahead?.credential === undefined ? {} : { ahead: ahead.credential }),
-    ...(passkey === undefined ? {} : { passkey }),
     touch: (touch) => {
       touched = touch;
     },
@@ -192,7 +188,7 @@ export async function admitAhead(
     const credential = rows(tried)?.credential;
     if (credential == null) return false;
     try {
-      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential);
+      const row = await findCredential(runtime.db, runtime.chainKey, { tokenHash }, credential, false);
       return row !== null && row.id === credentialId;
     } catch {
       return false;

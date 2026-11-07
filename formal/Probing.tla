@@ -160,7 +160,9 @@ CONSTANTS
     \* Reviews r6 and r7 of D153: the vault's "authenticated" is the app's.
     \* The named call carries what the app's config accepts of a credential
     \* (coffre's own sign-in; for a browser session, a sign-in provider the
-    \* deployment configures), and the vault holds her credential to it
+    \* deployment configures; for a person's session or token, a live
+    \* passkey behind it as the policy says, T216), and the vault holds her
+    \* credential to it
     \* first, before anything of the place or the key: one the app would
     \* refuse is answered as a token no credential has, 401, in that one
     \* call. Off, the vault, which sees only her sealed rows, decides the use

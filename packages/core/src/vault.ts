@@ -1904,7 +1904,7 @@ export type NamedUseInput = {
    * through coffre's own sign-in (under Cloudflare Access no coffre token is a credential); `issuers`, each sign-in
    * provider it configures, `<provider id>:<issuer hash>`, which a browser session's identity must name. The call
    * holds the token's credential to them first, before anything else it reads: one the app would refuse is answered
-   * as a token no credential has, whatever the request names.
+   * as a token no credential has, whatever the request names. `passkeys` among them (T216).
    */
   accepts: CredentialAcceptance;
   /**
@@ -1921,8 +1921,16 @@ export type NamedUseInput = {
   deadline: number;
 };
 
-/** What a named use's credential must be for the app to take it (`NamedUseInput.accepts`). */
-export type CredentialAcceptance = { signin: boolean; issuers: readonly string[] };
+/**
+ * What a named use's credential must be for the app to take it (`NamedUseInput.accepts`). `passkeys`: the deployment's
+ * passkey policy (T216; docs/design/passkeys.md, section 6.2), which a named call holds a person's session or token to
+ * with the rest, first: one that names a passkey, while that passkey is live, its person's, at the credential's
+ * generation; one that names none, under `optional`, while its person holds no live passkey, never under `required`.
+ * The call answers what it read of the passkeys with the app's rows, whose MACs the app checks. A key write's and an
+ * add's first call (`WriteKeysInput`, `AdmitReadInput`) decides nothing of it: it answers the same rows, and nothing it
+ * prepares commits without the app's transaction, which the app's check of those rows refuses first.
+ */
+export type CredentialAcceptance = { signin: boolean; issuers: readonly string[]; passkeys: 'off' | 'optional' | 'required' };
 
 /**
  * A named use's answer. `served: false`: none the vault serves this way (no live place of those names, a personal

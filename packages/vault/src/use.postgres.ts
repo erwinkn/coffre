@@ -54,7 +54,8 @@ async function useText(db: Queryable, call: UseCall): Promise<string> {
     ${call.names === undefined ? null : GATE_ROLES}::jsonb,
     ${call.way}::smallint, ${call.principal}::text,
     ${call.names?.forks === true}::boolean,
-    ${call.route ?? null}::text
+    ${call.route ?? null}::text,
+    p_passkeys => ${call.names?.accepts.passkeys ?? null}::text
   )::text AS use`);
   return row!.use;
 }
@@ -110,7 +111,7 @@ export async function callNamedBatch(db: Queryable, gate: UseCall, calls: readon
     ${list((call) => call.known?.newest ?? null)}::bigint[], ${list((call) => call.known?.newestMac ?? null)}::bytea[],
     ${list((call) => call.known?.cap.count ?? null)}::integer[], ${list((call) => (call.known === undefined ? null : String(call.known.cap.windowMs)))}::bigint[],
     ${first?.call.way ?? 0}::smallint, ${first?.call.principal ?? null}::text,
-    ${limit}::integer
+    ${limit}::integer, ${names.accepts.passkeys}::text
   )::text AS uses`);
   type Read = { gate: Record<string, unknown>; keys: string[] | null; rows: (Record<string, unknown> | null)[]; by_ids: boolean[]; aheads: (NamedAhead | null)[] };
   let read = JSON.parse(row!.uses) as Read;
@@ -175,7 +176,8 @@ function changeFrom(columns: unknown): ChangeColumns | null {
 /**
  * A route use on Postgres (T186 PR C): one call of `use_route` (0058), one statement and one round trip, its own
  * transaction: the gate, the route's levels, its editor and its keys, read; each key's use by ids when the call has
- * them and they are the names' now. It answers one JSON object (`RouteRows`).
+ * them and they are the names' now. It answers one JSON object (`RouteRows`). A handle's gate holds its credential to
+ * `accepts`, the passkey policy included (0073, `p_passkeys`), as any named call's.
  */
 export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRows> {
   const keys = call.keys;
@@ -189,7 +191,8 @@ export async function callRoute(db: Queryable, call: RouteCall): Promise<RouteRo
     ${list((one) => (one === null || one.requestId === '' ? null : one.requestId))}::bigint[], ${list((one) => (one === null || one.requestId === '' ? null : one.mac))}::bytea[],
     ${list((one) => one?.cover?.number ?? null)}::bigint[], ${list((one) => (one?.cover === undefined ? null : String(one.cover.at)))}::bigint[], ${list((one) => one?.cover?.requestId ?? null)}::bigint[],
     ${list((one) => one?.decided === true)}::boolean[],
-    ${call.offset}::integer, ${call.limit}::integer, ${call.lock}::text, ${call.use}::boolean, ${call.light}::boolean
+    ${call.offset}::integer, ${call.limit}::integer, ${call.lock}::text, ${call.use}::boolean, ${call.light}::boolean,
+    p_passkeys => ${call.accepts?.passkeys ?? null}::text
   )::text AS route`);
   type Read = Omit<RouteRows, 'gate' | 'rows' | 'levels' | 'editor' | 'madeFor'> & {
     gate: Record<string, unknown>; rows: (Record<string, unknown> | null)[] | null; levels: Record<string, unknown>[] | null; editor: Record<string, unknown> | null; made_for: string[] | null;

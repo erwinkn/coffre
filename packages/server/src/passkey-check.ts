@@ -1,13 +1,12 @@
-import { hashToken, type PasskeyPolicy, type TokenKind } from '@coffre/core/identity';
+import type { PasskeyPolicy } from '@coffre/core/identity';
 import type { Queryable } from '@coffre/db';
 
 import type { Caller } from './api/caller.ts';
 import { ApiError } from './api/errors.ts';
 import { formatMember } from './api/paths.ts';
 import { AuthRowTampered, verifyAuthRow } from './auth-rows.ts';
-import { findConnection, findCredential, passkeyByToken, type PasskeyRead } from './db/queries.ts';
+import { findConnection, findCredential, type PasskeyRead } from './db/queries.ts';
 import { errorResponse } from './http.ts';
-import type { CoffreRuntime } from './runtime.ts';
 
 /**
  * The check every request of a person's makes of the credential it came in on (docs/design/passkeys.md, section 6.2),
@@ -106,32 +105,5 @@ export async function sourceStands(
   } catch (error) {
     if (error instanceof AuthRowTampered) return false;
     throw error;
-  }
-}
-
-/**
- * The passkey check of a request whose credential the vault reads, not the app (docs/design/passkeys.md, section 6.4):
- * a use by name, a key write, a member's add. The vault answers nothing of passkeys, so the app reads what stands behind
- * the credential in one statement of its own, by its token's hash, and nothing of what the request names
- * (`passkeyByToken`). A use by name asks it before the vault's call, which releases values; a write or an add, beside
- * the vault's first call, which only reads and prepares, so it costs no wait (`writeAhead`, `admitAhead`). What it read
- * goes on to the credential's check (`authenticateRequest`'s `passkey`), which reads nothing more, and refuses there,
- * 401 `passkey_required`, before anything is written. Undefined where nothing is checked: a handle, a service's token,
- * policy `off`, or no such credential (the vault's call refuses that). A passkey removed between this read and the
- * vault's revoked the credential (section 6.1), which the vault refuses itself.
- *
- * `'ordinary'`: the request goes the ordinary way, asking the vault nothing ahead, whose credential check reads and
- * decides again and answers as it answers any request: refused, 401 `passkey_required`; a passkey row that fails its
- * MAC, 401 (`AuthRowTampered`); a read that failed, 503 (`CredentialUncheckable`). Never thrown from here, where no
- * boundary translates it (review r1 of #497).
- */
-export async function passkeyAhead(runtime: CoffreRuntime, token: string, kind: TokenKind): Promise<PasskeyRead | 'ordinary' | undefined> {
-  if (!passkeyChecked(kind) || runtime.auth.mode !== 'signin' || runtime.auth.signin.passkeys.policy === 'off') return undefined;
-  try {
-    const read = await passkeyByToken(runtime.db, runtime.chainKey, hashToken(token));
-    if (read === null) return undefined;
-    return passkeyStands(runtime.chainKey, runtime.auth.signin.passkeys.policy, read.holder, read) ? read : 'ordinary';
-  } catch {
-    return 'ordinary';
   }
 }

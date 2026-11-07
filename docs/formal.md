@@ -571,8 +571,10 @@ first or the vault learns it:
   (`NamedUseInput.accepts`) and the statement holds the credential to before
   it reads anything else, answering one the app would refuse as a token no
   credential has (`AcceptedFirst`): coffre's own sign-in (under Cloudflare
-  Access no coffre token is a credential), and for a browser session a
-  sign-in provider the deployment configures;
+  Access no coffre token is a credential), for a browser session a
+  sign-in provider the deployment configures, and for a person's session
+  or token a live passkey behind it, as the deployment's policy says
+  (T216; passkeys.md, section 6.2);
 - the token's kind, decided before any call (`NAMED_KINDS`, `refusedByKind`);
 - a fact the vault decides on itself before any lock: revoked, expired, an
   earlier generation (`credentialEnded`), an identity unlinked or a trust
@@ -2795,8 +2797,8 @@ for them all (a browser session at sign-in, a CLI session at its poll, an
 MCP connection, a device decision), whose checks under the head are held
 by tests on both engines (`passkey-check.test.ts`, `mcp-oauth.test.ts`).
 The requests whose credential the vault reads in its own call (a use by
-name, a key write, an add), which run the check as a statement of their
-own (passkeys.md, section 6.2): `req` is one statement either way. SQLite,
+name, a key write, an add), which run the check in that call (T216;
+passkeys.md, section 6.2): `req` is one statement either way. SQLite,
 whose one writer serializes the change and every issue whole, so the
 interleavings cannot happen.
 

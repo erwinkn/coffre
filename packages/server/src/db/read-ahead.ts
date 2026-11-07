@@ -104,7 +104,7 @@ export function namedManyAhead(db: Queryable, app: string | null, keys: readonly
 }
 
 function readAheadOf(db: Queryable, read: Answer, now: string, asked: { tokenHash: boolean; path: boolean }): ReadAhead {
-  const { credentials, identities, projects, environments, secrets, secretVersions } = tablesOf(db);
+  const { credentials, identities, passkeys, projects, environments, secrets, secretVersions } = tablesOf(db);
   const ahead: ReadAhead = {};
   if (asked.tokenHash) {
     ahead.credential = read.credential === null ? null : {
@@ -112,6 +112,9 @@ function readAheadOf(db: Queryable, read: Answer, now: string, asked: { tokenHas
       identity: read.identity === null ? null : rowOf(identities, read.identity),
       now,
       policySeq: read.policy,
+      // What stands behind it, as the vault's call read it with it (T216): the credential's check decides on these, as on
+      // its own statement's (`passkeyOf`).
+      ...(read.passkey_held === undefined ? {} : { passkey: read.passkey == null ? null : rowOf(passkeys, read.passkey), passkeyHeld: read.passkey_held }),
     };
   }
   if (asked.path) {
@@ -152,6 +155,13 @@ type Answer = {
   parent: string | null;
   /** A named use's key the place inherits: where it is held (0051). */
   held?: { id: string; slug: string } | null;
+  /**
+   * The vault's (0073, T216), for a person's credential: the passkey it names, and whether its person holds a live one
+   * at its generation (2), has rows but none live at it (1), or none ever (null), as `heldSql` answers. Absent from
+   * `app_read`'s, and from a write's or an add's for a kind the check exempts; null for a named call that checked none.
+   */
+  passkey?: Json | null;
+  passkey_held?: number | null;
   secrets: { secret: Json; version: Json | null }[] | null;
 };
 

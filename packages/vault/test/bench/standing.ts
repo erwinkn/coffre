@@ -86,7 +86,7 @@ async function sidecar(isolates: number, changesPerSecond: number): Promise<stri
   }
   const ask = (key: string): NamedUseInput => {
     const at = Date.now();
-    return { tokenHash: tokenHash.toString('base64'), place: { project: project!.slug, environment: 'dev' }, key, accepts: { signin: true, issuers: [] }, purpose: 'use', requestId: newRequestId(), at, deadline: at + 3000 };
+    return { tokenHash: tokenHash.toString('base64'), place: { project: project!.slug, environment: 'dev' }, key, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, purpose: 'use', requestId: newRequestId(), at, deadline: at + 3000 };
   };
   // Each isolate's names read once, before the count starts: a sidecar's isolates are warm. Then the cap's rows go, so
   // that each key enters the set once while counted, and moves on once a minute later.
@@ -144,7 +144,7 @@ async function ciRuns(runs: number): Promise<string> {
     for (const key of names) {
       const before = counts.use;
       const at = Date.now();
-      const answer = await vault.useNamed!({ tokenHash, place: { project: project!.slug, environment: 'dev' }, key, accepts: { signin: true, issuers: [] }, purpose: 'use', requestId: newRequestId(), at, deadline: at + 3000 });
+      const answer = await vault.useNamed!({ tokenHash, place: { project: project!.slug, environment: 'dev' }, key, accepts: { signin: true, issuers: [], passkeys: 'off' as const }, purpose: 'use', requestId: newRequestId(), at, deadline: at + 3000 });
       if (!answer.served || !answer.outcome.ok) throw new Error(`run ${r}, ${key}: ${JSON.stringify(answer)}`);
       run.push(counts.use - before);
     }

@@ -56,7 +56,6 @@ import {
   update,
   updateAuth,
   passkeyBehind,
-  passkeyByToken,
   passkeyByCredentialId,
   passkeyHistory,
   livePasskeys,
@@ -1291,8 +1290,6 @@ export class SigninService {
       sourceIp: string | null; recall?: boolean; ahead?: CredentialRead | null; shows?: Shows; standing?: Access; at?: number;
       /** `touch`: the request writes the touch itself, with what it writes, at no round trip of its own (a key write's held statement, T179 PR 3). */
       touch?: (touched: Touch) => void;
-      /** `passkey`: what stands behind the credential, read on its own before the vault's call that read the row (`passkeyByToken`). */
-      passkey?: PasskeyRead | null;
     } = { sourceIp: null },
   ): Promise<CredentialPrincipal> {
     if (!isCoffreToken(token)) throw new Error('not a coffre credential');
@@ -1300,6 +1297,8 @@ export class SigninService {
     const now = new Date();
     const asked = request.at === undefined ? now : new Date(request.at);
     const tokenHash = hashToken(token);
+    // Under `off` nothing behind the credential is read, as nothing below decides on it (review r1 of #528).
+    const checked = this.#deps.signin.passkeys.policy !== 'off';
 
     let row: Awaited<ReturnType<typeof findCredential>>;
     let access: Access | null = null;
@@ -1312,7 +1311,7 @@ export class SigninService {
         await sealScopes(db, chainKey, this.#deps.vault);
         this.#scopes.sealed = true;
       }
-      row = await findCredential(db, chainKey, { tokenHash }, request.shows === 'caller' ? 'answer' : request.shows ?? request.ahead);
+      row = await findCredential(db, chainKey, { tokenHash }, request.shows === 'caller' ? 'answer' : request.shows ?? request.ahead, checked);
       const shown = row === null || request.shows !== 'caller' ? null : answerOf(row.principal, row.answer);
       settings = shown?.settings ?? row?.settings;
       // Read with the row, before the vault is asked: a seal below commits only while the policy it answers with is still the newest.
@@ -1332,7 +1331,7 @@ export class SigninService {
         if (issued !== null) {
           await sealCredentials(db, chainKey, this.#deps.vault, access, policySeq, [{ kind: binding === null ? 'token' : 'binding', id: binding ?? row.id, principal: row.principal, createdBy: issued.createdBy, scope: issued.scope }]);
         }
-        row = await findCredential(db, chainKey, { tokenHash });
+        row = await findCredential(db, chainKey, { tokenHash }, undefined, checked);
         if (row !== null && this.#unsealed(row, access, asked)) throw new Error('its scope could not be sealed');
       }
     } catch (error) {
@@ -1340,18 +1339,13 @@ export class SigninService {
       throw new CredentialUncheckable(error);
     }
     if (row === null || access === null || !this.#liveCredential(row, access, asked)) throw new Error('unknown, expired or revoked credential');
-    // What stands behind a person's credential (passkeys.md, section 6.2): read with it, or by the request on its own
-    // before the vault's call that read it (`passkeyByToken`); a row read ahead without it (a handle's, never checked) is
-    // read here. Nothing read under `off`.
+    // What stands behind a person's credential (passkeys.md, section 6.2): read with it, by the app's own statement or
+    // by the vault's call that read the row (T216: a use by name, a key write's and an add's first call answer the
+    // passkey rows with the credential's). Nothing read under `off`. A row read without them (`app_read`'s, which only a
+    // handle's request reads ahead, never checked here) is a read this check cannot decide on: 503, never taken.
     if (passkeyChecked(row.kind) && this.#deps.signin.passkeys.policy !== 'off') {
-      let read = row.passkeyRead ?? request.passkey ?? null;
-      try {
-        read ??= await passkeyByToken(db, this.#deps.chainKey, tokenHash);
-      } catch (error) {
-        if (error instanceof AuthRowTampered) throw error;
-        throw new CredentialUncheckable(error);
-      }
-      if (read === null || !this.#backed(row, read)) throw new PasskeyRequired(row.principal, row.id);
+      if (row.passkeyRead === undefined) throw new CredentialUncheckable(new Error('the credential was read without what stands behind it'));
+      if (!this.#backed(row, row.passkeyRead)) throw new PasskeyRequired(row.principal, row.id);
     }
 
     const lastUsed = row.lastUsedAt?.getTime() ?? 0;
