@@ -151,7 +151,7 @@ results, historical: the promoted, merged model's counts are in
 | HotPathOneClock (deadline, floor, Postgres's clock stepping back) | 670,105 |
 | HotPathOneBulk (count 1, two keys, covers) | 11,521,159 |
 | HotPathOneBulkSlack (a refresh longer than the deadline) | 6,041,726 |
-| HotPathOneBulkSkew (the same, Worker clocks off by one; review r1) | 25,861,902 |
+| HotPathOneBulkSkew (the same, Worker clocks off by one, each key at a phase of its own; review r1, T204) | 10,715,615 |
 
 Each new protection, removed, breaks its invariant:
 
@@ -978,7 +978,9 @@ most a day). It is built into the use's one statement:
 
 - **What it keeps.** One row per (principal, key), holding `last`, the time of
   that key's last logged use. Since T127 (W228), the start of that use's
-  refresh period, `at − at % refresh`: below.
+  refresh period, `at − at % refresh`: below. Since T204 (0074), each
+  principal's key's periods start at a phase of their own,
+  `at − (at − phase) % refresh` (sealed-inputs.md, "The bulk cap").
 - **What counts.** A key is counted at time t if `last > t − window −
   refresh`.
 - **A use of a counted key** passes the cap.

@@ -45,8 +45,8 @@ export class World {
 
   /** A use: read, logged, decided. */
   use(request: UseRequest): UseCode | null {
-    this.log.push({ kind: 'use', number: (this.#number += 1n), request });
-    return decideUse(SEAL_KEYS, readUse(this.rows, this.newest, this.limit, this.bulk, request), request);
+    this.log.push({ kind: 'use', number: (this.#number += 1n), request, phased: true });
+    return decideUse(SEAL_KEYS, readUse(this.rows, this.newest, this.limit, this.bulk, request, true), request);
   }
 }
 

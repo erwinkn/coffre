@@ -266,8 +266,8 @@ test(`rows that are not the replay's change a decision only to stale or tampered
     for (const held of liveBulk.values()) for (const key of [...held.keys()]) if (tc.draw(gs.booleans())) held.delete(key);
     else held.set(key, held.get(key)! - tc.draw(gs.integers({ minValue: -120_000, maxValue: 120_000 })));
   }
-  const liveView = readUse(rows, world.newest, world.limit, liveBulk, request);
-  const replayView = readUse(replayed.rows, replayed.newest, replayed.limit, cloneBulk(replayed.bulk), request);
+  const liveView = readUse(rows, world.newest, world.limit, liveBulk, request, true);
+  const replayView = readUse(replayed.rows, replayed.newest, replayed.limit, cloneBulk(replayed.bulk), request, true);
   const live = decideUse(SEAL_KEYS, liveView, request);
   const truth = decideUse(SEAL_KEYS, replayView, request);
   const capOnly = bulkMoved && (live === null || live === 'bulk_limit') && (truth === null || truth === 'bulk_limit');
@@ -285,14 +285,14 @@ test('a personal config\'s parent is weighed only when the use reads it', () => 
   const parent = objectKey({ kind: 'environment', id: DEV });
   const rows = new Map(world.rows);
   rows.set(parent, { ...rows.get(parent)!, row: edited(rows.get(parent)!.row) });
-  const decide = (on: typeof rows, request: UseRequest) => decideUse(SEAL_KEYS, readUse(on, world.newest, world.limit, new Map(), request), request);
+  const decide = (on: typeof rows, request: UseRequest) => decideUse(SEAL_KEYS, readUse(on, world.newest, world.limit, new Map(), request, true), request);
   const absent = ask(1, 7, { place: MINE });
   assert.equal(decide(world.rows, absent), decide(rows, absent));
-  assert.ok(!weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), absent), absent).includes(parent));
+  assert.ok(!weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), absent, true), absent).includes(parent));
   const held = ask(1, 6);
   assert.equal(decide(world.rows, held), null);
   assert.equal(decide(rows, held), 'tampered');
-  assert.ok(weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), held), held).includes(parent));
+  assert.ok(weighedOf(readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), held, true), held).includes(parent));
 });
 
 /**

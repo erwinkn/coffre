@@ -127,14 +127,18 @@ function failedStatement(error: unknown): string | null {
  * What holds locks on the tables of coffre's schemas in this database, but
  * this session, as pg_locks shows it: sessions, and prepared transactions,
  * whose locks have no pid, named by the transaction ID their virtual
- * transaction holds (PREPARE always assigns one).
+ * transaction holds (PREPARE always assigns one). A day's partition is named
+ * by its table (`log_uses`, not each `log_uses_<day>` a lock of the table
+ * holds too).
  */
 const LOCK_HOLDERS = `
   SELECT l.pid, p.gid AS prepared, coalesce(a.usename, p.owner)::text AS login, a.application_name AS application,
-         array_agg(DISTINCT format('%I.%I', n.nspname, c.relname)) AS tables
+         array_agg(DISTINCT format('%I.%I', n.nspname, coalesce(t.relname, c.relname))) AS tables
     FROM pg_locks l
     JOIN pg_class c ON c.oid = l.relation
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_inherits i ON c.relispartition AND i.inhrelid = c.oid
+    LEFT JOIN pg_class t ON t.oid = i.inhparent
     LEFT JOIN pg_stat_activity a ON a.pid = l.pid
     LEFT JOIN pg_prepared_xacts p ON l.pid IS NULL AND EXISTS (
       SELECT 1 FROM pg_locks x WHERE x.locktype = 'transactionid' AND x.pid IS NULL AND x.virtualtransaction = l.virtualtransaction AND x.transactionid = p.transaction)

@@ -18,6 +18,7 @@ import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 import { postgresClient, postgresSession } from '@coffre/db/connect';
 
+import { periodOf, phaseOf } from '../src/bulk.ts';
 import { logOrigin } from '../src/checkpointer.ts';
 import { objectKey, sealOf, type Input, type Ref } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
@@ -335,6 +336,31 @@ test('the bulk cap at count 10 over a day: ten keys in, the eleventh refused, re
   assert.ok(await replayAgrees() >= 12);
 });
 
+test("T204, review r1: a log of the previous release's uses and 0074's replays as each statement decided, and says which", async () => {
+  // Count 1 over 15 minutes. B's use is stamped so that the other keys it counts are those moved on past T + 1, T a
+  // minute, every key's period start under the previous release's statement (use-decide.test.ts says why).
+  const w = await world({ count: 1, windowMs: 15 * 60_000 });
+  let a = await w.key();
+  while (phaseOf(w.principal, a, 60_000) <= 1) a = await w.key();
+  const b = await w.key();
+  const now = Date.now();
+  const bAt = now + ((((1_023_001 - now) % 60_000) + 60_000) % 60_000);
+  const T = bAt - 1_023_001;
+  const { use } = await isolate();
+  // A's use, as the previous release's statement left it: its entry stamped at T + phase, with no `phased`, its key's
+  // row at T, its period's start for every key then. Phase 59,999 (a key made just after a minute turns) stays in
+  // that period too (review r2).
+  const first = heard(await use(ask(w, a)));
+  assert.ok(first.ok && first.number !== null);
+  const [entry] = await rows<{ phased: boolean | number | null }>(db.owner, sql`SELECT phased FROM log_uses WHERE number = ${BigInt(first.number)}`);
+  assert.ok(entry!.phased === true || entry!.phased === 1, '0074 says its statement phased the key');
+  await run(db.owner, sql`UPDATE log_uses SET at = ${T + phaseOf(w.principal, a, 60_000)}, phased = NULL WHERE number = ${BigInt(first.number)}`);
+  await run(db.owner, sql`UPDATE log_bulk SET last = ${T} WHERE principal = ${w.principal} AND secret = ${a}`);
+  // B, decided by 0074's: A does not count, and the replay, which moves A on unphased, agrees.
+  assert.ok(heard(await use(ask(w, b, { at: bAt, deadline: bAt + 3000 }))).ok);
+  assert.equal(await replayAgrees(), 2);
+});
+
 /** One call of `use_credential` in the transaction `tx`, as the vault makes it, stamped `at`: what it answers. */
 /** A use's call as the vault makes it once it has decided the use (`p_decided`): the one that takes the principal's lock. */
 async function call(tx: Queryable, w: { credentialId: string }, secretId: string, at: number): Promise<{ state: string | null }> {
@@ -414,9 +440,9 @@ test('RefreshShared: uses moving one principal\'s keys on wait for none of one a
     await a.release();
     await b?.release();
   }
-  // Every row is the start of its last writer's refresh period (RefreshPeriods), a minute here.
-  for (const { last } of await rows<{ last: string }>(db.owner, sql`SELECT last FROM log_bulk WHERE principal = ${w.principal}`)) {
-    assert.equal(Number(last) % 60_000, 0);
+  // Every row is the start of its last writer's refresh period (RefreshPeriods), a minute here, from its key's phase (T204).
+  for (const { secret, last } of await rows<{ secret: string; last: string }>(db.owner, sql`SELECT secret, last FROM log_bulk WHERE principal = ${w.principal}`)) {
+    assert.equal(((Number(last) - phaseOf(w.principal, secret, 60_000)) % 60_000 + 60_000) % 60_000, 0);
   }
   assert.equal((await rows(db.owner, sql`SELECT 1 FROM log_bulk WHERE principal = ${w.principal}`)).length, 3);
   assert.ok(await replayAgrees() >= 5);
@@ -456,7 +482,7 @@ test('RefreshShared after a rollback: the uses that waited elect one to move the
     await c.release();
   }
   const [after] = await rows<{ last: string }>(db.owner, sql`SELECT last FROM log_bulk WHERE principal = ${w.principal}`);
-  assert.equal(Number(after!.last), at - (at % 60_000), 'moved on to the uses\' period, by the one elected after the rollback');
+  assert.equal(Number(after!.last), periodOf(at, 60_000, phaseOf(w.principal, k1, 60_000)), 'moved on to the uses\' period, by the one elected after the rollback');
   assert.ok(await replayAgrees() >= 2);
 });
 
@@ -505,7 +531,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
     const fresh = postgresSession(OWNER_URL);
     try {
       await fresh.unsafe(`SET lock_timeout = '200ms'`);
-      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0073', false)`);
+      if (planned) await fresh.unsafe(`SELECT set_config('coffre.use_planned', '0074', false)`);
       const at = Date.now();
       await assert.rejects(
         fresh.unsafe(`SELECT use_credential($1, $2, $3, $4, 4::smallint, NULL, $5, $6)`, [w.credentialId, id, newRequestId(), String(at), randomBytes(16), String(at + 3000)]),
@@ -536,7 +562,7 @@ test('a session\'s first call does its planning\'s cold work before it takes the
         [w.credentialId, id, newRequestId(), String(again), randomBytes(16), String(again + 3000)]);
       assert.equal(answer!.use.state, null);
       const [setting] = await fresh.unsafe<{ planned: string }[]>(`SELECT current_setting('coffre.use_planned', true) AS planned`);
-      assert.equal(setting!.planned, '0073');
+      assert.equal(setting!.planned, '0074');
     } finally {
       await fresh.end();
     }
@@ -962,8 +988,7 @@ for (const period of ['the same', 'passed'] as const) {
     const w = await world();
     const id = await w.key();
     // Within one refresh period (a minute, at the default window), with time to spare: the repeat's key needs no move.
-    const left = 60_000 - (Date.now() % 60_000);
-    if (left < 5_000) await sleep(left + 50);
+    // The world's key is made as its period starts (`freshKeyId`, T204), so the test has most of a minute.
     // The principal's one grant made to lapse shortly: a change, as PR 4's access.grant writes it.
     const lapses = Date.now() + 400;
     const before = w.objects.principal as Extract<Input, { kind: 'principal' }>;

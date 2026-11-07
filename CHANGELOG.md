@@ -67,6 +67,21 @@
   such a credential to paths instead (`docs/design/credential-proxy.md`,
   section 3, `allow`).
 
+- **No more busy answers every minute at 1,000 uses a second (T204).** The
+  bulk cap moves a hot key's row on once a refresh period (a minute at the
+  default 15-minute window), and every key's periods started at the same
+  instant: at each, every hot key's next use took the vault's two calls,
+  two locks and two writes at once. At 1,000 uses a second of 100 keys, the
+  burst answered some 60 of 20,000 uses `503` busy, every period. Each
+  principal's key now has periods of its own, from a phase of SHA-256 of
+  the two (migration 0074, `bulk_period`), so the moves spread over the
+  period: none refused in the same run. The cap's count, window and bounds
+  are unchanged; migration 0074 replaces `use_credential` and `use_route`,
+  and the previous release runs on it. Each use's entry now says whether
+  its statement phased its key (`log_uses.phased`, true from 0074's, null
+  from the previous release's), so a log of both, as an upgrade leaves,
+  replays to the answers each gave.
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

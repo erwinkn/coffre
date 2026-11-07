@@ -365,8 +365,8 @@ test('renaming staging to prod takes a Developer scoped to staging off it, live 
       newest.set(objectKey(ref), (await store.newestChange(db.owner, ref, [w.keys.mac]))?.seal ?? null);
     }
     const asked = request();
-    const now = decideUse(w.keys.seals, readUse(live, newest, replayed.limit, new Map(), asked), asked);
-    const then = decideUse(w.keys.seals, readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), asked), asked);
+    const now = decideUse(w.keys.seals, readUse(live, newest, replayed.limit, new Map(), asked, true), asked);
+    const then = decideUse(w.keys.seals, readUse(replayed.rows, replayed.newest, replayed.limit, new Map(), asked, true), asked);
     assert.equal(now, then, 'live and replayed decide alike');
     return now;
   };

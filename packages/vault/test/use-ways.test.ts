@@ -11,7 +11,7 @@ import { tablesOf } from '@coffre/db';
 import { sql } from 'drizzle-orm';
 
 import { objectKey, type Input, type Op, type Ref } from '../src/inputs.ts';
-import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
+import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { ask, change, DAY, emptyLog, genesis, isolate, ROOT, SEAL, seal, useDatabases, world } from './use-world.ts';
 import { newRequestId } from '../src/use.ts';
@@ -36,8 +36,8 @@ function heard(outcome: UseOutcome): UseOutcome {
 async function replayAgrees(): Promise<number> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);
-  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
-    sql`SELECT number, at, credential, secret, purpose, place FROM log_uses ORDER BY number`);
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | number | null }>(db.owner,
+    sql`SELECT number, at, credential, secret, purpose, place, phased FROM log_uses ORDER BY number`);
   const refs = new Map<string, Ref>();
   const entries: Logged[] = [
     ...changes.map((row) => {
@@ -45,7 +45,7 @@ async function replayAgrees(): Promise<number> {
       const { old: _, ...rest } = op;
       return { kind: 'change' as const, number: BigInt(row.number), at: Number(row.at), ref: refOf(op, row.object, refs), op: rest as Op, seal: row.seal === null ? null : Buffer.from(row.seal) };
     }),
-    ...uses.map((row) => ({ kind: 'use' as const, number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purposeOf(Number(row.purpose))! } })),
+    ...uses.map((row) => ({ kind: 'use' as const, number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purposeOf(Number(row.purpose))! }, phased: phasedOf(row.phased) })),
   ].sort((a, b) => (a.number < b.number ? -1 : 1));
   let checked = 0;
   const result = replay([SEAL], entries, (entry, code) => {

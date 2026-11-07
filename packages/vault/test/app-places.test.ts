@@ -20,7 +20,7 @@ import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, type Ref } from '../src/inputs.ts';
 import { grants, loggedChanges, loggedChangesQuery, member } from '../src/store.ts';
 import { logMacKey } from '../src/log-entry.ts';
-import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
+import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { environmentObject, principalObject, secretObject } from '../src/objects.ts';
 import { ENGINE, openTestDatabase, rows, run, sealed, nothingHeld, sqlitePlan, withLogUnlocked, withOldWrites, withTriggersLifted, type TestDatabase } from './database.ts';
 import { ask, change, CONFIG, emptyLog, isolate, ROOT, SEAL, seal, SIGNING_KEY, useDatabases, world } from './use-world.ts';
@@ -139,8 +139,8 @@ const codeOf = (outcome: UseOutcome) => (outcome.ok ? null : 'code' in outcome ?
 async function replayAgrees(): Promise<void> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes WHERE object <> ${CUTOVER_OBJECT}`);
-  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
-    sql`SELECT number, at, credential, secret, purpose, place FROM log_uses`);
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | number | null }>(db.owner,
+    sql`SELECT number, at, credential, secret, purpose, place, phased FROM log_uses`);
   const entries: Logged[] = [
     ...changes.map((row) => {
       const change = loggedChange({ number: BigInt(row.number), at: Number(row.at), object: row.object, payload: row.payload, seal: row.seal === null ? null : Buffer.from(row.seal) });
@@ -150,6 +150,7 @@ async function replayAgrees(): Promise<void> {
     ...uses.map((row) => ({
       kind: 'use' as const, number: BigInt(row.number),
       request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purposeOf(Number(row.purpose))! },
+      phased: phasedOf(row.phased),
     })),
   ].sort((a, b) => (a.number < b.number ? -1 : 1));
   let checked = 0;
