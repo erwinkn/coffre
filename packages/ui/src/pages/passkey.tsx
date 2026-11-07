@@ -6,7 +6,7 @@ import { ResetNotice } from '../components/reset-notice';
 import { pageRoute } from '../lib/page-route';
 import { authenticatorError, browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
-import { creationOptions, requestOptions, toJSON, type CreationJSON, type RequestJSON } from '../lib/webauthn';
+import { createCredential, getCredential, toJSON, type CreationJSON, type RequestJSON } from '../lib/webauthn';
 import type { passkey } from '../options';
 
 const Route = pageRoute<typeof passkey>();
@@ -123,10 +123,9 @@ export function PasskeyPage() {
           // at the call.
           const timeout = Math.min(left, current.options.timeout);
           const credential = current.purpose === 'enroll'
-            ? await navigator.credentials.create({ publicKey: creationOptions({ ...current.options, timeout }) })
-            : await navigator.credentials.get({ publicKey: requestOptions({ ...current.options, timeout }) });
-          if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-          return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...(current.state === undefined ? {} : { state: current.state }) });
+            ? await createCredential({ ...current.options, timeout })
+            : await getCredential({ ...current.options, timeout });
+          return JSON.stringify({ response: toJSON(credential), ...(current.state === undefined ? {} : { state: current.state }) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
         { once: current.purpose === 'enroll' },
