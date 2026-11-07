@@ -1680,9 +1680,14 @@ class VaultService implements Vault {
         action: intent.operation,
         decision: 'deny',
         code: 'wrong_kek',
-        secretId: key.secretId,
+        // A wrap's secret may have no row yet (a new key is wrapped before the app writes it): named in the metadata,
+        // as `keyEntry` names it, never in the column, whose foreign key would refuse it (review r6).
+        secretId: intent.operation === 'key.wrap' ? null : key.secretId,
         relatedSeq: BigInt(intent.seq),
-        metadata: JSON.stringify({ subject: key.subject, version: key.version, intent: intent.intentId, item: key.item, uncertain: true, closedBy: KEY_ROTATE }),
+        metadata: JSON.stringify({
+          subject: key.subject, ...(intent.operation === 'key.wrap' ? { secretId: key.secretId } : {}), version: key.version,
+          intent: intent.intentId, item: key.item, uncertain: true, closedBy: KEY_ROTATE,
+        }),
       })));
   }
 

@@ -1054,13 +1054,12 @@ test('a removal lands while a read is at the key service, waiting for nothing: t
   const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
   const read = w.vault.unwrap({ principal: ADA, purpose: 'reveal', items: await versionItems(items) });
   await reached;
-  const started = Date.now();
+  // Her read waits at the key service until told to answer, which comes only after the removal: a removal that
+  // waited for the read would never return.
   const removed = await other.remove({ actor: ROOT, principal: ADA });
-  const took = Date.now() - started;
   answer();
   const released = await read;
   assert.equal(removed.ok, true);
-  assert.ok(took < 1_000, `the removal waited ${took} ms for a read at the key service`);
   assert.equal(!released.ok && released.refusal.code, 'removed', 'the read, its key opened, is refused under the head');
   const log = await vaultLog(w);
   const removal = log.find((entry) => entry.action === 'member.remove')!;
@@ -1149,6 +1148,30 @@ test('a vault moved to a new signing key while a read is at the key service logs
   const outcome = log.find((entry) => entry.action === 'secret.read' && entry.detail.relatedSeq === String(intent.seq))!;
   assert.ok(outcome.seq > rotation.seq && outcome.outcome === 'refuse' && outcome.code === 'wrong_kek', 'its outcome logged by the rotation, refused');
   // Long after the intent's deadline, verification finds every key it named accounted for.
+  const later = await openLocalVault(await db.connect(), config, { clockOffset: () => 3_600_000 });
+  const verified = await later.verifyLog({});
+  assert.ok(verified.ok, JSON.stringify(verified));
+});
+
+test('a rotation closes a wrap of a key the app has not written yet: its secret named in the metadata, as the wrap names it (review r6)', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await wrapped(w, await w.secret(w.dev));
+  // A new key's id, its row not yet written: the app wraps first, then writes the version.
+  const fresh: SecretRef = { projectId: w.project, environmentId: w.dev, secretId: randomUUID(), version: 1, path: 'market/dev/NEW_KEY' };
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
+  const wrap = w.vault.wrap({ principal: ROOT, items: [{ secret: fresh, key: randomBytes(32).toString('base64') }] }).catch((error: unknown) => error);
+  await reached;
+  const config = configure({ keks, signingKeys: [randomBytes(32), SIGNING_KEY] });
+  const rotated = await openLocalVault(await db.connect(), config);
+  assert.equal((await rotated.access(ROOT)).role, 'owner', 'the rotation commits');
+  answer();
+  const outcome = await wrap;
+  assert.ok(outcome instanceof Error || !(outcome as { ok: boolean }).ok);
+  const closed = (await vaultLog(w)).find((entry) => entry.action === 'key.wrap' && entry.code === 'wrong_kek')!;
+  assert.equal(closed.detail.secretId, fresh.secretId);
   const later = await openLocalVault(await db.connect(), config, { clockOffset: () => 3_600_000 });
   const verified = await later.verifyLog({});
   assert.ok(verified.ok, JSON.stringify(verified));
@@ -1334,14 +1357,12 @@ test('a use asking for the fence while a change waits for it is let in within it
       assert.ok(i < 200, 'the change never waited for the fence');
       await sleep(10);
     }
-    // The use, as the hot login waits: a second at most.
-    const started = Date.now();
+    // The use, as the hot login waits: a second at most, by Postgres's clock. Had the change stayed in the queue ahead
+    // of it, it would fail (55P03); its lock had, the long statement still holds the fence shared.
     await (await db.connect()).transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${HOT_LOCK_TIMEOUT_MS}`));
       await tx.execute(fence);
     });
-    const waited = Date.now() - started;
-    assert.ok(waited < HOT_LOCK_TIMEOUT_MS, `the use waited ${waited} ms behind the change`);
   } finally {
     letGo();
     await long;
