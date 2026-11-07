@@ -165,6 +165,10 @@ export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_S
  * once and held it to jose's checks (`crit`, `b64`, the algorithm's
  * allow-list) before it found several keys; the key whose signature
  * verifies is then held to the whole of them once more, claims included.
+ * The signature check only picks that key: jose's verification alone
+ * accepts a token, so a check that passed what jose would not costs a
+ * failed sign-in, never a wrong one (a test holds a signature, an expiry and
+ * an issuer the check passes and jose refuses).
  */
 async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2]): Promise<JWTPayload> {
   const dot = token.lastIndexOf('.');

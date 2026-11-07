@@ -204,3 +204,36 @@ test("a token naming no key is tried against each key by its signature alone: it
   assert.equal(signed.result, 'repo:acme/api:ref:refs/heads/main');
   assert.equal(signed.parses, 2);
 });
+
+test("the signature check alone only picks the key: a token whose signature it passes is still refused by jose's whole verification", async () => {
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const [one, two] = [await signer('ES256', 'one'), await signer('ES256', 'two')];
+  const keys = [unnamed(one.jwk), unnamed(two.jwk)];
+  // What each WebCrypto check answered: the pre-check's, key by key, then jose's own, if it gets that far.
+  const subtle = crypto.subtle;
+  const verifySignature = subtle.verify.bind(subtle);
+  const checks: boolean[] = [];
+  subtle.verify = (async (...args: Parameters<SubtleCrypto['verify']>) => {
+    const verified = await verifySignature(...args);
+    checks.push(verified);
+    return verified;
+  }) as SubtleCrypto['verify'];
+  const passedThenRefused = async (token: string, reason: string) => {
+    checks.length = 0;
+    await refused(verify(token, keys), reason);
+    assert.ok(checks.includes(true), `the pre-check passed ${reason}'s token: ${checks}`);
+  };
+  try {
+    // A signature in base64url with a character outside its alphabet: Buffer skips it, so the pre-check
+    // verifies the bytes it reads; jose refuses to decode it.
+    const token = await two.sign({}, { kid: undefined });
+    const dot = token.lastIndexOf('.');
+    await passedThenRefused(`${token.slice(0, dot + 5)}!${token.slice(dot + 5)}`, 'signature');
+    // Signed by a key of the set, but expired, or from another issuer: the claims are jose's to check.
+    await passedThenRefused(await two.sign({ iat: at(-600), exp: at(-300) }, { kid: undefined }), 'expired');
+    await passedThenRefused(await two.sign({ iss: 'https://elsewhere.example' }, { kid: undefined }), 'signature');
+  } finally {
+    subtle.verify = verifySignature;
+    delete (subtle as { verify?: unknown }).verify;
+  }
+});

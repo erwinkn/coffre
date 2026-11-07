@@ -211,7 +211,16 @@ export const PASSKEY_BYTE_CPU_NS = 80;
  * (KEY_TRY_CPU_US + TOKEN_BYTE_CPU_NS × B)`, which gives B ≤ 145 kB; and a
  * passkey's answer, `PASSKEY_BYTE_CPU_NS × B`, 200 kB. So 128 KiB. Measured
  * there, 32 tries cost 4.2 to 11.5 ms whatever the token's shape, a
- * passkey's answer 6.7 to 8.4; at 256 KiB, up to 15.9 and 17.1.
+ * passkey's answer 6.7 to 8.4; at 256 KiB, up to 15.9 and 17.1; at 16 KiB,
+ * 32 tries cost 5 to 8 ms.
+ *
+ * To derive it again (a new Node, jose or key type, another budget), from
+ * `packages/server`: `node --conditions=coffre:source
+ * scripts/sign-in-cost.ts`, and again with `--jitless`, as on Workers. It
+ * prints each candidate's cost by size, the fits behind `KEY_TRY_CPU_US`,
+ * `TOKEN_BYTE_CPU_NS` and `PASSKEY_BYTE_CPU_NS`, and the bound they give
+ * beside this one: move the three constants to the dearest fit, not the
+ * bound, so the formula keeps saying where it comes from.
  *
  * Every other thing a stranger's body makes the app do costs less
  * (`packages/server/scripts/sign-in-cost.ts`, Node 26.13, jose 6.2, a
