@@ -87,8 +87,9 @@ before(async () => {
   await root.secrets.set('market/dev', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
   // What a fork copies: two keys of an environment no other case writes to, so that their two periods surely leave a
   // shared stretch to measure in (`inBulkPeriod`). market/dev gathers a key or more a case, and twenty random phases
-  // need not leave five seconds between their turns (T204).
+  // need not leave five seconds between their turns (T204). One is filed, so that the fork's copy of folders is counted.
   await root.secrets.set('market/base', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
+  await root.secrets.update('market/base/API_KEY', { folder: 'stripe' });
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.members.add(`user:${VIEWER}`);
@@ -351,9 +352,9 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'project renamed': { app: 5, vault: 1 },
   'project archived': { app: 8, vault: 1 },
   'environment made': { app: 5, vault: 2 },
-  // A fork of market/base's two keys: its app statements grow with the keys it copies (an `update "secrets"` each),
-  // so this is the fixture's number, 43 when it forked market/dev's twenty (T204).
-  'environment forked': { app: 21, vault: 5, hot: 1 },
+  // A fork of market/base's two keys, one filed: its app statements grow with the keys it copies (an `update "secrets"`
+  // each), so this is the fixture's number, 43 when it forked market/dev's twenty (T204), and 21 without the folder.
+  'environment forked': { app: 25, vault: 5, hot: 1 },
   'environment renamed': { app: 6, vault: 2 },
   'environment protected': { app: 5, vault: 9 },
   'environment archived': { app: 10, vault: 2 },
