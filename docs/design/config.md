@@ -214,8 +214,10 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | Proxy bodies read whole (`BODIES_BYTES`) | 16 MiB | what one body could take before #519 | choice (D1) |
 | Caches (`CACHES_BYTES`) | 16 MiB | as much as the bodies | choice (D1) |
 | Left for the runtime | 30,445,568 bytes | 128,000,000 − 64,000,000 − 2 × 16 MiB | the app Worker holds 8.6 MB idle, measured |
-| One body read whole | 1 MiB | D1 | Erwin; larger bodies stream |
-| Bodies read whole at once | 8 | 16 MiB ÷ (2 × 1 MiB): each counted twice, its bytes and a copy | #519's code. (`memory.ts`'s comment says sixteen: a P3 for #519) |
+| A forwarded body read whole (`BODY_READ_WHOLE_BYTES`) | 1 MiB | D1 | Erwin; larger bodies stream |
+| A body a form or JSON rule fills a field of (`MAX_FIELD_BODY`) | 64 KiB | a token refresh's or a siteverify's, never an upload's | #519 |
+| A sign or verify request | ⌈m ÷ 3⌉ × 4 + 4,096 bytes, m the longest message: 91,480 bytes at the 64 KiB default, 1,402,200 at 1 MiB (an `hmac()`'s `maxBytes`, or any editable proxy) | the message as base64url in JSON, and 4 KiB for the rest | #519 (`compute`) |
+| Bodies read whole at once, each counted twice (its bytes and a copy) out of the 16 MiB | 8 forwarded bodies of 1 MiB; 5 sign or verify requests at 1 MiB messages; 128 field bodies | 16 MiB ÷ (2 × the body's bound) | #519's code. (`memory.ts`'s comment says sixteen: a P3 for #519) |
 | One cache's slice | 2,396,745 bytes | 16 MiB ÷ 7 caches, least recently used out first | #519 |
 | Uses an isolate can hold | about 2,083 | 64,000,000 ÷ 30 KiB per held use | 30 KiB measured (W331, local workerd); stated in #519, not used until Q1 |
 | A plugin's WebSocket message on Node | 1 MiB | the body bound | #519 |
@@ -233,8 +235,9 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The bulk window's maximum | 1 day | releases kept a day and an hour | R52 |
 | Keys a statement uses at once (`uses.batch`) | 100 | about 0.4 ms a key under the lock every use shares, so about 40 ms | measured (review of #433) |
 | How long a use's cover serves repeats (`uses.coverMs`) | 60 s | none written | ⚠ a choice, `useLimits` (`packages/vault/src/use.ts`) |
-| Names a vault's use map keeps (`uses.names`) | 10,000 | none written | ⚠ a choice, `useLimits` |
-| Entries a use cache holds (`UseCache`'s `max`) | 10,000 | none written; a second number beside `names`, though they bound the same map's growth | ⚠ a choice |
+| Names the vault's isolate remembers (`uses.names`) | 10,000 in each of two maps: names to ids, and a key's name in an environment to its id | none written; least recently used out first | ⚠ a choice, `useLimits` |
+| Seals and covers the vault's isolate keeps (`UseCache`'s `max`) | 10,000 in each of two maps: each key's newest seals, and the covers repeats ride | none written; a full map is cleared whole | ⚠ a choice, `UseCache` |
+| All four together | up to 40,000 entries | counted by entries, not bytes: they live in the vault's isolate, outside #519's caches share, and nobody has measured an entry | ⚠ unmeasured |
 
 ### 2.4 Lock waits and deadlines (#538, #508)
 
@@ -308,6 +311,8 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The refresh window before values lapse | min(cache ÷ 4, 15 s) | none written ⚠ | limits.md S25 |
 | A message to sign or verify | 64 KiB by default; an `hmac()`'s `maxBytes` up to 1 MiB; editable definitions are counted at 1 MiB | 12 × Equisafe's largest in 90 days; 1 MiB costs about 5 ms of CPU | measured |
 | A presigned URL | 1 s to 1 h | "an hour at most" | policy |
+| Proxy items in one environment (`MAX_PROXY_ITEMS`) | 256 | its index stays under 17 KB, which every use of the environment carries | `packages/core/src/proxy.ts`, unchanged by #533. The 17 KB itself has no source ⚠ |
+| One proxy definition, as JSON (`MAX_DEFINITION_BYTES`) | 8,192 bytes | none written | ⚠ no source, and unchanged by #533, which removed the other unsourced field bounds (R70): an editable definition past 8 KiB is refused far below the 1 MiB body bound. Erwin's call: keep it with a reason, or let the 256 items' bound and the body bound stand alone |
 | The upstream request | no time bound | – | Q7 |
 
 ### 2.9 Audit and the uses log
@@ -317,10 +322,13 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The seal tick; a witness's wait | 500 ms; 2 s | – | R51, R54 |
 | A change waits for its seal | 5 s | – | T169 |
 | A seal is stale after | 5 s | 10 ticks | derived |
+| A tick's bound (`TICK_BOUND_MS`), and an open's (`OPEN_BOUND_MS`) | 10 s, + 0.01 ms for each number the barrier's window spans (`WINDOW_ENTRY_MS`) | an open waits as long as a tick; past its bound the checkpointer stalls, is closed for good, and its host opens another | `packages/vault/src/checkpointer.ts` (T169, Fable's review). Bounded by the work asked, so a drain of millions goes on |
+| Entries one tick seals (`WINDOW_MAX`) | 10,000 | a backlog is sealed in parts, each a pair, the next tick at once: read whole, a stall of minutes at R44 would pass the tick's bound and stall again | the same
 | Unsealed entries a check reads (`ABOVE_NEWEST`) | 1,000, on `main` | 4.5 ms fixed + 13.4 µs an entry fits 1,150 in R27's 20 ms at the median; 1,000 below it, where the p90 reaches 20 ms. Its floor: one late tick's entries at R44, 1,000 | D6, measured (`packages/vault/src/verifier.ts`). An exception to R27 at p99: the slowest check at 1,000 took 27 to 42 ms, and a cap that held it under 20 ms would sit below the floor. On Free, a check past about 400 entries fails instead |
 | Days of uses made ahead | 3 | – | a use with no day's table fails |
-| The uses log's stored size | 141 bytes a use (heap and index): about 12.2 GB a day at a steady 1,000 uses a second; far less when repeats are covered | measured | [hot-path-one.md](hot-path-one.md) (W211) |
-| The uses log's WAL | 248 bytes a use: about 21.4 GB a day at 1,000 a second, written, then recycled or archived as the database's own WAL settings say | measured | the same |
+| What one logged use stores, all of it kept as long as its day | **about 790 bytes**: the use's row 141 (heap and index), its level-0 tiles 47.5, its read in the reads' projection 322 (`log_reads`: heap 186, indexes 136), and the projection's place indexes about 280 | measured each; their sum is not measured as one | the row: [hot-path-one.md](hot-path-one.md) (W211); tiles: [audit-tree.md](audit-tree.md); the projection: [0.15-plan.md](0.15-plan.md) (0049, T175), whose days retention drops with the uses' |
+| The same, per day | about 68 GB at a steady 1,000 uses a second; far less when repeats are covered | 790 B × 86.4 M | derived |
+| The uses' row's WAL | 248 bytes a use: about 21.4 GB a day at 1,000 a second, written, then recycled or archived as the database's own WAL settings say. The projection's and the tiles' WAL come on top, unmeasured here | measured | [hot-path-one.md](hot-path-one.md) |
 | Days of uses kept | **every day**, as today | the object's `keepUsesDays` | Q6 |
 | The audit watch's staleness | 11 min | 2 × the 5 min schedule + 1 | #503 |
 
@@ -412,8 +420,10 @@ the vault and the uses, less 3 held back. The checkpointer's 2 come out of
 the vault's third. Keep the even split, one rule on both runtimes, until a
 Node run shows the uses' pool needs more. More than one process per role
 needs a pooler in front (PgBouncer, the part Hyperdrive plays on Workers):
-documented, not built. *Example:* at `max_connections` 100, every Node pool
-is 31, against 10 today, and nothing to configure. At 25, each is 6.
+documented, not built. *Example:* at `max_connections` 100 (3 reserved),
+each login's share is 31: the app's pool and the uses' pool are 31, the
+vault's request pool 29 and its checkpointer's 2, against 10 each today,
+and nothing to configure. At 25 the share is 6: pools of 6, 6, 4 and 2.
 
 ### Q3. Where the vault learns its connection share (`READ_HEAD_WAITERS`)
 
@@ -454,19 +464,44 @@ Two ways to bound them:
   trip, as the vault's transactions already are (T206's grouping). It
   needs each app call to carry a deadline to subtract from, and touches
   every query path.
-- **Per login, a ceiling.** `ALTER ROLE … SET statement_timeout`, in a
-  migration. It catches every statement whatever path sent it, and needs
-  no code. Postgres applies it at the next login, though: a connection
-  Hyperdrive already holds keeps its old setting until it is replaced
-  ([`ALTER ROLE`](https://www.postgresql.org/docs/16/sql-alterrole.html),
-  [Hyperdrive's connection lifecycle](https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/#how-connections-are-managed)).
-  The migration can end that login's idle backends
-  (`pg_terminate_backend`), and the rollout is tested against a warmed
-  pool, not a fresh one.
+- **Per login, a ceiling.** `ALTER ROLE … SET statement_timeout`. It
+  catches every statement whatever path sent it, and needs no code. Two
+  catches. Altering a role takes a superuser, or `CREATEROLE` and `ADMIN`
+  on that role ([`ALTER ROLE`](https://www.postgresql.org/docs/16/sql-alterrole.html)),
+  and a login that only migrates has neither: `docs/deploy.md` supports
+  it. And Postgres applies the setting at the next login: a connection
+  Hyperdrive already holds keeps its old one until it is replaced
+  ([Hyperdrive's connection lifecycle](https://developers.cloudflare.com/hyperdrive/concepts/connection-lifecycle/#how-connections-are-managed)).
+  Main already meets the first catch twice: migrate sets the hot login's
+  timeouts or stops with the SQL an administrator must run
+  (`holdHotLogin`), and resets 0.15's planner settings only where it
+  may, `deploy.md` giving the SQL otherwise (`clearPlannerSettings`).
 
 **Recommendation: the ceiling now, per-call bounds where a call has a
 deadline.** A role setting of 5 s for `coffre_runtime` and
-`coffre_vault_runtime`. The 5 s is a chosen ceiling, not a derived one: it
+`coffre_vault_runtime`, set where the privilege is:
+
+- `coffre setup` sets it, as it makes the logins.
+- `coffre migrate` sets it when its login has `CREATEROLE` and `ADMIN` on
+  both. A login without them leaves it, as `clearPlannerSettings` does,
+  says so, and `deploy.md` gives the administrator the two `ALTER ROLE`s
+  to run once per server.
+- Whoever sets it then ends those logins' idle backends, so a warmed pool
+  reconnects with it. `pg_terminate_backend` asks for more than `ALTER
+  ROLE`: the privileges of the login's role, or `pg_signal_backend`.
+  Where nobody may, the pool takes the ceiling as Hyperdrive replaces its
+  connections. Either way the rollout is tested against a warmed pool,
+  not a fresh one.
+- The app and the vault read `current_setting('statement_timeout')`
+  with their first reads (T206's round trip, so none added) and log a
+  warning when their login runs without the ceiling, so a deployment that
+  skipped the administrator's step hears it.
+
+Without the step, the ceiling waits; nothing breaks, as today. Unlike the
+hot login's settings, which 0.15's uses need to be correct, this is not
+worth stopping a migration for.
+
+The 5 s is a chosen ceiling, not a derived one: it
 equals a read call's deadline (`CALL_DEADLINE_MS`), and no statement of a
 caller who hears within 5 s needs longer. Writes may take longer (R75), so
 before the migration the suites run with it on, to find any write
@@ -493,14 +528,20 @@ connection a replan; at 500 days, 1,000 uses a second at 0.63 ms of CPU
 paragraph on T187). `use-days.alone.ts` holds it.
 
 So the days kept are a choice between storage and evidence, nothing else.
-Each use stores 141 bytes (section 2.9), and a backup carries them too.
+A day kept holds more than its uses' rows: each logged use also leaves its
+level-0 tiles and its row in the reads' projection, with that projection's
+indexes, and retention drops them all together. About 790 bytes a use in
+all (section 2.9: four measurements added up, never measured as one), and
+a backup carries them too.
 
 | uses a second, steady | a day | 30 days | a year |
 |---|---|---|---|
-| 1,000 (R44) | 12.2 GB | 365 GB | 4.45 TB |
-| 10 | 122 MB | 3.7 GB | 44.5 GB |
+| 1,000 (R44) | 68 GB | 2.0 TB | 25 TB |
+| 10 | 683 MB | 20.5 GB | 249 GB |
 
-Far less when repeats are covered (80% on covers: about a quarter).
+The use's own row is 141 of the 790 bytes (12.2 GB a day at 1,000 a
+second); the projection's 602 are most of it. Far less when repeats are
+covered (80% on covers: about a quarter).
 
 **Recommendation:** expose it as `audit.keepUsesDays`, **default `null`,
 every day kept**, as today. The uses are the record of who read which
@@ -508,8 +549,10 @@ secret, which an audit may ask for years later; dropping them should be a
 deployment's decision, with its numbers in front of it, not a default. A
 deployment at R44's rate sets a number, and `docs/deploy.md` shows the
 table above. *Example:* a deployment that must keep a year of evidence and
-runs at 10 uses a second sets nothing and holds 45 GB after a year; one
-at 1,000 a second that keeps 30 days sets 30 and holds about 365 GB.
+runs at 10 uses a second sets nothing and holds about 250 GB after a year;
+one at 1,000 a second that keeps 30 days sets 30 and holds about 2 TB.
+Kept forever at R44's rate, a year is 25 TB, which is why `deploy.md`
+puts the table in front of whoever deploys at that rate.
 
 ### Q7. A bound on the proxy's upstream request
 

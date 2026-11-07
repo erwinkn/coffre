@@ -894,7 +894,7 @@ or move, pointing to section 3's #).
 | V80 | `SLOTS` (e1-e4) | 4 | `use.ts:386` | c | = `MAX_PARENTS + 1` | | compute |
 | V81 | Input bounds | ids ≤ 100, `user:` ≤ 320, labels ≤ 120, jkt ≤ 128, run claims ≤ 32 × (64, 256), clientId ≤ 2,048 … | `credentials.ts:109-328`; `admit.ts:180`; `use.ts:436` | d | | | keep |
 | V82 | `MAX_RESERVED` | 1,000 names | `proxy.ts:19` | d | "far more than any deployment's code defines" | | keep |
-| V83 | `retainDays` | null: every day kept | `checkpointer-workers.ts:83`; `checkpointer-node.ts:92` | – | not in the standard setup: Workers' `checkpointer()` and `localVault`'s own checkpointer pass none. On Node, `runCheckpointer` and `keepCheckpointer` (`@coffre/vault/node`, `node.ts:36`) accept it, for a deployment that runs its checkpointer itself (`sealThrough`, `heldOutside`). 13.6 GB/day at 1,000/s (`hot-path-one.md:1285`) | | not a limit; see Q6 |
+| V83 | `retainDays` | null: every day kept | `checkpointer-workers.ts:83`; `checkpointer-node.ts:92` | – | not in the standard setup: Workers' `checkpointer()` and `localVault`'s own checkpointer pass none. On Node, `runCheckpointer` and `keepCheckpointer` (`@coffre/vault/node`, `node.ts:36`) accept it, for a deployment that runs its checkpointer itself (`sealThrough`, `heldOutside`). 13.6 GB/day at 1,000/s (`hot-path-one.md:1285`) for the uses' rows; about 68 GB/day with the reads' projection and tiles ([config.md](config.md), Q6) | | not a limit; see Q6 |
 
 Format, fine: `MAC_BYTES` 16 (twice: `log-entry.ts:36`, `reads.ts:97`),
 `TAG_BYTES`, `SEAL_BYTES`, the HKDF outputs, the Ed25519 PKCS8 prefix,
@@ -1248,7 +1248,9 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
 - **Q6. Retention can't be turned on in the standard setup.** `retainDays`
   exists, but only a Node deployment that runs its own checkpointer
   (`runCheckpointer`, `keepCheckpointer`) can reach it. The uses log
-  grows about 13.6 GB a day at 1,000/s. It isn't a limit, but it is a
+  grows about 13.6 GB a day at 1,000/s, and a day kept holds about 68 GB
+  in all, the reads' projection and tiles included ([config.md](config.md),
+  Q6). It isn't a limit, but it is a
   knob that a deployment needs and, in the standard setup, can't set.
   Expose it there (policy: days kept), or keep every day?
 - **Q7. A bound on the proxy's upstream request.** The credential proxy's
