@@ -1303,7 +1303,7 @@ test('a change that cannot have the head within its call\'s time fails as unavai
     await release();
   }
   const took = Date.now() - started;
-  assert.ok(took >= CALL_DEADLINE_MS - LOCK_WAIT_MS && took < CALL_DEADLINE_MS + 1_500, `it gave up after ${took} ms`);
+  assert.ok(took >= CALL_DEADLINE_MS && took < CALL_DEADLINE_MS + LOCK_WAIT_MS + 1_500, `it gave up after ${took} ms`);
   assert.equal((await vaultLog(w)).length, before, 'nothing written');
 });
 

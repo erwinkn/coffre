@@ -475,9 +475,10 @@ async function retryingLocks<T>(work: () => Promise<T>, by: number): Promise<T> 
       return await work();
     } catch (error) {
       if (!lockNotAvailable(error) || causedBy(error, HeadBusy)) throw error;
-      const wait = pause * (0.5 + Math.random());
-      if (Date.now() + wait >= by) throw error;
-      await new Promise((resolve) => setTimeout(resolve, wait));
+      // The pause, cut short at `by`, and one attempt more there; none past it.
+      const left = by - Date.now();
+      if (left <= 0) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(pause * (0.5 + Math.random()), left)));
     }
   }
 }
@@ -1623,7 +1624,9 @@ class VaultService implements Vault {
    */
   async #rotate(from: string): Promise<bigint> {
     const reports: NewEntry[] = [];
-    const since = await this.#db.transaction(async (tx) => {
+    // Its lock waits retried as a change's are (`retryingLocks`): each attempt reports afresh.
+    const since = await retryingLocks(() => this.#db.transaction(async (tx) => {
+      reports.length = 0;
       await store.boundLockWaits(tx, LOCK_WAIT_MS);
       const principals = (await store.allMembers(tx)).map((row) => row.principal);
       const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
@@ -1651,7 +1654,7 @@ class VaultService implements Vault {
       // (R75). So they are logged here, under the new key, each key refused (formal/Coffre.tla's RotationClosesIntents).
       const closed = await this.#closeIntents(tx);
       return (await this.#append(tx, [rotated, ...closed, ...reports])).seqStart;
-    });
+    }), Date.now() + CALL_DEADLINE_MS);
     this.#reported(reports);
     return since;
   }
@@ -1664,8 +1667,11 @@ class VaultService implements Vault {
    */
   async #closeIntents(tx: Transaction): Promise<NewEntry[]> {
     const at = await this.#now(tx);
-    // The longest an intent is open: its call's budget from its own time, and the margin after it (`#keys`).
-    const entries = await store.recentIntents(tx, at - (2 * CALL_DEADLINE_MS + this.#prepared.options.keyBudgetMs));
+    // The longest an intent is open: its call's budget from its own time, and the margin after it (`#keys`), whatever the
+    // key budget of the isolate that logged it, this one's or the default (Fable's review of #538): each is then held
+    // to its own `expiresAt`.
+    const lifetime = 2 * CALL_DEADLINE_MS + Math.max(KEY_BUDGET_MS, this.#prepared.options.keyBudgetMs);
+    const entries = await store.recentIntents(tx, at - lifetime);
     const accounting = new KeyAccounting();
     for (const entry of entries) if (this.#authentic(entry)) accounting.add(entry);
     return accounting.state().intents.filter((intent) => intent.expiresAt > at).flatMap((intent) =>
@@ -4229,7 +4235,9 @@ class VaultService implements Vault {
     const { role, scope } = asStored(ticket.role, ticket.scope);
     let numbers: ChangeNumbers;
     try {
-      numbers = await this.#db.transaction(async (tx) => {
+      // Its lock waits retried as a change's are (`retryingLocks`): it commits nothing before its COMMIT, and its ticket
+      // holds for `TICKET_MS` (Fable's review of #538).
+      numbers = await retryingLocks(() => this.#db.transaction(async (tx) => {
         // One Sync, nothing awaited: the bound, the members' rows, then the head, in that order (as `#decideOnce` takes
         // them), each a lock; then the hold, which every write after it rests on.
         void store.boundLockWaits(tx, LOCK_WAIT_MS, undefined, { final: true });
@@ -4248,7 +4256,7 @@ class VaultService implements Vault {
           credential: ticket.credential, identity: ticket.identity, inputs: ticket.digest, operationId: ticket.operationId, requestId: ticket.requestId,
           confirmed: input.confirmed ?? null,
         })]);
-      });
+      }), Date.now() + CALL_DEADLINE_MS);
     } catch (error) {
       // The read moved under it, or another add made the row first: nothing written, and the app reads again.
       if (isMovedChange(error) || isUniqueViolation(error)) return { written: false, why: 'moved' };

@@ -1020,8 +1020,12 @@ export async function recentIntents(db: Queryable, since: number): Promise<Store
   return [...intents, ...stored(outcomes)].sort((a, b) => (a.seq < b.seq ? -1 : a.seq > b.seq ? 1 : 0));
 }
 
-/** How many intents `recentIntents` reads a statement. */
-const INTENT_PAGE = 500;
+/**
+ * How many intents `recentIntents` reads a statement: a bound on one answer's size, an intent's metadata naming each of
+ * its keys, up to the bulk limit's (1,000 by default), about 120 bytes each: 100 intents, at most about 12 MB, under a
+ * tenth of a Worker's 128 MB. Fewer pages hold no lock longer; the rotation that reads them holds the head throughout.
+ */
+const INTENT_PAGE = 100;
 
 /** Which of these secrets' newest versions are sensitive, by the versions' own order. */
 export async function newestSensitive(db: Queryable, secretIds: readonly string[]): Promise<Set<string>> {

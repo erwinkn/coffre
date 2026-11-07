@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { issuedGrant, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import { HOT_LOCK_TIMEOUT_MS, LOCK_WAIT_MS, type CredentialColumns, type SignInInput } from '@coffre/core/vault';
+import { LOCK_WAIT_MS, type CredentialColumns, type SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
 import { and, asc, count, desc, eq } from 'drizzle-orm';
@@ -372,9 +372,30 @@ test("a revoke waits for the fence LOCK_WAIT_MS at most, then is busy, nothing w
     await holder.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
     const none = await written();
     const started = Date.now();
-    assert.deepEqual(await w.vault.revokeCredential!(revoking(made)), { ok: false, refused: 'busy' });
+    const revoked = w.vault.revokeCredential!(revoking(made));
+    // Once it waits for the fence, a use asks for it shared, waiting half a lock wait more than the revoke may: the
+    // revoke, which asked first, leaves the queue within its `LOCK_WAIT_MS` (both waits are Postgres's own clocks), and
+    // the use is let in. With 0047's 1 s, the revoke would still be ahead of it, and the use refused.
+    const watcher = postgresSession(OWNER_URL);
+    const use = postgresSession(OWNER_URL);
+    try {
+      for (let i = 0; ; i++) {
+        const [{ n }] = await watcher.unsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory' AND pid <> pg_backend_pid()`);
+        if (n > 0) break;
+        assert.ok(i < 200, 'the revoke never waited for the fence');
+        await sleep(5);
+      }
+      await use.unsafe(`SET lock_timeout = '${LOCK_WAIT_MS * 1.5}ms'`);
+      await use.unsafe('BEGIN');
+      await use.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+      await use.unsafe('ROLLBACK');
+    } finally {
+      await Promise.allSettled([watcher.end(), use.end()]);
+    }
+    assert.deepEqual(await revoked, { ok: false, refused: 'busy' });
     const took = Date.now() - started;
-    assert.ok(took >= LOCK_WAIT_MS && took < HOT_LOCK_TIMEOUT_MS, `refused after ${took} ms, within half a use's wait`);
+    assert.ok(took >= LOCK_WAIT_MS, `refused after ${took} ms, a lock wait at least`);
     assert.deepEqual(await written(), none);
     await holder.unsafe('ROLLBACK');
     assert.ok((await w.vault.revokeCredential!(revoking(made))).ok, 'and, the fence free, it lands');
