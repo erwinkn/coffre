@@ -157,6 +157,21 @@ Access, which owns their sessions: the `people` fields do not apply there.
   upstreams are `http://localhost`, production's must not be. The same
   holds for `signin({ workloads: { allowLoopbackIssuersForDevelopment } })`,
   which `signin` already refuses on an instance not on loopback.
+- **Who a provider lets authenticate**: `google({ domain })` and
+  `github({ organization })`. Each narrows sign-in to one Workspace's
+  accounts or one organization's members (`wrong_domain`,
+  `not_in_organization`). Default: none, so any account the provider
+  vouches for may authenticate. It is a policy, but it belongs to the
+  provider it filters, not to the deployment as a whole: two providers
+  can carry two different ones, and `oidc(…)` and `microsoft(…)` have
+  no such option (a Microsoft tenant is already one directory). It is a
+  second gate, not the only one: signing in proves who someone is, and
+  only an active member, whom the vault decides (an invitation or the
+  `owners` list), gets in ([deployment-auth.md](../deployment-auth.md)).
+  Today `coffre init` writes `github({ app })` with no organization (both
+  examples). Recommendation: keep both options on the providers, and have
+  `init` ask for the organization when it sets up GitHub, so a new
+  deployment starts with one.
 - **`owners`** (R3): who owns the instance, not how much anyone may do. It
   differs per environment (dev, prod) and comes from its environment, so it
   stays in the vault's wiring.
@@ -451,16 +466,22 @@ throttling (Google SRE book, "Handling Overload"). Each isolate counts, over
 a trailing window, the uses it was asked (`requests`) and those the vault
 answered in time (`accepts`), and refuses a new use with probability
 max(0, (requests − K × accepts) ÷ (requests + 1)). It has two numbers, both
-from the source: K = 2 and a 2-minute window. The window decides how fast
-refusals fade once the overload ends: two minutes of history must roll out.
+from the source: K = 2 and a 2-minute window. The window is how much history
+an isolate keeps, not how long an overload must last or how long refusals
+outlive it: the probability follows the ratio of requests to accepts in that
+window. K = 2 means nothing is refused until requests exceed twice the
+accepts. Two consequences, both from the formula: a cold isolate whose first
+use failed (1 request, 0 accepts) refuses the next with probability 1 ÷ 2;
+and successes after an overload bring the probability back to 0 while the
+failures are still in the window, once accepts are half the requests again.
 The probability stays below 1, so it never shuts and needs no reopening
 rule. A needs three numbers nobody has measured (window, percentile,
 reopening rate) and risks every isolate shutting at once. *Example:* 2,500
 uses a second offered against W208's ceiling of 1,040, for two minutes:
 300,000 requests, 124,800 accepts. A new use is refused with probability
 (300,000 − 2 × 124,800) ÷ 300,001 ≈ 17%. The rest of the excess still goes
-`late`, so K = 2 trades some lateness for never refusing during a short
-blip. Either rule needs one run on Erwin's Cloudflare (R34, under $5, about
+`late`, so K = 2 trades some lateness for fewer refusals while the vault
+still answers more than half of what it is asked. Either rule needs one run on Erwin's Cloudflare (R34, under $5, about
 an hour) before it ships. Without that run, there is no step 2: the excess
 is answered `late` within 3 s, as W208 measured, and R44's "refused fast"
 waits.
@@ -687,7 +708,7 @@ it ends at 30 s with the app's.
 | The proxy's caches | 1,000 or 10,000 entries, some cleared whole | least recently used, within a slice of 16 MiB (#519) |
 | The proxy's body read whole | 16 MiB | 1 MiB; larger bodies stream (#519) |
 | KMS's 8 calls at once | slots handed from one request to the next | per call (#538's KMS PR) |
-| KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms for the whole call, a ceiling sized to one operation's retries (2.4) |
+| KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms per operations batch, a ceiling sized to one operation's retries; a cold vault's KEK checks each get their own, all inside the call's 8.1 s (2.4) |
 
 What a deployment writes after all of this: its wiring, as today, and
 `policy.ts`, twelve fields, each with a default it can leave alone.
