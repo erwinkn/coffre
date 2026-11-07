@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { CoffreError, type CoffreClient, type SecretKey } from '@coffre/client';
+
+import { saveSecrets } from '../src/lib/changes.ts';
+
 import {
   applySecretEditBatch,
   companionsOf,
@@ -483,4 +487,24 @@ test('a save asks to confirm every key it makes sensitive, a public key made so 
   // Its public key at its own level: a secret, nothing more to confirm than the private key.
   const { sensitivity: _, ...secretPublic } = changes.PRIVATE_KEY!.companion!;
   assert.deepEqual(madeSensitive(listed, [], { PRIVATE_KEY: { ...changes.PRIVATE_KEY!, companion: secretPublic } }), ['PRIVATE_KEY']);
+});
+
+test('a rename and a write whose 200 was cut off on the way landed: the save goes on, and nothing is left to retry', async () => {
+  const asked: string[] = [];
+  const cutOff = (what: string) => async () => {
+    asked.push(what);
+    throw new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole', undefined, undefined, undefined, 'POST');
+  };
+  const client = { secrets: { rename: cutOff('rename'), set: cutOff('set') } } as unknown as CoffreClient;
+  const entry: SecretKey = {
+    key: 'OLD', reference: null, folder: null, archived: false, version: 1, versionId: 'OLD-v1', updatedAt: null, updatedBy: null,
+    generated: null, parent: null, value: null, sensitivity: 'secret', readable: true,
+  };
+  const applied = await saveSecrets(client, { project: 'market', environment: 'prod' }, null).run({
+    active: [entry],
+    drafts: [],
+    changes: { OLD: { key: 'NEW', value: 'v2', archived: false } },
+  });
+  assert.deepEqual(asked, ['rename', 'set']);
+  assert.equal(applied, 2);
 });

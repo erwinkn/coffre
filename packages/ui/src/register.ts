@@ -10,6 +10,7 @@ import {
   account,
   accountAppearance,
   accountApps,
+  accountPasskeys,
   accountProfile,
   accountSessions,
   audit,
@@ -40,7 +41,7 @@ import {
   users,
   type CoffreContext,
 } from './options';
-import { AccountAppearancePage, AccountAppsPage, AccountPage, AccountProfilePage, AccountSessionsPage } from './pages/account';
+import { AccountAppearancePage, AccountAppsPage, AccountPage, AccountPasskeysPage, AccountProfilePage, AccountSessionsPage } from './pages/account';
 import { AuditPage } from './pages/audit';
 import { DevicePage } from './pages/device-login';
 import { PasskeyPage } from './pages/passkey';
@@ -104,6 +105,7 @@ const routeTree = root.addChildren([
     accountPage.addChildren([
       createRoute({ ...tab(accountPage, '/'), ...accountProfile, component: AccountProfilePage }),
       createRoute({ ...tab(accountPage, '/sessions'), ...accountSessions, component: AccountSessionsPage }),
+      createRoute({ ...tab(accountPage, '/passkeys'), ...accountPasskeys, component: AccountPasskeysPage }),
       createRoute({ ...tab(accountPage, '/apps'), ...accountApps, component: AccountAppsPage }),
       createRoute({ ...tab(accountPage, '/appearance'), ...accountAppearance, component: AccountAppearancePage }),
     ]),

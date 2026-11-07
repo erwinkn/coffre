@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
+import { ResetNotice } from '../components/reset-notice';
 import { pageRoute } from '../lib/page-route';
 import { authenticatorError, browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
-import { creationOptions, requestOptions, toJSON, type CreationJSON, type RequestJSON } from '../lib/webauthn';
+import { createCredential, getCredential, toJSON, type CreationJSON, type RequestJSON } from '../lib/webauthn';
 import type { passkey } from '../options';
 
 const Route = pageRoute<typeof passkey>();
@@ -17,7 +18,7 @@ const Route = pageRoute<typeof passkey>();
  */
 type Step =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestJSON; state?: string }
-  | { purpose: 'enroll'; email: string; options: CreationJSON; state: string };
+  | { purpose: 'enroll'; email: string; options: CreationJSON; state: string; reset?: { by: string; at: string } | null };
 
 /**
  * `/auth/passkey`: the passkey a sign-in waits for after the provider
@@ -122,10 +123,9 @@ export function PasskeyPage() {
           // at the call.
           const timeout = Math.min(left, current.options.timeout);
           const credential = current.purpose === 'enroll'
-            ? await navigator.credentials.create({ publicKey: creationOptions({ ...current.options, timeout }) })
-            : await navigator.credentials.get({ publicKey: requestOptions({ ...current.options, timeout }) });
-          if (credential === null) throw new DOMException('no passkey answered', 'NotAllowedError');
-          return JSON.stringify({ response: toJSON(credential as PublicKeyCredential), ...(current.state === undefined ? {} : { state: current.state }) });
+            ? await createCredential({ ...current.options, timeout })
+            : await getCredential({ ...current.options, timeout });
+          return JSON.stringify({ response: toJSON(credential), ...(current.state === undefined ? {} : { state: current.state }) });
         },
         (body) => fetch('/api/auth/passkey', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body }),
         { once: current.purpose === 'enroll' },
@@ -146,6 +146,12 @@ export function PasskeyPage() {
       if (answer.kind === 'ok' && typeof answer.value.next === 'string') {
         // A full navigation: the new session cookie is the next page's.
         window.location.assign(answer.value.next);
+        return;
+      }
+      if (answer.kind === 'landed') {
+        // Signed in, the answer naming where to go cut off on the way: the new session's home. The page's own `next`
+        // is the server's to hold to its origin (`safeNext`), so it is not followed here.
+        window.location.assign('/');
         return;
       }
       if (answer.kind !== 'refused') {
@@ -191,6 +197,8 @@ export function PasskeyPage() {
           )}
         </p>
       </div>
+      {/* An Owner's reset of every passkey of theirs, which is why this sign-in asks for a new one (section 3.7). */}
+      {step.purpose === 'enroll' && step.reset != null && <ResetNotice reset={step.reset} />}
       <button className="btn btn-primary" type="button" disabled={busy} aria-busy={busy} onClick={() => void answer(step)}>
         {busy ? <Spinner /> : <Key size={14} />}
         {unanswered ? 'Try again' : enroll ? 'Add passkey' : 'Use passkey'}

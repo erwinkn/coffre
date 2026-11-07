@@ -77,6 +77,8 @@ export const ROUTE_FILES: Record<string, string> = {
   ...since('0.16.0', ['_coffre/projects.$project_.$environment_.proxy.tsx', 'use.$.ts']),
   // The passkey a sign-in waits for, or a step-up's (docs/design/passkeys.md, section 3.1).
   ...since('0.16.0', ['_solo/auth.passkey.tsx']),
+  // Account › Passkeys: a person's own, to add, rename and remove (section 3.6).
+  ...since('0.16.0', ['_coffre/account.passkeys.tsx']),
 };
 
 /** Route files, under `app/src/routes/`, that `release` first wrote. */

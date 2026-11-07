@@ -88,7 +88,12 @@ export type ClientOptions = {
   transport?: Transport;
 };
 
-/** The API's error shape, `{ error, message }`, with the HTTP status. */
+/**
+ * The API's error shape, `{ error, message }`, with the HTTP status. A success whose body did not arrive whole (the
+ * connection dropped after the status line) is one too, code `unreadable` with its 2xx status: the server did what was
+ * asked, and its answer was lost, which no caller can read as the route's output. `method` says what was asked: a
+ * write so answered was made, a read so answered read nothing.
+ */
 export class CoffreError extends Error {
   readonly status: number;
   readonly code: string;
@@ -101,8 +106,10 @@ export class CoffreError extends Error {
    * `navigator.credentials.get()`, and the act is sent again with `{ state, response }`.
    */
   readonly touch: { options: unknown; state: string } | undefined;
+  /** The request's method, `GET` or a write's, when the client sent it; unset on an error made elsewhere. */
+  readonly method: string | undefined;
 
-  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string, touch?: { options: unknown; state: string }) {
+  constructor(status: number, code: string, message: string, reason?: string, retryAfter?: string, touch?: { options: unknown; state: string }, method?: string) {
     super(message);
     this.name = 'CoffreError';
     this.status = status;
@@ -110,6 +117,7 @@ export class CoffreError extends Error {
     this.reason = reason;
     this.retryAfter = retryAfter;
     this.touch = touch;
+    this.method = method;
   }
 }
 
@@ -160,9 +168,9 @@ export function createClient(options: ClientOptions) {
     }
 
     const response = await transport(new Request(url, { method, headers, body }));
-    const payload = await response.json().catch(() => null);
+    const payload: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const error = payload as { error?: unknown; message?: unknown; reason?: unknown; touch?: { options?: unknown; state?: unknown } } | null;
+      const error = payload as { error?: unknown; message?: unknown; reason?: unknown; touch?: { options?: unknown; state?: unknown } } | null | undefined;
       const touch = error?.touch;
       throw new CoffreError(
         response.status,
@@ -171,7 +179,11 @@ export function createClient(options: ClientOptions) {
         typeof error?.reason === 'string' ? error.reason : undefined,
         response.headers.get('retry-after') ?? undefined,
         touch !== null && typeof touch === 'object' && typeof touch.state === 'string' ? { options: touch.options, state: touch.state } : undefined,
+        method,
       );
+    }
+    if (payload === undefined) {
+      throw new CoffreError(response.status, 'unreadable', `coffre answered ${response.status}, but its answer did not arrive whole`, undefined, undefined, undefined, method);
     }
     return payload;
   }
@@ -392,6 +404,21 @@ export function createClient(options: ClientOptions) {
     identities: {
       list: () => call('GET /identities', {}),
       unlink: (id: string) => call('DELETE /identities/:id', { id }),
+    },
+
+    /**
+     * A person's passkeys, by their member reference (`user:<email>`): one's own, or, for an Owner of the whole
+     * instance, anyone's, whose reset it weighs. Adding one is two calls, `options` then `add` with what `create()`
+     * gave, from a browser session only. Removing one replaces the browser's session, so it goes through the passkey
+     * page's door (`/api/auth/passkey?remove=<id>`), not here.
+     */
+    passkeys: {
+      list: (member: string) => call('GET /members/:member/passkeys', { member }),
+      options: (member: string) => call('POST /members/:member/passkeys/options', { member }),
+      add: (member: string, input: RouteInput<'POST /members/:member/passkeys'>) => call('POST /members/:member/passkeys', { member }, input),
+      rename: (member: string, id: string, name: string) => call('PATCH /members/:member/passkeys/:id', { member, id }, { name }),
+      /** Someone else's, every one: an Owner's, for a person who lost theirs. */
+      reset: (member: string) => call('DELETE /members/:member/passkeys', { member }),
     },
 
     /** A `coffre login` waiting for someone to approve it, by the code it shows. */

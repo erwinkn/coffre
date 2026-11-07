@@ -2,7 +2,7 @@ import type { CoffreClient, ConnectedApp, IdentityRow, MissingKey, OffboardingRe
 import { EVERYWHERE, unscoped, type InstanceRole, type Role, type Scope } from '@coffre/core/access';
 import type { QueryKey } from '@tanstack/react-query';
 
-import { failureMessage, memberRef, Refusal } from './coffre.ts';
+import { failureMessage, landedUnread, memberRef, Refusal } from './coffre.ts';
 import { projectAccessLabel } from './project-access.ts';
 import type { Change, ListShape, Target, Words } from './optimistic.ts';
 import { affects, keys } from './queries.ts';
@@ -10,6 +10,7 @@ import { regenerateWrite, type Generation } from '@coffre/core/recipe';
 import { regeneratedKeys, renamePairs } from './recipes.ts';
 import { applySecretEditBatch, companionsOf, generationsOf, levelsOf, type SecretChange, type SecretDraft, type SecretEditBatchResult } from './secret-edit-batch.ts';
 import type { DirectoryPrincipal, GrantRow, ProjectSummary } from '../shared/models.ts';
+import type { Passkey, PasskeyList } from './passkeys.ts';
 
 /**
  * Every change the pages make before the server answers, one per kind, each
@@ -308,6 +309,25 @@ export function unlinkIdentity(client: CoffreClient): Change<Identities, Identit
     removing: { pending: 'Unlinking…', done: 'unlinked', failed: 'Not unlinked.' },
     affects: () => affects.identities(),
     run: (identity) => client.identities.unlink(identity.id),
+  };
+}
+
+type Passkeys = ({ ok: true } & PasskeyList) | Failure;
+
+/** A person's passkeys, as Account › Passkeys lists them. */
+export function passkeysList(member: string) {
+  return listOf<Passkey, Passkeys>(keys.passkeys(member), 'passkeys', (passkey) => passkey.id);
+}
+
+/** Rename one of your passkeys: shown at once; a name grants nothing, so it takes no check (section 3.6). */
+export function renamePasskey(client: CoffreClient, member: string): Change<Passkeys, Passkey, { id: string; name: string }, unknown> {
+  return {
+    list: passkeysList(member),
+    label: (vars) => `passkey ${vars.name}`,
+    targets: (vars) => [saving(vars.id)],
+    apply: (passkeys, vars) => passkeys.map((passkey) => (passkey.id === vars.id ? { ...passkey, name: vars.name } : passkey)),
+    affects: () => affects.passkeys(member),
+    run: (vars) => client.passkeys.rename(member, vars.id, vars.name),
   };
 }
 
@@ -611,6 +631,8 @@ export function saveSecrets(
             try {
               await client.secrets.rename(`${path}/${key}`, nextKey);
             } catch (error) {
+              // Renamed, its answer cut off on the way: the batch goes on.
+              if (landedUnread(error)) return;
               // A refused rename names the key it stopped at.
               throw new Refusal(`${key}: ${failureMessage(error)}`);
             }
@@ -619,6 +641,7 @@ export function saveSecrets(
             try {
               await client.secrets.set(path, patch);
             } catch (error) {
+              if (landedUnread(error)) return;
               throw new Refusal(failureMessage(error));
             }
           },

@@ -14,6 +14,16 @@
 export type PasskeyAnswer<T> = { kind: 'ok'; value: T } | { kind: 'refused'; code: string | undefined } | { kind: 'unavailable' };
 
 export async function passkeyAnswer<T>(request: Promise<Response>): Promise<PasskeyAnswer<T>> {
+  const answer = await answerOf<T>(request);
+  return answer.kind === 'landed' ? { kind: 'unavailable' } : answer;
+}
+
+/**
+ * `passkeyAnswer`, with a success whose body did not arrive whole told apart: `landed`. A GET's (the step's options)
+ * is no step to go by, so `passkeyAnswer` says `unavailable`; a POST's was taken (`sendPasskey`), its headers, the new
+ * session's cookie among them, having arrived with its status.
+ */
+async function answerOf<T>(request: Promise<Response>): Promise<PasskeyAnswer<T> | { kind: 'landed' }> {
   let response: Response;
   try {
     response = await request;
@@ -22,7 +32,7 @@ export async function passkeyAnswer<T>(request: Promise<Response>): Promise<Pass
   }
   if (response.status >= 500 || response.status === 408 || response.status === 429) return { kind: 'unavailable' };
   const body: unknown = await response.json().catch(() => undefined);
-  if (response.ok) return body === undefined ? { kind: 'unavailable' } : { kind: 'ok', value: body as T };
+  if (response.ok) return body === undefined ? { kind: 'landed' } : { kind: 'ok', value: body as T };
   if (body === undefined && (response.status === 401 || response.status === 409)) return { kind: 'unavailable' };
   const { error, reason } = typeof body === 'object' && body !== null ? body as { error?: unknown; reason?: unknown } : {};
   if (response.status === 409 && error === 'conflict' && reason === 'changed') return { kind: 'unavailable' };
@@ -59,6 +69,40 @@ export function leftOf(ends: Deadline, clock: Clock): number {
 }
 
 /**
+ * A call to the authenticator ended at `left` milliseconds, by this page: `call` is given the signal to pass to
+ * `create()` or `get()`, aborted then, and a call it ended throws `TimeoutError` (`lapsed`). The options' `timeout` is
+ * a hint the browser may stretch: Chromium raises one under three minutes to three, so a step with seconds left would
+ * wait minutes, and a passkey made after the step lapsed is one coffre refuses, left on the device (review r2 of
+ * #539). An answer that came first is kept: coffre, not the page, says whether it came in time.
+ */
+export async function withinDeadline<T>(left: number, call: (signal: AbortSignal) => Promise<T>, closed?: AbortSignal): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(lapsed()), Math.max(0, left));
+  // `closed`: the page put the call away (its dialog closed) before it was answered; that ends it too, as itself.
+  const close = () => controller.abort(closed?.reason);
+  if (closed?.aborted) close();
+  closed?.addEventListener('abort', close, { once: true });
+  try {
+    return await call(controller.signal);
+  } catch (thrown) {
+    if (closed?.aborted) throw closed.reason;
+    throw controller.signal.aborted ? lapsed() : thrown;
+  } finally {
+    clearTimeout(timer);
+    closed?.removeEventListener('abort', close);
+  }
+}
+
+/** The throw of an authenticator call the page ended at its step's deadline (`withinDeadline`). */
+export function lapsed(): DOMException {
+  return new DOMException('the request lapsed before a passkey answered', 'TimeoutError');
+}
+
+function isLapse(thrown: unknown): boolean {
+  return thrown instanceof DOMException && thrown.name === 'TimeoutError';
+}
+
+/**
  * A step's press, in the page's own memory: the answer the server did not answer, for the next press, whether the
  * step's options were asked of the authenticator already, and when they lapse. Each GET's step starts with neither
  * answer nor ask.
@@ -77,6 +121,11 @@ export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
  * challenge. `ask` throws as the browser's `create()` or `get()` does, and its throw forgets the press: no passkey was
  * made.
  *
+ * `landed`: a 2xx whose body did not arrive whole. The server did what was asked: the sign-in, the step-up or the
+ * removal is done, and the response's cookie is this browser's new session. Sent again, the same answer would meet a
+ * step that ended, a refusal of something done (review r6 of #539), so the page goes on as on `ok`, without the
+ * answer's `next`.
+ *
  * `once`: the options may be asked of the authenticator once only, as a `create()`'s are: after a refusal that keeps
  * the step, the press answers `stale`, asking nothing, and the page asks coffre for new options, a user handle of
  * their own. A refusal says nothing of the answers sent before it: tab A's POST commits and its response is lost, tab
@@ -87,24 +136,30 @@ export type Unsent = { body: string | null; asked?: boolean; ends?: Deadline };
  * `ends`: a press past it answers `expired`, asking nothing either. A page left open past its five minutes would
  * otherwise hand the authenticator options the server no longer takes, and the person a passkey coffre refuses (the
  * `timeout` the options carry starts when the authenticator is called, not at the GET). Before it, `ask` is given what
- * is left, the `timeout` to call the authenticator with (review r14 of #500).
+ * is left, the `timeout` to call the authenticator with (review r14 of #500), and an `ask` the page ended there
+ * (`withinDeadline`) answers `expired` too.
  */
 export async function sendPasskey<T>(
   unsent: Unsent,
   ask: (left: number) => Promise<string>,
   send: (body: string) => Promise<Response>,
   { once = false, clock = browserClock }: { once?: boolean; clock?: Clock } = {},
-): Promise<PasskeyAnswer<T> | { kind: 'stale' } | { kind: 'expired' }> {
+): Promise<PasskeyAnswer<T> | { kind: 'landed' } | { kind: 'stale' } | { kind: 'expired' }> {
   if (unsent.body === null && once && unsent.asked === true) return { kind: 'stale' };
   let body = unsent.body;
   if (body === null) {
     const left = unsent.ends === undefined ? undefined : leftOf(unsent.ends, clock);
     if (left === 0) return { kind: 'expired' };
-    body = await ask(left ?? Number.POSITIVE_INFINITY);
+    try {
+      body = await ask(left ?? Number.POSITIVE_INFINITY);
+    } catch (thrown) {
+      if (isLapse(thrown)) return { kind: 'expired' };
+      throw thrown;
+    }
   }
   unsent.body = body;
   unsent.asked = true;
-  const answer = await passkeyAnswer<T>(send(body));
+  const answer = await answerOf<T>(send(body));
   // Kept only while the server may still take it; `passkey_failed` added nothing of this answer's, so a touch may
   // ask for another (a new passkey asks for new options first, `once`).
   if (answer.kind !== 'unavailable') unsent.body = null;
@@ -121,6 +176,7 @@ export async function sendPasskey<T>(
 export function authenticatorError(thrown: unknown, rpId: string): string {
   const name = thrown instanceof DOMException ? thrown.name : undefined;
   if (name === 'InvalidStateError') return 'This device already holds a passkey of yours here. Use another device, or sign in with that one.';
+  if (name === 'TimeoutError') return 'This request lapsed before a passkey answered. Press again for a new one.';
   if (name === 'NotAllowedError') return 'No passkey answered. Try again when you’re ready.';
   if (name === 'SecurityError') {
     return `This browser makes no passkey for ${rpId} on this site. Whoever runs coffre here: passkeys.rpId must be this site’s host or a domain registered above it, not a public suffix such as co.uk or workers.dev.`;

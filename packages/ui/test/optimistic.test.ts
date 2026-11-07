@@ -132,6 +132,25 @@ test('an optimistic add shows at once as saving, then as confirmed', async () =>
   stop();
 });
 
+test('an add whose 200 was cut off on the way landed: it counts as saved, and the list read back shows it', async () => {
+  const { client, grants, held } = server([lead]);
+  const queryClient = createQueryClient();
+  const stop = await onScreen(queryClient, client);
+  const add = new MutationObserver(queryClient, changeOptions(queryClient, grantAccess(client, 'market')));
+
+  const done = add.mutate(dev);
+  await settle();
+  grants.push({ ...lead, id: 'g-dev', principalId: dev.principalId, role: 'viewer', roleName: 'Viewer', environmentSlug: 'prod', scope: 'environment' });
+  held[0]!.reject(new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole', undefined, undefined, undefined, 'PUT'));
+  await done;
+  await settle();
+  assert.deepEqual(itemStatus(changes(queryClient), grantId(dev)), { state: 'idle' }, 'not marked as refused');
+  assert.equal(listed(queryClient).find((grant) => grantId(grant) === grantId(dev))?.id, 'g-dev', 'read back');
+  assert.deepEqual(failedAdds<GrantVars>(changes(queryClient), listed(queryClient).map(grantId)), []);
+  assert.equal(announcements().polite?.text, 'Viewer: prod for dev@acme.example saved');
+  stop();
+});
+
 test('a grant to a new service account makes it in the same call, and its refusal leaves none to show', async () => {
   const { client } = server([lead]);
   const sent: [string, unknown][] = [];
@@ -304,4 +323,32 @@ test('a service account added is read again once made: what was asked of it befo
   const after = await queryClient.fetchQuery(queries.bindings(client, 'token:ci-new', true));
   assert.deepEqual(after, { ok: true, bindings: [] });
   assert.deepEqual(asked, ['token:ci-new', 'token:ci-new']);
+});
+
+test('an invite whose look for the person first was cut off failed: nothing was written, and nothing shows as saved (review r6 of #539)', async () => {
+  // The read before the write: its 200 cut off on the way read nothing, and the add was never sent.
+  let cut = false;
+  const added: string[] = [];
+  const client = {
+    members: {
+      list: async () => {
+        if (cut) throw new CoffreError(200, 'unreadable', 'coffre answered 200, but its answer did not arrive whole', undefined, undefined, undefined, 'GET');
+        return { members: [], removed: [] };
+      },
+      add: async (member: string) => void added.push(member),
+    },
+  } as unknown as CoffreClient;
+  const queryClient = createQueryClient();
+  await queryClient.fetchQuery(queries.directory(client, true));
+  const add = new MutationObserver(queryClient, changeOptions(queryClient, invite(client)));
+
+  cut = true;
+  const failed = await add.mutate({ principalType: 'user', principalId: 'new@acme.example', role: 'member', scope: { projects: 'all', environments: 'all' } }).then(() => false, () => true);
+  cut = false;
+  await settle();
+  assert.equal(failed, true, 'the change failed');
+  assert.deepEqual(added, [], 'nothing written');
+  const directory = queryClient.getQueryData([...keys.directory, { owner: true }]) as { principals?: { principalId: string }[] };
+  assert.deepEqual(directory.principals?.map((principal) => principal.principalId), [], 'its row is undone');
+  assert.match(announcements().urgent?.text ?? '', /^new@acme\.example: Not saved\./);
 });

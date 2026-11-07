@@ -87,6 +87,19 @@ function subject(entry: AuditEntry): Part[] {
   return [{ member: `${entry.metadata.principalType === 'service' ? 'token' : 'user'}:${id}` }];
 }
 
+/** How many sign-ins a passkey entry ended, by its `ended` counts: sessions, terminals and tokens, and connected apps. */
+function signInsEnded(entry: AuditEntry): number {
+  const ended = entry.metadata.ended as { credentials?: unknown; connections?: unknown } | undefined;
+  const count = (value: unknown) => (typeof value === 'number' ? value : 0);
+  return count(ended?.credentials) + count(ended?.connections);
+}
+
+/** `, ending 4 sign-ins`, for a removal or a reset that ended any. */
+function ended(entry: AuditEntry): Part[] {
+  const count = signInsEnded(entry);
+  return count === 0 ? [] : [`, ending ${plural(count, 'sign-in')}`];
+}
+
 /** Whether a token entry is about a personal token, which acts as its person, rather than a service account's. */
 function personal(entry: AuditEntry): boolean {
   return entry.metadata.kind === 'personal';
@@ -545,16 +558,34 @@ const TEMPLATES: Record<string, Template> = {
     tried: 'link',
     what: ({ entry }) => [`a ${text(entry.metadata.provider) ?? 'sign-in'} account`],
   },
-  // A passkey added at a first sign-in (docs/design/passkeys.md, section 3.2), with what no passkey stood behind, ended.
+  // A passkey added at a first sign-in (docs/design/passkeys.md, section 3.2), with what no passkey stood behind, ended;
+  // or from Account › Passkeys, which ends nothing.
   'passkey.add': {
     did: 'added',
     tried: 'add',
     what: ({ entry }) => {
-      const ended = entry.metadata.ended as { credentials?: unknown; connections?: unknown } | undefined;
-      const count = (value: unknown) => (typeof value === 'number' ? value : 0);
-      const signedOut = count(ended?.credentials) + count(ended?.connections);
-      return [`a passkey${signedOut === 0 ? '' : `, ending ${signedOut} sign-in${signedOut === 1 ? '' : 's'} no passkey stood behind`}`];
+      const signedOut = signInsEnded(entry);
+      return [`a passkey${signedOut === 0 ? '' : `, ending ${plural(signedOut, 'sign-in')} no passkey stood behind`}`];
     },
+  },
+  // One's own passkey removed, from Account › Passkeys (section 3.6): every other sign-in of theirs ends with it.
+  'passkey.remove': {
+    did: 'removed',
+    tried: 'remove',
+    what: ({ entry }) => [text(entry.metadata.name) === null ? 'a passkey' : `the passkey “${text(entry.metadata.name)}”`],
+    then: ({ entry }) => ended(entry),
+  },
+  // An Owner's reset of someone else's passkeys, every one (section 3.7).
+  'passkey.reset': {
+    did: 'reset the passkeys of',
+    tried: 'reset the passkeys of',
+    what: (facts) => subject(facts.entry),
+    then: ({ entry }) => ended(entry),
+  },
+  'passkey.rename': {
+    did: 'renamed',
+    tried: 'rename',
+    what: ({ entry }) => [text(entry.metadata.name) === null ? 'a passkey' : `a passkey “${text(entry.metadata.name)}”`],
   },
   // A touch of a passkey for a session, which a new one replaced (section 6.5).
   'passkey.check': { did: 'confirmed a session with a passkey', tried: 'confirm a session with a passkey', what: () => [] },

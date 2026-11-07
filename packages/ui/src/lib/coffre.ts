@@ -25,11 +25,33 @@ export function statusOf(error: unknown): number | undefined {
   return error instanceof CoffreError ? error.status : undefined;
 }
 
+/**
+ * A write coffre answered with a success whose answer was cut off on the way
+ * (the client's `unreadable`): what was asked was done, and its answer is
+ * lost. Not a refusal: nothing is to be undone, and what it touched is to be
+ * read again. A read so answered is no such thing: it read nothing, and a
+ * change that reads before it writes (an invite looks for the person first)
+ * stopped there, so it failed, and may be retried (review r6 of #539).
+ */
+export function landedUnread(error: unknown): boolean {
+  return (
+    error instanceof CoffreError &&
+    error.code === 'unreadable' &&
+    error.status < 400 &&
+    error.method !== undefined &&
+    !READS.has(error.method)
+  );
+}
+
+const READS = new Set(['GET', 'HEAD']);
+
 /** What to tell the person when a call fails. */
 export function failureMessage(error: unknown): string {
   if (error instanceof Refusal) return error.message;
   if (!(error instanceof CoffreError)) return 'The request could not be sent. Nothing was changed.';
   if (error.status === 401) return 'Your session has ended. Sign in again, then retry.';
+  // A success whose answer was cut off (the client's `unreadable`): what was asked was done, unread.
+  if (error.code === 'unreadable') return 'coffre’s answer was cut off on the way. Reload to see where things stand.';
   if (error.code === 'cross_origin') return 'coffre refused a change that did not come from this page. Reload, then retry.';
   // The vault's own rule, which the app could not foresee (one removed by someone else, say), in its words.
   if (error.code === 'vault_refused' && error.reason === 'not_allowed') return error.message.replace(/^the vault refused: /, '');

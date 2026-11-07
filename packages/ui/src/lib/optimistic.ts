@@ -1,7 +1,7 @@
 import type { Mutation, MutationOptions, QueryClient, QueryKey } from '@tanstack/react-query';
 
 import { announce } from './announce.ts';
-import { failureMessage } from './coffre.ts';
+import { failureMessage, landedUnread } from './coffre.ts';
 import { refresh } from './queries.ts';
 
 /**
@@ -17,7 +17,9 @@ import { refresh } from './queries.ts';
  * Several changes can be in flight at once, so a failure undoes its own
  * items only, not the whole list as it was when it started; and the list is
  * read back from the server once the last change to it has landed, so one
- * landing does not erase another still on its way.
+ * landing does not erase another still on its way. A change the server
+ * answered with a success cut off on the way (`landedUnread`) landed: it
+ * counts as done, with no answer, and the list read back shows it.
  */
 
 /** What a row is waiting for. */
@@ -77,12 +79,16 @@ export function changeKey(list: QueryKey): QueryKey {
 export function changeOptions<TData, TItem, TVars, TResult>(
   queryClient: QueryClient,
   change: Change<TData, TItem, TVars, TResult>,
-): MutationOptions<TResult, unknown, TVars, ChangeContext> {
+): MutationOptions<TResult | undefined, unknown, TVars, ChangeContext> {
   const { list } = change;
   const mutationKey = changeKey(list.queryKey);
   return {
     mutationKey,
-    mutationFn: change.run,
+    mutationFn: (vars) =>
+      change.run(vars).catch((error: unknown) => {
+        if (landedUnread(error)) return undefined;
+        throw error;
+      }),
     onMutate: async (vars) => {
       const targets = change.targets(vars);
       const words = { saving: change.saving ?? WORDS.saving, removing: change.removing ?? WORDS.removing };
