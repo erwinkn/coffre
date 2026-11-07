@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-Dj1j2fgO.js
+//#region ../client/dist/src-LcpmJe3K.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1626,6 +1626,23 @@ set: (member, access) => call("PATCH /access/:member", { member }, access) },
 		identities: {
 			list: () => call("GET /identities", {}),
 			unlink: (id) => call("DELETE /identities/:id", { id })
+		},
+		/**
+		* A person's passkeys, by their member reference (`user:<email>`): one's own, or, for an Owner of the whole
+		* instance, anyone's, whose reset it weighs. Adding one is two calls, `options` then `add` with what `create()`
+		* gave, from a browser session only. Removing one replaces the browser's session, so it goes through the passkey
+		* page's door (`/api/auth/passkey?remove=<id>`), not here.
+		*/
+		passkeys: {
+			list: (member) => call("GET /members/:member/passkeys", { member }),
+			options: (member) => call("POST /members/:member/passkeys/options", { member }),
+			add: (member, input) => call("POST /members/:member/passkeys", { member }, input),
+			rename: (member, id, name) => call("PATCH /members/:member/passkeys/:id", {
+				member,
+				id
+			}, { name }),
+			/** Someone else's, every one: an Owner's, for a person who lost theirs. */
+			reset: (member) => call("DELETE /members/:member/passkeys", { member })
 		},
 		/** A `coffre login` waiting for someone to approve it, by the code it shows. */
 		deviceLogins: {
@@ -7389,7 +7406,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-DD67ua3B.js
+//#region ../client/dist/workload-9_rTfRix.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;

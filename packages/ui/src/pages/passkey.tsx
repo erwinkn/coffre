@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { ErrorLine, Spinner } from '../components/ui';
 import { Key } from '../components/icons';
+import { ResetNotice } from '../components/reset-notice';
 import { pageRoute } from '../lib/page-route';
 import { authenticatorError, browserClock, deadlineOf, passkeyAnswer, readClock, sendPasskey, type Unsent } from '../lib/passkey-answer';
 import { signinErrorMessage } from '../lib/signin-errors';
@@ -17,7 +18,7 @@ const Route = pageRoute<typeof passkey>();
  */
 type Step =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestJSON; state?: string }
-  | { purpose: 'enroll'; email: string; options: CreationJSON; state: string };
+  | { purpose: 'enroll'; email: string; options: CreationJSON; state: string; reset?: { by: string; at: string } | null };
 
 /**
  * `/auth/passkey`: the passkey a sign-in waits for after the provider
@@ -191,6 +192,8 @@ export function PasskeyPage() {
           )}
         </p>
       </div>
+      {/* An Owner's reset of every passkey of theirs, which is why this sign-in asks for a new one (section 3.7). */}
+      {step.purpose === 'enroll' && step.reset != null && <ResetNotice reset={step.reset} />}
       <button className="btn btn-primary" type="button" disabled={busy} aria-busy={busy} onClick={() => void answer(step)}>
         {busy ? <Spinner /> : <Key size={14} />}
         {unanswered ? 'Try again' : enroll ? 'Add passkey' : 'Use passkey'}

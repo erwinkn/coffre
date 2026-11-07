@@ -418,3 +418,18 @@ test("the Proxy tab's entries (0.16): a save, item by item; code's reservation; 
   assert.equal(said(entry({ action: 'proxy.release', author: 'vault', metadata: { proxy: { released: 'maps' } } })), 'released maps, reserved by earlier code, for every environment');
   assert.equal(who({ actorType: 'system', actorId: 'deployment' }), "the deployment's code");
 });
+
+test('passkeys: added, removed, reset and renamed, with what each ended', () => {
+  assert.equal(said(entry({ action: 'passkey.add', metadata: { ended: { credentials: 2, connections: 1 } } })), 'added a passkey, ending 3 sign-ins no passkey stood behind');
+  assert.equal(said(entry({ action: 'passkey.add', metadata: {} })), 'added a passkey');
+  assert.equal(
+    said(entry({ action: 'passkey.remove', metadata: { name: 'YubiKey 5C', ended: { credentials: 3, connections: 1, approvals: 0 } } })),
+    'removed the passkey “YubiKey 5C”, ending 4 sign-ins',
+  );
+  assert.equal(said(entry({ action: 'passkey.remove', decision: 'deny', reason: 'last_passkey', metadata: {} })).startsWith('tried to remove a passkey'), true);
+  assert.equal(
+    said(entry({ action: 'passkey.reset', metadata: { principalType: 'user', principalId: 'bob@acme.example', passkeys: ['a', 'b'], ended: { credentials: 1, connections: 0, approvals: 0 } } })),
+    'reset the passkeys of bob@acme.example, ending 1 sign-in',
+  );
+  assert.equal(said(entry({ action: 'passkey.rename', metadata: { passkeyId: 'p', name: 'Work laptop' } })), 'renamed a passkey “Work laptop”');
+});

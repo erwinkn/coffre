@@ -8,10 +8,14 @@
  * How the visitor has coffre's pages drawn: the theme they chose, `system`
  * when none, and whether the sidebar is folded.
  */
-export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expanded' | 'collapsed' };
+/**
+ * `passkeyPrompt`: whether the Projects page's prompt to add a passkey, under the `optional` policy, shows, or was put
+ * off with Not now, for 30 days in this browser (docs/design/passkeys.md, section 3.3).
+ */
+export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expanded' | 'collapsed'; passkeyPrompt: 'shown' | 'later' };
 
 /** The cookies that hold them. */
-export const PREFERENCE_COOKIES = { theme: 'coffre-theme', sidebar: 'coffre-sidebar' } as const;
+export const PREFERENCE_COOKIES = { theme: 'coffre-theme', sidebar: 'coffre-sidebar', passkeyPrompt: 'coffre-passkey-later' } as const;
 
 /**
  * A project's pages beside its environments': `/projects/market/settings`
@@ -34,6 +38,7 @@ export function preferencesIn(cookies: string | null): Preferences {
   return {
     theme: theme === 'light' || theme === 'dark' ? theme : 'system',
     sidebar: value(PREFERENCE_COOKIES.sidebar) === 'collapsed' ? 'collapsed' : 'expanded',
+    passkeyPrompt: value(PREFERENCE_COOKIES.passkeyPrompt) === '1' ? 'later' : 'shown',
   };
 }
 

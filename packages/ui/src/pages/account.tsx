@@ -9,7 +9,8 @@ import { PageTabs } from '../components/tabs';
 import { ThemeCards } from '../components/theme';
 import { InstanceRole } from '../components/directory';
 import { ConfirmButton, CopyButton, EmptyState, ErrorLine, Notice, Timestamp } from '../components/ui';
-import { Link as LinkIcon, Monitor, ProviderMark, SignOut, Sun, Terminal, User, X } from '../components/icons';
+import { Key, Link as LinkIcon, Monitor, ProviderMark, SignOut, Sun, Terminal, User, X } from '../components/icons';
+import { PasskeysCard } from '../components/passkeys';
 import { signinErrorMessage } from '../lib/signin-errors';
 import { useOneTime } from '../lib/one-time';
 import { memberRef, useCoffre } from '../lib/coffre';
@@ -28,13 +29,14 @@ const Route = pageRoute<typeof accountProfile>();
 /**
  * Your own account, around its tabs: who coffre takes you for and, when
  * coffre runs its own sign-in, which accounts you sign in with, where you
- * are signed in, the MCP clients you connected, and how coffre looks here.
+ * are signed in, your passkeys, the MCP clients you connected, and how
+ * coffre looks here.
  * The sidebar's Settings is the instance's; this page is reached from your
  * account at the sidebar's foot. It keeps the name it had as one page, which
  * a deployment's `_coffre/account.tsx` mounts.
  */
 export function AccountPage() {
-  const { principal, auth, features } = useShell();
+  const { principal, auth, features, passkeys } = useShell();
   const mounted = useMounted();
   const person = principal?.type === 'user';
 
@@ -52,6 +54,12 @@ export function AccountPage() {
             <Link key="sessions" to="/account/sessions">
               <Monitor size={15} />
               Sessions
+            </Link>
+          ),
+          person && passkeys !== null && mounted('/account/passkeys') && (
+            <Link key="passkeys" to="/account/passkeys">
+              <Key size={15} />
+              Passkeys
             </Link>
           ),
           person && features.mcp && mounted('/account/apps') && (
@@ -135,6 +143,16 @@ function PersonalTokens({ email }: { email: string }) {
       emptyActions={<CopyLine value="coffre tokens issue --label cursor-agent --scope <project>/<environment>=viewer --expires-in 4h" label="Copy the command" />}
     />
   );
+}
+
+/**
+ * Your passkeys (docs/design/passkeys.md, section 3.6): each with Rename and Remove, and Add a passkey, in place, or,
+ * for a first one, as you sign in again. Under `off` it stays, to remove the ones you lost (section 3.7).
+ */
+export function AccountPasskeysPage() {
+  const { principal, passkeys } = useShell();
+  if (principal?.type !== 'user' || passkeys === null) return null;
+  return <PasskeysCard email={principal.id} standing={passkeys} />;
 }
 
 /** How to connect Claude, then the apps you connected. */

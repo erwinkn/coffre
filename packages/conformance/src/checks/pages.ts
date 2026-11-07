@@ -111,6 +111,7 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
     [`${account}/activity`, `service:${name}`, 'Activity'],
     ['/account', 'Account', 'Profile'],
     ['/account/sessions', 'Account', 'Sessions'],
+    ['/account/passkeys', 'Account', 'Passkeys'],
     ['/account/apps', 'Account', 'Connected apps'],
     ['/account/appearance', 'Account', 'Appearance'],
   ] as const;
@@ -132,6 +133,11 @@ export async function pagesInBrowser(deployment: Deployment, admin: Person, brow
         expect(loaded.dialog?.includes('Removing revokes 0 grants, 0 bearer tokens') === true, `${path}: Remove… does not preview what it would revoke`, loaded.dialog);
       }
       if (path === '/settings?tab=keys') expect(loaded.cards.includes('Keys'), `${path} does not show what the keys are checked against`, loaded.cards);
+      // The admin's own passkeys, the one it signed in with among them, and the way to add another.
+      if (path === '/account/passkeys') {
+        expect(loaded.cards.includes('Passkeys'), `${path} does not list the admin's passkeys`, loaded.cards);
+        expect(loaded.text.includes('Rename') && loaded.text.includes('Add a passkey'), `${path} does not offer Rename and Add a passkey`, loaded.text);
+      }
       if (path === `${person}/apps`) expect(loaded.cards.includes('Connected apps'), `${path} does not show an owner the person's connected apps`, loaded.cards);
       if (path === '/account/apps') {
         expect(loaded.cards.join(' then ') === 'Connect an app then Connected apps', `${path} does not show Connect an app, then the connected apps`, loaded.cards);

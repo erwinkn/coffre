@@ -251,9 +251,16 @@ export const UI_PARITY: { [K in RouteKey]: Reach } = {
   'PUT /settings': { ui: [{ does: 'Settings › General › Service accounts › Edit, beside who creates them', in: 'pages/settings.tsx', call: 'settings.set' }] },
   'GET /audit/keys': { ui: [{ does: 'Settings › Keys: what the keys you keep are checked against', in: 'pages/settings.tsx', call: 'audit.keys' }] },
   'POST /audit/loss': { not: "an Owner's acceptance of lost audit entries is rare and irreversible: `coffre audit accept-loss`, never a button" },
-  'GET /members/:member/passkeys': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
-  'POST /members/:member/passkeys/options': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
-  'POST /members/:member/passkeys': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
-  'PATCH /members/:member/passkeys/:id': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
-  'DELETE /members/:member/passkeys': { inFlight: 'docs/design/passkeys.md (#441), T176 PR 6b (W324): Account › Passkeys' },
+  // A person's passkeys (docs/design/passkeys.md, section 3.6); removing one replaces the browser's session, so it goes
+  // through the passkey door (`/api/auth/passkey?remove=<id>`), no API route.
+  'GET /members/:member/passkeys': {
+    ui: [
+      { does: 'Account › Passkeys', in: 'components/passkeys.tsx', call: 'passkeys.list', args: ['user:ada@acme.example'] },
+      { does: "a user's ⋯ › Reset passkeys…: what the reset removes and ends", in: 'components/passkeys.tsx', call: 'passkeys.list', args: ['user:ada@acme.example'] },
+    ],
+  },
+  'POST /members/:member/passkeys/options': { ui: [{ does: 'Account › Passkeys › Add a passkey: the options, as the dialog opens', in: 'components/passkeys.tsx', call: 'passkeys.options', args: ['user:ada@acme.example'] }] },
+  'POST /members/:member/passkeys': { ui: [{ does: 'Account › Passkeys › Add a passkey › Add passkey', in: 'components/passkeys.tsx', call: 'passkeys.add', args: ['user:ada@acme.example', { state: 's', response: {} }] }] },
+  'PATCH /members/:member/passkeys/:id': { ui: [{ does: 'Account › Passkeys › a passkey › Rename', in: 'lib/changes.ts', call: 'passkeys.rename', args: ['user:ada@acme.example', 'id', 'Laptop'] }] },
+  'DELETE /members/:member/passkeys': { ui: [{ does: "a user's ⋯ › Reset passkeys… › Reset passkeys, an Owner's", in: 'components/passkeys.tsx', call: 'passkeys.reset', args: ['user:ada@acme.example'] }] },
 };

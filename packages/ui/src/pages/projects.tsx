@@ -19,6 +19,7 @@ import { affects } from '../lib/queries';
 import { useAction } from '../lib/use-action';
 import { ClosedDoor, PageHeader } from '../components/page';
 import { Tile } from '../components/tile';
+import { PasskeyPrompt } from '../components/passkeys';
 import { AlertTriangle, Folder, Hash, Layers, Lock, Plus } from '../components/icons';
 import {
   ProjectEmptyStateCopy,
@@ -60,6 +61,7 @@ export function ProjectsPage() {
   return (
     <>
       <PageHeader title="Projects" />
+      <PasskeyPrompt />
 
       {active.length === 0 && refusedProjects.length === 0 ? (
         <div className="card">
