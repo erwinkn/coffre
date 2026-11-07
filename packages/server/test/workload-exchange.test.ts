@@ -1809,13 +1809,16 @@ test("the scheduled run reads a removal again when another remover moved it, and
     return change(input);
   });
   const logged = t.mock.method(console, 'error', () => {});
+  // And, closed before both, one whose close a writer left without its remover (review r12).
+  const malformed = await bind({ ...DEPLOY, ref: 'refs/heads/malformed', workflow_ref: 'acme/api/.github/workflows/deploy.yml@refs/heads/malformed' });
+  await db.owner.update(serviceBindings).set({ closedAt: new Date(Date.now() - 120_000), closedBy: null }).where(eq(serviceBindings.id, malformed));
   const { resumed, failed } = await runtime.workloads!.resumeRemovals();
   assert.deepEqual(resumed, [other]);
-  assert.deepEqual(failed.map(({ id }) => id), [bound]);
+  assert.deepEqual(failed.map(({ id }) => id), [malformed, bound]);
   assert.ok(logged.mock.calls.length >= 1);
   assert.deepEqual(await bindingState(other), { live: 0, closed: true, ended: true });
   assert.deepEqual((await bindingState(bound)).ended, false);
-  await assert.rejects(runScheduled(runtime), new RegExp(`removal could not be gone on with: ${bound}`));
+  await assert.rejects(runScheduled(runtime), new RegExp(`removal could not be gone on with: ${malformed}: its close names no remover`));
 });
 
 test("a removal reads what is live on the database's clock, which the end names on: an app clock ahead of it ends the binding all the same (Fable on #520)", postgresOnly('the app and the vault share the clock on SQLite'), async (t) => {

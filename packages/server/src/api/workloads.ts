@@ -1345,18 +1345,22 @@ export class WorkloadService {
       let row: BindingRow | null = closed;
       for (let tries = 1; ; tries += 1) {
         if (row === null) break;
-        const remover: Remover = {
-          ctx: null, actor: SCHEDULE_ACTOR, via: null, actorAccess: null, connection: null,
-          revokedBy: row.closedBy!.slice(row.closedBy!.indexOf(':') + 1),
-          // An unbind weighs no protected environment; the policy only as its newest change stands, as the vault holds it.
-          policy: { seq: (await newestVaultSeq(db, 'policy.change'))?.toString() ?? null, protected: [] },
-          continues: { by: row.closedBy!, at: row.closedAt!.getTime() },
-        };
-        const metadata = { bindingId: row.id, principalType: 'service', principalId: row.principal.slice('token:'.length) };
         try {
+          // Inside the binding's own boundary: a row whose close a writer left without its remover (`closed_by` null or
+          // malformed) is that binding's failure, reported, and stops no other (review r12).
+          const by = row.closedBy;
+          if (by === null || !/^[a-z]+:./.test(by) || row.closedAt === null) throw new Error('its close names no remover: a row changed around coffre');
+          const remover: Remover = {
+            ctx: null, actor: SCHEDULE_ACTOR, via: null, actorAccess: null, connection: null,
+            revokedBy: by.slice(by.indexOf(':') + 1),
+            // An unbind weighs no protected environment; the policy only as its newest change stands, as the vault holds it.
+            policy: { seq: (await newestVaultSeq(db, 'policy.change'))?.toString() ?? null, protected: [] },
+            continues: { by, at: row.closedAt.getTime() },
+          };
+          const metadata = { bindingId: row.id, principalType: 'service', principalId: row.principal.slice('token:'.length) };
           await this.#bindingsByVault(remover, row.principal, null, null, [row], 'unbound', metadata, [{
             actorType: 'system', actorId: 'schedule', action: 'token.unbind', decision: 'allow',
-            metadata: { ...metadata, reason: 'removed', removedBy: row.closedBy, closedAt: row.closedAt!.toISOString() },
+            metadata: { ...metadata, reason: 'removed', removedBy: by, closedAt: row.closedAt.toISOString() },
           } as AuditEntry]);
           resumed.push(row.id);
           break;
