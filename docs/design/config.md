@@ -120,13 +120,25 @@ bytes for 60 + 10 = 70 s. The proposal derives both from the one number R:
 - a handle's tunnel: each check given d = min(R ÷ 2, 10 s), the checks
   R − d apart, so that a check's interval and its deadline add up to R;
 - a fresh request's window to send (or, for a signature, to answer), from
-  its start: today max(cache, 3 s), the 3 s being the use's own deadline
-  (`USE_DEADLINE_MS`; `sendBy` and `answerBy` in `credential-proxy.ts`), so
-  that a cold request whose use took most of its 3 s still goes out. It
-  stays max(R, 3 s), which is R once R is at least 3.
+  its start: max(R, 3 s), the 3 s being the use's own deadline
+  (`USE_DEADLINE_MS`), so that a cold request whose use took most of its
+  3 s still goes out; R once R is at least 3.
+
+**Today only editable definitions have that window.** Their paths set it
+at max(cache, 3 s) (`sendBy` and `answerBy` in `credential-proxy.ts`). A
+credential defined in code has none: its handle requests and its
+workloads' requests reach `send` with no `sendBy` (`forward` and
+`workloadForward` in `credential-proxy.ts`), whose check runs only when
+one is set, and `sign`, `verify` and `presign` answer with no
+`answerBy`. So a request that paused after its values opened (a slow
+upload, a stalled isolate) sends or answers whenever it resumes, however
+long after a revocation. The promise below needs the window on every path
+that forwards, signs or checks a signature: a code change, part of this
+proposal, not a setting.
 
 *Example:* an Owner revokes a CI token at 12:00:00. At R = 60, its last
-request through the proxy leaves by 12:01:00; its open Postgres tunnel
+request through the proxy leaves by 12:01:00 (once every path has the
+window; today a code-defined credential's may leave later); its open Postgres tunnel
 checks every 50 s, each check given 10 s, and closes by 12:01:00. At R = 4,
 the tunnel checks every 2 s with 2 s to answer.
 
@@ -317,8 +329,9 @@ retry only when each key needs one operation and they all run at once:
 - a rewrap: each key decrypts under its old wrap, then encrypts, one after
   the other (`vault.ts`, the rewrap's operation). On first tries the pair
   takes at most 2 × 706 = 1,412 ms; a decrypt that spends all three attempts
-  leaves the encrypt nothing, and the call fails `kek_unavailable`, which
-  its caller may retry.
+  leaves the encrypt nothing, and the call fails with a
+  `KekUnavailableError` (each key's outcome recorded as `cancelled`,
+  `kms_unavailable` or `kms_uncertain`), which its caller may retry.
 - more than 8 keys: the per-call slots run them in waves of 8, and each wave
   gets what the earlier ones left.
 
@@ -340,7 +353,7 @@ read call with a key service 11.2 s.
 |---|---|---|---|
 | A Hyperdrive config's connections, set by `coffre setup` | ⌊(max_connections − reserved − 3) ÷ 3⌋, at least 5, at most **20** ⚠ | an even third for each login (app, vault, uses), less 3 held back | the 20 is Free's maximum, applied on Paid too: [limits.md](limits.md) #12 proposes the plan's maximum. Example at 100: 31 each, cut to 20 |
 | Held back (`HELD_BACK`) | 3 | for the administrator, `coffre migrate`, the host's tools | a guess ⚠ (Q2) |
-| A Node pool | **10** ⚠ | `max ?? 10`, node-postgres's default | Q2 |
+| A Node pool | **10** ⚠ | `max ?? 10`, node-postgres's default; proposed: setup's share, at least 5, or the process refuses to start | Q2 |
 | The Node checkpointer's pool | 2 | its own connection | ⚠ (limits.md V39) |
 | A Workers call's connections | 1 | several at once were cancelled as hung on Cloudflare | measured (#80) |
 
@@ -384,7 +397,7 @@ read call with a key service 11.2 s.
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
 | Values served from memory | 60 s | R, the object's `revokedWithinSeconds` | policy |
-| A fresh request's window to send, or to answer with a signature, from its start | 60 s | max(R, 3 s), 3 s the use's deadline (`USE_DEADLINE_MS`), so R's floor is 3 | `sendBy`, `answerBy` (`credential-proxy.ts`), policy |
+| A fresh request's window to send, or to answer with a signature, from its start | 60 s | max(R, 3 s), 3 s the use's deadline (`USE_DEADLINE_MS`), so R's floor is 3 | `sendBy`, `answerBy` (`credential-proxy.ts`), policy. Today editable definitions only: code-defined forwarding, signing, verifying and presigning check no window, and must (section 1, `revokedWithinSeconds`) |
 | A handle's tunnel: a check's deadline; the checks' interval | 10 s; 50 s | d = min(R ÷ 2, 10 s); R − d (today 10 s and 60 s, a 70 s bound) | policy |
 | A workload's tunnel (and a UI tunnel a workload opens): two checks | (1) its session still stands: bound b = min(R, 15 s), checked every 2b ÷ 3 with b ÷ 3 to answer, today every 10 s with 5 s; (2) the vault still grants the key, and for an editable tunnel the item is the one dialled: every R with min(R, 10 s) to answer, today every 60 s with 10 s | (1) design section 8.2's 15 s; (2) proposed as the handle's: every R − d, d = min(R ÷ 2, 10 s), so a lost grant or a changed definition ends it within R | `credential-proxy.ts` (`workloadTunnel`, `uiTunnel`), policy |
 | The refresh window before values lapse | min(cache ÷ 4, 15 s) | none written ⚠ | limits.md S25 |
@@ -472,14 +485,18 @@ On Node, the same two bounds for the process, as #519 does for its shares.
 taken for its database phase alone: `raced` (`packages/vault/src/use.ts`)
 admits it, and releases the place when the statement and its reads after
 it settle, before `opening` unwraps the value's key at the key service.
-And a batch (`useMany`'s rounds, up to `uses.batch` = 100 keys) is admitted
-once, as one place. So neither today's 10 nor a 1,250 bounds what an
-isolate holds: a use waiting up to 3,118 ms on KMS for its key holds its
-row and request but no place, and a batch of 100 keys counts as one use.
+And a batch is admitted once per round, as one place: `useMany`'s round
+holds every key the call asks, sent `uses.batch` = 100 keys a statement,
+in turn, under that one admission (`inStatements`). So neither today's 10
+nor a 1,250 bounds what an isolate holds: a use waiting on KMS for its key,
+for what is left of its own 3 s deadline (the hot path hands KMS the use's
+deadline, not `KEY_BUDGET_MS`), holds its row and request but no place,
+and a round of 100 keys, or of more, counts as one use.
 *Example:* an isolate taking 400 uses a second while KMS answers each key
 in about 3 s admits each use for its few ms in the database, then holds
 about 1,200 uses waiting on their keys, none of them counted; and 1,250
-batches of 100 would be 125,000 keys under the same count. Step 1
+rounds of 100 keys would be 125,000 keys under the same count, more if a
+round asks more. Step 1
 therefore needs two code changes before its number means anything:
 
 - a place is held from admission until the value is opened or the use
@@ -553,6 +570,18 @@ documented, not built. *Example:* at `max_connections` 100 (3 reserved),
 each login's share is 31: the app's pool and the uses' pool are 31, the
 vault's request pool 29 and its checkpointer's 2, against 10 each today,
 and nothing to configure. At 25 the share is 6: pools of 6, 6, 4 and 2.
+
+**The formula's floor: a share of 5.** Each pool must keep a connection,
+and Q3's waiters need the vault's request pool to leave 2 free, so the
+request pool needs at least 3, and the share at least 5. That is setup's
+minimum for a Hyperdrive config (`HYPERDRIVE_CONNECTIONS.fewest`), one
+floor on both runtimes. Below it a Node process refuses to start, naming
+the `max_connections` it needs, as `coffre setup` refuses on Workers;
+today setup checks the minimum for Workers alone (`setup.ts`), and Node
+checks nothing. *Example:* at `max_connections` 14, 3 reserved and 3 held
+back, the share is ⌊8 ÷ 3⌋ = 2: the vault's request pool would be 0 and
+Q3's waiters −2, so the process refuses, asking for 21 (3 + 3 + 3 × 5). At
+21, pools of 5, 5, 3 and 2, and 1 waiter.
 
 ### Q3. Where the vault learns its connection share (`READ_HEAD_WAITERS`)
 
