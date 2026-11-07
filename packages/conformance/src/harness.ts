@@ -337,9 +337,10 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         await halt(wrangler);
         const since = mark();
         const refused = startWrangler({ ...settings, ...asked });
-        // Wrangler serves whatever the Worker does: the Worker's config is read at its first request, and refused there.
-        await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`).catch(() => null)) !== null || refused.exited, 120);
         try {
+          // Wrangler serves whatever the Worker does: the Worker's config is read at its first request, and refused there.
+          // Waited for inside the `finally`: a Wrangler that never serves is stopped, and the deployment put back, too.
+          await until(`${origin}/livez`, async () => (await fetch(`${origin}/livez`).catch(() => null)) !== null || refused.exited, 120);
           return await refusal(refused, since);
         } finally {
           await halt(refused);

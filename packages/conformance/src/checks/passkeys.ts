@@ -65,10 +65,10 @@ async function keyHolder(deployment: Deployment, admin: Person, name: string, ac
 }
 
 /** Another passkey of the person's, from Account → Passkeys: the key, and its id there. */
-async function addPasskey(deployment: Deployment, person: Person): Promise<{ key: SoftAuthenticator; id: string }> {
+async function addPasskey(deployment: Deployment, person: Person, kind: { synced?: boolean } = {}): Promise<{ key: SoftAuthenticator; id: string }> {
   const before = new Set((await person.api.passkeys.list(person.member)).passkeys.map((passkey) => passkey.id));
   const { options, state } = await person.api.passkeys.options(person.member);
-  const key = await SoftAuthenticator.create('ES256');
+  const key = await SoftAuthenticator.create('ES256', kind);
   const response = await key.register({ ...ceremonyOf(deployment, options.challenge), userHandle: new Uint8Array(Buffer.from(options.user.id, 'base64url')) });
   await person.api.passkeys.add(person.member, { state, response: response as unknown as Record<string, unknown> });
   const added = (await person.api.passkeys.list(person.member)).passkeys.find((passkey) => !before.has(passkey.id));
@@ -168,6 +168,9 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
   }
   expect(await signedIn(ada.browser), 'a refused step-up ended the session it came in on');
 
+  // Added before the sign-in below starts: a passkey's replay mark starts at its own ceremony, which a challenge drawn
+  // before it would not pass.
+  const synced = await addPasskey(deployment, ada, { synced: true });
   // 1, 4, 6 at a sign-in: refused, then the honest answer signs in.
   const signing = new Browser(deployment.origin);
   expect((await provider(deployment, signing, ada.email)).pathname === '/auth/passkey', "ada's sign-in asked no passkey");
@@ -178,14 +181,16 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
     expect(refused.status === 401 && !(await signedIn(signing)), `a sign-in assertion ${what} answered ${await said(refused)}, not 401`);
   }
 
-  // 3 at a sign-in: the same assertion, sent again with the same sealed state from a copy, signs in once.
+  // 3 at a sign-in: the same assertion, sent again with the same sealed state from a copy, signs in once. Signed by a
+  // synced passkey, whose counter stays 0: only the replay mark (section 7.3) refuses it, not a counter standing still.
   const page = await passkeyPage(signing);
   const thief = signing.copy();
-  const response = await ada.key.assert(ceremonyOf(deployment, page.options!.challenge));
+  const response = await synced.key.assert(ceremonyOf(deployment, page.options!.challenge));
   const first = await answer(signing, { response });
   expect(first.ok && (await signedIn(signing)), `the honest sign-in assertion answered ${await said(first)}`);
   const replayed = await answer(thief, { response });
-  expect(!replayed.ok && !(await signedIn(thief)), `a sign-in assertion sent twice signed in twice: ${await said(replayed)}`);
+  expect(replayed.status === 400 && (await bodyOf(replayed)).error === 'state_mismatch' && !(await signedIn(thief)),
+    `a synced passkey's sign-in assertion sent twice answered ${await said(replayed)}, not 400 state_mismatch`);
 
   // 10 and 21: a fresh check ends the session it came in on, and the new one expires when that one would have.
   const expiry = async (browser: Browser) => (await browser.client().sessions.list()).sessions.find((session) => session.current)?.expiresAt;
@@ -249,11 +254,13 @@ export async function ceremonies(deployment: Deployment, { admin }: People): Pro
   expect(enrolled.ok, `the honest enroll was refused: ${await said(enrolled)}`);
   keepPasskey(cy.email, cyKey);
   const held = async () => (await admin.api.passkeys.list(cy.member)).passkeys.length;
+  // A first passkey's enroll holds only while the person has never had one (section 3.2): `400 passkey_exists` after.
+  const spent = async (answered: Response) => answered.status === 400 && (await bodyOf(answered)).error === 'passkey_exists';
   const second = await answer(later, { state: enroll.state, response: await register(await SoftAuthenticator.create()) });
-  expect(!second.ok && (await held()) === 1, `a second enroll with the same state added a passkey: ${await said(second)}`);
+  expect((await spent(second)) && (await held()) === 1, `a second enroll with the same state answered ${await said(second)}, not 400 passkey_exists, or added a passkey`);
   await admin.api.passkeys.reset(cy.member);
   const reused = await answer(afterReset, { state: enroll.state, response: await register(await SoftAuthenticator.create()) });
-  expect(!reused.ok && (await held()) === 0, `an enroll's state used again after a reset enrolled: ${await said(reused)}`);
+  expect((await spent(reused)) && (await held()) === 0, `an enroll's state used again after a reset answered ${await said(reused)}, not 400 passkey_exists, or enrolled`);
 
   return `refused at the step-up and at sign-in: an assertion for another origin, another RP ID, without UV, backed up but not eligible, by another member's passkey; ` +
     `an answer sent twice taken once, at sign-in and at the step-up; a fresh check ends its session and keeps its expiry; two at once, one session and one 401; ` +
@@ -271,14 +278,26 @@ export async function passkeyChanges(deployment: Deployment, { admin }: People):
   const cli = bearer(deployment.origin, await deviceLogin(deployment, dee.browser));
   const approved = await startDevice(deployment);
   await dee.api.deviceLogins.decide(approved.user_code, true);
+  // Approved too, left unpolled through the first passkey and the reset: denied by the first, and still after (23).
+  const unpolled = await startDevice(deployment);
+  await dee.api.deviceLogins.decide(unpolled.user_code, true);
   const handle = await dee.api.handles.create({ label: 'conformance', paths: [DEV] });
   expect((await used(deployment, handle.token)) === 200, 'a handle made before any passkey does not reach /use');
   await withPasskey(deployment, dee);
+  // Denied for good by the first passkey itself, unpolled: a poll now would be refused anyway while Dee holds one, and
+  // a reset denies what is left, so only the row shows it (a later `off` would let an approval still standing redeem).
+  const decision = await using(deployment.database(), async (sql) =>
+    (await query<{ decision: string }>(sql, 'SELECT decision FROM device_logins WHERE user_code = $1', [unpolled.user_code]))[0]?.decision);
+  expect(decision === 'denied', `a terminal approved before the first passkey is ${decision} after it, not denied`);
   expect((await refusal(cli.me())).status === 401, "a CLI session made before the person's first passkey still answers");
-  expect((await polled(deployment, approved.device_code)) !== 'token', 'a terminal approved before the first passkey redeemed a token after it');
+  const deniedFirst = await polled(deployment, approved.device_code);
+  expect(deniedFirst === 'access_denied', `a terminal approved before the first passkey answered ${deniedFirst} after it, not access_denied`);
   expect((await used(deployment, handle.token)) === 401, 'a handle made before the first passkey still reaches /use');
   await admin.api.passkeys.reset(dee.member);
   expect((await refusal(cli.me())).status === 401, 'a CLI session made before the first passkey answers again once that passkey is reset');
+  const deniedAfter = await polled(deployment, unpolled.device_code);
+  expect(deniedAfter === 'access_denied', `a terminal approved before the first passkey, polled once it was reset, answered ${deniedAfter}, not access_denied`);
+  expect((await used(deployment, handle.token)) === 401, 'a handle made before the first passkey reaches /use again once that passkey is reset');
 
   // 30: under optional, an unscoped Owner without a passkey adds one at sign-in; a Developer does not.
   const deeAgain = new Browser(deployment.origin);
@@ -326,8 +345,12 @@ export async function passkeyChanges(deployment: Deployment, { admin }: People):
     const doomed = await addPasskey(deployment, fay);
     const racer = new Browser(deployment.origin);
     expect((await signIn(deployment, racer, fay.email)).ok, 'fay could not sign in to race');
+    // Refused only as a source the removal ended is: 401 once it is revoked, 403 when it ended under the issue's lock.
     const [issued, gone] = await Promise.all([
-      racer.client().handles.create({ label: 'conformance race', paths: [DEV] }).catch(() => null),
+      racer.client().handles.create({ label: 'conformance race', paths: [DEV] }).catch((error: unknown) => {
+        if (error instanceof CoffreError && (error.status === 401 || (error.status === 403 && error.code === 'forbidden' && /session has ended/.test(error.message)))) return null;
+        throw error;
+      }),
       removePasskey(deployment, fay.browser, doomed.id, second.key),
     ]);
     expect(gone.ok, `the raced removal answered ${await said(gone)}`);
@@ -400,13 +423,21 @@ function consentRequest(deployment: Deployment, clientId: string) {
   };
 }
 
-/** A browser session of the admin's, touched now and left alone, and a link to another account it started meanwhile. */
-export type LeftAlone = { browser: Browser; at: number; callback: string };
+/**
+ * A browser session of the admin's, touched now and left alone, and a link to another account it started meanwhile:
+ * where its callback, called once the session went stale, sent the browser, or why it could not be called.
+ */
+export type LeftAlone = { browser: Browser; at: number; linked: Promise<{ status: number; location: string } | { failed: string }> };
+
+/** The account the left-alone session links, which no identity may name after. */
+const ELSEWHERE = 'root-elsewhere@conformance.example';
 
 /**
  * The admin, signed in in a browser of their own and then left alone, for 9, 14, 24 and 32: its session is fresh
  * now, and stale once five minutes pass. A link to another GitHub account starts while it is fresh, and calls back
- * once it is not.
+ * five minutes and five seconds on, on a timer of its own, whatever check runs then: its pending state lasts ten
+ * minutes, which the checks between here and `stale session` may outlast. A restart then (a scheduled job's, on Node)
+ * is waited out, a minute at most.
  */
 export async function leaveAlone(deployment: Deployment, admin: Person) {
   const browser = new Browser(deployment.origin);
@@ -417,11 +448,24 @@ export async function leaveAlone(deployment: Deployment, admin: Person) {
   const authorize = new URL(leave.headers.get('location') ?? '', deployment.origin);
   expect(leave.status === 302 && authorize.origin === deployment.idp.origin, 'a link from a fresh session did not go to GitHub', `${leave.status} ${leave.headers.get('location')}`);
   const form = new URLSearchParams(authorize.searchParams);
-  form.set('email', 'root-elsewhere@conformance.example');
+  form.set('email', ELSEWHERE);
   const approve = await fetch(authorize.origin + authorize.pathname, { method: 'POST', body: form, redirect: 'manual' });
   const callback = approve.headers.get('location') ?? '';
   expect(callback.startsWith(`${deployment.origin}/auth/callback/github?`), 'GitHub did not send the link back', callback);
-  return { detail: "the admin, in a browser left alone from now on, a link to another account started", value: { browser, at, callback } satisfies LeftAlone };
+  const linked = new Promise<{ status: number; location: string } | { failed: string }>((done) => {
+    const call = async (until: number): Promise<void> => {
+      try {
+        const back = await browser.fetch(callback);
+        if (back.status < 500) return done({ status: back.status, location: back.headers.get('location') ?? '' });
+        if (Date.now() > until) return done({ failed: `${back.status} ${await back.text()}` });
+      } catch (error) {
+        if (Date.now() > until) return done({ failed: String(error) });
+      }
+      setTimeout(() => void call(until), 1000).unref();
+    };
+    setTimeout(() => void call(Date.now() + 60_000), at + FRESH_MS + 5_000 - Date.now()).unref();
+  });
+  return { detail: 'the admin, in a browser left alone from now on, a link to another account started', value: { browser, at, linked } satisfies LeftAlone };
 }
 
 /**
@@ -437,12 +481,14 @@ export async function staleSession(deployment: Deployment, people: People, alone
   const { browser } = alone;
   expect(await signedIn(browser), 'the session left alone was signed out');
 
-  // 14: the link, at its callback and at a start.
-  const identities = (await admin.api.identities.list()).identities.length;
-  const back = await browser.fetch(alone.callback);
-  const landed = new URL(back.headers.get('location') ?? '', deployment.origin);
-  expect(landed.searchParams.get('error') === 'link_stale', `a link whose session went stale was answered ${back.status} ${landed.pathname}${landed.search}`);
-  expect((await admin.api.identities.list()).identities.length === identities, 'a link refused at its callback linked an account');
+  // 14: the link, at its callback (called on its timer) and at a start.
+  const back = await alone.linked;
+  expect(!('failed' in back), `the link's callback could not be called: ${'failed' in back ? back.failed : ''}`);
+  const { status, location } = back as { status: number; location: string };
+  const landed = new URL(location, deployment.origin);
+  expect(landed.searchParams.get('error') === 'link_stale', `a link whose session went stale was answered ${status} ${landed.pathname}${landed.search}`);
+  const { identities } = await admin.api.identities.list();
+  expect(!identities.some((identity) => identity.email === ELSEWHERE), 'a link refused at its callback linked an account', identities);
   const start = await browser.fetch('/auth/signin/github?link=1');
   expect(start.status === 302 && new URL(start.headers.get('location') ?? '', deployment.origin).origin === deployment.origin,
     `a link from a stale session was not sent to a fresh check: ${start.status} ${start.headers.get('location')}`);
@@ -456,7 +502,12 @@ export async function staleSession(deployment: Deployment, people: People, alone
   const same = await browser.send('PATCH', `/api/secrets/${DEV}`, { STALE_LOOSE: { sensitivity: 'sensitive' } });
   expect(same.ok, `a write keeping a key's nature was refused a stale session: ${await said(same)}`);
 
-  // 9 and 24: every always route.
+  // 9 and 24: every always route. The workloads' on a service of its own, with bodies the routes take, so that each
+  // would change something were it let through; ids no row has where a row must exist first (a 404 then).
+  const service = 'token:conformance-stale';
+  await admin.api.members.add(service);
+  const { keys: jwks } = (await (await fetch(deployment.idp.workloads.jwksUrl)).json()) as { keys: Record<string, unknown>[] };
+  const issuer = 'https://stale.cluster.local';
   const placeholder = await SoftAuthenticator.create();
   const registration = await placeholder.register({ ...ceremonyOf(deployment, Buffer.alloc(32).toString('base64url')), userHandle: new Uint8Array(32) });
   const [project, environment] = DEV.split('/') as [string, string];
@@ -469,7 +520,12 @@ export async function staleSession(deployment: Deployment, people: People, alone
     ['POST', `/api/members/${admin.member}/passkeys/options`],
     ['POST', `/api/members/${admin.member}/passkeys`, { state: 'stale', response: registration }],
     ['DELETE', `/api/members/${reader.member}/passkeys`],
-    ['POST', '/api/members/token:conformance-stale/tokens', { label: 'stale', expiresInDays: 1 }],
+    ['POST', `/api/members/${service}/tokens`, { label: 'stale', expiresInDays: 1 }],
+    ['POST', `/api/members/${service}/bindings`, { profile: 'custom', issuer, claims: { sub: 'stale' }, jwks: { keys: jwks } }],
+    ['POST', `/api/members/${service}/bindings/keys`, { issuer, jwks: { keys: jwks } }],
+    ['POST', `/api/members/${service}/bindings/${crypto.randomUUID()}/enrollments`, {}],
+    ['POST', `/api/members/${service}/bindings/${crypto.randomUUID()}/enrollments/${crypto.randomUUID()}/promote`, {}],
+    ['POST', `/api/members/${service}/tokens/${crypto.randomUUID()}/approve`],
     ['PUT', '/api/settings', { serviceAccounts: { projects: 'all' } }],
     ['POST', '/api/audit/loss', { from: 1, to: 1 }],
     ['DELETE', `/api/projects/${project}`],
@@ -493,6 +549,8 @@ export async function staleSession(deployment: Deployment, people: People, alone
   expect(!members.some((id) => id.includes('stale-new')) && members.includes(reader.member),
     'a refused member change changed the members', members);
   expect((await admin.api.passkeys.list(reader.member)).passkeys.length > 0, "a refused reset removed the reader's passkeys");
+  const { bindings } = await admin.api.bindings.list(service);
+  expect(bindings.length === 0, 'a refused binding bound', bindings);
   expect((await admin.api.secrets.list(DEV)).keys.some((key) => key.key === 'STALE_LOOSE'), 'a refused erase erased an environment');
   return `${acts.length} acts of routes that take a fresh check, ?dryRun=1 on two that take none, refused a session touched over five minutes ago, changing nothing; ` +
     'a link it started while fresh refused at its callback, and another sent to a fresh check; a loosening refused, the same write keeping the nature taken';
@@ -528,27 +586,33 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   await admin.api.secrets.set(BULK, { REQUIRED_SENSITIVE: { value: canary(), sensitivity: 'sensitive' } });
   const existing = (await admin.api.secrets.list(BULK)).keys.find((key) => key.key !== 'REQUIRED_SENSITIVE')?.key;
   expect(existing !== undefined, `${BULK} holds no key to ask for`);
+  // 16: a handle of a person with no passkey, made under `optional`, which `/use` takes the same under `required`.
+  const ivy = await personaOn(deployment, admin, 'ivy', { [DEV]: 'viewer' });
+  const handle = await ivy.api.handles.create({ label: 'conformance required', paths: [DEV] });
+  const usedFirst = await used(deployment, handle.token);
+  expect(usedFirst === 200, `a handle made under optional answered ${usedFirst} at /use, not 200`);
   const since = new Date().toISOString();
   await deployment.restart({ PASSKEYS: 'required' });
 
-  // 8: nothing but the way out.
+  // 8: nothing but the way out, `GET /api/me` included: `401 passkey_required` to each.
+  const required = async (response: Response) => response.status === 401 && (await bodyOf(response)).error === 'passkey_required';
   const reached: string[] = [];
   for (const [method, path, body] of [
-    ['GET', '/api/projects'], ['GET', '/api/members'], ['GET', '/api/sessions'], ['GET', `/api/secrets/${BULK}`],
+    ['GET', '/api/me'], ['GET', '/api/projects'], ['GET', '/api/members'], ['GET', '/api/sessions'], ['GET', `/api/secrets/${BULK}`],
     ['PATCH', `/api/secrets/${BULK}`, { REQUIRED_WRITE: { value: canary() } }], ['POST', '/api/handles', { label: 'x', paths: [BULK] }],
   ] as [string, string, unknown?][]) {
     const response = await bulk.browser.send(method, path, body);
-    if (response.status !== 401) reached.push(`${method} ${path}: ${await said(response)}`);
+    if (!(await required(response))) reached.push(`${method} ${path}: ${await said(response)}`);
   }
-  expect(reached.length === 0, 'under required, a session no passkey stands behind reached the API', reached);
+  expect(reached.length === 0, 'under required, a session no passkey stands behind was not answered 401 passkey_required', reached);
 
   // 19: one key, alike whatever it is.
   const reveal = async (key: string) => {
     const response = await bulk.browser.send('POST', '/api/reveals', { path: `${BULK}/${key}` });
-    return `${response.status} ${await response.text()}`;
+    return { required: await required(response), said: `${response.status} ${await response.text()}` };
   };
   const answers = [await reveal(existing!), await reveal('REQUIRED_SENSITIVE'), await reveal('NEVER_MADE')];
-  expect(answers.every((each) => each === answers[0]) && answers[0]!.startsWith('401'), 'a refused credential told keys apart', answers);
+  expect(answers.every((each) => each.required && each.said === answers[0]!.said), 'a refused credential told keys apart, or was not answered 401 passkey_required', answers.map((each) => each.said));
   const { entries } = await admin.api.audit.list({ actor: bulk.member, limit: 100 });
   const uses = entries.filter((entry) => entry.occurredAt >= since && entry.action.startsWith('secret.') && entry.decision === 'allow');
   expect(uses.length === 0, 'a refused credential has a use of a key in the log', uses);
@@ -556,10 +620,12 @@ export async function passkeysRequired(deployment: Deployment, { admin, bulk }: 
   const out = await bulk.browser.send('POST', '/auth/signout');
   expect(out.status === 303 || out.status === 302, `signing out a session no passkey stands behind answered ${out.status}`);
 
-  // 16: a service, with no passkey anywhere, reads as it did.
+  // 16: a service, with no passkey anywhere, reads as it did; the handle reaches /use as it did.
   const read = await bearer(deployment.origin, live.token).secrets.reveal(`${live.canary.project}/${live.canary.environment}`);
   expect(read.values[live.canary.key] === live.canary.value, "under required, a service's token did not read its value");
-  return 'under required, a session no passkey stands behind answered 401 to every call but signing out; a one-key reveal refused alike for a key that exists, a sensitive one and one never made, no use logged; a service read as before';
+  const usedThen = await used(deployment, handle.token);
+  expect(usedThen === 200, `under required, a handle made under optional answered ${usedThen} at /use, not 200 as before`);
+  return 'under required, a session no passkey stands behind answered 401 passkey_required to every call, /api/me too, but signing out; a one-key reveal refused alike for a key that exists, a sensitive one and one never made, no use logged; a service read as before, and a handle reached /use as before';
 }
 
 /** The deployment back to `optional`, after the workload checks ran under `required` (16). */

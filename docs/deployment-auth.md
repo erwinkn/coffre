@@ -282,8 +282,9 @@ in with GitHub alone, as before, and is asked for one the first time they
 do something that needs a fresh check. People add more (ten at most) and
 rename or remove theirs in **Account → Passkeys**.
 
-**What needs a fresh check.** A touch at sign-in, or in the dialog an act
-opens, keeps that browser's session fresh for five minutes. The acts that
+**What needs a fresh check.** A touch at sign-in, or in the step-up dialog
+an act opens when the session is not fresh, keeps that browser's session
+fresh for five minutes. The acts that
 need one widen someone's reach, mint a credential or cannot be undone:
 adding, changing or removing a member, their grants or instance role, a
 role, issuing a service's token, a trust binding or an enrollment code,
@@ -296,8 +297,13 @@ protecting never need one: in an incident they must be quick.
 The table is `FRESH_ROUTES` (`packages/server/src/api/fresh-routes.ts`); a
 refused request answers `403 fresh_check_required`, and the pages ask for
 the touch and send it again. The CLI asks the same of its terminal, through
-a browser that approves it. A touch also ends the session it came in on and
-issues a new one, so a copy of the old cookie stops working.
+a browser that approves it. Those two touches, at sign-in and the step-up,
+also end the session they came in on and issue a new one, so a copy of the
+old cookie stops working. Approving a terminal, an MCP client's change or
+its connection takes a touch of its own, for that act alone: it approves
+that act and nothing else, and neither refreshes the session nor replaces
+it. A copy of that browser's cookie keeps working until it expires or is
+revoked, and needs a fresh touch of its own for anything above.
 
 **What a change to someone's passkeys ends.** Adding a first passkey ends
 every session, terminal, personal token, handle and MCP client of theirs
@@ -335,9 +341,14 @@ Set `rpId` before a move, or recover as below.
   passkey, and turning it back restores everyone's. Sessions, terminals,
   personal tokens and MCP clients made meanwhile name no passkey, and are
   refused at their next request once it is back, for everyone who holds
-  one. What they did meanwhile stays done: read the log for the window
-  (**Audit**, or `coffre audit`), and look for `member.*`, `access.*`,
-  `role.*`, service tokens and trust bindings, and `passkey.*`.
+  one. Handles are the exception: `/use` does not hold a handle to the
+  policy at each request, so one made meanwhile keeps working once it is
+  back, until it expires (twelve hours unless asked, a week at most). A
+  reset of its person's passkeys, or their removal, ends it. What they
+  did meanwhile stays done: read the log for the window (**Audit**, or
+  `coffre audit`), and look for `member.*`, `access.*`, `role.*`, service
+  tokens and trust bindings, handles (`token.create` of kind `handle`),
+  and `passkey.*`.
 
 ### When someone else added their passkey
 

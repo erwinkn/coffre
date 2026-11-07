@@ -68,7 +68,14 @@ token, handle and MCP client they were signed in with, at once, as a removal
 does, but keeps their grants. Their next sign-in adds a passkey again (under
 `optional`, an Owner's, or whoever wants one). The log's `passkey.reset`
 names what ended; read what was done in their name before it, and rotate as
-below.
+below. A reset needs a passkey to remove: for someone who never added one
+(anyone but an Owner, under `optional`), it answers `409 no_passkeys` and
+ends nothing. Remove them instead, which ends everything they were signed in
+with, and add them back with the grants their page listed; then have them
+add a passkey (**Account → Passkeys**). Either way, they win their GitHub
+or Google account back first: until then, whoever holds it signs in as them
+again, and under `optional` can add a passkey of their own
+([deployment-auth.md](deployment-auth.md#when-someone-else-added-their-passkey)).
 
 **Removal does not reach outside coffre.** Remove them from your identity
 provider as well (the GitHub organisation, the Google Workspace). With

@@ -2132,10 +2132,13 @@ Where the checks differ from the list above:
 
 - 8: under `required` the server answers `GET /api/me` too with `401
   passkey_required`, so the session reaches nothing but signing out; the
-  check holds every API call to 401 and signing out to working.
+  check holds every API call, `/api/me` included, to that answer and
+  signing out to working.
 - 16: `/use` is checked through people's handles, live until a passkey
-  change ends them; services and the workload checks (CI and pod
-  sign-in) run under `required` unchanged.
+  change ends them, and one made under `optional` by a person with no
+  passkey, which reaches `/use` the same once the policy is `required`;
+  services and the workload checks (CI and pod sign-in) run under
+  `required` unchanged.
 - 35 races three handles against three removals on one deployment; the
   previous release's vault during a rollout is `formal/Factor.tla`'s
   and the vault suite's, as conformance boots one release.
