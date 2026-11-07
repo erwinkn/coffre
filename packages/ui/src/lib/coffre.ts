@@ -25,6 +25,16 @@ export function statusOf(error: unknown): number | undefined {
   return error instanceof CoffreError ? error.status : undefined;
 }
 
+/**
+ * A call coffre answered with a success whose answer was cut off on the way
+ * (the client's `unreadable`): what was asked was done, and its answer is
+ * lost. Not a refusal: nothing is to be undone, and what it touched is to be
+ * read again.
+ */
+export function landedUnread(error: unknown): boolean {
+  return error instanceof CoffreError && error.code === 'unreadable' && error.status < 400;
+}
+
 /** What to tell the person when a call fails. */
 export function failureMessage(error: unknown): string {
   if (error instanceof Refusal) return error.message;

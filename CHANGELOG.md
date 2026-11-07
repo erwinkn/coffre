@@ -362,7 +362,10 @@
   serves at `http://localhost:3000` now. `@coffre/client` throws
   `CoffreError` with code `unreadable` and the 2xx status when a
   success's body is cut off, where it returned `null` as the route's
-  output: what was asked was done, and its answer was lost.
+  output: what was asked was done, and its answer was lost. The pages
+  count such a change as made, not refused: an optimistic one shows as
+  saved, a dialog's change reads again what it touched and says its
+  answer was lost, and conformance counts such a call as let through.
 
 - **A Terraform provider that writes and never reads (T108).**
   `terraform-provider/` is a Go provider for Terraform and OpenTofu 1.11

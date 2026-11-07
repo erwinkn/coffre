@@ -745,7 +745,11 @@ sign-in's page does. A 200 whose body did not arrive whole is no
 output at all: the client throws `CoffreError` `unreadable` with the
 status, so a read of the passkeys fails as any read does, the add's
 options offer their retry, and an add or a reset so answered is done
-(review r4 of #539). An add whose reply was lost, sent
+(review r4 of #539). Every change the pages make takes it so
+(`landedUnread`): an optimistic one counts as saved and its list is read
+back, `useAction` reads again what the change touched and says its answer
+was lost, and conformance's probes count it as let through, not as a
+refusal (review r5 of #539). An add whose reply was lost, sent
 again, finds its passkey among the person's live ones before it counts
 them and answers `409 passkey_exists`, which the dialog takes as done
 (review r1 of #539).
