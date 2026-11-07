@@ -42,6 +42,10 @@ const anyOf = (...prefixes) => (f) => prefixes.some((p) => f.startsWith(p))
 // What every install and every step that runs workspace code depends on.
 const manifests = anyOf('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.node-version')
 // docker-compose.yml: every step that boots Postgres, or builds on one, starts it from this file.
+// Any file of a package, example or the dev deployment: the Postgres-backed jobs run the packages together
+// (the matrices call the client, the schema job runs the CLI's setup), so none is picked by naming which
+// package it thinks it needs.
+const workspace = anyOf('packages/', 'examples/', 'dev/')
 const packages = (f) => anyOf('packages/', 'examples/', 'dev/', 'docker-compose.yml')(f) || manifests(f)
 const formalModel = (f) =>
   /^formal\/[^/]+\.(tla|cfg)$/.test(f) ||
@@ -78,11 +82,11 @@ const STEPS = [
     name: 'matrices',
     job: 'matrices-shard',
     postgres: true,
-    needs: (f) => anyOf('packages/vault/', 'packages/server/', 'packages/core/', 'packages/db/', 'scripts/matrix', 'docker-compose.yml')(f) || manifests(f),
+    needs: (f) => workspace(f) || anyOf('scripts/matrix', 'docker-compose.yml')(f) || manifests(f),
     // CI splits these over eight runners; one machine runs them whole (about three quarters of an hour on Postgres).
     run: ['pnpm test:matrices', 'pnpm test:matrices:sqlite'],
   },
-  { name: 'schema', job: 'schema', postgres: true, needs: (f) => anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'scripts/setup-test-database', 'scripts/test-setup', 'scripts/test-backup-role', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:schema'] },
+  { name: 'schema', job: 'schema', postgres: true, needs: (f) => workspace(f) || anyOf('scripts/setup-test-database', 'scripts/test-setup', 'scripts/test-backup-role', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:schema'] },
   { name: 'formal', job: 'formal', needs: formalModel, run: ['./scripts/formal.sh --workers 4 --heap 4g'], full: true },
   { name: 'proofs', job: 'proofs', needs: (f) => leanInputs(f) || manifests(f), run: ['pnpm formal:lean'] },
   { name: 'workers', job: 'workers', build: true, postgres: true, browser: true, needs: packages, run: [`pnpm conformance:workers --browser ${BROWSER}`] },
@@ -90,7 +94,7 @@ const STEPS = [
   { name: 'terraform', job: 'terraform', build: true, needs: (f) => packages(f) || f.startsWith('terraform-provider/'), run: ['pnpm test:terraform'] },
   // The consumer script starts Postgres itself (ensure-postgres.sh), so it gets this run's.
   { name: 'consumer', job: 'consumer', build: true, postgres: true, needs: (f) => packages(f) || f === 'scripts/client-smoke.cjs', run: ['pnpm test:consumer'] },
-  { name: 'compat', job: 'compat', postgres: true, needs: (f) => anyOf('packages/db/', 'packages/server/', 'packages/vault/', 'packages/conformance/', 'scripts/compat', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:compat'] },
+  { name: 'compat', job: 'compat', postgres: true, needs: (f) => workspace(f) || anyOf('scripts/compat', 'docker-compose.yml')(f) || manifests(f), run: ['pnpm test:compat'] },
 ]
 
 const { values: opt } = parseArgs({

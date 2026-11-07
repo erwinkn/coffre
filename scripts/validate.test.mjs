@@ -133,3 +133,16 @@ test('a code file no step claims runs every step but TLC', () => {
   const docs = selected((dir) => writeFileSync(join(dir, 'NOTES.md'), '# changed'))
   assert.match(docs.tests, /not run: diff does not touch it/)
 })
+
+test('the CLI selects the schema step (its setup tests) and the client selects the matrices (they call it)', () => {
+  const cli = selected((dir) => {
+    mkdirSync(join(dir, 'packages/cli/src'), { recursive: true })
+    writeFileSync(join(dir, 'packages/cli/src/setup.ts'), '// changed')
+  })
+  assert.match(cli.schema, /setup\.ts changed/)
+  const client = selected((dir) => {
+    mkdirSync(join(dir, 'packages/client/src'), { recursive: true })
+    writeFileSync(join(dir, 'packages/client/src/index.ts'), '// changed')
+  })
+  assert.match(client.matrices, /index\.ts changed/)
+})
