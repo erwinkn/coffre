@@ -21,6 +21,34 @@
   proxy's docs say so, with the one accepted cost: a key made only of escapes
   can make a redirect to `/tg/keep////next` fail shut.
 
+- **What a migration makes is the owner's, whichever login applies it
+  (T193).** A login that migrates as a member of the role that owns
+  coffre's objects, as a managed host's admin login may, made the
+  functions and tables of each migration its own, so that the owner's
+  functions could not call them without a grant (0057, 0058, 0060,
+  0064 and 0073 made those grants, T187). `coffre migrate` and `coffre setup` still
+  apply the migrations as the login, and now, in the same transaction,
+  before it commits, hand the owner of the `drizzle` schema each of
+  coffre's objects whose owner's privileges the login has: what the run
+  made, and what a member made before, its tables, their partitions (the
+  log's days and tile ranges, retention's detached ones included), the
+  statistics objects on them (0065, 0067), functions and types. A superuser's run hands over every one of them.
+  Once, on the run that first hands over a member's functions, a call of
+  one under way still runs as the member, and a day of the log it makes
+  meanwhile, or made before the run in a transaction still open, is the
+  member's until a run after that transaction commits hands it over (at worst,
+  a run as the owner is refused with the login to use; nothing is
+  exposed or lost). A
+  failed run hands over nothing, as it applies nothing. The grants stay,
+  folded into the owner's own. A member that inherits the owner's
+  privileges but may not become it (`WITH SET FALSE`), which handing it
+  an object asks, is refused, with the `GRANT` that lets it; the owner,
+  over a member's objects, is told to migrate once with the member's
+  login or a superuser's, unless the member owns the `drizzle` schema, as
+  its first run of a fresh database makes it: then the member is coffre's
+  owner, and the one to migrate as. A hand-over Postgres refuses says so,
+  and which object it was moving.
+
 - **The UI and the CLI no longer tell anyone to remove a tampered member to
   start over (T195).** 0.15's log refuses that removal. The Users page, the
   signed-in member's own page, `coffre members` and `coffre access` now say

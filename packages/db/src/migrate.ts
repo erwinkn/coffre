@@ -17,6 +17,20 @@ import { postgresSession, quoteIdentifier, type PostgresClient } from './postgre
  * before and after. Only one migrator runs at a time: Postgres takes an
  * advisory lock, and SQLite's own write lock covers the
  * whole run. Restricted runtime roles are Postgres-only (baseline/postgres.sql).
+ *
+ * On Postgres, coffre's objects have one owner: the role that owns the
+ * `drizzle` schema, which the first migration made. The login applies the
+ * migrations as itself, with its own attributes, which 0019's and 0022's
+ * roles need (CREATEROLE), and with the privileges of the owners of
+ * coffre's objects, which it must have; another is refused, NotOwner. What
+ * it makes is its own, so in the migrations' transaction, before it
+ * commits, each of coffre's objects whose owner's privileges the login has
+ * is handed to the ledger's owner (`HANDED_OVER`): what this run made, and
+ * what a member made before T193; a superuser has every role's. So a function the owner's functions call is the owner's too, and
+ * needs no grant to them (0057's, 0058's, 0060's, 0064's and 0073's were
+ * for a member that made its own, T187). Handing an object to a role asks a
+ * login that may become it (SET ROLE): one that inherits the owner's
+ * privileges but may not is refused too.
  */
 
 const MIGRATION_LOCK_KEY = '7165058122361679213';
@@ -307,6 +321,21 @@ export class AfterMigrations extends Error {
   }
 }
 
+/**
+ * Postgres refused to hand one of coffre's objects to the ledger's owner, in
+ * the migrations' transaction, which it rolled back: `statement` says which
+ * object, and to whom.
+ */
+export class HandOverFailed extends Error {
+  readonly statement: string;
+
+  constructor(statement: string, error: unknown) {
+    super(`handing coffre's objects to the owner of its ledger failed, at ${statement}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    this.name = 'HandOverFailed';
+    this.statement = statement;
+  }
+}
+
 interface JournalEntry {
   idx: number;
   when: number;
@@ -331,16 +360,23 @@ interface Migrator {
   applied(): Promise<AppliedMigration[] | null>;
   lock(): Promise<void>;
   unlock(): Promise<void>;
-  migrate(migrationsFolder: string): Promise<void>;
+  /** Apply `pending`, in one transaction, which on Postgres hands `managed` to the ledger's owner before it commits. */
+  migrate(pending: ExpectedMigration[], managed: Managed): Promise<void>;
   /** Reassert privileges a one-database backup does not carry, and grant `backupLogin` the backup group (0019_backup_role.sql). */
   restrict(backupLogin: string | undefined): Promise<void>;
-  /** Why this login cannot change the objects migrations change, `managed` among them, or null when it can. */
+  /** Why this login cannot change the objects migrations change, `managed` among them, or hand them to their owner, or null when it can. */
   notOwner(managed: Managed): Promise<NotOwner | null>;
   close(): Promise<void>;
 }
 
-/** An owner of coffre's objects whose privileges the login lacks: not a member of it, or one that does not inherit them. */
-export type ForeignOwner = { name: string; member: boolean };
+/**
+ * An owner of coffre's objects whose privileges the login lacks: not a
+ * member of it, or one that does not inherit them. `memberOfLogin`: it is
+ * a member of the login, which granting it to the login would make a cycle.
+ * `ownsLedger`: it owns the drizzle schema, so the hand-over gives it the
+ * rest.
+ */
+export type ForeignOwner = { name: string; member: boolean; memberOfLogin?: boolean; ownsLedger?: boolean };
 
 /**
  * The login cannot change coffre's objects, the ledger's schema, the tables
@@ -351,24 +387,57 @@ export type ForeignOwner = { name: string; member: boolean };
  * this one able to: on Postgres 16 and later, a membership that inherits,
  * which each one's GRANT says; before, a membership, and a login that
  * inherits (`ALTER ROLE … INHERIT`).
+ *
+ * An owner that is a member of the login (a member that migrated before
+ * T193, when the login is the ledger's owner) cannot be granted to it: its
+ * own login, or a superuser's, migrating once hands its objects to the
+ * ledger's owner. Unless it is the ledger's owner, as a member's first run
+ * of a fresh database makes it: then it is coffre's owner, whose login
+ * migrates. One that inherits the ledger's owner's privileges but may
+ * not become it, a membership `WITH SET FALSE` (`settable`), could not hand
+ * it what it makes, and is told the GRANT that lets it.
  */
 export class NotOwner extends Error {
   readonly login: string;
   readonly owners: ForeignOwner[];
 
-  constructor(login: string, owners: ForeignOwner[], { grantsInherit, inherits }: { grantsInherit: boolean; inherits: boolean }) {
+  constructor(
+    login: string,
+    owners: ForeignOwner[],
+    { grantsInherit, inherits, settable = true }: { grantsInherit: boolean; inherits: boolean; settable?: boolean },
+  ) {
     const one = owners.length === 1;
     const members = owners.every((owner) => owner.member);
-    const fixes = [
-      ...owners.filter((owner) => grantsInherit || !owner.member).map((owner) => `GRANT ${identifier(owner.name)} TO ${identifier(login)}${grantsInherit ? ' WITH INHERIT TRUE' : ''}`),
-      ...(grantsInherit || inherits ? [] : [`ALTER ROLE ${identifier(login)} INHERIT`]),
-    ];
+    const grantable = owners.filter((owner) => !owner.memberOfLogin);
+    const ungrantable = owners.filter((owner) => owner.memberOfLogin);
+    const ledger = ungrantable.find((owner) => owner.ownsLedger);
+    const whose = (some: ForeignOwner[]) => (some.length === 1 ? `${some[0]!.name}'s` : 'their');
+    const fixes = settable
+      ? [
+          ...grantable.filter((owner) => grantsInherit || !owner.member).map((owner) => `GRANT ${identifier(owner.name)} TO ${identifier(login)}${grantsInherit ? ' WITH INHERIT TRUE' : ''}`),
+          ...(grantsInherit || inherits ? [] : [`ALTER ROLE ${identifier(login)} INHERIT`]),
+        ]
+      : owners.map((owner) => `GRANT ${identifier(owner.name)} TO ${identifier(login)} WITH SET TRUE`);
+    const handOver = `migrate once with ${whose(ungrantable)} connection string, or a superuser's, which hands ${ungrantable.length === 1 ? 'its' : 'their'} objects to the owner of coffre's ledger`;
     super(
       `coffre's tables are owned by ${owners.map((owner) => owner.name).join(' and ')}, and this login, ${login}, ` +
-        (members
-          ? `is a member of ${one ? 'it' : 'them'} but does not inherit ${one ? 'its' : 'their'} privileges: `
-          : `is neither ${one ? 'it nor a member of it' : 'one nor a member of one'}: `) +
-        `migrate with ${one ? `${owners[0]!.name}'s` : 'their'} connection string, or, as a role that administers ${one ? 'it' : 'them'}, run ${fixes.join('; ')}`,
+        (!settable
+          ? `inherits ${one ? 'its' : 'their'} privileges but may not become ${one ? 'it' : 'them'} (SET ROLE), which handing ${one ? 'it' : 'them'} what the migrations make asks: `
+          : members
+            ? `is a member of ${one ? 'it' : 'them'} but does not inherit ${one ? 'its' : 'their'} privileges: `
+            : `is neither ${one ? 'it nor a member of it' : 'one nor a member of one'}: `) +
+        (ledger !== undefined
+          ? `coffre's ledger, the drizzle schema, is ${ledger.name}'s, a member of this login, which makes ${ledger.name} the owner of coffre's objects: ` +
+            (one
+              ? `migrate with ${ledger.name}'s connection string`
+              : `migrate once with a superuser's connection string, which hands ${owners
+                  .filter((owner) => owner !== ledger)
+                  .map((owner) => `${owner.name}'s`)
+                  .join(' and ')} objects to ${ledger.name}, then with ${ledger.name}'s`)
+          : grantable.length === 0
+            ? handOver
+            : `migrate with ${whose(grantable)} connection string, or, as a role that administers ${grantable.length === 1 ? 'it' : 'them'}, run ${fixes.join('; ')}` +
+              (ungrantable.length === 0 ? '' : `; and, for ${ungrantable.map((owner) => owner.name).join(' and ')}, ${ungrantable.length === 1 ? 'a member' : 'members'} of this login, ${handOver}`)),
     );
     this.name = 'NotOwner';
     this.login = login;
@@ -381,47 +450,124 @@ function identifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-/** What coffre's migrations make and so change later: relations and functions, by name, in public. */
-type Managed = { relations: string[]; functions: string[] };
+/** What coffre's migrations make and so change later: relations, functions and types, by name, in public. */
+type Managed = { relations: string[]; functions: string[]; types: string[] };
 
 /**
  * The names a migration's SQL makes: CREATE TABLE, VIEW, MATERIALIZED VIEW
- * and SEQUENCE, and CREATE FUNCTION, in public. Unquoted, a name is folded
- * to lower case, as Postgres folds it.
+ * and SEQUENCE, CREATE FUNCTION, and CREATE TYPE, in public. Unquoted, a
+ * name is folded to lower case, as Postgres folds it. A name followed by a
+ * dot is a schema's, never the object's: `CREATE TABLE public.%I`, in the
+ * SQL a function runs (0022, 0049), makes no table named public.
  */
 export function managedObjects(sqlTexts: readonly string[]): Managed {
-  const name = String.raw`(?:"?public"?\.)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))`;
+  const name = String.raw`(?:"?public"?\.)?(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_$]*))(?![A-Za-z0-9_$"]|\s*\.)`;
   const relation = new RegExp(String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:UNLOGGED\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|SEQUENCE)\s+(?:IF\s+NOT\s+EXISTS\s+)?${name}`, 'gi');
   const fn = new RegExp(String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+${name}\s*\(`, 'gi');
+  const type = new RegExp(String.raw`\bCREATE\s+TYPE\s+${name}`, 'gi');
   const names = (pattern: RegExp) => [
     ...new Set(sqlTexts.flatMap((text) => [...text.matchAll(pattern)].map(([, quoted, bare]) => (quoted !== undefined ? quoted.replace(/""/g, '"') : bare!.toLowerCase())))),
   ];
-  return { relations: names(relation), functions: names(fn) };
+  return { relations: names(relation), functions: names(fn), types: names(type) };
 }
 
 /**
+ * coffre's relations, as a recursive CTE, `relations`: the drizzle schema's,
+ * and in public those coffre's migrations make ($1), and nothing else of
+ * public, which may hold a database's other tables; each partition below
+ * one, which a day's table is (0022, 0049); and retention's detached tables,
+ * by the names its functions give and drop (0027's `drop_day` and
+ * `drop_tiles`, which take a table of such a name without a parent for one
+ * they detached), which no longer have a parent to be found by.
+ */
+const RELATIONS = String.raw`relations AS (
+    SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+       AND (n.nspname = 'drizzle' OR (n.nspname = 'public' AND (c.relname = ANY($1::text[])
+         OR (c.relkind = 'r' AND (c.relname ~ '^log_uses_\d{8}$' OR c.relname ~ '^log_tiles_uses_\d+$')))))
+    UNION
+    SELECT i.inhrelid FROM pg_inherits i JOIN relations r ON r.oid = i.inhparent
+  )`;
+
+/**
  * The owners of what migrations change, whose privileges the login lacks:
- * the drizzle schema and everything in it, and in public the relations and
- * functions coffre's migrations make ($1, $2), and nothing else of public,
- * which may hold a database's other tables. A superuser has every role's.
+ * the drizzle schema, coffre's relations (`RELATIONS`) and the statistics
+ * objects on them (0065, 0067), and in public the functions and types
+ * coffre's migrations make ($2, $3). A superuser has every role's. Whether
+ * each is a member of the login (`member_of_login`), whom it cannot then be
+ * granted to, and whether it owns the ledger (`owns_ledger`).
  */
 const FOREIGN_OWNERS = `
-  WITH owned AS (
+  WITH RECURSIVE ${RELATIONS}, owned AS (
     SELECT nspowner AS owner FROM pg_namespace WHERE nspname = 'drizzle'
     UNION ALL
-    SELECT c.relowner FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
-        AND (n.nspname = 'drizzle' OR (n.nspname = 'public' AND c.relname = ANY($1::text[])))
+    SELECT c.relowner FROM relations JOIN pg_class c USING (oid)
+    UNION ALL
+    SELECT s.stxowner FROM relations JOIN pg_statistic_ext s ON s.stxrelid = relations.oid
     UNION ALL
     SELECT p.proowner FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE n.nspname = 'public' AND p.proname = ANY($2::text[])
+    UNION ALL
+    SELECT t.typowner FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+      WHERE n.nspname = 'public' AND t.typname = ANY($3::text[])
   )
-  SELECT DISTINCT r.rolname AS owner, pg_has_role(owned.owner, 'MEMBER') AS member, current_user AS login,
-    current_setting('server_version_num')::int >= 160000 AS grants_inherit,
+  SELECT DISTINCT r.rolname AS owner, pg_has_role(owned.owner, 'MEMBER') AS member,
+    pg_has_role(owned.owner, (SELECT oid FROM pg_roles WHERE rolname = current_user), 'MEMBER') AS member_of_login,
+    owned.owner = (SELECT nspowner FROM pg_namespace WHERE nspname = 'drizzle') AS owns_ledger,
+    current_user AS login, current_setting('server_version_num')::int >= 160000 AS grants_inherit,
     (SELECT rolinherit FROM pg_roles WHERE rolname = current_user) AS inherits
   FROM owned JOIN pg_roles r ON r.oid = owned.owner
   WHERE NOT pg_has_role(owned.owner, 'USAGE')
   ORDER BY r.rolname`;
+
+/**
+ * The ledger's owner, when it is another role whose privileges the login
+ * has (null before the first migration, or when it is the login, or one
+ * whose privileges `FOREIGN_OWNERS` says it lacks), and whether the login
+ * may become it, as handing it an object asks (`SET` from Postgres 16, any
+ * membership before; a superuser may become any role).
+ */
+const LEDGER_OWNER = `
+  SELECT r.rolname AS owner, pg_has_role(r.oid, 'MEMBER') AS member,
+    CASE WHEN current_setting('server_version_num')::int >= 160000 THEN pg_has_role(r.oid, 'SET') ELSE pg_has_role(r.oid, 'MEMBER') END AS settable,
+    current_setting('server_version_num')::int >= 160000 AS grants_inherit,
+    (SELECT rolinherit FROM pg_roles WHERE rolname = current_user) AS inherits
+  FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner
+  WHERE n.nspname = 'drizzle' AND r.rolname <> current_user AND pg_has_role(r.oid, 'USAGE')`;
+
+/**
+ * What hands the ledger's owner each of coffre's objects that is another
+ * role's, whose privileges the login has (its own, a role it is a member
+ * of, or any, for a superuser), one statement each: coffre's relations
+ * (`RELATIONS`, $1) but the sequences their columns own, the statistics
+ * objects on them, and its functions and types ($2, $3). An ALTER of a
+ * table moves its indexes and those sequences, but none of its partitions,
+ * which are relations of their own here, nor its statistics objects
+ * (`CREATE STATISTICS`, 0065, 0067), which are their maker's. The ACLs move with them, grants by the old owner becoming the new
+ * one's, so a grant 0057 made the owner of a helper a member had made is
+ * folded into the owner's own.
+ */
+const HANDED_OVER = `
+  WITH RECURSIVE ${RELATIONS}, ledger AS (
+    SELECT n.nspowner AS oid, r.rolname AS name FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = 'drizzle'
+  )
+  SELECT format('ALTER %s %s OWNER TO %I',
+      CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'S' THEN 'SEQUENCE' WHEN 'f' THEN 'FOREIGN TABLE' ELSE 'TABLE' END,
+      c.oid::regclass, ledger.name) AS statement
+    FROM relations JOIN pg_class c USING (oid), ledger
+    WHERE c.relowner <> ledger.oid AND pg_has_role(c.relowner, 'USAGE')
+      AND NOT (c.relkind = 'S' AND EXISTS (
+        SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')))
+  UNION ALL
+  SELECT format('ALTER STATISTICS %I.%I OWNER TO %I', n.nspname, s.stxname, ledger.name)
+    FROM relations JOIN pg_statistic_ext s ON s.stxrelid = relations.oid JOIN pg_namespace n ON n.oid = s.stxnamespace, ledger
+    WHERE s.stxowner <> ledger.oid AND pg_has_role(s.stxowner, 'USAGE')
+  UNION ALL
+  SELECT format('ALTER ROUTINE %s OWNER TO %I', p.oid::regprocedure, ledger.name) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, ledger
+    WHERE n.nspname = 'public' AND p.proname = ANY($2::text[]) AND p.proowner <> ledger.oid AND pg_has_role(p.proowner, 'USAGE')
+  UNION ALL
+  SELECT format('ALTER TYPE %s OWNER TO %I', t.oid::regtype, ledger.name) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace, ledger
+    WHERE n.nspname = 'public' AND t.typname = ANY($3::text[]) AND t.typowner <> ledger.oid AND pg_has_role(t.typowner, 'USAGE')`;
 
 /**
  * Beside this module: src/migrations in the workspace, and dist/migrations
@@ -527,10 +673,6 @@ function verifyHistory(
 }
 
 async function postgresMigrator(url: string): Promise<Migrator> {
-  const [{ createDatabase }, { migrate }] = await Promise.all([
-    import('./database.ts'),
-    import('drizzle-orm/postgres-js/migrator'),
-  ]);
   // One session: the advisory lock and lock_timeout are the session's, and a statement after it is lost fails.
   const client = postgresSession(url, { application_name: 'coffre-migrations' });
   return {
@@ -552,10 +694,27 @@ async function postgresMigrator(url: string): Promise<Migrator> {
     async unlock() {
       await client.unsafe('SELECT pg_advisory_unlock($1::bigint)', [MIGRATION_LOCK_KEY]);
     },
-    // The migrator uses the database's dialect and session alone, never its relational config. Drizzle applies every
-    // pending migration in one transaction, which a statement that gave up waiting aborts: the whole run is tried again.
-    migrate: (migrationsFolder) =>
-      waitingBriefly(client, () => migrate(createDatabase(client) as unknown as Parameters<typeof migrate>[0], { migrationsFolder })),
+    // As drizzle-orm's migrator applies a tree, to the same ledger: each migration's statements, split where drizzle-kit
+    // breaks them, then its row; but all in one transaction with the ledger's own, and the hand-over before it commits,
+    // so that no session sees an object of coffre's that is not the owner's, and a failure changes nothing. A statement
+    // that gave up waiting aborts it: the whole run is tried again.
+    migrate: (pending, { relations, functions, types }) =>
+      waitingBriefly(client, () =>
+        client.begin(async (tx) => {
+          await tx.unsafe('CREATE SCHEMA IF NOT EXISTS drizzle');
+          await tx.unsafe('CREATE TABLE IF NOT EXISTS drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)');
+          for (const migration of pending) {
+            for (const statement of migration.sql.split('--> statement-breakpoint')) await tx.unsafe(statement);
+            await tx.unsafe('INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2::bigint)', [migration.hash, migration.createdAt]);
+          }
+          for (const { statement } of await tx.unsafe<{ statement: string }[]>(HANDED_OVER, [relations, functions, types])) {
+            await tx.unsafe(statement).catch((error: unknown) => {
+              // A lock wait's is tried again with the run, as a migration's.
+              throw lockNotAvailable(error) ? error : new HandOverFailed(statement, error);
+            });
+          }
+        }),
+      ),
     async restrict(backupLogin) {
       // It changes no table, only rows of the roles and of the database, which no use locks: it may wait for another
       // database's migrator changing the same roles, as for the migration lock. The last of the run's statements.
@@ -568,11 +727,19 @@ async function postgresMigrator(url: string): Promise<Migrator> {
         await client.unsafe(`GRANT coffre_backup TO ${quoteIdentifier(backupLogin)} WITH ADMIN FALSE, INHERIT TRUE, SET FALSE`);
       }
     },
-    async notOwner({ relations, functions }) {
-      const rows = await client.unsafe<{ owner: string; member: boolean; login: string; grants_inherit: boolean; inherits: boolean }[]>(FOREIGN_OWNERS, [relations, functions]);
-      if (rows.length === 0) return null;
-      const [{ login, grants_inherit: grantsInherit, inherits }] = rows as unknown as [(typeof rows)[number]];
-      return new NotOwner(login, rows.map(({ owner, member }) => ({ name: owner, member })), { grantsInherit, inherits });
+    async notOwner({ relations, functions, types }) {
+      type Foreign = { owner: string; member: boolean; member_of_login: boolean; owns_ledger: boolean; login: string; grants_inherit: boolean; inherits: boolean };
+      const rows = await client.unsafe<Foreign[]>(FOREIGN_OWNERS, [relations, functions, types]);
+      if (rows.length > 0) {
+        const [{ login, grants_inherit: grantsInherit, inherits }] = rows as unknown as [Foreign];
+        return new NotOwner(login, rows.map(({ owner, member, member_of_login: memberOfLogin, owns_ledger: ownsLedger }) => ({ name: owner, member, memberOfLogin, ownsLedger })), { grantsInherit, inherits });
+      }
+      const [ledger] = await client.unsafe<{ owner: string; member: boolean; settable: boolean; grants_inherit: boolean; inherits: boolean }[]>(LEDGER_OWNER);
+      if (ledger === undefined || ledger.settable) return null;
+      // It has the ledger's owner's privileges but may not become it (Postgres 16's `WITH SET FALSE`), so may not hand
+      // it what it makes: that would be its own, beside the owner's, which one owner rules out.
+      const [{ login }] = await client.unsafe<[{ login: string }]>('SELECT current_user AS login');
+      return new NotOwner(login, [{ name: ledger.owner, member: ledger.member }], { grantsInherit: ledger.grants_inherit, inherits: ledger.inherits, settable: false });
     },
     async close() {
       await client.end();
@@ -621,9 +788,9 @@ async function sqliteMigrator(url: string): Promise<Migrator> {
     // The migration runs as one transaction, in the database's write queue.
     async lock() {},
     async unlock() {},
-    migrate: (migrationsFolder) => migrate(sqlite, { migrationsFolder }),
+    // drizzle-orm's own, which applies the tree in one transaction. One file, which whoever opens it may change: no owner.
+    migrate: () => migrate(sqlite, { migrationsFolder: migrationsFolder('sqlite') }),
     async restrict() {},
-    // One file, which whoever opens it may change.
     notOwner: async () => null,
     close,
   };
@@ -667,10 +834,12 @@ export async function migrationStatus(url: string): Promise<{ applied: string[];
 /**
  * Apply missing migrations, check their history, and reassert database
  * privileges, on every run, even with nothing to apply, as a login that can
- * change coffre's objects: another is refused, NotOwner, before anything
- * changes. `onPlan` hears what there is to apply before it is, under
- * the migration lock, and may stop the run by throwing: all of it then goes
- * in one call, with no word of each. `backupLogin` names an existing role to
+ * change coffre's objects and hand them to their owner (see above): another
+ * is refused, NotOwner, before anything changes. `onPlan` hears what there
+ * is to apply before it is, under the migration lock, and may stop the run
+ * by throwing: all of it then goes in one transaction, with no word of each,
+ * and with it the hand-over, which a run with nothing to apply makes too.
+ * `backupLogin` names an existing role to
  * grant the backup group, `coffre_backup`, on Postgres; it is never made, and
  * never revoked when a later run names none.
  */
@@ -690,13 +859,14 @@ export async function migrateDatabase(
     await migrator.lock();
     locked = true;
 
-    const notOwner = await migrator.notOwner(managedObjects(expected.map((entry) => entry.sql)));
+    const managed = managedObjects(expected.map((entry) => entry.sql));
+    const notOwner = await migrator.notOwner(managed);
     if (notOwner !== null) throw notOwner;
     const applied = await migrator.applied();
     verifyHistory(expected, applied, false);
     const done = applied?.length ?? 0;
     await onPlan?.({ applied: done, total: expected.length, pending: expected.slice(done).map((entry) => entry.tag) });
-    await migrator.migrate(migrationsFolder(engine));
+    await migrator.migrate(expected.slice(done), managed);
     verifyHistory(expected, await migrator.applied(), true);
     try {
       await migrator.restrict(backupLogin);
