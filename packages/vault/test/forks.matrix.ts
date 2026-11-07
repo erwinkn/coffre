@@ -22,10 +22,12 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
+import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
+import { deletesSettled, removeDeleted } from '../../../scripts/matrix-weigh.ts';
+import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { holding, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
 
@@ -184,7 +186,7 @@ const ROWS: Row[] = shardOf(import.meta.url, WHERE.flatMap((where) => LOST
   .filter((lost) => lost !== 'parent not read' || where === 'fork' || where === 'fork of a fork')
   .flatMap((lost) => MAPS.flatMap((map) => WINDOWS.map((window) => ({ where, lost, map, window }))))), labelOf);
 
-test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not have, in any of ${ROWS.length} rows of ${KEYS.length} key states (T165, D153)`, { timeout: 7_200_000 }, async () => {
+test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not have, in any of ${ROWS.length} rows of ${KEYS.length} key states (T165, D153)`, { timeout: 7_200_000 }, async (t) => {
   const differing: string[] = [];
   await namedWorld(db);
   for (const row of ROWS) {
@@ -211,6 +213,15 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
     // second call, may run past its deadline, as use.matrix.ts leaves it (use-named-forks.test.ts holds its yes).
     // Without standing at the place, no call reads anything of its key: as many blocks of the key's relations for each.
     if (ENGINE === 'postgres' && !stands(row)) {
+      // The rows of the cap's the window passed deleted, taken out first: left in, a new session read them, a block or
+      // three of `bulk_cap`, whenever a transaction ended before it, in another database too (T240, `removeDeleted`).
+      const watcher = postgresClient(OWNER_URL, { max: 1 });
+      try {
+        await deletesSettled(watcher, t.signal);
+        await removeDeleted(watcher, 'bulk_cap', t.signal);
+      } finally {
+        await watcher.end();
+      }
       await run(db.owner, sql`ANALYZE`);
       const session = weighingSession();
       try {

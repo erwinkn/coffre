@@ -263,7 +263,16 @@ its own database did, and holds it to every other check
     taken out first. A lazy VACUUM counts this database's sessions alone,
     so once `deletesSettled` returns, `removeDeleted` takes the rows out,
     heap and index (`INDEX_CLEANUP ON`), and drops the visibility map the
-    VACUUM left, so no page of `bulk_cap` is all-visible, as before.
+    VACUUM left, so no page of `bulk_cap` is all-visible, as before. That
+    holds only while no session of this database takes a snapshot between
+    the wait and the VACUUM: one that does, while the other database's
+    transaction runs, reaches back to it and keeps every deleted row (Sol's
+    review r1: five rows left, then 1, 1, 3, 1 heap blocks to the sessions
+    after). So `removeDeleted` counts the dead rows left (`pgstattuple`)
+    and, while any are, waits for the sessions holding them as
+    `deletesSettled` does and vacuums again (`weighing.test.ts`: 2000 rows
+    left without the wait, none with it). `forks.matrix.ts` deletes the
+    same rows and weighs new sessions after, so it takes them out too.
     The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so

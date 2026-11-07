@@ -356,7 +356,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
     const watcher = postgresClient(OWNER_URL, { max: 1 });
     try {
       await deletesSettled(watcher, t.signal);
-      await removeDeleted(watcher, 'bulk_cap');
+      await removeDeleted(watcher, 'bulk_cap', t.signal);
       // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
       // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
       // read hundreds of buffers above the rest (CI, W268). The key's relations as they are, but for the rows taken out

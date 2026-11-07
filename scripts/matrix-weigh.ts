@@ -106,9 +106,9 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
  * is left (`HOLDERS`): from then, every such row is dead to every session started after, but for a transaction of
  * another database older than the row's delete, which each new snapshot here takes the oldest of, and which moves the
  * horizon when it ends, and for a session of this database that took a snapshot while one ran; weigh under
- * `horizonHeld`, which waits for the second and keeps the horizon where it is. From then too, a lazy VACUUM of this
- * database removes every such row (`removeDeleted`), whatever runs elsewhere: a VACUUM counts this database's sessions
- * alone, and not its own snapshot. Until then a new session's planner, probing an end of `bulk_cap_pkey` for the range
+ * `horizonHeld`, which waits for the second and keeps the horizon where it is, or take the rows out (`removeDeleted`),
+ * which a lazy VACUUM of this database does whatever runs elsewhere, so long as no session of this database takes a
+ * snapshot meanwhile: a VACUUM counts this database's sessions alone, and not its own snapshot. Until then a new session's planner, probing an end of `bulk_cap_pkey` for the range
  * its estimates use (`get_actual_variable_range`, which skips only rows known dead), takes a deleted row there for one
  * that may still be seen and reads its heap page as a live row's; once that ends, the first session to plan reads the
  * dead row's page and the next row's, one block more, and marks the entry dead, so that no session after it reads it.
@@ -131,16 +131,31 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
 export async function deletesSettled(watcher: WeighingSession, signal: AbortSignal): Promise<void> {
   const [{ sees }] = await watcher.unsafe(`SELECT pg_has_role('pg_read_all_stats', 'USAGE') AS sees`) as unknown as { sees: boolean }[];
   if (!sees) throw new Error("deletesSettled needs a login with pg_read_all_stats's privileges (a superuser, or a member that inherits them): it could not name the sessions it waits on");
-  // One past the newest transaction to have ended (a snapshot's xmax), as `pg_stat_activity`'s 32-bit ids are: every
-  // row deleted before the call was deleted by a transaction older than this.
-  const [{ ended }] = await watcher.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
-  await noneOlder(watcher, ended, signal, 'deletesSettled', 'the rows a batch deleted may still be seen');
+  await noneOlder(watcher, await endedBy(watcher), signal, 'deletesSettled', 'the rows a batch deleted may still be seen');
 }
 
 /**
- * Takes the rows of `table` deleted before `deletesSettled` returned out of it, heap and index alike, with a lazy
- * VACUUM, which removes every row no session of this database can see (above); then drops the visibility map that
- * VACUUM left, so that every page is read as before, none all-visible (review r4 of W268: `KEY_TABLES` hide no heap work).
+ * One past the newest transaction to have ended (a snapshot's xmax), as `pg_stat_activity`'s 32-bit ids are: every row
+ * deleted before it is asked was deleted by a transaction older than this.
+ */
+async function endedBy(asker: WeighingSession): Promise<string> {
+  const [{ ended }] = await asker.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
+  return ended;
+}
+
+/**
+ * Takes the rows of `table` deleted before it is called out of it, heap and index alike, with a lazy VACUUM; then drops
+ * the visibility map that VACUUM left, so that every page is read as before, none all-visible (review r4 of W268:
+ * `KEY_TABLES` hide no heap work). Resolves once none is left, which it counts (`pgstattuple`, a scan of every page):
+ * a VACUUM removes only the rows no session of this database can see, and `deletesSettled` returning says only that
+ * none could when it looked. A session of this database that takes a snapshot after it, while a transaction older than
+ * the deletes runs in another database, reaches back to that transaction (a snapshot's oldest is the cluster's oldest
+ * running), and every row the VACUUM meets meanwhile stays (Sol's review r1 of T240: five rows deleted, a snapshot taken
+ * after `deletesSettled` returned, all five left, and 1, 1, 3, 1 heap blocks to the sessions after, held horizon or
+ * not). Autovacuum is off on the matrices' tables, but not its ANALYZE of the catalogs, nor a session's start, which
+ * takes a snapshot to read them. So while rows are left, it waits for every such session to end (`HOLDERS`, as
+ * `deletesSettled` waits, until `signal` aborts, naming them) and vacuums again: the rows' removal is what it answers
+ * for, and nothing but a session of this database stands in its way.
  *
  * Left in, such a row's index entry was read differently by one weighed session than by the next, held horizon or not
  * (T240). A new session takes the bounds it judges rows dead by as it logs in, counting every database's sessions,
@@ -153,15 +168,31 @@ export async function deletesSettled(watcher: WeighingSession, signal: AbortSign
  * transaction ended between a session's login and its probe, 2 blocks and the entries marked, then 1). Taken out, they
  * are read by no session (`packages/vault/test/weighing.test.ts`: 66 buffers beside 7 left in). `INDEX_CLEANUP ON`:
  * VACUUM may otherwise leave a table's index alone when few of its pages had rows to remove, and the entries in it.
+ * With none left in the heap, none is left in an index either: VACUUM takes a row's entries out before the row.
  *
  * `watcher` must be a superuser (the owner, in compose and CI): the visibility map's truncation, `pg_visibility`'s, is
- * a superuser's, and so is its extension, which this adds to the database if it is not there.
+ * a superuser's, `pgstattuple` a superuser's or `pg_stat_scan_tables`', and so are their extensions, which this adds
+ * to the database if they are not there; and it must see what `deletesSettled`'s must.
  */
-export async function removeDeleted(watcher: WeighingSession, table: string): Promise<void> {
+export async function removeDeleted(watcher: WeighingSession, table: string, signal: AbortSignal): Promise<void> {
   // Asked first: `IF NOT EXISTS` would say it is there, a notice the client prints, every batch.
-  const [{ there }] = await watcher.unsafe(`SELECT count(*) > 0 AS there FROM pg_extension WHERE extname = 'pg_visibility'`) as unknown as { there: boolean }[];
-  if (!there) await watcher.unsafe('CREATE EXTENSION pg_visibility');
-  await watcher.unsafe(`VACUUM (INDEX_CLEANUP ON) ${table}`);
+  const there = await watcher.unsafe(`SELECT extname FROM pg_extension WHERE extname IN ('pg_visibility', 'pgstattuple')`) as unknown as { extname: string }[];
+  for (const extension of ['pg_visibility', 'pgstattuple']) {
+    if (!there.some((e) => e.extname === extension)) await watcher.unsafe(`CREATE EXTENSION ${extension}`);
+  }
+  for (;;) {
+    await watcher.unsafe(`VACUUM (INDEX_CLEANUP ON) ${table}`);
+    const [{ left }] = await watcher.unsafe('SELECT dead_tuple_count::int AS left FROM pgstattuple($1::regclass)', [table]) as unknown as { left: number }[];
+    if (left === 0) break;
+    if (signal.aborted) {
+      const message = `removeDeleted left ${left} dead row(s) of ${table} when the test's time ran out`;
+      console.error(message);
+      throw new Error(message);
+    }
+    await noneOlder(watcher, await endedBy(watcher), signal, 'removeDeleted', `${left} dead row(s) of ${table} could not be removed`);
+    // At the wait's cadence, should the session have ended before it looked.
+    await sleep(25, undefined, { signal }).catch(() => undefined);
+  }
   await watcher.unsafe('SELECT pg_truncate_visibility_map($1::regclass)', [table]);
 }
 
