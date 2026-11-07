@@ -146,7 +146,7 @@ const manifest = (rev) => {
     return {}
   }
 }
-const diffFiles = git('diff', '--name-only', base, head).split('\n').filter(Boolean)
+const diffFiles = git('diff', '--name-only', '--no-renames', base, head).split('\n').filter(Boolean)
 const changed = diffFiles.filter((f) => f !== 'package.json')
 if (diffFiles.includes('package.json')) {
   const { scripts: before = {}, ...otherBefore } = manifest(base)
@@ -161,7 +161,8 @@ if (diffFiles.includes('package.json')) {
 // when another's text holds its name; reading too much only runs a step more often.
 const scriptFiles = (text) => [...text.matchAll(/(?:^|[\s'"=])(?:\.\/)?(scripts\/[A-Za-z0-9_./-]+)/g)].map((m) => m[1])
 const rootScripts = manifest(head).scripts ?? {}
-const tracked = git('ls-files', 'scripts').split('\n').filter(Boolean)
+// A helper the change deleted still names the steps that call it.
+const tracked = [...new Set([...git('ls-files', 'scripts').split('\n'), ...git('ls-tree', '-r', '--name-only', base, 'scripts').split('\n')])].filter(Boolean)
 const readTracked = (file) => {
   try {
     return readFileSync(resolve(root, file), 'utf8')
@@ -399,6 +400,7 @@ try {
       built = code === 0
     }
     for (const command of code === 0 ? step.run : []) {
+      if (interrupted) break
       console.log(`\n== ${step.name}: ${command}`)
       code = await sh(command, step.env)
       if (code !== 0) break

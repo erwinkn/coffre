@@ -50,7 +50,8 @@ const selected = (change) => {
   try {
     mkdirSync(join(dir, 'scripts'))
     copyFileSync(script, join(dir, 'scripts/validate.mjs'))
-    for (const file of ['terraform-provider.sh', 'consumer-test.sh', 'client-smoke.cjs']) writeFileSync(join(dir, 'scripts', file), '')
+    for (const file of ['consumer-test.sh', 'client-smoke.cjs', 'helper.sh']) writeFileSync(join(dir, 'scripts', file), '')
+    writeFileSync(join(dir, 'scripts/terraform-provider.sh'), 'bash scripts/helper.sh\n')
     const manifest = (extra = {}) => JSON.stringify({ name: 'x', scripts: { 'test:terraform': './scripts/terraform-provider.sh', 'test:consumer': './scripts/consumer-test.sh', build: 'true', ...extra }, ...extra.top })
     writeFileSync(join(dir, 'package.json'), manifest())
     git('init', '-q')
@@ -88,4 +89,18 @@ test('a change to a root package.json entry selects the steps that name it, the 
   assert.match(build.schema, /not run: diff does not touch it/)
   const deps = selected((dir, manifest) => writeFileSync(join(dir, 'package.json'), manifest({ top: { dependencies: { a: '1.0.0' } } })))
   for (const name of ['terraform', 'consumer', 'schema', 'compat', 'matrices']) assert.match(deps[name], /package\.json changed/)
+})
+
+test('a helper the change deleted still selects the steps that call it', () => {
+  const steps = selected((dir) => rmSync(join(dir, 'scripts/helper.sh')))
+  assert.match(steps.terraform, /helper\.sh changed/)
+  assert.match(steps.consumer, /not run: diff does not touch it/)
+})
+
+test('a rename selects the steps of the path it left', () => {
+  const steps = selected((dir) => {
+    mkdirSync(join(dir, 'docs'))
+    execFileSync('git', ['mv', 'scripts/terraform-provider.sh', 'docs/terraform-provider.sh'], { cwd: dir })
+  })
+  assert.match(steps.terraform, /terraform-provider\.sh changed/)
 })
