@@ -107,9 +107,9 @@ class CountingPool {
    * connection that has not yet planned what a function it calls runs (the
    * audit pages' reads of 0.15's uses, T166) reads no catalog for it.
    */
-  async work(statement: Statement): Promise<{ pages: number; plan: string } | null> {
+  async work(statement: Statement): Promise<{ pages: number; plan: string; tree: Plan } | null> {
     const rolledBack = new Error('rolled back');
-    let work: { pages: number; plan: string } | null = null;
+    let work: { pages: number; plan: string; tree: Plan } | null = null;
     await this.#pool.begin(async (tx) => {
       try {
         await tx.unsafe('SAVEPOINT warm');
@@ -117,7 +117,7 @@ class CountingPool {
         await tx.unsafe('ROLLBACK TO SAVEPOINT warm');
         const [row] = await tx.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${statement.text}`, statement.values as never[]);
         const [{ Plan: plan }] = (row as unknown as { 'QUERY PLAN': [{ Plan: Plan }] })['QUERY PLAN'];
-        work = { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan) };
+        work = { pages: plan['Shared Hit Blocks'] + plan['Shared Read Blocks'], plan: shown(plan), tree: plan };
       } catch (error) {
         if ((error as { code?: string }).code !== '23505') throw error;
       }
@@ -1329,7 +1329,11 @@ test("a project's audit page reads as many pages however many keys the project h
  * key, so as many pages however many the instance holds (T221). A count of them read every live key of the places, a
  * page for each when Postgres picked an index scan for each environment (1,184 pages for 1,282 keys), 30 to 48 when it
  * picked one bitmap scan, and which it picked followed the statistics of `secrets` (T166's flake): with keys counted,
- * these grow with the keys, whichever plan runs.
+ * these grow with the keys, whichever plan runs. The earlier tests leave the log due for an auto-analyze, which landed
+ * now and then between the two counts: the missing members' read then looked for an access entry of every principal
+ * before it dropped those with a member row, 155 pages to 370, until it named its order (`missingMembers`, T233, which
+ * the next test holds). The log is analyzed before each count here, so that both are planned on fresh statistics, and
+ * no auto-analyze is left due to land between them.
  */
 test("a member's report, `me` and the members list read as many pages however many keys the instance holds (T221)", POSTGRES, async () => {
   const someone = (await root.members.list()).members.find((entry) => entry.member.startsWith('user:'))!.member;
@@ -1354,7 +1358,7 @@ test("a member's report, `me` and the members list read as many pages however ma
     }
     return read;
   };
-  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects`);
+  const settle = () => db.owner.execute(sql`VACUUM (ANALYZE) secrets, environments, projects, audit_log`);
   await settle();
   const small = await pages();
   try {
@@ -1375,6 +1379,34 @@ test("a member's report, `me` and the members list read as many pages however ma
     await db.owner.execute(sql`DELETE FROM secrets WHERE starts_with(key, 'PLACE_KEY_')`);
     await settle();
   }
+});
+
+/**
+ * The missing members' read (`missingMembers`) looks for an access entry only of the principals the log names with no
+ * member row. Left to the planner, it looked for one of every principal first, once the log's statistics were fresh,
+ * each a step down the subject index to an allowed entry: 155 pages to 370 in the test above, whenever an auto-analyze
+ * landed between its counts (T233). So the log is analyzed here, as that auto-analyze did, and the read is held, beyond
+ * the walk that names the principals, to the rowless principals' log: a ceiling of its own, not a baseline an earlier
+ * plan could raise. This file leaves no principal rowless, so the ceiling is 16 pages, which the old order passed by
+ * about 170 (172 against 0 over 20 analyzes, each a fresh sample of the ~190,000 entries this file leaves): a bound for
+ * this fixture, not for any log, where a hash join may scan the log for a few rowless principals.
+ */
+test("the missing members' read looks in the log, beyond naming its principals, only for those with no member row (T233)", POSTGRES, async () => {
+  await db.owner.execute(sql`ANALYZE audit_log`);
+  await root.members.list();
+  app.recorded = [];
+  await root.members.list();
+  const statement = app.recorded.find((recorded) => /^\s*select principal from \(\s*with recursive named\b/i.test(recorded.text));
+  app.recorded = null;
+  assert.ok(statement, 'the members list read the missing members');
+  const { plan, tree } = (await app.work(statement))!;
+  const rowless = await db.owner.execute<{ n: number }>(sql`
+    SELECT count(DISTINCT subject_principal)::int AS n FROM audit_log
+    WHERE author = 'vault' AND (subject_principal LIKE 'user:%' OR subject_principal LIKE 'token:%')
+      AND NOT EXISTS (SELECT 1 FROM principals WHERE principals.principal = audit_log.subject_principal)`);
+  const inLog = (node: Plan): number => node['Node Type'] === 'Recursive Union' ? 0
+    : (node['Relation Name'] === 'audit_log' ? node['Shared Hit Blocks'] + node['Shared Read Blocks'] : 0) + (node.Plans ?? []).reduce((sum, child) => sum + inLog(child), 0);
+  assert.ok(inLog(tree) <= 8 * rowless[0]!.n + 16, `the missing members' read read ${inLog(tree)} pages of the log beyond naming its principals, ${rowless[0]!.n} of them with no member row:\n${plan}`);
 });
 
 
