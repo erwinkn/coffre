@@ -83,8 +83,12 @@ before(async () => {
   deps = testDeps(db.runtime, [ROOT], { vault: testVault([ROOT], {}, { kek }, {}, { log: '0.15', sealThrough: sealedNow, heldOutside: nothingHeld }) });
   const root = clientFor(deps, ROOT);
   await root.projects.create('market', { name: 'Market' });
-  for (const path of ['market/dev', 'market/prod']) await root.environments.create(path);
+  for (const path of ['market/dev', 'market/prod', 'market/base']) await root.environments.create(path);
   await root.secrets.set('market/dev', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
+  // What a fork copies: two keys of an environment no other case writes to, so that their two periods surely leave a
+  // shared stretch to measure in (`inBulkPeriod`). market/dev gathers a key or more a case, and twenty random phases
+  // need not leave five seconds between their turns (T204).
+  await root.secrets.set('market/base', { API_KEY: 'fake-api-key', DATABASE_URL: 'postgres://fake' });
   await root.members.add(SERVICE);
   await root.access.set(SERVICE, { 'market/dev': 'viewer' });
   await root.members.add(`user:${VIEWER}`);
@@ -259,7 +263,7 @@ const CASES: Case[] = [
     run: (i) => owner.projects.update(`shelved-${i}`, { archived: true }),
   },
   { name: 'environment made', run: (i) => owner.environments.create(`market/env-${i}`) },
-  { name: 'environment forked', run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'dev' }) },
+  { name: 'environment forked', run: (i) => owner.environments.create(`market/fork-${i}`, { from: 'base' }) },
   {
     name: 'environment renamed',
     setup: async (i) => void (await owner.environments.create(`market/was-${i}`)),
@@ -347,7 +351,9 @@ const BUDGETS: Record<string, { app: number; vault: number; hot?: number }> = {
   'project renamed': { app: 5, vault: 1 },
   'project archived': { app: 8, vault: 1 },
   'environment made': { app: 5, vault: 2 },
-  'environment forked': { app: 43, vault: 5, hot: 1 },
+  // A fork of market/base's two keys: its app statements grow with the keys it copies (an `update "secrets"` each),
+  // so this is the fixture's number, 43 when it forked market/dev's twenty (T204).
+  'environment forked': { app: 21, vault: 5, hot: 1 },
   'environment renamed': { app: 6, vault: 2 },
   'environment protected': { app: 5, vault: 9 },
   'environment archived': { app: 10, vault: 2 },
@@ -381,8 +387,8 @@ test('each change route answers in exactly its budget of round trips (T179)', PO
     try {
       // The warm request and the measured one in one bulk refresh period of every key they use (a minute, at the default
       // 15-minute window, from each key's phase, T204): a use that crosses into the next moves its key's row on, a
-      // statement more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of market/dev.
-      await inBulkPeriod(5_000, db.owner, [`user:${ROOT}`], 'market/dev');
+      // statement more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of market/base.
+      await inBulkPeriod(5_000, db.owner, [`user:${ROOT}`], 'market/base');
       for (const i of [2 * n, 2 * n + 1]) if (setup !== undefined) await asRequest(() => setup(i));
       await cost(() => run(2 * n));
       const { statements: ran, connections, ...counts } = await cost(() => run(2 * n + 1));
