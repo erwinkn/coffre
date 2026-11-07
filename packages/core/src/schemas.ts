@@ -175,9 +175,10 @@ export const MAX_KEYS = 32;
  * JWK and its signature checked, failed, over the signing input made once
  * (`@coffre/core/identity`'s `anyKey`). Fitted with `TOKEN_BYTE_CPU_NS` over
  * tokens of 1 to 256 KiB, their bytes in the payload or in the protected
- * header, however it is shaped: 156 to 222 µs for ES256 and 65 to 160 for
+ * header, however it is shaped: 139 to 222 µs for ES256 and 65 to 168 for
  * RS256, of 2,048 and 4,096 bits, each signature as long as its modulus
- * (review r9), over seven runs, taken as the dearest, rounded up.
+ * (review r9) and below it, so checked to the end (r10), over nine runs,
+ * taken as the dearest, rounded up.
  */
 export const KEY_TRY_CPU_US = 230;
 

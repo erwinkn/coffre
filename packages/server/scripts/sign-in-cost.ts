@@ -112,8 +112,12 @@ function strangerToken(kind: KeyKind, bytes: number, fill: Fill = 'payload'): st
   const claims = { iss: ISSUER, aud: AUDIENCE, sub: 'repo:acme/app:ref:refs/heads/main', iat: now, exp: now + 300 };
   const alg = kind === 'ec' ? 'ES256' : 'RS256';
   // A signature of the key's own size, as a real one is: RSA's is its modulus, which WebCrypto checks in full only
-  // then; a shorter one is refused before any arithmetic, and would measure that instead (review r9).
-  const signature = randomBytes(SIGNATURE_BYTES[kind]).toString('base64url');
+  // then; a shorter one is refused before any arithmetic, and would measure that instead (review r9). An RSA one is
+  // also below the modulus, or it is refused before the exponentiation too (review r10): its top bit clear, it is
+  // below 2^(bits - 1), and a modulus of that many bits is at least that. `belowEveryModulus` checks it.
+  const raw = randomBytes(SIGNATURE_BYTES[kind]);
+  if (kind !== 'ec') raw[0] &= 0x7f;
+  const signature = raw.toString('base64url');
   const room = Math.max(0, Math.floor(((bytes - b64(claims).length - signature.length - 40) * 3) / 4));
   const values = MAX_BODY_NODES - 20;
   const head: Record<string, unknown> = { alg, typ: 'JWT' };
@@ -126,6 +130,15 @@ function strangerToken(kind: KeyKind, bytes: number, fill: Fill = 'payload'): st
     head.pad = JSON.parse(`${'['.repeat(depth)}${']'.repeat(depth)}`);
   } else head.x5c = Array.from({ length: Math.max(1, Math.floor(room / 1400)) }, () => randomBytes(1000).toString('base64'));
   return `${b64(head)}.${b64(body)}.${signature}`;
+}
+
+/** Throws unless the token's signature, read as an integer, is below every RSA key's modulus (review r10). */
+function belowEveryModulus(token: string, keys: { keys: Record<string, unknown>[] }): void {
+  const int = (b64url: string) => BigInt(`0x${Buffer.from(b64url, 'base64url').toString('hex') || '0'}`);
+  const signature = int(token.slice(token.lastIndexOf('.') + 1));
+  for (const key of keys.keys) {
+    if (typeof key.n === 'string' && signature >= int(key.n)) throw new Error('a stranger RSA signature is not below a modulus');
+  }
 }
 
 function keySet(kind: KeyKind): { keys: Record<string, unknown>[] } {
@@ -151,6 +164,7 @@ for (const [kind, alg, fill] of KEY_CASES) {
   const keys = sets[kind];
   await measure(`${alg}, ${kind === 'ec' ? 'P-256' : `${kind.slice(3)}-bit`}: ${fill}`, async (bytes) => {
     const token = strangerToken(kind, bytes, fill);
+    belowEveryModulus(token, keys);
     return async () => {
       decodeWorkloadToken(token);
       await verifyWorkloadToken(token, keys as never, { issuer: ISSUER, audience: AUDIENCE, now: new Date() }).then(
