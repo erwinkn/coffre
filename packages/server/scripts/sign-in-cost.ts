@@ -100,13 +100,20 @@ const AUDIENCE = 'https://coffre.example';
 type Fill = 'payload' | 'header, many members' | 'header, one long value' | 'header, nested' | 'header, an x5c of long strings';
 const FILLS: readonly Fill[] = ['payload', 'header, many members', 'header, one long value', 'header, nested', 'header, an x5c of long strings'];
 
+type KeyKind = 'ec' | 'rsa2048' | 'rsa4096';
+/** A signature's bytes for each kind of key: ES256's r and s, an RSA modulus's. */
+const SIGNATURE_BYTES: Record<KeyKind, number> = { ec: 64, rsa2048: 256, rsa4096: 512 };
+
 /**
  * A token of about `bytes` bytes, signed by none of the keys and naming none (no `kid`), so every key is tried, its
  * bytes where `fill` says, within the values a part may hold (`MAX_BODY_NODES`, which `decodeWorkloadToken` counts).
  */
-function strangerToken(alg: 'ES256' | 'RS256', bytes: number, fill: Fill = 'payload'): string {
+function strangerToken(kind: KeyKind, bytes: number, fill: Fill = 'payload'): string {
   const claims = { iss: ISSUER, aud: AUDIENCE, sub: 'repo:acme/app:ref:refs/heads/main', iat: now, exp: now + 300 };
-  const signature = Buffer.from(randomBytes(alg === 'ES256' ? 64 : 256)).toString('base64url');
+  const alg = kind === 'ec' ? 'ES256' : 'RS256';
+  // A signature of the key's own size, as a real one is: RSA's is its modulus, which WebCrypto checks in full only
+  // then; a shorter one is refused before any arithmetic, and would measure that instead (review r9).
+  const signature = randomBytes(SIGNATURE_BYTES[kind]).toString('base64url');
   const room = Math.max(0, Math.floor(((bytes - b64(claims).length - signature.length - 40) * 3) / 4));
   const values = MAX_BODY_NODES - 20;
   const head: Record<string, unknown> = { alg, typ: 'JWT' };
@@ -121,7 +128,7 @@ function strangerToken(alg: 'ES256' | 'RS256', bytes: number, fill: Fill = 'payl
   return `${b64(head)}.${b64(body)}.${signature}`;
 }
 
-function keySet(kind: 'ec' | 'rsa2048' | 'rsa4096'): { keys: Record<string, unknown>[] } {
+function keySet(kind: KeyKind): { keys: Record<string, unknown>[] } {
   const keys = Array.from({ length: MAX_KEYS }, () => {
     const pair = kind === 'ec' ? generateKeyPairSync('ec', { namedCurve: 'P-256' }) : generateKeyPairSync('rsa', { modulusLength: kind === 'rsa2048' ? 2048 : 4096 });
     return { ...(pair.publicKey as KeyObject).export({ format: 'jwk' }), alg: kind === 'ec' ? 'ES256' : 'RS256', use: 'sig' };
@@ -143,7 +150,7 @@ const sets = { ec: keySet('ec'), rsa2048: keySet('rsa2048'), rsa4096: keySet('rs
 for (const [kind, alg, fill] of KEY_CASES) {
   const keys = sets[kind];
   await measure(`${alg}, ${kind === 'ec' ? 'P-256' : `${kind.slice(3)}-bit`}: ${fill}`, async (bytes) => {
-    const token = strangerToken(alg, bytes, fill);
+    const token = strangerToken(kind, bytes, fill);
     return async () => {
       decodeWorkloadToken(token);
       await verifyWorkloadToken(token, keys as never, { issuer: ISSUER, audience: AUDIENCE, now: new Date() }).then(

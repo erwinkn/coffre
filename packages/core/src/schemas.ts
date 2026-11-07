@@ -175,10 +175,11 @@ export const MAX_KEYS = 32;
  * JWK and its signature checked, failed, over the signing input made once
  * (`@coffre/core/identity`'s `anyKey`). Fitted with `TOKEN_BYTE_CPU_NS` over
  * tokens of 1 to 256 KiB, their bytes in the payload or in the protected
- * header, however it is shaped: 156 to 207 µs for ES256 and 65 to 131 for
- * RS256 over three runs, taken as the dearest, rounded up.
+ * header, however it is shaped: 156 to 222 µs for ES256 and 65 to 160 for
+ * RS256, of 2,048 and 4,096 bits, each signature as long as its modulus
+ * (review r9), over seven runs, taken as the dearest, rounded up.
  */
-export const KEY_TRY_CPU_US = 210;
+export const KEY_TRY_CPU_US = 230;
 
 /**
  * Each byte of a workload token, per key tried, in nanoseconds of CPU: each
@@ -208,10 +209,11 @@ export const PASSKEY_BYTE_CPU_NS = 80;
  * request has left once a body is read (`REQUEST_CPU_US − READ_CPU_US`,
  * 16 ms), rounded down to a power of two. Two costs bind: a workload token
  * that names no key, tried against each of `MAX_KEYS` keys, `MAX_KEYS ×
- * (KEY_TRY_CPU_US + TOKEN_BYTE_CPU_NS × B)`, which gives B ≤ 145 kB; and a
+ * (KEY_TRY_CPU_US + TOKEN_BYTE_CPU_NS × B)`, which gives B ≤ 135 kB; and a
  * passkey's answer, `PASSKEY_BYTE_CPU_NS × B`, 200 kB. So 128 KiB. Measured
- * there, 32 tries cost 4.2 to 11.5 ms whatever the token's shape, a
- * passkey's answer 6.7 to 8.4; at 256 KiB, up to 15.9 and 17.1; at 16 KiB,
+ * there, 32 tries cost 4.2 to 11.5 ms whatever the token's shape and key
+ * (RSA of 4,096 bits, 8.9 to 10.8), a passkey's answer 6.7 to 9.0; at
+ * 256 KiB, up to 16.6 and 18.7; at 16 KiB,
  * 32 tries cost 5 to 8 ms.
  *
  * To derive it again (a new Node, jose or key type, another budget), from
@@ -224,7 +226,7 @@ export const PASSKEY_BYTE_CPU_NS = 80;
  *
  * Every other thing a stranger's body makes the app do costs less
  * (`packages/server/scripts/sign-in-cost.ts`, Node 26.13, jose 6.2, a
- * 96-core Linux host at loads of 25 to 40, 2026-11-07, the process's CPU,
+ * 96-core Linux host at loads of 25 to 40, 2026-11-07 and 08, the process's CPU,
  * the median of nine samples, with zod's eval-built fast paths and without):
  * a form of `+` or of short distinct fields, read and checked for a name
  * given twice, 10 to 30 ns a byte (3.7 ms at 128 KiB); the body's count,
