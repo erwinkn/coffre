@@ -41,7 +41,6 @@ import {
   updateAuth,
   type ConnectionRow,
 } from '../db/queries.ts';
-import { logged } from '../logged.ts';
 import { passkeyStands, sourceStands } from '../passkey-check.ts';
 import type { WorkloadTransport } from '../workloads/transport.ts';
 import { McpApprovals } from './approvals.ts';
@@ -84,6 +83,9 @@ export type McpServiceDeps = {
 export type Asker = Pick<ApiContext, 'caller' | 'requestId' | 'sourceIp' | 'credentialId' | 'passkeyId'>;
 
 /** An OAuth error, as the token, registration and revocation endpoints answer it (RFC 6749, section 5.2). */
+/** The OAuth endpoints anyone may ask, each limited apart: `authorize` only when it would fetch a client's metadata. */
+export type OAuthEndpoint = 'authorize' | 'register' | 'token' | 'revoke';
+
 export class OAuthError extends Error {
   readonly error: string;
   readonly status: number;
@@ -323,7 +325,7 @@ export class McpService {
     if (redirectUri === '') return { status: 'invalid', message: 'The app sent no redirect_uri.' };
     let client: ClientMetadata;
     try {
-      if (wouldFetch(clientId, this.#deps.config.allowLoopback)) await this.#admit(sourceIp);
+      if (wouldFetch(clientId, this.#deps.config.allowLoopback)) await this.#admit('authorize', sourceIp);
       client = await resolveClient({ ...this.#deps, allowLoopback: this.#deps.config.allowLoopback }, clientId);
     } catch (error) {
       if (error instanceof ClientInvalid) return { status: 'invalid', message: `${error.message.charAt(0).toUpperCase()}${error.message.slice(1)}.` };
@@ -667,32 +669,24 @@ export class McpService {
 
   // --- shared -------------------------------------------------------------------
 
-  /** The unauthenticated endpoints' limits, per source and in total; a limiter that fails refuses. */
-  async admit(sourceIp: string | null): Promise<void> {
-    return this.#admit(sourceIp);
+  /**
+   * An unauthenticated OAuth endpoint's admission: the requests its source
+   * address made to it, each endpoint counted apart (`oauth:token:<address>`,
+   * W331, D177), with the limiter `workloads.limits` may share. A limiter
+   * that fails refuses.
+   */
+  async admit(endpoint: OAuthEndpoint, sourceIp: string | null): Promise<void> {
+    return this.#admit(endpoint, sourceIp);
   }
 
-  async #admit(sourceIp: string | null): Promise<void> {
-    const { perSource, total } = this.#deps.config.limits;
+  async #admit(endpoint: OAuthEndpoint, sourceIp: string | null): Promise<void> {
     let passed: boolean;
     try {
-      const [source, all] = await Promise.all([perSource.limit({ key: `source:${sourceIp ?? 'unknown'}` }), total.limit({ key: 'total' })]);
-      passed = source.success && all.success;
+      passed = (await this.#deps.config.limits.perSource.limit({ key: `oauth:${endpoint}:${sourceIp ?? 'unknown'}` })).success;
     } catch {
       throw new OAuthError('temporarily_unavailable', 'coffre cannot count requests right now: try again shortly', 503);
     }
-    if (!passed) throw new OAuthError('slow_down', 'too many requests: try again in a minute', 429);
-  }
-
-  /** A connection's tool calls, against its own limit. */
-  async admitCall(connectionId: string, requestId: string): Promise<boolean> {
-    try {
-      return (await this.#deps.config.limits.perConnection.limit({ key: `connection:${connectionId}` })).success;
-    } catch (error) {
-      // Refused all the same, and logged: a limiter that fails is not a client calling too often.
-      console.error('mcp limiter failed', { requestId, connectionId, error: logged(error) });
-      return false;
-    }
+    if (!passed) throw new OAuthError('slow_down', 'too many requests from this address: try again in a few seconds', 429);
   }
 
   async #find(by: Parameters<typeof findConnection>[2]) {

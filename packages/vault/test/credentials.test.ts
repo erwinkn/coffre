@@ -210,19 +210,39 @@ test("an ID token is spent once (SpentChecked): presented again, it buys nothing
   assert.deepEqual(await written(), after);
 });
 
-test("a binding makes at most 60 credentials a minute, counted under its row (BindingLocked): the 61st is busy", async () => {
+test("nothing counts a binding's credentials: with 60 made this minute, the 61st is made too (W331, D177)", async () => {
   const w = await world();
   const { credentials } = tablesOf(db.owner);
   await db.owner.insert(credentials).values(Array.from({ length: 60 }, () => ({
     id: randomUUID(), kind: 'service', authMac: randomBytes(32), tokenHash: randomBytes(32), tokenHint: 'x', generation: 0, principal: CI,
     createdBy: `binding:${w.binding}`, expiresAt: new Date(Date.now() + 300_000),
   })));
-  const none = await written();
-  assert.deepEqual(await w.vault.signIn!(asked(w)), { ok: false, refused: 'busy' });
-  assert.deepEqual(await written(), none);
-  // Those of another binding, or a minute old, count for nothing.
-  await db.owner.update(credentials).set({ createdAt: new Date(Date.now() - 61_000) }).where(eq(credentials.principal, CI));
   assert.ok((await w.vault.signIn!(asked(w))).ok);
+});
+
+test("a sign-in shares its binding's row (FOR KEY SHARE), and skips stamping its last use while another stamps it (SKIP LOCKED): it waits for neither (W331)", postgresOnly('row locks'), async () => {
+  const w = await world();
+  const { serviceBindings } = tablesOf(db.owner);
+  const old = new Date(Date.now() - 120_000);
+  await db.owner.update(serviceBindings).set({ lastUsedAt: old }).where(eq(serviceBindings.id, w.binding));
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // Another sign-in in flight, stamping the row: its share, and the update lock its stamp takes, uncommitted.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe(`SELECT 1 FROM service_bindings WHERE id = '${w.binding}' FOR KEY SHARE`);
+    await holder.unsafe(`SELECT 1 FROM service_bindings WHERE id = '${w.binding}' FOR NO KEY UPDATE`);
+    const started = Date.now();
+    assert.ok((await w.vault.signIn!(asked(w))).ok, 'made beside the other');
+    assert.ok(Date.now() - started < 900, `waited ${Date.now() - started} ms on the other sign-in`);
+    await holder.unsafe('ROLLBACK');
+  } finally {
+    await holder.end();
+  }
+  // It left the stamp to the other: still the old one, which the next sign-in, alone, moves on.
+  const stamp = async () => (await db.owner.select({ at: serviceBindings.lastUsedAt }).from(serviceBindings).where(eq(serviceBindings.id, w.binding)))[0]!.at!.getTime();
+  assert.equal(await stamp(), old.getTime());
+  assert.ok((await w.vault.signIn!(asked(w))).ok);
+  assert.ok((await stamp()) > old.getTime());
 });
 
 test("the proof's times and the credential's end are held to by the database's clock, in the statement: past, or too far, nothing written", async () => {

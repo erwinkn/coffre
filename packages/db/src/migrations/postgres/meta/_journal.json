@@ -512,6 +512,20 @@
       "when": 1793972586629,
       "tag": "0075_sign_in_pinned",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1793990000000,
+      "tag": "0076_sign_in_shares",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1793990000001,
+      "tag": "0077_spent_tokens_pruned",
+      "breakpoints": true
     }
   ]
 }

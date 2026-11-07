@@ -1256,7 +1256,7 @@ function githubEnvironment(entries, nextDelimiter = () => `coffre_${randomUUID()
 	return out;
 }
 //#endregion
-//#region ../client/dist/src-Dj1j2fgO.js
+//#region ../client/dist/src-Dj3_I1yF.js
 /** Two colons or more, in hex: an IPv6 address, as `::1` or `2001:db8::1:443` with its port. */
 const IPV6 = /[0-9a-f]*:[0-9a-f]*:[0-9a-f:]*/i;
 const TIMEOUT_OR_REFUSAL = /* @__PURE__ */ new Set([
@@ -1402,6 +1402,22 @@ function place$1(path) {
 function asPreviewed(revision) {
 	return revision === void 0 ? "" : `?revision=${encodeURIComponent(revision)}`;
 }
+/** A binding as this client types it: `removing` null where a server older than 0.16 says nothing of it (review r10). */
+function removal(binding) {
+	return {
+		...binding,
+		removing: binding.removing ?? null
+	};
+}
+/** What a binding's removal has left, and whether this request did any of it, when the server answered that it is under way (a 202). */
+function removingLeft(response, payload) {
+	if (response.status !== 202 || payload === null || typeof payload !== "object") return null;
+	const removing = payload.removing;
+	return typeof removing?.left === "number" ? {
+		left: removing.left,
+		progressed: removing.progressed !== false
+	} : null;
+}
 function createClient(options) {
 	const origin = options.url.replace(/\/+$/, "");
 	const transport = options.transport ?? (async (request) => {
@@ -1413,20 +1429,31 @@ function createClient(options) {
 	});
 	async function send(method, path, input) {
 		const url = new URL(`${origin}/api${path}`);
-		const headers = new Headers(await options.headers?.());
 		let body;
 		if (method === "GET") {
 			for (const [name, value] of Object.entries(input ?? {})) if (value !== void 0 && value !== null) url.searchParams.set(name, String(value));
-		} else if (input !== void 0) {
-			headers.set("content-type", "application/json");
-			body = JSON.stringify(input);
+		} else if (input !== void 0) body = JSON.stringify(input);
+		const ask = async () => {
+			const headers = new Headers(await options.headers?.());
+			if (body !== void 0) headers.set("content-type", "application/json");
+			const response = await transport(new Request(url, {
+				method,
+				headers,
+				body
+			}));
+			return {
+				response,
+				payload: await response.json().catch(() => null)
+			};
+		};
+		let { response, payload } = await ask();
+		for (let before = Infinity, under = removingLeft(response, payload); under !== null; under = removingLeft(response, payload)) {
+			const { left } = under;
+			if (!under.progressed || left >= before) throw new CoffreError(202, "removal_under_way", `the removal is under way: ${left} left to do; ask again to go on`);
+			before = left;
+			options.onRemoving?.(left);
+			({response, payload} = await ask());
 		}
-		const response = await transport(new Request(url, {
-			method,
-			headers,
-			body
-		}));
-		const payload = await response.json().catch(() => null);
 		if (!response.ok) {
 			const error = payload;
 			const touch = error?.touch;
@@ -1591,20 +1618,38 @@ function createClient(options) {
 		},
 		/** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
 		bindings: {
-			list: (member) => call("GET /members/:member/bindings", { member }),
+			list: async (member) => {
+				const listed = await call("GET /members/:member/bindings", { member });
+				return {
+					...listed,
+					bindings: listed.bindings.map(removal)
+				};
+			},
 			/** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. */
 			preview: (member, input) => {
 				const [method, route] = address("POST /members/:member/bindings", { member });
 				return send(method, `${route}?dryRun=1`, input);
 			},
-			create: (member, input) => call("POST /members/:member/bindings", { member }, input),
+			create: async (member, input) => {
+				const made = await call("POST /members/:member/bindings", { member }, input);
+				return {
+					...made,
+					binding: removal(made.binding)
+				};
+			},
 			/** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. */
 			previewKeys: (member, input) => {
 				const [method, route] = address("POST /members/:member/bindings/keys", { member });
 				return send(method, `${route}?dryRun=1`, input);
 			},
 			/** New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them. */
-			replaceKeys: (member, input) => call("POST /members/:member/bindings/keys", { member }, input),
+			replaceKeys: async (member, input) => {
+				const made = await call("POST /members/:member/bindings/keys", { member }, input);
+				return {
+					...made,
+					bindings: made.bindings.map(removal)
+				};
+			},
 			remove: (member, id) => call("DELETE /members/:member/bindings/:id", {
 				member,
 				id
@@ -7072,7 +7117,11 @@ function describeBindings(member, bindings) {
 	if (bindings.length === 0) return `${shownMember$1(member)} trusts no CI runs or workloads: none signs in as it by OIDC or a platform's proof\n`;
 	return `${bindings.map((binding) => {
 		const used = binding.lastUsedAt === null ? "never used" : `last used ${binding.lastUsedAt.slice(0, 16).replace("T", " ")}`;
-		return [`${binding.id}${binding.label === null ? "" : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`, ...describeBinding(binding)].join("\n");
+		return [
+			`${binding.id}${binding.label === null ? "" : `  ${binding.label}`}  (added by ${binding.createdBy} ${binding.createdAt.slice(0, 10)}, ${used})`,
+			...binding.removing === null ? [] : [`being removed since ${binding.removing.since.slice(0, 16).replace("T", " ")}: refused already, its credentials still being revoked`],
+			...describeBinding(binding)
+		].join("\n");
 	}).join("\n\n")}\n`;
 }
 //#endregion
@@ -7389,7 +7438,7 @@ async function createProof(key, request) {
 	return `${input}.${base64url(new Uint8Array(signature))}`;
 }
 //#endregion
-//#region ../client/dist/workload-DD67ua3B.js
+//#region ../client/dist/workload-Cv-Nfu2T.js
 /** `<audience>#jkt=<thumbprint>`: an audience only this key can use (section 4.2). */
 function keyAudience(context) {
 	return `${context.audience}#jkt=${context.jkt}`;
@@ -17046,7 +17095,8 @@ function client(to = target(), hint, handled = [], ask = once) {
 	return createClient({
 		url: to.origin,
 		headers: () => headersFor(to).catch((error) => fail(error instanceof Error ? error.message : String(error))),
-		transport: (request) => send(request, to, hint, handled, ask)
+		transport: (request) => send(request, to, hint, handled, ask),
+		onRemoving: (left) => void process.stderr.write(`Removing the binding, its credentials revoked a batch at a time: ${left} left to do\n`)
 	});
 }
 /**

@@ -86,6 +86,12 @@ export type ClientOptions = {
   /** Sent with every request: a bearer token, a Cloudflare Access header. */
   headers?: () => HeadersInit | Promise<HeadersInit>;
   transport?: Transport;
+  /**
+   * Told what a binding's removal has left to do (its credentials to revoke and bindings to end) each time the server answers that it is under way (a 202,
+   * `{ removing: { left } }`): on Workers, one request revokes a few hundred at most, and the client asks again, the
+   * same request, until it is done (W331). `coffre untrust` shows it.
+   */
+  onRemoving?: (left: number) => void;
 };
 
 /** The API's error shape, `{ error, message }`, with the HTTP status. */
@@ -134,6 +140,18 @@ function asPreviewed(revision: string | undefined): string {
   return revision === undefined ? '' : `?revision=${encodeURIComponent(revision)}`;
 }
 
+/** A binding as this client types it: `removing` null where a server older than 0.16 says nothing of it (review r10). */
+function removal<T extends { removing?: unknown }>(binding: T): T & { removing: NonNullable<T['removing']> | null } {
+  return { ...binding, removing: (binding.removing ?? null) as NonNullable<T['removing']> | null };
+}
+
+/** What a binding's removal has left, and whether this request did any of it, when the server answered that it is under way (a 202). */
+function removingLeft(response: Response, payload: unknown): { left: number; progressed: boolean } | null {
+  if (response.status !== 202 || payload === null || typeof payload !== 'object') return null;
+  const removing = (payload as { removing?: { left?: unknown; progressed?: unknown } }).removing;
+  return typeof removing?.left === 'number' ? { left: removing.left, progressed: removing.progressed !== false } : null;
+}
+
 export function createClient(options: ClientOptions) {
   const origin = options.url.replace(/\/+$/, '');
   const transport =
@@ -148,19 +166,37 @@ export function createClient(options: ClientOptions) {
 
   async function send(method: string, path: string, input: unknown): Promise<unknown> {
     const url = new URL(`${origin}/api${path}`);
-    const headers = new Headers(await options.headers?.());
     let body: string | undefined;
     if (method === 'GET') {
       for (const [name, value] of Object.entries(input ?? {})) {
         if (value !== undefined && value !== null) url.searchParams.set(name, String(value));
       }
     } else if (input !== undefined) {
-      headers.set('content-type', 'application/json');
       body = JSON.stringify(input);
     }
+    const ask = async () => {
+      const headers = new Headers(await options.headers?.());
+      if (body !== undefined) headers.set('content-type', 'application/json');
+      const response = await transport(new Request(url, { method, headers, body }));
+      return { response, payload: await response.json().catch(() => null) as unknown };
+    };
 
-    const response = await transport(new Request(url, { method, headers, body }));
-    const payload = await response.json().catch(() => null);
+    let { response, payload } = await ask();
+    // A binding's removal not finished in one request (W331): its binding is closed, and asking again, the same
+    // request, goes on with it, as many times as it takes. Each request revokes some of what is left, so `left` falls;
+    // one that revokes nothing (made from inside another request, which has spent that request's calls already) is
+    // no further along, and asking again from there would not be either.
+    for (let before = Infinity, under = removingLeft(response, payload); under !== null; under = removingLeft(response, payload)) {
+      const { left } = under;
+      // No call made (a request inside another, its calls spent), or nothing done: asking again would do no more, though
+      // `left` may fall as credentials end on their own (Fable on #520).
+      if (!under.progressed || left >= before) {
+        throw new CoffreError(202, 'removal_under_way', `the removal is under way: ${left} left to do; ask again to go on`);
+      }
+      before = left;
+      options.onRemoving?.(left);
+      ({ response, payload } = await ask());
+    }
     if (!response.ok) {
       const error = payload as { error?: unknown; message?: unknown; reason?: unknown; touch?: { options?: unknown; state?: unknown } } | null;
       const touch = error?.touch;
@@ -353,22 +389,29 @@ export function createClient(options: ClientOptions) {
 
     /** Trust bindings: which CI runs may sign in as a service, by their platform's ID token. */
     bindings: {
-      list: (member: string) => call('GET /members/:member/bindings', { member }),
+      list: async (member: string) => {
+        const listed = await call('GET /members/:member/bindings', { member });
+        return { ...listed, bindings: listed.bindings.map(removal) };
+      },
       /** The binding as it would be saved, the keys its issuer names, and what it replaces; writes nothing. */
       preview: (member: string, input: RouteInput<'POST /members/:member/bindings'>) => {
         const [method, route] = address('POST /members/:member/bindings', { member });
         return send(method, `${route}?dryRun=1`, input) as Promise<BindingPlan>;
       },
-      create: (member: string, input: RouteInput<'POST /members/:member/bindings'>) =>
-        call('POST /members/:member/bindings', { member }, input) as Promise<{ binding: BindingView; replaced: string[] }>,
+      create: async (member: string, input: RouteInput<'POST /members/:member/bindings'>) => {
+        const made = (await call('POST /members/:member/bindings', { member }, input)) as { binding: BindingView; replaced: string[] };
+        return { ...made, binding: removal(made.binding) };
+      },
       /** The service's bindings on an issuer that new keys would replace, and the keys as checked; writes nothing. */
       previewKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) => {
         const [method, route] = address('POST /members/:member/bindings/keys', { member });
         return send(method, `${route}?dryRun=1`, input) as Promise<KeysPlan>;
       },
       /** New keys, uploaded, for every binding of the service on the issuer: each replaced by one the same but for them. */
-      replaceKeys: (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) =>
-        call('POST /members/:member/bindings/keys', { member }, input) as Promise<{ bindings: BindingView[]; replaced: string[] }>,
+      replaceKeys: async (member: string, input: RouteInput<'POST /members/:member/bindings/keys'>) => {
+        const made = (await call('POST /members/:member/bindings/keys', { member }, input)) as { bindings: BindingView[]; replaced: string[] };
+        return { ...made, bindings: made.bindings.map(removal) };
+      },
       remove: (member: string, id: string) => call('DELETE /members/:member/bindings/:id', { member, id }),
       /** A GitHub repository's or GitLab project's IDs, which bindings name: a public one's, or one the deployment's GitHub App is installed on. */
       lookup: (input: RouteInput<'GET /workloads/lookup'>) => call('GET /workloads/lookup', {}, input),

@@ -20,7 +20,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { postgres, sqlite, using, type Sql } from './database.ts';
 import { KEYS } from './fixtures.ts';
-import { drainingConfig } from './draining.ts';
+import { drainingConfig, LOCAL_RATE_LIMIT } from './draining.ts';
 import { DevIdp } from './idp/index.ts';
 import { Failure, until } from './report.ts';
 
@@ -344,6 +344,8 @@ export async function boot(kind: Kind, at: string, options: HarnessOptions): Pro
         AUDIT_ANCHOR: join(scratch, 'anchor.json'),
         APP_KEY: KEYS.APP_KEY,
         ALLOW_LOOPBACK_ISSUERS_FOR_DEVELOPMENT: 'true',
+        // A window `exchangesLimited` can fill whatever this machine's pace, as the Workers build's config has it (draining.ts).
+        SIGN_IN_PER_SOURCE: String(LOCAL_RATE_LIMIT),
         ...github,
       });
     let server = startServer();

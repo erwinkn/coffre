@@ -81,7 +81,7 @@ export async function conform(
   await report.check('instance roles', all, ({ people, canaries }) => instanceRoles(deployment, people, canaries));
   await report.check('bulk limit', { people }, ({ people }) => bulkLimit(people, options.bulkLimit));
   // A CI run signing in with its ID token, through a binding. The limit
-  // comes last of these: it spends this address's exchanges for the minute.
+  // comes last of these: it spends this address's exchanges for the window, 10 s.
   const binding = await report.check('trust a run', { admin }, ({ admin }) => trustRun(deployment, admin));
   const credential = await report.check('run signs in', { admin, canaries, binding }, ({ admin, canaries }) => runSignsIn(deployment, admin, canaries));
   await report.check('run token spent', { binding }, () => spentOnce(deployment));

@@ -19,6 +19,7 @@ import { expect, Skip } from '../report.ts';
 import { Cli } from './cli.ts';
 import { DEV, type Canaries, type Person } from './people.ts';
 import { listed } from './audit.ts';
+import { LOCAL_RATE_LIMIT } from '../draining.ts';
 
 /** The service the runs sign in as: a viewer on dev. */
 export const RUNNER = 'token:conformance-run';
@@ -236,21 +237,34 @@ export async function runUnbound(deployment: Deployment, admin: Person, bindingI
 
 /**
  * One address may exchange only so often: tokens that would be refused
- * anyway still count, before anything about them is read. Fixed windows
- * of a minute, so the 429 may wait for the next one.
+ * anyway still count, before anything about them is read. `coffre init`
+ * writes 10,000 per 10-second window (1,000 a second, W331, D177), more
+ * than a machine running the checks may send in one, so the harness runs
+ * the deployment at `LOCAL_RATE_LIMIT` a window (draining.ts: the Workers
+ * build's config, and Node's `SIGN_IN_PER_SOURCE`). In fixed windows, so
+ * the check sends malformed tokens, `AT_ONCE` at a time, until one is
+ * turned away: within two windows' worth, one of which then holds more
+ * than the limit, whatever the pace (above 11 a second). What it holds is
+ * the wiring, the limit counting before any work, not the deployment's
+ * number. `AT_ONCE` stays under the exchanges an isolate or process lets
+ * in flight (32), whose own 429 says to wait a minute.
  */
 export async function exchangesLimited(deployment: Deployment): Promise<string> {
-  const most = 200;
-  for (let sent = 1; sent <= most; sent++) {
-    const answer = await exchange(deployment, 'not.a.token');
-    if (answer.status === 429) {
-      expect(answer.reason === 'busy' && answer.retryAfter === '60', 'the 429 did not say to wait a minute', shown(answer));
-      return `a 429 after ${sent} malformed tokens from one address, and Retry-After: 60`;
+  const most = 2 * LOCAL_RATE_LIMIT + AT_ONCE;
+  for (let sent = 0; sent < most; sent += AT_ONCE) {
+    const answers = await Promise.all(Array.from({ length: AT_ONCE }, () => exchange(deployment, 'not.a.token')));
+    const limited = answers.find((answer) => answer.status === 429);
+    if (limited !== undefined) {
+      expect(limited.reason === 'busy' && limited.retryAfter === '10', 'the 429 did not say to wait for the next window, 10 seconds', shown(limited));
+      return `a 429 after at most ${sent + AT_ONCE} malformed tokens from one address, and Retry-After: 10`;
     }
-    expect(answer.status === 401 && answer.reason === 'malformed', 'a malformed token was not refused as malformed', shown(answer));
+    for (const answer of answers) expect(answer.status === 401 && answer.reason === 'malformed', 'a malformed token was not refused as malformed', shown(answer));
   }
   throw new Error(`${most} exchanges from one address, and none was turned away`);
 }
+
+/** Exchanges sent at once by `exchangesLimited`: half the 32 an isolate lets in flight. */
+const AT_ONCE = 16;
 
 /** No ID token the checks sent, nor credential they were given, in what the deployment's processes printed. */
 export async function tokensUnlogged(deployment: Deployment): Promise<string> {

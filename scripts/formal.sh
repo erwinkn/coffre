@@ -58,7 +58,6 @@ REMOVALS=(
   "Exchanging SpentTokenInsertedWithCredential SingleUse"
   "Exchanging BindingRecheckUnderHead NoExchangeAfterUnbind"
   "Exchanging MemberRecheckInExchange ExchangedAtCurrentGeneration"
-  "Exchanging RateCountUnderHead RateHeld"
   "Revoking CredentialFenceUnderHead NoReleaseAfterEnd"
   "Revoking CredentialFenceUnlocked NoReleaseAfterEnd"
   "Revoking RevokeIssuedCredentials NoReleaseAfterEnd"
@@ -450,15 +449,39 @@ REMOVALS=(
   # A binding is the vault's to make, as a token is (PR 3a): weighed on its maker's rows, held to them as read.
   "LifecycleBind IssuerLocked SensitiveOnlyFromOwners"
   "LifecycleBind IssuerCAS SensitiveOnlyFromOwners"
-  # A sign-in's binding row holds its rate; the account's row, or W242's generation at use, its removal.
-  "LifecycleSignIn BindingLocked RateHeld"
+  # One binding's sign-ins share its row, and skip a stamp of its last use another holds: none waits for another (W331).
+  "LifecycleSignIn SignInsShare SignInsRunTogether"
+  "LifecycleSignIn TouchSkipsLocked SignInsRunTogether"
+  # The account's row, or W242's generation at use, holds its removal.
   "LifecycleSignIn MemberLocked+UseChecksGeneration AllowedAtCurrentGeneration"
   "LifecycleSignIn IssueOffFence UsesNeverWaitOnIssues"
   "LifecycleSignIn RevokeTakesFence RevokeOrdersUses"
   "LifecycleReplay SpentChecked SpentOnce"
-  # An unbind sweeps what its binding issued: only all of it while the sign-in holds the row and the sweep follows its lock.
+  # An unbind sweeps what its binding issued: only all of it while the sign-ins hold the row, the unbind's lock excludes
+  # them (FOR UPDATE, which their FOR KEY SHARE waits for), and the sweep follows its lock.
   "LifecycleUnbind BindingLocked EndedBindingEndsCredentials"
+  "LifecycleUnbind UnbindExclusive EndedBindingEndsCredentials"
   "LifecycleUnbind SweepAfterLock EndedBindingEndsCredentials"
+  # A binding removed in batches (Unbinding.tla, W331): its end, complete under the row's FOR UPDATE, is what leaves no
+  # credential live; the close is what makes the removal end, sign-ins otherwise moving every end it tries; the close
+  # waits for the sign-ins sharing the row, which then refuse it; the answer waits for the end's seal (R51); the
+  # scheduled run finishes an abandoned removal; the person's request and the run, racing, revoke each credential once
+  # (each as read) and end the binding once (it still live); a closed binding serves no use meanwhile; and every revoke,
+  # the batches after the close too, takes the fence, as a request checked before the close reaches the vault after it;
+  # and a replacement makes its new binding as it closes the old one.
+  "Unbinding EndComplete EndedBindingEndsCredentials"
+  "UnbindingRace EndExclusive EndedBindingEndsCredentials"
+  "Unbinding Closes UnbindFinishes"
+  "Unbinding SignInChecksClosed NoSignInAfterClose"
+  "UnbindingRace CloseExclusive NoSignInAfterClose"
+  "Unbinding SealWait AnsweredWhenSealed"
+  "UnbindingAbandoned Resumes RemovalEnds"
+  "UnbindingRace RevokeCAS NoDoubleRevoke"
+  "UnbindingRace EndChecksLive EndsOnce"
+  "Unbinding UseChecksClosed ClosedServesNone"
+  "UnbindingRace CloseFenced RevokeOrdersUses"
+  "UnbindingRace BatchFenced RevokeOrdersUses"
+  "UnbindingReplaced MakesAtClose NoGapInTrust"
   # A database writer: what it puts back, forges or edits serves nothing while the use checks seals; a token's hash it
   # moves, nothing while the seal covers the hash (option (a)) or the app checks its MAC (option (b)), either one.
   "LifecycleForge SealChecked AllowedOnSealed"

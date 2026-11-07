@@ -202,6 +202,8 @@ const bindingCalls = prepared((db) => {
       eq(serviceBindings.principal, sql.placeholder('principal')),
       eq(serviceBindings.profile, 'cloudflare'),
       isNull(serviceBindings.revokedAt),
+      // Closed by a removal under way (W331): it takes no call from then on, as it signs nobody in.
+      isNull(serviceBindings.closedAt),
       isNotNull(serviceBindings.policy),
     ))
     .orderBy(asc(serviceBindings.createdAt), asc(serviceBindings.id));
@@ -236,6 +238,8 @@ export async function workloadCandidates(
       eq(serviceBindings.principal, principal),
       eq(serviceBindings.issuer, issuer),
       isNull(serviceBindings.revokedAt),
+      // Closed by a removal under way (W331): it signs nobody in, so it shadows no binding that would (review r6).
+      isNull(serviceBindings.closedAt),
       isNotNull(serviceBindings.policy),
       inArray(serviceBindings.profile, [...profiles]),
     ))

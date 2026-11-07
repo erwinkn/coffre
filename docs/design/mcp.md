@@ -149,12 +149,13 @@ auth: signin({
   providers: [github({ … })],
   workloads: { … },
   // MCP clients, Claude among them, may act as the people who connect them (docs/mcp.md).
-  mcp: { limits: { perSource: env.MCP_PER_SOURCE, perConnection: env.MCP_PER_CONNECTION, total: env.MCP_TOTAL } },
+  mcp: { limits: { perSource: env.SIGN_IN_PER_SOURCE } },
 }),
 ```
 
-The limits are three more rate-limiting bindings in `app/wrangler.jsonc` on
-Workers, and `processLimits()` on Node (section 4, "Admission").
+The limit is the rate-limiting binding CI sign-ins pass, in
+`app/wrangler.jsonc` on Workers, and `processLimits()` on Node (section 4,
+"Admission").
 Without `mcp`, `/mcp` and the OAuth routes answer `404` and say which
 setting turns them on.
 
@@ -346,11 +347,14 @@ neither sign-in signs the other out.
 The token is bound to the MCP resource (RFC 8707), and the scopes can't be
 dodged by calling the API directly.
 
-**Admission.** The unauthenticated endpoints (`token`, `register`, the
-consent page's CIMD fetch) pass a limiter per source address and one in
-total, before any database or network work, as the OIDC exchange does.
-Each connection's tool calls pass a limiter of their own. On Workers these
-are Cloudflare rate-limiting bindings; on Node, `processLimits()`. Bodies
+**Admission.** The unauthenticated endpoints (`token`, `register`,
+`revoke`, the consent page's CIMD fetch) pass a limiter per source
+address, each endpoint counted apart, before any database or network
+work, as the OIDC exchange does: 10,000 per 10 seconds by default, the
+same limiter (W331, D177; there is no limit in total, and none per
+connection: a connection acts as the person who approved it, whose other
+ways in have no rate). On Workers this is a Cloudflare rate-limiting
+binding; on Node, `processLimits()`. Bodies
 are read to 16 KiB at most. A token endpoint that waits on nothing slow
 answers well inside Claude's 10 seconds.
 

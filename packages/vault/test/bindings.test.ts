@@ -699,3 +699,73 @@ test("a binding's row put back after its end, its old seal and all, signs nobody
   assert.deepEqual(outcome, { ok: false, refused: 'unbound' });
   assert.equal((await db.owner.select().from(credentials)).length, none, 'nothing written');
 });
+
+test("a sweep closes the binding, revoking only the credentials it names, each a change, waiting for no seal; a closed binding signs nobody in, and the end ends it (W331, Unbinding.tla)", async () => {
+  const w = await world();
+  const made = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: made, reason: 'replaced' }))).ok);
+  const first = await signIn(w, made.id);
+  const second = await signIn(w, made.id);
+  assert.ok(first.outcome.ok && second.outcome.ok);
+  assert.equal((await w.vault.about()).sweeps, true);
+  const swept = await w.vault.changeBindings!(change({ ends: [await ending(made.id, [first.credential])], sweep: true }));
+  assert.ok(swept.ok, JSON.stringify(swept));
+  assert.equal(swept.witnessed, null, 'no seal waited for');
+  // Closed, not ended: no change of the binding's; the one named revoked, the other still live.
+  assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make']);
+  assert.deepEqual(await ops({ kind: 'credential', id: first.credential }), ['credential.issue', 'credential.revoke']);
+  assert.deepEqual(await ops({ kind: 'credential', id: second.credential }), ['credential.issue']);
+  const { serviceBindings } = tablesOf(db.owner);
+  const [row] = await db.owner.select({ closedAt: serviceBindings.closedAt, revokedAt: serviceBindings.revokedAt }).from(serviceBindings).where(eq(serviceBindings.id, made.id));
+  assert.deepEqual([row!.closedAt !== null, row!.revokedAt], [true, null]);
+  assert.deepEqual((await signIn(w, made.id)).outcome, { ok: false, refused: 'unbound' });
+  // A sweep of none closes again, changing nothing; then the end, the rest named.
+  assert.ok((await w.vault.changeBindings!(change({ ends: [await ending(made.id, [])], sweep: true }))).ok);
+  const ended = await w.vault.changeBindings!(change({ ends: [await ending(made.id)] }));
+  assert.ok(ended.ok, JSON.stringify(ended));
+  assert.deepEqual(await ops({ kind: 'binding', id: made.id }), ['binding.make', 'binding.revoke']);
+  assert.deepEqual(await ops({ kind: 'credential', id: second.credential }), ['credential.issue', 'credential.revoke']);
+});
+
+test('a sweep closes and revokes, and ends nothing: one with none to close is no sweep (W331)', async () => {
+  const w = await world();
+  await assert.rejects(w.vault.changeBindings!(change({ make: binding(w), reason: 'replaced', sweep: true })), /a change of bindings names/);
+  await assert.rejects(w.vault.changeBindings!(change({ ends: [], sweep: true })), /a change of bindings names/);
+});
+
+test("a replacement's sweep makes its binding as it closes the one it replaces, weighed on its maker's standing: a demoted maker's sweep closes, revokes and makes nothing (reviews r4, r9)", async () => {
+  const w = await world();
+  const old = binding(w);
+  assert.ok((await w.vault.changeBindings!(change({ make: old, reason: 'replaced' }))).ok);
+  const run = await signIn(w, old.id);
+  assert.ok(run.outcome.ok);
+  // As the Owner, weighed: the old one closed and its batch revoked, the new one made in the same statement, so that no
+  // request that stops after it leaves the old closed and nothing in its place (Unbinding.tla's MakesAtClose).
+  const next = binding(w);
+  const swept = await w.vault.changeBindings!(change({ make: next, live: [old.id], ends: [await ending(old.id)], reason: 'replaced', sweep: true }));
+  assert.ok(swept.ok, JSON.stringify(swept));
+  assert.deepEqual(await ops({ kind: 'binding', id: next.id }), ['binding.make']);
+  assert.deepEqual(await ops({ kind: 'credential', id: run.credential }), ['credential.issue', 'credential.revoke']);
+  const { serviceBindings } = tablesOf(db.owner);
+  const [made] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, next.id));
+  assert.ok(made !== undefined && made.revokedAt === null && made.closedAt === null);
+  const [closed] = await db.owner.select().from(serviceBindings).where(eq(serviceBindings.id, old.id));
+  assert.ok(closed!.closedAt !== null && closed!.revokedAt === null, 'the old one closed, not ended');
+  // A maker whose access moved since the app weighed it (a demotion, say): the sweep refused, nothing closed or revoked.
+  const other = binding(w);
+  // Beside every binding not ended: the old one, closed, and the one its sweep made.
+  assert.ok((await w.vault.changeBindings!(change({ make: other, live: [old.id, next.id], reason: 'replaced' }))).ok);
+  const second = await signIn(w, other.id);
+  assert.ok(second.outcome.ok);
+  const { vaultMembers } = tablesOf(db.owner);
+  const [{ accessSeq }] = (await db.owner.select({ accessSeq: vaultMembers.accessSeq }).from(vaultMembers).where(eq(vaultMembers.principal, ROOT))) as [{ accessSeq: bigint }];
+  const refusedMake = binding(w);
+  const stale = await w.vault.changeBindings!(change({
+    make: refusedMake, live: [old.id, next.id, other.id], ends: [await ending(other.id)], reason: 'replaced', sweep: true, actorAccess: String(BigInt(accessSeq) + 1n),
+  }));
+  assert.equal(!stale.ok && stale.refused, 'access');
+  const [row] = await db.owner.select({ closedAt: serviceBindings.closedAt }).from(serviceBindings).where(eq(serviceBindings.id, other.id));
+  assert.equal(row!.closedAt, null);
+  assert.deepEqual(await ops({ kind: 'credential', id: second.credential }), ['credential.issue']);
+  assert.deepEqual(await ops({ kind: 'binding', id: refusedMake.id }), []);
+});

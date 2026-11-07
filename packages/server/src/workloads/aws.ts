@@ -254,12 +254,12 @@ export function matchAwsBinding(bindings: readonly BindingRow[], identity: AwsId
   return bindings.find((row) => row.profile === 'aws' && differingClaims('aws', JSON.parse(row.claims), claims).length === 0) ?? null;
 }
 
-/** A service's live `aws` bindings. */
+/** A service's live `aws` bindings, but those a removal under way closed (W331): they sign nobody in, and shadow none. */
 async function awsBindings(ctx: ProofContext): Promise<BindingRow[]> {
   const standing = await memberStanding(ctx.db, ctx.service);
   if (standing === null || standing.status !== 'active') return [];
   const live = await liveBindings(ctx.db, ctx.chainKey, ctx.service, standing.generation);
-  return live.filter((row) => row.profile === 'aws' && row.issuer === PROFILE_URNS.aws && row.policy !== null);
+  return live.filter((row) => row.profile === 'aws' && row.issuer === PROFILE_URNS.aws && row.policy !== null && row.closedAt === null);
 }
 
 export type AwsProofOptions = {

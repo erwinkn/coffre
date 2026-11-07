@@ -235,6 +235,11 @@ export interface Vault {
     /** `true` when the vault makes and ends trust bindings itself, and signs in through none it did not seal (`changeBindings`; T149, PR 3a). Absent otherwise. */
     binds?: true;
     /**
+     * `true` when `changeBindings` takes a sweep (`sweep`; W331): a removal in batches, the binding closed first. Of a
+     * vault older than this app, mid-deploy, the app ends a binding in one call, as before. Absent otherwise.
+     */
+    sweeps?: true;
+    /**
      * `true` when the vault decides a key write on one read of its own (`writeKeys`; T179 PR 3): its log is 0.15's, on
      * Postgres, its key-encryption key held in memory. Said here, as a Worker's stub answers any method's name: of a
      * vault older than this app, mid-deploy, the app writes as before. Absent otherwise.
@@ -376,12 +381,13 @@ export interface Vault {
   /**
    * 0.15 (T149, D146; docs/design/credential-lifecycle.md): a sign-in
    * through a trust binding, a CI run's or a workload's, made by the vault
-   * in one statement (`sign_in`, migration 0034; formal/Lifecycle.tla).
+   * in one statement (`sign_in`, migrations 0037, 0076; formal/Lifecycle.tla).
    * The app verifies the proof and names the binding as it read it; the
    * vault makes the credential's object from those columns, and the
    * statement goes ahead only while they are the binding's row, its
-   * account active at its generation, its rate not spent and the token
-   * not, under their locks: the issue lock, never the fence, so no use
+   * account active at its generation and the token not spent, under their
+   * locks (the binding's shared with its other sign-ins, W331): the issue
+   * lock, never the fence, so no use
    * waits on it (R58), and no 0.14 head. No 0.14 entry either: the change
    * records the sign-in (D147). Answers once it is sealed (R51). Only with
    * 0.15's log on.
@@ -1017,6 +1023,19 @@ export type ChangeBindingsInput = {
   ends: EndedBinding[];
   /** Why they end, for the changes' record. */
   reason: 'replaced' | 'keys_moved' | 'unbound';
+  /**
+   * A sweep (W331; formal/Unbinding.tla): `ends` are closed, not ended (no sign-in through them from then on), and the
+   * credentials they name revoked, each still as named; their other live ones are left to the next call. It makes
+   * nothing, and answers once committed, unsealed: the end that follows waits for its seal, which covers these. Only
+   * of a vault whose `about()` says `sweeps`.
+   */
+  sweep?: boolean;
+  /**
+   * The scheduled run going on with a removal a request left under way (W331): then `actor` is `system:schedule`,
+   * `make` null, and this names who asked (their principal) and when the binding was closed (ms), which each change
+   * records.
+   */
+  continues?: { by: string; at: number };
   revokedAt: number;
   revokedBy: string;
   /** The policy the app weighed on: the newest `policy.change`'s seq and the protected environments' slugs. */
@@ -1097,8 +1116,8 @@ export type SignInCredential = {
 
 /**
  * Why a sign-in made nothing, the statement's own words: the account or
- * the binding not as named, frozen, its rate spent (or a lock not had in
- * time), its times past or too far, the token spent, the app's key one it
+ * the binding not as named, frozen, busy (a lock not had in time), its
+ * times past or too far, the token spent, the app's key one it
  * rotated from.
  */
 /** Why a sign-in made nothing; `unsealed`: its binding is none the vault sealed (one 0.14 made, or a row not its object), which signs nobody in (PR 3a). */
@@ -1839,6 +1858,14 @@ export const USE_DEADLINE_MS = 3000;
  */
 export const HOT_LOCK_TIMEOUT_MS = 1000;
 export const HOT_STATEMENT_TIMEOUT_MS = 2000;
+
+/**
+ * A vault's pool's connections, unless its transport says (pg's default), and so the uses an isolate or process has in
+ * flight at most unless set (`useLimits`): past it, a use is refused at once as `overloaded` (R44). A binding's removal
+ * holds the fence each use shares for no longer than that many uses arriving at R44's rate take (W331; the server's
+ * api/workloads.ts, `FENCE_BUDGET_MS`), so that none of them is refused behind it.
+ */
+export const DEFAULT_CONNECTIONS = 10;
 
 /** A use's request id: 63 random bits, as text, unique within its millisecond (hot-path-one.md, "Row size"). */
 export function newUseRequestId(): string {

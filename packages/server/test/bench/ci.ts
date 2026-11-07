@@ -9,10 +9,8 @@
 // jobs of one run sign in as one service at once, as a market Build's do.
 // It reports each phase's wall time, p50 and p99, its statements, and the
 // time its statements spent in the database beyond the round trip:
-// waiting on locks, almost all of it, and which statements waited. A
-// binding issues at most 60 credentials a minute, so the service is bound
-// afresh before a round would pass that, and a level runs at most 60 jobs
-// at once. With 5 to 15 runs a level, its p99 is its slowest run.
+// waiting on locks, almost all of it, and which statements waited. With 5
+// to 15 runs a level, its p99 is its slowest run.
 // With `--log 0.15`, the vault keeps 0.15's log: the sign-in's credential is a change of it, which a Node
 // checkpointer seals before the sign-in answers (R51; docs/design/0.15-plan.md, "As built: PR 4b"), over its own
 // connection, near; and each vault call has the hot path's login too, so that a job's reveal is 0.15's uses, as a
@@ -42,8 +40,11 @@
 // `--issue` makes each job a service token's issue by the Owner instead (T149, PR 2), the vault weighing it: what a burst
 // of issues costs beside the uses. `--legacy` hides from the app that the vault issues tokens and signs in (`about()`
 // says neither): the app's own transactions under 0.14's head, as before T149, to compare with.
-// `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own: a binding
-// takes at most 60 sign-ins a minute, so 100 at once are two bindings' (with 0.15's log, each serializes on its row).
+// `--bindings <n>` spreads a level's jobs over n bindings of the one service, each a workflow of its own (with 0.15's
+// log, a binding's sign-ins share its row, W331).
+// `--unbind <n>`, after the levels, signs n runs in through one binding, then removes it while the uses beside run: what
+// a removal in batches (W331, `UNBIND_BATCH` a call, each holding the fence) costs the hot path, reported as the uses of
+// its own phase, `unbind`, beside `--jobs 0`'s, which holds none.
 // `--days <n>` attaches the log's days back to n days ago, empty, as an instance that keeps every day has them attached
 // (T187's measure): what a use costs as the log ages (R48, T207).
 // Not part of the suite. On a migrated scratch database, as `pnpm test` makes:
@@ -71,7 +72,7 @@ import { localVault, spoken, runCheckpointer, type SpokenVault, type RunningChec
 import { sql } from 'drizzle-orm';
 
 import { resolveConfig } from '../../src/config.ts';
-import { EXCHANGES_PER_BINDING_MINUTE, exchangeLimit } from '../../src/api/workloads.ts';
+import { exchangeLimit, UNBIND_BATCH } from '../../src/api/workloads.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { processLimits } from '../../src/workloads/limits.ts';
 import { FetchRefused, type WorkloadTransport } from '../../src/workloads/transport.ts';
@@ -117,12 +118,14 @@ const { values } = parseArgs({
     cgroup: { type: 'string' },
     bindings: { type: 'string', default: '1' },
     days: { type: 'string', default: '0' },
+    unbind: { type: 'string', default: '0' },
   },
 });
 const RTT = Number(values.rtt);
 const ROUNDS = Number(values.rounds);
 const JOBS = values.jobs.split(',').map(Number);
 const USES = Number(values.uses);
+const UNBIND = Number(values.unbind);
 const SIGNIN_ONLY = values['signin-only'];
 const ISSUE = values.issue;
 const PROXY = Number(values.proxy);
@@ -305,7 +308,7 @@ try {
   const config = resolveConfig({
     publicUrl: ORIGIN,
     vault: entryOf(vaultFor(newCost())),
-    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1_000_000, total: 1_000_000 }) } }),
+    auth: signin({ providers: [github({ clientId: 'a', clientSecret: 'b' })], workloads: { limits: processLimits({ perSource: 1_000_000 }) } }),
     auditChainKey: deps.chainKey.toString('base64'),
     plugins: [auditWatch({ anchor: deps.anchor })],
   });
@@ -317,24 +320,17 @@ try {
   await root.secrets.set('ci/dev', Object.fromEntries(keys.map((key) => [key, `${key.toLowerCase()}-value`])));
   await root.members.add(MEMBER);
   await root.access.set(MEMBER, { 'ci/dev': 'viewer' });
-  /** Each workflow's binding, and the sign-ins it has left this minute: a round that would pass them binds afresh, replacing it. */
-  const bindings = Array.from({ length: BINDINGS }, () => ({ id: null as string | null, left: 0 }));
-  const bind = async (n: number) => {
-    const held = bindings[n]!;
-    const made = await setup.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: claimsOf(n), label: `build-${n}`, replaces: held.id === null ? [] : [held.id] }, { dryRun: false });
-    if (!('binding' in made)) throw new Error('bind');
-    held.id = made.binding.id;
-    held.left = EXCHANGES_PER_BINDING_MINUTE;
-  };
-  /** `jobs` sign-ins, job i through binding i mod `--bindings`, each binding with them left. */
+  /** Each workflow's binding, made once: a binding takes as many sign-ins as its runs ask (W331, D177). */
+  const bound = new Set<number>();
+  /** `jobs` sign-ins, job i through binding i mod `--bindings`, each binding made before its first. */
   const room = async (jobs: number) => {
     // An issue signs nothing in through a binding.
     if (ISSUE) return;
-    for (let n = 0; n < BINDINGS; n += 1) {
-      const share = Math.ceil((jobs - n) / BINDINGS);
-      if (share > EXCHANGES_PER_BINDING_MINUTE) throw new Error(`a binding takes at most ${EXCHANGES_PER_BINDING_MINUTE} sign-ins a minute: run at most that many jobs a binding at once`);
-      if (bindings[n]!.left < share) await bind(n);
-      bindings[n]!.left -= share;
+    for (let n = 0; n < Math.min(jobs, BINDINGS); n += 1) {
+      if (bound.has(n)) continue;
+      const made = await setup.workloads!.bind(await contextFor(deps, ROOT), SERVICE, { profile: 'github', issuer: null, claims: claimsOf(n), label: `build-${n}`, replaces: [] }, { dryRun: false });
+      if (!('binding' in made)) throw new Error('bind');
+      bound.add(n);
     }
   };
 
@@ -531,6 +527,25 @@ try {
       );
       for (const [what, waited] of [...waits].sort((a, b) => b[1] - a[1]).slice(0, 3)) console.log(`         ${(waited / runs.length).toFixed(0).padStart(5)} ms/run  ${what}`);
     }
+  }
+  if (UNBIND > 0) {
+    await room(1);
+    const started = performance.now();
+    // As many at once as an isolate lets exchanges in flight, less a few.
+    for (let made = 0; made < UNBIND; made += 24) {
+      for (const { body } of await Promise.all(Array.from({ length: Math.min(24, UNBIND - made) }, () =>
+        request(() => new Request(`${ORIGIN}/api/auth/oidc`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ service: MEMBER, token: token(0) }) }))))) {
+        if (typeof (body as { token?: unknown }).token !== 'string') throw new Error(`a sign-in refused: ${JSON.stringify(body)}`);
+      }
+    }
+    const [{ id }] = await db.owner.execute(sql`SELECT id::text AS id FROM service_bindings WHERE label = 'build-0' AND revoked_at IS NULL`) as unknown as [{ id: string }];
+    console.log(`${UNBIND} runs signed in through one binding in ${((performance.now() - started) / 1000).toFixed(1)} s; its removal, uses beside:`);
+    await usesIn('unbind');
+    const removing = performance.now();
+    await setup.workloads!.unbind(await contextFor(deps, ROOT), SERVICE, id);
+    const took = performance.now() - removing;
+    await usesIn(null);
+    console.log(`removed in ${took.toFixed(0)} ms, ${Math.ceil(UNBIND / UNBIND_BATCH)} calls of ${UNBIND_BATCH} at most`);
   }
   if (proxies.length > 0) {
     const reports = await Promise.all(proxies.map((worker) => {

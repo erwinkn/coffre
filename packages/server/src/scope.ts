@@ -33,6 +33,8 @@ export function requestScope(
   runtime: CoffreRuntime,
   sourceIp: (request: Request) => string | null,
   track: (work: Promise<unknown>) => void = () => {},
+  /** What each of its calls runs inside: on Workers, the invocation's count of its vault calls (removal.ts). */
+  within: <T>(work: () => T) => T = (work) => work(),
 ): CoffreRequest {
   const tracked = <T>(work: Promise<T>): Promise<T> => {
     track(work);
@@ -41,15 +43,15 @@ export function requestScope(
   return {
     route: (request) =>
       tracked(
-        (async () => {
+        within(async () => {
           try {
             return (await coffreRoute(request, runtime, sourceIp(request))) ?? errorResponse(new ApiError('not_found', 'no such path'));
           } catch (error) {
             return errorResponse(error);
           }
-        })(),
+        }),
       ),
-    respond: (request, render) => tracked(respond(request, runtime, sourceIp(request), render)),
+    respond: (request, render) => tracked(within(() => respond(request, runtime, sourceIp(request), render))),
   };
 }
 

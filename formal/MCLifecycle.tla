@@ -9,8 +9,8 @@ EXTENDS Lifecycle
 IssueProcs == {"ada", "admin", "rev", "u1"}
 IssueOps == [p \in IssueProcs |-> CASE p = "admin" -> {"demote"} [] p = "rev" -> {"cA", "t"} [] OTHER -> {}]
 
-\* Two CI runs sign in through one binding, at most one a window, with one
-\* ID token (replayed) or two, while svc is removed (and admitted again) or
+\* Two CI runs sign in through one binding at once, with one ID token
+\* (replayed) or two, while svc is removed (and admitted again) or
 \* a credential revoked; a use presents whichever token went out.
 SignInProcs == {"s1", "s2", "admin", "rev", "u1"}
 SignInOps == [p \in SignInProcs |->
@@ -20,13 +20,15 @@ SignInOps == [p \in SignInProcs |->
       [] p = "rev" -> {"x1", "cS"}
       [] OTHER -> {}]
 
-\* One ID token presented twice, by two runs, the binding's rate room for both.
+\* One ID token presented twice, by two runs at once.
 ReplayProcs == {"s1", "s2", "u1"}
 ReplayOps == [p \in ReplayProcs |-> CASE p \in {"s1", "s2"} -> {[tok |-> "j1", b |-> "b", evil |-> FALSE, aud |-> "us"]} [] OTHER -> {}]
 
-\* A run signs in while a manager unbinds its binding; a use of what it got.
-UnbindProcs == {"s1", "ub", "u1"}
-UnbindOps == [p \in UnbindProcs |-> CASE p = "s1" -> {[tok |-> "j1", b |-> "b", evil |-> FALSE, aud |-> "us"]} [] OTHER -> {}]
+\* Two runs sign in through one binding, sharing its row, while a manager
+\* unbinds it; a use of what either got.
+UnbindProcs == {"s1", "s2", "ub", "u1"}
+UnbindOps == [p \in UnbindProcs |-> CASE p = "s1" -> {[tok |-> "j1", b |-> "b", evil |-> FALSE, aud |-> "us"]}
+                                       [] p = "s2" -> {[tok |-> "j2", b |-> "b", evil |-> FALSE, aud |-> "us"]} [] OTHER -> {}]
 
 \* A manager revokes svc's token while an admin takes the right away; a use of it.
 RevokeProcs == {"rev", "admin", "u1"}

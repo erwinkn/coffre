@@ -12,6 +12,7 @@ import { CoffreWorkload } from './cloudflare-workload.ts';
 import type { Gates } from './gate.ts';
 import { takesSocket } from './plugins.ts';
 import { createRuntime, watchOf } from './runtime.ts';
+import { countedEntry, countingCalls, workersRemovalBudget } from './removal.ts';
 import { requestScope, type CoffreContext } from './scope.ts';
 import { admitSocket } from './socket-admission.ts';
 import { fetchTransport } from './workloads/transport.ts';
@@ -85,10 +86,13 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
     // A request's plain reads asked together go under one Sync, a round trip for them all: a page's calls read side by side.
     const pool = new HyperdrivePool(entry.config.database.hyperdrive.connectionString, { groupReads: true });
     const left: Promise<unknown>[] = [];
-    const runtime = createRuntime(entry.resolved, createDatabase(pool), versioned(entry.config.vault), fetchTransport(), (promise) => {
+    // Every call to the vault counted for this invocation: it makes 32 at most (removal.ts), which a binding's removal is
+    // held to. The vault is the isolate's one still (`countedEntry`); the count is this invocation's (`counter.run`).
+    const counter = countingCalls();
+    const runtime = createRuntime(entry.resolved, createDatabase(pool), versioned(countedEntry(entry.config.vault)), fetchTransport(), (promise) => {
       left.push(promise);
       ctx.waitUntil(promise);
-    }, entry.gates);
+    }, entry.gates, workersRemovalBudget(counter.calls));
     let closing: Promise<void> | undefined;
     /**
      * Close the client once `work`, and whatever the invocation left to
@@ -103,17 +107,17 @@ export function createCoffre<Env>(configure: (env: Env) => WorkersConfig): Coffr
       })();
       ctx.waitUntil(closing);
     };
-    return { runtime, close };
+    return { runtime, close, counter };
   }
 
   return {
     request(env, ctx) {
-      const { runtime, close } = runtimeFor(env, ctx);
-      return { coffre: requestScope(runtime, cloudflareSourceIp, close) };
+      const { runtime, close, counter } = runtimeFor(env, ctx);
+      return { coffre: requestScope(runtime, cloudflareSourceIp, close, counter.run) };
     },
     async scheduled(_controller, env, ctx) {
-      const { runtime, close } = runtimeFor(env, ctx);
-      const ran = runScheduled(runtime);
+      const { runtime, close, counter } = runtimeFor(env, ctx);
+      const ran = counter.run(() => runScheduled(runtime));
       close(ran);
       await ran;
     },

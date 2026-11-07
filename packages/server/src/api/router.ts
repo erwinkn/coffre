@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { AccessChanged } from '../accesses.ts';
 import type { ResolvedPath } from '../db/queries.ts';
 import { errorResponse, jsonResponse, readJson } from '../http.ts';
+import { RemovalUnderWay } from '../removal.ts';
 import { can, placeOf } from './caller.ts';
 import { denied, missing, refuse, Refusal, type ApiContext } from './context.ts';
 import { ApiError, badRequest, CALLER_HEADER, callerName, forbidden, notFound } from './errors.ts';
@@ -286,6 +287,9 @@ export async function serveApi(request: Request, ctx: ApiContext): Promise<Respo
 
     return jsonResponse(await def.run(ctx, { params: found.params, place, input, query } as never));
   } catch (error) {
+    // A binding's removal past what this request may spend (removal.ts): accepted, under way, its binding closed. The
+    // caller asks again to go on (the pages and the CLI do), or the scheduled run does.
+    if (error instanceof RemovalUnderWay) return jsonResponse({ removing: { left: error.left, progressed: error.progressed } }, 202);
     // Decided on a kept answer about the caller that is not the vault's now: answered by whoever starts it over.
     if (error instanceof AccessChanged) throw error;
     return errorResponse(error);

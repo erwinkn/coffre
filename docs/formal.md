@@ -357,9 +357,10 @@ Each CI run holds an ID token, good for one credential.
   1. the live bindings, unlocked;
   2. whether the token is spent, a read;
   3. the vault's answer about the account;
-  4. then, under the head, the account and the binding again, the
-     binding's rate, the token spent, the credential issued and
-     `token.exchange` logged.
+  4. then, under the head, the account and the binding again, the token
+     spent, the credential issued and `token.exchange` logged. No count
+     of the binding's credentials (W331, D177: its rate, `RateHeld`, went
+     with it).
 - **Using a credential** (`signin.ts`, `verify`; `secrets.ts`, `reveal`;
   `context.ts`, `recorded`):
   1. its row, unlocked;
@@ -403,7 +404,6 @@ Each CI run holds an ID token, good for one credential.
 | The exchange spends the ID token in the transaction that issues its credential, a primary key on its hash (`exchangeToken`) | one ID token bought two credentials (`SingleUse`) | |
 | It reads its binding again under the head (`exchangeStill`) | a credential issued after its binding's `token.unbind` (`NoExchangeAfterUnbind`) | |
 | And the account, in the same read (`exchangeStill`) | a credential at a generation a removal had moved past (`ExchangedAtCurrentGeneration`) | |
-| The binding's rate is counted under the head, in it too (`exchangeStill`) | more credentials in the minute than the rate (`RateHeld`) | |
 | Once the vault has released, the app reads the credential and the member's generation again before it answers (`credentialStill`), under the head when it appends a use of its own (a vault older than 0.14.5, plain values only, or a record too long for the vault) | a value released through a token revoked after it was checked (`NoReleaseAfterEnd`) | this model, fixed with it |
 | And with no lock for an export, and for a use the vault appended, which commit nothing more | the same, by an export (`NoReleaseAfterEnd`) | this model, fixed with it |
 | Untrusting or replacing a binding revokes the credentials it issued (`#revoke`) | the same, through a credential whose binding was untrusted (`NoReleaseAfterEnd`) | |
@@ -785,7 +785,6 @@ batch's buffers its gate's and its keys' lone uses', its own 16 flat from
 | `NoExchangeAfterUnbind` | No exchange through a binding follows its `token.unbind` in the log |
 | `ExchangedAtCurrentGeneration`, `TokensAtCurrentGeneration` | A credential is issued to an active account, at its generation when it commits |
 | `IssuedAsAuthenticated` | And by the membership its request came in as |
-| `RateHeld` | A binding issues no more than its rate |
 | `NoReleaseAfterEnd` | No value reaches a caller through a credential whose release, the vault's `secret.read`, follows the entry that ended it: its `token.revoke`, its binding's `token.unbind`, or a removal past its generation |
 | `UnboundStayUnusable` | A credential an untrusted or replaced binding issued never verifies again |
 | `NoReadOnStaleAnswer` | No `secret.read` is logged on an answer of the vault's kept from an earlier request that is no longer its answer |
@@ -808,7 +807,7 @@ batch's buffers its gate's and its keys' lone uses', its own 16 flat from
 
 | Scenario | Who runs what | States |
 |---|---|---|
-| `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 112 thousand |
+| `Exchanging` | Two runs present one ID token at once, and each another of its own, while an owner untrusts the binding, replaces its keys, or removes the account and admits it again | 81 thousand |
 | `Revoking` | A run reads through its token, by the proxy or an export, and through an exchanged credential, on the vault's answer or one kept from an earlier request, while an owner revokes, untrusts, replaces keys or removes the account, and another admits it again | 162 thousand |
 | `Proxying` | A reader uses its token through the credential proxy alone, its use logged by the vault or by the app, while an owner revokes the token or removes the account: each fence shown needed on the proxy's own path | 505 |
 | `Revoking015` | `Revoking` with 0.15's reads: each one use, deciding on the rows as they are and logging its request. It states no `NoReadOnStaleAnswer`: a kept answer is no input of a use, whose entry is the request whatever it decides | 82 thousand |
@@ -1940,9 +1939,11 @@ svc's CI through the vault, an issue that commits a binding, while she is
 demoted; a run signs in through it; a bind that replaces another, which
 takes the ended rows exclusive and then, under the issue lock shared, the
 fence, is the lock pattern `Migration015.tla`'s `Mixed` checks free of wait
-cycles), `LifecycleSignIn`,
+cycles), `LifecycleSignIn` (two runs through one binding at once, while
+the account is removed, or a credential revoked),
 `LifecycleReplay` (one ID token
-presented twice), `LifecycleUnbind`, `LifecycleRevoke` (a manager's revoke
+presented twice), `LifecycleUnbind` (two runs through one binding at once
+while a manager unbinds it), `LifecycleRevoke` (a manager's revoke
 while an admin takes the right away), `LifecycleForge`,
 `LifecycleCompromised` and `LifecycleFetched` (the same, binding b's keys
 published by its issuer: the vault, which fetches nothing, takes the app's
@@ -1957,8 +1958,12 @@ word for its tokens).
 | an issue's write goes ahead only on the objects its read decided on (IssuerCAS) | `SensitiveOnlyFromOwners`, `IssuedByLiveCredential` |
 | an issue compares the policy under the issue lock shared, which a policy change takes exclusive (IssuePolicyHeld) | `SensitiveOnlyFromOwners`: a change narrowing the issuer's role, her row untouched, commits between the check and the number |
 | a policy change takes the issue lock before the fence (PolicyIssueFirst) | `UsesNeverWaitOnIssues`: it holds the fence while it waits for an issue, and a use waits behind it |
-| a sign-in holds its binding's row exclusive (BindingLocked) | `RateHeld`; `EndedBindingEndsCredentials` |
+| a sign-in holds its binding's row to its commit (BindingLocked) | `EndedBindingEndsCredentials` |
+| ... shared, `FOR KEY SHARE`, which its other sign-ins share (SignInsShare; W331: `FOR UPDATE` before) | `SignInsRunTogether`: a sign-in waits for another through its binding |
+| an unbind takes the binding's row exclusive, `FOR UPDATE`, which waits for every sign-in sharing it (UnbindExclusive) | `EndedBindingEndsCredentials`: a sign-in commits its credential after the unbind's sweep read the binding's live ones, and serves a use numbered after the unbind |
 | an unbind sweeps once it holds the binding's row (SweepAfterLock) | `EndedBindingEndsCredentials` |
+| (the unbind here is a removal's end; [Unbinding.tla](#unbindingtla) models the close and the sweeps before it) | |
+| a sign-in stamps its binding's `last_used_at` only when a minute old, under the row's update lock, which `FOR KEY SHARE` shares, and skips it when another holds it (TouchSkipsLocked; `SKIP LOCKED`) | `SignInsRunTogether`: a sign-in waits for another's stamp to commit |
 | the ID token spent by a unique insert (SpentChecked) | `SpentOnce` |
 | the account's row shared (MemberLocked) and W242's generation at use (UseChecksGeneration), each covering for the other | `AllowedAtCurrentGeneration` without both |
 | the use checks seals (SealChecked) | `AllowedOnSealed` |
@@ -1976,10 +1981,173 @@ app's to check. `EXPECTED`: `LifecycleFetched` breaks
 signing a run in through b with a token nobody signed: the gap the design
 accepts (docs/design/credential-lifecycle.md, section 4b).
 
+Why `FOR KEY SHARE` and not `FOR SHARE` (W331): the stamp's `UPDATE`
+takes `FOR NO KEY UPDATE`, which `FOR SHARE` excludes. Under `FOR SHARE`,
+a sign-in arriving while another stamps the row would wait for that
+one's commit, and the stamp, skipped (`SKIP LOCKED`) whenever another
+sign-in shares the row, would go unwritten as long as sign-ins overlap.
+`FOR KEY SHARE` waits only for `FOR UPDATE`, which `change_bindings` takes
+on every binding it ends; the other writers of a binding's row change
+nothing a sign-in weighs (migration 0076 lists them). One binding's
+sign-ins, measured on the compose Postgres with `pgbench` calling
+`sign_in` itself, 50 at once: 1,412 a second at 35 ms each before (one at
+a time), 27,937 at 1.8 ms after.
+
 **Not modelled:** the checkpointer's barrier and R51's wait beyond the
-revoke's answer (HotPathOneIssue's), Postgres's lock queue (HotPathOne's),
-the proof's claims and the binding's match, and a removal's sweep beyond one
-step.
+revoke's answer (HotPathOneIssue's), Postgres's lock queue (HotPathOne's;
+here, that sharers who keep coming can hold an unbind's `FOR UPDATE` off:
+measured, it waits at most a few ms at 5,000 sign-ins a second on one
+binding, and past a second only near 28,000, Postgres's own ceiling, when
+it is asked again), a minute passing again (the same race as the first),
+the proof's claims and the binding's match, and a removal's sweep beyond
+one step.
+
+### Unbinding.tla
+
+A binding's removal when its sign-ins keep coming (W331, D177). With no
+count of a binding's sign-ins, its live credentials can outgrow one vault
+call: an unbind names each, with the app's new MAC, and Node's vault
+transport takes 8 MiB, about 15,000 of them (550 bytes each, measured);
+one revoke under the fence also makes every use wait about 0.08 ms a
+credential. So the app removes a binding in steps (`#bindingsByVault`,
+`change_bindings`' sweep, migration 0076), each a statement of its own:
+
+1. **read** the binding's live credentials, no lock;
+2. **sweep**, while more than a batch is live (`UNBIND_BATCH`, 125, from
+   the fence, and half a vault message of serialized bytes, as a
+   credential's scope may be wide; the app reads a batch and one more by
+   id and size alone, soonest to end first through `credentials_live_idx`,
+   which a revoked credential leaves, from where the last batch ended, then
+   only the chosen rows whole): the binding's row `FOR UPDATE`, which waits for every
+   sign-in sharing it; a replacement's sweep is weighed and held to its
+   maker's rows as its make is, and makes nothing;
+   the binding closed (`closed_at`), which `sign_in`'s `WHERE` drops, so
+   a closed binding's sign-ins take no lock and are refused (`unbound`),
+   and which the app's sign-in reads of the candidates leave out, so it
+   shadows no other binding the run matches;
+   a batch of what was read revoked, under the fence, waiting for no seal;
+   read again;
+3. **end**, a batch or fewer left: the row `FOR UPDATE`, every live
+   credential named or `moved` (then closed by a sweep of none, and read
+   again), all revoked and the binding ended in one commit;
+4. **answer** once the end's change is sealed (R51): the checkpointer
+   seals a prefix of the log, so every sweep's revoke is sealed with it.
+
+Two removers take these steps, the same way: the person's request (`ub`),
+and the scheduled run (`rs`), which every beat goes on with each binding
+a removal left closed and not ended (`resumeRemovals`), as the system
+(`system:schedule`), each change naming whom it continues and when that
+removal closed the binding. A request may stop between two steps: a crash,
+or, on Workers, what one request may spend (`removal.ts`): 32 invocations
+(each vault call one, counted, not guessed: `countedEntry`, the isolate's
+one entry, each invocation counting its own calls), and a call's
+10 ms of CPU, Workers Free's hard limit, so a batch there is 114
+credentials and a request makes two such calls (`WORKERS_BATCH`,
+`WORKERS_BATCHES`, derived from the CPU each costs, measured), then
+answers 202 `{ removing: { left } }`, `left` what the request still has to
+do (credentials to revoke and bindings to end, across every binding it
+ends), which falls with each request that does any of it. Asked again (the
+client asks again, the same request, while `left` falls), or never asked
+again, the binding stays closed and the next step picks up the
+credentials still live. On Node nothing bounds a request, and a removal
+ends in one. A replacement makes its new binding in its first call, the
+one that closes the old (`MakesAtClose`): its request answers once that
+is in, and what is left is the old one's removal, which the request goes
+on with where nothing bounds it (Node) and the scheduled run finishes
+where it does (Workers). So no request that stops leaves the old binding
+closed and nothing in its place (`NoGapInTrust`, `UnbindingReplaced`),
+which a make held to the old one's end did: there the scheduled run
+ended the old one, and the request asked again found nothing to replace
+(reviews r8, r9). Errors after the make are logged, not answered: asked
+again, a replacement would make another binding. The make's entries go
+in the app's log with it; the tombstones of those it replaces only with
+their end, as a tombstone before would have the app refuse a credential
+the vault still takes (review r10). The 16-binding cap counts open
+bindings, as a replacement's closed one waits for its end beside the new.
+
+The close ends every session of the binding at once, and every Cloudflare
+call through it: their statements read the binding's row before any
+vault call (`sessionRowsFor`, `callBindings`) and refuse one closed, so
+none of its sessions, which live hours, is used or renewed from the
+close's commit. The bearer credentials it exchanged it does not end: a use
+by name asks the vault before the app reads their binding, and the vault
+refuses first whatever the app would (named-use.ts), so an app-only check
+would tell a caller what the vault looked up. They end at their batch, or
+at their own end, five minutes after their sign-in at most, whichever is
+first: a removal left for the scheduled run (each beat revokes 228, every
+five minutes, on Workers) leaves them serving five minutes at most.
+The batches still take the fence, the instance's one, which every use of
+every credential shares: a request whose check of its binding passed
+before the close can reach the vault after it, and a revoke that did not
+wait for its statement would number its use after the revoke (below,
+without CloseFenced or BatchFenced). A vault whose every use statement
+also read the binding's `closed_at` would let them go unfenced
+(VaultChecksClosed holds the model without them), at a join on the hot
+path; it does not. So the batch bounds the fence each revoke holds: for
+no longer than the uses a process takes in flight (10, the vault pool's,
+`DEFAULT_CONNECTIONS`) take to arrive at R44's 1,000 a second, 10 ms, as
+each use past them is refused `overloaded` while it waits; at about 0.08
+ms a credential, 125 a batch on Node. D178 (Erwin, 2026-11-06) had chosen
+50 ms (625); measured through the whole app, one Node process beside a
+removal of 5,000 (reveals by the same service), it refused none of 100
+uses a second, 10% of 200, 43% of 400 and 68% of 800; at 125 a batch,
+none of 100 or 200 and 11% of 400 (0.5% with no removal), the removal's
+own CPU, in the same process, lengthening each use. On SQLite, kept for
+tests and development, a removal's statements block Node's event loop:
+two uses ran during one of 5,000. 500 ms was rejected, as every use would
+wait out a batch's fence.
+
+MCUnbinding.tla's scenarios: `Unbinding` (one run signing in again and
+again, two credentials live at most, a batch of one: the removal sweeps,
+ends, and answers), `UnbindingCrash` (the same, the request stopping up
+to twice midway and asked again), `UnbindingAbandoned` (the request
+stopping for good, the scheduled run finishing it) and `UnbindingRace`
+(two runs signing in at once while the binding closes, and the request
+and the scheduled run racing: safety alone, as two runs that always
+overlap could keep the row's lock from the removal forever) and
+`UnbindingReplaced` (a replacement, its request stopping, once or for
+good, after any step, while the scheduled run comes round). A request using one of the binding's credentials runs beside the removal in `Unbinding` and `UnbindingRace` (`Using`); `UnbindingCrash` and `UnbindingAbandoned` leave it out, as they check the removers' liveness, which a use only slows: with it, each took about five minutes rather than seconds.
+
+| protection | turned off, TLC finds |
+|---|---|
+| the end holds every live credential to the ones it names, under the row's lock (EndComplete) | `EndedBindingEndsCredentials`: a credential signed in after the read outlives the end |
+| the end takes the row `FOR UPDATE` (EndExclusive) | `EndedBindingEndsCredentials` (`UnbindingRace`): a sign-in sharing the row commits after the end's check |
+| a sweep closes the binding, and an end refused as `moved` closes it before reading again (Closes) | `UnbindFinishes`, a liveness property: a run signs in between every read and the end's lock, each end `moved`, forever |
+| `sign_in` drops a closed binding's row (SignInChecksClosed) | `NoSignInAfterClose` |
+| the close takes the row `FOR UPDATE`, waiting for the sign-ins that share it (CloseExclusive) | `NoSignInAfterClose` (`UnbindingRace`): one that checked the binding before the close commits after it |
+| the answer waits for the end's seal (SealWait) | `AnsweredWhenSealed` |
+| the scheduled run goes on with every closed binding (Resumes) | `RemovalEnds` (`UnbindingAbandoned`), a liveness property: a removal abandoned after its close never ends |
+| a sweep or an end revokes only credentials still as read (RevokeCAS) | `NoDoubleRevoke` (`UnbindingRace`): the request and the scheduled run each revoke the same batch |
+| an end ends only a binding still live (EndChecksLive) | `EndsOnce` (`UnbindingRace`): both removers end it |
+| a session's statement refuses a binding closed (UseChecksClosed) | `ClosedServesNone`: a session not yet in a batch is used while the removal is under way |
+| a replacement makes its new binding in the statement that closes the old one (MakesAtClose) | `NoGapInTrust` (`UnbindingReplaced`): the old binding closed, its request stopped, and no new binding |
+| the statement that closes the binding takes the fence (CloseFenced) | `RevokeOrdersUses` (`UnbindingRace`): a use read live as it closes is numbered after the revoke of its credential |
+| every revoke after the close takes the fence (BatchFenced) | `RevokeOrdersUses` (`UnbindingRace`): a request checked before the close reads its credential live after it, the end revokes it unfenced, and the use commits after |
+
+The safety is the end's: its completeness check under `FOR UPDATE` leaves
+no credential live, with or without the close. The close is what makes the
+removal end, and what stops every use at once. `ClosedStaysClosed` (a
+property, checked in every scenario): a closed binding is never opened
+again.
+
+A use here is its three steps: the app's check of its binding, the
+vault's statement under the fence shared, and its commit, which numbers
+it. Two places where the model is stricter or coarser than the SQL: a
+sweep here always takes the fence, where `change_bindings` takes it only
+when it revokes something (a sweep of none, after a `moved` end, closes
+unfenced, which revokes nothing and so breaks no `RevokeOrdersUses`); and
+a read here reads every live credential, where the app reads a window
+from the last batch's end and reads from the start once more before the
+end, so a credential that ends sooner than the window, signed in just
+before the close, is named by that last read and the end's completeness
+check, which TLC does not check apart. The app reads what is live on the
+database's clock (`now()`), as the end's check does a moment later. On
+`moved` the scheduled run reads again, as `rs` does here, a few times,
+and a binding the vault refuses is reported apart, stopping no other.
+**Not modelled:** the binding's stamp of its last use (it takes no lock a removal
+waits for: it skips one held), Postgres's lock queue (fairness: the
+removal's `FOR UPDATE`, free again and again, gets the row; measured,
+within 2 ms at 5,000 sign-ins a second on one binding).
 
 ### WaysIn.tla
 

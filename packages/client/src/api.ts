@@ -863,6 +863,10 @@ export type Api = {
         createdAt: string;
         createdBy: string;
         lastUsedAt: string | null;
+        removing: null | {
+          since: string;
+          by: string | null;
+        };
       }[];
     };
   };
@@ -960,6 +964,10 @@ export type Api = {
         createdAt: string;
         createdBy: string;
         lastUsedAt: string | null;
+        removing: null | {
+          since: string;
+          by: string | null;
+        };
       };
       replaced: string[];
     };
@@ -1512,6 +1520,10 @@ export type Api = {
         createdAt: string;
         createdBy: string;
         lastUsedAt: string | null;
+        removing: null | {
+          since: string;
+          by: string | null;
+        };
       }[];
       replaced: string[];
     };
@@ -2607,6 +2619,10 @@ export type BindingView = {
   createdAt: string;
   createdBy: string;
   lastUsedAt: string | null;
+  removing: null | {
+    since: string;
+    by: string | null;
+  };
 };
 
 export type ConnectedApp = {
