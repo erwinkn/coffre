@@ -140,19 +140,6 @@ test('a body is abandoned soon after the cap, not drained to the end', async () 
   assert.ok(pulled <= 8, `the stream was abandoned soon after the cap, not drained (pulled ${pulled} chunks)`);
 });
 
-test('a body whose Content-Length says it is past the bound is refused before a byte of it is read', async () => {
-  let pulled = 0;
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      pulled += 1;
-      controller.enqueue(new Uint8Array(1024).fill(0x61));
-    },
-  });
-  const request = new Request('https://x/', { method: 'POST', body: stream, headers: { 'content-length': String(4 * 1024 + 1) }, duplex: 'half' } as RequestInit);
-  await assert.rejects(readLimitedText(request, 4 * 1024), /larger than 4096 bytes/);
-  assert.equal(pulled, 0);
-});
-
 test('both unauthenticated device-login endpoints refuse a body past the bound of every body before sign-in, 413', async () => {
   assert.equal(SIGN_IN_BODY_BYTES, 16 * 1024);
   const post = (path: string, body: string) => coffreRoute(

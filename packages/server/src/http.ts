@@ -49,16 +49,12 @@ export async function readLimitedText(request: Request, max: number): Promise<st
 
 /**
  * A body's bytes, no more than `max` of them: past it, its stream is
- * cancelled and it is refused, 413 `too_large`. One whose `Content-Length`
- * says it is longer is refused before a byte of it is read.
+ * cancelled and it is refused, 413 `too_large`. Not on its `Content-Length`
+ * alone: cancelled before a byte is read, a body the client is still sending
+ * resets its connection on Node, and the client sees no answer at all.
  */
 export async function readLimitedBytes(request: Request, max: number): Promise<Uint8Array<ArrayBuffer>> {
   const tooLarge = () => new ApiError('too_large', `the body is larger than ${max} bytes`);
-  const declared = request.headers.get('content-length');
-  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > max) {
-    await request.body?.cancel().catch(() => {});
-    throw tooLarge();
-  }
   const reader = request.body?.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
