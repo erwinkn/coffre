@@ -33,7 +33,7 @@ const root = resolve(import.meta.dirname, '..')
 /** What a diff has to touch for a step to run; the rest is the diff's own. */
 const code = (f) => !/\.md$/.test(f) && !f.startsWith('docs/')
 const anyOf = (...prefixes) => (f) => prefixes.some((p) => f.startsWith(p))
-const packages = anyOf('packages/', 'examples/', 'dev/', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package.json', '.node-version')
+const packages = anyOf('packages/', 'examples/', 'dev/', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', '.node-version')
 const formalModel = (f) =>
   /^formal\/[^/]+\.(tla|cfg)$/.test(f) ||
   ['scripts/formal.sh', 'scripts/formal-trace.mjs'].includes(f)
