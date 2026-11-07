@@ -98,25 +98,13 @@ export function nameProblem(name: string): string | null {
   return null;
 }
 
-export type AddOptions = RouteOutput<'POST /members/:member/passkeys/options'>;
-
-/**
- * The add's options as the client read them, or a throw: a 200 whose body did not arrive whole reads as null (the
- * client's `send`), and the dialog's failure path takes it as `unavailable`, with its retry (review r3 of #539).
- */
-export function readAddOptions(answer: AddOptions | null): AddOptions {
-  if (answer === null || typeof answer !== 'object' || typeof answer.state !== 'string' || answer.options === null || typeof answer.options !== 'object') {
-    throw new TypeError('the options did not arrive whole');
-  }
-  return answer;
-}
-
 /**
  * What a failed add means for its dialog (`POST /members/:member/passkeys`):
  * - `unavailable`: no answer to go by (the network, a 5xx, a 408 or 429, a 409 `changed`, a 401 or 409 unread). The server may have added
  *   it, so the next press sends the same answer again, never asks the authenticator for another: a second `create()`
  *   could replace on the device a passkey coffre holds (as `sendPasskey`, review r7 of #500).
- * - `exists`: that answer was added already, as when the first send's answer was lost. Done.
+ * - `exists`: that answer was added already, as when the first send's answer was lost (a 409 `passkey_exists`, or the
+ *   200 itself, `unreadable`). Done.
  * - `again`: the options lapsed, the session changed, the person's passkeys changed, or the authenticator's answer did
  *   not verify: new options, a user handle of their own, and a new `create()`.
  * - `refused`: anything else, said in the server's words (`failureMessage`).
@@ -130,7 +118,7 @@ export function addOutcome(error: unknown): AddOutcome {
   // A 401 or 409 whose body did not arrive whole (the client's `http_error`): those are the statuses of `passkey_exists`
   // and of a refusal that keeps the answer, so it is not read as a refusal (as `passkeyAnswer`, review r2 of #539).
   if ((error.status === 401 || error.status === 409) && error.code === 'http_error') return 'unavailable';
-  if (error.reason === 'passkey_exists') return 'exists';
+  if (error.reason === 'passkey_exists' || error.code === 'unreadable') return 'exists';
   if (error.reason === 'state_mismatch' || error.code === 'touch_failed') return 'again';
   return 'refused';
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CoffreError, type CoffreClient } from '@coffre/client';
+import { CoffreError, createClient, type CoffreClient } from '@coffre/client';
 import { dehydrate, hydrate, QueryObserver, type QueryClient } from '@tanstack/react-query';
 
 import {
@@ -468,4 +468,24 @@ test('the page shows a break either check found, and the walk from the first ent
   // A newer check whose check of the sealed log could not run says so over the walk's seal (review r10).
   const unchecked = { ...intact(0, false), treesFailed: 'coffre could not check the sealed log: the request failed with HTTP 503' } as ChainResult;
   assert.equal(shownChain(unchecked, walked), unchecked);
+});
+
+test('a passkey list whose 200 is cut off is a failed read, never an empty success (review r4 of #539)', async () => {
+  const client = createClient({
+    url: 'https://coffre.acme.example',
+    transport: async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"passkeys":['));
+            controller.error(new TypeError('terminated'));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+  });
+  const queryClient = createQueryClient();
+  const read = await queryClient.fetchQuery(queries.passkeys(client, 'user:ada@acme.example'));
+  assert.equal(read.ok, false);
+  assert.match(read.ok ? '' : read.error, /cut off/);
 });

@@ -78,6 +78,26 @@ test('an error that is not JSON still throws with its status', async () => {
   await assert.rejects(client.me(), { name: 'CoffreError', status: 502, code: 'http_error' });
 });
 
+test('a success whose body is cut off throws `unreadable` with its status, never a null output', async () => {
+  // The status line and the first bytes arrived; then the connection dropped.
+  const cut = () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"passkeys":[{"id":'));
+          controller.error(new TypeError('terminated'));
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  const { client } = recording(cut);
+  await assert.rejects(client.passkeys.list('user:ada'), { name: 'CoffreError', status: 200, code: 'unreadable' });
+  await assert.rejects(client.passkeys.reset('user:ada'), { name: 'CoffreError', status: 200, code: 'unreadable' });
+  // A whole JSON body still reads, `null` included.
+  const { client: whole } = recording(() => Response.json(null));
+  assert.equal(await whole.call('GET /me', {}), null);
+});
+
 test("a server older than 0.15 has no route for 0.15's log: it keeps 0.14's alone", async () => {
   const { client } = recording(() => Response.json({ error: 'not_found', message: 'no such route' }, { status: 404 }));
   assert.deepEqual(await client.audit.verifyTrees(), { kept: false });

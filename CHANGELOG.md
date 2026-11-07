@@ -359,7 +359,10 @@
   removal now lands back on `/account/passkeys`. `coffre update` adds
   the tab's route file, `_coffre/account.passkeys.tsx`
   ([docs/design/passkeys.md](docs/design/passkeys.md)). `pnpm dev`
-  serves at `http://localhost:3000` now.
+  serves at `http://localhost:3000` now. `@coffre/client` throws
+  `CoffreError` with code `unreadable` and the 2xx status when a
+  success's body is cut off, where it returned `null` as the route's
+  output: what was asked was done, and its answer was lost.
 
 - **A Terraform provider that writes and never reads (T108).**
   `terraform-provider/` is a Go provider for Terraform and OpenTofu 1.11
