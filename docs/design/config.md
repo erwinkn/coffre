@@ -54,7 +54,7 @@ export const policy = definePolicy({
     tokenMaxDays: 365, // 1 to 365 (R76)
     signInsPerAddress: 10_000, // per 10 s, each sign-in entry point counted apart (R76, #520)
     useOnly: false, // true: no service token issued or taken; services sign in with a key
-    noReads: false, // true: no binding lists reads; services read plain values only
+    noReads: false, // true: no binding lists reads (plain values only, with useOnly: true)
   },
   reads: {
     bulkLimit: { count: 1_000, windowMinutes: 15 }, // window at most a day (R28, R52)
@@ -97,7 +97,7 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | `services.tokenMaxDays` | 365, 1 to 365 | app **and vault** | `signin({ serviceTokenMaxDays })`, app only (#516) | R76. New: the vault holds an issue to the deployment's number too, where today it holds only the 365. The default lifetime offered stays min(90, this) |
 | `services.signInsPerAddress` | 10,000 per 10 s | app | Workers: `SIGN_IN_PER_SOURCE` in `app/wrangler.jsonc` (#520); Node: `processLimits({ perSource })` | R76 asked for one or two settings. The default is R44's 1,000 sign-ins a second over one window, since a fleet behind one NAT is one address. A deployment with no such fleet may set it lower |
 | `services.useOnly` | `false` | app | `signin({ workloads: { useOnly } })` | whether a service may hold a bearer token at all. `true` refuses to issue one (`forbidden`, `use_only`), refuses those already issued at use (`unauthenticated`, `use_only`), and gives every new binding a policy, so that it signs in only for a key-bound session ([workload-access.md](workload-access.md), section 6.3). Enforced on `main`, though `signin`'s type comment still says "not yet enforced": a P3 |
-| `services.noReads` | `false` | app | `signin({ workloads: { noReads } })` | stricter still: no binding may list `reads`, so a service gets plain values only; a binding made with reads before the switch is refused at its next sign-in. Neither flag is held by the vault today; like `tokenMaxDays`, the vault could hold both from the same object |
+| `services.noReads` | `false` | app | `signin({ workloads: { noReads } })` | no binding may list `reads`: a key-bound session gets plain values only, and a binding made with reads before the switch is refused at its next sign-in. Alone it leaves bearer service tokens and `/api/auth/oidc`'s exchanges reading as today ([workload-access.md](workload-access.md), section 6.3); only `useOnly` ends those. A deployment whose services read plain values only sets **both** to `true`. Neither flag is held by the vault today; like `tokenMaxDays`, the vault could hold both from the same object |
 | `reads.bulkLimit` | 1,000 keys per 15 min | vault | `vault({ bulkLimit })` | R28, R52 |
 | `values.rotateAfterDays` | 365, or `null` | app | `createCoffre({ rotateAfterDays })` | when the UI and `coffre list` flag a value nobody changed |
 | `proxy.revokedWithinSeconds` | 60, 1 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
@@ -239,6 +239,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | How long a use's place outlives its deadline (`HELD_PAST_DEADLINE_MS`) | 2 s | the uses' login's `statement_timeout` | R53 |
 | A use's time tolerance (`AT_SLACK_MS`) | 63 s | deadline 3 s + a clock 60 s ahead | R53, D3 |
 | The bulk cap's refresh | 60 s at 15 min | min(60 s, window ÷ 10) | decision 9 |
+| How long a key counts against a **new** key (`bulkRule`) | 17 min 3 s at 15 min | window + refresh + the use's deadline 3 s + a clock 60 s ahead, against the stored periods: a key may still be refused 17 minutes after the 1,000th entered | `packages/vault/src/bulk.ts` (TLC's HotPathOneClock, HotPathOneBulkSkew). The object's window is not the one a caller sees: `deploy.md` should say both |
 | The bulk window's maximum | 1 day | releases kept a day and an hour | R52 |
 | Keys a statement uses at once (`uses.batch`) | 100 | about 0.4 ms a key under the lock every use shares, so about 40 ms | measured (review of #433) |
 | How long a use's cover serves repeats (`uses.coverMs`) | 60 s | none written | ⚠ a choice, `useLimits` (`packages/vault/src/use.ts`) |
@@ -255,8 +256,8 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The migrator's wait per statement | 500 ms, 5 tries, 1 s apart | `LOCK_WAIT_MS` | #508 |
 | The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
-| A read call, from start to answer (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s | a choice: "a caller hears within it" | #356 ⚠ not derived |
-| A read call with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is 3,118 ms (below) | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
+| A read's deadline (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s, **not from the call's start**: an ordinary decision's clock starts once the vault is settled and cut over (`#decideNow`); `unwrap`'s once it has loaded the versions, read the references, settled and read the environments, at `#keys`. That preparation has no bound of its own beyond each statement's | a choice: "a caller hears within it" | #356 ⚠ not derived. A bound from the call's start would move the clock to the call's entry, which #538 does not |
+| A read with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is 3,118 ms (below), from `#keys`, after the preparation above | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
 | A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
 | A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s, or what is left of the call's deadline if less | a choice | #347 ⚠ |
@@ -267,13 +268,17 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | An AWS KMS attempt's timeout | 706 ms (from 5 s), or what is left of the caller's deadline if less | a measured p99 of a KMS call | #538's stacked KMS PR (its measurement table not yet in a PR) |
 | AWS KMS attempts | 3 (unchanged), pauses 100-200 ms then 400-800 ms | `100 × 4^(attempt−1) × (1 + random)`, as in `aws-kms.ts` | a retry policy, written as one |
 | One KMS operation, every retry spent | 3,118 ms | 3 attempts × 706 ms + the two longest pauses (200 + 800 ms) | derived |
-| The key service, per call (`KEY_BUDGET_MS`) | 3,118 ms (from 5 s): **a ceiling for the whole call**, not a sufficient budget | one operation's full retries; every key operation of the call spends from it (`settle` in `vault.ts`, one deadline for all) | a choice, sized to one operation: see below. A read call with a key service is then 5 s + 3.1 s |
+| The key service, per batch of a call's operations (`KEY_BUDGET_MS`) | 3,118 ms (from 5 s): **a ceiling for the operations batch**, not a sufficient budget, and not for the call | one operation's full retries; every key operation of the batch spends from it (`settle` in `vault.ts`, one deadline for all) | a choice, sized to one operation: see below. A read with a key service is then 5 s + 3.1 s |
+| A cold vault's KEK checks (`#checkKeks`) | up to 3,118 ms **per configured KEK**, before the batch | each check gets `KEY_BUDGET_MS` again, or what is left of the call's deadline if less | #538. So KMS time in one call is bounded only by the call's 8.1 s: two KEKs whose checks take 2 s each, then a 2 s unwrap, spend 6 s at KMS |
 | AWS KMS calls at once | 8 per provider object → per call | the isolate-wide `Slots(8)` goes: a `/use` waited 5 s behind 8 hung calls (measured). The 8 cited "six connections", which Workers counts per request, not per isolate ([limits.md](limits.md), item 5) | same PR, with `formal/KeyService.tla` |
 | When a key service's intent is overdue (`expiresAt`), and how far back a rotation looks for open ones | 15 s today; 13,118 ms with the ceiling above | `at` + 2 × `CALL_DEADLINE_MS` + `KEY_BUDGET_MS`: the call's budget, and one more call deadline as a margin for its COMMIT, which nothing bounds | #538 (`#keys`, `#closeIntents`); the margin is not measured ⚠ |
 
 **What a 3,118 ms ceiling covers, and what it does not.** The budget
-belongs to the call, and every key the call opens or wraps spends from the
-same deadline. 3,118 ms is one operation's worst case, so it covers every
+belongs to the call's batch of key operations, and every key the batch
+opens or wraps spends from the same deadline. A cold vault first checks
+each KEK, each check with a budget of its own, all inside the call's
+8.1 s: what follows holds for a warm vault, and a cold one's batch gets
+what the checks left of the call. 3,118 ms is one operation's worst case, so it covers every
 retry only when each key needs one operation and they all run at once:
 
 - a read or a wrap of up to 8 keys: one wave, each key with its three
@@ -347,7 +352,7 @@ read call with a key service 11.2 s.
 |---|---|---|---|
 | Values served from memory | 60 s | R, the object's `revokedWithinSeconds` | policy |
 | A handle's tunnel: a check's deadline; the checks' interval | 10 s; 50 s | d = min(R ÷ 2, 10 s); R − d (today 10 s and 60 s, a 70 s bound) | policy |
-| A workload's tunnel check | 15 s | design section 8.2 | policy |
+| A workload's tunnel (and a UI tunnel a workload opens): two checks | (1) its session still stands: bound b = min(R, 15 s), checked every 2b ÷ 3 with b ÷ 3 to answer, today every 10 s with 5 s; (2) the vault still grants the key, and for an editable tunnel the item is the one dialled: every R with min(R, 10 s) to answer, today every 60 s with 10 s | (1) design section 8.2's 15 s; (2) proposed as the handle's: every R − d, d = min(R ÷ 2, 10 s), so a lost grant or a changed definition ends it within R | `credential-proxy.ts` (`workloadTunnel`, `uiTunnel`), policy |
 | The refresh window before values lapse | min(cache ÷ 4, 15 s) | none written ⚠ | limits.md S25 |
 | A message to sign or verify | 64 KiB by default; an `hmac()`'s `maxBytes` up to 1 MiB; editable definitions are counted at 1 MiB | 12 × Equisafe's largest in 90 days; 1 MiB costs about 5 ms of CPU | measured |
 | A presigned URL | 1 s to 1 h | "an hour at most" | policy |
@@ -373,6 +378,9 @@ read call with a key service 11.2 s.
 | The same, per day | about 68 GB at a steady 1,000 uses a second; far less when repeats are covered | 790 B × 86.4 M | derived |
 | The uses' row's WAL | 248 bytes a use: about 21.4 GB a day at 1,000 a second, written, then recycled or archived as the database's own WAL settings say. The projection's and the tiles' WAL come on top, unmeasured here | measured | [hot-path-one.md](hot-path-one.md) |
 | Days of uses kept | **every day**, as today | the object's `keepUsesDays` | Q6 |
+| How often retention runs (`RETAIN_EVERY_MS`) | hourly | – | `log-checkpointer.ts` |
+| Days detached per run | **one** | each DETACH makes every backend plan the uses again; two close together stall uses (measured for a DROP, [0.15-plan.md](0.15-plan.md)) | `retention.ts`. A backlog drains a day an hour: switching on 30 days on a database a year old detaches its 335 extra days over about 14 days |
+| A day's freshness margin before it goes | 20 min | 2 × `FRESH_MS` (10 min) past the day's cut, read from the signer's own pair | `checkpointer.ts`, `retention.ts` (FreshBeforeDrop) |
 | The audit watch's staleness | 11 min | 2 × the 5 min schedule + 1 | #503 |
 
 ## 3. Open questions
@@ -609,6 +617,9 @@ runs at 10 uses a second sets nothing and holds about 250 GB after a year;
 one at 1,000 a second that keeps 30 days sets 30 and holds about 2 TB.
 Kept forever at R44's rate, a year is 25 TB, which is why `deploy.md`
 puts the table in front of whoever deploys at that rate.
+Switching retention on late is slow on purpose: one day detached an hour
+(section 2.9), so a year-old database that sets 30 sheds its 335 extra
+days over about two weeks, each day at least 20 minutes past its cut.
 
 ### Q7. A bound on the proxy's upstream request
 
