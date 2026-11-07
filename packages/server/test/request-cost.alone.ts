@@ -1332,7 +1332,8 @@ test("a project's audit page reads as many pages however many keys the project h
  * these grow with the keys, whichever plan runs. The earlier tests leave the log due for an auto-analyze, which landed
  * now and then between the two counts: the missing members' read then looked for an access entry of every principal
  * before it dropped those with a member row, 155 pages to 370, until it named its order (`missingMembers`, T233, which
- * the next test holds). The log is analyzed before each count here, so that both are planned on the same statistics.
+ * the next test holds). The log is analyzed before each count here, so that both are planned on fresh statistics, and
+ * no auto-analyze is left due to land between them.
  */
 test("a member's report, `me` and the members list read as many pages however many keys the instance holds (T221)", POSTGRES, async () => {
   const someone = (await root.members.list()).members.find((entry) => entry.member.startsWith('user:'))!.member;
@@ -1384,9 +1385,11 @@ test("a member's report, `me` and the members list read as many pages however ma
  * The missing members' read (`missingMembers`) looks for an access entry only of the principals the log names with no
  * member row. Left to the planner, it looked for one of every principal first, once the log's statistics were fresh,
  * each a step down the subject index to an allowed entry: 155 pages to 370 in the test above, whenever an auto-analyze
- * landed between its counts (T233). So the log is analyzed here, which reads all of it while it holds fewer rows than
- * an analyze samples, and the read is held, beyond the walk that names the principals, to the rowless principals' log:
- * a ceiling of its own, which no baseline planned on the same statistics can raise.
+ * landed between its counts (T233). So the log is analyzed here, as that auto-analyze did, and the read is held, beyond
+ * the walk that names the principals, to the rowless principals' log: a ceiling of its own, not a baseline an earlier
+ * plan could raise. This file leaves no principal rowless, so the ceiling is 16 pages, which the old order passed by
+ * about 170 (172 against 0 over 20 analyzes, each a fresh sample of the ~190,000 entries this file leaves): a bound for
+ * this fixture, not for any log, where a hash join may scan the log for a few rowless principals.
  */
 test("the missing members' read looks in the log, beyond naming its principals, only for those with no member row (T233)", POSTGRES, async () => {
   await db.owner.execute(sql`ANALYZE audit_log`);
