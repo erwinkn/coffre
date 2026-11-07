@@ -347,9 +347,13 @@
   passkeys…, which says what it removes and ends first. Under
   `optional`, Projects asks a person with none to add one, or Not
   now, which puts it off in that browser for 30 days (the
-  `coffre-passkey-later` cookie). A person whose passkeys an Owner
-  reset reads who did and when, on Account → Passkeys, the prompt and
-  the sign-in's step that adds a new one. The audit log reads
+  `coffre-passkey-later` cookie, which holds when it was pressed). A
+  person whose passkeys an Owner reset reads who did and when, on
+  Account → Passkeys, the prompt (shown again for a reset after a Not
+  now, and in the page the server renders) and the sign-in's step
+  that adds a new one. Another passkey's options last no longer than
+  the session stays fresh, and an add whose reply was lost, sent
+  again, answers `passkey_exists`, which the dialog takes as done. The audit log reads
   `passkey.remove`, `passkey.reset` and `passkey.rename` in words. A
   removal now lands back on `/account/passkeys`. `coffre update` adds
   the tab's route file, `_coffre/account.passkeys.tsx`

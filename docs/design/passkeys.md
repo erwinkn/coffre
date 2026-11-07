@@ -722,10 +722,23 @@ Reset passkeys…, an unscoped Owner's, for anyone but themselves, an
 Owner the deployment names included; its dialog reads the person's
 passkeys first and says what the reset removes and ends. The prompt
 of 3.3 is on Projects; Not now is the `coffre-passkey-later` cookie, a
-preference as the theme is, 30 days, so the server renders the page
-without it from the first byte. The reset notice ("Ada reset your
-passkeys on …") shows on the tab, in the prompt, and on the sign-in's
-step that adds a new one under `required`.
+preference as the theme is, 30 days, holding when it was pressed, so
+the server renders the page without it from the first byte. The reset
+notice ("Ada reset your passkeys on …") shows on the tab, in the
+prompt, and on the sign-in's step that adds a new one under
+`required`. A reset after a Not now shows the prompt again, to say it,
+and Projects' loader reads the person's passkeys, so the server
+renders the notice too (review r1 of #539).
+
+Another passkey's options last no longer than the session stays fresh
+(`timeout`, at most the five minutes since its touch): its add is held
+to the fresh check too, and a `create()` answered after would meet a
+step-up, which replaces the session the options name, leaving a
+passkey on the device coffre never stored; the page asks for new
+options instead, after the step-up. An add whose reply was lost, sent
+again, finds its passkey among the person's live ones before it counts
+them and answers `409 passkey_exists`, which the dialog takes as done
+(review r1 of #539).
 
 ### 3.7 Recovery
 

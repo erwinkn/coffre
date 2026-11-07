@@ -9,13 +9,14 @@
  * when none, and whether the sidebar is folded.
  */
 /**
- * `passkeyPrompt`: whether the Projects page's prompt to add a passkey, under the `optional` policy, shows, or was put
- * off with Not now, for 30 days in this browser (docs/design/passkeys.md, section 3.3).
+ * `passkeyLater`: when, in ms since the epoch, the Projects page's prompt to add a passkey, under the `optional` policy,
+ * was put off with Not now in this browser, which hides it for 30 days; null when it was not. A reset of the person's
+ * passkeys after that shows it again, to say so (docs/design/passkeys.md, sections 3.3 and 3.7).
  */
-export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expanded' | 'collapsed'; passkeyPrompt: 'shown' | 'later' };
+export type Preferences = { theme: 'system' | 'light' | 'dark'; sidebar: 'expanded' | 'collapsed'; passkeyLater: number | null };
 
 /** The cookies that hold them. */
-export const PREFERENCE_COOKIES = { theme: 'coffre-theme', sidebar: 'coffre-sidebar', passkeyPrompt: 'coffre-passkey-later' } as const;
+export const PREFERENCE_COOKIES = { theme: 'coffre-theme', sidebar: 'coffre-sidebar', passkeyLater: 'coffre-passkey-later' } as const;
 
 /**
  * A project's pages beside its environments': `/projects/market/settings`
@@ -35,10 +36,11 @@ export function preferencesIn(cookies: string | null): Preferences {
     return undefined;
   };
   const theme = value(PREFERENCE_COOKIES.theme);
+  const later = value(PREFERENCE_COOKIES.passkeyLater);
   return {
     theme: theme === 'light' || theme === 'dark' ? theme : 'system',
     sidebar: value(PREFERENCE_COOKIES.sidebar) === 'collapsed' ? 'collapsed' : 'expanded',
-    passkeyPrompt: value(PREFERENCE_COOKIES.passkeyPrompt) === '1' ? 'later' : 'shown',
+    passkeyLater: later !== undefined && /^[0-9]{1,16}$/.test(later) ? Number(later) : null,
   };
 }
 

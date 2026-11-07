@@ -49,7 +49,7 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
   const initial = (useRouter().options.context as RouterContext).preferences;
   const [theme, setThemeState] = useState(initial.theme);
   const [sidebar, setSidebarState] = useState(initial.sidebar);
-  const [passkeyPrompt, setPasskeyPrompt] = useState(initial.passkeyPrompt);
+  const [passkeyLater, setPasskeyLater] = useState(initial.passkeyLater);
   const portal = useRef<HTMLDivElement>(null);
   const preferences = useMemo(
     () => ({
@@ -63,14 +63,15 @@ export function CoffreProvider({ children }: { children: ReactNode }) {
         rememberSidebar(next);
         setSidebarState(next);
       },
-      passkeyPrompt,
-      passkeyLater: () => {
-        rememberPasskeyLater();
-        setPasskeyPrompt('later');
+      passkeyLater,
+      putPasskeyOff: () => {
+        const at = Date.now();
+        rememberPasskeyLater(at);
+        setPasskeyLater(at);
       },
       portal,
     }),
-    [theme, sidebar, passkeyPrompt],
+    [theme, sidebar, passkeyLater],
   );
   return (
     <PreferencesContext.Provider value={preferences}>

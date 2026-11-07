@@ -7,7 +7,7 @@ import type { Preferences } from './preferences';
 /** What coffre's middleware hands each request's render (`@coffre/server/start`). */
 export type PageContext = { cspNonce: string; client: CoffreClient; preferences: Preferences };
 
-export const DEFAULT_PREFERENCES: Preferences = { theme: 'system', sidebar: 'expanded', passkeyPrompt: 'shown' };
+export const DEFAULT_PREFERENCES: Preferences = { theme: 'system', sidebar: 'expanded', passkeyLater: null };
 
 
 /**
