@@ -501,7 +501,7 @@ not merging it with the above.
   (`docs/deploy.md:365`), and 16 waiters can hold all 6.
 
 **Proposal:** keep it, computed (class c): `min(lock wait budget ÷
-measured hold, the vault config's share − 2)`, with the derivation
+measured hold, the vault's request connections − 2)`, with the derivation
 beside it. The vault doesn't see its Hyperdrive config's limit at run
 time, so setup writes the share where the vault reads it (question Q3).
 This changes how many wait, not what anyone locks or in what order, so
@@ -536,7 +536,7 @@ Q = SQL). Items that change what a flow locks or waits on are marked
 |---|---|---|---|
 | 11 | Node hot pool size (D1) | `max ?? 10` in `connect.ts`; a URL-based setup can't change it | from the database's budget, split across every process and pool (section 2), one value written once (Q2) |
 | 12 | `coffre setup`'s Hyperdrive share (C2) | `min(share, 20)`; a config above it is lowered, one below kept (`cappedLimit`, `cli/src/connections.ts:39-46`) | `min(share, the plan's max)`: 20 on Free, 100 on Paid. Ask for the share; if Cloudflare refuses past Free's 20, use 20. Keep lowering a config above the share: that is the database's budget, and the comment names the failure it prevents (53300, `:24-31`). The 3 connections held back (`HELD_BACK`, `:6-7`) are for the administrator, `coffre migrate` and the host's tools, and say so; they are not headroom for Hyperdrive running past its soft limit, since those clients may hold them when it does. How much headroom that needs is unproven: neither the code nor Cloudflare's guidance sizes it (Q2) |
-| 13 | `READ_HEAD_WAITERS` (V6) | 16, from one rig's 150 ms | `min(budget ÷ measured hold, vault share − 2)`, the derivation written beside it |
+| 13 | `READ_HEAD_WAITERS` (V6) | 16, from one rig's 150 ms | `min(budget ÷ measured hold, the vault's request connections − 2)`: the share on Workers, the share less the checkpointer's 2 on Node ([config.md](config.md), Q3); the derivation written beside it |
 | 14 | `HELD_PAST_DEADLINE_MS = 2_000` (V7) | "the hot login's `statement_timeout`", retyped | imported from the one constant that migration 0022, `HOT_SETTINGS` and conformance also read |
 | 15 | The use deadline, 3,000 (V8) | `USE_DEADLINE_MS` (core), `deadline_max()` (SQL 0022:121), `USE_DEADLINE_SECONDS` (`api/proxy.ts:89`), literals in `log-store.ts:485, 487, 629` and inside `AT_SLACK_MS` | `USE_DEADLINE_MS` once; a test holds `deadline_max()` to it |
 | 16 | The clock-ahead minute, 60,000 (V9) | `USE_AHEAD_MS`, `use.sqlite.ts:589`, SQL `+ 60000` in 0022 and 0024, inside `AT_SLACK_MS` | `USE_AHEAD_MS` once, `AT_SLACK_MS = USE_DEADLINE_MS + USE_AHEAD_MS`, a test for the SQL |
@@ -894,7 +894,7 @@ or move, pointing to section 3's #).
 | V80 | `SLOTS` (e1-e4) | 4 | `use.ts:386` | c | = `MAX_PARENTS + 1` | | compute |
 | V81 | Input bounds | ids ≤ 100, `user:` ≤ 320, labels ≤ 120, jkt ≤ 128, run claims ≤ 32 × (64, 256), clientId ≤ 2,048 … | `credentials.ts:109-328`; `admit.ts:180`; `use.ts:436` | d | | | keep |
 | V82 | `MAX_RESERVED` | 1,000 names | `proxy.ts:19` | d | "far more than any deployment's code defines" | | keep |
-| V83 | `retainDays` | null: every day kept | `checkpointer-workers.ts:83`; `checkpointer-node.ts:92` | – | not in the standard setup: Workers' `checkpointer()` and `localVault`'s own checkpointer pass none. On Node, `runCheckpointer` and `keepCheckpointer` (`@coffre/vault/node`, `node.ts:36`) accept it, for a deployment that runs its checkpointer itself (`sealThrough`, `heldOutside`). 13.6 GB/day at 1,000/s (`hot-path-one.md:1285`) for the uses' rows; about 68 GB/day with the reads' projection and tiles ([config.md](config.md), Q6) | | not a limit; see Q6 |
+| V83 | `retainDays` | null: every day kept | `checkpointer-workers.ts:83`; `checkpointer-node.ts:92` | – | not in the standard setup: Workers' `checkpointer()` and `localVault`'s own checkpointer pass none. On Node, `runCheckpointer` and `keepCheckpointer` (`@coffre/vault/node`, `node.ts:36`) accept it, for a deployment that runs its checkpointer itself (`sealThrough`, `heldOutside`). 12.2 GB/day at 1,000/s for the uses' rows, 141 B a use as wired ([hot-path-one.md](hot-path-one.md), W211's row; the 13.6 GB/day there is the 158 B prototype's); about 68 GB/day with the reads' projection and tiles ([config.md](config.md), Q6) | | not a limit; see Q6 |
 
 Format, fine: `MAC_BYTES` 16 (twice: `log-entry.ts:36`, `reads.ts:97`),
 `TAG_BYTES`, `SEAL_BYTES`, the HKDF outputs, the Ed25519 PKCS8 prefix,
@@ -1248,7 +1248,7 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
 - **Q6. Retention can't be turned on in the standard setup.** `retainDays`
   exists, but only a Node deployment that runs its own checkpointer
   (`runCheckpointer`, `keepCheckpointer`) can reach it. The uses log
-  grows about 13.6 GB a day at 1,000/s, and a day kept holds about 68 GB
+  grows about 12.2 GB a day at 1,000/s, and a day kept holds about 68 GB
   in all, the reads' projection and tiles included ([config.md](config.md),
   Q6). It isn't a limit, but it is a
   knob that a deployment needs and, in the standard setup, can't set.

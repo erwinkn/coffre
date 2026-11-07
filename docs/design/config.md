@@ -27,7 +27,8 @@ Four parts:
 ## 1. The object
 
 Today a deployment's choices sit in six places: `signin({…})` (passkeys,
-session lifetimes, the longest service token), `vault({…})` on Workers and
+session lifetimes, the longest service token, and in `workloads` whether
+services may hold bearer tokens or list reads), `vault({…})` on Workers and
 `serveVault({…})` on Node (the bulk read cap, the `uses` block),
 `credentialProxy({…})` (two revocation delays, whether definitions are editable), `createCoffre({…})` (when a
 value is flagged for rotation), five rate-limiting bindings in
@@ -52,6 +53,8 @@ export const policy = definePolicy({
   services: {
     tokenMaxDays: 365, // 1 to 365 (R76)
     signInsPerAddress: 10_000, // per 10 s, each sign-in entry point counted apart (R76, #520)
+    useOnly: false, // true: no service token issued or taken; services sign in with a key
+    noReads: false, // true: no binding lists reads; services read plain values only
   },
   reads: {
     bulkLimit: { count: 1_000, windowMinutes: 15 }, // window at most a day (R28, R52)
@@ -93,6 +96,8 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | `people.cliSessionDays` | 30; above 0, at most 365, as today | app | `signin({ cliSessionDays })` | the same for `coffre login` |
 | `services.tokenMaxDays` | 365, 1 to 365 | app **and vault** | `signin({ serviceTokenMaxDays })`, app only (#516) | R76. New: the vault holds an issue to the deployment's number too, where today it holds only the 365. The default lifetime offered stays min(90, this) |
 | `services.signInsPerAddress` | 10,000 per 10 s | app | Workers: `SIGN_IN_PER_SOURCE` in `app/wrangler.jsonc` (#520); Node: `processLimits({ perSource })` | R76 asked for one or two settings. The default is R44's 1,000 sign-ins a second over one window, since a fleet behind one NAT is one address. A deployment with no such fleet may set it lower |
+| `services.useOnly` | `false` | app | `signin({ workloads: { useOnly } })` | whether a service may hold a bearer token at all. `true` refuses to issue one (`forbidden`, `use_only`), refuses those already issued at use (`unauthenticated`, `use_only`), and gives every new binding a policy, so that it signs in only for a key-bound session ([workload-access.md](workload-access.md), section 6.3). Enforced on `main`, though `signin`'s type comment still says "not yet enforced": a P3 |
+| `services.noReads` | `false` | app | `signin({ workloads: { noReads } })` | stricter still: no binding may list `reads`, so a service gets plain values only; a binding made with reads before the switch is refused at its next sign-in. Neither flag is held by the vault today; like `tokenMaxDays`, the vault could hold both from the same object |
 | `reads.bulkLimit` | 1,000 keys per 15 min | vault | `vault({ bulkLimit })` | R28, R52 |
 | `values.rotateAfterDays` | 365, or `null` | app | `createCoffre({ rotateAfterDays })` | when the UI and `coffre list` flag a value nobody changed |
 | `proxy.revokedWithinSeconds` | 60, 1 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
@@ -149,7 +154,9 @@ Access, which owns their sessions: the `people` fields do not apply there.
   lets the proxy's upstreams be plain HTTP and private addresses. Default
   `false`, which is the right default. It stays beside the credentials
   because it differs per environment, as `owners` does: a dev deployment's
-  upstreams are `http://localhost`, production's must not be.
+  upstreams are `http://localhost`, production's must not be. The same
+  holds for `signin({ workloads: { allowLoopbackIssuersForDevelopment } })`,
+  which `signin` already refuses on an instance not on loopback.
 - **`owners`** (R3): who owns the instance, not how much anyone may do. It
   differs per environment (dev, prod) and comes from its environment, so it
   stays in the vault's wiring.
@@ -237,7 +244,8 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | How long a use's cover serves repeats (`uses.coverMs`) | 60 s | none written | ⚠ a choice, `useLimits` (`packages/vault/src/use.ts`) |
 | Names the vault's isolate remembers (`uses.names`) | 10,000 in each of two maps: names to ids, and a key's name in an environment to its id | none written; least recently used out first | ⚠ a choice, `useLimits` |
 | Seals and covers the vault's isolate keeps (`UseCache`'s `max`) | 10,000 in each of two maps: each key's newest seals, and the covers repeats ride | none written; a full map is cleared whole | ⚠ a choice, `UseCache` |
-| All four together | up to 40,000 entries | counted by entries, not bytes: they live in the vault's isolate, outside #519's caches share, and nobody has measured an entry | ⚠ unmeasured |
+| A route use's maps (`madeFor`, `routeKeys`, T186) | 10,000 in each of two maps: a handle's made-for places by its token, and each route's keys' ids by place and route | bounded as `uses.names`, least recently used out first | ⚠ the same choice, `UseCache` (`use.ts`) |
+| All six together | up to 60,000 entries | counted by entries, not bytes: they live in the vault's isolate, outside #519's caches share, and nobody has measured an entry | ⚠ unmeasured |
 
 ### 2.4 Lock waits and deadlines (#538, #508)
 
@@ -248,18 +256,47 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
 | A read call, from start to answer (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s | a choice: "a caller hears within it" | #356 ⚠ not derived |
-| A read call with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is derived (below) | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
+| A read call with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is 3,118 ms (below) | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
 | A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
 | A read's lock wait (`READ_LOCK_TIMEOUT_MS`) | 3 s, or what is left of the call's deadline if less | a choice | #347 ⚠ |
 | The app's first ask of the vault's `about()` and the proxy's gate: take over a call after (`TAKE_OVER_MS`); give up with 503 after (`WAIT_MS`) | 3 s; 6 s | "longer than a deploy's write and its seal take"; 2 × `TAKE_OVER_MS` | T201 (`packages/server/src/asked-once.ts`) ⚠ the 3 s is not measured |
-| Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's connections − 2 | Q3 |
+| Waiters for the log's head (`READ_HEAD_WAITERS`) | 16 | 2.4 s ÷ 150 ms measured; should also be ≤ the vault's request connections − 2 | Q3 |
 | A plain 503's `Retry-After` | 1 s (from 5) | `LOCK_WAIT_MS` rounded up to whole seconds | #538 |
 | An app write's lock wait | 500 ms (from unbounded) | `LOCK_WAIT_MS`; then 503 at once | #538 |
 | An AWS KMS attempt's timeout | 706 ms (from 5 s), or what is left of the caller's deadline if less | a measured p99 of a KMS call | #538's stacked KMS PR (its measurement table not yet in a PR) |
 | AWS KMS attempts | 3 (unchanged), pauses 100-200 ms then 400-800 ms | `100 × 4^(attempt−1) × (1 + random)`, as in `aws-kms.ts` | a retry policy, written as one |
-| The key service, per call (`KEY_BUDGET_MS`) | 3,118 ms (from 5 s) | 3 attempts × 706 ms + the two longest pauses (200 + 800 ms) | derived; same PR. A read call with a key service is then 5 s + 3.1 s |
+| One KMS operation, every retry spent | 3,118 ms | 3 attempts × 706 ms + the two longest pauses (200 + 800 ms) | derived |
+| The key service, per call (`KEY_BUDGET_MS`) | 3,118 ms (from 5 s): **a ceiling for the whole call**, not a sufficient budget | one operation's full retries; every key operation of the call spends from it (`settle` in `vault.ts`, one deadline for all) | a choice, sized to one operation: see below. A read call with a key service is then 5 s + 3.1 s |
 | AWS KMS calls at once | 8 per provider object → per call | the isolate-wide `Slots(8)` goes: a `/use` waited 5 s behind 8 hung calls (measured). The 8 cited "six connections", which Workers counts per request, not per isolate ([limits.md](limits.md), item 5) | same PR, with `formal/KeyService.tla` |
+| When a key service's intent is overdue (`expiresAt`), and how far back a rotation looks for open ones | 15 s today; 13,118 ms with the ceiling above | `at` + 2 × `CALL_DEADLINE_MS` + `KEY_BUDGET_MS`: the call's budget, and one more call deadline as a margin for its COMMIT, which nothing bounds | #538 (`#keys`, `#closeIntents`); the margin is not measured ⚠ |
+
+**What a 3,118 ms ceiling covers, and what it does not.** The budget
+belongs to the call, and every key the call opens or wraps spends from the
+same deadline. 3,118 ms is one operation's worst case, so it covers every
+retry only when each key needs one operation and they all run at once:
+
+- a read or a wrap of up to 8 keys: one wave, each key with its three
+  attempts. Covered.
+- a rewrap: each key decrypts under its old wrap, then encrypts, one after
+  the other (`vault.ts`, the rewrap's operation). On first tries the pair
+  takes at most 2 × 706 = 1,412 ms; a decrypt that spends all three attempts
+  leaves the encrypt nothing, and the call fails `kek_unavailable`, which
+  its caller may retry.
+- more than 8 keys: the per-call slots run them in waves of 8, and each wave
+  gets what the earlier ones left.
+
+A budget that covered every case would be ⌈keys ÷ 8⌉ × operations per key
+× 3,118 ms: 6,236 ms for a rewrap of up to 8 keys, about 25 s for a read of
+64. It grows with the batch, and a caller's deadline cannot. So the
+proposal states it as a ceiling: past one wave of single operations, a call
+completes on early tries or fails and is retried. *Example:* a decrypt's
+first attempt times out at 706 ms, and after a 150 ms pause the second
+answers in 100 ms: 956 ms. A read of that key is done. A rewrap of it has
+3,118 − 956 = 2,162 ms left for its encrypt: two attempts and the pause
+between them (at most 706 + 200 + 706 = 1,612 ms), not a third. If Erwin
+wants a rewrap's two legs covered whole, the ceiling is 6,236 ms, and a
+read call with a key service 11.2 s.
 
 ### 2.5 Database connections
 
@@ -325,7 +362,10 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The seal tick; a witness's wait | 500 ms; 2 s | – | R51, R54 |
 | A change waits for its seal | 5 s | – | T169 |
 | A seal is stale after | 5 s | 10 ticks | derived |
-| A tick's bound (`TICK_BOUND_MS`), and an open's (`OPEN_BOUND_MS`) | 10 s, + 0.01 ms for each number the barrier's window spans (`WINDOW_ENTRY_MS`) | an open waits as long as a tick; past its bound the checkpointer stalls, is closed for good, and its host opens another | `packages/vault/src/checkpointer.ts` (T169, Fable's review). Bounded by the work asked, so a drain of millions goes on |
+| The vault's wait on the checkpointer's Durable Object for a seal, on Workers (`SEAL_ASK_BOUND_MS`) | 8 s | `SEAL_WAIT_MS` 5 s + a witness's 2 s + 1 s margin | `checkpointer-workers.ts`; the 1 s is not measured ⚠ |
+| The same for anything else: a start, its status, the pair it remembers (`ASK_BOUND_MS`) | 2 s | none written | ⚠ a choice, `checkpointer-workers.ts` |
+| A tick's bound (`TICK_BOUND_MS`) | 10,000 + span × 0.01 ms, span the numbers the barrier's window covers (`WINDOW_ENTRY_MS`) | past it the checkpointer stalls, is closed for good, and its host opens another. Bounded by the work asked, so a drain of millions goes on | `packages/vault/src/checkpointer.ts` (T169, Fable's review) |
+| An open's bound (`OPEN_BOUND_MS`) | 10 s, fixed | `TICK_BOUND_MS`, without the per-entry extension | `checkpointer-node.ts`, `checkpointer-workers.ts` |
 | Entries one tick seals (`WINDOW_MAX`) | 10,000 | a backlog is sealed in parts, each a pair, the next tick at once: read whole, a stall of minutes at R44 would pass the tick's bound and stall again | the same
 | Unsealed entries a check reads (`ABOVE_NEWEST`) | 1,000, on `main` | 4.5 ms fixed + 13.4 µs an entry fits 1,150 in R27's 20 ms at the median; 1,000 below it, where the p90 reaches 20 ms. Its floor: one late tick's entries at R44, 1,000 | D6, measured (`packages/vault/src/verifier.ts`). An exception to R27 at p99: the slowest check at 1,000 took 27 to 42 ms, and a cap that held it under 20 ms would sit below the floor. On Free, a check past about 400 entries fails instead |
 | Days of uses made ahead | 3 | – | a use with no day's table fails |
@@ -445,13 +485,17 @@ connections than that: at `max_connections` 25, setup gives it 6, and 16
 waiters take all 6.
 
 **Recommendation:** the vault computes the share itself, from the database,
-with setup's formula, and holds the waiters to min(16, share − 2). It asks
-for the two numbers with its first reads, in the round trip it already makes
-(T206), so this adds no round trip. The plan's 20 or 100 never
-matters: it caps the share only above 20, where 16 is already under the
-share − 2. *Example:* at 25, share 6, so 4 waiters, and two connections stay
-free for everything else; at 100, 16, as now. One caveat: a Hyperdrive
-config someone set by hand below setup's number makes the vault count more
+with setup's formula, and holds the waiters to min(16, request
+connections − 2): its request connections are the share on Workers, and
+the share less the checkpointer's 2 on Node (Q2). It asks for the two
+numbers with its first reads, in the round trip it already makes (T206),
+so this adds no round trip. The plan's 20 or 100 never matters: it caps
+the share only above 20, where 16 is already under the request connections
+− 2. *Example:* at 25, share 6. On Workers, 6 request connections, so 4
+waiters, and two connections stay free for everything else. On Node, 4
+request connections (the checkpointer's 2 are a pool of their own), so 2
+waiters, and two stay free. At 100, 16 on both, as now. One caveat: a
+Hyperdrive config someone set by hand below setup's number makes the vault count more
 connections than it has: the formula assumes setup set the config.
 
 ### Q5. Statement timeouts for the app's and the vault's logins
@@ -613,7 +657,8 @@ it ends at 30 s with the app's.
 | `USES_AT_ONCE` (4 per request) | "leaves the isolate's admission room" | gone with the count it protects |
 | Node pool size (`max ?? 10`) | 10 per pool; a deployment passing a URL cannot change it | derived from the database at start (Q2) |
 | `coffre setup`'s Hyperdrive maximum | 20, Free's, on Paid too | the plan's maximum (limits.md #12) |
-| `READ_HEAD_WAITERS` | 16, whatever the database | min(16, share − 2), the share computed (Q3) |
+| `READ_HEAD_WAITERS` | 16, whatever the database | min(16, request connections − 2), the share computed (Q3) |
+| `signin({ workloads: { useOnly, noReads } })` | in `signin`'s `workloads`, both `false` | `policy.services.useOnly`, `policy.services.noReads`; `workloads` keeps its wiring (the limiters' bindings, `github`, `alert`) |
 | `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | in the vault's config | `policy.reads.bulkLimit` |
 | `signin({ passkeys, browserSessionHours, cliSessionDays, serviceTokenMaxDays })` | in `signin` | `policy.people.*`, `policy.services.tokenMaxDays`; `passkeys.rpId` stays in `signin` |
 | `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60: a tunnel's bound 70 s | one, `policy.proxy.revokedWithinSeconds`, the tunnel's checks derived to fit it |
@@ -631,7 +676,7 @@ it ends at 30 s with the app's.
 | The proxy's caches | 1,000 or 10,000 entries, some cleared whole | least recently used, within a slice of 16 MiB (#519) |
 | The proxy's body read whole | 16 MiB | 1 MiB; larger bodies stream (#519) |
 | KMS's 8 calls at once | slots handed from one request to the next | per call (#538's KMS PR) |
-| KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms in all, derived (2.4) |
+| KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms for the whole call, a ceiling sized to one operation's retries (2.4) |
 
 What a deployment writes after all of this: its wiring, as today, and
-`policy.ts`, ten fields, each with a default it can leave alone.
+`policy.ts`, twelve fields, each with a default it can leave alone.
