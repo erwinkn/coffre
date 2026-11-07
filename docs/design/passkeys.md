@@ -741,7 +741,11 @@ call at that deadline itself (an `AbortSignal`), since browsers take
 three); every `create()` and `get()` the pages make is held so
 (`withinDeadline`, review r2 of #539). A 401 or 409 whose body did not
 arrive whole keeps the add's answer for the next press, as the
-sign-in's page does. An add whose reply was lost, sent
+sign-in's page does. A 200 whose body did not arrive whole is no
+output at all: the client throws `CoffreError` `unreadable` with the
+status, so a read of the passkeys fails as any read does, the add's
+options offer their retry, and an add or a reset so answered is done
+(review r4 of #539). An add whose reply was lost, sent
 again, finds its passkey among the person's live ones before it counts
 them and answers `409 passkey_exists`, which the dialog takes as done
 (review r1 of #539).

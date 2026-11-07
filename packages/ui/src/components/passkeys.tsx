@@ -1,3 +1,4 @@
+import { CoffreError } from '@coffre/client';
 import { useQuery, useQueryClient, useSuspenseQuery } from '@tanstack/react-query';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -16,7 +17,6 @@ import {
   kindOf,
   nameProblem,
   promptsForPasskey,
-  readAddOptions,
   readsForPrompt,
   removable,
   removalSentence,
@@ -245,13 +245,14 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
     setStep(null);
     unsent.current = { answer: null, asked: false };
     const sent = readClock(browserClock);
-    // An unreadable 200 rejects too (`readAddOptions`), so that it ends in `unavailable`, with a retry.
-    client.passkeys.options(member).then(readAddOptions).then(
+    client.passkeys.options(member).then(
       ({ options, state }) => {
         if (current) setStep({ options: options as CreationJSON, state, ends: deadlineOf(sent, options.timeout) });
       },
       (failure: unknown) => {
-        if (current) setStep(addOutcome(failure) === 'unavailable' ? 'unavailable' : { refused: failureMessage(failure) });
+        // Anything but a refusal offers a retry, an unreadable 200 (`unreadable`, which `addOutcome` reads as an add's
+        // `exists`) included (review r3 of #539).
+        if (current) setStep(addOutcome(failure) === 'refused' ? { refused: failureMessage(failure) } : 'unavailable');
       },
     );
     return () => {
@@ -597,13 +598,17 @@ export function ResetPasskeysDialog({ person, open, onOpenChange }: { person: st
       confirmLabel="Reset passkeys"
       confirmDisabled={list === null || none}
       onConfirm={() => {
+        const done = async (removed: number | null) => {
+          await refresh(queryClient, affects.passkeys(member));
+          toast.success(removed === null ? `Reset ${person}’s passkeys` : `Reset ${person}’s passkeys: ${removed} removed`);
+        };
         void client.passkeys.reset(member).then(
-          async (result) => {
-            await refresh(queryClient, affects.passkeys(member));
-            // A 200 whose body did not arrive whole is null (the client's `send`): reset all the same.
-            toast.success(typeof result?.reset === 'number' ? `Reset ${person}’s passkeys: ${result.reset} removed` : `Reset ${person}’s passkeys`);
+          (result) => done(result.reset),
+          // A 200 whose body did not arrive whole (the client's `unreadable`) was a reset all the same.
+          async (failure: unknown) => {
+            if (failure instanceof CoffreError && failure.code === 'unreadable') await done(null);
+            else toast.error(`Not reset. ${failureMessage(failure)}`);
           },
-          (failure: unknown) => toast.error(`Not reset. ${failureMessage(failure)}`),
         );
       }}
     />

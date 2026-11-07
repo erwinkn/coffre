@@ -88,7 +88,11 @@ export type ClientOptions = {
   transport?: Transport;
 };
 
-/** The API's error shape, `{ error, message }`, with the HTTP status. */
+/**
+ * The API's error shape, `{ error, message }`, with the HTTP status. A success whose body did not arrive whole (the
+ * connection dropped after the status line) is one too, code `unreadable` with its 2xx status: the server did what was
+ * asked, and its answer was lost, which no caller can read as the route's output.
+ */
 export class CoffreError extends Error {
   readonly status: number;
   readonly code: string;
@@ -160,9 +164,9 @@ export function createClient(options: ClientOptions) {
     }
 
     const response = await transport(new Request(url, { method, headers, body }));
-    const payload = await response.json().catch(() => null);
+    const payload: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const error = payload as { error?: unknown; message?: unknown; reason?: unknown; touch?: { options?: unknown; state?: unknown } } | null;
+      const error = payload as { error?: unknown; message?: unknown; reason?: unknown; touch?: { options?: unknown; state?: unknown } } | null | undefined;
       const touch = error?.touch;
       throw new CoffreError(
         response.status,
@@ -172,6 +176,9 @@ export function createClient(options: ClientOptions) {
         response.headers.get('retry-after') ?? undefined,
         touch !== null && typeof touch === 'object' && typeof touch.state === 'string' ? { options: touch.options, state: touch.state } : undefined,
       );
+    }
+    if (payload === undefined) {
+      throw new CoffreError(response.status, 'unreadable', `coffre answered ${response.status}, but its answer did not arrive whole`);
     }
     return payload;
   }
