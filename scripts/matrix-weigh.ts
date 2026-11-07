@@ -70,18 +70,24 @@ export async function weigh(session: WeighingSession, call: HotCall): Promise<We
 }
 
 /**
- * The sessions that may still see a row deleted by a transaction older than `$1`, a transaction id: in any of the
- * cluster's databases, one whose transaction took an id older than it, or whose snapshot's oldest is. Neither this
- * session (`pg_backend_pid`) nor one holding neither (a session between transactions, or reading with no snapshot yet:
- * `age(NULL)` is no age). Every other kind of session counts, not only clients: an autovacuum worker's ANALYZE runs in a
- * transaction of its own, whose id and snapshot hold rows back as a client's do; only a lazy VACUUM is left out of the
- * horizon (`PROC_IN_VACUUM`), and waiting on one too costs at most its run. `age` compares ids as Postgres does, modulo
- * 2³², which `pg_stat_activity`'s 32-bit ids need.
+ * The sessions that may still see a row of this database deleted by a transaction older than `$1`, a transaction id:
+ * one whose transaction took an id older than it, or whose snapshot's oldest is, connected to this database or to none.
+ * Postgres keeps a horizon per database for its own tables' rows (`ComputeXidHorizons`, the data horizon), which counts
+ * only that database's sessions and those of none (a physical walsender's feedback, a backend still starting): a
+ * transaction held open in another database leaves this one's deleted rows dead (Postgres 16.14, T238: VACUUM removed
+ * all 1000 rows beside it, none beside the same in this one). A session here whose snapshot reaches back because of
+ * another database's transaction is itself a holder, so none is missed. Neither this session (`pg_backend_pid`) nor one
+ * holding neither (a session between transactions, or reading with no snapshot yet: `age(NULL)` is no age). Every
+ * other kind of session counts, not only clients: an autovacuum worker's ANALYZE runs in a transaction of its own,
+ * whose id and snapshot hold rows back as a client's do; only a lazy VACUUM is left out of the horizon
+ * (`PROC_IN_VACUUM`), and waiting on one too costs at most its run. `age` compares ids as Postgres does, modulo 2³²,
+ * which `pg_stat_activity`'s 32-bit ids need.
  */
 const HOLDERS = `
   SELECT pid, backend_type AS kind, datname, state, xact_start::text AS since, backend_xid::text AS xid, backend_xmin::text AS xmin
     FROM pg_stat_activity
    WHERE pid <> pg_backend_pid()
+     AND (datname = current_database() OR datid IS NULL)
      AND (age(backend_xid) > age($1::xid) OR age(backend_xmin) > age($1::xid))`;
 
 /**
@@ -94,23 +100,23 @@ const HOLDERS = `
 const NAME_HOLDERS_EVERY_MS = 60_000;
 
 /**
- * Resolves once every row deleted before it is called is dead to every session started after: once no session that
- * might still see it (`HOLDERS`) is left, in any database of the cluster, since that is how far a new session's
- * snapshot looks (its xmin is the oldest id still running anywhere). Until then a new session's planner, probing an
+ * Resolves once every row of `watcher`'s database deleted before it is called is dead to every session started after:
+ * once no session that might still see it (`HOLDERS`) is left, in that database or in none. Until then a new session's planner, probing an
  * end of `log_bulk_pkey` for the range its estimates use (`get_actual_variable_range`, which skips only rows known
  * dead), takes a deleted row there for one that may still be seen and reads its heap page as a live row's; once that
  * ends, the first session to plan reads the dead row's page and the next row's, one block more, and marks the entry
- * dead, so that no session after it reads it. A transaction of another test's database ending between a call and its
- * twins moved that block from one to the next: `log_bulk` 9 blocks beside 8 for a key never made, or 8 beside 9, in
+ * dead, so that no session after it reads it. A transaction ending between a call and its twins moved that block from
+ * one to the next: `log_bulk` 9 blocks beside 8 for a key never made, or 8 beside 9, in
  * the rows of the window passed, which delete their principal's rows of the cap's (T225: in CI, the other matrices'
- * work beside them on the one Postgres). Weighed after this, every call faces the index its first warm-up leaves.
+ * work beside them on the one Postgres; T238 found the horizon is this database's alone). Weighed after this, every call faces the index its first warm-up leaves.
  *
  * `watcher` must have the privileges of `pg_read_all_stats` (a superuser does: the owner, in compose and CI), not only
  * be a member of it (`USAGE`, not `MEMBER`: a membership granted `INHERIT FALSE` gives none): without them Postgres
  * still shows it other logins' `backend_xid` and `backend_xmin`, so it would wait as long, but hides their
- * `backend_type`, `state` and `xact_start`, which name a holder to whoever must end it. It waits until `signal`
- * aborts: the test's own timeout, the only bound there is on how long a transaction elsewhere in the cluster may run,
- * so no number of its own (R70). While it waits it names what holds it every `NAME_HOLDERS_EVERY_MS`, so that a wait
+ * `backend_type`, `state` and `xact_start`, which name a holder to whoever must end it. It is connected to the
+ * database the rows were deleted in, the test's own, so it waits only on that test's own sessions and on autovacuum's,
+ * never on another test's or on a session left open elsewhere in the cluster. It waits until `signal` aborts: the
+ * test's own timeout, the only bound there is on how long its own sessions may run, so no number of its own (R70). While it waits it names what holds it every `NAME_HOLDERS_EVERY_MS`, so that a wait
  * CI cancels first is not a silent one; aborted, it fails naming each session still in the way, on stderr as well as
  * in its error: a test that timed out reports its timeout alone, not the error it ends with. It polls every 25 ms: how
  * late past the last holder's end a batch is weighed, a delay of the test's alone, which bounds nothing.

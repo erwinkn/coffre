@@ -349,8 +349,8 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
   const weigh = async <T extends { sent: HotCall | null; buffers: number | null; keyBlocks: number | null; blocks: Weighed['blocks'] | null; cold: HotCall | null; coldBuffers: number | null; coldKeyBlocks: number | null; coldBlocks: Weighed['blocks'] | null; early: boolean; turns: { asked: Weighed[]; twin: Weighed[]; absent: Weighed[] } | null }>(results: T[]) => {
     if (ENGINE !== 'postgres') return;
     // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session first, so
-    // that no transaction elsewhere in the cluster, ending as the batch is weighed, moves a block of `log_bulk` from one
-    // call to the next (T225, `deletesSettled`).
+    // that no transaction of this database (an autovacuum's ANALYZE, say), ending as the batch is weighed, moves a block
+    // of `log_bulk` from one call to the next (T225, `deletesSettled`).
     const watcher = postgresClient(OWNER_URL, { max: 1 });
     try {
       await deletesSettled(watcher, t.signal);
