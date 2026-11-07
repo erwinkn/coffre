@@ -15,10 +15,11 @@ import { resolveVaultConfig, type ResolvedVaultConfig } from '../src/config.ts';
 import { CUTOVER_OBJECT } from '../src/cutover.ts';
 import { objectKey, sealKey, sealOf, type Input, type Op, type Ref } from '../src/inputs.ts';
 import { entryMac, logMacKey } from '../src/log-entry.ts';
-import { purposeOf, replay, type Logged } from '../src/log-replay.ts';
+import { phasedOf, purposeOf, replay, type Logged } from '../src/log-replay.ts';
 import { openVault, prepareVault, type VaultOptions } from '../src/vault.ts';
 import { newRequestId } from '../src/use.ts';
 import { emptyReads, ENGINE, projectSlug, rows, run, type TestDatabase } from './database.ts';
+import { freshKeyId } from './window-fixture.ts';
 
 export const SIGNING_KEY = randomBytes(32);
 /** The vault's key encryption key, as a configuration names it: a vault elsewhere (a Worker's) opens what this one wrapped. */
@@ -167,7 +168,8 @@ export async function world(options: {
   /** A key in `dev`, or another environment of the project, with a value of its own, sealed. */
   /** A key in `environment` (`dev` by default), sealed; `owner`, a personal config's, whose wrap binds them. */
   const key = async (value = `value-${keys.length}`, sensitive = false, environment = dev, owner: string | null = null) => {
-    const id = randomUUID();
+    // Made as its period starts for the world's principal (T204): a test has a minute before it turns.
+    const id = freshKeyId(principal);
     const version = randomUUID();
     const dek = freshDek();
     const sealed = encrypt(Buffer.from(value), { projectId: project, environmentId: environment, secretId: id }, dek);
@@ -245,8 +247,8 @@ export function ask(w: { credentialId: string }, secretId: string, extra: Partia
 export async function replayed(answered: ReadonlyMap<string, UseOutcome>): Promise<number> {
   const changes = await rows<{ number: string | number; at: string | number; object: string; payload: string; seal: Buffer | null }>(db.owner,
     sql`SELECT number, at, object, payload, seal FROM log_changes ORDER BY number`);
-  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null }>(db.owner,
-    sql`SELECT number, at, credential, secret, purpose, place FROM log_uses ORDER BY number`);
+  const uses = await rows<{ number: string | number; at: string | number; credential: string; secret: string; purpose: number; place: string | null; phased: boolean | number | null }>(db.owner,
+    sql`SELECT number, at, credential, secret, purpose, place, phased FROM log_uses ORDER BY number`);
   const refs = new Map<string, Ref>();
   const entries: Logged[] = [
     ...changes.map((row) => {
@@ -257,6 +259,7 @@ export async function replayed(answered: ReadonlyMap<string, UseOutcome>): Promi
     ...uses.map((row) => ({
       kind: 'use' as const, number: BigInt(row.number),
       request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purposeOf(Number(row.purpose))! },
+      phased: phasedOf(row.phased),
     })),
   ].sort((a, b) => (a.number < b.number ? -1 : 1));
   let checked = 0;

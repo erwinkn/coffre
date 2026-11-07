@@ -23,6 +23,7 @@ import { clientFor, entryOf, nothingHeld, openTestDatabase, resetDatabase, seale
 import { TEST_HOT_DATABASE_URL, TEST_RUNTIME_DATABASE_URL, TEST_VAULT_DATABASE_URL } from './db/connections.ts';
 import { postgresOnly } from './db/engine.ts';
 import { addPasskey, removePasskey, steppedUp } from './passkey-rows.ts';
+import { inBulkPeriod } from './window-fixture.ts';
 import { postgresProxy } from '../../../scripts/postgres-proxy.ts';
 
 const POSTGRES = postgresOnly("counts the app's and the vault's Postgres round trips");
@@ -378,10 +379,10 @@ test('each change route answers in exactly its budget of round trips (T179)', PO
   const failures: string[] = [];
   for (const [n, { name, setup, run }] of CASES.entries()) {
     try {
-      // The warm request and the measured one in one bulk refresh period (a minute, at the default 15-minute window): a
-      // use that crosses into the next moves its key's row on, a statement more on the hot path (`bulkRule`).
-      const left = 60_000 - (Date.now() % 60_000);
-      if (left < 5_000) await new Promise((resolve) => setTimeout(resolve, left + 100));
+      // The warm request and the measured one in one bulk refresh period of every key they use (a minute, at the default
+      // 15-minute window, from each key's phase, T204): a use that crosses into the next moves its key's row on, a
+      // statement more on the hot path (`bulkRule`). Only a fork uses keys, the owner's of market/dev.
+      await inBulkPeriod(5_000, db.owner, [`user:${ROOT}`], 'market/dev');
       for (const i of [2 * n, 2 * n + 1]) if (setup !== undefined) await asRequest(() => setup(i));
       await cost(() => run(2 * n));
       const { statements: ran, connections, ...counts } = await cost(() => run(2 * n + 1));

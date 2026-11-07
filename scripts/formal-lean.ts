@@ -47,7 +47,7 @@ import { encodeAad, type SecretContext } from '../packages/core/src/context.ts';
 import { handsBack, type RefusalCode } from '../packages/core/src/vault.ts';
 import { keyRefusals, referenceRefusal, sensitiveRefusals, useOnlyRefusals, type Reader, type SecretPlace } from '../packages/vault/src/decide.ts';
 import type { EnvironmentRow } from '../packages/vault/src/store.ts';
-import { bulkRule } from '../packages/vault/src/bulk.ts';
+import { bulkRule, phaseOf, refreshMs } from '../packages/vault/src/bulk.ts';
 import { decideChecked, type Checked, type CheckedView, type UseRequest } from '../packages/vault/src/decide.ts';
 import type { CredentialInput, EnvironmentInput, Input, PrincipalInput, SecretInput } from '../packages/vault/src/inputs.ts';
 
@@ -472,7 +472,12 @@ repeat(6000, () => {
   const limit = { count: 1 + Math.floor(random() * 4), windowMs: pick([1_000, 10_000, 60_000, 600_001]) };
   const rows = new Map(some(KEYS, 4).map((key) => [key, at - Math.floor(random() * 2.2 * limit.windowMs)]));
   const key = pick(KEYS);
-  add({ op: 'bulkRule', rows: [...rows].map(([k, last]) => ({ key: k, last })), key, at, limit }, bulkRule(rows, key, at, limit));
+  // The model takes the principal's key's phase as given (T204): any the hash gives, here a principal's of a handful,
+  // or 0, the previous release's statement's, which a log replays for the uses it decided (`phased`).
+  const principal = pick(['token:ci', 'user:ada@acme.example', 'user:bo@acme.example']);
+  const phased = random() < 0.75;
+  const phase = phased ? phaseOf(principal, key, refreshMs(limit)) : 0;
+  add({ op: 'bulkRule', rows: [...rows].map(([k, last]) => ({ key: k, last })), key, at, limit, phase }, bulkRule(rows, principal, key, at, limit, phased));
 });
 
 // --- envelope: the AAD -------------------------------------------------------

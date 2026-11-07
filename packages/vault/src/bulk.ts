@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { CLOCK_SKEW_MS, USE_DEADLINE_MS } from '@coffre/core/vault';
 
 import type { BulkLimit } from './config.ts';
@@ -10,7 +12,8 @@ export { USE_DEADLINE_MS };
  * log's policy object, as the deployment configured it.
  *
  * One row per principal and key holds `last`, when the key was last
- * counted, as the start of that use's refresh period (`periodOf`). A key
+ * counted, as the start of that use's refresh period (`periodOf`), each
+ * principal's key's periods from a phase of their own (`phaseOf`). A key
  * is in the principal's set at `t` while `last > t − window − refresh`; a
  * key in it passes; a key not in it passes only if fewer than `count`
  * other keys count, and then enters (`last := periodOf(t)`). A key's row
@@ -53,9 +56,21 @@ export function refreshMs(limit: BulkLimit): number {
   return Math.max(1, Math.min(REFRESH_MAX_MS, Math.floor(limit.windowMs / REFRESH_WINDOW_SHARE)));
 }
 
-/** The start of `at`'s refresh period: what a use that writes its key's row writes. */
-export function periodOf(at: number, refresh: number): number {
-  return at - (((at % refresh) + refresh) % refresh);
+/**
+ * Where a principal's key's refresh periods start, in [0, `refresh`): the first 6 bytes of SHA-256 of
+ * `<principal>/<key>`, a whole number, modulo `refresh` (T204). With one phase for every row, every hot key moved on
+ * at the same instant, each of their uses there a second call, two locks and two writes, and 1,000 uses a second
+ * came out of it with a burst of busy answers every period. Phases spread the moves over the period. The functions of
+ * 0074 compute it as `bulk_period` does, which a test holds to this.
+ */
+export function phaseOf(principal: string, key: string, refresh: number): number {
+  // The key as Postgres writes a uuid as text: lowercase.
+  return createHash('sha256').update(`${principal}/${key.toLowerCase()}`, 'utf8').digest().readUIntBE(0, 6) % refresh;
+}
+
+/** The start of `at`'s refresh period, one of `phase` + n × `refresh`: what a use that writes its key's row writes. */
+export function periodOf(at: number, refresh: number, phase: number): number {
+  return at - ((((at - phase) % refresh) + refresh) % refresh);
 }
 
 /** A principal's rows: each key's `last`, ms since the epoch. */
@@ -65,13 +80,16 @@ export type BulkRows = Map<string, number>;
 export type BulkRead = { inSet: boolean; others: number };
 
 /**
- * The cap's rule for a request for `key` at `at`: what it reads, and the
- * `last` it writes, or null for none. Live, the use's statement applies it
- * to the `bulk` table, under the principal's lock to write: exclusive for a
- * key that enters the set, shared for one moved on; replayed, `bulkStep`
- * to the replay's rows.
+ * The cap's rule for `principal`'s request for `key` at `at`, on the
+ * principal's rows: what it reads, and the `last` it writes, or null for
+ * none. Live, the use's statement applies it to the `bulk` table, under
+ * the principal's lock to write: exclusive for a key that enters the set,
+ * shared for one moved on; replayed, `bulkStep` to the replay's rows.
+ * `phased`: whether the statement starts the key's periods at its phase,
+ * as 0074's does; the previous release's started every key's at 0, and
+ * the log says which decided each use (`log_uses.phased`).
  */
-export function bulkRule(rows: ReadonlyMap<string, number>, key: string, at: number, limit: BulkLimit): BulkRead & { write: number | null } {
+export function bulkRule(rows: ReadonlyMap<string, number>, principal: string, key: string, at: number, limit: BulkLimit, phased: boolean): BulkRead & { write: number | null } {
   const refresh = refreshMs(limit);
   const last = rows.get(key);
   const inSet = last !== undefined && last > at - limit.windowMs - refresh;
@@ -83,14 +101,15 @@ export function bulkRule(rows: ReadonlyMap<string, number>, key: string, at: num
     }
   }
   const admitted = inSet || others < limit.count;
-  const period = periodOf(at, refresh);
+  if (!admitted) return { inSet, others, write: null };
+  const period = periodOf(at, refresh, phased ? phaseOf(principal, key, refresh) : 0);
   const stale = last === undefined || last < period;
-  return { inSet, others, write: admitted && stale ? period : null };
+  return { inSet, others, write: stale ? period : null };
 }
 
-/** The rule applied: the rows moved on, and what the request read. */
-export function bulkStep(rows: BulkRows, key: string, at: number, limit: BulkLimit): BulkRead {
-  const { write, ...read } = bulkRule(rows, key, at, limit);
+/** The rule applied: `principal`'s rows moved on, and what the request read. */
+export function bulkStep(rows: BulkRows, principal: string, key: string, at: number, limit: BulkLimit, phased: boolean): BulkRead {
+  const { write, ...read } = bulkRule(rows, principal, key, at, limit, phased);
   if (write !== null) rows.set(key, write);
   return read;
 }

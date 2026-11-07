@@ -120,7 +120,8 @@
 (* policy in force at its number, live and in the replay. One row          *)
 (* per key the principal asked for, `last`: when the key last entered the *)
 (* set or was moved on, as the start of that use's refresh period (the     *)
-(* periods are Refresh, delta, long: t - t % delta). A key is in the set   *)
+(* periods are Refresh, delta, long, each key's from a phase of its own:   *)
+(* t - (t - phase) % delta, T204). A key is in the set                     *)
 (* at time t while last > t - W - delta. A key that is not in the set      *)
 (* enters it if fewer than BulkCount others count at t, else the request   *)
 (* is refused `bulk`; another key counts while last > t - W - delta - D - *)
@@ -247,6 +248,11 @@
 (*                         earlier period (delta old, without periods);    *)
 (*   CoverFresh            a repeat rides a cover only while its key's     *)
 (*                         `last` is from its own period;                  *)
+(*   ReplayPhases          the replay starts each key's periods where the  *)
+(*                         statement does, at its phase (T204);            *)
+(*   ReplayPhased          it phases a use's key only if the statement     *)
+(*                         that decided it did, as its entry records: the  *)
+(*                         previous release's phases none (T204);          *)
 (*   Slack                 the set keeps a key delta longer than W (its    *)
 (*                         last use may be up to delta after `last`);      *)
 (*   DeadlineSlack         another key counts against a new one D longer   *)
@@ -351,7 +357,7 @@ CONSTANTS
     LockToCommit, CommitBeforeAnswer, ReleaseAfterCommit, SyncCommit, CheckpointLocks,
     CoverChecksChanges, CoverChecksAllInputs, CoverExists, StaleFirst, CacheChecked, CacheSameChange,
     ChangeCAS, ChangeRereads, ChangeChecksSeal, BarrierChecksFloor, BarrierAcceptsLate, ChunkFloor, AheadChecked, DeadlineChecked, FloorChecked, WorkerHonoursDeadline,
-    PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, Slack, DeadlineSlack,
+    PrincipalLocks, RefreshLocks, RefreshPeriods, RefreshShared, RefreshOnUse, CoverFresh, ReplayPhases, ReplayPhased, Slack, DeadlineSlack,
     AheadSlack, CapFromPolicy, CapSealed, ChangeMacChecked, CacheVerified, ChangeChecksMac,
     Issuers,         \* the sign-ins, each issuing one new credential: {} for none
     IssueOwnLock, IssueNumberUnderLock, BarrierWaitsIssues, BarrierIssueFirst, NamedAfterIssue,
@@ -464,6 +470,9 @@ Stands(f) == Content(Newest) /\ (f = None \/ IssuedIn(log, f))
 \* (SYMMETRY Alike), and lists NumbersUnique. Not one with PROPERTIES: TLC's liveness checking is
 \* unsound under symmetry.
 Alike == Permutations(Uses) \cup Permutations(Keys)
+\* The uses alone alike: a scenario whose keys' periods start apart (Phase <- Staggered) tells its keys
+\* apart by their phases.
+UsesAlike == Permutations(Uses)
 \* The keys a use may ask for: with no bulk cap, one, which no bulk row tracks.
 KeysOr == IF Keys = {} THEN {None} ELSE Keys
 
@@ -483,19 +492,45 @@ CountMargin == Margin + (IF DeadlineSlack THEN D ELSE 0) + (IF AheadSlack THEN M
 \* The cap's set at time t under window w, on rows L; the other keys that count against a new one.
 InSet(L, k, t, w) == L[k] > t - w - Margin
 Counts(L, k, t, w) == L[k] > t - w - CountMargin
-\* The start of t's refresh period (% is never negative for a positive divisor), or, without periods, t.
-Period(t) == IF RefreshPeriods THEN t - (t % Refresh) ELSE t
-Fresh(L, k, t) == IF RefreshPeriods THEN L[k] >= Period(t) ELSE L[k] > t - Refresh
+\* Each key's phase (T204): its refresh periods start at Phase(k) + n * Refresh. In code it is a hash of
+\* the principal and the key, so that a principal's keys, and one key's principals, do not all move on at
+\* the same instant; here 0, every key's periods together, but in HotPathOneBulkPhases, which replaces it
+\* with Staggered: each key a phase of its own in turn (KeyOrder, a constant, is evaluated once).
+Phase(k) == 0
+KeyOrder == CHOOSE f \in [Keys -> 0..Cardinality(Keys) - 1] : \A a, b \in Keys : f[a] = f[b] => a = b
+Staggered(k) == KeyOrder[k] % Refresh
+\* The start of k's refresh period at t, whatever its phase (% is never negative for a positive divisor),
+\* or, without periods, t.
+PeriodFrom(ph, t) == IF RefreshPeriods THEN t - ((t - ph) % Refresh) ELSE t
+FreshFrom(L, k, t, ph) == IF RefreshPeriods THEN L[k] >= PeriodFrom(ph, t) ELSE L[k] > t - Refresh
+\* The uses the previous release's statement decides, the one 0074 replaced, every key's phase 0: none
+\* here, but in HotPathOneBulkSwitch, one, which runs beside the others, at any time (T204, r1). Each
+\* use's entry records whether the statement that decided it phased its key (`phased`, 0074's
+\* `log_uses.phased`, which only the new statement writes).
+OldUses == {}
+\* HotPathOneBulkSwitch's: one use the previous release's.
+OneOld == {CHOOSE x \in Uses : TRUE}
+\* The new release's uses alone alike: HotPathOneBulkSwitch tells its old one apart.
+NewUsesAlike == Permutations(Uses \ OldUses)
+\* Whether use x's statement phases its key.
+Phased(x) == x \notin OldUses
+\* The phase use x's statement moves k on by.
+LivePhase(x, k) == IF k = None \/ ~Phased(x) THEN 0 ELSE Phase(k)
+\* The phase the replay moves entry e's key on by: the statement's, as e records it (ReplayPhased;
+\* without, every use's phased, as r1 found it), or, without ReplayPhases, every key's 0.
+ReplayPhase(e) == IF ~ReplayPhases THEN 0 ELSE IF ReplayPhased /\ ~e.phased THEN 0 ELSE Phase(e.key)
 
-\* The cap's rule for a request for k at t under the policy p, on rows L: admitted or not, and the
-\* `last` it writes (NoTime: none). The live statement B and the replay apply the same rule.
-Rule(L, k, t, p) ==
+\* The cap's rule for a request for k at t under the policy p, on rows L, k's periods from phase ph:
+\* admitted or not, and the `last` it writes (NoTime: none). The live statement B and the replay apply
+\* the same rule.
+RuleFrom(L, k, t, p, ph) ==
     IF k = None THEN [admitted |-> TRUE, write |-> NoTime]
     ELSE IF InSet(L, k, t, p.w)
-    THEN [admitted |-> TRUE, write |-> IF RefreshOnUse /\ ~Fresh(L, k, t) THEN Period(t) ELSE NoTime]
+    THEN [admitted |-> TRUE, write |-> IF RefreshOnUse /\ ~FreshFrom(L, k, t, ph) THEN PeriodFrom(ph, t) ELSE NoTime]
     ELSE IF Cardinality({k2 \in Keys \ {k} : Counts(L, k2, t, p.w)}) >= p.n
          THEN [admitted |-> FALSE, write |-> NoTime]
-         ELSE [admitted |-> TRUE, write |-> Period(t)]
+         ELSE [admitted |-> TRUE, write |-> PeriodFrom(ph, t)]
+Rule(x, L, k, t, p) == RuleFrom(L, k, t, p, LivePhase(x, k))
 
 \* The replay of the cap: the use entries of the log G in number order, the rule applied to each on
 \* the rows the ones before it left, under the policy the changes numbered before it left.
@@ -503,7 +538,7 @@ RECURSIVE ReplayFrom(_, _, _, _)
 ReplayFrom(es, L, decided, G) ==
     IF es = {} THEN [rows |-> L, decided |-> decided]
     ELSE LET e == CHOOSE e \in es : \A d \in es : e.seq <= d.seq
-             r == Rule(L, e.key, e.at, ReplayPolicyIn({d \in G : d.seq < e.seq}))
+             r == RuleFrom(L, e.key, e.at, ReplayPolicyIn({d \in G : d.seq < e.seq}), ReplayPhase(e))
          IN ReplayFrom(es \ {e}, IF r.write = NoTime THEN L ELSE [L EXCEPT ![e.key] = Max(@, r.write)],
                        decided \cup {<<e.seq, r.admitted>>}, G)
 BulkReplay(G) == ReplayFrom({e \in UsesIn(G) : e.key /= None}, [k \in Keys |-> NoTime], {}, G)
@@ -523,16 +558,17 @@ ReplayAllows(e) ==
 UseEntry(x, durable) ==
     [seq |-> u[x].seq, kind |-> "use", id |-> x, seen |-> u[x].seen, allow |-> u[x].allow, code |-> u[x].code,
      answeredAt |-> answered, key |-> u[x].key, at |-> u[x].at, deadline |-> u[x].deadline, decidedAt |-> u[x].decidedAt,
-     admitted |-> u[x].admitted, input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable]
+     admitted |-> u[x].admitted, input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<>>, fresh |-> u[x].fresh, durable |-> durable,
+     phased |-> Phased(x)]
 ChangeEntry(seq, input, value, made, durable) ==
     [seq |-> seq, kind |-> "change", id |-> Change, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> input, value |-> value, seal |-> value, made |-> made, fresh |-> None, durable |-> durable]
+     input |-> input, value |-> value, seal |-> value, made |-> made, fresh |-> None, durable |-> durable, phased |-> FALSE]
 \* An issue's: its number, its issuer (whose credential it makes).
 IssueEntry(seq, i, durable) ==
     [seq |-> seq, kind |-> "issue", id |-> i, seen |-> 0, allow |-> FALSE, code |-> None, answeredAt |-> 0,
      key |-> None, at |-> 0, deadline |-> 0, decidedAt |-> 0, admitted |-> FALSE,
-     input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable]
+     input |-> None, value |-> FALSE, seal |-> FALSE, made |-> <<i>>, fresh |-> None, durable |-> durable, phased |-> FALSE]
 
 IdleUse == [pc |-> "idle", seq |-> 0, seen |-> 0, snap |-> 0, snapRows |-> AllTrue, snapNewest |-> AllTrue,
             snapForged |-> {}, forged |-> {}, snapNewestChange |-> NoChange, covered |-> 0, coverId |-> None, allow |-> FALSE, code |-> None,
@@ -657,7 +693,7 @@ UseRead(x) ==
            t == u[x].at
            f == u[x].fresh
            enters == k /= None /\ ~InSet(bulk, k, t, WindowIn(log))
-           moves == k /= None /\ ~enters /\ ~Fresh(bulk, k, t)
+           moves == k /= None /\ ~enters /\ ~FreshFrom(bulk, k, t, LivePhase(x, k))
            waits == PrincipalLocks /\ (enters \/ (moves /\ RefreshLocks))
            decides == DecideBeforeLock /\ waits /\ ~u[x].second
        IN /\ u' = [u EXCEPT ![x] = [@ EXCEPT !.pc = IF decides THEN "deciding" ELSE IF waits THEN "waiting" ELSE "read",
@@ -722,7 +758,7 @@ CoverThere(sl) ==
     /\ CoverExists => \E e \in UsesIn(log) : e.seq = cover[sl].seq /\ e.id = cover[sl].id
 CoverNoChange(sl) ==
     CoverChecksChanges => \A d \in ChangesIn(log) : (CoverChecksAllInputs \/ d.input = "member") => d.seq < cover[sl].seq
-CoverInSet(k, t, w) == k /= None => InSet(bulk, k, t, w) /\ (CoverFresh => Fresh(bulk, k, t))
+CoverInSet(x, k, t, w) == k /= None => InSet(bulk, k, t, w) /\ (CoverFresh => FreshFrom(bulk, k, t, LivePhase(x, k)))
 
 \* The caps a caller may pass from its own config (without CapFromPolicy): any the policy has had.
 CallerPolicies ==
@@ -754,9 +790,9 @@ UseRun(x) ==
            p == IF "policy" \notin Inputs THEN PolicyOf(TRUE)
                 ELSE IF ~CapFromPolicy THEN callerPolicy
                 ELSE PolicyOf(IF CapSealed THEN newest["policy"] ELSE read["policy"])
-           covered == /\ Covers /\ CoverThere(sl) /\ CoverInSet(k, t, p.w)
+           covered == /\ Covers /\ CoverThere(sl) /\ CoverInSet(x, k, t, p.w)
                       /\ IF skip THEN cover[sl].seq > cache[sl].change.seq ELSE CoverNoChange(sl)
-           r == Rule(bulk, k, t, p)
+           r == Rule(x, bulk, k, t, p)
            admitted == covered \/ r.admitted
            \* A new credential is found only once its issue has committed, in the statement's snapshot (its row).
            found == u[x].fresh = None \/ IF StatementSnapshot THEN IssuedIn(log, u[x].fresh) ELSE u[x].snapIssued

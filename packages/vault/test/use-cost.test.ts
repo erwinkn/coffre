@@ -81,7 +81,7 @@ test('R48: a use is one statement, its buffers the same at 10k and at 1M entries
   const { pool, statements } = counting();
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
   // The key enters the set in the first use; a period turning over before the next would have it write its row again (T218).
-  await inBulkPeriod(PERIOD_ROOM_MS);
+  await inBulkPeriod(PERIOD_ROOM_MS, [{ principal: w.principal, key: id }]);
   // One statement per use, whichever form: the first probes, the next is from the cache. The first, its key not yet in
   // the principal's set, would take their lock: decided first, then made, a second (DecideBeforeLock; review r2 of D153).
   try {

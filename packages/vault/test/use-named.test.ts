@@ -14,7 +14,6 @@ import { tablesOf } from '@coffre/db';
 import { appendEntries } from '@coffre/db/log';
 import { sql } from 'drizzle-orm';
 
-import { refreshMs } from '../src/bulk.ts';
 import type { Input } from '../src/inputs.ts';
 import { vaultLogKey } from '../src/log.ts';
 import { newRequestId, UseCache, useLimits, type Resolved } from '../src/use.ts';
@@ -368,10 +367,8 @@ test("revoked, their principal's lock held and every statement 1.1 s slow (revie
   const deletedId = await w.key();
   const deleted = await w.nameOf(deletedId);
   // The key used before stays fresh in the cap's set only within its period (a minute, at the 15-minute window): one
-  // passed between its use and its request would move it on, a `share` that decides first and writes no entry. So the
-  // test starts with half a minute left of one, which it takes far less than.
-  const period = refreshMs({ count: 1000, windowMs: 15 * 60_000 });
-  if (period - (Date.now() % period) < 30_000) await sleep(period - (Date.now() % period) + 50);
+  // passed between its use and its request would move it on, a `share` that decides first and writes no entry. Its
+  // period started as it was made (T204, `freshKeyId`), and the test takes far less than a minute.
   const { vault, statements, slow, end } = await slowed();
   try {
     // Allowed, before: two keys used (each now fresh in the cap's set), one never made asked (`missing`); the isolate

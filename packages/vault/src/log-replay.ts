@@ -26,8 +26,12 @@ import { loggedRows } from './store.ts';
 
 /** A change as logged: its number, its time, its object, what it did, and the seal it left (null: none, the object gone). */
 export type LoggedChange = { kind: 'change'; number: bigint; at: number; ref: Ref; op: Op; seal: Buffer | null };
-/** A use as logged: the request (UseRequest), numbered. */
-export type LoggedUse = { kind: 'use'; number: bigint; request: UseRequest };
+/**
+ * A use as logged: the request (UseRequest), numbered, and whether the statement that decided it started its key's
+ * refresh periods at the key's phase (`phased`, T204): 0074's does, the previous release's did not, and a log holds
+ * uses of both, around the upgrade (review r1 of #532).
+ */
+export type LoggedUse = { kind: 'use'; number: bigint; request: UseRequest; phased: boolean };
 export type Logged = LoggedChange | LoggedUse;
 
 /** Rows by object key: each input's row as stored, with the seal on it. */
@@ -44,9 +48,10 @@ export type Rows = ReadonlyMap<string, { row: Input; seal: Buffer | null }>;
  * statement reads before anyone checks its seal, so a row put back would
  * move the cap otherwise than the replay (`BulkReplayAgrees`). Every request
  * the cap admits moves it, however it is decided after, `stale` included
- * (`HotPathOneStaleBulk`).
+ * (`HotPathOneStaleBulk`), from its key's phase if the statement that decided it phased it (`phased`; HotPathOne's
+ * `ReplayPhased`).
  */
-export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, limit: BulkLimit | null, bulk: Map<string, BulkRows>, request: UseRequest): UseView {
+export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, limit: BulkLimit | null, bulk: Map<string, BulkRows>, request: UseRequest, phased: boolean): UseView {
   const read = <K extends Kind>(kind: K, id: string): Read<Extract<Input, { kind: K }>> => {
     const key = objectKey({ kind, id });
     // Each kind is a table of its own: a key's row is one of its kind or none.
@@ -72,7 +77,7 @@ export function readUse(rows: Rows, newest: ReadonlyMap<string, Buffer | null>, 
     const held = bulk.get(holder) ?? new Map<string, number>();
     bulk.set(holder, held);
     // No policy in the log, no cap to move: the decision refuses the use (`no_policy`).
-    cap = limit === null ? { inSet: false, others: 0 } : bulkStep(held, request.secretId, request.at, limit);
+    cap = limit === null ? { inSet: false, others: 0 } : bulkStep(held, holder, request.secretId, request.at, limit, phased);
   }
   return { credential, principal, roles: read('roles', ROLES_REF.id), policy, secret, source, environments, bulk: cap };
 }
@@ -133,7 +138,7 @@ export function replay(
       if (!LOGS_OWN.has((entry.op as { op: string }).op)) change(keys, replayed, entry);
       continue;
     }
-    const view = readUse(replayed.rows, replayed.newest, replayed.limit, replayed.bulk, entry.request);
+    const view = readUse(replayed.rows, replayed.newest, replayed.limit, replayed.bulk, entry.request, entry.phased);
     const code = decideUse(keys, view, entry.request) ?? (entry.request.route === undefined ? null : routeDecision(keys, replayed, view, entry.request));
     decided?.(entry, code);
   }
@@ -191,6 +196,11 @@ function change(keys: SealKeys, replayed: Replayed, entry: LoggedChange): void {
   replayed.newest.set(key, entry.seal);
 }
 
+/** Whether a stored use's statement phased its key: 0074's writes true (Postgres) or 1 (SQLite), the previous release's null. */
+export function phasedOf(stored: boolean | number | null): boolean {
+  return stored === true || stored === 1;
+}
+
 /**
  * The log as stored, read whole and replayed with the seal keys of
  * `signingKeys` (the vault's): each use's decision by its entry number,
@@ -216,7 +226,7 @@ export async function replayStored(db: Queryable, signingKeys: readonly Uint8Arr
     else {
       // A route use's (T186): decided as a named use is, then for its route's editor (`routeDecision`).
       const route = row.route == null ? {} : { route: row.route, plain: true as const };
-      entries.push({ kind: 'use', number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purpose, ...route } });
+      entries.push({ kind: 'use', number: BigInt(row.number), request: { credential: row.credential, secretId: row.secret, place: row.place, at: Number(row.at), ...purpose, ...route }, phased: phasedOf(row.phased) });
     }
   }
   entries.sort((a, b) => (a.number < b.number ? -1 : a.number > b.number ? 1 : 0));

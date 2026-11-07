@@ -29,7 +29,9 @@ are compared on those; the theorems hold for every view.
   is in the principal's set, or fewer than the cap's count of other keys
   counted; the rule writes a key's row only for a request it admits, at
   the start of the request's refresh period (`periodOf_lags`: less than a
-  refresh before the request's time, never after it).
+  refresh before the request's time, never after it), whatever the phase
+  its principal's key's periods start at (T204: in code, a hash of the
+  two, `phaseOf`, which the model takes as given).
 -/
 
 namespace Coffre
@@ -352,20 +354,21 @@ def useAhead : Int := 60000
 /-- `refreshMs`: a minute, or a tenth of a shorter window, at least 1 ms. -/
 def refreshOf (l : Limit) : Int := max 1 (min 60000 (l.window / 10))
 
-/-- `periodOf`: the start of `time`'s refresh period. -/
-def periodOf (time refresh : Int) : Int := time - time % refresh
+/-- `periodOf`: the start of `time`'s refresh period, one of `phase` + n × `refresh`. -/
+def periodOf (time refresh phase : Int) : Int := time - (time - phase) % refresh
 
 /-- What the rule writes: the request's period, for a request it admits whose key's row is from an earlier one, or missing. -/
 def bulkWrite (inSet : Bool) (others count : Nat) (stale : Bool) (period : Int) : Option Int :=
   if (inSet || decide (others < count)) && stale then some period else none
 
-/-- `bulkRule`: whether the key is in the set, how many others count (up to `count`), and what it writes. -/
-def bulkRule (rows : Table Int) (key : String) (time : Int) (l : Limit) : Bool × Nat × Option Int :=
+/-- `bulkRule`: whether the key is in the set, how many others count (up to `count`), and what it writes, its periods
+from `phase` (`phaseOf`, the principal's key's). -/
+def bulkRule (rows : Table Int) (key : String) (time : Int) (l : Limit) (phase : Int) : Bool × Nat × Option Int :=
   let refresh := refreshOf l
   let last := rows.get? key
   let inSet := match last with | some t => decide (t > time - l.window - refresh) | none => false
   let others := if inSet then 0 else min l.count (rows.filter fun (k, t) => k != key && decide (t > time - l.window - refresh - useDeadline - useAhead)).length
-  let period := periodOf time refresh
+  let period := periodOf time refresh phase
   let stale := match last with | some t => decide (t < period) | none => true
   (inSet, others, bulkWrite inSet others l.count stale period)
 
@@ -529,15 +532,16 @@ theorem bulkWrite_admitted {i : Bool} {o c : Nat} {st : Bool} {period t : Int} (
 
 /-- A period starts less than a refresh before its time, and never after it: so `last` lags a key's newest
 use by less than `refresh`, which the set's bound adds back. -/
-theorem periodOf_lags {time refresh : Int} (h : 0 < refresh) : periodOf time refresh ≤ time ∧ time - refresh < periodOf time refresh := by
+theorem periodOf_lags {time refresh phase : Int} (h : 0 < refresh) :
+    periodOf time refresh phase ≤ time ∧ time - refresh < periodOf time refresh phase := by
   unfold periodOf
-  have h1 := Int.emod_nonneg time (Int.ne_of_gt h)
-  have h2 := Int.emod_lt_of_pos time h
+  have h1 := Int.emod_nonneg (time - phase) (Int.ne_of_gt h)
+  have h2 := Int.emod_lt_of_pos (time - phase) h
   omega
 
 /-- **The rule writes only for what it admits,** at the start of the request's refresh period. -/
-theorem bulkRule_writes_admitted {rows : Table Int} {key : String} {time t : Int} {l : Limit} {i : Bool} {o : Nat}
-    (h : bulkRule rows key time l = (i, o, some t)) : t = periodOf time (refreshOf l) ∧ (i = true ∨ o < l.count) := by
+theorem bulkRule_writes_admitted {rows : Table Int} {key : String} {time t phase : Int} {l : Limit} {i : Bool} {o : Nat}
+    (h : bulkRule rows key time l phase = (i, o, some t)) : t = periodOf time (refreshOf l) phase ∧ (i = true ∨ o < l.count) := by
   unfold bulkRule at h
   simp only [Prod.mk.injEq] at h
   obtain ⟨rfl, rfl, hw⟩ := h

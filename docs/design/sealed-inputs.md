@@ -300,6 +300,34 @@ configuration writes a `bulk.limit` change first (`limitChange`).
   number order, not by time (TLC's finding), up to the deadline after their
   `at` or, a Worker's clock ahead, a minute before it (W228, migration 0028).
 - `refresh` is a minute, or a tenth of a shorter window.
+- Each principal's key has refresh periods of its own (T204, migration
+  0074): they start at a phase, the first 6 bytes of SHA-256 of
+  `<principal>/<key>` modulo `refresh` (`phaseOf`, `bulk_period`). With
+  one phase for every row, every hot key's next use after each minute's
+  turn found its row stale at once, and each of those uses was two calls,
+  three reads of the statement, two locks, a `log_bulk` update and a
+  `log_uses` row its cover would have spared. At 1,000 uses a second of
+  100 keys, the burst answered 61 to 66 of 20,000 uses busy, all of them
+  in the quarter second after a turn. Spread over the period, the same
+  moves cost nothing anyone waits for. The bounds above hold whatever the
+  phase: a period still starts less than a `refresh` before its use, and
+  never after it (HotPathOneBulkPhases; Lean's `periodOf_lags`).
+- The replay moves a key on as the statement that decided each use did.
+  An upgrade's log holds uses decided by the previous release's
+  statement, every phase 0, before 0074 and, from the calls it had begun,
+  just after it: count 1 over 15 minutes, a use of A at `T + phase`
+  (T a minute) wrote `T`, and a use of B at `T + 1,023,001` counts only
+  the keys moved on past `T + 1`, so not A; replayed phased, A's row
+  would say `T + phase`, and B be refused. So each entry says which
+  statement decided it, `log_uses.phased`: true from 0074's, null from
+  the one before, which writes no value (HotPathOneBulkSwitch,
+  `ReplayPhased`). It is outside the entry's MAC, which the previous
+  release's callers make whichever statement then decides: who could
+  change it could change the cap's rows, and it moves only the replay's
+  (R64). Nor is it in the checkpoints' leaves or the verifier's rows, so
+  the chain does not hold it either: today only the suites' replay reads
+  it, and a verifier that replayed decisions would have to take it as
+  unauthenticated input, a shift of up to a `refresh` in a key's row.
 - Every request counts, whatever else refuses it, but those the cap
   refuses: the use's statement writes the row before the vault decides.
 - A key is the key asked for: two references to one source count twice.

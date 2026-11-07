@@ -87,7 +87,7 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
   const vault = openVault(db.vault, await prepareVault(CONFIG, LOG_015), createDatabase(pool));
   try {
     // The key enters the set in the cold use; a period turning over before the warm one would have it write its row again (T218).
-    await inBulkPeriod(PERIOD_ROOM_MS);
+    await inBulkPeriod(PERIOD_ROOM_MS, [{ principal: w.principal, key }]);
     // Cold: the map's miss reads the ids (one statement), then the use, its key entering the set, decided first and made
     // under the lock (two more). Warm, its key in the set: one.
     const cold = await vault.useRoute(w.askRoute('openai'));
@@ -162,7 +162,7 @@ test('R48: a route use is one statement on a warm map, its buffers the same at 1
   /** Each form's work: the light gate's, the vault's on a warm map; the whole gate's; a miss's; and the route's named call's. */
   const measured = async () => {
     // The light and the whole gate are held to each other, so both read the key's row in one period: a period turning over between them has the first write the row and the other not (T218).
-    await inBulkPeriod(PERIOD_ROOM_MS);
+    await inBulkPeriod(PERIOD_ROOM_MS, [{ principal: w.principal, key }]);
     return { ...(await measure('light')), whole: (await measure('whole')).buffers, miss: (await measure('miss')).buffers, named: await measureNamed() };
   };
   await grow(10_000);

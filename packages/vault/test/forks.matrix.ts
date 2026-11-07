@@ -25,7 +25,6 @@ import type { NamedUseInput, NamedUseOutcome } from '@coffre/core/vault';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { refreshMs } from '../src/bulk.ts';
 import { ENGINE, openTestDatabase, rows, run, type TestDatabase } from './database.ts';
 import { holding, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall } from './named-world.ts';
 import { emptyLog, useDatabases } from './use-world.ts';
@@ -89,11 +88,6 @@ const count = async (query: ReturnType<typeof sql>) => Number((await rows<{ n: n
 const delayOf = () => (ENGINE !== 'postgres' ? 0 : 1600);
 const LAPSES_MS = ENGINE === 'postgres' ? 2500 : 300;
 
-async function inPeriod(ms: number): Promise<void> {
-  const period = refreshMs({ count: 1000, windowMs: 15 * 60_000 });
-  const left = period - (Date.now() % period);
-  if (left < ms) await sleep(left + 50);
-}
 
 /** One cell, in its own world and isolate: everything up to its request, then the request, measured. */
 async function cell(row: Row, key: Key) {
@@ -194,7 +188,7 @@ test(`at a fork and at \`dev@me\`, a caller learns nothing of a key they may not
   const differing: string[] = [];
   await namedWorld(db);
   for (const row of ROWS) {
-    await inPeriod(20_000);
+    // Each cell's keys are made as their periods start (T204, `freshKeyId`): made and asked within a minute, each within one.
     const made = await each(KEYS, (key) => cell(row, key));
     // Each cell's principal's lock held by another connection, all of the row's on one (a connection each would take as
     // many of Postgres's as the row has cells), while its cells are asked.
