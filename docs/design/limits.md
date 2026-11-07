@@ -1198,7 +1198,8 @@ with `QUEUE_TIMEOUT` if it waits longer, without ever sending it"
 - **Q1. Fast refusal on Workers.** Two steps (section 2). First, replace
   the count of 10 with one computed from memory: what share of an
   isolate's 128 MB may uses in flight take (I'd say half), with the bytes
-  per use measured locally? Second, a refusal rule from recent outcomes:
+  per use measured locally? (config.md Q1: the count must first hold a
+  use's place until its key opens, and a batch's per key.) Second, a refusal rule from recent outcomes:
   A (predicted lateness) or B (adaptive throttling, the published one).
   Neither is proven; I'd like one run on your Cloudflare to compare them
   with no fast refusal at all (R34, under $5, about an hour of a throwaway

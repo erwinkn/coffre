@@ -63,7 +63,7 @@ export const policy = definePolicy({
     rotateAfterDays: 365, // null: never flag
   },
   proxy: { // read only with the credential proxy
-    revokedWithinSeconds: 60, // 1 to 3,600
+    revokedWithinSeconds: 60, // 3 to 3,600
     editable: false, // Owners may add and change definitions in the UI
   },
   audit: {
@@ -100,7 +100,7 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | `services.noReads` | `false` | app | `signin({ workloads: { noReads } })` | no binding may list `reads`: a key-bound session gets plain values only, and a binding made with reads before the switch is refused at its next sign-in. Alone it leaves bearer service tokens and `/api/auth/oidc`'s exchanges reading as today ([workload-access.md](workload-access.md), section 6.3); only `useOnly` ends those. A deployment whose services read plain values only sets **both** to `true`. Neither flag is held by the vault today; like `tokenMaxDays`, the vault could hold both from the same object |
 | `reads.bulkLimit` | 1,000 keys per 15 min | vault | `vault({ bulkLimit })` | R28, R52 |
 | `values.rotateAfterDays` | 365, or `null` | app | `createCoffre({ rotateAfterDays })` | when the UI and `coffre list` flag a value nobody changed |
-| `proxy.revokedWithinSeconds` | 60, 1 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
+| `proxy.revokedWithinSeconds` | 60, 3 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
 | `proxy.editable` | `false` | app | `credentialProxy({ editable })` | whether an Owner may add and change proxy definitions in the UI, beside those the deployment's code names |
 | `audit.keepUsesDays` | `null`, every day kept, as today | vault | `retainDays`, reachable only by a Node deployment that runs its own checkpointer | Q6 |
 
@@ -118,17 +118,30 @@ bytes for 60 + 10 = 70 s. The proposal derives both from the one number R:
 
 - values served from memory: R;
 - a handle's tunnel: each check given d = min(R ÷ 2, 10 s), the checks
-  R − d apart, so that a check's interval and its deadline add up to R.
+  R − d apart, so that a check's interval and its deadline add up to R;
+- a fresh request's window to send (or, for a signature, to answer), from
+  its start: today max(cache, 3 s), the 3 s being the use's own deadline
+  (`USE_DEADLINE_MS`; `sendBy` and `answerBy` in `credential-proxy.ts`), so
+  that a cold request whose use took most of its 3 s still goes out. It
+  stays max(R, 3 s), which is R once R is at least 3.
 
 *Example:* an Owner revokes a CI token at 12:00:00. At R = 60, its last
 request through the proxy leaves by 12:01:00; its open Postgres tunnel
 checks every 50 s, each check given 10 s, and closes by 12:01:00. At R = 4,
 the tunnel checks every 2 s with 2 s to answer.
 
-The range is 1 to 3,600. Today `cacheSeconds: 0` (no cache) is allowed and
+The range is 3 to 3,600. Below 3, the promise would not hold: at R = 1, a
+request that started at 11:59:59.9, its use decided just before the
+revocation at 12:00:00, may still send at 12:00:02.8, inside its 3 s
+window, where R promised 12:00:01. Capping that window at R instead
+would keep the promise and fail every cold request whose use takes longer
+than R (503 `late`, to ask again), which a slow key service makes common:
+one KMS attempt alone may take 706 ms. So the floor is the use's deadline,
+derived, not a choice. Today `cacheSeconds: 0` (no cache) is allowed and
 `recheckSeconds: 0` is refused; one number cannot be both, and a tunnel
-cannot check continuously, so 0 goes: a deployment that wants no cache sets
-1. A workload's tunnel keeps its own 15 s bound (`WORKLOAD_RECHECK_MS`,
+cannot check continuously, so 0 goes. A deployment that wants no cache
+sets 3, which is what `cacheSeconds: 0` gives a fresh request today
+anyway. A workload's tunnel keeps its own 15 s bound (`WORKLOAD_RECHECK_MS`,
 design section 8.2), or R if less, as today.
 
 **`services.signInsPerAddress` on Workers.** Cloudflare reads a rate limit's
@@ -194,7 +207,10 @@ show it; `docs/deploy.md` gets one section on it.
 Every other number in the 0.16 code is one of three things: a platform fact,
 a rule of Erwin's, or a value computed from those and the object. The tables
 give each one's formula and source. **⚠** marks a value with no source yet,
-which the questions in section 3 or a later PR settle.
+which the questions in section 3 or a later PR settle. They hold every value
+D172 changes or derives, and the fixed ones a reviewer of those needs;
+[limits.md](limits.md)'s inventory (its V and S rows) lists the rest, each
+with its source and verdict, and those stand as it says.
 
 ### 2.1 Inputs: platform facts and Erwin's rules
 
@@ -241,7 +257,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | A sign or verify request | ⌈m ÷ 3⌉ × 4 + 4,096 bytes, m the longest message: 91,480 bytes at the 64 KiB default, 1,402,200 at 1 MiB (an `hmac()`'s `maxBytes`, or any editable proxy) | the message as base64url in JSON, and 4 KiB for the rest | #519 (`compute`) |
 | Bodies read whole at once, each counted twice (its bytes and a copy) out of the 16 MiB | 8 forwarded bodies of 1 MiB; 5 sign or verify requests at 1 MiB messages; 128 field bodies | 16 MiB ÷ (2 × the body's bound) | #519's code. (`memory.ts`'s comment says sixteen: a P3 for #519) |
 | One cache's slice | 2,396,745 bytes | 16 MiB ÷ 7 caches, least recently used out first | #519 |
-| Uses an isolate can hold | about 2,083 | 64,000,000 ÷ 30 KiB per held use | 30 KiB measured (W331, local workerd); stated in #519, not used until Q1 |
+| Uses an isolate can hold | about 2,083 | 64,000,000 ÷ 30 KiB per held use | 30 KiB measured (W331, local workerd); stated in #519, not used until Q1, which first has it re-measured over a use's whole life, its key's opening included |
 | A plugin's WebSocket message on Node | 1 MiB | the body bound | #519 |
 | A streamed body | 5 GiB | S3's one request | platform |
 | A body whose digest is declared | 95 MiB | under Cloudflare's 100 MB | platform |
@@ -250,7 +266,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| Uses in flight per isolate or process | **10** ⚠ | node-postgres's default pool, where Workers has no pool | none: Q1 |
+| Uses in flight per isolate or process | **10** ⚠ | node-postgres's default pool, where Workers has no pool | none: Q1. It counts a use's database phase only, and a batch as one: a use waiting on its key service holds no place (Q1) |
 | How long a use's place outlives its deadline (`HELD_PAST_DEADLINE_MS`) | 2 s | the uses' login's `statement_timeout` | R53 |
 | A use's time tolerance (`AT_SLACK_MS`) | 63 s | deadline 3 s + a clock 60 s ahead | R53, D3 |
 | The bulk cap's refresh | 60 s at 15 min | in ms, max(1, min(60,000, ⌊window ÷ 10⌋)): a 1 ms window refreshes every 1 ms | decision 9 (`refreshMs`, `packages/vault/src/bulk.ts`) |
@@ -347,6 +363,7 @@ read call with a key service 11.2 s.
 | Keys in a key set, fetched or uploaded (`MAX_KEYS`) | 32 | none written: the pre-sign-in body bound is derived from it | #533 ⚠ the 32 itself is a choice |
 | A key tried against a token that does not verify (`KEY_TRY_CPU_US`), and each token byte per try (`TOKEN_BYTE_CPU_NS`) | 260 µs; 14 ns | measured over tokens of 1 to 32 KiB, ES256 and RS256, the dearest rounded up | #533 (its `sign-in-cost.ts` script) |
 | A binding's issuer | 1,670 bytes (from 400) | 2,704 (index entry) − 1,034 (the entry's other columns) | #533 |
+| A provider fetch: discovery document, key set, GitHub's API (`FETCH_DEADLINE_MS`) | 5 s, DNS to last byte | none written | ⚠ a choice, `packages/server/src/workloads/transport.ts` (limits.md S64, which proposes the same deadline for the UI routes' fetches, today unbounded) |
 | A workload's gate | 1,000 a second per service | a Durable Object's soft limit | platform; on Node it stands in for a memory bound ⚠ (limits.md #5) |
 
 ### 2.7 Bodies (#533)
@@ -360,12 +377,14 @@ read call with a key service 11.2 s.
 | A provider's discovery document or key set | 64 KiB | about 1/2,000 of an isolate | #533 |
 | Every body before sign-in (`SIGN_IN_BODY_BYTES`): device login, CI and workload exchanges, a passkey's answer, MCP's OAuth token, revocation and registration | 16 KiB | the largest B with `MAX_KEYS` × (`KEY_TRY_CPU_US` + `TOKEN_BYTE_CPU_NS` × B) ≤ 20 ms − 4 ms: 32 × (260 µs + 14 ns × B) ≤ 16 ms gives B ≤ 17.1 kB, rounded down to a power of two | #533 (R27). Measured: 32 tries of a 16 KiB token cost 7.1 to 12.0 ms; of 32 KiB, up to 21.4 ms. ⚠ Not Free's: a stranger's worst sign-in at 16 KiB, up to 12 ms before the rest of the request, runs past Free's 10 ms. No body size fits 32 keys in Free's 10 ms less the 4 ms read: 32 × 260 µs is 8.3 ms before a byte, so a Free bound would also lower `MAX_KEYS` (to 23 at most). The device login's 4 KiB and MCP's 256 KiB go; the exchanges' 16 KiB stays |
 | Field bounds with no source | gone | – | R70 (#533): labels, role names and descriptions, claims, scopes and the rest |
+| A field body's fields and depth, in the proxy (`MAX_FIELDS`, `MAX_DEPTH`) | 256; 32 | refused before parsing, so that a body made to cost the most (65,000 empty pairs in 64 KiB) costs no more than a real one, unauthenticated; a siteverify has four fields | `credential-proxy.ts`, kept by #533 (limits.md S27). The reason is written; the two numbers are not derived from it ⚠ |
 
 ### 2.8 Proxy
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
 | Values served from memory | 60 s | R, the object's `revokedWithinSeconds` | policy |
+| A fresh request's window to send, or to answer with a signature, from its start | 60 s | max(R, 3 s), 3 s the use's deadline (`USE_DEADLINE_MS`), so R's floor is 3 | `sendBy`, `answerBy` (`credential-proxy.ts`), policy |
 | A handle's tunnel: a check's deadline; the checks' interval | 10 s; 50 s | d = min(R ÷ 2, 10 s); R − d (today 10 s and 60 s, a 70 s bound) | policy |
 | A workload's tunnel (and a UI tunnel a workload opens): two checks | (1) its session still stands: bound b = min(R, 15 s), checked every 2b ÷ 3 with b ÷ 3 to answer, today every 10 s with 5 s; (2) the vault still grants the key, and for an editable tunnel the item is the one dialled: every R with min(R, 10 s) to answer, today every 60 s with 10 s | (1) design section 8.2's 15 s; (2) proposed as the handle's: every R − d, d = min(R ÷ 2, 10 s), so a lost grant or a changed definition ends it within R | `credential-proxy.ts` (`workloadTunnel`, `uiTunnel`), policy |
 | The refresh window before values lapse | min(cache ÷ 4, 15 s) | none written ⚠ | limits.md S25 |
@@ -396,6 +415,9 @@ read call with a key service 11.2 s.
 | How often retention runs (`RETAIN_EVERY_MS`) | hourly | – | `log-checkpointer.ts` |
 | Days detached per run | **one** | each DETACH makes every backend plan the uses again; two close together stall uses (measured for a DROP, [0.15-plan.md](0.15-plan.md)) | `retention.ts`. A backlog drains a day an hour: switching on 30 days on a database a year old detaches its 335 extra days over about 14 days |
 | A day's freshness margin before it goes | 20 min | 2 × `FRESH_MS` (10 min) past the day's cut, read from the signer's own pair | `checkpointer.ts`, `retention.ts` (FreshBeforeDrop) |
+| How long a tick waits on the log's upkeep (`UPKEEP_BOUND_MS`): retention's drop of a day and its tiles | 60 s | none written | ⚠ a choice (T169, 205e8255), `checkpointer.ts` (limits.md V14) |
+| Alarms a checkpointer keeps, in its Durable Object or the Node runner's file (`ALARMS_KEPT_MS`) | 30 days | none written; on Node a compaction trigger past 1,000,000 bytes, not a byte bound | ⚠ a choice, `checkpointer.ts` (limits.md V57, which leaves a byte bound open) |
+| Reads the projector takes a step (`PROJECTED_AT_ONCE`), steps a run | 1,000; 4 | a tick's worth at R44, 500 entries, twice over: 4,000 a run | `packages/vault/src/reads.ts` (limits.md V74) |
 | The audit watch's staleness | 11 min | 2 × the 5 min schedule + 1 | #503 |
 
 ## 3. Open questions
@@ -445,6 +467,32 @@ deadline:
 > = min(64,000,000 ÷ 30 KiB, 3,000 ms ÷ 2.4 ms) = min(2,083, 1,250) = **1,250**
 
 On Node, the same two bounds for the process, as #519 does for its shares.
+
+**What the count must cover first.** Today a use's place in admission is
+taken for its database phase alone: `raced` (`packages/vault/src/use.ts`)
+admits it, and releases the place when the statement and its reads after
+it settle, before `opening` unwraps the value's key at the key service.
+And a batch (`useMany`'s rounds, up to `uses.batch` = 100 keys) is admitted
+once, as one place. So neither today's 10 nor a 1,250 bounds what an
+isolate holds: a use waiting up to 3,118 ms on KMS for its key holds its
+row and request but no place, and a batch of 100 keys counts as one use.
+*Example:* an isolate taking 400 uses a second while KMS answers each key
+in about 3 s admits each use for its few ms in the database, then holds
+about 1,200 uses waiting on their keys, none of them counted; and 1,250
+batches of 100 would be 125,000 keys under the same count. Step 1
+therefore needs two code changes before its number means anything:
+
+- a place is held from admission until the value is opened or the use
+  fails (its key opened, refused, or `late`), so a use waiting on its key
+  service counts;
+- a batch takes one place per key, not one for the call.
+
+And the 30 KiB must be measured over that lifetime: held uses with a slow
+key service, and batches, not only uses held as today's admission counts
+them. The formula stays; its byte input is re-measured, and 1,250 holds
+only if the new figure is at most 50 KiB (64,000,000 ÷ 1,250 = 51,200
+bytes), where the CPU bound is still the smaller.
+
 *Example:* a cold isolate that Cloudflare sends 200 uses in its first
 second, each taking 80 ms, has about 16 in flight: today 6 of them are
 refused with the database idle; after step 1, none.
