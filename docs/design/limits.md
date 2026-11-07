@@ -616,7 +616,7 @@ What a deployment can set for performance, before and after:
 | Where | Before | After |
 |---|---|---|
 | `vault(env => …)` (Workers) | `uses: { inFlight, connections, coverMs, names, batch }` | nothing |
-| `serveVault` / `localVault` (Node) | a URL gets a pool of 10; a `Database` passed in can have any size, but admission stays 10 (V2); `VaultOptions` only through `localVault` | the hot pool's size, from the database's budget across processes (Q2) |
+| `serveVault` / `localVault` (Node) | a URL gets a pool of 10; a `Database` passed in can have any size, but admission stays 10 (V2); `VaultOptions` through `localVault`, and through `serveVault` since T230 (#514) | the hot pool's size, from the database's budget across processes (Q2) |
 | `createCoffre` (Node) | a URL, a pool of 10, no size option | the app pool's size, the same way |
 | Hyperdrive `origin_connection_limit` | setup, ≤ 20 | setup, the database's share, ≤ the plan's max |
 | `signin({ workloads: { limits } })` | required: `{ perSource, total }` | `perSource` only, if Erwin agrees (Q4) |
