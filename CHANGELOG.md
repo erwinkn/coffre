@@ -110,6 +110,15 @@
   from the previous release's), so a log of both, as an upgrade leaves,
   replays to the answers each gave.
 
+- **The Proxy tab says why a route stopped from the vault's code, not its
+  words (T197).** The note on a UI item that would not route now matched
+  the vault's text, so a route saved by an Owner who was then demoted read
+  "its save was not an Owner's", and an inherited key was said to be read
+  "here". The vault's mark now carries a code (`unread`, `unread_at_save`,
+  `not_owner_at_save`, `not_owner`) and the environment that holds the
+  key, and the tab words each: "pat@acme.example, who saved it as an Owner
+  of market, no longer is one. An Owner of market saves it again."
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

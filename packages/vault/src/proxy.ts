@@ -1,6 +1,6 @@
 import { covers, DEFAULT_POLICY, holds, inScope, issuedGrant, ownsProject, scopeDefinition, type Columns, type Holdings, type Permission, type Place, type RoleDefinition } from '@coffre/core/access';
 import { CREDENTIAL_NAME } from '@coffre/core/identity';
-import type { ProxyItemView, ProxyView } from '@coffre/core/vault';
+import type { NotCleared, ProxyItemView, ProxyView, RefusalCode } from '@coffre/core/vault';
 
 import { placeIn, readerOf, refuses, type Reader } from './decide.ts';
 import {
@@ -69,12 +69,21 @@ export function frozenOwns(frozen: FrozenHoldings, projectId: string): boolean {
  * A deleted or archived holder routes nothing.
  */
 export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly EnvironmentInput[]): string | null {
-  const places = new Map(chain.map((environment) => [environment.id, environment]));
-  const { holder } = key;
-  const code = refuses(reader, 'secret.read', placeIn({ projectId: holder.projectId, environmentId: holder.id }, places), holder.deleted || holder.archived || holder.projectArchived);
-  if (code !== null) return `${key.name}: its editor does not read it in ${holder.slug} (${code})`;
-  if (key.nature === 'sensitive' && !ownsProject(reader.live, holder.projectId)) return `${key.name} is sensitive: an Owner of its project may route sensitive keys`;
+  const code = unread(reader, key, chain);
+  if (code !== null) return `${key.name}: its editor does not read it in ${key.holder.slug} (${code})`;
+  if (key.nature === 'sensitive' && !ownsProject(reader.live, key.holder.projectId)) return `${key.name} is sensitive: an Owner of its project may route sensitive keys`;
   return null;
+}
+
+/** Why `reader` does not read `key` where it is held, or null; a deleted or archived holder is read by no one. */
+function unread(reader: Reader, key: ResolvedKey, chain: readonly EnvironmentInput[]): RefusalCode | null {
+  const { holder } = key;
+  return refuses(reader, 'secret.read', holderPlace(key, chain), holder.deleted || holder.archived || holder.projectArchived);
+}
+
+/** Where `key` is held, as a decision weighs it: its holder in the fork chain. */
+function holderPlace(key: ResolvedKey, chain: readonly EnvironmentInput[]): Place {
+  return placeIn({ projectId: key.holder.projectId, environmentId: key.holder.id }, new Map(chain.map((environment) => [environment.id, environment])));
 }
 
 
@@ -86,14 +95,14 @@ export function routeRefusal(reader: Reader, key: ResolvedKey, chain: readonly E
  * key, until someone who reads its keys saves it again. A key the place does
  * not hold is decided at each use, and marks nothing here.
  *
- *   Lin saved openai; she is demoted to Viewer   ->  { key: 'OPENAI_API_KEY', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' }
+ *   Lin saved openai; she is demoted to Viewer   ->  { key: 'OPENAI_API_KEY', code: 'unread', environment: 'dev', reason: 'OPENAI_API_KEY: its editor does not read it in dev (no_grant)' }
  */
-export function notCleared(item: ProxyItem, editor: Reader, keys: ReadonlyMap<string, ResolvedKey>, chain: readonly EnvironmentInput[]): NonNullable<ProxyItemView['notCleared']> | null {
+export function notCleared(item: ProxyItem, editor: Reader, keys: ReadonlyMap<string, ResolvedKey>, chain: readonly EnvironmentInput[]): NotCleared | null {
   for (const name of item.keys) {
     const key = keys.get(name);
     if (key === undefined) continue;
-    const reason = editorRefusal(item.holdings, editor, key, chain);
-    if (reason !== null) return { key: name, reason };
+    const refused = editorRefusal(item.holdings, editor, key, chain);
+    if (refused !== null) return { key: name, ...refused, environment: key.holder.slug };
   }
   return null;
 }
@@ -260,21 +269,24 @@ export function proxyServing(keys: SealKeys, levels: readonly RouteLevel[]):
 /**
  * Why a route's editor may not route `key` at a use, or null (decision 5(b); formal/Routing.tla, ClearanceAtUse,
  * EditorStillHolds): both what their save froze (`frozenAllows`, `frozenOwns`, the place protected or not as the policy
- * is now) and what they hold now (`routeRefusal`, as the save weighed them) must read it where it is held, and, for a
+ * is now) and what they hold now (as `routeRefusal` weighed them at the save) must read it where it is held, and, for a
  * sensitive value, own its project. So a role widened since the save widens nothing, and an editor demoted or removed
- * since routes nothing they no longer read:
+ * since routes nothing they no longer read. The first that fails says why, as a code the tab words (`NotClearedCode`):
  *
- *   Lin, router on market/dev when she saved, a Viewer now        route_not_cleared
- *   Lin saved as a Developer, an Owner now, the key sensitive since  route_not_cleared: her save froze no ownership
+ *   Lin, router on market/dev when she saved, a Viewer now           unread
+ *   Lin, router when she saved, market/dev protected since           unread_at_save
+ *   Lin saved as a Developer, an Owner now, the key sensitive since  not_owner_at_save: her save froze no ownership
+ *   Pat saved as an Owner of market, a Maintainer now                not_owner
  */
-export function editorRefusal(frozen: FrozenHoldings, now: Reader, key: ResolvedKey, chain: readonly EnvironmentInput[]): string | null {
-  const current = routeRefusal(now, key, chain);
-  if (current !== null) return current;
-  const places = new Map(chain.map((environment) => [environment.id, environment]));
+export function editorRefusal(frozen: FrozenHoldings, now: Reader, key: ResolvedKey, chain: readonly EnvironmentInput[]): Pick<NotCleared, 'code' | 'reason'> | null {
   const { holder } = key;
-  const place = placeIn({ projectId: holder.projectId, environmentId: holder.id }, places);
-  if (!frozenAllows(frozen, 'secret.read', place, { policy: now.live.policy, service: false })) return `${key.name}: what its editor held when they saved it does not read it in ${holder.slug}`;
-  if (key.nature === 'sensitive' && !frozenOwns(frozen, holder.projectId)) return `${key.name} is sensitive, and its editor was no Owner of its project when they saved it`;
+  const code = unread(now, key, chain);
+  if (code !== null) return { code: 'unread', reason: `${key.name}: its editor does not read it in ${holder.slug} (${code})` };
+  if (!frozenAllows(frozen, 'secret.read', holderPlace(key, chain), { policy: now.live.policy, service: false })) return { code: 'unread_at_save', reason: `${key.name}: what its editor held when they saved it does not read it in ${holder.slug}` };
+  if (key.nature !== 'sensitive') return null;
+  // Their save first: an editor who was never an Owner of it was not cleared by their save, whatever they are now.
+  if (!frozenOwns(frozen, holder.projectId)) return { code: 'not_owner_at_save', reason: `${key.name} is sensitive, and its editor was no Owner of its project when they saved it` };
+  if (!ownsProject(now.live, holder.projectId)) return { code: 'not_owner', reason: `${key.name} is sensitive, and its editor, an Owner of its project when they saved it, no longer is` };
   return null;
 }
 
@@ -295,5 +307,5 @@ export function routeEditorRefusal(
   const holder = secret === null ? undefined : view.environments.get(secret.environmentId)?.row ?? undefined;
   if (secret === null || value === null || holder === undefined) return `${name}: not held where the route serves it`;
   const reader = readerOf(editor, credential, roles, chain, at);
-  return editorRefusal(item.holdings, reader, { name, holder, nature: value.nature }, chain);
+  return editorRefusal(item.holdings, reader, { name, holder, nature: value.nature }, chain)?.reason ?? null;
 }

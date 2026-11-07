@@ -69,7 +69,7 @@ export type ProxyItem = {
   savedAt: number | null;
   routesSensitive: boolean;
   /** Why it would not route now (`route_not_cleared`, decision 5), or null: someone who reads its keys saves it again. */
-  notCleared: { key: string; reason: string } | null;
+  notCleared: NonNullable<ProxyPage['items'][number]['notCleared']> | null;
   /** An inherited item's place, `market/dev`; an own item's that it overrides; null otherwise. */
   from: string | null;
 };
@@ -479,17 +479,30 @@ export function routedInWords(keys: readonly string[]): string {
 }
 
 /**
- * An item that would not route now, in words: which key its save no longer
- * clears, and who clears it again.
+ * An item that would not route now, in words, from the vault's mark (its
+ * code, never its reason's text): which key no longer clears, why, and who
+ * clears it again. The key is held in the mark's environment, a fork's
+ * parent for an inherited one, of the place's project, whose Owners route
+ * its sensitive keys (R66, R71).
  *
- *   "gemini does not route now: lead@acme.example, who saved it, no longer reads OPENAI_API_KEY here. Someone who does saves it again."
+ *   "gemini does not route now: lead@acme.example, who saved it, does not read OPENAI_API_KEY in market/dev. Someone who does saves it again."
+ *   "stripe does not route now: STRIPE_KEY is sensitive, and pat@acme.example, who saved it as an Owner of market, no longer is one. An Owner of market saves it again."
  */
 export function notClearedInWords(item: Pick<ProxyItem, 'definition' | 'savedBy' | 'notCleared'>, place: Place): string {
-  const { key, reason } = item.notCleared!;
+  const { key, code, environment } = item.notCleared!;
   const who = savedByInWords(item.savedBy);
-  return / is sensitive/.test(reason)
-    ? `${item.definition.name} does not route now: ${key} is sensitive, and ${who}'s save was not an Owner's. An Owner of ${place.project} saves it again.`
-    : `${item.definition.name} does not route now: ${who}, who saved it, no longer reads ${key} here. Someone who does saves it again.`;
+  const said = (why: string, again: string) => `${item.definition.name} does not route now: ${why}. ${again} saves it again.`;
+  const owner = `An Owner of ${place.project}`;
+  switch (code) {
+    case 'unread':
+      return said(`${who}, who saved it, does not read ${key} in ${place.project}/${environment}`, 'Someone who does');
+    case 'unread_at_save':
+      return said(`what ${who} held when they saved it does not read ${key} in ${place.project}/${environment}`, 'Someone who reads it');
+    case 'not_owner_at_save':
+      return said(`${key} is sensitive, and ${who} was no Owner of ${place.project} when they saved it`, owner);
+    case 'not_owner':
+      return said(`${key} is sensitive, and ${who}, who saved it as an Owner of ${place.project}, no longer is one`, owner);
+  }
 }
 
 /** Keys the place lacks: the route is saved, and serves once they are set. */

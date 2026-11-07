@@ -1992,6 +1992,8 @@ export type Api = {
         routesSensitive: boolean;
         notCleared?: null | {
           key: string;
+          code: "not_owner" | "not_owner_at_save" | "unread" | "unread_at_save";
+          environment: string;
           reason: string;
         };
       }[];
@@ -2000,6 +2002,8 @@ export type Api = {
       inheritedNotCleared?: {
         [key: string]: {
           key: string;
+          code: "not_owner" | "not_owner_at_save" | "unread" | "unread_at_save";
+          environment: string;
           reason: string;
         };
       };
@@ -2189,6 +2193,8 @@ export type Api = {
         routesSensitive: boolean;
         notCleared?: null | {
           key: string;
+          code: "not_owner" | "not_owner_at_save" | "unread" | "unread_at_save";
+          environment: string;
           reason: string;
         };
       }[];
@@ -2197,6 +2203,8 @@ export type Api = {
       inheritedNotCleared?: {
         [key: string]: {
           key: string;
+          code: "not_owner" | "not_owner_at_save" | "unread" | "unread_at_save";
+          environment: string;
           reason: string;
         };
       };
@@ -3109,6 +3117,8 @@ export type ProxyPage = {
     routesSensitive: boolean;
     notCleared?: null | {
       key: string;
+      code: "not_owner" | "not_owner_at_save" | "unread" | "unread_at_save";
+      environment: string;
       reason: string;
     };
   }[];
@@ -3117,6 +3127,8 @@ export type ProxyPage = {
   inheritedNotCleared?: {
     [key: string]: {
       key: string;
+      code: "not_owner" | "not_owner_at_save" | "unread" | "unread_at_save";
+      environment: string;
       reason: string;
     };
   };
