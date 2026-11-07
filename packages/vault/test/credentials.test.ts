@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { issuedGrant, storedScope } from '@coffre/core/access';
 import { KekRegistry, LocalKekProvider } from '@coffre/core/kek';
-import type { CredentialColumns, SignInInput } from '@coffre/core/vault';
+import { HOT_LOCK_TIMEOUT_MS, LOCK_WAIT_MS, type CredentialColumns, type SignInInput } from '@coffre/core/vault';
 import { tablesOf } from '@coffre/db';
 import { postgresSession } from '@coffre/db/connect';
 import { and, asc, count, desc, eq } from 'drizzle-orm';
@@ -357,6 +357,27 @@ test("a revoke takes 0.14's head first, which 0.14's use of the credential holds
     assert.equal(revoked, false, "the revoke waits for 0.14's head");
     await holder.unsafe('COMMIT');
     assert.ok((await revoking_).ok);
+  } finally {
+    await holder.end();
+  }
+});
+
+test("a revoke waits for the fence LOCK_WAIT_MS at most, then is busy, nothing written: the uses that ask after it are not held back a use's whole wait (R75, migration 0078)", postgresOnly('lock_timeout'), async () => {
+  const w = await world();
+  const made = await signedIn(w);
+  const holder = postgresSession(OWNER_URL);
+  try {
+    // A long use statement, holding the fence shared.
+    await holder.unsafe('BEGIN');
+    await holder.unsafe('SELECT pg_advisory_xact_lock_shared(1668244070, 0)');
+    const none = await written();
+    const started = Date.now();
+    assert.deepEqual(await w.vault.revokeCredential!(revoking(made)), { ok: false, refused: 'busy' });
+    const took = Date.now() - started;
+    assert.ok(took >= LOCK_WAIT_MS && took < HOT_LOCK_TIMEOUT_MS, `refused after ${took} ms, within half a use's wait`);
+    assert.deepEqual(await written(), none);
+    await holder.unsafe('ROLLBACK');
+    assert.ok((await w.vault.revokeCredential!(revoking(made))).ok, 'and, the fence free, it lands');
   } finally {
     await holder.end();
   }

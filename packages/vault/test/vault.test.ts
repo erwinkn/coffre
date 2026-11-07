@@ -1154,6 +1154,35 @@ test('a vault moved to a new signing key while a read is at the key service logs
   assert.ok(verified.ok, JSON.stringify(verified));
 });
 
+test('a rotation closing more open intents\' keys than one statement binds logs them all, in its one transaction (review r3)', async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  // Three wraps of 1,100 keys each, paused at the key service: 3,300 outcomes for the rotation to log, past Postgres's
+  // 3,000 entries a statement and SQLite's 1,560.
+  // The vault's first key operation is its key's check (`#kekMismatch`), before any intent: made first.
+  await wrapped(w, await w.secret(w.dev));
+  const calls: Promise<unknown>[] = [];
+  let answer = () => {};
+  const until = new Promise<void>((resolve) => (answer = resolve));
+  for (let call = 0; call < 3; call += 1) {
+    const secrets: SecretRef[] = [];
+    for (let i = 0; i < 1_100; i += 100) secrets.push(...await Promise.all(Array.from({ length: 100 }, () => w.secret(w.dev))));
+    const reached = new Promise<void>((resolve) => (seen.pause = { reached: resolve, until }));
+    calls.push(w.vault.wrap({ principal: ROOT, items: secrets.map((secret) => ({ secret, key: randomBytes(32).toString('base64') })) }).catch((error: unknown) => error));
+    await reached;
+  }
+  const config = configure({ keks, signingKeys: [randomBytes(32), SIGNING_KEY] });
+  const rotated = await openLocalVault(await db.connect(), config);
+  assert.equal((await rotated.access(ROOT)).role, 'owner', 'the new vault starts, its rotation committed');
+  answer();
+  for (const outcome of await Promise.all(calls)) assert.ok(outcome instanceof Error || !(outcome as { ok: boolean }).ok, 'no wrap on the retired key answers');
+  const [{ n }] = await rows<{ n: string | number }>(db.owner, sql`SELECT count(*) AS n FROM audit_log WHERE author = 'vault' AND action = 'key.wrap' AND code = 'wrong_kek'`);
+  assert.equal(Number(n), 3_300);
+  const later = await openLocalVault(await db.connect(), config, { clockOffset: () => 3_600_000 });
+  const verified = await later.verifyLog({});
+  assert.ok(verified.ok, JSON.stringify(verified));
+});
+
 test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
