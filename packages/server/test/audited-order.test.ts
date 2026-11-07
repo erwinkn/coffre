@@ -63,17 +63,21 @@ test("a factor lock that fails fails the work with its own error, the head's que
   try {
     await holding;
     const work = audited(ctx, async () => 'done', null, ROOT);
+    // Heard from the start: the cancel below is the test's own query, on its own connection, and the work's refusal may
+    // reach this process before that query's answer does; left unheard until then, it is an unhandled rejection (T238).
+    // The factor lock's own error, 57014, not the head's 25P02.
+    const refused = assert.rejects(work, (error: unknown) => (error as { cause?: { code?: unknown } }).cause?.code === '57014');
     // The work's factor lock waits; cancelled, as a `lock_timeout` ends it, the head's statement behind it fails 25P02.
+    // In this database: pg_locks shows the cluster's, and another test file's waiter on the same person's lock is not ours.
     let waiter: string | undefined;
     for (let i = 0; i < 200 && waiter === undefined; i++) {
-      const rows = await db.owner.execute<{ pid: number }>(sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = 1717658484`);
+      const rows = await db.owner.execute<{ pid: number }>(sql`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = 1717658484 AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`);
       waiter = (rows as unknown as { pid: number }[])[0]?.pid?.toString();
       if (waiter === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.ok(waiter !== undefined, 'the work waits on the factor lock');
     await db.owner.execute(sql`SELECT pg_cancel_backend(${Number(waiter)})`);
-    // The factor lock's own error, 57014, not the head's 25P02.
-    await assert.rejects(work, (error: unknown) => (error as { cause?: { code?: unknown } }).cause?.code === '57014');
+    await refused;
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.deepEqual(unhandled, []);
   } finally {
