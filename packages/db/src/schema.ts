@@ -1109,6 +1109,32 @@ export const logConfig = pgTable(
 );
 
 /**
+ * The instance's policy (T178, 0.16): the bulk cap's count and window, R52's,
+ * each a column of the one row. Sealed as every input is, its object the
+ * `policy` one `log_config` held, `{ kind: 'policy', bulk: { count,
+ * windowMs } }`, which every change of it carries whole: a use reads the cap
+ * from that change (CapSealed), and this row only to check its seal.
+ * Written only through `change_input`, which writes `log_config`'s too while
+ * 0.15.0's code may read it. The window's bound is the vault's
+ * `MAX_BULK_WINDOW_MINUTES` (a day), as `checkBulkLimit` holds it.
+ */
+export const policy = pgTable(
+  'policy',
+  {
+    name: text().primaryKey(),
+    bulkCount: bigint('bulk_count', { mode: 'number' }).notNull(),
+    bulkWindowMs: bigint('bulk_window_ms', { mode: 'number' }).notNull(),
+    seal: bytea().notNull(),
+  },
+  (table) => [
+    check('policy_name_check', sql`${table.name} = 'instance'`),
+    check('policy_bulk_count_check', sql`${table.bulkCount} >= 1`),
+    check('policy_bulk_window_ms_check', sql`${table.bulkWindowMs} > 0 AND ${table.bulkWindowMs} <= 86400000`),
+    check('policy_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
+/**
  * Proxy definitions written in the UI (0.16, T186; docs/design/proxy-ui.md,
  * section 2): each environment's, one sealed object of 0.15's log, kind
  * `proxy`. Its items by name, each with what its save froze; the index of

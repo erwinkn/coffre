@@ -10,6 +10,7 @@ DECLARE
     t bigint := (extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 BEGIN
     UPDATE log_config SET value = '{"bulk":{"count":99,"windowMs":86400000}}' WHERE name = 'policy';
+    UPDATE policy SET bulk_count = 99, bulk_window_ms = 86400000;
     r := json_populate_record(NULL::use_row, use_credential('33333333-3333-3333-3333-333333333333', '44444444-4444-4444-4444-444444444442', 30, t, 1::smallint, NULL, decode(repeat('00', 16), 'hex'), t + 2000, p_decided => true));
     IF r.state IS NOT NULL OR r.cap_count <> 1 OR r.in_set OR EXISTS (SELECT 1 FROM bulk_cap WHERE secret = '44444444-4444-4444-4444-444444444442') THEN
         RAISE EXCEPTION 'FAIL: the policy''s row moved the cap: %', r;
@@ -75,7 +76,8 @@ BEGIN
         ('credential', '66666666-6666-6666-6666-666666666666', 'service_bindings', 'id'),
         ('secret', '44444444-4444-4444-4444-444444444441', 'secrets', 'id'),
         ('environment', '22222222-2222-2222-2222-222222222222', 'environments', 'id'),
-        ('roles', 'instance', 'log_config', 'name')
+        ('roles', 'instance', 'log_config', 'name'),
+        ('policy', 'instance', 'policy', 'name')
     ) AS o (kind, id, tbl, keycol) LOOP
         EXECUTE format('UPDATE %I SET seal = decode(repeat(''9e'', 16), ''hex'') WHERE %I::text = %L', object.tbl, object.keycol, CASE object.kind WHEN 'roles' THEN 'roles' ELSE object.id END);
         BEGIN

@@ -17,6 +17,16 @@
   sign-in rows' MACs still name the tables as they were when first written
   (`device_authorizations`, `enrollments`), so nothing is signed again.
 
+- **The policy has a table of its own (T178).** `policy` holds the bulk
+  cap as columns, `bulk_count` and `bulk_window_ms`, each held by a check
+  to what a deployment's `bulkLimit` may be (a count of at least one, a
+  window above nothing and at most a day), where `log_config` held it as
+  JSON. It is the same sealed object: every change of it still carries the
+  whole policy, and a use still reads its cap from the newest one. The
+  migration copies the row over; `log_config`'s stays, written beside the
+  new one, for this release, while 0.15's code may read it, and the release
+  after this one drops it.
+
 - **Service tokens last a year at most, and a deployment may say fewer (W331,
   R76).** The longest a service token may be issued for is 365 days, from
   366. `signin({ serviceTokenMaxDays })` holds this deployment's tokens to a

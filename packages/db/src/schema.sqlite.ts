@@ -983,6 +983,23 @@ export const logConfig = sqliteTable(
   ],
 );
 
+/** The instance's policy, its bulk cap typed (schema.ts). */
+export const policy = sqliteTable(
+  'policy',
+  {
+    name: text().primaryKey(),
+    bulkCount: integer('bulk_count').notNull(),
+    bulkWindowMs: integer('bulk_window_ms', { mode: 'number' }).notNull(),
+    seal: bytes('seal').notNull(),
+  },
+  (table) => [
+    check('policy_name_check', sql`${table.name} = 'instance'`),
+    check('policy_bulk_count_check', sql`${table.bulkCount} >= 1`),
+    check('policy_bulk_window_ms_check', sql`${table.bulkWindowMs} > 0 AND ${table.bulkWindowMs} <= 86400000`),
+    check('policy_seal_check', sql`octet_length(${table.seal}) = 16`),
+  ],
+);
+
 /** An environment's proxy definitions, sealed as `proxy` (schema.ts). Its items as JSON text. */
 export const proxyDefinitions = sqliteTable(
   'proxy_definitions',

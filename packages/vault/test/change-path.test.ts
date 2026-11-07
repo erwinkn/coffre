@@ -435,10 +435,11 @@ test('protecting two sealed environments in one call is two changes, each from i
   await holdsReplay(w.keys, [w.dev, w.prod, gone].map((id) => ({ kind: 'environment' as const, id })));
 });
 
-test('a policy row planted with no seal is refused, not taken for one from before the cutover', async () => {
+test('a policy row planted under no seal of the vault\'s is refused, not taken for one from before the cutover', async () => {
   const config = configure();
-  const { logConfig } = tablesOf(db.owner);
-  await db.owner.insert(logConfig).values({ name: 'policy', value: JSON.stringify({ kind: 'policy', bulk: { count: 1_000_000, windowMs: 60_000 } }) });
+  // Its seal is a column it must have (0074), so the writer makes one up.
+  const { policy } = tablesOf(db.owner);
+  await db.owner.insert(policy).values({ name: 'instance', bulkCount: 1_000_000, bulkWindowMs: 60_000, seal: randomBytes(16) });
   const vault = await openLocalVault(db.vault, config, { log: '0.15', sealThrough: sealed, heldOutside: nothingHeld });
   assert.equal((await vault.access(ROOT)).role, 'owner');
   assert.deepEqual(await opsOf(keysOf(config), { kind: 'policy', id: 'instance' }), []);

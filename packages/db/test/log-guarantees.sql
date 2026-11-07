@@ -21,6 +21,7 @@ BEGIN
         $q$INSERT INTO log_changes (number, at, request_id, object, actor, payload, mac) VALUES (1, 1, 'x', gen_random_uuid(), 'system:x', '{}', decode(repeat('00', 16), 'hex'))$q$,
         $q$INSERT INTO bulk_cap VALUES ('token:deploy', gen_random_uuid(), 1)$q$,
         $q$INSERT INTO log_config VALUES ('policy', '{}', NULL)$q$,
+        $q$INSERT INTO policy VALUES ('instance', 1, 1, decode(repeat('00', 16), 'hex'))$q$,
         $q$UPDATE checkpoint_fence SET at_floor = 0$q$,
         $q$DELETE FROM bulk_cap$q$,
         $q$TRUNCATE log_changes$q$,
@@ -32,6 +33,7 @@ BEGIN
         $q$UPDATE environments SET seal = NULL$q$,
         $q$UPDATE secrets SET seal = NULL$q$,
         $q$UPDATE log_config SET seal = NULL$q$,
+        $q$UPDATE policy SET bulk_count = 1$q$,
         $q$SELECT nextval('log_number')$q$,
         $q$CREATE TABLE log_uses_19700101 PARTITION OF log_uses FOR VALUES FROM (0) TO (86400000)$q$
     ] LOOP
@@ -42,7 +44,7 @@ BEGIN
         END;
     END LOOP;
     PERFORM count(*) FROM log_uses;
-    PERFORM count(*) FROM log_changes, bulk_cap, checkpoint_fence, log_checkpoints, log_tiles, log_config;
+    PERFORM count(*) FROM log_changes, bulk_cap, checkpoint_fence, log_checkpoints, log_tiles, log_config, policy;
     RAISE NOTICE 'PASS: coffre_vault reads the log and writes it only through its functions';
 END
 $$;
@@ -60,6 +62,7 @@ BEGIN
        OR has_function_privilege('coffre_app', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'project_reads(jsonb, bigint, bigint, bigint, bigint, bytea)', 'EXECUTE')
        OR has_table_privilege('coffre_app', 'log_uses', 'SELECT') OR has_table_privilege('coffre_app', 'log_config', 'SELECT')
+       OR has_table_privilege('coffre_app', 'policy', 'SELECT')
        OR has_function_privilege('coffre_app', 'close_one()', 'EXECUTE')
        OR has_function_privilege('coffre_backup', 'change_input(text, text, text, bigint, text, text, text, bytea, bytea, bytea)', 'EXECUTE') THEN
         RAISE EXCEPTION 'FAIL: the app or the backup reaches the 0.15 log';
@@ -549,6 +552,10 @@ BEGIN
                       cap, held, next, tag);
     IF n IS NULL OR (SELECT value::jsonb FROM log_config WHERE name = 'policy') <> cap::jsonb THEN
         RAISE EXCEPTION 'FAIL: the policy''s change did not write its value';
+    END IF;
+    -- Its typed row too (0074, T178), sealed the same.
+    IF NOT EXISTS (SELECT 1 FROM policy WHERE name = 'instance' AND bulk_count = 5 AND bulk_window_ms = 60000 AND seal = next) THEN
+        RAISE EXCEPTION 'FAIL: the policy''s change did not write its typed row';
     END IF;
     BEGIN
         PERFORM change_input('policy', 'instance', 'cap-elsewhere', t, 'system:vault', '{"op":"bulk.limit","ref":{"kind":"roles","id":"instance"},"value":' || cap || '}',

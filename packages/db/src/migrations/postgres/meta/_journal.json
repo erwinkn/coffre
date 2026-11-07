@@ -498,6 +498,13 @@
       "when": 1793820000000,
       "tag": "0073_table_renames",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1793978463635,
+      "tag": "0074_policy_table",
+      "breakpoints": true
     }
   ]
 }

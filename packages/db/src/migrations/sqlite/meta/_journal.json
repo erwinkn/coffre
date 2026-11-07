@@ -260,6 +260,13 @@
       "when": 1793820000000,
       "tag": "0036_table_renames",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1793978464405,
+      "tag": "0037_policy_table",
+      "breakpoints": true
     }
   ]
 }

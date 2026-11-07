@@ -48,7 +48,7 @@ export async function useDatabases(opened: TestDatabase): Promise<Database> {
 
 /** The log as a new instance's: no change, no use, the floor a minute back, days of uses made around today. */
 export async function emptyLog(): Promise<void> {
-  for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
+  for (const table of ['log_uses', 'bulk_cap', 'log_changes', 'log_config', 'policy']) await run(db.owner, sql.raw(`DELETE FROM ${table}`));
   await emptyReads(db.owner);
   await run(db.owner, sql`UPDATE checkpoint_fence SET at_floor = ${Date.now() - 60_000}`);
   if (ENGINE === 'postgres') {
@@ -217,7 +217,9 @@ export async function genesis(ref: Ref, object: Input): Promise<void> {
   };
   await change(ref, op, object, async (tx, value) => {
     if (ref.kind === 'roles' || ref.kind === 'policy') {
+      // As `change_input` makes them: the policy's typed row beside its `log_config` one (0074).
       await run(tx, sql`INSERT INTO log_config (name, value, seal) VALUES (${ref.kind}, ${JSON.stringify(object)}, ${value})`);
+      if (object.kind === 'policy') await run(tx, sql`INSERT INTO policy (name, bulk_count, bulk_window_ms, seal) VALUES ('instance', ${object.bulk.count}, ${object.bulk.windowMs}, ${value})`);
       return;
     }
     const [table, key] = where[ref.kind]!;

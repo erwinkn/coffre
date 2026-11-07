@@ -66,7 +66,7 @@ function shapes(schema: Record<string, unknown>, config: (table: never) => unkno
 
 test('the SQLite schema has the Postgres tables, columns, nullability and keys', () => {
   const expected = shapes(postgres, postgresConfig);
-  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'bulk_cap', 'capped_alerts', 'checkpoint_fence', 'credentials', 'device_logins', 'dismissed_keys', 'enrollment_codes', 'environments', 'grants', 'identities', 'log_changes', 'log_checkpoints', 'log_config', 'log_read_days', 'log_read_place_days', 'log_reads', 'log_reads_cursor', 'log_tiles', 'log_uses', 'mcp_approvals', 'mcp_connections', 'oauth_clients', 'passkeys', 'principals', 'projects', 'proxy_definitions', 'proxy_reserved', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'spent_id_tokens', 'vault_releases']);
+  assert.deepEqual(Object.keys(expected), ['audit_chain_head', 'audit_log', 'bulk_cap', 'capped_alerts', 'checkpoint_fence', 'credentials', 'device_logins', 'dismissed_keys', 'enrollment_codes', 'environments', 'grants', 'identities', 'log_changes', 'log_checkpoints', 'log_config', 'log_read_days', 'log_read_place_days', 'log_reads', 'log_reads_cursor', 'log_tiles', 'log_uses', 'mcp_approvals', 'mcp_connections', 'oauth_clients', 'passkeys', 'policy', 'principals', 'projects', 'proxy_definitions', 'proxy_reserved', 'secret_references', 'secret_versions', 'secrets', 'service_bindings', 'spent_id_tokens', 'vault_releases']);
   assert.deepEqual(shapes(sqlite, sqliteConfig), expected);
 });
 

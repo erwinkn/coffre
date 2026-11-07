@@ -5,7 +5,7 @@ import { TOMBSTONE } from '@coffre/core/schemas';
 import type { BindingColumns, ConnectionColumns, CredentialColumns, EnvironmentColumns, SecretColumns, VersionColumns } from '@coffre/core/vault';
 import { storedRole } from '@coffre/db/grants';
 
-import type { BindingInput, ConnectionInput, CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PrincipalInput, SecretInput } from './inputs.ts';
+import type { BindingInput, ConnectionInput, CredentialInput, EnvironmentInput, Input, InputGrant, Nature, PolicyInput, PrincipalInput, SecretInput } from './inputs.ts';
 
 /**
  * The tables' rows as the objects of the 0.15 log (inputs.ts): what a seal
@@ -131,11 +131,20 @@ export function environmentObject(row: EnvironmentColumns): EnvironmentInput {
 }
 
 /**
- * The roles and the policy: each one `log_config` row whose value is the
- * object as the change that made it wrote it (0022's `change_input`:
- * genesis's `value`), read whole. A value that is not that object fails
- * its seal.
+ * The roles: their `log_config` row, whose value is the object as the
+ * change that made it wrote it (0022's `change_input`: genesis's `value`),
+ * read whole. A value that is not that object fails its seal. (The policy's
+ * row there too, which only 0.15.0's code still reads: `policyObject`.)
  */
 export function configObject(value: string): Input {
   return JSON.parse(value) as Input;
+}
+
+/**
+ * The policy (T178, 0.16): its row of `policy`, the bulk cap's count and
+ * window typed, as the object every change of it carries whole and its seal
+ * covers. The same object `log_config`'s row held as JSON.
+ */
+export function policyObject(row: { bulkCount: number; bulkWindowMs: number }): PolicyInput {
+  return { kind: 'policy', bulk: { count: Number(row.bulkCount), windowMs: Number(row.bulkWindowMs) } };
 }

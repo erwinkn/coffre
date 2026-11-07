@@ -200,7 +200,7 @@ test(`${TAGS[TEST_ENGINE]} keeps 0.14.5's rows and leaves 0.14.5 serving: its re
     }
     const [fence] = await read(opened.owner, 'checkpoint_fence');
     assert.ok(fence !== undefined && Number(fence.at_floor) > Date.now() - 600_000, 'the fence has its floor');
-    for (const table of ['log_changes', 'log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_config']) {
+    for (const table of ['log_changes', 'log_uses', 'bulk_cap', 'log_checkpoints', 'log_tiles', 'log_config', 'policy']) {
       assert.deepEqual(await read(opened.owner, table), [], `${table} starts empty`);
     }
 

@@ -10,7 +10,7 @@ import { entryColumns, numbersIn, recorded, strictly, withinBytes, type ChangeNu
 import { MAX_BULK_WINDOW_MINUTES } from './config.ts';
 import { indexBytes, objectKey, type EnvironmentInput, type Input, type Kind, type ProxyItem, type Ref } from './inputs.ts';
 import { changeHolds, CUTOVER_OBJECT, type ChangeRow, type LogMacKey } from './log-entry.ts';
-import { configObject, environmentObject, memberStanding, principalObject, secretObject } from './objects.ts';
+import { configObject, environmentObject, memberStanding, policyObject, principalObject, secretObject } from './objects.ts';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lt, lte, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
 /**
@@ -1204,11 +1204,16 @@ export async function readObject(db: Queryable, ref: Ref & { kind: ReadKind }, {
         seal: row.seal === null ? null : Buffer.from(row.seal),
       };
     }
-    case 'roles': case 'policy': {
+    case 'roles': {
       const [row] = await db.select({ value: logConfig.value, seal: logConfig.seal }).from(logConfig).where(eq(logConfig.name, ref.kind));
       if (row === undefined) return { row: null, seal: null };
       // Whatever it holds: a value that is not the object fails its seal.
       return { row: configObject(row.value), seal: row.seal ?? null };
+    }
+    case 'policy': {
+      const { policy } = tablesOf(db);
+      const [row] = await db.select().from(policy).where(eq(policy.name, ref.id));
+      return row === undefined ? { row: null, seal: null } : { row: policyObject(row), seal: row.seal };
     }
     case 'proxy': {
       const { proxyDefinitions } = tablesOf(db);
@@ -1618,6 +1623,18 @@ async function changeOnSqlite(tx: Transaction, call: ChangeCall): Promise<bigint
       done = call.sealFrom === null
         ? changedRows(await tx.insert(logConfig).values({ name: ref.kind, value: JSON.stringify(config), seal: call.seal }).onConflictDoNothing())
         : changedRows(await tx.update(logConfig).set({ value: JSON.stringify(config), seal: call.seal }).where(and(eq(logConfig.name, ref.kind), eq(logConfig.seal, call.sealFrom))));
+      // The policy's typed row too (0074), from the same value, sealed the same; both move, or the change is refused.
+      if (ref.kind === 'policy' && done > 0) {
+        const { policy } = tablesOf(tx);
+        const bulk = (config as { bulk?: { count?: unknown; windowMs?: unknown } }).bulk;
+        if (typeof bulk?.count !== 'number' || typeof bulk.windowMs !== 'number') throw new Error('a policy object is its bulk cap\'s count and window');
+        if (call.seal === null) throw new Error('a policy change leaves its object');
+        const columns = { bulkCount: bulk.count, bulkWindowMs: bulk.windowMs, seal: call.seal };
+        const moved = call.sealFrom === null
+          ? changedRows(await tx.insert(policy).values({ name: 'instance', ...columns }).onConflictDoNothing())
+          : changedRows(await tx.update(policy).set(columns).where(and(eq(policy.name, 'instance'), eq(policy.seal, call.sealFrom))));
+        if (moved === 0) throw new StaleRow('the policy object\'s rows are not one another\'s: stale');
+      }
       break;
     }
     case 'proxy': case 'proxy-reserved': {
@@ -1731,9 +1748,9 @@ export async function loggedObjects(db: Queryable): Promise<Set<string>> {
   return new Set(rows.map((row) => row.object));
 }
 
-/** The rows `log_config` holds, by name: only `change_input` writes one, sealed (the roles', the policy's). */
+/** The configuration objects' rows there are, by kind: only `change_input` writes one, sealed (the roles' in `log_config`, the policy's in `policy`). */
 export async function configRows(db: Queryable): Promise<Set<string>> {
-  const rows = await rowsOf<{ name: string }>(db, sql`SELECT name FROM log_config`);
+  const rows = await rowsOf<{ name: string }>(db, sql`SELECT name FROM log_config WHERE name = 'roles' UNION ALL SELECT 'policy' FROM policy`);
   return new Set(rows.map((row) => row.name));
 }
 
