@@ -674,6 +674,27 @@ test('query and Basic credentials, with their methods and paths', async () => {
   assert.equal(echoedQuery.includes(encodeURIComponent('maps+real/key=0123456789')) || echoedQuery.includes('maps%2Breal%2Fkey%3D0123456789') || echoedQuery.includes('maps+real'), false, echoedQuery);
 });
 
+test("a method override the credential's methods do not take is refused before the vault opens anything (T189); one they take costs the one use", async () => {
+  const handle = await handleFor();
+  const opened = async () => (LOG === '0.14' ? (await entries('credential.use')).filter((entry) => entry.metadata.credential === 'maps').length : (await usesLogged(db.owner)).filter((use) => use.purpose === 4).length);
+  const before = received.length;
+  for (const [path, init] of [
+    [`/use/market/dev/maps/geocode?key=${handle}`, { headers: { 'x-http-method-override': 'DELETE' } }],
+    [`/use/market/dev/maps/geocode?key=${handle}&_method=PUT`, {}],
+    [`/use/maps/geocode?key=${handle}`, { headers: { 'x-http-method': 'POST' } }],
+  ] as const) {
+    const refused = await route(path, init);
+    assert.equal(refused.status, 405, path);
+    assert.match(await refused.text(), /maps does not take (DELETE|PUT|POST) on \/geocode, which this request asks for in/);
+  }
+  assert.equal(received.length, before);
+  assert.equal(await opened(), 0, 'nothing opened');
+  const named = await route(`/use/market/dev/maps/geocode?key=${handle}`, { headers: { 'x-http-method-override': 'GET' } });
+  assert.equal(named.status, 200);
+  assert.equal(received.at(-1)!.headers['x-http-method-override'], 'GET');
+  assert.equal(await opened(), 1);
+});
+
 test('a handle for a fork reads what it inherits, and one for dev@me stands in for the personal config', async () => {
   const root = clientFor(deps, ROOT);
   await root.environments.create('market/dev-eu', { from: 'dev', inherit: true });
