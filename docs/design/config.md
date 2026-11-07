@@ -64,6 +64,7 @@ export const policy = definePolicy({
   },
   proxy: { // read only with the credential proxy
     revokedWithinSeconds: 60, // 3 to 3,600
+    cacheValues: true, // false: every request asks the vault, nothing kept
     editable: false, // Owners may add and change definitions in the UI
   },
   audit: {
@@ -101,6 +102,7 @@ sizes come from the database (Q2), and the `uses` block goes (section 4).
 | `reads.bulkLimit` | 1,000 keys per 15 min | vault | `vault({ bulkLimit })` | R28, R52 |
 | `values.rotateAfterDays` | 365, or `null` | app | `createCoffre({ rotateAfterDays })` | when the UI and `coffre list` flag a value nobody changed |
 | `proxy.revokedWithinSeconds` | 60, 3 to 3,600 | app | two settings, `credentialProxy({ cacheSeconds, recheckSeconds })`, both 60 | see below |
+| `proxy.cacheValues` | `true` | app | `credentialProxy({ cacheSeconds: 0 })` | whether opened values serve later requests at all. `false` keeps today's uncached mode: every request asks the vault, so each one is a decision and an entry in the log, and a revocation ends the next request, not one up to R later. R still bounds the send window and the tunnels |
 | `proxy.editable` | `false` | app | `credentialProxy({ editable })` | whether an Owner may add and change proxy definitions in the UI, beside those the deployment's code names |
 | `audit.keepUsesDays` | `null`, every day kept, as today | vault | `retainDays`, reachable only by a Node deployment that runs its own checkpointer | Q6 |
 
@@ -151,9 +153,14 @@ than R (503 `late`, to ask again), which a slow key service makes common:
 one KMS attempt alone may take 706 ms. So the floor is the use's deadline,
 derived, not a choice. Today `cacheSeconds: 0` (no cache) is allowed and
 `recheckSeconds: 0` is refused; one number cannot be both, and a tunnel
-cannot check continuously, so 0 goes. A deployment that wants no cache
-sets 3, which is what `cacheSeconds: 0` gives a fresh request today
-anyway. A workload's tunnel keeps its own 15 s bound (`WORKLOAD_RECHECK_MS`,
+cannot check continuously, so R has no 0. No cache is a different policy,
+not a short one: at R = 3 a request may reuse values another opened up to
+3 s before, and asks the vault nothing, where `cacheSeconds: 0` asks it
+every time (`credential-proxy.ts`, `opened`: `cacheMs > 0` guards the
+cache's write). So it stays, as its own field, `proxy.cacheValues: false`.
+*Example:* a deployment that wants every proxied request in the log as a
+decision of its own sets `cacheValues: false` and keeps R = 60 for its
+tunnels. A workload's tunnel keeps its own 15 s bound (`WORKLOAD_RECHECK_MS`,
 design section 8.2), or R if less, as today.
 
 **`services.signInsPerAddress` on Workers.** Cloudflare reads a rate limit's
@@ -299,7 +306,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | The migrator's lock waits | 500 ms for **each lock** a statement waits for, so one statement that waits for several may wait longer in all; then the run is tried again, up to 5 times, 1 s apart, and a try is the **whole transaction** of the pending migrations: one that gives up on its third migration applies the first two again | `LOCK_WAIT_MS` (Postgres's `lock_timeout` counts each wait); `MIGRATION_LOCK_ATTEMPTS`, `MIGRATION_LOCK_PAUSE_MS` | #508, #538 (`packages/db/src/migrate.ts`, `waitingBriefly`). The migration lock itself and the roles' last statements wait up to 5 min, for another run |
 | The two credential writers that take the uses' lock exclusively, in SQL (`revoke_credential`, `change_bindings`) | 500 ms (from 1 s) | `LOCK_WAIT_MS` | #538 (migration 0076) |
 | `sign_in`, `issue_token` | 1 s | they take only the issue lock, which no use asks for | #538 |
-| A read's deadline (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s, **not from the call's start**: an ordinary decision's clock starts once the vault is settled and cut over (`#decideNow`); `unwrap`'s once it has loaded the versions, read the references, settled and read the environments, at `#keys`. That preparation has no bound of its own beyond each statement's | a choice: "a caller hears within it" | #356 ⚠ not derived. A bound from the call's start would move the clock to the call's entry, which #538 does not |
+| A read's deadline (`CALL_DEADLINE_MS`, was `READ_DEADLINE_MS`) | 5 s, nominal: **not from the call's start**, and **not a strict total** after it. Its clock starts once the vault is settled and cut over (`#decideNow`); `unwrap`'s once it has loaded the versions, read the references, settled and read the environments, at `#keys`. That preparation has no bound of its own beyond each statement's. And the transaction sets what is left, once, at its BEGIN, as a `SET LOCAL statement_timeout` that Postgres times per statement: two statements of 2.8 s each end at 5.6 s, neither timed out | a choice: "a caller hears within it" | #356 ⚠ not derived; #538 (`vault.ts`, `#decide`; `store.ts`, `boundLockWaits`). A strict 5 s needs the client to cancel the call's query at the deadline (Postgres's cancel request), not one more `SET` per statement, which a batch sent under one Sync computes before any of it runs |
 | A read with a key service | 10 s; 8.1 s once `KEY_BUDGET_MS` is 3,118 ms (below), from `#keys`, after the preparation above | `CALL_DEADLINE_MS` + `KEY_BUDGET_MS` | #538 |
 | A write call | its lock waits retried for up to 5 s from its first attempt; its work itself unbounded | `CALL_DEADLINE_MS` as a retry budget | R75: writes may take longer |
 | Its retry pauses | 25 ms doubling to 400 ms, ×0.5 to ×1.5 | a retry policy, written as one | #538 |
@@ -310,7 +317,7 @@ choice, not a measurement, so each share is listed for Erwin to judge.
 | An app write's lock wait | 500 ms (from unbounded) | `LOCK_WAIT_MS`; then 503 at once | #538 |
 | An AWS KMS attempt's timeout | 706 ms (from 5 s), or what is left of the caller's deadline if less | a measured p99 of a KMS call | #538's stacked KMS PR (its measurement table not yet in a PR) |
 | AWS KMS attempts | 3 (unchanged), pauses 100-200 ms then 400-800 ms | `100 × 4^(attempt−1) × (1 + random)`, as in `aws-kms.ts` | a retry policy, written as one |
-| One KMS operation, every retry spent | 3,118 ms | 3 attempts × 706 ms + the two longest pauses (200 + 800 ms) | derived |
+| One KMS operation's HTTP attempts, every retry spent | 3,118 ms | 3 attempts × 706 ms + the two longest pauses (200 + 800 ms) | derived. Not the operation's worst case: before its first attempt it awaits the provider's AWS credentials (`aws-kms.ts`, `#call`), under no timeout of its own, inside the batch's budget ⚠ |
 | The key service, per batch of a call's operations (`KEY_BUDGET_MS`) | 3,118 ms (from 5 s): **a ceiling for the operations batch**, not a sufficient budget, and not for the call | one operation's full retries; every key operation of the batch spends from it (`settle` in `vault.ts`, one deadline for all) | a choice, sized to one operation: see below. A read with a key service is then 5 s + 3.1 s |
 | A cold vault's KEK checks (`#checkKeks`) | up to 3,118 ms **per configured KEK**, before the batch | each check gets `KEY_BUDGET_MS` again, or what is left of the call's deadline if less | #538. So KMS time in one call is bounded only by the call's 8.1 s: two KEKs whose checks take 2 s each, then a 2 s unwrap, spend 6 s at KMS |
 | AWS KMS calls at once | 8 per provider object → per call | the isolate-wide `Slots(8)` goes: a `/use` waited 5 s behind 8 hung calls (measured). The 8 cited "six connections", which Workers counts per request, not per isolate ([limits.md](limits.md), item 5) | same PR, with `formal/KeyService.tla` |
@@ -321,8 +328,13 @@ belongs to the call's batch of key operations, and every key the batch
 opens or wraps spends from the same deadline. A cold vault first checks
 each KEK, each check with a budget of its own, all inside the call's
 8.1 s: what follows holds for a warm vault, and a cold one's batch gets
-what the checks left of the call. 3,118 ms is one operation's worst case, so it covers every
-retry only when each key needs one operation and they all run at once:
+what the checks left of the call. 3,118 ms is one operation's HTTP worst
+case, attempts and pauses. It assumes the AWS credentials are already
+in hand: the provider awaits its credential callback first, inside the
+same budget, so a refresh that takes 1 s leaves 2,118 ms for the
+attempts, two and their pause, not three. With credentials in hand, it
+covers every retry only when each key needs one operation and they all
+run at once:
 
 - a read or a wrap of up to 8 keys: one wave, each key with its three
   attempts. Covered.
@@ -396,7 +408,7 @@ read call with a key service 11.2 s.
 
 | Name | 0.16 value | Formula | Source |
 |---|---|---|---|
-| Values served from memory | 60 s | R, the object's `revokedWithinSeconds` | policy |
+| Values served from memory | 60 s | R, the object's `revokedWithinSeconds`; none with `cacheValues: false` | policy |
 | A fresh request's window to send, or to answer with a signature, from its start | 60 s | max(R, 3 s), 3 s the use's deadline (`USE_DEADLINE_MS`), so R's floor is 3 | `sendBy`, `answerBy` (`credential-proxy.ts`), policy. Today editable definitions only: code-defined forwarding, signing, verifying and presigning check no window, and must (section 1, `revokedWithinSeconds`) |
 | A handle's tunnel: a check's deadline; the checks' interval | 10 s; 50 s | d = min(R ÷ 2, 10 s); R − d (today 10 s and 60 s, a 70 s bound) | policy |
 | A workload's tunnel (and a UI tunnel a workload opens): two checks | (1) its session still stands: bound b = min(R, 15 s), checked every 2b ÷ 3 with b ÷ 3 to answer, today every 10 s with 5 s; (2) the vault still grants the key, and for an editable tunnel the item is the one dialled: every R with min(R, 10 s) to answer, today every 60 s with 10 s | (1) design section 8.2's 15 s; (2) proposed as the handle's: every R − d, d = min(R ÷ 2, 10 s), so a lost grant or a changed definition ends it within R | `credential-proxy.ts` (`workloadTunnel`, `uiTunnel`), policy |
@@ -625,8 +637,9 @@ Node has no shards: there the count is exact.
 **Facts.** Only the uses' login has a `statement_timeout` (2 s). #538 (R75)
 bounds a write's lock waits to 500 ms (section 2.4 lists the longer ones:
 reads 3 s, `sign_in` and `issue_token` 1 s), and the vault's transactions
-that carry a deadline bound their statements by what is left of it (`SET
-LOCAL`). What is left unbounded: every app statement, and vault statements
+that carry a deadline bound each statement by what was left of it at
+BEGIN (`SET LOCAL statement_timeout`, which Postgres counts per
+statement), so the transaction as a whole may run past it (section 2.4). What is left unbounded: every app statement, and vault statements
 outside a deadline's transaction. Postgres runs such a statement until it
 ends or Hyperdrive gives up at 60 s.
 
@@ -684,7 +697,8 @@ equals a read call's deadline (`CALL_DEADLINE_MS`), and no statement of a
 caller who hears within 5 s needs longer. Writes may take longer (R75), so
 before the migration the suites run with it on, to find any write
 statement that legitimately does. The vault's transactions keep tightening
-it from their remaining deadline, as today. Backups and migrations use
+it to what their deadline had left at BEGIN, as today: per statement,
+not a bound on the whole (section 2.4 says what a strict one needs). Backups and migrations use
 logins of their own, untouched. *Example:* today a slow vault statement on
 a small database holds one of its config's 6 connections for up to
 Hyperdrive's 60 s; with the role's 5 s, Postgres ends it at 5 s and the
@@ -786,7 +800,7 @@ it ends at 30 s with the app's.
 | `signin({ workloads: { useOnly, noReads } })` | in `signin`'s `workloads`, both `false` | `policy.services.useOnly`, `policy.services.noReads`; `workloads` keeps its wiring (the limiters' bindings, `github`, `alert`) |
 | `vault({ bulkLimit })`, `serveVault({ bulkLimit })` | in the vault's config | `policy.reads.bulkLimit` |
 | `signin({ passkeys, browserSessionHours, cliSessionDays, serviceTokenMaxDays })` | in `signin` | `policy.people.*`, `policy.services.tokenMaxDays`; `passkeys.rpId` stays in `signin` |
-| `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60: a tunnel's bound 70 s | one, `policy.proxy.revokedWithinSeconds`, the tunnel's checks derived to fit it |
+| `credentialProxy({ cacheSeconds, recheckSeconds })` | two settings, both 60: a tunnel's bound 70 s | `policy.proxy.revokedWithinSeconds`, the tunnel's checks derived to fit it; `cacheSeconds: 0` becomes `policy.proxy.cacheValues: false` |
 | `credentialProxy({ editable })` | in the plugin's options | `policy.proxy.editable` |
 | `createCoffre({ rotateAfterDays })` | in `createCoffre` | `policy.values.rotateAfterDays` |
 | `retainDays` | only through `runCheckpointer`/`keepCheckpointer` on Node | `policy.audit.keepUsesDays`, default every day, as today (Q6) |
@@ -804,4 +818,4 @@ it ends at 30 s with the app's.
 | KMS's attempt timeout and key budget | 5 s each; 5 s in all | 706 ms each, measured; 3,118 ms per operations batch, a ceiling sized to one operation's retries; a cold vault's KEK checks each get their own, all inside the call's 8.1 s (2.4) |
 
 What a deployment writes after all of this: its wiring, as today, and
-`policy.ts`, twelve fields, each with a default it can leave alone.
+`policy.ts`, thirteen fields, each with a default it can leave alone.
