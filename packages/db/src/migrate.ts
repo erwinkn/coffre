@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS } from '@coffre/core/vault';
+import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, LOCK_WAIT_MS } from '@coffre/core/vault';
 
 import { engineOfUrl } from './connect.ts';
-import type { Engine } from './dialect.ts';
+import { lockNotAvailable, type Engine } from './dialect.ts';
 import { postgresSession, quoteIdentifier, type PostgresClient } from './postgres.ts';
 
 /**
@@ -23,8 +23,9 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
 
 /**
  * How long each of a migration's statements waits for a lock, once the
- * migration lock is held: half a use's (`HOT_LOCK_TIMEOUT_MS`, the hot
- * login's `lock_timeout`, `@coffre/core/vault`). Postgres
+ * migration lock is held: `LOCK_WAIT_MS` (`@coffre/core/vault`), half a
+ * use's (`HOT_LOCK_TIMEOUT_MS`, the hot login's `lock_timeout`), as every
+ * wait but a use's. Postgres
  * grants a table's locks in the order they were asked, so a DDL statement
  * waiting for a table that a long transaction holds queues every later
  * statement on that table behind it, a use's included. Leaving the queue
@@ -35,7 +36,7 @@ const MIGRATION_LOCK_KEY = '7165058122361679213';
  * roles, which other databases' migrators may be changing too, wait as
  * briefly: they share the transaction that holds its tables.
  */
-export const MIGRATION_LOCK_WAIT_MS = HOT_LOCK_TIMEOUT_MS / 2;
+export const MIGRATION_LOCK_WAIT_MS = LOCK_WAIT_MS;
 
 /**
  * Retry policy, not a constraint: how many times the migrations (all of them,
@@ -100,14 +101,6 @@ export type LockHolder = { pid: number | null; prepared: string | null; login: s
 function holderInWords({ pid, prepared, login, application, tables }: LockHolder): string {
   const who = [login, application].filter((part) => part !== null && part !== '').join(', ');
   return `${pid === null ? `prepared transaction '${prepared}'` : `pid ${pid}`}${who === '' ? '' : ` (${who})`} on ${tables.join(', ')}`;
-}
-
-/** Whether a statement gave up waiting for a lock: `lock_timeout` (55P03), anywhere in its causes. */
-function lockNotAvailable(error: unknown): boolean {
-  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
-    if ((cause as { code?: unknown }).code === '55P03') return true;
-  }
-  return false;
 }
 
 /**

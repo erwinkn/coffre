@@ -91,7 +91,7 @@ models' are [below](#credentials-issuing-and-the-bulk-limit).
 | Renaming, archiving or restoring a key resolves its environment again under the head (`patchSecret`, `checkEnvironment`) | a key renamed in a deleted place, its tombstone's names changed (`DeletedStaysUnreachable`) | reported with #147, fixed in #149 |
 | Sign-in re-reads the member's generation under the head (`#stillMember`) | a credential issued at a generation a removal had moved past (`CredentialsAtCurrentGeneration`) | |
 | Member rows are locked in principal order (`lockMembers`) | two decisions waiting on each other (`NoWaitCycle`) | |
-| A read decides under the reader's row, shared with their other reads, which a revocation or a removal waits for (`#keys`, through `#decide`, `reads`; `lockMembers`, `FOR SHARE`, not `KEY SHARE`, which they would not wait for) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`, in `Members` and `Sharing`) | |
+| A read or a wrap with a key service checks its reader's standing again where it commits, under their row and the head, once the key service has answered: its first check, the intent's, holds no lock across the key service (`#keys`, the outcome's decision; R75, W331) | a value released to a member after their removal committed (`NothingReleasedAfterRevocation`, in `Members` and `Sharing`) | W331, which dropped the row held across the key service (`ReaderRowLocked`) |
 | A read through a reference checks again, under the head, that it has not ended (`unwrap`'s `vet`, run again in `underLock`) | a value read through a reference after it was broken (`NothingReleasedThroughEndedReference`) | |
 | Making a reference checks its source again under the head (`secrets.ts`, `setSecrets`) | a reference made to a source archived or deleted meanwhile (`ReferencedSourcesStayLive`) | #152 |
 | Archiving is refused while a live reference held in an unarchived place elsewhere reads the place (`references.ts`, `archiveBlockers`) | a reference in a live holder reading an archived source (`ReferencedSourcesStayLive`) | #152 |
@@ -190,7 +190,10 @@ Traces are shortened here; the script prints every step.
   takes the lock and the reads in one step, or the lock and then the reads.
 - **Locks.** Two kinds, each held to the end of its transaction:
   - a member's row, taken one row at a time, in principal order: alone,
-    or shared by a read or a wrap with others like it;
+    or shared by a read or a wrap with others like it, never across a key
+    service (R75): a read or a wrap with one checks first holding nothing
+    after, asks the key service, then takes the row and the head and checks
+    again;
   - the log's head.
 - **Giving up.** A read waiting for the head another holds may give up
   instead (`ReadGivesUp`): its statement's bound ran out, its call's
@@ -198,8 +201,11 @@ Traces are shortened here; the script prints every step.
   (`lockLogHeadQueued`). It rolls back having released nothing and
   appended no `secret.read` (a key service's intent, committed before, is
   accounted for as after any failure), and every invariant holds with or
-  without the step. The model's other waits never
-  give up; in the code they do, at fifteen seconds, the same way.
+  without the step. Any other process waiting for a lock may give up too
+  (`GivesUp`), rolling back what its transaction had not committed: in the
+  code each wait but a use's is `LOCK_WAIT_MS`, half a use's own, and a
+  vault decision whose wait gave up is decided again from the start (R75,
+  W331). Every invariant holds with the step.
 
   A process whose next step takes a lock that another holds simply cannot
   take it until that lock is released: that is the wait. A share lock also

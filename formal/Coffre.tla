@@ -90,12 +90,13 @@ CONSTANTS
     \* Members' rows are locked in principal order (vault store.ts,
     \* lockMembers, `ORDER BY principal`), not in the order a call names them.
     SortedMemberLocks,
-    \* A read decides under the reader's row, shared with their other reads,
-    \* which a change to their grants or their removal waits for (vault
-    \* vault.ts, #keys through #decide, `reads`; store.ts, lockMembers, FOR
-    \* SHARE). Off, it takes none, as KEY SHARE would be: a lock that a
-    \* writer's FOR NO KEY UPDATE never waits for.
-    ReaderRowLocked,
+    \* A read or a wrap checks its reader's standing again where it commits,
+    \* under their row, shared, and the head, once its key service has
+    \* answered: the first check, the intent's, holds no lock across the key
+    \* service (R75), so a revocation or a removal commits meanwhile and is
+    \* seen here, and the key is withheld (vault vault.ts, #keys: the
+    \* outcome's decision runs the check again). Off, only the first check.
+    StandingRecheckUnderHead,
     \* A read through a reference checks again, under the head, that no
     \* `reference.end` committed since it decided (vault vault.ts, unwrap's
     \* `vet`, run again in #keys' `underLock`).
@@ -403,23 +404,28 @@ ReadResolve(p) ==
 ReadVersions(p) ==
     /\ pc[p] = "read.versions"
     /\ IF ~Gone("env") /\ held
-         THEN Read(p, IF ReaderRowLocked THEN "read.lock" ELSE "read.check", l[p])
+         THEN Read(p, "read.check", l[p])
          ELSE Refuse(p)
 
-ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.check")
-
-\* Under the reader's row: their standing and grants where they read, and
-\* whether either place was deleted (environmentsById); through a
-\* reference, whether it ended (`vet`). Then the bulk limit and the key
-\* service. Without the row's lock, a revocation or a removal can commit
-\* between this check and the entry.
+\* The first check, the key service's intent's, which commits on its own
+\* (#keys): their standing and grants where they read, and whether either
+\* place was deleted (environmentsById); through a reference, whether it
+\* ended (`vet`). The intent's transaction is short, and nothing comes
+\* between its statements that the commit below does not read again, so
+\* it is one step here, holding nothing after. Then the key service, with
+\* no lock and no transaction open (R75): any step of any other process
+\* may come between this one and ReadLock.
 ReadCheck(p) ==
     /\ pc[p] = "read.check"
     /\ IF /\ MayUse(op[p].who, op[p].at)
           /\ ~Gone("env") /\ ~Gone(op[p].at)
           /\ l[p].ref # NoRef => ~Ended(l[p].ref)
-         THEN Read(p, "read.head", l[p])
+         THEN Read(p, "read.lock", l[p])
          ELSE Refuse(p)
+
+\* The outcome's decision, once the keys are open: the reader's row, shared
+\* with their other reads, then the head.
+ReadLock(p) == pc[p] = "read.lock" /\ ShareNext(p, "read.head")
 
 ReadHead(p) == pc[p] = "read.head" /\ TakeHead(p, "read.commit")
 
@@ -449,7 +455,8 @@ ReadGivesUp(p) ==
 \* statement of its own and reads again), so it reads as of the lock.
 ReadCommit(p) ==
     /\ pc[p] = "read.commit"
-    /\ IF \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
+    /\ IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, op[p].at)
+          \/ KeyPlaceRecheckUnderHead /\ (Gone("env") \/ Gone(op[p].at))
           \/ EndRecheckUnderHead /\ l[p].ref # NoRef /\ Ended(l[p].ref)
          THEN Refuse(p)
          ELSE /\ log' = Append(log, [Entry("secret.read", "env", p) EXCEPT !.via = l[p].ref])
@@ -473,23 +480,26 @@ ReadAnswer(p) ==
 WriteResolve(p) ==
     /\ pc[p] = "write.resolve"
     /\ IF AppLive
-         THEN Read(p, "write.lock", [l[p] EXCEPT !.named = Named, !.nver = version])
+         THEN Read(p, "write.check", [l[p] EXCEPT !.named = Named, !.nver = version])
          ELSE Refuse(p)
 
-WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.check")
-
+\* The wrap's intent, as a read's (ReadCheck); then the key service, holding nothing.
 WriteCheck(p) ==
     /\ pc[p] = "write.check"
     /\ IF MayUse(op[p].who, "env") /\ ~Gone("env")
-         THEN Read(p, "write.head", l[p])
+         THEN Read(p, "write.lock", l[p])
          ELSE Refuse(p)
+
+WriteLock(p) == pc[p] = "write.lock" /\ ShareNext(p, "write.head")
 
 WriteHead(p) == pc[p] = "write.head" /\ TakeHead(p, "write.wrap")
 
-\* The vault appends `key.wrap` and commits; the wrapped key goes to the app.
+\* Under the writer's row and the head, the check again, then the vault
+\* appends `key.wrap` and commits; the wrapped key goes to the app.
 WriteWrap(p) ==
     /\ pc[p] = "write.wrap"
-    /\ IF KeyPlaceRecheckUnderHead /\ Gone("env")
+    /\ IF \/ StandingRecheckUnderHead /\ ~MayUse(op[p].who, "env")
+          \/ KeyPlaceRecheckUnderHead /\ Gone("env")
          THEN Refuse(p)
          ELSE /\ log' = Append(log, Entry("key.wrap", "env", p))
               /\ Release(p)
@@ -1047,10 +1057,31 @@ Init ==
     /\ declared = {}
     /\ regens = {}
 
+\* The process p waits for: the holders of the lock its next step takes,
+\* and for a share lock, those queued to take it alone.
+HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
+               "delete.head", "patch.head", "addenv.head", "renamekey.head",
+               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
+               "regen.tx", "override.head"}
+WaitsFor(p) ==
+    IF pc[p] \in LockLabels /\ l[p].toLock # <<>>
+      THEN LET m == Head(l[p].toLock) IN
+           (({memberLock[m]} \ {None}) \cup (IF pc[p] \in SharedLabels THEN Changing(m) ELSE memberShared[m])) \ {p}
+    ELSE IF pc[p] \in HeadLabels /\ head \notin {None, p}
+      THEN {head}
+    ELSE {}
+
+\* Or any process waiting for a lock gives up (R75): a change's wait is
+\* short, half a use's (`LOCK_WAIT_MS`, vault.ts, store.ts boundLockWaits;
+\* the app's write transactions too), and past it the transaction rolls
+\* back, having committed nothing, and the call decides again from the
+\* start, or answers unavailable. No invariant may need a wait to last.
+GivesUp(p) == WaitsFor(p) # {} /\ Refuse(p)
+
 Step(p) ==
     \/ Begin(p)
     \/ ReadResolve(p) \/ ReadVersions(p) \/ ReadLock(p) \/ ReadCheck(p)
-    \/ ReadHead(p) \/ ReadGivesUp(p) \/ ReadCommit(p) \/ ReadAnswer(p)
+    \/ ReadHead(p) \/ ReadGivesUp(p) \/ ReadCommit(p) \/ ReadAnswer(p) \/ GivesUp(p)
     \/ WriteResolve(p) \/ WriteLock(p) \/ WriteCheck(p) \/ WriteHead(p)
     \/ WriteWrap(p) \/ WriteTx(p) \/ WriteStore(p)
     \/ GrantResolve(p) \/ CallLock(p) \/ CallHeadFirst(p) \/ CallCheck(p)
@@ -1095,19 +1126,6 @@ TypeOK ==
     /\ \A m \in Members : memberLock[m] # None => memberShared[m] \subseteq {memberLock[m]}
     /\ head \in Procs \cup {None}
 
-\* The process p waits for: the holders of the lock its next step takes,
-\* and for a share lock, those queued to take it alone.
-HeadLabels == {"read.head", "write.head", "write.tx", "call.headfirst", "call.head",
-               "delete.head", "patch.head", "addenv.head", "renamekey.head",
-               "signin.head", "remove.head", "demote.head", "declare.head", "rotate.head", "refer.head", "refer.tx", "end.head",
-               "regen.tx", "override.head"}
-WaitsFor(p) ==
-    IF pc[p] \in LockLabels /\ l[p].toLock # <<>>
-      THEN LET m == Head(l[p].toLock) IN
-           (({memberLock[m]} \ {None}) \cup (IF pc[p] \in SharedLabels THEN Changing(m) ELSE memberShared[m])) \ {p}
-    ELSE IF pc[p] \in HeadLabels /\ head \notin {None, p}
-      THEN {head}
-    ELSE {}
 
 RECURSIVE Waited(_, _)
 Waited(p, n) == IF n = 0 THEN {} ELSE WaitsFor(p) \cup UNION {Waited(q, n - 1) : q \in WaitsFor(p)}

@@ -1207,7 +1207,8 @@ they outlive the deployment that reserved them:
   places, `READ_HEAD_WAITERS`, are apart). The others, refused that place at
   once, pause (25 ms, doubled each time, up to 400 ms) and try again, and
   read the name the one wrote; their waits, for the place and for the head,
-  within one bound of 15 s for the call. The one that writes waits besides
+  within one bound for the call, the vault's call deadline (15 s until
+  W331, 5 s since). The one that writes waits besides
   for the issue lock and the fence, each within what was left when its
   attempt began, as every change waits for each lock it takes. Each waiting
   its turn instead, 3,080 no-op decisions queued 200 s in the same bench. On

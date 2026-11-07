@@ -262,7 +262,7 @@ function workloadCredential(origin: string, workload: Extract<Credential, { kind
  * instance cannot answer it yet (`momentary`): twice, each wait between
  * half and one and a half of these, so that the jobs of one run that
  * failed together do not all ask again together, or at least as long as
- * the instance's `Retry-After` says (5 s on a 503 `unavailable`), spread
+ * the instance's `Retry-After` says (1 s on a 503 `unavailable`), spread
  * past it as far, and never more than `MAX_RETRY_AFTER_MS`. Then its
  * answer stands.
  */
