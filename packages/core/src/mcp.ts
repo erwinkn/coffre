@@ -1,3 +1,5 @@
+import { MAX_BODY_NODES, splitAtMost } from './schemas.ts';
+
 /**
  * What MCP clients may be, and do: the scopes a person grants one, and the
  * rules its identity and redirects must pass (docs/design/mcp.md, sections
@@ -42,7 +44,11 @@ export function isMcpScope(value: string): value is McpScope {
  * caller refuses as `invalid_scope`.
  */
 export function parseScopes(value: string | null | undefined): { scopes: McpScope[]; unknown: string[] } {
-  const asked = new Set((value ?? '').split(' ').filter((scope) => scope !== '' && !IGNORED_SCOPES.has(scope)));
+  // As many words as a body holds values, counted before it is split (`splitAtMost`): past them, the request names
+  // no scope coffre knows, and is refused for it.
+  const words = splitAtMost(value ?? '', ' ');
+  if (words === null) return { scopes: [], unknown: [`more than ${MAX_BODY_NODES} scopes`] };
+  const asked = new Set(words.filter((scope) => scope !== '' && !IGNORED_SCOPES.has(scope)));
   const unknown = [...asked].filter((scope) => !isMcpScope(scope));
   return { scopes: MCP_SCOPES.filter((scope) => scope === 'read' || asked.has(scope)), unknown };
 }

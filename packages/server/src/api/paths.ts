@@ -1,3 +1,5 @@
+import { splitAtMost } from '@coffre/core/schemas';
+
 import { badRequest } from './errors.ts';
 
 export type { ResolvedPath } from '../db/queries.ts';
@@ -5,9 +7,23 @@ export type { ResolvedPath } from '../db/queries.ts';
 /** `market`, `market/prod` or `market/prod/DATABASE_URL`. */
 export type Path = { project: string; environment?: string; key?: string };
 
+/**
+ * `path` without the slashes at either end, in one pass from each: what a regular expression such as `/^\/+|\/+$/g`
+ * does, but its second branch is tried at every slash of a run and scans the rest of it each time, so a path of
+ * thousands of slashes inside, as long as a body lets one be, cost it seconds.
+ */
+export function trimSlashes(path: string): string {
+  let start = 0;
+  let end = path.length;
+  while (start < end && path.charCodeAt(start) === 0x2f) start += 1;
+  while (end > start && path.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return path.slice(start, end);
+}
+
 /** Split `market/prod/KEY`; the depth says what it names. */
 export function parsePath(path: string, depths: readonly (1 | 2 | 3)[] = [1, 2, 3]): Path {
-  const parts = path.trim().replace(/^\/+|\/+$/g, '').split('/');
+  // Three parts at most, counted before it is split.
+  const parts = splitAtMost(trimSlashes(path.trim()), '/', 3) ?? [];
   if (parts.some((part) => part === '') || !depths.includes(parts.length as 1 | 2 | 3)) {
     const shapes = { 1: 'project', 2: 'project/environment', 3: 'project/environment/KEY' };
     throw badRequest(`name a ${depths.map((depth) => shapes[depth]).join(' or ')}`);

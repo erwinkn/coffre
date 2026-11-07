@@ -1,3 +1,6 @@
+import { countValues, MAX_BODY_NODES } from '@coffre/core/schemas';
+import { z } from 'zod';
+
 import { ApiError, badRequest, DEPLOYING_RETRY_AFTER, toErrorBody, UNAVAILABLE_RETRY_AFTER } from './api/errors.ts';
 
 export function jsonResponse(
@@ -66,55 +69,131 @@ export async function readLimitedBytes(request: Request, max: number): Promise<U
   return Buffer.concat(chunks);
 }
 
-/**
- * The most values a request body may hold, counted over the whole tree
- * (every object entry, array element and leaf). Validation builds work, and
- * sometimes an error, per value, so a body is held to this before it is
- * validated: well above the largest real one (a 1000-key bulk write of
- * generated values is about 11k), and far below what a megabyte of tiny
- * entries or array elements would reach, which cost seconds of CPU (R27).
- * The CBOR a passkey's response carries in its strings decodes under the
- * same count, on its own (`CeremonyExpectation.values`).
- */
-export const MAX_BODY_NODES = 20000;
+// The bounds every body is read to, and the count of its values, are core's, so that what decodes a body's strings
+// (a workload token's parts) holds to the same: re-exported here, where the API reads its bodies.
+export { API_BODY_BYTES, countValues, MAX_BODY_NODES, READ_CPU_US, REQUEST_CPU_US, VALUE_CPU_US } from '@coffre/core/schemas';
+
 
 /**
- * Parse a JSON body, then walk it once under a node cap, refusing a
- * `__proto__` key anywhere. `JSON.parse` makes `__proto__` an own property,
- * not prototype pollution, but validation treats it inconsistently (a secret
- * named that would seem to write and store nothing), so it is refused. The
- * walk counts every value and stops the body — before validation — once it
- * is too large: a plain parse (not a per-node reviver) is bounded by the
- * byte cap, but validating a huge array or record is not, so the count is
- * what keeps a request within R27's CPU budget. The walk pushes a node's
- * children only while under the cap, so a 262k-element array is refused
- * after counting it, never after copying it.
+ * A JSON body, its values counted first (`countValues`) and refused past
+ * `MAX_BODY_NODES` before `JSON.parse` makes any of them: parsed, a
+ * mebibyte of tiny entries or of nesting costs 35 to 40 ms of CPU and holds
+ * 8 to 28 times its size (`scripts/body-cost.ts`), where the count costs a
+ * pass over the text. Then a walk of what was parsed refuses a `__proto__`
+ * key anywhere: `JSON.parse` makes it an own property, not prototype
+ * pollution, but validation treats it inconsistently (a secret named that
+ * would seem to write and store nothing).
  */
 export function parseJsonBody(text: string): unknown {
+  if (countValues(text, MAX_BODY_NODES) > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
   let body: unknown;
   try {
     body = JSON.parse(text);
   } catch {
     throw badRequest('the body is not JSON');
   }
-  let nodes = 1;
   const stack: unknown[] = [body];
   while (stack.length > 0) {
     const value = stack.pop();
     if (value === null || typeof value !== 'object') continue;
     if (Array.isArray(value)) {
-      nodes += value.length;
-      if (nodes > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
       for (const element of value) stack.push(element);
     } else {
       if (Object.prototype.hasOwnProperty.call(value, '__proto__')) throw badRequest('__proto__ cannot be used as a key');
-      const keys = Object.keys(value);
-      nodes += keys.length;
-      if (nodes > MAX_BODY_NODES) throw badRequest(`the body holds more than ${MAX_BODY_NODES} values`);
-      for (const key of keys) stack.push((value as Record<string, unknown>)[key]);
+      for (const key of Object.keys(value)) stack.push((value as Record<string, unknown>)[key]);
     }
   }
   return body;
+}
+
+/** A nested issue's message, never shown: an answer names the first issue alone, whose own message it keeps. */
+const QUIET: z.core.ParseContext<z.core.$ZodIssue> & { async: false } = { async: false, error: () => 'invalid' };
+
+/**
+ * `schema`'s reading of a body, as `safeParse` answers, but with the first
+ * issue alone: what an answer names (`toErrorBody`). `safeParse` builds
+ * every issue's message, and its error a JSON of them all, which for a body
+ * of failing entries costs twice the walk itself (`VALUE_CPU_US`); here a
+ * union's branches keep a message no one reads, and only the first issue is
+ * finished, with zod's own message. The walk still visits every value, which
+ * `MAX_BODY_NODES` bounds.
+ */
+export function check<S extends z.ZodType>(schema: S, value: unknown): z.ZodSafeParseResult<z.output<S>> {
+  const result = schema._zod.run({ value, issues: [] }, QUIET);
+  if (result instanceof Promise) throw new Error('a body schema is synchronous');
+  if (result.issues.length === 0) return { success: true, data: result.value as z.output<S> };
+  const [first] = result.issues;
+  return { success: false, error: new z.ZodError([z.core.util.finalizeIssue(first!, {}, z.core.config())]) as z.ZodError<z.output<S>> };
+}
+
+/** `schema`'s reading of a body, or its first issue thrown, as a `ZodError` the API answers 400 (`toErrorBody`). */
+export function validate<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
+  const result = check(schema, value);
+  if (!result.success) throw result.error;
+  return result.data;
+}
+
+/** A hex digit's value, or -1. */
+function hexDigit(byte: number): number {
+  if (byte >= 0x30 && byte <= 0x39) return byte - 0x30;
+  const lower = byte | 0x20;
+  return lower >= 0x61 && lower <= 0x66 ? lower - 0x57 : -1;
+}
+
+/** One name or value of a form, bytes `start` to `end`: `+` a space, `%XX` its byte, then UTF-8 (WHATWG URL, 5.1). */
+function formComponent(bytes: Uint8Array, start: number, end: number): string {
+  const out = new Uint8Array(end - start);
+  let n = 0;
+  for (let i = start; i < end; i += 1) {
+    const byte = bytes[i]!;
+    const high = byte === 0x25 && i + 2 < end ? hexDigit(bytes[i + 1]!) : -1;
+    const low = high === -1 ? -1 : hexDigit(bytes[i + 2]!);
+    if (low !== -1) {
+      out[n++] = high * 16 + low;
+      i += 2;
+    } else out[n++] = byte === 0x2b ? 0x20 : byte;
+  }
+  return LENIENT.decode(out.subarray(0, n));
+}
+
+/**
+ * UTF-8 as a form's names and values are read: an invalid sequence a
+ * replacement character, and a leading U+FEFF kept, as `URLSearchParams` has
+ * them (`TextDecoder` drops one unless told).
+ */
+const LENIENT = new TextDecoder('utf-8', { ignoreBOM: true });
+
+/**
+ * A form body (`application/x-www-form-urlencoded`) of at most `max` bytes,
+ * as `URLSearchParams` reads one (WHATWG URL, 5.1), but its fields counted
+ * first and held to `MAX_BODY_NODES`, as a JSON body's values are, and read
+ * in one pass over its bytes: `URLSearchParams` takes seconds over a
+ * mebibyte of empty fields, and 50 ms over one field of a mebibyte of `+`,
+ * where this pass takes 2 or 3 (`scripts/body-cost.ts`'s machine).
+ */
+export async function readLimitedForm(request: Request, max: number): Promise<URLSearchParams> {
+  const bytes = await readLimitedBytes(request, max);
+  let fields = bytes.length === 0 ? 0 : 1;
+  for (let at = bytes.indexOf(0x26); at !== -1 && fields <= MAX_BODY_NODES; at = bytes.indexOf(0x26, at + 1)) fields += 1;
+  if (fields > MAX_BODY_NODES) throw badRequest(`the form holds more than ${MAX_BODY_NODES} fields`);
+  // UTF-8, as every body coffre reads: refused otherwise, before a field is read.
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw badRequest('the body is not UTF-8');
+  }
+  const form = new URLSearchParams();
+  for (let start = 0; start <= bytes.length;) {
+    const amp = bytes.indexOf(0x26, start);
+    const end = amp === -1 ? bytes.length : amp;
+    if (end > start) {
+      const equals = bytes.subarray(start, end).indexOf(0x3d);
+      const split = equals === -1 ? end : start + equals;
+      form.append(formComponent(bytes, start, split), split === end ? '' : formComponent(bytes, split + 1, end));
+    }
+    start = end + 1;
+  }
+  return form;
 }
 
 /** A JSON body of at most `max` bytes, as `readLimitedText` reads it. */

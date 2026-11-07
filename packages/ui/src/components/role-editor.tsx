@@ -1,6 +1,6 @@
 import { useId, useRef, useState, type ReactNode } from 'react';
 import { CoffreError, type RoleImpact, type RoleView } from '@coffre/client';
-import { definitionProblem, ROLE_DESCRIPTION_MAX, ROLE_ID_MAX, ROLE_NAME_MAX, type Permission, type RoleDefinition } from '@coffre/core/access';
+import { definitionProblem, ROLE_ID_MAX, type Permission, type RoleDefinition } from '@coffre/core/access';
 import { useSuspenseQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -338,7 +338,6 @@ function RoleEditor({
                 id={ids.name}
                 className="input"
                 autoFocus={made}
-                maxLength={ROLE_NAME_MAX}
                 autoComplete="off"
                 placeholder={made ? 'Release manager' : undefined}
                 value={draft.name}
@@ -381,7 +380,6 @@ function RoleEditor({
             <input
               id={ids.description}
               className="input"
-              maxLength={ROLE_DESCRIPTION_MAX}
               autoComplete="off"
               value={draft.description}
               onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}

@@ -351,7 +351,7 @@ consent page's CIMD fetch) pass a limiter per source address and one in
 total, before any database or network work, as the OIDC exchange does.
 Each connection's tool calls pass a limiter of their own. On Workers these
 are Cloudflare rate-limiting bindings; on Node, `processLimits()`. Bodies
-are read to 16 KiB at most. A token endpoint that waits on nothing slow
+are read to the API's one bound, 1 MiB (`API_BODY_BYTES`). A token endpoint that waits on nothing slow
 answers well inside Claude's 10 seconds.
 
 ## 5. Scopes and permissions

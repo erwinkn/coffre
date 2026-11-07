@@ -1,4 +1,6 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
+import { createRemoteJWKSet, customFetch, jwtVerify, type JWTPayload } from 'jose';
+
+import { boundedFetch } from './fetched.ts';
 import type { AccessVerifierConfig, IdentityVerifier, Principal } from './types.ts';
 
 export type { AccessVerifierConfig };
@@ -38,6 +40,8 @@ export class AccessIdentityVerifier implements IdentityVerifier {
     this.#jwks = createRemoteJWKSet(new URL(config.jwksUrl), {
       cooldownDuration: 30_000,
       cacheMaxAge: 600_000,
+      // Read to `PUBLISHED_BYTES` at most.
+      [customFetch]: boundedFetch(),
     });
   }
 

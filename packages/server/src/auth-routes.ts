@@ -1,4 +1,3 @@
-import { CREDENTIAL_LABEL_MAX } from '@coffre/core/access';
 import { EXCHANGE_SKEW_SECONDS, SigninError, verifyProof, type SigninProfile } from '@coffre/core/identity';
 import { emailAddress } from '@coffre/core/schemas';
 import type { Confirmation } from '@coffre/core/vault';
@@ -9,7 +8,6 @@ import { ApiError, badRequest, notFound, UNAVAILABLE_RETRY_AFTER } from './api/e
 import type { SignedInAccount, SigninResult } from './api/signin.ts';
 import { CEREMONY_TTL_SECONDS } from './api/ceremony.ts';
 import { freshEnough, freshPass } from './api/fresh-routes.ts';
-import { API_BODY_BYTES } from './api/router.ts';
 import { ExchangeRefused, UnknownKey, type WorkloadService } from './api/workloads.ts';
 import {
   accessTokenForRequest,
@@ -21,7 +19,7 @@ import {
 } from './auth.ts';
 import { dpopToken, SessionRefused, signedUrl, standingSession } from './workload-sessions.ts';
 import { apiCaller } from './fetch-api.ts';
-import { errorResponse, jsonResponse, readJson, readLimitedJson } from './http.ts';
+import { API_BODY_BYTES, errorResponse, jsonResponse, readJson, readLimitedJson, validate } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import {
@@ -79,9 +77,8 @@ function stepUpNext(raw: string | null, config: { providers: readonly { id: stri
   return safeNext(raw, config.publicUrl);
 }
 
-/** A device-login body carries a short label or a device code, nothing more: it is read in at most this many bytes, as anyone may call it. */
-const DEVICE_BODY_BYTES = 4 * 1024;
-const deviceStart = z.object({ client_label: z.string().trim().max(CREDENTIAL_LABEL_MAX).optional() });
+/** A device login's start: the label its terminal gives itself, if any. Its body, as every one before sign-in, is read to `API_BODY_BYTES`. */
+const deviceStart = z.object({ client_label: z.string().trim().optional() });
 
 /**
  * POST /api/auth/device: start a device login (RFC 8628). The CLI gets a
@@ -91,7 +88,7 @@ const deviceStart = z.object({ client_label: z.string().trim().max(CREDENTIAL_LA
 export async function startDevice(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
   try {
-    const input = deviceStart.parse(await readJson(request, DEVICE_BODY_BYTES, {}));
+    const input = validate(deviceStart, await readJson(request, API_BODY_BYTES, {}));
     const started = await runtime.signin.startDevice({ clientLabel: input.client_label ?? null, sourceIp });
     return jsonResponse({
       device_code: started.deviceCode,
@@ -109,7 +106,7 @@ export async function startDevice(request: Request, runtime: CoffreRuntime, sour
   }
 }
 
-const devicePoll = z.object({ device_code: z.string().min(1).max(128) });
+const devicePoll = z.object({ device_code: z.string().min(1) });
 
 /**
  * POST /api/auth/device/token: the CLI's poll. Errors use RFC 8628's names
@@ -119,7 +116,7 @@ const devicePoll = z.object({ device_code: z.string().min(1).max(128) });
 export async function pollDevice(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
   try {
-    const { device_code } = devicePoll.parse(await readJson(request, DEVICE_BODY_BYTES));
+    const { device_code } = validate(devicePoll, await readJson(request, API_BODY_BYTES));
     const polled = await runtime.signin.pollDevice(device_code, { requestId: crypto.randomUUID(), sourceIp });
     switch (polled.status) {
       case 'pending':
@@ -141,9 +138,8 @@ export async function pollDevice(request: Request, runtime: CoffreRuntime, sourc
   }
 }
 
-/** An exchange's body: the service and the token, and nothing else, in at most this many bytes. */
-const EXCHANGE_BODY_BYTES = 16 * 1024;
-const exchangeBody = z.object({ service: z.string().max(120), token: z.string().max(8 * 1024) }).strict();
+/** An exchange's body: the service and the token, and nothing else, read to `API_BODY_BYTES`. */
+const exchangeBody = z.object({ service: z.string(), token: z.string() }).strict();
 
 const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'unavailable' } as const;
 
@@ -208,7 +204,7 @@ export async function exchangeWorkloadToken(
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {
-    const body = exchangeBody.parse(asked(await readLimitedJson(request, EXCHANGE_BODY_BYTES)));
+    const body = validate(exchangeBody, asked(await readLimitedJson(request, API_BODY_BYTES)));
     return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
   } catch (error) {
     if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
@@ -217,10 +213,10 @@ export async function exchangeWorkloadToken(
   }
 }
 
-/** A workload's sign-in body: the service, and one proof by its kind, in at most this many bytes. */
+/** A workload's sign-in body: the service, and one proof by its kind, read to `API_BODY_BYTES`. */
 const sessionBody = z.object({
-  service: z.string().max(120),
-  proof: z.record(z.string().max(32), z.unknown()).refine((proof) => Object.keys(proof).length === 1, 'a proof names one kind: { "oidc": "<token>" }'),
+  service: z.string(),
+  proof: z.record(z.string(), z.unknown()).refine((proof) => Object.keys(proof).length === 1, 'a proof names one kind: { "oidc": "<token>" }'),
 }).strict();
 
 
@@ -248,7 +244,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {
-    const body = sessionBody.parse(await readLimitedJson(request, EXCHANGE_BODY_BYTES));
+    const body = validate(sessionBody, await readLimitedJson(request, API_BODY_BYTES));
     const header = request.headers.get('dpop');
     if (header === null) return refuseExchange(new ExchangeRefused('dpop', "a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in"));
     const proof = await verifyProof(header, { method: request.method, url: signedUrl(request, runtime.publicUrl), skewSeconds: EXCHANGE_SKEW_SECONDS });
@@ -526,7 +522,7 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
   let body: { response?: Record<string, unknown>; state?: string };
   try {
     // A control-plane request's body, read to the one bound the API reads every body to (R70).
-    body = passkeyAnswer.parse(await readLimitedJson(request, API_BODY_BYTES)) as typeof body;
+    body = validate(passkeyAnswer, await readLimitedJson(request, API_BODY_BYTES)) as typeof body;
   } catch (error) {
     return errorResponse(error);
   }

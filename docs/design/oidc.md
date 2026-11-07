@@ -121,7 +121,9 @@ Some rules within the profiles:
 
 **What a service holds is bounded.**
 - A service holds at most 16 live bindings.
-- A binding has at most 16 claims, each value at most 256 bytes.
+- A binding's claims have no count or length of their own: the body that
+  carries them is held to 1 MiB and 1,600 values (`API_BODY_BYTES`,
+  `MAX_BODY_NODES`), and nothing else bounds them (R70).
 - A service's bindings on one issuer share one JWKS URL. A binding made
   after the issuer moved its keys replaces the others, which would fail
   anyway.
@@ -141,7 +143,8 @@ answers `{"token": "coffre_svc_…", "expiresAt": "…"}`. The caller names the
 service, as AWS's `AssumeRoleWithWebIdentity` names a role, and only that
 service's bindings are read. In order:
 
-1. **Admission.** The body is read as a stream and cut off at 16 KiB. Two
+1. **Admission.** The body is read as a stream and cut off at the one bound
+   every body has, 1 MiB (`API_BODY_BYTES`). Two
    limits apply before any database, crypto or network work, one per source
    address and one for all sources together, answered 429 beyond.
    - **The limits are approximate.** On Workers they are Cloudflare's
@@ -401,7 +404,8 @@ in [ci.md](../ci.md#issuers-coffre-cannot-reach), and Kubernetes' in
 
 - **Nothing is fetched.** Not at bind time, not at an exchange. The issuer
   is then any string a token's `iss` holds, matched exactly, with no
-  control character or space at either end, at most 400 bytes. github.com's
+  control character or space at either end, at most 1,670 bytes, what fits
+  in the index entry it shares with its service (`MAX_ISSUER_BYTES`). github.com's
   and gitlab.com's issuers are refused: they rotate their keys, so coffre
   always fetches theirs.
 - **The keys are checked at upload** (`uploadedKeys` in core): RSA of 2048

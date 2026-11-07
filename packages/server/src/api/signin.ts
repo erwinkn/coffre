@@ -18,7 +18,7 @@ import {
   type PasskeyAlgorithm,
   type StoredPasskey,
 } from '@coffre/core/identity';
-import { allows, CREDENTIAL_LABEL_MAX, DEFAULT_POLICY, ownsInstance, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
+import { allows, DEFAULT_POLICY, ownsInstance, DEVICE_TTL_SECONDS, HANDLE_POLICY, holds, MAX_PERSONAL_TOKEN_MINUTES, PERMISSIONS, ROLES, runsInstance, type CredentialScope, type Holdings, type Policy, type RoleDefinition } from '@coffre/core/access';
 import type { Access, ObjectChange, Settings, Vault } from '@coffre/core/vault';
 import type { Database, Transaction } from '@coffre/db';
 import { isUniqueViolation } from '@coffre/db/dialect';
@@ -35,6 +35,7 @@ import {
   findBinding,
   findCredential,
   findDeviceAuthorizations,
+  openDeviceSources,
   findIdentity,
   passkeyCredentialTaken,
   signinMembers,
@@ -1611,7 +1612,7 @@ export class SigninService {
       tokenHint: tokenHint(token),
       principal: principalOf(principal),
       identityId: options.identityId,
-      label: options.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null,
+      label: options.label ?? null,
       createdBy: options.createdBy,
       expiresAt: options.expiresAt,
       scope: options.stored !== undefined ? options.stored : options.scope === undefined ? null : storedScope(options.scope),
@@ -2286,8 +2287,8 @@ export class SigninService {
   async startDevice(input: { clientLabel: string | null; sourceIp: string | null }): Promise<DeviceStart> {
     const { db } = this.#deps;
     const now = new Date();
-    const open = await findDeviceAuthorizations(db, this.#deps.chainKey, { openAt: now });
-    const fromIp = open.filter((row) => row.clientIp === input.sourceIp).length;
+    const open = await openDeviceSources(db, this.#deps.chainKey, now);
+    const fromIp = open.filter((source) => source === input.sourceIp).length;
     if (fromIp >= DEVICE_PENDING_PER_IP || open.length >= DEVICE_PENDING_TOTAL) {
       throw new ApiError('too_many_requests', 'too many sign-in requests are waiting; try again in a few minutes');
     }
@@ -2302,7 +2303,7 @@ export class SigninService {
           id: randomUUID(),
           deviceCodeHash: hashToken(deviceCode),
           userCode: code,
-          clientLabel: input.clientLabel?.slice(0, CREDENTIAL_LABEL_MAX) ?? null,
+          clientLabel: input.clientLabel ?? null,
           clientIp: input.sourceIp,
           expiresAt: new Date(now.getTime() + DEVICE_TTL_SECONDS * 1000),
           decision: null,

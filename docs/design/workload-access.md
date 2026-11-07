@@ -230,7 +230,7 @@ Cache-Control: no-store
 - **Admission, then work, in the same order as the OIDC exchange
   ([oidc.md](oidc.md), section 2):**
   1. the two limiters (per source, and total);
-  2. the body, at most 16 KiB;
+  2. the body, at most 1 MiB (`API_BODY_BYTES`, every body's bound);
   3. the shape;
   4. one read of the service's live bindings of the proof's profiles, by an
      explicit profile filter;

@@ -27,6 +27,7 @@
 import { shownMember } from '../schemas.ts';
 import { CLOCK_SKEW_MS } from '../clock.ts';
 import type { Constraints } from './constraints.ts';
+import { CHAR_NS, DOT_NS, KEY_LISTED_NS, KEY_TRIED_NS, LIST_THRESHOLD_NS, SLICE_NS, signInWork, type SignInWork } from './sign-in-work.ts';
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 export const GITLAB_ISSUER = 'https://gitlab.com';
@@ -181,18 +182,15 @@ const EVENT_CLAIM: Record<WorkloadProfile, { name: string; values: readonly stri
   cloudflare: null,
 };
 
-/** At most this many live bindings per service, and claims per binding. */
+/** At most this many live bindings per service. */
 export const MAX_BINDINGS = 16;
-export const MAX_CLAIMS = 16;
-/** The longest claim value, in bytes. */
-export const MAX_CLAIM_BYTES = 256;
 
 /** Claims a binding never names: the issuer is its own field, and the audience, times and ID are the exchange's. */
 const RESERVED = new Set(['iss', 'aud', 'exp', 'iat', 'nbf', 'jti']);
-const CLAIM_NAME = /^[A-Za-z0-9_.:/-]{1,64}$/;
+const CLAIM_NAME = /^[A-Za-z0-9_.:/-]+$/;
 const DIGITS = /^[1-9][0-9]{0,19}$/;
 const SHA = /^[0-9a-f]{40}$/;
-const REF = /^refs\/(heads|tags)\/\S{1,200}$/;
+const REF = /^refs\/(heads|tags)\/\S+$/;
 const WORKFLOW = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/\.github\/workflows\/[^@\s]+\.ya?ml@\S+$/;
 /**
  * A GitHub environment's name, as GitHub takes one: at most 255 characters,
@@ -250,8 +248,20 @@ export function defaultIssuer(profile: WorkloadProfile): string | null {
   return profile === 'gcp' ? GOOGLE_ISSUER : null;
 }
 
-/** The longest issuer a binding with uploaded keys names, in bytes. */
-export const MAX_ISSUER_BYTES = 400;
+/**
+ * The longest issuer a binding names, in bytes of UTF-8: what fits in a
+ * Postgres index entry, where the issuer is kept beside its service
+ * (`service_bindings_live_idx`: principal, issuer, generation, created_at,
+ * id). A btree entry is at most 2,704 bytes on 8 KiB pages (`BTMaxItemSize`,
+ * `src/include/access/nbtree.h`), and past it the insert fails ("index row
+ * size exceeds btree version 4 maximum 2704"). The rest of the entry takes
+ * 1,034 at most: its 8-byte header, the principal (`token:` and an id of 320
+ * characters, `principalId`, each up to 3 bytes of UTF-8, with a 4-byte
+ * length), the issuer's own length (4), the generation (4), the time (8),
+ * the id (16), and up to 24 of alignment. No issuer's URL comes near it; an
+ * uploaded binding's issuer is any string.
+ */
+export const MAX_ISSUER_BYTES = 2704 - (8 + 4 + 6 + 320 * 3 + 4 + 4 + 8 + 16 + 24);
 
 /**
  * Check a binding against its profile, and return it as stored: the
@@ -283,8 +293,8 @@ export function checkBinding(
     throw new BindingInvalid(`${issuer} signs only for the ${forced[0]} profile${forced.length > 1 ? 's' : ''}`);
   }
 
+  if (new TextEncoder().encode(issuer).length > MAX_ISSUER_BYTES) throw new BindingInvalid(`the issuer is longer than ${MAX_ISSUER_BYTES} bytes`);
   const entries = Object.entries(input.claims);
-  if (entries.length > MAX_CLAIMS) throw new BindingInvalid(`a binding names at most ${MAX_CLAIMS} claims`);
   const event = EVENT_CLAIM[profile];
   const claims: BindingClaims = {};
   for (const [name, value] of entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
@@ -303,9 +313,6 @@ export function checkBinding(
     }
     if (typeof value !== 'string' || value.length === 0) {
       throw new BindingInvalid(`claim ${name} must be a nonempty string${Array.isArray(value) && event !== null ? `: only ${event.name} lists several` : ''}`);
-    }
-    if (new TextEncoder().encode(value).length > MAX_CLAIM_BYTES) {
-      throw new BindingInvalid(`claim ${name} is longer than ${MAX_CLAIM_BYTES} bytes`);
     }
     claims[name] = value;
   }
@@ -331,7 +338,6 @@ function checkIssuerName(issuer: string): void {
   if (issuer === '' || /^\s|\s$/.test(issuer) || /\p{Cc}/u.test(issuer)) {
     throw new BindingInvalid('the issuer is its tokens\' iss, exactly: no control character, no space at either end');
   }
-  if (new TextEncoder().encode(issuer).length > MAX_ISSUER_BYTES) throw new BindingInvalid(`the issuer is longer than ${MAX_ISSUER_BYTES} bytes`);
   if (issuer === GITHUB_ISSUER || issuer === GITLAB_ISSUER) {
     throw new BindingInvalid(`${issuer} publishes its keys and rotates them: coffre fetches them, so upload none`);
   }
@@ -405,26 +411,81 @@ function checkGitLab(claims: BindingClaims): void {
  * `kubernetes.io.serviceaccount.uid` is `4f1c…`, `kubernetes.io` an object,
  * and `kubernetes.io.pod` nothing.
  */
-export function claimAt(claims: Record<string, unknown>, name: string): unknown {
-  const parts = name.split('.');
-  let found: unknown;
-  let readings = 0;
-  // Each step takes one key, of one or more parts, from the object it is in; stops once a second reading shows.
-  const walk = (at: unknown, from: number): void => {
-    if (readings > 1) return;
-    if (from === parts.length) {
-      found = at;
-      readings++;
-      return;
+export function claimAt(claims: Record<string, unknown>, name: string, work: SignInWork = signInWork()): unknown {
+  // Each step finds the keys of the object it is in that the name continues with, from where it is to a dot or its
+  // end, whichever way costs less: each such end's slice looked up, or the object's keys tried, listed once and kept.
+  // So a short name in a wide object costs a few lookups, and a long dotted name in a small one a few keys, never
+  // every split of the name nor every key for every claim; each object at each place in the name is read once, its
+  // readings kept (two meaning several), however many ways lead to it. What each step does is spent from `work`
+  // (`SIGN_IN_WORK_NS`): once it is gone, the name reads nothing, nor does any other that shares it.
+  if (work.left < 0) return undefined;
+  // The name's dots, each paid for as it is found: a name of nothing but dots stops once the budget is spent.
+  work.left -= name.length * CHAR_NS;
+  const dots: number[] = [];
+  for (let at = name.indexOf('.'); at !== -1 && work.left >= 0; at = name.indexOf('.', at + 1)) {
+    dots.push(at);
+    work.left -= DOT_NS;
+  }
+  if (work.left < 0) return undefined;
+  // `after[i]`, the sum of the dots from the i-th on: the lengths of a step's slices, summed at once.
+  const after = new Array<number>(dots.length + 1).fill(0);
+  for (let i = dots.length - 1; i >= 0; i--) after[i] = after[i + 1]! + dots[i]!;
+  type Reading = { count: number; value: unknown };
+  const none: Reading = { count: 0, value: undefined };
+  const read = new Map<object, Map<number, Reading>>();
+  // What the name from `start` on reaches in `at`: a key must start there.
+  const from = (at: unknown, start: number): Reading => {
+    if (work.left < 0 || typeof at !== 'object' || at === null || Array.isArray(at)) return none;
+    const kept = read.get(at)?.get(start);
+    if (kept !== undefined) return kept;
+    let first = 0;
+    for (let high = dots.length; first < high;) {
+      const middle = (first + high) >> 1;
+      if (dots[middle]! < start) first = middle + 1;
+      else high = middle;
     }
-    if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
-    for (let to = from + 1; to <= parts.length; to++) {
-      const key = parts.slice(from, to).join('.');
-      if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
+    // A key ends at a dot from `start` on, or at the name's end: what slicing each of them costs.
+    const ends = dots.length - first + 1;
+    const slicing = ends * SLICE_NS + (after[first]! - start * (ends - 1) + name.length - start) * CHAR_NS;
+    let listed = work.keys.get(at);
+    if (listed === undefined && slicing > LIST_THRESHOLD_NS) {
+      const keys = Object.keys(at);
+      listed = { keys, chars: keys.reduce((sum, key) => sum + key.length, 0) };
+      work.keys.set(at, listed);
+      work.left -= keys.length * KEY_LISTED_NS;
     }
+    // Trying every key costs each one and its characters, as many of them as the name has left.
+    const scanning = listed === undefined ? Infinity : listed.keys.length * KEY_TRIED_NS + Math.min(listed.chars, listed.keys.length * (name.length - start)) * CHAR_NS;
+    let reading: Reading = none;
+    const take = (key: string, end: number): boolean => {
+      const child = (at as Record<string, unknown>)[key];
+      const next = end === name.length ? { count: 1, value: child } : from(child, end + 1);
+      if (next.count > 0) reading = { count: Math.min(2, reading.count + next.count), value: next.value };
+      return reading.count > 1;
+    };
+    if (slicing <= scanning) {
+      work.left -= slicing;
+      for (let i = first; i <= dots.length && work.left >= 0; i++) {
+        const end = i < dots.length ? dots[i]! : name.length;
+        const key = name.slice(start, end);
+        if (Object.hasOwn(at, key) && take(key, end)) break;
+      }
+    } else {
+      for (const key of listed!.keys) {
+        work.left -= KEY_TRIED_NS + Math.min(key.length, name.length - start) * CHAR_NS;
+        if (work.left < 0) break;
+        if (!name.startsWith(key, start)) continue;
+        const end = start + key.length;
+        if (end !== name.length && name.charCodeAt(end) !== 0x2e) continue;
+        if (take(key, end)) break;
+      }
+    }
+    if (!read.has(at)) read.set(at, new Map());
+    read.get(at)!.set(start, reading);
+    return reading;
   };
-  walk(claims, 0);
-  return readings === 1 ? found : undefined;
+  const reading = from(claims, 0);
+  return reading.count === 1 && work.left >= 0 ? reading.value : undefined;
 }
 
 /**
@@ -440,17 +501,20 @@ export function claimAt(claims: Record<string, unknown>, name: string): unknown 
  *   case-insensitive, so `Production` and `production` are one environment,
  *   under the same protection rules.
  */
-export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>): string[] {
+export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>, work: SignInWork = signInWork()): string[] {
   const github = profile.startsWith('github');
   const claims = github ? atBaseBranch(token) : token;
-  return Object.entries(expected)
+  // One budget for all of them, and for every binding the sign-in weighs (`work`, its caller's): a search that costs
+  // more than a sign-in may spend matches nothing.
+  const differing = Object.entries(expected)
     .filter(([name, value]) => {
-      const actual = claimAt(claims, name);
+      const actual = claimAt(claims, name, work);
       if (typeof actual !== 'string') return true;
       if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
       return !claimValues(value).includes(actual);
     })
     .map(([name]) => name);
+  return work.left < 0 ? Object.keys(expected) : differing;
 }
 
 function atBaseBranch(claims: Record<string, unknown>): Record<string, unknown> {
@@ -702,11 +766,6 @@ export const POLICY_DEFAULTS = {
   unsignedUploads: false,
 } as const;
 
-/** The most environments, and keys in each, a binding's `reads` lists; the most `sources`. */
-export const MAX_READ_PLACES = 64;
-export const MAX_READ_KEYS = 256;
-export const MAX_SOURCES = 16;
-
 type PolicyField = keyof BindingPolicy;
 
 const SESSION_FIELDS: readonly PolicyField[] = ['reads', 'sources', 'sessionHours', 'unsignedUploads'];
@@ -756,9 +815,9 @@ function sortedUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-function uuidList(value: unknown, what: string, max: number): string[] {
-  if (!Array.isArray(value) || value.length > max || value.some((id) => typeof id !== 'string' || !UUID.test(id.toLowerCase()))) {
-    throw new BindingInvalid(`${what} lists at most ${max} IDs`);
+function uuidList(value: unknown, what: string): string[] {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !UUID.test(id.toLowerCase()))) {
+    throw new BindingInvalid(`${what} lists IDs`);
   }
   return sortedUnique(value.map((id: string) => id.toLowerCase()));
 }
@@ -766,7 +825,6 @@ function uuidList(value: unknown, what: string, max: number): string[] {
 function checkReads(value: unknown): BindingReads | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new BindingInvalid('reads maps environment IDs to { keys, mints }');
   const entries = Object.entries(value as Record<string, unknown>);
-  if (entries.length > MAX_READ_PLACES) throw new BindingInvalid(`reads names at most ${MAX_READ_PLACES} environments`);
   const reads: Record<string, { keys?: readonly string[] | '*'; mints?: readonly string[] }> = {};
   const seen = new Set<string>();
   for (const [environment, entry] of entries) {
@@ -779,11 +837,11 @@ function checkReads(value: unknown): BindingReads | undefined {
     if (Object.keys(rest).length > 0) throw new BindingInvalid(`each environment of reads holds keys and mints, not ${Object.keys(rest).join(', ')}`);
     const read: { keys?: readonly string[] | '*'; mints?: readonly string[] } = {};
     if (keys !== undefined) {
-      const listed = keys === '*' ? '*' : uuidList(keys, 'reads.keys', MAX_READ_KEYS);
+      const listed = keys === '*' ? '*' : uuidList(keys, 'reads.keys');
       if (listed === '*' || listed.length > 0) read.keys = listed;
     }
     if (mints !== undefined) {
-      if (!Array.isArray(mints) || mints.length > MAX_READ_KEYS || mints.some((name) => typeof name !== 'string' || !CREDENTIAL_NAME.test(name))) {
+      if (!Array.isArray(mints) || mints.some((name) => typeof name !== 'string' || !CREDENTIAL_NAME.test(name))) {
         throw new BindingInvalid('reads.mints lists minters by name');
       }
       if (mints.length > 0) read.mints = sortedUnique(mints as string[]);
@@ -832,7 +890,7 @@ export function checkPolicy(profile: WorkloadProfile, input: unknown, options: {
     if (reads !== undefined) policy.reads = reads;
   }
   if (given.sources !== undefined) {
-    if (!Array.isArray(given.sources) || given.sources.length > MAX_SOURCES) throw new BindingInvalid(`sources lists at most ${MAX_SOURCES} CIDRs`);
+    if (!Array.isArray(given.sources)) throw new BindingInvalid('sources lists CIDRs');
     const sources = sortedUnique(given.sources.map((source: unknown) => {
       const block = typeof source === 'string' ? parseCidr(source) : null;
       if (block === null) throw new BindingInvalid(`sources lists CIDRs, such as 162.220.232.0/24 or 2001:db8::/32: ${String(source)} is none`);

@@ -7,7 +7,7 @@ import type { ApiContext } from './api/context.ts';
 import { ApiError } from './api/errors.ts';
 import { parsePath, type Path } from './api/paths.ts';
 import { Render } from './api/render.ts';
-import { API_BODY_BYTES, routeParts, serveApi } from './api/router.ts';
+import { routeParts, serveApi } from './api/router.ts';
 import { revealInput } from './api/routes.ts';
 import {
   authenticateRequest,
@@ -21,7 +21,7 @@ import {
   unauthenticated,
   type AuthenticatedIdentity,
 } from './auth.ts';
-import { errorResponse, jsonResponse, methodNotAllowed, parseJsonBody, readLimitedBytes } from './http.ts';
+import { API_BODY_BYTES, check, errorResponse, jsonResponse, methodNotAllowed, parseJsonBody, readLimitedBytes } from './http.ts';
 import { useByName, useManyByName } from './named-use.ts';
 import { writeAhead, writeAsked, type Written } from './write-ahead.ts';
 import { admitAhead, admitAsked, type Admission } from './admit-ahead.ts';
@@ -110,7 +110,7 @@ function namedReveal(body: Uint8Array): { place: { project: string; environment:
   } catch {
     return null;
   }
-  const parsed = revealInput.safeParse(input);
+  const parsed = check(revealInput, input);
   if (!parsed.success) return null;
   const { path: asked, keys } = parsed.data;
   let path: Path;

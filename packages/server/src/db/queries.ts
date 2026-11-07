@@ -1,5 +1,5 @@
 import { EVERYWHERE, type GrantPlace, type InstanceRole, type Scope } from '@coffre/core/access';
-import { BEARER_PROFILES } from '@coffre/core/identity';
+import { BEARER_PROFILES, ROW_BYTE_NS, SignInWorkSpent, type SignInWork } from '@coffre/core/identity';
 import { verifyEntries, type Author, type LogKey } from '@coffre/core/audit';
 import { ACCESS_ACTIONS, MAX_PARENTS, settingsFrom, type Checkpoint, type EnvironmentColumns, type LoggedChange, type SecretColumns } from '@coffre/core/vault';
 import type { Envelope } from '@coffre/core/envelope';
@@ -1922,6 +1922,7 @@ export async function exchangeCandidates(
   issuer: string,
   max: number,
   token: Buffer,
+  work?: SignInWork,
 ): Promise<{ bindings: BindingRow[]; spent: boolean | null; policySeq: bigint | null; newest: NewestChanges }> {
   const { spentIdTokens, serviceBindings, principals } = tablesOf(db);
   const id = dialect.engineOf(db) === 'postgres' ? sql`${serviceBindings.id}::text` : sql`${serviceBindings.id}`;
@@ -1951,7 +1952,7 @@ export async function exchangeCandidates(
     return { bindings: [], spent: null, policySeq: null, newest: NO_CHANGES };
   }
   const seq = rows[0]?.policySeq ?? null;
-  const bindings = rows.map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
+  const bindings = checkedCandidates(chainKey, rows.map((row) => row.binding), work);
   return {
     bindings,
     // Null where nothing was read: no binding, so no row to read it with.
@@ -2010,6 +2011,25 @@ function loggedChange(text: string | null): LoggedChange | null {
   if (text === null) return null;
   const [number, at, requestId, actor, payload, seal, mac] = JSON.parse(text) as [string, number, string, string, string, string | null, string];
   return { number, at, requestId, actor, payload, seal, mac };
+}
+
+/**
+ * A sign-in's candidate bindings that pass their MACs, each check paid for
+ * from the sign-in's budget before it is made (`ROW_BYTE_NS`, its claims'
+ * bytes mostly). Spent, it throws `SignInWorkSpent` and checks none further:
+ * never a shorter list, whose newest would then name another binding's keys.
+ */
+export function checkedCandidates(chainKey: Buffer, rows: readonly BindingRow[], work?: SignInWork): BindingRow[] {
+  const checked: BindingRow[] = [];
+  for (const row of rows) {
+    if (work !== undefined) {
+      // In UTF-16 units, each up to 3 bytes of the UTF-8 the MAC reads: paid as if every one were.
+      work.left -= (row.claims.length + row.issuer.length + (row.jwksUri?.length ?? 0)) * 3 * ROW_BYTE_NS;
+      if (work.left < 0) throw new SignInWorkSpent();
+    }
+    if (checkAuthRow(chainKey, 'service_bindings', row)) checked.push(row);
+  }
+  return checked;
 }
 
 /**
@@ -2764,21 +2784,30 @@ export async function unansweredApprovals(db: Queryable, connectionId: string, d
 export async function findDeviceAuthorizations(
   db: Queryable,
   chainKey: Buffer,
-  by: { userCode: string } | { deviceCodeHash: Buffer } | { openAt: Date },
+  by: { userCode: string } | { deviceCodeHash: Buffer },
 ) {
   const { deviceLogins } = tablesOf(db);
   const rows = await db
     .select()
     .from(deviceLogins)
-    .where(
-      'userCode' in by
-        ? eq(deviceLogins.userCode, by.userCode)
-        : 'deviceCodeHash' in by
-          ? eq(deviceLogins.deviceCodeHash, by.deviceCodeHash)
-          : and(isNull(deviceLogins.decidedAt), gt(deviceLogins.expiresAt, by.openAt)),
-    );
+    .where('userCode' in by ? eq(deviceLogins.userCode, by.userCode) : eq(deviceLogins.deviceCodeHash, by.deviceCodeHash));
   for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
   return rows;
+}
+
+/**
+ * The address each open device login came from, for the next one's
+ * admission: the rows' every column but the label, which the MAC does not
+ * cover and anyone may make as long as a body is, so that the hundreds of
+ * open logins admission reads hold a few hundred bytes each, never a body's
+ * size each. Each row's MAC is checked all the same.
+ */
+export async function openDeviceSources(db: Queryable, chainKey: Buffer, at: Date): Promise<(string | null)[]> {
+  const { deviceLogins } = tablesOf(db);
+  const { clientLabel: _label, ...columns } = getTableColumns(deviceLogins);
+  const rows = await db.select(columns).from(deviceLogins).where(and(isNull(deviceLogins.decidedAt), gt(deviceLogins.expiresAt, at)));
+  for (const row of rows) verifyAuthRow(chainKey, 'device_authorizations', row);
+  return rows.map((row) => row.clientIp);
 }
 
 // --- secrets ------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { CREDENTIAL_LABEL_MAX, isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
+import { isCredentialScope, scopeWithReads, sealedSessionScope, type CredentialScope } from '@coffre/core/access';
 import {
   EXCHANGED_CREDENTIAL_MS,
   SESSION_MS,
@@ -12,7 +12,12 @@ import {
   checkPolicy,
   CLOCK_TOLERANCE_SECONDS,
   decodeWorkloadToken,
+  CHAR_NS,
   differingClaims,
+  signInWork,
+  SignInWorkSpent,
+  TOKEN_BYTE_NS,
+  type SignInWork,
   generateToken,
   GitHubAppUnavailable,
   GITLAB_ISSUER,
@@ -22,8 +27,6 @@ import {
   keySummaries,
   KeysInvalid,
   MAX_BINDINGS,
-  MAX_READ_KEYS,
-  MAX_READ_PLACES,
   MAX_TOKEN_AGE_SECONDS,
   OIDC_PROFILES,
   POLICY_DEFAULTS,
@@ -324,21 +327,50 @@ const OIDC: ProofKind = {
     }
     const issuer = decoded.claims.iss;
     const unbound = new ExchangeRefused('no_match', `no workload binding of ${shownMember(ctx.service)} trusts tokens from ${issuer}`);
+    // One budget for the sign-in (`SIGN_IN_WORK_NS`): the token's decoding above, its candidates' checks, its key tries
+    // and its claims, all paid from it.
+    const work = signInWork();
+    work.left -= input.length * TOKEN_BYTE_NS;
     // The bindings first, so that a token none can take costs this one read.
-    const { bindings: loaded, newest: changes } = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS);
+    let candidatesRead: Awaited<ReturnType<typeof workloadCandidates>>;
+    try {
+      candidatesRead = await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, issuer, OIDC_PROFILES, MAX_BINDINGS, work);
+    } catch (error) {
+      if (error instanceof SignInWorkSpent) return new ExchangeRefused('no_match', error.message);
+      throw error;
+    }
+    const { bindings: loaded, newest: changes } = candidatesRead;
     if (loaded.length === 0) return unbound;
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, ctx.publicUrl));
     if (candidates.length === 0) return madeElsewhere(loaded[loaded.length - 1]!, ctx.publicUrl);
-    const accepted = (binding: BindingRow) => expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
+    // Each candidate's policy read once, and paid for from the sign-in's budget as its claims are (`SIGN_IN_WORK_NS`).
+    const audiences = new Map<BindingRow, string[]>();
+    const accepted = (binding: BindingRow): string[] => {
+      let held = audiences.get(binding);
+      if (held === undefined) {
+        work.left -= binding.policy!.length * CHAR_NS;
+        if (work.left < 0) throw new SignInWorkSpent();
+        held = expectedAudiences(binding.profile as WorkloadProfile, JSON.parse(binding.policy!) as BindingPolicy, { publicUrl: ctx.publicUrl, jkt: ctx.jkt });
+        audiences.set(binding, held);
+      }
+      return held;
+    };
     // The audience the token names, if a binding takes it; else the instance's, which verifying it then refuses.
     const named = soleAudience(decoded.claims.aud);
-    const audience = named !== null && candidates.some((binding) => accepted(binding).includes(named)) ? named : ctx.publicUrl;
-    const taking = candidates.filter((binding) => accepted(binding).includes(audience));
+    let audience: string;
+    let taking: BindingRow[];
+    try {
+      audience = named !== null && candidates.some((binding) => accepted(binding).includes(named)) ? named : ctx.publicUrl;
+      taking = candidates.filter((binding) => accepted(binding).includes(audience));
+    } catch (error) {
+      if (error instanceof SignInWorkSpent) return new ExchangeRefused('no_match', error.message);
+      throw error;
+    }
     // A token its platform hands out again is as old as its platform's cache: its own `exp` ends it, not an hour after `iat`.
     const repeats = taking.some((binding) => REPEATING_PROFILES.includes(binding.profile as WorkloadProfile));
     const newest = candidates[candidates.length - 1]!;
-    const expected = { issuer, audience, now: new Date(), ...(repeats ? { maxAge: null } : {}) };
+    const expected = { issuer, audience, now: new Date(), work, ...(repeats ? { maxAge: null } : {}) };
     let claims: Record<string, unknown>;
     try {
       claims = newest.jwks === null
@@ -356,7 +388,7 @@ const OIDC: ProofKind = {
     }
     let binding: BindingRow;
     try {
-      binding = matching(taking.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, ctx.service);
+      binding = matching(taking.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, ctx.service, work);
     } catch (error) {
       if (error instanceof ExchangeRefused) return error;
       throw error;
@@ -687,7 +719,7 @@ export class WorkloadService {
           const row = {
             id: randomUUID(), principal: member, generation: standing.generation, profile: planned.profile, issuer: planned.issuer, jwksUri: planned.jwksUri,
             jwks: uploaded?.jwks ?? null, claims: canonicalClaims(planned.claims), scope: storedScope(scope), policy: rules === null ? null : policyText(rules),
-            label: input.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
+            label: input.label ?? null, createdBy: ctx.caller.principal.id, createdAt: new Date(),
           };
           const ending = live.filter((candidate) => planned.replaces.some(({ id }) => id === candidate.id));
           const entries = [
@@ -743,7 +775,7 @@ export class WorkloadService {
           scope: storedScope(scope),
           // None on a bearer binding, which `/api/auth/oidc` takes; canonical JSON on a workload's, under the MAC (`policed_`).
           policy: rules === null ? null : policyText(rules),
-          label: input.label?.slice(0, CREDENTIAL_LABEL_MAX) ?? null,
+          label: input.label ?? null,
           createdAt: now,
           createdBy: ctx.caller.principal.id,
         };
@@ -1208,15 +1240,26 @@ export class WorkloadService {
     const unbound = () => new ExchangeRefused('no_match', `no binding of ${shownMember(member)} trusts tokens from ${issuer}`);
     if (!/^token:[a-z0-9][a-z0-9._-]{0,99}$/.test(member)) throw unbound();
 
+    // One budget for the sign-in (`SIGN_IN_WORK_NS`): the token's decoding above, its candidates' checks, its key tries
+    // and its claims, all paid from it.
+    const work = signInWork();
+    work.left -= token.length * TOKEN_BYTE_NS;
     // The bindings first, so that a token none can take costs this one read.
-    const { bindings: loaded, spent, policySeq, newest: changes } = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash);
+    let candidatesRead: Awaited<ReturnType<typeof exchangeCandidates>>;
+    try {
+      candidatesRead = await exchangeCandidates(db, chainKey, member, issuer, MAX_BINDINGS, decoded.signingInputHash, work);
+    } catch (error) {
+      if (error instanceof SignInWorkSpent) throw new ExchangeRefused('no_match', error.message);
+      throw error;
+    }
+    const { bindings: loaded, spent, policySeq, newest: changes } = candidatesRead;
     if (loaded.length === 0 || spent === null) throw unbound();
     // Those made on this instance's URL: one made on another shadows none that was (review r1).
     const candidates = loaded.filter((binding) => madeHere(binding, this.#deps.publicUrl));
     if (candidates.length === 0) throw madeElsewhere(loaded[loaded.length - 1]!, this.#deps.publicUrl);
     // A service's bindings on one issuer share its keys; one made after the keys moved replaced the rest.
     const newest = candidates[candidates.length - 1]!;
-    const expected = { issuer, audience: this.#deps.publicUrl, now: new Date() };
+    const expected = { issuer, audience: this.#deps.publicUrl, now: new Date(), work };
     let claims: Record<string, unknown>;
     try {
       claims = newest.jwks === null
@@ -1228,7 +1271,7 @@ export class WorkloadService {
       if (newest.jwks !== null && error instanceof WorkloadTokenRefused && error.reason === 'unknown_key') throw new UnknownKey(member, newest, issuer, shownKid(decoded.header));
       throw refused(error);
     }
-    const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member);
+    const binding = matching(candidates.filter((candidate) => candidate.jwksUri === newest.jwksUri), claims, member, work);
     return { binding, claims, token: decoded, spent, policySeq, newest: { member: changes.member, binding: changes.bindings.get(binding.id) ?? null } };
   }
 
@@ -1740,10 +1783,14 @@ function refused(error: unknown): ExchangeRefused {
  * the claims that differ from the closest binding, by name, never the
  * values it expects.
  */
-function matching(bindings: BindingRow[], claims: Record<string, unknown>, member: string): BindingRow {
+function matching(bindings: BindingRow[], claims: Record<string, unknown>, member: string, work: SignInWork): BindingRow {
   let closest: string[] | null = null;
+  // The sign-in's budget, what its key tries left (`SIGN_IN_WORK_NS`), for the whole search: each binding's claims are
+  // read from it too.
   for (const binding of bindings) {
-    const differ = differingClaims(binding.profile as WorkloadProfile, JSON.parse(binding.claims) as BindingClaims, claims);
+    work.left -= binding.claims.length * CHAR_NS;
+    if (work.left < 0) throw new ExchangeRefused('no_match', `${shownMember(member)}'s bindings cost more to match than a sign-in may spend: none trusts these claims`);
+    const differ = differingClaims(binding.profile as WorkloadProfile, JSON.parse(binding.claims) as BindingClaims, claims, work);
     if (differ.length === 0) return binding;
     if (closest === null || differ.length < closest.length) closest = differ;
   }
@@ -1797,12 +1844,11 @@ function checked<T>(check: () => T): T {
 async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRead[]> {
   if (typeof wanted !== 'object' || wanted === null || Array.isArray(wanted)) throw badRequest('reads maps each environment, by path, to its key names or "*"');
   const entries = Object.entries(wanted as Record<string, unknown>);
-  if (entries.length > MAX_READ_PLACES) throw badRequest(`reads names at most ${MAX_READ_PLACES} environments`);
   const known = await places(db);
   const resolved: ResolvedRead[] = [];
   for (const [path, keys] of entries) {
-    if (keys !== '*' && !(Array.isArray(keys) && keys.length <= MAX_READ_KEYS && keys.every((key) => typeof key === 'string' && key.length <= 256))) {
-      throw badRequest(`reads lists ${path}'s keys by name, at most ${MAX_READ_KEYS}, or "*" for every one`);
+    if (keys !== '*' && !(Array.isArray(keys) && keys.every((key) => typeof key === 'string'))) {
+      throw badRequest(`reads lists ${path}'s keys by name, or "*" for every one`);
     }
     const at = parsePath(path, [2]);
     const project = known.find((candidate) => candidate.slug === at.project);
@@ -1827,7 +1873,9 @@ async function resolveReads(db: Queryable, wanted: unknown): Promise<ResolvedRea
       const sensitive = row.current?.sensitive ?? (source === undefined ? undefined : sensitiveSources.has(source));
       return sensitive === undefined ? [] : [{ id: row.id, key: row.key, sensitive }];
     });
-    const missing = names.filter((name) => !held.some((row) => row.key === name));
+    // By a set of what it holds, not each name against every row: both as long as a body and an environment let them be.
+    const holds = new Set(held.map((row) => row.key));
+    const missing = names.filter((name) => !holds.has(name));
     if (missing.length > 0) throw badRequest(`reads lists keys ${path} does not hold: ${missing.join(', ')}`);
     resolved.push({ environmentId: environment.id, path: `${project.slug}/${environment.slug}`, projectId: project.id, keys: held });
   }

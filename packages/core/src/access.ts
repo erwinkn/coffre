@@ -112,14 +112,14 @@ export type Role = string;
 export const ROLE_NAMES = Object.keys(ROLES) as BuiltinRole[];
 
 /**
- * How long a role's id, name and description may be, in characters. Input bounds chosen with custom roles (W128,
- * 0.10) so a definition stays a small row, never measured: no platform or design document sets them (the limits
- * audit, #501, S68 and C4). The vault checks a definition by them (`definitionProblem`), the database's role check
- * holds the id's (`grants_role_check`), and the API's schema and the UI's fields take them from here.
+ * The longest a role's id may be, in characters. An id is not free text but an identifier, like a place's slug or a
+ * key, which people type in a URL (`/roles/release-manager`), a CLI flag and a policy, and whose format, length
+ * included, every copy of it holds: the API's schema, the vault's checks, the database's role check
+ * (`grants_role_check`, both engines) and the UI's field. No platform sets 32; it is the format custom roles
+ * shipped with (W128, 0.10), kept as a format, not as a bound on work (the limits audit, #501, S68 and C4). A role's
+ * name and description are text, and bounded only by the body that carries them.
  */
 export const ROLE_ID_MAX = 32;
-export const ROLE_NAME_MAX = 40;
-export const ROLE_DESCRIPTION_MAX = 200;
 
 /** A custom role's id: lowercase, as a slug, 2 to `ROLE_ID_MAX` characters, and no built-in one's. */
 export const ROLE_ID = new RegExp(`^[a-z][a-z0-9-]{1,${ROLE_ID_MAX - 1}}$`);
@@ -252,8 +252,8 @@ export const FIXED_ROLES = { roles: ['owner'] as readonly string[], instanceRole
  */
 export function definitionProblem(definition: RoleDefinition): string | null {
   const { name, description, permissions } = definition;
-  if (typeof name !== 'string' || name.trim() === '' || name.length > ROLE_NAME_MAX || /[\u0000-\u001f\u007f]/.test(name)) return `a role needs a name of 1 to ${ROLE_NAME_MAX} characters`;
-  if (typeof description !== 'string' || description.length > ROLE_DESCRIPTION_MAX || /[\u0000-\u001f\u007f]/.test(description)) return `a description is ${ROLE_DESCRIPTION_MAX} characters at most`;
+  if (typeof name !== 'string' || name.trim() === '' || /[\u0000-\u001f\u007f]/.test(name)) return 'a role needs a name, with no control character';
+  if (typeof description !== 'string' || /[\u0000-\u001f\u007f]/.test(description)) return 'a description holds no control character';
   for (const column of [permissions, definition.protected]) {
     if (!Array.isArray(column) || column.some((permission) => !PERMISSIONS.includes(permission)) || new Set(column).size !== column.length) {
       return `a role holds permissions from ${PERMISSIONS.join(', ')}, each once`;
@@ -548,9 +548,6 @@ export function scopeDefinition(grant: ScopeGrant): RoleDefinition {
   return isBuiltinRole(grant.role) ? ROLES[grant.role] : { name: grant.role, description: '', permissions: [], protected: [] };
 }
 
-/** The most places a scope asked for names: far more than any credential needs, and a bound on what a request makes the app check. */
-export const MAX_SCOPE_PLACES = 1000;
-
 /**
  * Whether a personal token's scope may name `role`: one that manages no
  * access. A token acting as its person reaches their secrets and places,
@@ -610,13 +607,6 @@ export const DEFAULT_SERVICE_TOKEN_DAYS = 90;
 export function serviceTokenDefaultDays(maxDays: number): number {
   return Math.min(DEFAULT_SERVICE_TOKEN_DAYS, maxDays);
 }
-
-/**
- * The longest a credential's label may be, a token's, a binding's or a device login's, in characters. An input bound
- * chosen with the first sign-ins, never measured: no platform or design document sets it (the limits audit, #501, S60,
- * S68 and V81). The vault holds an issue to it, the API's schemas refuse a longer one, and what stores one cuts it there.
- */
-export const CREDENTIAL_LABEL_MAX = 120;
 
 /**
  * How long a `coffre login` code waits to be approved. The server expires it

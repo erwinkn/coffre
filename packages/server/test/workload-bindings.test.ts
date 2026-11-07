@@ -1,9 +1,10 @@
 import test, { after, before, beforeEach } from 'node:test';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 
 import { CoffreError } from '@coffre/client';
 import { DevIdp, fakeInstallations } from '@coffre/conformance/idp';
-import { defineSignin, github, githubApp, MAX_BINDINGS, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
+import { defineSignin, github, githubApp, MAX_BINDINGS, MAX_ISSUER_BYTES, signin as signinAuth, type BindingClaims } from '@coffre/core/identity';
 import type { Database } from '@coffre/db';
 import { asc, eq, sql, type SQL } from 'drizzle-orm';
 
@@ -13,7 +14,7 @@ import { WorkloadService } from '../src/api/workloads.ts';
 import { processLimits } from '../src/workloads/limits.ts';
 import { liveBindings, tombstoned } from '../src/db/queries.ts';
 import { FetchRefused, type WorkloadTransport } from '../src/workloads/transport.ts';
-import { clientFor, holdSomething, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
+import { clientFor, holdSomething, openTestDatabase, resetDatabase, speaking, testDeps, type FixtureDeps } from './api-fixture.ts';
 import { TEST_ENGINE } from './db/engine.ts';
 
 const ROOT = 'admin@acme.example';
@@ -134,6 +135,26 @@ test('an owner previews a binding, with the keys its issuer names, then saves it
       replaces: [],
     },
   });
+});
+
+test('the longest issuer, beside the longest principal in UTF-8, fits the index entry they share: made, not a 500', async () => {
+  // 320 characters of three bytes each, the most a service's ID holds as UTF-8 (`principalId`), and an issuer of
+  // MAX_ISSUER_BYTES that does not compress, on the engine whose index has the limit (review r5).
+  const wide = `token:${Array.from({ length: 320 }, (_, i) => String.fromCodePoint(0x4e00 + ((i * 7919) % 20000))).join('')}`;
+  assert.equal(Buffer.byteLength(wide), 6 + 960);
+  assert.equal((await deps.vault.admit({ actor: `user:${ROOT}`, principal: wide })).ok, true);
+  // Something to hold: the project the other service reads.
+  const granted = await speaking(deps.vault).setAccess({ actor: `user:${ROOT}`, principal: wide, changes: [{ projectId: reads, environmentId: null, role: 'viewer', expiresAt: null }] });
+  assert.equal(granted.ok, true);
+  const key = { ...generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey.export({ format: 'jwk' }), alg: 'ES256', use: 'sig' };
+  const issuer = randomBytes(MAX_ISSUER_BYTES).toString('base64url').slice(0, MAX_ISSUER_BYTES);
+  assert.equal(Buffer.byteLength(issuer), MAX_ISSUER_BYTES);
+  const made = await as(LEAD).bindings.create(wide, { profile: 'custom', issuer, claims: { sub: 'x' }, jwks: { keys: [key] } });
+  assert.equal(made.binding.issuer, issuer);
+  await assert.rejects(
+    as(LEAD).bindings.create(wide, { profile: 'custom', issuer: `${issuer}x`, claims: { sub: 'x' }, jwks: { keys: [key] } }),
+    (error: unknown) => (error as CoffreError).status === 400 && /longer than/.test((error as Error).message),
+  );
 });
 
 test('the server holds every binding to its profile, from the API as from anywhere', async () => {

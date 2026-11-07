@@ -78,12 +78,17 @@ import {
   Unreachable,
   type CoffreClient,
 } from '@coffre/client';
-import { CREDENTIAL_LABEL_MAX, credentialScopeInWords, ROLE_ID } from '@coffre/core/access';
+import { credentialScopeInWords, ROLE_ID } from '@coffre/core/access';
 import { formatDotenv, formatShellExports, parseDotenv } from '@coffre/core/dotenv';
 import { regenerateWrite, type GeneratedWrite } from '@coffre/core/recipe';
 
 const CREDENTIALS_PATH = join(homedir(), '.coffre', 'credentials.json');
 const PINS_PATH = join(homedir(), '.coffre', 'directories.json');
+/**
+ * The longest label the CLI gives a credential it asks for: instances up to 0.15 refuse one past 120 characters,
+ * and a newer instance takes any, so the CLI's own (a host name, a run's paths) is cut to what both take.
+ */
+const OLD_LABEL_MAX = 120;
 
 // `coffre export … | head` closes the pipe early; that is the reader being
 // done, not an error worth a stack trace.
@@ -782,7 +787,7 @@ async function approvedInBrowser(origin: string, label: string, intro: string, n
       method: 'POST',
       redirect: 'manual',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ client_label: label.slice(0, CREDENTIAL_LABEL_MAX) }),
+      body: JSON.stringify({ client_label: label.slice(0, OLD_LABEL_MAX) }),
     });
   } catch (error) {
     fail(unreachable(origin, error));
@@ -1432,10 +1437,10 @@ async function placeholders(paths: readonly string[], to: Target = target()): Pr
   // A plan reads values too, and is asked again as `run`'s reads are.
   const at = (path: string, headers: Record<string, string>) =>
     retryingPolicyChange(new Request(`${to.origin}/use${path}`, { headers })).catch((error: unknown) => fail(unreachable(to.origin, error)));
-  // A label is `CREDENTIAL_LABEL_MAX` characters at most: the paths go in whole, the label names as many as fit.
+  // The paths go in whole; the label names as many as an older instance takes (`OLD_LABEL_MAX`).
   const label = `coffre run on ${hostname()}: ${paths.join(' ')}`;
   // Asked again too: a handle weighed from a policy another change overtook is made from none, and refused to be asked again.
-  const handle = await client(to, undefined, [], retryingPolicyChange).handles.create({ label: label.length <= CREDENTIAL_LABEL_MAX ? label : `${label.slice(0, CREDENTIAL_LABEL_MAX - 1)}…`, paths: [...paths] });
+  const handle = await client(to, undefined, [], retryingPolicyChange).handles.create({ label: label.length <= OLD_LABEL_MAX ? label : `${label.slice(0, OLD_LABEL_MAX - 1)}…`, paths: [...paths] });
   const planOf = async (path: string): Promise<Plan> => {
     const response = await at(`/${path}`, { authorization: `Bearer ${handle.token}` });
     const body = (await response.json().catch(() => ({}))) as { message?: string };

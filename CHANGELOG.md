@@ -31,6 +31,57 @@
   - On Node, a plugin's WebSocket message is held to 1 MiB too (16 MiB
     before), 1009 past it. Node has no 128 MB limit: each process holds
     to the same numbers, as defensive bounds.
+- **One bound per body, and its values counted before it is parsed (W331,
+  limits S15b, S60, S64, S67, S68, C22).** Every body the app reads, the
+  API's, sign-in's before anyone has signed in and MCP's, is read to one
+  bound, 1 MiB (`API_BODY_BYTES`): the device login's 4 KiB, the
+  exchanges' 16 KiB and MCP's 16 KiB and 256 KiB are gone. Its values are
+  now counted on its text, before `JSON.parse` makes any: parsed, a
+  mebibyte of tiny entries or of nesting cost 35 to 40 ms of CPU and held
+  8 to 28 times its size, where the count costs 0.1 ms. The count,
+  `MAX_BODY_NODES`, is computed from R27's 20 ms, less the read of the
+  largest body (4 ms), at validation's measured worst, 10 µs a value:
+  **1,600, from 20,000**, and validation stops building every issue's
+  message, which had cost twice the walk itself
+  (`packages/server/scripts/body-cost.ts` measures it all). A bulk write of
+  plain values takes up to 1,599 keys; `MAX_BODY_KEYS` (2,000 top-level
+  entries) is gone. The field bounds with no source are gone too (R70): a
+  credential's label (120), a role's name (40) and description (200), a
+  binding's claims (16 of 256 bytes), its policy's `reads` (64 environments
+  of 256 keys) and `sources` (16), a narrowed session's constraints (32), a
+  scope's places (1,000), a reveal's keys (2,000; the vault's bulk limit
+  governs them), a workload token's 8 KiB, MCP's paths, members and
+  50-place access changes, and the paths, version IDs and OAuth parameters
+  the API took up to a few hundred characters; the vault no longer checks a
+  label's length either. What stays says why beside it: a secret's value,
+  64 KiB of UTF-8, now counted in bytes (Linux's `MAX_ARG_STRLEN` is
+  128 KiB per environment string, and `coffre run` makes each value one); a
+  binding's issuer, 1,670 bytes, from 400, what fits in its Postgres index
+  entry; a role's ID, 2 to 32, a format; an email address's 320 (RFC 5321);
+  a key set's 32 keys, which bound the signature checks of a sign-in. The
+  CLI still cuts its own labels to 120, which instances up to 0.15 refuse
+  past. An OIDC provider's discovery document and Cloudflare Access's key
+  set are now read to 64 KiB, as a workload issuer's already were
+  (`PUBLISHED_BYTES`). A body nested deeper than a walk of it holds,
+  whose `RangeError` answered 500, answers 400 `the body is nested too
+  deeply to read`, at the API, sign-in, MCP and the vault's Node socket.
+  What no longer had a length to hide behind now costs its own size: a
+  workload token's parts are counted as a body's values before they are
+  parsed; an OAuth form's fields are held to the same count and read in
+  one pass over its bytes, as the URL standard reads a form; a path's
+  slashes are trimmed in a pass, not by a regular expression's retries; a
+  device login's admission reads the open logins' addresses and never their
+  labels; and a sign-in's claim matching takes, at each step, the cheaper of
+  looking up the name's splits or trying the token's keys. A workload's
+  sign-in has one budget, `SIGN_IN_WORK_NS` (16 ms, what R27's 20 ms leaves
+  after the largest read, spent at measured costs), for its token's tries
+  against its issuer's keys, each paid for with the token's size, and for
+  matching its claims against every binding it weighs, and for checking
+  each candidate binding's MAC before it is read: past it, the sign-in is
+  refused. A string a request turns into a list (a path, a scope list, a
+  sealed state) is counted before it is split and holds no more parts than
+  a body holds values, and a narrowed session's path constraints are
+  reduced by a sort rather than by comparing every pair.
 
 - **A token's end may run at most a minute past its longest by the app's
   clock, not five (W331, limits D3).** The vault held a service or
