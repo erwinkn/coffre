@@ -357,7 +357,7 @@ the credential ID's and the user handle's are the spec's, the signature's
 the longest key coffre takes (RSA of 4,096 bits); the fields the spec
 leaves open, the client data, the authenticator data and the attestation
 object, have none of their own, and the request they come in is read to
-the bound of every body sent before sign-in, 16 KiB (`SIGN_IN_BODY_BYTES`,
+the bound of every body sent before sign-in, 128 KiB (`SIGN_IN_BODY_BYTES`,
 413 past it), once the cookie it must carry has opened. Their CBOR is read with a list of
 what is open, not the call stack, so however deep it nests it costs no
 stack (RFC 8949, section 10), and needs no depth limit. What it decodes to

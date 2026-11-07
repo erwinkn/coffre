@@ -211,8 +211,8 @@ this build.
     signed.
 
   A stranger's sign-in is held apart: its body, token included, is at most
-  `SIGN_IN_BODY_BYTES` (16 KiB), the most whose 32 key tries fit what R27
-  leaves a request. A follow-up may name the binding by its ID in each
+  `SIGN_IN_BODY_BYTES` (128 KiB), the most at which its 32 key tries, or a
+  passkey's answer, fit what R27 leaves a request. A follow-up may name the binding by its ID in each
   credential and log entry instead of copying its label.
 
 ## 4. Proofs and the exchange
@@ -250,7 +250,7 @@ Cache-Control: no-store
 - **Admission, then work, in the same order as the OIDC exchange
   ([oidc.md](oidc.md), section 2):**
   1. the two limiters (per source, and total);
-  2. the body, at most 16 KiB (`SIGN_IN_BODY_BYTES`, every body's bound
+  2. the body, at most 128 KiB (`SIGN_IN_BODY_BYTES`, every body's bound
      before sign-in, 413 past it);
   3. the shape;
   4. one read of the service's live bindings of the proof's profiles, by an

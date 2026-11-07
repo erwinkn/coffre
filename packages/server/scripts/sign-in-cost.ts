@@ -6,13 +6,16 @@
  *   node --conditions=coffre:source scripts/sign-in-cost.ts --jitless   without, as on Workers, which forbids eval
  *
  * Each candidate is what a stranger's body of B bytes makes the app do
- * before anyone has signed in, at B = 4 KiB to 256 KiB (the key tries, 1 to
- * 32 KiB, where the bound is chosen):
+ * before anyone has signed in, at B = 4 KiB to 256 KiB (the key tries, from
+ * 1 KiB):
  *
  * 1. A workload token that names no key (no `kid`), tried against each of
  *    a set's `MAX_KEYS` keys (`verifyWorkloadToken`'s `anyKey`), after
  *    `decodeWorkloadToken`: ES256, RS256 of 2,048 bits (what GitHub and
- *    GitLab publish) and of 4,096. Each try hashes the whole token again.
+ *    GitLab publish) and of 4,096, its bytes in its payload or in its
+ *    protected header (many members, one long value, nesting, an `x5c`),
+ *    which jose's own verification parsed again at each try (review r8).
+ *    Each try checks a signature over the whole token.
  * 2. Claim matching (`differingClaims`) of a B-byte token against realistic
  *    bindings, GitHub's, GitLab's and Kubernetes', one of names of five
  *    dots, the token's keys made so every split of each name is there.
@@ -25,12 +28,11 @@
  *
  * CPU is the process's own (`process.cpuUsage`, the thread pool's included,
  * where WebCrypto verifies), the median of nine samples, so a loaded machine
- * slows it less than wall time would. Each line fits a + b·B over the sizes,
- * and the key tries' fit, divided by `MAX_KEYS`, gives the cost of a try and
- * of a byte a try that `KEY_TRY_CPU_US` and `TOKEN_BYTE_CPU_NS` are taken
- * from; the bound is the largest power-of-two KiB at which `MAX_KEYS` tries
- * fit in what a request has left once a body is read
- * (`REQUEST_CPU_US − READ_CPU_US`).
+ * slows it less than wall time would. Each line fits a + b·B over the sizes:
+ * the key tries' fit, divided by `MAX_KEYS`, gives `KEY_TRY_CPU_US` and
+ * `TOKEN_BYTE_CPU_NS`, and the passkey's, `PASSKEY_BYTE_CPU_NS`. The bound
+ * is the largest power-of-two KiB at which every candidate fits in what a
+ * request has left once a body is read (`REQUEST_CPU_US − READ_CPU_US`).
  */
 import { generateKeyPairSync, randomBytes, type KeyObject } from 'node:crypto';
 
@@ -46,11 +48,8 @@ const { SIGN_IN_SCHEMAS } = await import('../src/auth-routes.ts');
 
 const KiB = 1024;
 const SIZES = [4, 8, 16, 32, 64, 128, 256].map((k) => k * KiB);
-/**
- * The key tries' sizes: the range the bound is chosen in, up to the power of two above it. Past 32 KiB a try costs
- * more than linearly (twice as much at 64 KiB as at 32), which a fit over 4 to 256 KiB would carry back down into it.
- */
-const TRY_SIZES = [1, 4, 8, 16, 32].map((k) => k * KiB);
+/** The key tries' sizes: from a real token's 1 KiB to the power of two above the bound. */
+const TRY_SIZES = [1, 4, 8, 16, 32, 64, 128, 256].map((k) => k * KiB);
 const BUDGET_MS = (REQUEST_CPU_US - READ_CPU_US) / 1000;
 
 /** The median of nine samples of `run`, each `repeats` runs, in ms of the process's CPU a run. */
@@ -97,13 +96,29 @@ const now = Math.floor(Date.now() / 1000);
 const ISSUER = 'https://issuer.example';
 const AUDIENCE = 'https://coffre.example';
 
-/** A token of `bytes` bytes, signed by none of the keys and naming none (no `kid`), so every key is tried. */
-function strangerToken(alg: 'ES256' | 'RS256', bytes: number, extra: Record<string, unknown> = {}): string {
-  const head = b64({ alg, typ: 'JWT' });
-  const claims = { iss: ISSUER, aud: AUDIENCE, sub: 'repo:acme/app:ref:refs/heads/main', iat: now, exp: now + 300, ...extra };
-  const base = `${head}.${b64({ ...claims, pad: '' })}.${Buffer.from(randomBytes(alg === 'ES256' ? 64 : 256)).toString('base64url')}`;
-  const pad = 'x'.repeat(Math.max(0, Math.floor(((bytes - base.length) * 3) / 4)));
-  return `${head}.${b64({ ...claims, pad })}.${base.split('.')[2]}`;
+/** Where a stranger's token puts its bytes: its payload, or its protected header, which jose read again at each try. */
+type Fill = 'payload' | 'header, many members' | 'header, one long value' | 'header, nested' | 'header, an x5c of long strings';
+const FILLS: readonly Fill[] = ['payload', 'header, many members', 'header, one long value', 'header, nested', 'header, an x5c of long strings'];
+
+/**
+ * A token of about `bytes` bytes, signed by none of the keys and naming none (no `kid`), so every key is tried, its
+ * bytes where `fill` says, within the values a part may hold (`MAX_BODY_NODES`, which `decodeWorkloadToken` counts).
+ */
+function strangerToken(alg: 'ES256' | 'RS256', bytes: number, fill: Fill = 'payload'): string {
+  const claims = { iss: ISSUER, aud: AUDIENCE, sub: 'repo:acme/app:ref:refs/heads/main', iat: now, exp: now + 300 };
+  const signature = Buffer.from(randomBytes(alg === 'ES256' ? 64 : 256)).toString('base64url');
+  const room = Math.max(0, Math.floor(((bytes - b64(claims).length - signature.length - 40) * 3) / 4));
+  const values = MAX_BODY_NODES - 20;
+  const head: Record<string, unknown> = { alg, typ: 'JWT' };
+  const body: Record<string, unknown> = { ...claims };
+  if (fill === 'payload') body.pad = 'x'.repeat(room);
+  else if (fill === 'header, one long value') head.pad = 'x'.repeat(room);
+  else if (fill === 'header, many members') for (let i = 0; i < values && JSON.stringify(head).length < room - 12; i += 1) head[`m${i}`] = 0;
+  else if (fill === 'header, nested') {
+    const depth = Math.min(values, Math.floor(room / 2));
+    head.pad = JSON.parse(`${'['.repeat(depth)}${']'.repeat(depth)}`);
+  } else head.x5c = Array.from({ length: Math.max(1, Math.floor(room / 1400)) }, () => randomBytes(1000).toString('base64'));
+  return `${b64(head)}.${b64(body)}.${signature}`;
 }
 
 function keySet(kind: 'ec' | 'rsa2048' | 'rsa4096'): { keys: Record<string, unknown>[] } {
@@ -118,10 +133,17 @@ console.log(`${process.version}${process.argv.includes('--jitless') ? ', jitless
 
 // 1. A token that names no key, decoded, then tried against every key of the set: what a stranger's token costs.
 header(`1. a token naming no key, decoded and tried against ${MAX_KEYS} keys (ms)`, TRY_SIZES);
-for (const [kind, alg] of [['ec', 'ES256'], ['rsa2048', 'RS256'], ['rsa4096', 'RS256']] as const) {
-  const keys = keySet(kind);
-  await measure(`${alg}, ${kind === 'ec' ? 'P-256' : `${kind.slice(3)}-bit`} keys`, async (bytes) => {
-    const token = strangerToken(alg, bytes);
+const KEY_CASES = [
+  ...FILLS.map((fill) => ['ec', 'ES256', fill] as const),
+  ['rsa2048', 'RS256', 'payload'],
+  ['rsa2048', 'RS256', 'header, many members'],
+  ['rsa4096', 'RS256', 'payload'],
+] as const;
+const sets = { ec: keySet('ec'), rsa2048: keySet('rsa2048'), rsa4096: keySet('rsa4096') };
+for (const [kind, alg, fill] of KEY_CASES) {
+  const keys = sets[kind];
+  await measure(`${alg}, ${kind === 'ec' ? 'P-256' : `${kind.slice(3)}-bit`}: ${fill}`, async (bytes) => {
+    const token = strangerToken(alg, bytes, fill);
     return async () => {
       decodeWorkloadToken(token);
       await verifyWorkloadToken(token, keys as never, { issuer: ISSUER, audience: AUDIENCE, now: new Date() }).then(
@@ -231,12 +253,12 @@ await measure("registration, clientDataJSON's extra member", async (bytes) => {
   };
 });
 
-// The bound, as `SIGN_IN_BODY_BYTES` computes it from the constants beside it, then from what this run measured: the
-// largest power-of-two KiB at which the dearest key tries fit, and what every candidate costs there.
-const bound = (keyTryUs: number, byteNs: number) => 1024 * 2 ** Math.floor(Math.log2(((BUDGET_MS * 1000 - MAX_KEYS * keyTryUs) * 1000) / (MAX_KEYS * byteNs) / 1024));
-const dearest = results.filter((r) => r.tries).sort((x, y) => y.a + y.b * 32 * KiB - (x.a + x.b * 32 * KiB))[0]!;
-const [keyTryUs, byteNs] = [(dearest.a * 1000) / MAX_KEYS, (dearest.b * 1e6) / MAX_KEYS];
-const measured = bound(keyTryUs, byteNs);
-console.log(`\ndearest tries: ${dearest.what}, ${keyTryUs.toFixed(0)} µs + ${byteNs.toFixed(1)} ns/B a try`);
-console.log(`within ${BUDGET_MS} ms: B ≤ ${(((BUDGET_MS * 1000 - MAX_KEYS * keyTryUs) * 1000) / (MAX_KEYS * byteNs) / 1000).toFixed(1)} kB, so ${measured / KiB} KiB measured here; ${SIGN_IN_BODY_BYTES / KiB} KiB from the constants`);
+// The bound: the largest power-of-two KiB at which every candidate fits, by its fit, and the one that binds; then
+// what each costs at `SIGN_IN_BODY_BYTES`, which the constants beside it compute.
+const most = results.map((r) => ({ ...r, bytes: r.b > 0 ? (BUDGET_MS - r.a) / r.b : Infinity })).sort((x, y) => x.bytes - y.bytes);
+const binding = most[0]!;
+const measured = 1024 * 2 ** Math.floor(Math.log2(binding.bytes / 1024));
+const tries = results.filter((r) => r.tries).sort((x, y) => y.b - x.b)[0]!;
+console.log(`\ndearest key tries a byte: ${tries.what}, ${((tries.a * 1000) / MAX_KEYS).toFixed(0)} µs + ${((tries.b * 1e6) / MAX_KEYS).toFixed(1)} ns/B a try`);
+console.log(`binds first: ${binding.what}, within ${BUDGET_MS} ms at B ≤ ${(binding.bytes / 1000).toFixed(1)} kB, so ${measured / KiB} KiB measured here; ${SIGN_IN_BODY_BYTES / KiB} KiB from the constants`);
 for (const { what, a, b } of results) console.log(`  ${(a + b * SIGN_IN_BODY_BYTES).toFixed(2).padStart(6)} ms at ${SIGN_IN_BODY_BYTES / KiB} KiB  ${what}`);

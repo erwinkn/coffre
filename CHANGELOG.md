@@ -36,13 +36,18 @@
   read to one of two bounds, and refused past it with a 413 `too_large`
   (it was a 400), before it is read whole: before anyone has signed in
   (device login, the CI and workload exchanges, a passkey's answer, MCP's
-  OAuth token, revocation and registration), 16 KiB
-  (`SIGN_IN_BODY_BYTES`), computed from what a stranger's token can cost,
-  32 key tries within what R27 leaves a request; after, 1 MiB
-  (`API_BODY_BYTES`), the API's and MCP's endpoint's. The device login's
-  4 KiB becomes 16 KiB, MCP's endpoint's 256 KiB 1 MiB, and a workload
-  token's own 8 KiB is gone: a CI run's ID token, about 1.2 kB, is
-  bounded by its body. Its values are
+  OAuth token, revocation and registration), 128 KiB
+  (`SIGN_IN_BODY_BYTES`), computed from what a stranger's body can cost
+  within what R27 leaves a request: a token naming no key, tried against
+  32 keys, and a passkey's answer; after, 1 MiB (`API_BODY_BYTES`), the
+  API's and MCP's endpoint's. The device login's 4 KiB, the exchanges'
+  and MCP's OAuth 16 KiB, MCP's endpoint's 256 KiB and a workload token's
+  own 8 KiB are gone: a CI run's ID token, about 1.2 kB, is bounded by its
+  body. A token that names no key is tried against each key of its set by
+  its signature alone, over a signing input made once, then verified
+  whole by the one key that signed it: jose's own verification parsed its
+  header again at each try, so a stranger's header of a thousand members
+  cost 27 ms at 16 KiB, past R27. Its values are
   now counted on its text, before `JSON.parse` makes any: parsed, a
   mebibyte of tiny entries or of nesting cost 35 to 40 ms of CPU and held
   8 to 28 times its size, where the count costs 0.1 ms. The count,

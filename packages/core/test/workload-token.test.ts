@@ -174,3 +174,33 @@ test('a token that names no key verifies under whichever key of the set signed i
   // Its claims are still checked, under the key that signed it.
   await refused(verify(await next.sign({ aud: 'https://elsewhere.example' }, { kid: undefined }), keys), 'audience');
 });
+
+test("a token naming no key is tried against each key by its signature alone: its header parsed once, however wide, not once a key (review r8)", async () => {
+  const unnamed = (jwk: JWK) => Object.fromEntries(Object.entries(jwk).filter(([name]) => name !== 'kid')) as JWK;
+  const signers = await Promise.all(Array.from({ length: 32 }, (_, i) => signer('ES256', `k${i}`)));
+  const keys = signers.map(({ jwk }) => unnamed(jwk));
+  // A header of 1,300 members, as a stranger's may be: within the values a part may hold, and no key named.
+  const wide = Object.fromEntries(Array.from({ length: 1300 }, (_, i) => [`m${i}`, 0]));
+  const headerParses = async (token: string) => {
+    const text = Buffer.from(token.split('.')[0]!, 'base64url').toString('utf8');
+    const parse = JSON.parse;
+    let parses = 0;
+    JSON.parse = ((input: string, reviver?: Parameters<typeof JSON.parse>[1]) => {
+      if (input === text) parses += 1;
+      return parse(input, reviver);
+    }) as typeof JSON.parse;
+    try {
+      return { result: await verify(token, keys).then((claims) => claims.sub, (error: unknown) => error), parses };
+    } finally {
+      JSON.parse = parse;
+    }
+  };
+  // A stranger's: refused for its signature, its header read once, by jose's first look, before it found 32 keys.
+  const stranger = await headerParses(await (await signer('ES256', 'stranger')).sign({}, { kid: undefined, ...wide }));
+  assert.ok(stranger.result instanceof WorkloadTokenRefused && stranger.result.reason === 'signature', String(stranger.result));
+  assert.equal(stranger.parses, 1);
+  // Signed by the 20th key: verified, and its header read once more, by the whole verification of that key alone.
+  const signed = await headerParses(await signers[19]!.sign({}, { kid: undefined, ...wide }));
+  assert.equal(signed.result, 'repo:acme/api:ref:refs/heads/main');
+  assert.equal(signed.parses, 2);
+});

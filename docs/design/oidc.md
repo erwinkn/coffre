@@ -144,7 +144,7 @@ service, as AWS's `AssumeRoleWithWebIdentity` names a role, and only that
 service's bindings are read. In order:
 
 1. **Admission.** The body is read as a stream and cut off at the bound of
-   every body sent before sign-in, 16 KiB (`SIGN_IN_BODY_BYTES`, 413 past
+   every body sent before sign-in, 128 KiB (`SIGN_IN_BODY_BYTES`, 413 past
    it), which bounds the token too. Two
    limits apply before any database, crypto or network work, one per source
    address and one for all sources together, answered 429 beyond.

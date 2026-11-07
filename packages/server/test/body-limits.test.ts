@@ -141,7 +141,7 @@ test('a body is abandoned soon after the cap, not drained to the end', async () 
 });
 
 test('both unauthenticated device-login endpoints refuse a body past the bound of every body before sign-in, 413', async () => {
-  assert.equal(SIGN_IN_BODY_BYTES, 16 * 1024);
+  assert.equal(SIGN_IN_BODY_BYTES, 128 * 1024);
   const post = (path: string, body: string) => coffreRoute(
     new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
     runtime,

@@ -5796,7 +5796,7 @@ object({
 }).strict();
 string().uuid();
 string().email().max(320);
-1024 * 2 ** Math.floor(Math.log2(768e4 / 448 / 1024));
+1024 * 2 ** Math.floor(Math.log2(Math.min(145e3, 2e5) / 1024));
 const WORKLOAD_PROFILES = [
 	"github",
 	"github-reusable",

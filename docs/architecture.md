@@ -1064,7 +1064,7 @@ minutes (below).
 this order, so that a stranger costs one bounded read at most:
 
 1. **Admission**: the deployment's two limiters, per source address and in
-   total, then the body, read only to 16 KiB, the bound of every body sent
+   total, then the body, read only to 128 KiB, the bound of every body sent
    before sign-in (`SIGN_IN_BODY_BYTES`, 413 past it). A limiter that fails
    refuses.
    Cloudflare counts per location and a Node process per process, so these

@@ -157,15 +157,29 @@ export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_S
 /**
  * A token that names no key, or one several keys share, verified by
  * whichever of them signed it: a set may hold several, as while its issuer
- * rotates. At most `MAX_KEYS` tries, each a signature check alone over a
- * token of at most `SIGN_IN_BODY_BYTES`, the body that brought it.
+ * rotates. At most `MAX_KEYS` tries, each a signature check alone, over the
+ * signing input made once: jose's own verification parses the token's
+ * protected header again and copies it at each call, which a stranger's
+ * header of a thousand members made 32 times dearer, 27 to 45 ms where a
+ * plain one costs 8 (review r8 of #533). Its first call parsed the header
+ * once and held it to jose's checks (`crit`, `b64`, the algorithm's
+ * allow-list) before it found several keys; the key whose signature
+ * verifies is then held to the whole of them once more, claims included.
  */
 async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2]): Promise<JWTPayload> {
-  for await (const key of matching) {
+  const dot = token.lastIndexOf('.');
+  const signingInput = new TextEncoder().encode(token.slice(0, dot));
+  const signature = new Uint8Array(Buffer.from(token.slice(dot + 1), 'base64url'));
+  for await (const key of matching as AsyncIterable<CryptoKey>) {
+    const { name, modulusLength } = key.algorithm as RsaHashedKeyAlgorithm;
+    // As jose refuses an RSA key under 2,048 bits, before its signature is checked.
+    if (name === 'RSASSA-PKCS1-v1_5' && modulusLength < 2048) throw new WorkloadTokenRefused('signature', 'the token does not verify');
+    const algorithm = name === 'ECDSA' ? { name, hash: 'SHA-256' } : { name };
+    if (!(await crypto.subtle.verify(algorithm, key, signature, signingInput).catch(() => false))) continue;
     try {
       return (await jwtVerify(token, key, options)).payload;
     } catch (error) {
-      if (!(error instanceof errors.JWSSignatureVerificationFailed)) throw refusalOf(error);
+      throw refusalOf(error);
     }
   }
   throw new WorkloadTokenRefused('signature', "the token's signature does not verify");
