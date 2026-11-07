@@ -1076,6 +1076,52 @@ test('a removal lands while a read is at the key service, waiting for nothing: t
   assert.ok((await w.vault.verifyLog({})).ok);
 });
 
+test('a read at a key service whose outcome is decided again hands back the key it opened, wiped only once it is answered (review r1)', postgresOnly('a unique violation injected by a Postgres trigger'), async () => {
+  const { keks, seen } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  // The first append of its release fails as a unique violation would (another decision admitted someone meanwhile):
+  // the outcome's decision is made again (`#decideNow`), on the keys the key service opened once.
+  await run(db.owner, sql.raw(`CREATE SEQUENCE test_fail_once`));
+  await run(db.owner, sql.raw(`CREATE FUNCTION test_fail_once() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $$
+    BEGIN IF NEW.author = 'vault' AND NEW.action = 'secret.read' AND nextval('test_fail_once') = 1 THEN
+      RAISE unique_violation USING MESSAGE = 'test: decided again'; END IF; RETURN NEW; END $$`));
+  await run(db.owner, sql`CREATE TRIGGER test_fail_once BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION test_fail_once()`);
+  try {
+    seen.opened.length = 0;
+    const asked = seen.unwrap;
+    const read = await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items });
+    assert.ok(read.ok, JSON.stringify(read));
+    const [key] = read.keys;
+    assert.notEqual(key, Buffer.alloc(32).toString('base64'), 'the key handed back is the one opened, not its wiped buffer');
+    assert.equal(seen.unwrap, asked + 1, 'the key service asked once, whatever the attempts');
+    assert.equal(Buffer.from(key!, 'base64').length, 32);
+    assert.ok(seen.opened.every((opened) => opened.equals(Buffer.alloc(32))), 'and its buffer wiped after');
+    const [{ n }] = await rows<{ n: string }>(db.owner, sql`SELECT last_value::text AS n FROM test_fail_once`);
+    assert.equal(n, '2', 'its release was appended on the second attempt');
+  } finally {
+    await run(db.owner, sql`DROP TRIGGER test_fail_once ON audit_log`);
+    await run(db.owner, sql`DROP FUNCTION test_fail_once()`);
+    await run(db.owner, sql`DROP SEQUENCE test_fail_once`);
+  }
+});
+
+test('a key service\'s intent is accounted for until the call\'s whole budget from when it was logged, and a margin', async () => {
+  const { keks } = service();
+  const w = await world({ keks });
+  await member(w, ADA, [[w.dev, 'viewer']]);
+  const secret = await w.secret(w.dev);
+  const items = await versionItems([{ secret, wrapped: await wrapped(w, secret) }]);
+  assert.ok((await w.vault.unwrap({ principal: ADA, purpose: 'reveal', items })).ok);
+  const intent = (await vaultLog(w)).findLast((entry) => entry.action === 'key.intent')!;
+  const { expiresAt } = intent.detail as { expiresAt: number };
+  // The call's budget, its deadline and the key budget (5 s by default), from the intent's own time, then one more deadline.
+  const left = expiresAt - Date.parse(intent.at);
+  assert.ok(left >= 2 * CALL_DEADLINE_MS + 5_000 && left < 2 * CALL_DEADLINE_MS + 5_000 + 1_000, `accounted for ${left} ms`);
+});
+
 test('one member\'s reads at the key service run side by side, not one behind the other', postgresOnly('SQLite runs one writer at a time'), async () => {
   const { keks, seen } = service();
   const w = await world({ keks });
@@ -1216,8 +1262,9 @@ test('a use asking for the fence while a change waits for it is let in within it
     await held;
   });
   await holds;
+  let changing: Promise<{ ok: boolean }>;
   try {
-    const changing = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] });
+    changing = w.vault.setAccess({ actor: ROOT, principal: ADA, changes: [{ projectId: w.project, environmentId: w.dev, role: 'developer', expiresAt: null }] });
     changing.catch(() => {});
     for (let i = 0; ; i++) {
       const [waiting] = await rows<{ n: number }>(db.owner, sql`SELECT count(*)::int AS n FROM pg_stat_activity
@@ -1238,6 +1285,8 @@ test('a use asking for the fence while a change waits for it is let in within it
     letGo();
     await long;
   }
+  // The change, having let the use in, tries again, and lands once the long statement has let go: before the next test.
+  assert.equal((await changing!).ok, true);
 });
 
 test('a read gives up a lock it waits seconds for, and fails as unavailable, its connection let go', postgresOnly('SQLite runs one writer at a time'), async () => {
