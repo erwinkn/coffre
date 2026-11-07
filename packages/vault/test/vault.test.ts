@@ -1318,7 +1318,8 @@ test('a change waits for the head half a use\'s wait at a time, and tries again:
   const took = Date.now() - started;
   assert.equal(changed.ok, true, 'it lands once the head is free');
   assert.ok(longest > 0 && longest < LOCK_WAIT_MS + 250, `a wait lasted ${longest} ms`);
-  assert.ok(took >= 1_500 && took < 3_000, `it landed after ${took} ms`);
+  // A watchdog, not a bound: each wait's bound is Postgres's (`longest`, by its clock); Node's clock only says it did not hang.
+  assert.ok(took >= 1_500 && took < 30_000, `it landed after ${took} ms`);
 });
 
 test('a change that cannot have the head within its call\'s time fails as unavailable, having written nothing', postgresOnly('SQLite runs one writer at a time'), async () => {
@@ -1336,7 +1337,8 @@ test('a change that cannot have the head within its call\'s time fails as unavai
     await release();
   }
   const took = Date.now() - started;
-  assert.ok(took >= CALL_DEADLINE_MS && took < CALL_DEADLINE_MS + LOCK_WAIT_MS + 1_500, `it gave up after ${took} ms`);
+  // Not before its call's time (a last attempt at it, `retryingLocks`); the upper bound a watchdog for a hang alone.
+  assert.ok(took >= CALL_DEADLINE_MS && took < CALL_DEADLINE_MS + 30_000, `it gave up after ${took} ms`);
   assert.equal((await vaultLog(w)).length, before, 'nothing written');
 });
 

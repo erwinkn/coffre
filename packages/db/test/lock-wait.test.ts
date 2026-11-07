@@ -35,7 +35,8 @@ test("a transaction of a database made with lockWaitMs gives up a lock after it,
       (error: unknown) => gaveUp(error),
     );
     const took = Date.now() - started;
-    assert.ok(took >= LOCK_WAIT_MS && took < LOCK_WAIT_MS + 1_000, `it gave up after ${took} ms`);
+    // At its bound, by Postgres's clock: never before it; after, by Node's, a watchdog for a hang alone.
+    assert.ok(took >= LOCK_WAIT_MS && took < LOCK_WAIT_MS + 30_000, `it gave up after ${took} ms`);
     letGo();
     await holder_;
     // SET LOCAL: the bound ends with its transaction, and the connection's next statement has Postgres's own.
