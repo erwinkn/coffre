@@ -388,15 +388,20 @@ function sending(name: string) {
   return { client, sent };
 }
 
-/** Until the backend named `name` waits in pg_sleep, then end it. */
+/**
+ * Until the backend named `name` waits in pg_sleep, then end it: in this database, since another run of this file, from
+ * another checkout on the same Postgres, names its own the same. The caller listens for what the cut fails before it
+ * cuts: the failure may reach this process before the terminate's answer does, and a rejection left unheard until then
+ * is an unhandled one, which node:test fails the case with (T238).
+ */
 async function cutWhileAsleep(owner: ReturnType<typeof postgresClient>, name: string): Promise<void> {
   for (let tries = 0; ; tries += 1) {
-    const [{ n }] = (await owner.unsafe("select count(*)::int as n from pg_stat_activity where application_name = $1 and wait_event = 'PgSleep'", [name])) as unknown as [{ n: number }];
+    const [{ n }] = (await owner.unsafe("select count(*)::int as n from pg_stat_activity where application_name = $1 and datname = current_database() and wait_event = 'PgSleep'", [name])) as unknown as [{ n: number }];
     if (n > 0) break;
     assert.ok(tries < 300, 'the statement never slept');
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  await owner.unsafe('select pg_terminate_backend(pid) from pg_stat_activity where application_name = $1', [name]);
+  await owner.unsafe('select pg_terminate_backend(pid) from pg_stat_activity where application_name = $1 and datname = current_database()', [name]);
 }
 
 test('a first statement that cannot be written takes its BEGIN with it, and what was asked beside it is not sent', { skip }, async () => {
@@ -454,16 +459,18 @@ test('a connection cut under a transaction, in a statement or its COMMIT: nothin
       late = await tx.unsafe('insert into cut values ($1)', [66]).then(() => 'sent', (e: { code?: string }) => e.code);
     });
     const second = client.begin((tx) => tx.unsafe('insert into cut values ($1)', [70]));
+    const firstCut = assert.rejects(first, { code: 'CONNECTION_CLOSED' });
     await cutWhileAsleep(owner, 'coffre-tx-cut');
-    await assert.rejects(first, { code: 'CONNECTION_CLOSED' });
+    await firstCut;
     await second;
     assert.equal(late, 'CONNECTION_CLOSED');
     assert.deepEqual([...await owner.unsafe('select n from cut order by n')], [{ n: 70 }]);
 
     // In its COMMIT.
     const committing = client.begin((tx) => tx.unsafe('insert into slow values ($1)', [1]));
+    const commitCut = assert.rejects(committing, { code: 'CONNECTION_CLOSED' });
     await cutWhileAsleep(owner, 'coffre-tx-cut');
-    await assert.rejects(committing, { code: 'CONNECTION_CLOSED' });
+    await commitCut;
     assert.deepEqual([...await owner.unsafe('select count(*)::int as n from slow')], [{ n: 0 }]);
     assert.ok(!sent.includes('rollback'), 'no rollback for a connection gone');
     assert.ok(!sent.some((text) => text.startsWith('insert into cut values ($1) 66')));
@@ -677,8 +684,9 @@ test('a connection cut as a transaction\'s BEGIN goes: nothing of it runs, and t
     await owner.unsafe('create table cutbegin (n int)');
     const cut = client.begin((tx) => Promise.all([tx.unsafe('select pg_sleep(5)'), tx.unsafe('insert into cutbegin values ($1)', [1])]));
     const after = client.unsafe('insert into cutbegin values ($1)', [2]);
+    const cutFails = assert.rejects(cut, { code: 'CONNECTION_CLOSED' });
     await cutWhileAsleep(owner, 'coffre-tx-cut-begin');
-    await assert.rejects(cut, { code: 'CONNECTION_CLOSED' });
+    await cutFails;
     await after;
     // The insert asked with the sleep went under its Sync, behind it, and never ran: the connection went first.
     assert.deepEqual([...await owner.unsafe('select n from cutbegin')], [{ n: 2 }]);
