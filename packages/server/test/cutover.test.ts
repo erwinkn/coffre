@@ -342,8 +342,10 @@ test("the door tries a due cutover once at a time, and holds a failure as a refu
     throw new Error('canceling statement due to lock timeout');
   };
   const failed = 'the cutover failed: canceling statement due to lock timeout';
-  // Both ask whether it is due; one tries it, the other answers from the hold.
-  assert.deepEqual(await Promise.all([now.cutover(), now.cutover()]), [failed, CUTTING_OVER_NOW]);
+  // Both ask whether it is due; one tries it, the other answers from the hold. Whichever probe
+  // answers first is the one that tries, so the two answers come in either order.
+  const answers = await Promise.all([now.cutover(), now.cutover()]);
+  assert.deepEqual([...answers].sort(), [CUTTING_OVER_NOW, failed].sort());
   assert.equal(tries, 1);
   const before = asked;
   // Held as failed, which the door says apart from a refusal (T170).
