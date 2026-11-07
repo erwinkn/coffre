@@ -195,7 +195,9 @@ row to a newest change's seal before that change's MAC holds:
     revoked, put back, its revoke's seal forged, then renewed by a minute,
     and served again;
   - a sign-in through a binding (`sign_in`): the member and the binding,
-    one statement before it;
+    read by the app in the statement that reads the binding (T192), every
+    column their MACs cover, which the vault checks; else, or when they no
+    longer are the newest, by the vault, one statement before it;
   - an issue, and a binding made, on the credential the request came in on
     (`issue_token`, `change_bindings`): read in the same statement as that
     credential (`issuingCredential`), no round trip more.
@@ -223,24 +225,81 @@ row to a newest change's seal before that change's MAC holds:
   change the vault has already checked, after its read and before the
   statement, and that change must be an honest one landing in that gap
   (row and seal put back, its seal forged). An issue holds the credential
-  it came in on to its checked change's seal the same way, and so does a
-  sign-in its binding (review r3: without it, an ended binding put back,
-  its end's seal column forged once the vault read the end, signed a run
-  in), and both statements take that seal as a parameter: the same gap.
-  A sign-in's member is wider: `sign_in` reads the member's row itself,
-  and the vault, which never sees it, pins nothing, so a member removed,
-  its row put back and the removal's seal forged after the MAC check,
-  takes no honest change, only the timing (a writer holding the member's
-  row locked widens it to `lock_timeout`). Closing both takes the statement
-  holding the newest
-  change's seal column to the seal the vault checked (a number alone is not
-  enough: the forgery edits the seal in place and keeps the number), under
-  the lock: a parameter of `app_change`, `sign_in` (the member's) and
-  `issue_token`.
-  T179's two-trip writes, which check their read set there (#458), take it
-  on. The model checks the MAC as the code does, of the change read at
-  `ChangeStart`, and its scenarios, one tamper each (`MaxTampers = 1`),
-  cannot reach the gap.
+  it came in on to its checked change's seal the same way, and both
+  statements take that seal as a parameter: the same gap. Closing it takes
+  the statement holding the newest change's seal column to the seal the
+  vault checked (a number alone is not enough: the forgery edits the seal
+  in place and keeps the number), under the lock: a parameter of
+  `app_change` and `issue_token`. T179's two-trip writes, which check their
+  read set there (#458), take it on.
+
+  **A sign-in closes it (T192, migration 0075).** `sign_in` takes the
+  member's and the binding's newest changes as the vault checked them,
+  whole: each one's number, every column its MAC covers (`at`,
+  `request_id`, `actor`, `payload`, `seal`) and the MAC (`p_member_*`,
+  `p_binding_*`; the binding's seal is `p_binding_seal`). Under each
+  row's lock, in a statement after it, it holds the object's newest change
+  to them: another is `moved`, and the vault reads them again itself. Then
+  the row to that seal. Whole, the change under the lock is one whose MAC
+  holds, as if the vault had read it there; what that cannot see is a
+  change replayed whole over the newest, its MAC intact, which the
+  checkpoints catch, as for a read (`changeHolds`).
+
+  Number and seal alone are not enough, because the app chooses what it
+  hands back (review r2 of T192). No MAC covers a number (the sequence
+  gives it at insert), so Mallory, with the app and a database writer,
+  takes `token:ci`'s change before its removal (seal S0, MAC valid), puts
+  back the account's row with S0, and writes S0 into the removal's seal
+  column. The app hands the old change under the removal's number: its MAC
+  holds, and the removal's number and seal column now read S0 too. Only
+  the rest of the row (its `at`, request id, payload, MAC) tells the old
+  change from the removal. A binding's making under its end's number is the
+  same (`packages/vault/test/bindings.test.ts`). Before it, the member was wider than
+  the binding (review r3 had pinned the binding's seal): `sign_in` read the
+  member's row itself, the vault pinned nothing, and a member removed, its
+  row put back and the removal's seal forged after the MAC check, signed a
+  run in on timing alone. Example: Ada removes `token:ci` (seal S1 after
+  S0). Mallory puts back its row with S0 and lets the vault check the
+  removal's MAC, which holds (its column still S1). As `sign_in` goes out
+  she writes S0 into the removal's seal column. Before T192, `sign_in`
+  compared the row's S0 with the column's S0 and made a credential; now
+  the column's S0 is not the S1 the vault checked: `moved`, then the
+  vault's own read finds the MAC broken, `tampered`, and nobody signs in
+  (`packages/vault/test/bindings.test.ts`). The model: HotPathOne.tla's
+  ChangePinsChecked and ChangePinsWhole, for the changers that are
+  sign-ins (`PinnedChangers`): the model's other writes pin nothing, as
+  `app_change` and `issue_token` outside T179's two trips do not yet. The
+  scenario `HotPathOneForgedGap` gives the writer two tampers, the row
+  put back before the vault's read and the forgery after it, and lets the
+  app hand any authentic change of the object under any number
+  (`AppPins`). Without the pin, which is every other write, TLC finds
+  `EachChangeFlips` broken; with the pin by number and seal alone, too.
+  The other scenarios pin nothing and tamper once (`MaxTampers = 1`).
+
+  What the pin does not check is the account's row against what its
+  newest change sealed, which 0037 did not either (review r4 of T192).
+  `sign_in` holds the row's seal column to the pinned change's seal, but
+  not its columns to that seal: proving them would take the row and its
+  grants (`principalObject`) in the app's read. So a writer with no log
+  tamper at all can still have a credential made. Example: Ada removes
+  `token:ci` (seal S1); its binding stays live at generation 0, as a
+  removal ends none. Mallory sets the row back to `active`, generation 0,
+  with seal S1. The pinned change is the honest removal, the row's seal
+  is its seal, and `sign_in` makes a credential, which nothing honours:
+  every decision that reads the account checks its row against its seal
+  (`viewOf` in `packages/vault/src/use.ts`) and finds it tampered. That
+  fails closed, which is all R64 asks of forged rows; the test names it
+  open (`packages/vault/test/bindings.test.ts`).
+
+  The same pins win the sign-in's extra round trip back: the app reads the
+  member's and each candidate binding's newest change in the statement
+  that reads the bindings (`exchangeCandidates`, `workloadCandidates`; two
+  probes of `log_changes_object_idx`), the vault checks their MACs over the
+  objects it derives (`givenPins`), and `sign_in` is its one statement.
+  The app's word refuses nothing: a change missing, whose MAC fails, of
+  another object, or no longer the newest, sends the vault to read them
+  itself, which reports what is wrong, as T190 did. Three statements of
+  `sign_in` in all, then `busy`.
 
 A change's MAC is checked under the key its tag names, among every
 signing key the vault holds, as seals are (`sealed`): this check guards

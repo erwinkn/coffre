@@ -85,9 +85,11 @@ test("no function works out a key's period but through bulk_period", POSTGRES, (
 test('no function holds another copy of the minute or the deadline than the ones above', POSTGRES, () => {
   // sign_in's own minute (0037): a credential's expiry may run that far past its longest by the app's clock, which is
   // CLOCK_SKEW_MS, the app's clock against the vault's, as the TypeScript checks (credentials.ts, credentials.sqlite.ts).
+  // Once in each overload: 0037's, which the previous release's vault calls, and 0075's (T192).
   const signIn = found(/now_ms \+ p_longest \+ (\d+)\b/g);
-  assert.deepEqual(signIn.map(({ name }) => name), ['sign_in'], "sign_in's minute is sign_in's alone, and written once");
-  assert.deepEqual(signIn.map(({ groups }) => Number(groups[0])), [CLOCK_SKEW_MS], "sign_in's minute is CLOCK_SKEW_MS");
+  const overloads = functions.filter(({ name }) => name === 'sign_in').length;
+  assert.deepEqual(signIn.map(({ name }) => name), Array<string>(overloads).fill('sign_in'), "sign_in's minute is sign_in's alone, and written once in each of its overloads");
+  assert.deepEqual(signIn.map(({ groups }) => Number(groups[0])), Array<number>(overloads).fill(CLOCK_SKEW_MS), "sign_in's minute is CLOCK_SKEW_MS");
   const minutes = found(/\b(60000)\b/g).length;
   const counted = found(/clock_timestamp\(\)\) \* 1000\)::bigint \+ 60000\b/g).length + found(/deadline_max\(\) - 60000\b/g).length
     + found(/least\(60000, /g).length + signIn.length;

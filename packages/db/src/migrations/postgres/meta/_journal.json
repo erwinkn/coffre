@@ -505,6 +505,13 @@
       "when": 1793830000000,
       "tag": "0074_bulk_phase",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1793972586629,
+      "tag": "0075_sign_in_pinned",
+      "breakpoints": true
     }
   ]
 }

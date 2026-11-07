@@ -1,6 +1,7 @@
 // What a CI run's sign-in costs with 0.15's log, where the vault makes it (T149, R42, R44, R48): on the app's
 // connection, one read, its service's bindings on the token's issuer with whether the token was spent (which the
-// app's check of the token needs); then the vault's one call, `sign_in` (migration 0034), one statement, which weighs
+// app's check of the token needs), and the account's and each binding's newest change, whose MACs the vault checks
+// (T192); then the vault's one call, `sign_in` (migrations 0034, 0075), one statement, which weighs
 // the binding, the account, the rate and the token on their rows and writes the credential and its change. No 0.14
 // head, no entry of 0.14's. Each statement reads as many rows, and as many pages, however many credentials the binding
 // issued before, however many tokens were spent, and however long both logs grow.
@@ -174,12 +175,13 @@ function freshSignIn(values: unknown[]): unknown[] {
   return next;
 }
 
-test("a CI run's sign-in is one app statement and one vault call, two statements there: no 0.14 head, no 0.14 entry (T149, T190)", POSTGRES, async () => {
+test("a CI run's sign-in is one app statement and one vault call, one statement there: no 0.14 head, no 0.14 entry (T149, T190, T192)", POSTGRES, async () => {
   const ran = await statements();
-  assert.deepEqual(shown(ran.app), ['select "service_bindings"."i'], "its service's bindings on the issuer, with whether the token was spent");
-  // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate:
-  // the vault reads those changes first and checks their MACs (T190, R64), one statement more; then the sign-in, in one.
-  assert.deepEqual(shown(ran.vault), ['SELECT c.number, c.at, c.req', '/* writes */ SELECT sign_in('], 'the newest changes, then the sign-in');
+  assert.deepEqual(shown(ran.app), ['select "service_bindings"."i'], "its service's bindings on the issuer, with whether the token was spent and the newest changes");
+  // `sign_in` holds the member's and the binding's rows to their newest changes' seals, which SQL cannot authenticate
+  // (T190, R64): the app's read answers those changes beside the bindings, the vault checks their MACs, and `sign_in`
+  // holds each object's newest change to the one checked (T192), in its one statement.
+  assert.deepEqual(shown(ran.vault), ['/* writes */ SELECT sign_in('], 'the sign-in, in one statement');
   assert.equal(ran.vaultCalls, 1);
 });
 
