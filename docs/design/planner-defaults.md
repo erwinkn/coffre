@@ -229,15 +229,22 @@ its own database did, and holds it to every other check
     deletes is left (`deletesSettled`), as long as the test's own timeout
     lets it, and fails naming those sessions if it runs out; then it is
     weighed under a snapshot held open in that database
-    (`horizonHeld`), which keeps the database's horizon where it was
-    while another database's transaction ends. Waiting on the whole
-    cluster's sessions instead (T225's first fix) held a test up for as
-    long as any session anywhere kept a transaction open (T238); the
-    held snapshot asks nothing of other databases. Ended between a call and
-    its twin, such a transaction left `use-route.test.ts`'s T200 a call
-    35 buffers above its twin without the held snapshot, and none with
-    it (`packages/vault/test/weighing.test.ts` holds the helper to it:
-    66 buffers beside 7 without).
+    (`horizonHeld`). The hold first waits until no other session of the
+    database reaches back further than its own snapshot (one that took
+    its snapshot while an older transaction of another database still
+    ran, after `deletesSettled` returned: an autovacuum's ANALYZE, say);
+    every snapshot taken after reaches back no further than the hold's,
+    so from then the database's horizon is the hold's own, and no
+    transaction ending moves it, in this database or another. Waiting on
+    the whole cluster's sessions instead (T225's first fix) held a test
+    up for as long as any session anywhere kept a transaction open
+    (T238); the hold asks nothing of other databases. Ended between a
+    call and its twin, such a transaction of another database left
+    `use-route.test.ts`'s T200 a call 35 buffers above its twin without
+    the hold, and a late session of this database 40 or 42 with a hold
+    that did not wait; none with both
+    (`packages/vault/test/weighing.test.ts` holds the helper to each
+    case: 66 buffers beside 7 without).
     The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so

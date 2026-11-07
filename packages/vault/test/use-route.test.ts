@@ -1135,7 +1135,8 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     // scan reads them until it ends; ending between a call and its twin, it left the call 9 to 35 buffers above its twin
     // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `log_bulk`. Then weighed with the horizon held where
     // it is, so that a transaction of another database ending between a call and its twin moves nothing either
-    // (`horizonHeld`; T238 r2: 146 buffers beside 111).
+    // (`horizonHeld`; T238 r2: 146 buffers beside 111), nor one of this database that took its snapshot while such a
+    // transaction ran (T238 r3: 40 and 42).
     // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
       const args = [...call.args];
@@ -1147,7 +1148,7 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     try {
       await deletesSettled(watcher, t.signal);
       await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
-      await horizonHeld(watcher, async () => {
+      await horizonHeld(watcher, t.signal, async () => {
         for (const { label, call } of asked) {
           const [one, twin] = [await weigh(session, call), await weigh(session, twinOf(call))];
           assert.equal(one.keyBlocks, twin.keyBlocks, `${label}: the key's blocks as its twin's`);

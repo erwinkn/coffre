@@ -363,7 +363,7 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
       // Each cell is a world of its own, whose own rows its setup wrote over a few times: their tables vacuumed, the key's
       // own relations not (`WORLD_TABLES`).
       await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
-      await horizonHeld(watcher, async () => {
+      await horizonHeld(watcher, t.signal, async () => {
         // One session for them all, so that every call is weighed on the same plans (`weighingSession`).
         const session = weighingSession();
         try {

@@ -8,50 +8,104 @@ import { postgresClient } from '@coffre/db/connect';
 import { deletesSettled, horizonHeld } from '../../../scripts/matrix-weigh.ts';
 import { ENGINE, OWNER_URL } from './database.ts';
 
-test("a transaction of another database ending while calls are weighed moves no deleted row from maybe seen to dead (horizonHeld, T238 r2: a call 146 buffers beside its twin's 111)", { skip: ENGINE !== 'postgres' ? 'Postgres horizons' : false }, async (t) => {
-  const owner = postgresClient(OWNER_URL, { max: 1 });
-  const elsewhere = postgresClient(OWNER_URL.replace(/\/[^/?]+$/, '/postgres'), { max: 1 });
-  // A scan by the index alone, as a weighed call's probes are: it meets every deleted row's entry and reads its heap
-  // page until it knows the row dead to all, when it marks the entry, and no scan after reads it (a bitmap scan reads
-  // the pages whatever it knows, and marks nothing).
-  const session = postgresClient(OWNER_URL, { max: 1, connection: { enable_seqscan: 'off', enable_bitmapscan: 'off' } });
+const skip = ENGINE !== 'postgres' ? 'Postgres horizons' : false;
+
+/** A transaction left open, its snapshot taken (and its id, if `withId`), until `end`. */
+const opened = async (client: ReturnType<typeof postgresClient>, withId: boolean) => {
   let end!: () => void;
   const ended = new Promise<void>((resolve) => { end = resolve; });
-  let foreign: Promise<unknown> | null = null;
+  let begun!: () => void;
+  const started = new Promise<void>((resolve) => { begun = resolve; });
+  const done = client.begin('isolation level repeatable read', async (tx) => {
+    await tx.unsafe(withId ? 'SELECT pg_current_xact_id()' : 'SELECT 1');
+    begun();
+    await ended;
+  });
+  await Promise.race([started, done]);
+  return { end: async () => { end(); await done; }, done };
+};
+
+/**
+ * 2000 rows deleted while a transaction of another database, older than the delete, runs (`deletesSettled` waits on
+ * none such), then `deletesSettled` returned; `weighed` reads them by the index alone, as a weighed call's probes do,
+ * and as `weigh` weighs a call: a first scan, then the least of three. A scan meets every deleted row's entry and reads
+ * its heap page until it knows the row dead to all, when it marks the entry, and no scan after reads it (a bitmap scan
+ * reads the pages whatever it knows, and marks nothing). Weighed so, the rows read 66 buffers while a transaction can
+ * still see them, and 7 once none can (Postgres 16.14).
+ */
+const deletedBeside = async (t: { signal: AbortSignal }, run: (world: { owner: ReturnType<typeof postgresClient>; elsewhere: ReturnType<typeof postgresClient>; foreign: Awaited<ReturnType<typeof opened>>; weighed: () => Promise<number> }) => Promise<void>) => {
+  const owner = postgresClient(OWNER_URL, { max: 1 });
+  const elsewhere = postgresClient(OWNER_URL.replace(/\/[^/?]+$/, '/postgres'), { max: 1 });
+  const session = postgresClient(OWNER_URL, { max: 1, connection: { enable_seqscan: 'off', enable_bitmapscan: 'off' } });
+  let foreign: Awaited<ReturnType<typeof opened>> | null = null;
   try {
     await owner.unsafe('CREATE TABLE weighed_rows (id int PRIMARY KEY, pad text) WITH (autovacuum_enabled = off)');
     await owner.unsafe("INSERT INTO weighed_rows SELECT n, repeat('x', 200) FROM generate_series(1, 2000) n");
-    // Older than the delete, in another database: `deletesSettled` waits on none such.
-    let begun!: () => void;
-    const started = new Promise<void>((resolve) => { begun = resolve; });
-    foreign = elsewhere.begin(async (tx) => {
-      await tx.unsafe('SELECT pg_current_xact_id()');
-      begun();
-      await ended;
-    });
-    await Promise.race([started, foreign]);
+    foreign = await opened(elsewhere, true);
     await owner.unsafe('DELETE FROM weighed_rows');
     await deletesSettled(owner, t.signal);
-    const buffers = async () => {
+    const scan = async () => {
       const [{ 'QUERY PLAN': [{ Plan: plan }] }] = await session.unsafe('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT id FROM weighed_rows WHERE id > 0 ORDER BY id') as unknown as { 'QUERY PLAN': { Plan: { 'Shared Hit Blocks': number; 'Shared Read Blocks': number } }[] }[];
       return plan['Shared Hit Blocks'] + plan['Shared Read Blocks'];
     };
-    const [before, after] = await horizonHeld(owner, async () => {
-      const before = await buffers();
-      end();
-      await foreign;
-      // The first scan after it ends, which would mark the entries were their rows now dead to all, then the one weighed.
-      await buffers();
-      return [before, await buffers()];
-    });
-    // Unheld, 66 buffers beside 7 (Postgres 16.14): every heap page while it ran, the index's alone after.
-    assert.equal(after, before, `${before} buffers while the other database's transaction ran, ${after} after it ended`);
+    const weighed = async () => {
+      await scan();
+      return Math.min(await scan(), await scan(), await scan());
+    };
+    await run({ owner, elsewhere, foreign, weighed });
   } finally {
-    end();
-    await foreign?.catch(() => undefined);
+    await foreign?.end().catch(() => undefined);
     await session.end();
     await owner.unsafe('DROP TABLE IF EXISTS weighed_rows').catch(() => undefined);
     await owner.end();
     await elsewhere.end();
   }
+};
+
+test("a transaction of another database ending while calls are weighed moves no deleted row from maybe seen to dead (horizonHeld, T238 r2: a call 146 buffers beside its twin's 111)", { skip }, async (t) => {
+  await deletedBeside(t, async ({ owner, foreign, weighed }) => {
+    const [before, after] = await horizonHeld(owner, t.signal, async () => {
+      const before = await weighed();
+      await foreign.end();
+      return [before, await weighed()];
+    });
+    // Unheld, 66 buffers beside 7: every heap page while it ran, the index's alone after.
+    assert.equal(after, before, `${before} buffers while the other database's transaction ran, ${after} after it ended`);
+  });
+});
+
+test("a session of this database that took its snapshot while such a transaction ran, ending while calls are weighed, moves no deleted row either (horizonHeld waits for it, T238 r3: 40 and 42 buffers above a twin)", { skip }, async (t) => {
+  await deletedBeside(t, async ({ owner, elsewhere, foreign, weighed }) => {
+    // Its snapshot reaches back to the other database's transaction, which then ends: the hold's, taken after, does not.
+    // It has an id, as an autovacuum's ANALYZE has (it writes `pg_statistic`): a session reconsiders the horizon only
+    // once its snapshot's oldest has moved (`GlobalVisTestShouldUpdate`), which a transaction with no id ending moves
+    // not, in a database where nothing else runs.
+    const local = postgresClient(OWNER_URL, { max: 1 });
+    try {
+      const late = await opened(local, true);
+      await foreign.end();
+      const [{ pid }] = await owner.unsafe('SELECT pg_backend_pid() AS pid') as unknown as { pid: number }[];
+      // It ends once the hold is seen waiting on it (its session's last statement the wait's), or else when `measure`,
+      // run with it still open, ends it between its scans: the first, a hold that does not wait, fails below.
+      let lateEnded = false;
+      const endLate = async () => { lateEnded = true; await late.end(); };
+      const watching = (async () => {
+        while (!lateEnded) {
+          const [{ waiting }] = await elsewhere.unsafe("SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE pid = $1 AND query LIKE '%FROM pg_stat_activity%'", [pid]) as unknown as { waiting: number }[];
+          if (waiting > 0) return endLate();
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      })();
+      const [before, after] = await horizonHeld(owner, t.signal, async () => {
+        const before = await weighed();
+        if (!lateEnded) await endLate();
+        return [before, await weighed()];
+      });
+      await watching;
+      // Held without the wait, 66 buffers beside 7, as unheld above.
+      assert.equal(after, before, `${before} buffers while the late snapshot was open, ${after} after it ended`);
+    } finally {
+      await local.end();
+    }
+  });
 });

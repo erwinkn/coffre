@@ -77,8 +77,8 @@ export async function weigh(session: WeighingSession, call: HotCall): Promise<We
  * transaction held open in another database leaves this one's deleted rows dead to a lazy VACUUM (Postgres 16.14, T238:
  * VACUUM removed all 1000 rows beside it, none beside the same in this one). But not to a session of this database
  * that takes a snapshot while it runs: a snapshot's oldest is the cluster's oldest running transaction, so the session
- * holds this database's horizon back to it until its own transaction ends (T238 r2), which `horizonHeld` answers. Neither
- * this session (`pg_backend_pid`) nor one holding neither (a session between transactions, or reading with no snapshot yet: `age(NULL)` is no age). Every
+ * holds this database's horizon back to it until its own transaction ends (T238 r2), which `horizonHeld` answers,
+ * waiting with this query on its own snapshot's oldest (T238 r3). Neither this session (`pg_backend_pid`) nor one holding neither (a session between transactions, or reading with no snapshot yet: `age(NULL)` is no age). Every
  * other kind of session counts, not only clients: an autovacuum worker's ANALYZE runs in a transaction of its own,
  * whose id and snapshot hold rows back as a client's do; only a lazy VACUUM is left out of the horizon
  * (`PROC_IN_VACUUM`), and waiting on one too costs at most its run. `age` compares ids as Postgres does, modulo 2³²,
@@ -104,7 +104,8 @@ const NAME_HOLDERS_EVERY_MS = 60_000;
  * Resolves once no session of `watcher`'s database (or of none) that might still see a row deleted before it is called
  * is left (`HOLDERS`): from then, every such row is dead to every session started after, but for a transaction of
  * another database older than the row's delete, which each new snapshot here takes the oldest of, and which moves the
- * horizon when it ends; weigh under `horizonHeld`, which keeps it where it is. Until then a new session's planner, probing an
+ * horizon when it ends, and for a session of this database that took a snapshot while one ran; weigh under
+ * `horizonHeld`, which waits for the second and keeps the horizon where it is. Until then a new session's planner, probing an
  * end of `log_bulk_pkey` for the range its estimates use (`get_actual_variable_range`, which skips only rows known
  * dead), takes a deleted row there for one that may still be seen and reads its heap page as a live row's; once that
  * ends, the first session to plan reads the dead row's page and the next row's, one block more, and marks the entry
@@ -132,20 +133,31 @@ export async function deletesSettled(watcher: WeighingSession, signal: AbortSign
   // One past the newest transaction to have ended (a snapshot's xmax), as `pg_stat_activity`'s 32-bit ids are: every
   // row deleted before the call was deleted by a transaction older than this.
   const [{ ended }] = await watcher.unsafe(`SELECT (pg_snapshot_xmax(pg_current_snapshot())::text::numeric % 4294967296)::text AS ended`) as unknown as { ended: string }[];
+  await noneOlder(watcher, ended, signal, 'deletesSettled', 'the rows a batch deleted may still be seen');
+}
+
+/**
+ * Resolves once no session of `asker`'s database (or of none) but `asker`'s own is older than `than` (`HOLDERS`), polling
+ * every 25 ms; see `deletesSettled` for the naming of holders and the abort. `asker` may be a transaction:
+ * `pg_stat_activity` answers a transaction from what it read first (a backend's status is kept for the transaction
+ * until `pg_stat_clear_snapshot`), so each poll clears it first.
+ */
+async function noneOlder(asker: Pick<WeighingSession, 'unsafe'>, than: string, signal: AbortSignal, who: string, what: string): Promise<void> {
   type Holder = { pid: number; kind: string | null; datname: string | null; state: string | null; since: string | null; xid: string | null; xmin: string | null };
   const named = (holders: Holder[]) => holders.map((h) => `pid ${h.pid} (${h.kind}, database ${h.datname ?? 'none'}, ${h.state ?? 'no state'}, its transaction begun ${h.since}, xid ${h.xid ?? 'none'}, xmin ${h.xmin ?? 'none'})`).join('; ');
   const began = performance.now();
   let nextNaming = began + NAME_HOLDERS_EVERY_MS;
   for (;;) {
-    const holders = await watcher.unsafe(HOLDERS, [ended]) as unknown as Holder[];
+    await asker.unsafe('SELECT pg_stat_clear_snapshot()');
+    const holders = await asker.unsafe(HOLDERS, [than]) as unknown as Holder[];
     if (holders.length === 0) return;
     if (signal.aborted) {
-      const message = `the rows a batch deleted may still be seen when the test's time ran out: ${holders.length} session(s) older than xid ${ended} still run, ${named(holders)}`;
+      const message = `${what} when the test's time ran out: ${holders.length} session(s) older than xid ${than} still run, ${named(holders)}`;
       console.error(message);
       throw new Error(message);
     }
     if (performance.now() >= nextNaming) {
-      console.error(`deletesSettled has waited ${Math.round((performance.now() - began) / 1000)} s for ${holders.length} session(s) older than xid ${ended}: ${named(holders)}`);
+      console.error(`${who} has waited ${Math.round((performance.now() - began) / 1000)} s for ${holders.length} session(s) older than xid ${than}: ${named(holders)}`);
       nextNaming += NAME_HOLDERS_EVERY_MS;
     }
     await sleep(25, undefined, { signal }).catch(() => undefined);
@@ -154,22 +166,26 @@ export async function deletesSettled(watcher: WeighingSession, signal: AbortSign
 
 /**
  * `measure`'s answer, run while `watcher` holds a snapshot open (a repeatable read transaction, its snapshot taken by a
- * first statement), which keeps its database's horizon where that snapshot found it until `measure` settles. Call it
- * once `deletesSettled` has returned, and the rows deleted before stay as dead, or as maybe seen, to every call weighed
- * inside it: a session of the database taking a snapshot while a transaction of another database older than a delete
- * runs holds the horizon back to that transaction, and once it ends the next session's horizon passes the delete, so
- * that a call and its twin met the deleted rows apart (T238 r2: `log_changes` 41 blocks beside 6, held open in
- * `postgres` and ended between them). The held snapshot reaches back as far as a call's taken at its start would, and
- * no further; what it adds is that it stays there. A lazy VACUUM run inside it removes no row deleted after its
- * snapshot's oldest: VACUUM before.
+ * first statement), which keeps its database's horizon at that snapshot's oldest until `measure` settles. Every
+ * snapshot taken after it reaches back no further (its oldest is the oldest transaction still running, which ran when
+ * the hold's was taken too), so once no session of the database taken before it reaches back further either, which it
+ * waits for (`HOLDERS`, until `signal` aborts, as `deletesSettled` does), the horizon is the hold's own, and no
+ * transaction ending moves it: neither one of another database older than a delete, which a session of this database
+ * taking a snapshot while it runs holds the horizon back to (T238 r2: `log_changes` 41 blocks beside 6, held open in
+ * `postgres` and ended between a call and its twin), nor such a session of this database, begun before the hold,
+ * ending inside it (T238 r3: an autovacuum's ANALYZE, say; forced, "warm held" 40 and 42 buffers above its twin).
+ * Call it once `deletesSettled` has returned, and the rows deleted before stay as dead, or as maybe seen, to every call
+ * weighed inside it. A lazy VACUUM run inside it removes no row deleted after the hold's oldest: VACUUM before.
  */
-export async function horizonHeld<T>(watcher: WeighingSession, measure: () => Promise<T>): Promise<T> {
+export async function horizonHeld<T>(watcher: WeighingSession, signal: AbortSignal, measure: () => Promise<T>): Promise<T> {
   let release!: () => void;
   const released = new Promise<void>((resolve) => { release = resolve; });
   let taken!: () => void;
   const held = new Promise<void>((resolve) => { taken = resolve; });
   const holding = watcher.begin('isolation level repeatable read', async (tx) => {
-    await tx.unsafe('SELECT 1');
+    // The transaction's snapshot, which its first statement takes, and its oldest, as `pg_stat_activity`'s ids are.
+    const [{ oldest }] = await tx.unsafe(`SELECT (pg_snapshot_xmin(pg_current_snapshot())::text::numeric % 4294967296)::text AS oldest`) as unknown as { oldest: string }[];
+    await noneOlder(tx, oldest, signal, 'horizonHeld', 'the horizon could not be held');
     taken();
     await released;
   });
