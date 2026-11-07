@@ -1841,7 +1841,7 @@ async function planImport(coffre, path, entries) {
 	};
 }
 //#endregion
-//#region ../core/dist/access-DmEq73AZ.js
+//#region ../core/dist/access-Dlz5TFkW.js
 /**
 * Who may do what: nine permissions, the seven project roles a grant names,
 * and the five instance roles a person holds across every project.
@@ -5796,6 +5796,7 @@ object({
 }).strict();
 string().uuid();
 string().email().max(320);
+1024 * 2 ** Math.floor(Math.log2(768e4 / 448 / 1024));
 const WORKLOAD_PROFILES = [
 	"github",
 	"github-reusable",

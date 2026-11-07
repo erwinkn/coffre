@@ -194,6 +194,26 @@ this build.
 - **Upstreams must accept only Coffre.** If Stripe accepts the same key from
   anywhere, a copy of it from any *earlier* exposure still works. Section 7's
   playbook covers each kind of credential.
+- **What an Owner's bindings cost, their own service's sign-ins pay.** A
+  binding's label, claims and issuer have no length of their own (R70; the
+  2026-11-06 decision): the API body that makes one is held to 1 MiB and
+  1,600 values, nothing else. Only an Owner makes a binding, and what its
+  size costs lands on that service, so each cost is an accepted
+  consequence (2026-11-07), not a bound:
+  - its label is copied into every credential and `issue` log entry a CI
+    sign-in writes, and every candidate read of the service loads it: a
+    label of 1 MiB is 1 MiB written per sign-in;
+  - each candidate's claims and issuer are checked against its MAC
+    (HMAC-SHA256, about 0.6 ms per MiB) and parsed (about 0.6 ms per MiB)
+    on each sign-in of its service;
+  - its claim names are matched by trying each split (`claimAt`): 2^d
+    lookups for a name of d dots, 32 at five, on a token its issuer
+    signed.
+
+  A stranger's sign-in is held apart: its body, token included, is at most
+  `SIGN_IN_BODY_BYTES` (16 KiB), the most whose 32 key tries fit what R27
+  leaves a request. A follow-up may name the binding by its ID in each
+  credential and log entry instead of copying its label.
 
 ## 4. Proofs and the exchange
 
@@ -230,7 +250,8 @@ Cache-Control: no-store
 - **Admission, then work, in the same order as the OIDC exchange
   ([oidc.md](oidc.md), section 2):**
   1. the two limiters (per source, and total);
-  2. the body, at most 1 MiB (`API_BODY_BYTES`, every body's bound);
+  2. the body, at most 16 KiB (`SIGN_IN_BODY_BYTES`, every body's bound
+     before sign-in, 413 past it);
   3. the shape;
   4. one read of the service's live bindings of the proof's profiles, by an
      explicit profile filter;

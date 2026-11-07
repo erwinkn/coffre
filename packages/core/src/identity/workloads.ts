@@ -27,7 +27,6 @@
 import { shownMember } from '../schemas.ts';
 import { CLOCK_SKEW_MS } from '../clock.ts';
 import type { Constraints } from './constraints.ts';
-import { CHAR_NS, DOT_NS, KEY_LISTED_NS, KEY_TRIED_NS, LIST_THRESHOLD_NS, SLICE_NS, signInWork, type SignInWork } from './sign-in-work.ts';
 
 export const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 export const GITLAB_ISSUER = 'https://gitlab.com';
@@ -410,82 +409,37 @@ function checkGitLab(claims: BindingClaims): void {
  *
  * `kubernetes.io.serviceaccount.uid` is `4f1c…`, `kubernetes.io` an object,
  * and `kubernetes.io.pod` nothing.
+ *
+ * Every split of the name is tried, at most 2^d ways for a name of d dots,
+ * each one lookup: a binding's names are an Owner's, a handful with up to a
+ * few dots (Kubernetes' three), so 32 at five, and it runs only on a token
+ * whose issuer signed it. What a binding's own size costs (its names, its
+ * claims, its issuer, read and checked against its MAC on each sign-in) is
+ * an accepted consequence of the 2026-11-06 decision, borne by its own
+ * service (docs/design/workload-access.md, section 3, "What an Owner's
+ * bindings cost"); a stranger's token is held by its body's bound,
+ * `SIGN_IN_BODY_BYTES`.
  */
-export function claimAt(claims: Record<string, unknown>, name: string, work: SignInWork = signInWork()): unknown {
-  // Each step finds the keys of the object it is in that the name continues with, from where it is to a dot or its
-  // end, whichever way costs less: each such end's slice looked up, or the object's keys tried, listed once and kept.
-  // So a short name in a wide object costs a few lookups, and a long dotted name in a small one a few keys, never
-  // every split of the name nor every key for every claim; each object at each place in the name is read once, its
-  // readings kept (two meaning several), however many ways lead to it. What each step does is spent from `work`
-  // (`SIGN_IN_WORK_NS`): once it is gone, the name reads nothing, nor does any other that shares it.
-  if (work.left < 0) return undefined;
-  // The name's dots, each paid for as it is found: a name of nothing but dots stops once the budget is spent.
-  work.left -= name.length * CHAR_NS;
-  const dots: number[] = [];
-  for (let at = name.indexOf('.'); at !== -1 && work.left >= 0; at = name.indexOf('.', at + 1)) {
-    dots.push(at);
-    work.left -= DOT_NS;
-  }
-  if (work.left < 0) return undefined;
-  // `after[i]`, the sum of the dots from the i-th on: the lengths of a step's slices, summed at once.
-  const after = new Array<number>(dots.length + 1).fill(0);
-  for (let i = dots.length - 1; i >= 0; i--) after[i] = after[i + 1]! + dots[i]!;
-  type Reading = { count: number; value: unknown };
-  const none: Reading = { count: 0, value: undefined };
-  const read = new Map<object, Map<number, Reading>>();
-  // What the name from `start` on reaches in `at`: a key must start there.
-  const from = (at: unknown, start: number): Reading => {
-    if (work.left < 0 || typeof at !== 'object' || at === null || Array.isArray(at)) return none;
-    const kept = read.get(at)?.get(start);
-    if (kept !== undefined) return kept;
-    let first = 0;
-    for (let high = dots.length; first < high;) {
-      const middle = (first + high) >> 1;
-      if (dots[middle]! < start) first = middle + 1;
-      else high = middle;
+export function claimAt(claims: Record<string, unknown>, name: string): unknown {
+  const parts = name.split('.');
+  let found: unknown;
+  let readings = 0;
+  // Each step takes one key, of one or more parts, from the object it is in; stops once a second reading shows.
+  const walk = (at: unknown, from: number): void => {
+    if (readings > 1) return;
+    if (from === parts.length) {
+      found = at;
+      readings++;
+      return;
     }
-    // A key ends at a dot from `start` on, or at the name's end: what slicing each of them costs.
-    const ends = dots.length - first + 1;
-    const slicing = ends * SLICE_NS + (after[first]! - start * (ends - 1) + name.length - start) * CHAR_NS;
-    let listed = work.keys.get(at);
-    if (listed === undefined && slicing > LIST_THRESHOLD_NS) {
-      const keys = Object.keys(at);
-      listed = { keys, chars: keys.reduce((sum, key) => sum + key.length, 0) };
-      work.keys.set(at, listed);
-      work.left -= keys.length * KEY_LISTED_NS;
+    if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
+    for (let to = from + 1; to <= parts.length; to++) {
+      const key = parts.slice(from, to).join('.');
+      if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
     }
-    // Trying every key costs each one and its characters, as many of them as the name has left.
-    const scanning = listed === undefined ? Infinity : listed.keys.length * KEY_TRIED_NS + Math.min(listed.chars, listed.keys.length * (name.length - start)) * CHAR_NS;
-    let reading: Reading = none;
-    const take = (key: string, end: number): boolean => {
-      const child = (at as Record<string, unknown>)[key];
-      const next = end === name.length ? { count: 1, value: child } : from(child, end + 1);
-      if (next.count > 0) reading = { count: Math.min(2, reading.count + next.count), value: next.value };
-      return reading.count > 1;
-    };
-    if (slicing <= scanning) {
-      work.left -= slicing;
-      for (let i = first; i <= dots.length && work.left >= 0; i++) {
-        const end = i < dots.length ? dots[i]! : name.length;
-        const key = name.slice(start, end);
-        if (Object.hasOwn(at, key) && take(key, end)) break;
-      }
-    } else {
-      for (const key of listed!.keys) {
-        work.left -= KEY_TRIED_NS + Math.min(key.length, name.length - start) * CHAR_NS;
-        if (work.left < 0) break;
-        if (!name.startsWith(key, start)) continue;
-        const end = start + key.length;
-        if (end !== name.length && name.charCodeAt(end) !== 0x2e) continue;
-        if (take(key, end)) break;
-      }
-    }
-    if (!read.has(at)) read.set(at, new Map());
-    read.get(at)!.set(start, reading);
-    return reading;
   };
-  const reading = from(claims, 0);
-  return reading.count === 1 && work.left >= 0 ? reading.value : undefined;
+  walk(claims, 0);
+  return readings === 1 ? found : undefined;
 }
 
 /**
@@ -501,20 +455,17 @@ export function claimAt(claims: Record<string, unknown>, name: string, work: Sig
  *   case-insensitive, so `Production` and `production` are one environment,
  *   under the same protection rules.
  */
-export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>, work: SignInWork = signInWork()): string[] {
+export function differingClaims(profile: WorkloadProfile, expected: BindingClaims, token: Record<string, unknown>): string[] {
   const github = profile.startsWith('github');
   const claims = github ? atBaseBranch(token) : token;
-  // One budget for all of them, and for every binding the sign-in weighs (`work`, its caller's): a search that costs
-  // more than a sign-in may spend matches nothing.
-  const differing = Object.entries(expected)
+  return Object.entries(expected)
     .filter(([name, value]) => {
-      const actual = claimAt(claims, name, work);
+      const actual = claimAt(claims, name);
       if (typeof actual !== 'string') return true;
       if (github && name === 'environment') return actual.toLowerCase() !== (value as string).toLowerCase();
       return !claimValues(value).includes(actual);
     })
     .map(([name]) => name);
-  return work.left < 0 ? Object.keys(expected) : differing;
 }
 
 function atBaseBranch(claims: Record<string, unknown>): Record<string, unknown> {

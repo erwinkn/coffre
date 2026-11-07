@@ -248,7 +248,10 @@ export const FIXED_ROLES = { roles: ['owner'] as readonly string[], instanceRole
  * What is wrong with a role's definition, or null: a name and a
  * description; known permissions, each once; reading implies using, and
  * editing the proxy reading, in each column; and the protected column holds no more than the other, and
- * nothing project-wide.
+ * nothing project-wide. A name and a description have no length of their own: an accepted consequence of the
+ * 2026-11-06 decision, since only an Owner writes them and what they cost lands on their own instance, which keeps
+ * them in the policy every app and vault isolate holds and parses on change (docs/design/roles.md, section 6,
+ * decision 11).
  */
 export function definitionProblem(definition: RoleDefinition): string | null {
   const { name, description, permissions } = definition;

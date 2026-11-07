@@ -19,7 +19,7 @@ import {
 } from './auth.ts';
 import { dpopToken, SessionRefused, signedUrl, standingSession } from './workload-sessions.ts';
 import { apiCaller } from './fetch-api.ts';
-import { API_BODY_BYTES, errorResponse, jsonResponse, readJson, readLimitedJson, validate } from './http.ts';
+import { errorResponse, jsonResponse, readJson, readLimitedJson, SIGN_IN_BODY_BYTES, validate } from './http.ts';
 import { logged } from './logged.ts';
 import type { CoffreRuntime } from './runtime.ts';
 import {
@@ -77,7 +77,7 @@ function stepUpNext(raw: string | null, config: { providers: readonly { id: stri
   return safeNext(raw, config.publicUrl);
 }
 
-/** A device login's start: the label its terminal gives itself, if any. Its body, as every one before sign-in, is read to `API_BODY_BYTES`. */
+/** A device login's start: the label its terminal gives itself, if any. Its body, as every one before sign-in, is read to `SIGN_IN_BODY_BYTES`. */
 const deviceStart = z.object({ client_label: z.string().trim().optional() });
 
 /**
@@ -88,7 +88,7 @@ const deviceStart = z.object({ client_label: z.string().trim().optional() });
 export async function startDevice(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
   try {
-    const input = validate(deviceStart, await readJson(request, API_BODY_BYTES, {}));
+    const input = validate(deviceStart, await readJson(request, SIGN_IN_BODY_BYTES, {}));
     const started = await runtime.signin.startDevice({ clientLabel: input.client_label ?? null, sourceIp });
     return jsonResponse({
       device_code: started.deviceCode,
@@ -116,7 +116,7 @@ const devicePoll = z.object({ device_code: z.string().min(1) });
 export async function pollDevice(request: Request, runtime: CoffreRuntime, sourceIp: string | null) {
   if (runtime.signin === null) return errorResponse(notFound('device login needs signin mode'));
   try {
-    const { device_code } = validate(devicePoll, await readJson(request, API_BODY_BYTES));
+    const { device_code } = validate(devicePoll, await readJson(request, SIGN_IN_BODY_BYTES));
     const polled = await runtime.signin.pollDevice(device_code, { requestId: crypto.randomUUID(), sourceIp });
     switch (polled.status) {
       case 'pending':
@@ -138,7 +138,7 @@ export async function pollDevice(request: Request, runtime: CoffreRuntime, sourc
   }
 }
 
-/** An exchange's body: the service and the token, and nothing else, read to `API_BODY_BYTES`. */
+/** An exchange's body: the service and the token, and nothing else, read to `SIGN_IN_BODY_BYTES`, which bounds the token too. */
 const exchangeBody = z.object({ service: z.string(), token: z.string() }).strict();
 
 const REFUSED_CODE = { 401: 'unauthenticated', 429: 'too_many_requests', 503: 'unavailable' } as const;
@@ -204,7 +204,7 @@ export async function exchangeWorkloadToken(
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {
-    const body = validate(exchangeBody, asked(await readLimitedJson(request, API_BODY_BYTES)));
+    const body = validate(exchangeBody, asked(await readLimitedJson(request, SIGN_IN_BODY_BYTES)));
     return jsonResponse(await workloads.exchange(body, { requestId: crypto.randomUUID(), sourceIp }));
   } catch (error) {
     if (error instanceof UnknownKey) await unknownKeyAlert(runtime, error, sourceIp);
@@ -213,7 +213,7 @@ export async function exchangeWorkloadToken(
   }
 }
 
-/** A workload's sign-in body: the service, and one proof by its kind, read to `API_BODY_BYTES`. */
+/** A workload's sign-in body: the service, and one proof by its kind, read to `SIGN_IN_BODY_BYTES`. */
 const sessionBody = z.object({
   service: z.string(),
   proof: z.record(z.string(), z.unknown()).refine((proof) => Object.keys(proof).length === 1, 'a proof names one kind: { "oidc": "<token>" }'),
@@ -244,7 +244,7 @@ export async function exchangeWorkloadSession(request: Request, runtime: CoffreR
   const refused = await admission(workloads, sourceIp);
   if (refused !== null) return refused;
   try {
-    const body = validate(sessionBody, await readLimitedJson(request, API_BODY_BYTES));
+    const body = validate(sessionBody, await readLimitedJson(request, SIGN_IN_BODY_BYTES));
     const header = request.headers.get('dpop');
     if (header === null) return refuseExchange(new ExchangeRefused('dpop', "a DPoP header, a proof signed by the key the session will be bound to, comes with the sign-in"));
     const proof = await verifyProof(header, { method: request.method, url: signedUrl(request, runtime.publicUrl), skewSeconds: EXCHANGE_SKEW_SECONDS });
@@ -521,8 +521,8 @@ export async function passkeyStep(request: Request, runtime: CoffreRuntime, sour
 
   let body: { response?: Record<string, unknown>; state?: string };
   try {
-    // A control-plane request's body, read to the one bound the API reads every body to (R70).
-    body = validate(passkeyAnswer, await readLimitedJson(request, API_BODY_BYTES)) as typeof body;
+    // Read before the session or the ceremony it answers is checked, so to the bound of every body before sign-in.
+    body = validate(passkeyAnswer, await readLimitedJson(request, SIGN_IN_BODY_BYTES)) as typeof body;
   } catch (error) {
     return errorResponse(error);
   }
@@ -602,3 +602,6 @@ export async function signOut(request: Request, runtime: CoffreRuntime, sourceIp
   }
   return redirectResponse('/login', [clearCookieHeader(auth, name)], 303);
 }
+
+/** The schemas of the bodies read before sign-in, by route: what `scripts/sign-in-cost.ts` measures. */
+export const SIGN_IN_SCHEMAS = { deviceStart, devicePoll, exchangeBody, sessionBody, passkeyAnswer };

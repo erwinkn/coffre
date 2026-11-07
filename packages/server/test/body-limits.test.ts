@@ -1,9 +1,10 @@
-// Every request body is read with a byte cap and abandoned past it, so an
-// oversize or endless body never buffers and never reaches JSON.parse: the
-// unauthenticated device-login endpoints (W155 red-team: a 20 MB body was
-// buffered and parsed before validation) and the whole authenticated API,
-// one bound for both (`API_BODY_BYTES`); and its values counted before it is
-// parsed (`MAX_BODY_NODES`), then validated to their first issue.
+// Every request body is read with a byte cap and abandoned past it, 413, so
+// an oversize or endless body never buffers and never reaches JSON.parse:
+// before sign-in, the device-login endpoints (W155 red-team: a 20 MB body
+// was buffered and parsed before validation) and every other, to
+// `SIGN_IN_BODY_BYTES`; the authenticated API, to `API_BODY_BYTES`; and its
+// values counted before it is parsed (`MAX_BODY_NODES`), then validated to
+// their first issue.
 import test, { after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -14,7 +15,7 @@ import { parsePath, trimSlashes } from '../src/api/paths.ts';
 import { coffreRoute } from '../src/app.ts';
 import { z } from 'zod';
 
-import { API_BODY_BYTES, check, countValues, MAX_BODY_NODES, readJson, readLimitedForm, readLimitedJson, readLimitedText } from '../src/http.ts';
+import { API_BODY_BYTES, check, countValues, MAX_BODY_NODES, readJson, readLimitedJson, readLimitedText, SIGN_IN_BODY_BYTES } from '../src/http.ts';
 import { resolveConfig } from '../src/config.ts';
 import { createRuntime, type CoffreRuntime } from '../src/runtime.ts';
 import { clientFor, openTestDatabase, resetDatabase, testDeps, type FixtureDeps } from './api-fixture.ts';
@@ -44,10 +45,14 @@ beforeEach(async () => {
   root = clientFor(deps, ROOT);
 });
 
-test('readJson abandons an oversize body instead of buffering and parsing it', async () => {
+test('readJson abandons an oversize body instead of buffering and parsing it, a 413', async () => {
   const big = 'a'.repeat(200 * 1024);
   const request = new Request('https://x/', { method: 'POST', body: JSON.stringify({ v: big }) });
-  await assert.rejects(readJson(request, 4 * 1024), /larger than 4096 bytes/);
+  await assert.rejects(readJson(request, 4 * 1024), (error: unknown) => {
+    assert.deepEqual([(error as { code: string }).code, (error as { status: number }).status], ['too_large', 413]);
+    assert.match((error as Error).message, /larger than 4096 bytes/);
+    return true;
+  });
   // readLimitedText stops reading past the cap too.
   await assert.rejects(readLimitedText(new Request('https://x/', { method: 'POST', body: big }), 1024), /larger than 1024 bytes/);
   // Within the cap, it still parses, and still refuses a __proto__ key, nested too.
@@ -96,33 +101,6 @@ test('the count is the one JSON.parse would make: the root, each element and eac
   assert.equal(countValues('[1,2,3,4,5,6]', 3), 4);
 });
 
-test('a form reads as URLSearchParams reads it, its fields counted first, in one pass however long a field', async () => {
-  const request = (body: string | Uint8Array<ArrayBuffer>) => new Request('https://x/', { method: 'POST', body });
-  let seed = 11;
-  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
-  // Raw characters past ASCII or escapes of them, not both: where they meet in one name or value, a broken escape
-  // beside a raw one, Node's URLSearchParams reads otherwise than the standard, which this reads as written (below).
-  const pieces = ['a', 'b=', '=', '&', '&&', '+', '%', '%2', '%20', '%2B', '%e2%82%ac', '%E2%82', '%zz', ' ', '%26', '%3D', '%EF%BB%BF'];
-  // A leading U+FEFF is a name's or a value's own, never dropped: `%EF%BB%BFcode` is no `code`.
-  assert.deepEqual([...(await readLimitedForm(request('%EF%BB%BFcode=%EF%BB%BFabc'), API_BODY_BYTES))], [['\uFEFFcode', '\uFEFFabc']]);
-  for (const text of ['é=€', 'a=€+é', '€%20=%26']) assert.deepEqual([...(await readLimitedForm(request(text), API_BODY_BYTES))], [...new URLSearchParams(text)], text);
-  // The standard: UTF-8 of the text, its escapes decoded, then UTF-8 read again, a broken sequence one U+FFFD.
-  assert.deepEqual([...(await readLimitedForm(request('a=€%E2%82a'), API_BODY_BYTES))], [['a', '€\uFFFDa']]);
-  for (let i = 0; i < 4000; i++) {
-    const text = Array.from({ length: Math.floor(random() * 12) }, () => pieces[Math.floor(random() * pieces.length)]).join('');
-    assert.deepEqual([...(await readLimitedForm(request(text), API_BODY_BYTES))], [...new URLSearchParams(text)], JSON.stringify(text));
-  }
-  await assert.rejects(readLimitedForm(request(new Uint8Array([0x61, 0x3d, 0xff])), API_BODY_BYTES), /not UTF-8/);
-  await assert.rejects(readLimitedForm(request(Array.from({ length: MAX_BODY_NODES + 1 }, () => 'x').join('&')), API_BODY_BYTES), /more than \d+ fields/);
-  // One field of a mebibyte of `+`, which URLSearchParams takes 50 ms to read: a pass over its bytes.
-  const plus = `x=${'+'.repeat(API_BODY_BYTES - 2)}`;
-  const started = process.cpuUsage();
-  const read = await readLimitedForm(request(plus), API_BODY_BYTES);
-  const spent = process.cpuUsage(started);
-  assert.equal(read.get('x'), ' '.repeat(API_BODY_BYTES - 2));
-  assert.ok((spent.user + spent.system) / 1000 < 20, `took ${(spent.user + spent.system) / 1000} ms`);
-});
-
 test('a path of a long run of slashes is read in a pass: trimmed at either end, refused for its empty parts', () => {
   assert.equal(trimSlashes('//market/dev/'), 'market/dev');
   assert.equal(trimSlashes('///'), '');
@@ -162,17 +140,48 @@ test('a body is abandoned soon after the cap, not drained to the end', async () 
   assert.ok(pulled <= 8, `the stream was abandoned soon after the cap, not drained (pulled ${pulled} chunks)`);
 });
 
-test('both unauthenticated device-login endpoints refuse an oversize body, to the one bound every body has', async () => {
+test('a body whose Content-Length says it is past the bound is refused before a byte of it is read', async () => {
+  let pulled = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled += 1;
+      controller.enqueue(new Uint8Array(1024).fill(0x61));
+    },
+  });
+  const request = new Request('https://x/', { method: 'POST', body: stream, headers: { 'content-length': String(4 * 1024 + 1) }, duplex: 'half' } as RequestInit);
+  await assert.rejects(readLimitedText(request, 4 * 1024), /larger than 4096 bytes/);
+  assert.equal(pulled, 0);
+});
+
+test('both unauthenticated device-login endpoints refuse a body past the bound of every body before sign-in, 413', async () => {
+  assert.equal(SIGN_IN_BODY_BYTES, 16 * 1024);
+  const post = (path: string, body: string) => coffreRoute(
+    new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
+    runtime,
+    '203.0.113.7',
+  );
   for (const path of ['/api/auth/device', '/api/auth/device/token']) {
-    const body = JSON.stringify({ client_label: 'x', device_code: 'a'.repeat(API_BODY_BYTES) });
-    const response = await coffreRoute(
-      new Request(`${ORIGIN}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body }),
-      runtime,
-      '203.0.113.7',
-    );
-    assert.equal(response!.status, 400, path);
-    assert.match(JSON.stringify(await response!.json()), new RegExp(`larger than ${API_BODY_BYTES} bytes`));
+    const over = JSON.stringify({ client_label: 'x', device_code: 'a'.repeat(SIGN_IN_BODY_BYTES) });
+    const response = await post(path, over);
+    assert.equal(response!.status, 413, path);
+    assert.deepEqual(await response!.json(), { error: 'too_large', message: `the body is larger than ${SIGN_IN_BODY_BYTES} bytes` });
   }
+  // At the bound, read: a device login started with a label as long as the body lets it be.
+  const at = JSON.stringify({ client_label: 'x'.repeat(SIGN_IN_BODY_BYTES - 20) });
+  assert.equal(at.length <= SIGN_IN_BODY_BYTES, true);
+  assert.equal((await post('/api/auth/device', at))!.status, 200);
+});
+
+test('the API refuses a body past its bound, 413, as a client reads any refusal: its status, code and message', async () => {
+  await root.projects.create('market');
+  await root.environments.create('market/dev');
+  const value = 'v'.repeat(60 * 1024);
+  const keys = Object.fromEntries(Array.from({ length: Math.ceil(API_BODY_BYTES / value.length) + 1 }, (_, i) => [`K${i}`, value]));
+  await assert.rejects(root.secrets.set('market/dev', keys), (error: unknown) => {
+    assert.deepEqual([(error as { status: number }).status, (error as { code: string }).code], [413, 'too_large']);
+    assert.equal((error as Error).message, `the body is larger than ${API_BODY_BYTES} bytes`);
+    return true;
+  });
 });
 
 test('readLimitedJson refuses a top-level __proto__ key, as readJson does', async () => {

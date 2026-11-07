@@ -100,13 +100,13 @@ export async function mcpEndpoint(request: Request, runtime: CoffreRuntime, sour
   if (caller instanceof Response) return caller;
   let body: unknown;
   try {
-    // Read to the API's one bound (`API_BODY_BYTES`), as every body coffre takes.
+    // Its caller checked first, so read to the API's bound (`API_BODY_BYTES`), as every body a credential sends.
     body = await readLimitedJson(request, API_BODY_BYTES);
   } catch (error) {
     // A malformed body is a parse error; a well-formed one the guard refuses (too large, or a `__proto__` key) is an
     // invalid request, told as such rather than as broken JSON.
     return error instanceof ApiError && error.message !== 'the body is not JSON'
-      ? failure(null, 400, { code: CODE.invalidRequest, message: `Invalid Request: ${error.message}` })
+      ? failure(null, error.status, { code: CODE.invalidRequest, message: `Invalid Request: ${error.message}` })
       : failure(null, 400, { code: CODE.parse, message: 'Parse error: the body is not JSON' });
   }
   const message = parseMessage(body);

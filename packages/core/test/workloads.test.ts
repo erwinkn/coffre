@@ -13,8 +13,6 @@ import {
   githubWorkflow,
   GITHUB_ISSUER,
   GITLAB_ISSUER,
-  SIGN_IN_WORK_NS,
-  signInWork,
   MAX_ISSUER_BYTES,
   type BindingClaims,
 } from '@coffre/core/identity';
@@ -226,93 +224,6 @@ test('claims are nonempty strings with names a binding may match, and never the 
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: { sub: 'x', 'kubernetes.io serviceaccount': 'y' } }, /not a claim name/);
   // As a JSON body has it: an own `__proto__`, which the stored binding would otherwise drop, matching more than it says.
   refused({ profile: 'custom', issuer: 'https://idp.acme.example', claims: JSON.parse('{"sub":"x","__proto__":"y"}') as Record<string, unknown> }, /not a claim name/);
-});
-
-test("a claim's lookup costs the token's keys, not the ways a long name splits: the same readings as every split tried", () => {
-  // What `claimAt` was, every split of the name tried at every step: the reference its readings are held to.
-  const splits = (claims: Record<string, unknown>, name: string): unknown => {
-    const parts = name.split('.');
-    let found: unknown;
-    let readings = 0;
-    const walk = (at: unknown, from: number): void => {
-      if (readings > 1) return;
-      if (from === parts.length) {
-        found = at;
-        readings++;
-        return;
-      }
-      if (typeof at !== 'object' || at === null || Array.isArray(at)) return;
-      for (let to = from + 1; to <= parts.length; to++) {
-        const key = parts.slice(from, to).join('.');
-        if (Object.hasOwn(at, key)) walk((at as Record<string, unknown>)[key], to);
-      }
-    };
-    walk(claims, 0);
-    return readings === 1 ? found : undefined;
-  };
-  let seed = 7;
-  const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
-  // Short pieces, read by slices; and long ones, past which a step lists the object's keys and tries them instead.
-  const z = 'z'.repeat(400);
-  const pieces = ['a', 'b', 'a.b', 'b.a', 'a.a', '', z, `${z}.a`, `a.${z}`];
-  const tree = (depth: number): Record<string, unknown> => Object.fromEntries(
-    Array.from({ length: 1 + Math.floor(random() * 3) }, () => [pieces[Math.floor(random() * pieces.length)]!, depth > 0 && random() < 0.6 ? tree(depth - 1) : `v${Math.floor(random() * 3)}`]),
-  );
-  for (let i = 0; i < 6000; i++) {
-    const claims = tree(3);
-    const name = Array.from({ length: 1 + Math.floor(random() * 4) }, () => pieces[Math.floor(random() * pieces.length)]).join('.');
-    assert.deepEqual(claimAt(claims, name), splits(claims, name), `${name} in ${JSON.stringify(claims)}`);
-  }
-  // A name of 10,000 dots, as a binding with no length of its own may name: read at once, the token's keys its work.
-  const long = `${'a.'.repeat(10_000)}a`;
-  const started = performance.now();
-  assert.equal(claimAt({ sub: 'x', a: { a: { b: 'y' } } }, long), undefined);
-  let chain: unknown = 'deep';
-  for (let i = 0; i < 1000; i++) chain = { a: chain };
-  assert.equal(claimAt(chain as Record<string, unknown>, `${'a.'.repeat(999)}a`), 'deep');
-  assert.ok(performance.now() - started < 200, `took ${performance.now() - started} ms`);
-});
-
-test("matching a sign-in's claims spends at most SIGN_IN_WORK_NS of CPU, every binding it weighs together; past it, nothing matches", () => {
-  const cpu = (run: () => unknown) => {
-    const started = process.cpuUsage();
-    const result = run();
-    const spent = process.cpuUsage(started);
-    return { result, ms: (spent.user + spent.system) / 1000 };
-  };
-  assert.equal(SIGN_IN_WORK_NS, 16_000_000);
-  // Wide and short, as a binding with no count of its own may be: each claim a lookup or two, read at once and matched.
-  const wide = Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`c${i}`, 'v']));
-  const short = cpu(() => differingClaims('custom', { sub: 'x', ...wide }, { sub: 'x', ...wide }));
-  assert.deepEqual(short.result, []);
-  assert.ok(short.ms < 16, `1,500 short claims took ${short.ms} ms`);
-  // Long names against as many long keys sharing their start: once half a second a sign-in (#533, review r2). Each
-  // name looked up whole, a slice, not tried against every key: matched as well.
-  const prefix = 'p'.repeat(1400);
-  const long = Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`${prefix}${i}`, 'v']));
-  const shared = cpu(() => differingClaims('custom', { sub: 'x', ...long }, { sub: 'x', ...long }));
-  assert.deepEqual(shared.result, []);
-  assert.ok(shared.ms < 16, `500 long claims took ${shared.ms} ms`);
-  // Sixteen bindings of a thousand claims, each differing in one: one budget for the search, not one each (review r3).
-  const work = signInWork();
-  const token = { sub: 'x', ...Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`c${i}`, 'v'])) };
-  const search = cpu(() => Array.from({ length: 16 }, (_, b) => differingClaims('custom', { ...token, [`c${b}`]: 'other' }, token, work)));
-  assert.ok(search.ms < 40, `sixteen bindings took ${search.ms} ms`);
-  // A long dotted name against a wide token: what neither way reads cheaply, refused once the budget is spent.
-  const dotted = `${'a.'.repeat(5000)}a`;
-  const wideToken: Record<string, unknown> = Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`${'a.'.repeat(i % 700)}a`, { a: 'v' }]));
-  const spent = cpu(() => differingClaims('custom', Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`${dotted}${i}`, 'v'])), wideToken));
-  assert.equal((spent.result as string[]).length, 200);
-  assert.ok(spent.ms < 40, `the costly search took ${spent.ms} ms`);
-  // Names of nothing but dots, one to a binding, each found dot paid for as it is found: the search stops once the
-  // budget is spent, not after every binding's names are taken apart (review r4).
-  const dots = signInWork();
-  const prepared = cpu(() => Array.from({ length: 6 }, (_, b) => differingClaims('custom', { sub: 'x', [`${'.'.repeat(400_000)}${b}`]: 'v' }, { sub: 'x' }, dots)));
-  assert.ok(dots.left < 0);
-  assert.ok(prepared.ms < 40, `six bindings of 400,000 dots took ${prepared.ms} ms`);
-  // Spent, a reading is none, though the token holds it.
-  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...signInWork(), left: 0 }), undefined);
-  assert.equal(claimAt({ sub: 'x' }, 'sub', { ...signInWork(), left: 100 }), 'x');
 });
 
 test('a URL coffre fetches is https on 443 at a public host name, with no credentials, and loopback only for a deployment that says so', () => {

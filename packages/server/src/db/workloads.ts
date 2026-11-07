@@ -1,4 +1,4 @@
-import type { SignInWork, WorkloadProfile } from '@coffre/core/identity';
+import type { WorkloadProfile } from '@coffre/core/identity';
 import { prepared, tablesOf, type Queryable } from '@coffre/db';
 import { newestSeqQuery } from '@coffre/db/log';
 import * as dialect from '@coffre/db/dialect';
@@ -6,8 +6,8 @@ import { changedRows, clockMillis, truth } from '@coffre/db/dialect';
 import type * as schema from '@coffre/db/schema';
 import { and, asc, eq, inArray, isNotNull, isNull, lt, or, sql, type AnyColumn, type SQL } from 'drizzle-orm';
 
-import { authMac } from '../auth-rows.ts';
-import { checkedCandidates, hasTombstone, insert, newestChangeColumns, newestChanges, type BindingRow, type NewestChanges } from './queries.ts';
+import { authMac, checkAuthRow } from '../auth-rows.ts';
+import { hasTombstone, insert, newestChangeColumns, newestChanges, type BindingRow, type NewestChanges } from './queries.ts';
 
 // A workload's key-bound sessions (docs/design/workload-access.md, section
 // 5): the one statement every request runs, the bindings an exchange reads,
@@ -217,6 +217,10 @@ const bindingCalls = prepared((db) => {
  * More than `max` is a database changed around the app, and matches nothing.
  * With them, the account's and each binding's newest change, which the
  * vault checks and pins in its one statement (T192, `NewestChanges`).
+ * Each is read whole, its label included, and its MAC checked over its
+ * claims and issuer, whatever their size: an Owner's, and accepted
+ * (docs/design/workload-access.md, section 3, "What an Owner's bindings
+ * cost").
  */
 export async function workloadCandidates(
   db: Queryable,
@@ -225,7 +229,6 @@ export async function workloadCandidates(
   issuer: string,
   profiles: readonly WorkloadProfile[],
   max: number,
-  work?: SignInWork,
 ): Promise<{ bindings: BindingRow[]; newest: NewestChanges }> {
   const { serviceBindings, principals } = tablesOf(db);
   if (profiles.length === 0) return { bindings: [], newest: await newestChanges(db, principal, []) };
@@ -246,7 +249,7 @@ export async function workloadCandidates(
     console.error({ event: 'bindings_over_limit', principal, issuer }, 'a service holds more bindings than any can');
     return { bindings: [], newest: await newestChanges(db, principal, []) };
   }
-  const bindings = checkedCandidates(chainKey, rows.filter((row) => !row.tombstoned).map((row) => row.binding), work);
+  const bindings = rows.filter((row) => !row.tombstoned).map((row) => row.binding).filter((row) => checkAuthRow(chainKey, 'service_bindings', row));
   return { bindings, newest: await newestChanges(db, principal, rows) };
 }
 

@@ -2,8 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { createLocalJWKSet, errors, importJWK, jwtVerify, type JSONWebKeySet, type JWK, type JWTPayload } from 'jose';
 
-import { countValues, MAX_BODY_NODES } from '../schemas.ts';
-import { KEY_TRY_NS, signInWork, TOKEN_BYTE_NS, type SignInWork } from './sign-in-work.ts';
+import { countValues, MAX_BODY_NODES, MAX_KEYS } from '../schemas.ts';
 
 export type { JSONWebKeySet };
 
@@ -66,13 +65,8 @@ const PART = /^[A-Za-z0-9_-]+$/;
 export function decodeWorkloadToken(token: string): DecodedToken {
   const malformed = (why: string) => new WorkloadTokenRefused('malformed', `the token ${why}`);
   if (typeof token !== 'string' || token.length === 0) throw malformed('is empty');
-  // Its two dots found by index, never split on: a body of nothing but dots is refused at its third, not cut into a
-  // million parts.
-  const first = token.indexOf('.');
-  const second = first === -1 ? -1 : token.indexOf('.', first + 1);
-  if (second === -1 || token.indexOf('.', second + 1) !== -1) throw malformed('is not a compact JWS');
-  const parts = [token.slice(0, first), token.slice(first + 1, second), token.slice(second + 1)];
-  if (!parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
+  const parts = token.split('.');
+  if (parts.length !== 3 || !parts.every((part) => PART.test(part))) throw malformed('is not a compact JWS');
   const json = (part: string): Record<string, unknown> => {
     let text: string;
     let value: unknown;
@@ -117,7 +111,7 @@ export function decodeWorkloadToken(token: string): DecodedToken {
 export async function verifyWorkloadToken(
   token: string,
   keys: JSONWebKeySet,
-  expected: { issuer: string; audience: string; now: Date; maxLifetime?: number; maxAge?: null; work?: SignInWork },
+  expected: { issuer: string; audience: string; now: Date; maxLifetime?: number; maxAge?: null },
 ): Promise<JWTPayload & DecodedToken['claims']> {
   const options = {
     algorithms: [...WORKLOAD_ALGORITHMS],
@@ -127,16 +121,12 @@ export async function verifyWorkloadToken(
     requiredClaims: ['iss', 'sub', 'exp', 'iat'],
     currentDate: expected.now,
   };
-  // The first check paid for too, its token decoded and, under a key it names, hashed: then each further key's.
-  const work = expected.work ?? signInWork();
-  work.left -= KEY_TRY_NS + token.length * TOKEN_BYTE_NS;
-  if (work.left < 0) throw new WorkloadTokenRefused('signature', 'the token costs more to check than a sign-in may spend');
   let payload: JWTPayload;
   try {
     ({ payload } = await jwtVerify(token, createLocalJWKSet(keys), options));
   } catch (error) {
     if (!(error instanceof errors.JWKSMultipleMatchingKeys)) throw refusalOf(error);
-    payload = await anyKey(token, error, options, work);
+    payload = await anyKey(token, error, options);
   }
   const issued = issuedRefusal(payload.iat!, expected.now.getTime() / 1000, expected.maxAge === null ? Infinity : MAX_TOKEN_AGE_SECONDS);
   if (issued !== null) throw issued;
@@ -167,15 +157,11 @@ export function issuedRefusal(iat: number, now: number, maxAge = MAX_TOKEN_AGE_S
 /**
  * A token that names no key, or one several keys share, verified by
  * whichever of them signed it: a set may hold several, as while its issuer
- * rotates. At most `MAX_KEYS` tries, each a signature check, which decodes
- * and hashes the whole token again: each is paid for from the sign-in's
- * budget (`work`) before it is made, so a token of most of a mebibyte gets a
- * try or two, not 32, and is refused once the budget is spent.
+ * rotates. At most `MAX_KEYS` tries, each a signature check alone over a
+ * token of at most `SIGN_IN_BODY_BYTES`, the body that brought it.
  */
-async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2], work: SignInWork): Promise<JWTPayload> {
+async function anyKey(token: string, matching: errors.JWKSMultipleMatchingKeys, options: Parameters<typeof jwtVerify>[2]): Promise<JWTPayload> {
   for await (const key of matching) {
-    work.left -= KEY_TRY_NS + token.length * TOKEN_BYTE_NS;
-    if (work.left < 0) throw new WorkloadTokenRefused('signature', "the token costs more to check against every one of its issuer's keys than a sign-in may spend: name its key (kid)");
     try {
       return (await jwtVerify(token, key, options)).payload;
     } catch (error) {
@@ -208,16 +194,8 @@ function refusalOf(error: unknown): WorkloadTokenRefused {
   return new WorkloadTokenRefused('signature', 'the token does not verify');
 }
 
-/**
- * At most this many keys in a set, fetched or uploaded: a bound on a CI
- * sign-in's work, not on a field. A token that names no key, or one several
- * share, is tried against each (`anyKey`), and a failed check costs 77 µs
- * of CPU for RS256 and 133 µs for ES256 (Node 24, jose, the median of 1,400
- * on the machine that measured `MAX_BODY_NODES`): 32 tries are 4.3 ms at
- * worst, under half the 10 ms R27 gives a request at p50, on the hot path
- * CI sign-in is (R44).
- */
-export const MAX_KEYS = 32;
+/** At most this many keys in a set, fetched or uploaded (`@coffre/core/schemas`, beside the sign-in body it bounds the work of). */
+export { MAX_KEYS };
 
 /** One key of an uploaded set, as an owner sees it: its `kid`, its algorithm, and its RFC 7638 thumbprint. */
 export type KeySummary = { kid: string | null; alg: (typeof WORKLOAD_ALGORITHMS)[number]; thumbprint: string };

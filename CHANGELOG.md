@@ -32,10 +32,17 @@
     before), 1009 past it. Node has no 128 MB limit: each process holds
     to the same numbers, as defensive bounds.
 - **One bound per body, and its values counted before it is parsed (W331,
-  limits S15b, S60, S64, S67, S68, C22).** Every body the app reads, the
-  API's, sign-in's before anyone has signed in and MCP's, is read to one
-  bound, 1 MiB (`API_BODY_BYTES`): the device login's 4 KiB, the
-  exchanges' 16 KiB and MCP's 16 KiB and 256 KiB are gone. Its values are
+  limits S15b, S60, S64, S67, S68, C22).** Every body the app reads is
+  read to one of two bounds, and refused past it with a 413 `too_large`
+  (it was a 400), before it is read whole: before anyone has signed in
+  (device login, the CI and workload exchanges, a passkey's answer, MCP's
+  OAuth token, revocation and registration), 16 KiB
+  (`SIGN_IN_BODY_BYTES`), computed from what a stranger's token can cost,
+  32 key tries within what R27 leaves a request; after, 1 MiB
+  (`API_BODY_BYTES`), the API's and MCP's endpoint's. The device login's
+  4 KiB becomes 16 KiB, MCP's endpoint's 256 KiB 1 MiB, and a workload
+  token's own 8 KiB is gone: a CI run's ID token, about 1.2 kB, is
+  bounded by its body. Its values are
   now counted on its text, before `JSON.parse` makes any: parsed, a
   mebibyte of tiny entries or of nesting cost 35 to 40 ms of CPU and held
   8 to 28 times its size, where the count costs 0.1 ms. The count,
@@ -67,18 +74,15 @@
   deeply to read`, at the API, sign-in, MCP and the vault's Node socket.
   What no longer had a length to hide behind now costs its own size: a
   workload token's parts are counted as a body's values before they are
-  parsed; an OAuth form's fields are held to the same count and read in
-  one pass over its bytes, as the URL standard reads a form; a path's
-  slashes are trimmed in a pass, not by a regular expression's retries; a
-  device login's admission reads the open logins' addresses and never their
-  labels; and a sign-in's claim matching takes, at each step, the cheaper of
-  looking up the name's splits or trying the token's keys. A workload's
-  sign-in has one budget, `SIGN_IN_WORK_NS` (16 ms, what R27's 20 ms leaves
-  after the largest read, spent at measured costs), for its token's tries
-  against its issuer's keys, each paid for with the token's size, and for
-  matching its claims against every binding it weighs, and for checking
-  each candidate binding's MAC before it is read: past it, the sign-in is
-  refused. A string a request turns into a list (a path, a scope list, a
+  parsed; an OAuth form's names are checked for one given twice in a
+  pass, not each against all; a path's slashes are trimmed in a pass, not
+  by a regular expression's retries; and a device login's admission reads
+  the open logins' addresses and never their labels. What an Owner's own
+  bindings and roles cost (a binding's label copied into each credential
+  its sign-ins issue, a role's description held by every isolate) lands on
+  their own instance, and is accepted
+  (`docs/design/workload-access.md`, `docs/design/roles.md`). A string a
+  request turns into a list (a path, a scope list, a
   sealed state) is counted before it is split and holds no more parts than
   a body holds values, and a narrowed session's path constraints are
   reduced by a sort rather than by comparing every pair.

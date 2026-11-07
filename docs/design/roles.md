@@ -301,6 +301,17 @@ two: replacing a Viewer's binding keeps what the Viewer held.
     sealed by the vault, which would still need the credential's (a
     token a Developer issued before an Owner flagged the grant would
     read them), and a migration.
+11. **A role's name and description have no length of their own** (R70;
+    the 2026-11-06 decision), only the 1 MiB and 1,600 values of the body
+    that writes them. They live in the policy, which every app and vault
+    isolate holds and parses on each change (`/use` reads it through
+    `configObject`), so their sum grows with the roles an Owner writes:
+    32 roles of 900 KiB descriptions are about 29.5 MB held per isolate
+    and about 22 ms to parse. Only an Owner writes a role, and the cost
+    lands on their own instance: an accepted consequence (2026-11-07), not
+    a bound. *Alternative:* keep display text out of the decision object
+    (a data change), or bound the policy's bytes by the caches' share of
+    an isolate.
 
 ## 7. The API
 

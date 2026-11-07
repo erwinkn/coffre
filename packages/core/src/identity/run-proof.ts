@@ -1,6 +1,5 @@
 import { expectedAudiences, PROFILE_RULES } from './profile-rules.ts';
 import { CLOCK_TOLERANCE_SECONDS, decodeWorkloadToken, MAX_TOKEN_AGE_SECONDS, uploadedKeys, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from './workload-token.ts';
-import { CHAR_NS, signInWork, TOKEN_BYTE_NS } from './sign-in-work.ts';
 import { claimAt, differingClaims, REPEATING_PROFILES, type BindingClaims, type BindingPolicy, type WorkloadProfile } from './workloads.ts';
 
 /**
@@ -115,10 +114,7 @@ export async function verifyRunToken(
   const named = soleAudience(unverified.aud);
   const audience = named !== null && accepted.includes(named) ? named : accepted[0]!;
   const repeating = context.workload !== null && REPEATING_PROFILES.includes(binding.profile);
-  // One budget for the sign-in's key tries and its claims (`SIGN_IN_WORK_NS`), the token's decoding above paid from it.
-  const work = signInWork();
-  work.left -= token.length * TOKEN_BYTE_NS;
-  const expected = { issuer: binding.issuer, audience, now: context.now, work, ...(repeating ? { maxAge: null } : {}) };
+  const expected = { issuer: binding.issuer, audience, now: context.now, ...(repeating ? { maxAge: null } : {}) };
   let claims: Record<string, unknown>;
   try {
     // The very keys its seal digests, never others the app names (a forged set).
@@ -133,8 +129,7 @@ export async function verifyRunToken(
     }
     throw refusedBy(error);
   }
-  work.left -= binding.claims.length * CHAR_NS;
-  const differ = differingClaims(binding.profile, JSON.parse(binding.claims) as BindingClaims, claims, work);
+  const differ = differingClaims(binding.profile, JSON.parse(binding.claims) as BindingClaims, claims);
   if (differ.length > 0) throw new RunProofRefused('no_match', `the binding does not trust these claims: ${differ.join(', ')} differ`);
   if (context.workload !== null) {
     const ruled = PROFILE_RULES[binding.profile]?.token(claims, { issuer: binding.issuer, claims: JSON.parse(binding.claims) as BindingClaims, policy: policy! }) ?? null;

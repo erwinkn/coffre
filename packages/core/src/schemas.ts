@@ -103,9 +103,9 @@ export const emailAddress = z.string().email().max(320);
 
 /**
  * The most an API request body may be, read as it streams and abandoned
- * past this, at every route the app answers, sign-in's included (one bound
- * before sign-in, as after): a control-plane request, a bulk secret write
- * its largest. Workers gives an isolate 128 MB
+ * past this (413), at every route the app answers once its caller has a
+ * credential (the API, MCP's endpoint); before sign-in, `SIGN_IN_BODY_BYTES`:
+ * a control-plane request, a bulk secret write its largest. Workers gives an isolate 128 MB
  * (https://developers.cloudflare.com/workers/platform/limits/, "Memory"); a
  * body takes about 5 MiB of it while it is read, 4% at most: its chunks and
  * their one copy (2 MiB), its text (up to 2 MiB, two bytes a character past
@@ -159,6 +159,65 @@ export const VALUE_CPU_US = 10;
  * the same count, on its own (`CeremonyExpectation.values`).
  */
 export const MAX_BODY_NODES = Math.floor((REQUEST_CPU_US - READ_CPU_US) / VALUE_CPU_US);
+
+/**
+ * At most this many keys in a set, fetched or uploaded: a bound on a CI
+ * sign-in's work, not on a field. A token that names no key, or one several
+ * share, is tried against each (`@coffre/core/identity`'s `anyKey`), so it
+ * sets, with the token's size, what a stranger's sign-in costs
+ * (`SIGN_IN_BODY_BYTES`).
+ */
+export const MAX_KEYS = 32;
+
+/**
+ * A key tried against a workload token that does not verify, in
+ * microseconds of CPU, beside the token's bytes: jose's `jwtVerify`, the key
+ * imported from its JWK, the signature checked and failed. Fitted with
+ * `TOKEN_BYTE_CPU_NS` over tokens of 1 to 32 KiB, the range the bound is
+ * chosen in: 203 to 257 µs for ES256 and 81 to 185 for RS256 over nine runs
+ * (`SIGN_IN_BODY_BYTES` names the host), taken as the dearest, rounded up.
+ */
+export const KEY_TRY_CPU_US = 260;
+
+/**
+ * Each byte of a workload token, per key tried, in nanoseconds of CPU: each
+ * signature check encodes and hashes the token whole again, its one
+ * decoding spread over the tries. Fitted over 1 to 32 KiB: 6 to 13.5 over
+ * nine runs, ES256 and RS256 alike, taken as the dearest, rounded up: a try
+ * costs more than linearly near 32 KiB (twice as much at 64 KiB as at 32).
+ */
+export const TOKEN_BYTE_CPU_NS = 14;
+
+/**
+ * The most a body sent before sign-in may be, in bytes, read as it streams
+ * and refused past this with a 413 before it is read whole: a device login's
+ * start and poll, a CI run's or a workload's exchange (its ID token, AWS
+ * proof or enrollment code), a passkey's answer, and MCP's OAuth token,
+ * revocation and registration. Anyone may send one, and the costliest it
+ * can make the app do, per byte, is a workload token that names no key,
+ * tried against each of `MAX_KEYS` keys: `MAX_KEYS × (KEY_TRY_CPU_US +
+ * TOKEN_BYTE_CPU_NS × B)` within what a request has left once a body is read
+ * (`REQUEST_CPU_US − READ_CPU_US`, 16 ms) gives B ≤ 17.1 kB, so 16 KiB, the
+ * power of two below. Measured directly, 32 tries of a token of 16 KiB cost
+ * 9.7 to 12.0 ms (ES256) and 7.1 to 10.1 (RS256); of 32 KiB, 10.3 to 21.4,
+ * past the 16 ms in a third of the runs. 16 KiB was the exchanges' and MCP's
+ * OAuth bound before this change, so every body that signed in still fits: a
+ * GitHub Actions ID token is about 1.2 kB, a passkey's answer under 1 kB,
+ * an AWS proof a few kB with its session token.
+ *
+ * Every other thing a stranger's body makes the app do costs less
+ * (`packages/server/scripts/sign-in-cost.ts`, Node 24.22, jose 6.2, a 96-core
+ * Linux host at loads of 33 to 57, 2026-11-07, the process's CPU, the median
+ * of nine samples, with zod's eval-built fast paths and without): a passkey's
+ * answer, verified, 71 to 77 ns a byte (1.1 to 1.3 ms at 16 KiB); a form of
+ * `+` or of short distinct fields, read and checked for a name given twice,
+ * 10 to 26 ns (at most 0.6 ms); the body's count, parse and validation, under
+ * 6 ns (0.1 ms); and claim matching, once a token verifies, against GitHub's,
+ * GitLab's and Kubernetes' bindings and one of five-dot names, every split of
+ * each present in the token, 20 to 30 µs whatever its size.
+ */
+export const SIGN_IN_BODY_BYTES =
+  1024 * 2 ** Math.floor(Math.log2(((REQUEST_CPU_US - READ_CPU_US - MAX_KEYS * KEY_TRY_CPU_US) * 1000) / (MAX_KEYS * TOKEN_BYTE_CPU_NS) / 1024));
 
 /**
  * How many values a JSON text holds, counted as `JSON.parse` would make

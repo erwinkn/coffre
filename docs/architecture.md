@@ -1064,8 +1064,9 @@ minutes (below).
 this order, so that a stranger costs one bounded read at most:
 
 1. **Admission**: the deployment's two limiters, per source address and in
-   total, then the body, read only to 1 MiB, the bound every body has
-   (`API_BODY_BYTES`). A limiter that fails refuses.
+   total, then the body, read only to 16 KiB, the bound of every body sent
+   before sign-in (`SIGN_IN_BODY_BYTES`, 413 past it). A limiter that fails
+   refuses.
    Cloudflare counts per location and a Node process per process, so these
    bound a flood per location or process, not across the deployment.
 2. **The token's shape**: a compact JWS, `iss` and `sub`

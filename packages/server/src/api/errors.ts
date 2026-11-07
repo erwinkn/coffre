@@ -31,6 +31,8 @@ import { Superseded } from '../watch.ts';
  *   405 method_not_allowed
  *   409 conflict           the request is valid but the current state refuses it; `reason: 'caller_changed'`: an act
  *                          sent again after its fresh check, by another person than the one who sent it first
+ *   413 too_large          the body is larger than the route reads: `API_BODY_BYTES`, or `SIGN_IN_BODY_BYTES` before
+ *                          sign-in (`@coffre/core/schemas`); nothing past the bound was read
  *   429 too_many_requests  too many sign-ins waiting; try again later
  *   501 not_implemented    a route this release declares and does not serve yet
  *   503 unavailable        something coffre needs is not answering: the vault, a platform, its database
@@ -58,6 +60,7 @@ export const ERROR_STATUS = {
   not_available: 404,
   method_not_allowed: 405,
   conflict: 409,
+  too_large: 413,
   too_many_requests: 429,
   not_implemented: 501,
   unavailable: 503,

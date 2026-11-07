@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
 
-import { CHAR_NS, differingClaims, MAX_BINDINGS, PROFILE_URNS, SESSION_MS, signInWork, SignInWorkSpent, type BindingClaims, type SignInWork } from '@coffre/core/identity';
+import { differingClaims, PROFILE_URNS, SESSION_MS } from '@coffre/core/identity';
 
 import { ExchangeRefused, madeElsewhere, madeHere, type MatchedProof, type ProofContext, type ProofKind } from '../api/workloads.ts';
-import { memberStanding, type BindingRow } from '../db/queries.ts';
-import { workloadCandidates } from '../db/workloads.ts';
+import { liveBindings, memberStanding, type BindingRow } from '../db/queries.ts';
 import { capped, FETCH_DEADLINE_MS, FetchRefused, USER_AGENT } from './transport.ts';
 
 /**
@@ -250,25 +249,17 @@ export function awsClaims(identity: AwsIdentity): { account: string; role_id: st
 }
 
 /** The oldest of `bindings` the identity matches: an `aws` binding naming its account and role ID. */
-export function matchAwsBinding(bindings: readonly BindingRow[], identity: AwsIdentity, work: SignInWork = signInWork()): BindingRow | null {
+export function matchAwsBinding(bindings: readonly BindingRow[], identity: AwsIdentity): BindingRow | null {
   const claims = awsClaims(identity);
-  // The sign-in's budget for the whole search, each binding's claims read from it too (`SIGN_IN_WORK_NS`).
-  return bindings.find((row) => {
-    if (row.profile !== 'aws') return false;
-    work.left -= row.claims.length * CHAR_NS;
-    return work.left >= 0 && differingClaims('aws', JSON.parse(row.claims) as BindingClaims, claims, work).length === 0;
-  }) ?? null;
+  return bindings.find((row) => row.profile === 'aws' && differingClaims('aws', JSON.parse(row.claims), claims).length === 0) ?? null;
 }
 
-/**
- * A service's live `aws` bindings, theirs alone read (`workloadCandidates`): its other bindings, as large as a body
- * lets them be, are neither read nor checked for a proof none of them can take, and what is checked is paid from the
- * sign-in's budget.
- */
-async function awsBindings(ctx: ProofContext, work: SignInWork): Promise<BindingRow[]> {
+/** A service's live `aws` bindings. */
+async function awsBindings(ctx: ProofContext): Promise<BindingRow[]> {
   const standing = await memberStanding(ctx.db, ctx.service);
   if (standing === null || standing.status !== 'active') return [];
-  return (await workloadCandidates(ctx.db, ctx.chainKey, ctx.service, PROFILE_URNS.aws, ['aws'], MAX_BINDINGS, work)).bindings;
+  const live = await liveBindings(ctx.db, ctx.chainKey, ctx.service, standing.generation);
+  return live.filter((row) => row.profile === 'aws' && row.issuer === PROFILE_URNS.aws && row.policy !== null);
 }
 
 export type AwsProofOptions = {
@@ -293,14 +284,7 @@ export function awsProof(options: AwsProofOptions = {}): ProofKind {
     async verify(input: unknown, ctx: ProofContext): Promise<MatchedProof | ExchangeRefused> {
       const request = checkAwsRequest(input, { publicUrl: ctx.publicUrl, jkt: ctx.jkt, now: now() });
       if (request instanceof ExchangeRefused) return request;
-      const work = signInWork();
-      let live: BindingRow[];
-      try {
-        live = await awsBindings(ctx, work);
-      } catch (error) {
-        if (error instanceof SignInWorkSpent) return new ExchangeRefused('no_match', error.message);
-        throw error;
-      }
+      const live = await awsBindings(ctx);
       if (live.length === 0) return new ExchangeRefused('no_match', `${ctx.service.slice('token:'.length)} has no aws binding`);
       // Those made on this instance's URL: one made on another shadows none that was (review r2).
       const bindings = live.filter((binding) => madeHere(binding, ctx.publicUrl));
@@ -315,7 +299,7 @@ export function awsProof(options: AwsProofOptions = {}): ProofKind {
         return new ExchangeRefused('issuer_unavailable', 'STS could not be asked about the aws proof: try again', 503);
       }
       if (identity instanceof ExchangeRefused) return identity;
-      const binding = matchAwsBinding(bindings, identity, work);
+      const binding = matchAwsBinding(bindings, identity);
       if (binding === null) {
         return new ExchangeRefused('no_match', `no aws binding of ${ctx.service.slice('token:'.length)} names role ${identity.role} (${identity.roleId}) of account ${identity.account}`);
       }

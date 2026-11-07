@@ -2255,7 +2255,12 @@ export class SigninService {
    * (`WorkloadService.exchange`): its row, which the exchange writes as it
    * spends the token (`exchangeToken`), under the log's head, its member
    * checked under it. It names its binding in `created_by`, under its MAC,
-   * and dies with it.
+   * and dies with it. Its label is a copy of its binding's, whatever its
+   * length: an accepted consequence of the 2026-11-06 decision (no length of
+   * a label's own), since only an Owner's binding sets it and its bytes land
+   * on that service's sign-ins, each credential and `issue` entry one copy
+   * (docs/design/workload-access.md, section 3, "What an Owner's bindings
+   * cost"). Naming the binding by its ID instead is a follow-up.
    */
   exchangedCredential(
     service: string,

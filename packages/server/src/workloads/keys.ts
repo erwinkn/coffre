@@ -1,4 +1,4 @@
-import { MAX_KEYS, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet, type SignInWork } from '@coffre/core/identity';
+import { MAX_KEYS, verifyWorkloadToken, WorkloadTokenRefused, type JSONWebKeySet } from '@coffre/core/identity';
 
 import { FetchRefused, type WorkloadTransport } from './transport.ts';
 
@@ -74,7 +74,7 @@ export async function verifyWithKeys(
   transport: WorkloadTransport,
   url: string,
   token: string,
-  expected: { issuer: string; audience: string; now: Date; maxAge?: null; work?: SignInWork },
+  expected: { issuer: string; audience: string; now: Date; maxAge?: null },
 ): ReturnType<typeof verifyWorkloadToken> {
   const now = expected.now.getTime();
   let entry = entries.get(url);
