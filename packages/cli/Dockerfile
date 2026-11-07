@@ -1,5 +1,5 @@
 # The coffre CLI's image, ghcr.io/erwinkn/coffre-cli: a release's
-# @coffre/cli on Node 24, as a non-root user, for `coffre serve` (a
+# @coffre/cli on Node 26, as a non-root user, for `coffre serve` (a
 # workload's sidecar, docs/workloads.md) or any other command:
 #
 #   docker run --rm ghcr.io/erwinkn/coffre-cli:<version> --version

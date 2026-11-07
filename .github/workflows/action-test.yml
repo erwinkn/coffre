@@ -203,7 +203,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs[] | select(.name | startswith("Action smoke (")) | .id' > "$RUNNER_TEMP/coffre-action-job-ids"
-          test "$(wc -l < "$RUNNER_TEMP/coffre-action-job-ids")" -eq 5
+          # One job per entry of the smoke matrix's `node` list.
+          test "$(wc -l < "$RUNNER_TEMP/coffre-action-job-ids")" -eq 6
           while read -r job; do
             gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job/logs" > "$RUNNER_TEMP/coffre-action-job-$job.log"
             node packages/conformance/scripts/action-test.ts verify-masks "$RUNNER_TEMP/coffre-action-job-$job.log"
