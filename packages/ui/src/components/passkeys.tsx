@@ -235,14 +235,20 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The answer coffre did not answer, sent again by the next press; and whether this step's options were used.
-  const unsent = useRef<{ answer: { state: string; response: Record<string, unknown> } | null; asked: boolean }>({ answer: null, asked: false });
+  // The answer coffre did not answer, sent again by the next press; whether this step's options were used; and the
+  // signal that this step was put away (the dialog closed, or new options asked), which ends its `create()`.
+  const unsent = useRef<{ answer: { state: string; response: Record<string, unknown> } | null; asked: boolean; closed: AbortSignal }>({
+    answer: null,
+    asked: false,
+    closed: new AbortController().signal,
+  });
 
   useEffect(() => {
     if (!open) return;
     let current = true;
+    const closing = new AbortController();
     setStep(null);
-    unsent.current = { answer: null, asked: false };
+    unsent.current = { answer: null, asked: false, closed: closing.signal };
     const sent = readClock(browserClock);
     client.passkeys.options(member).then(
       ({ options, state }) => {
@@ -256,6 +262,7 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
     );
     return () => {
       current = false;
+      closing.abort(new DOMException('the dialog was closed', 'AbortError'));
     };
   }, [open, attempt, client, member]);
 
@@ -270,33 +277,37 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
   }
 
   async function press(current: AddStep) {
+    // This step's own slot: the dialog closed and opened again meanwhile gives the next step another, which this press
+    // must neither fill nor send from (review of #539 by Fable 5.1).
+    const mine = unsent.current;
     setBusy(true);
     setError(null);
     try {
-      let answer = unsent.current.answer;
+      let answer = mine.answer;
       if (answer === null) {
         const left = leftOf(current.ends, browserClock);
-        if (left === 0 || unsent.current.asked) {
+        if (left === 0 || mine.asked) {
           setError('This request lapsed while the dialog was open. Press again for a new one.');
           setAttempt((n) => n + 1);
           return;
         }
-        unsent.current.asked = true;
+        mine.asked = true;
         let credential: PublicKeyCredential;
         try {
-          credential = await createCredential({ ...current.options, timeout: Math.min(left, current.options.timeout) });
+          credential = await createCredential({ ...current.options, timeout: Math.min(left, current.options.timeout) }, mine.closed);
         } catch (thrown) {
-          // Ended at the options' deadline (the session's fresh window's end, at most): new options, asked of a session
-          // fresh again, rather than a passkey coffre would refuse.
-          if (thrown instanceof DOMException && thrown.name === 'TimeoutError') {
-            setError(authenticatorError(thrown, current.options.rp.id));
-            setAttempt((n) => n + 1);
-            return;
-          }
-          throw thrown;
+          if (mine.closed.aborted) return;
+          // These options were asked of the authenticator, whatever it answered: the next press is new options', asked
+          // now, so that it goes at once. Ended at their deadline (the session's fresh window's end, at most), they are
+          // asked of a session fresh again, rather than make a passkey coffre would refuse. An authenticator holding
+          // one of yours already may hold the one an add whose answer was lost added: the list, read again, shows it.
+          setError(authenticatorError(thrown, current.options.rp.id));
+          setAttempt((n) => n + 1);
+          if (thrown instanceof DOMException && thrown.name === 'InvalidStateError') void refresh(queryClient, affects.passkeys(member)).catch(() => {});
+          return;
         }
         answer = { state: current.state, response: toJSON(credential) as Record<string, unknown> };
-        unsent.current.answer = answer;
+        mine.answer = answer;
       }
       try {
         await client.passkeys.add(member, answer);
@@ -306,7 +317,7 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
           setError('coffre did not answer just now. Try again: it sends the passkey you just made, without asking for another.');
           return;
         }
-        unsent.current.answer = null;
+        mine.answer = null;
         if (outcome === 'exists') {
           await added();
           return;
@@ -319,7 +330,7 @@ function AddPasskeyDialog({ open, onOpenChange, member }: { open: boolean; onOpe
         setError(failureMessage(failure));
         return;
       }
-      unsent.current.answer = null;
+      mine.answer = null;
       await added();
     } catch (thrown) {
       setError(authenticatorError(thrown, current.options.rp.id));
@@ -394,6 +405,9 @@ function RenamePasskeyDialog({ passkey, onOpenChange, member }: { passkey: Passk
   );
 }
 
+/** How long the server's sealed step lasts (`CEREMONY_TTL_SECONDS`), for a step whose options do not say. */
+const CEREMONY_MS = 5 * 60_000;
+
 /** What the passkey door answers for a removal: a touch of a passkey you keep (or of the last, under `optional`), or none under `off`. */
 type RemoveStep = { purpose: 'remove'; email: string; name: string; options: RequestJSON | null; state: string };
 
@@ -441,7 +455,9 @@ function RemovePasskeyDialog({
     const sent = readClock(browserClock);
     void passkeyAnswer<RemoveStep>(fetch(`/api/auth/passkey?remove=${encodeURIComponent(id)}`, { credentials: 'same-origin' })).then((answer) => {
       if (!current) return;
-      if (answer.kind === 'ok' && answer.value.options !== null) fresh.ends = deadlineOf(sent, answer.value.options.timeout);
+      // Under `off` the step names no options, and no timeout: its state lapses as every ceremony's does, five minutes on
+      // (`CEREMONY_TTL_SECONDS`), and a press after asks for another rather than read as an ended session.
+      if (answer.kind === 'ok') fresh.ends = deadlineOf(sent, answer.value.options?.timeout ?? CEREMONY_MS);
       setStep(answer.kind === 'ok' ? answer.value : answer.kind === 'refused' ? { refused: answer.code } : 'unavailable');
     });
     return () => {

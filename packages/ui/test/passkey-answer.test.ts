@@ -234,3 +234,31 @@ test("a POST whose 200 was cut off was taken: landed, its answer forgotten, neve
   // A GET's so cut off is no step to go by.
   assert.deepEqual(await passkeyAnswer(Promise.resolve(new Response('{"purpose":', { status: 200 }))), { kind: 'unavailable' });
 });
+
+test("a dialog closed ends its authenticator's call as closed, not lapsed: its press drops it, rather than fill the next opening's step (review of #539 by Fable 5.1)", async () => {
+  // As `create()` does: a signal aborted already refuses at once.
+  const waits = (signal: AbortSignal) =>
+    new Promise<string>((_, reject) => {
+      if (signal.aborted) reject(new DOMException('aborted', 'AbortError'));
+      signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    });
+  // Held to a second of their own, so a call never ended fails rather than hangs.
+  const ended = async (call: Promise<string>) => {
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    const never = new Promise<never>((_, reject) => {
+      guard = setTimeout(() => reject(new Error('the call was never ended')), 1000);
+    });
+    try {
+      return await Promise.race([call, never]);
+    } finally {
+      clearTimeout(guard);
+    }
+  };
+  const closing = new AbortController();
+  const call = withinDeadline(60_000, waits, closing.signal);
+  closing.abort(new DOMException('the dialog was closed', 'AbortError'));
+  await assert.rejects(ended(call), { name: 'AbortError', message: 'the dialog was closed' });
+  // Closed already, the call ends at once; never closed, an answer is the authenticator's.
+  await assert.rejects(ended(withinDeadline(60_000, waits, closing.signal)), { name: 'AbortError', message: 'the dialog was closed' });
+  assert.equal(await withinDeadline(60_000, async () => 'answer', new AbortController().signal), 'answer');
+});

@@ -75,15 +75,21 @@ export function leftOf(ends: Deadline, clock: Clock): number {
  * wait minutes, and a passkey made after the step lapsed is one coffre refuses, left on the device (review r2 of
  * #539). An answer that came first is kept: coffre, not the page, says whether it came in time.
  */
-export async function withinDeadline<T>(left: number, call: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withinDeadline<T>(left: number, call: (signal: AbortSignal) => Promise<T>, closed?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(lapsed()), Math.max(0, left));
+  // `closed`: the page put the call away (its dialog closed) before it was answered; that ends it too, as itself.
+  const close = () => controller.abort(closed?.reason);
+  if (closed?.aborted) close();
+  closed?.addEventListener('abort', close, { once: true });
   try {
     return await call(controller.signal);
   } catch (thrown) {
+    if (closed?.aborted) throw closed.reason;
     throw controller.signal.aborted ? lapsed() : thrown;
   } finally {
     clearTimeout(timer);
+    closed?.removeEventListener('abort', close);
   }
 }
 

@@ -758,7 +758,15 @@ and its cookie set, so the page goes on rather than send the same
 answer to a step that ended (review r6 of #539). An add whose reply was lost, sent
 again, finds its passkey among the person's live ones before it counts
 them and answers `409 passkey_exists`, which the dialog takes as done
-(review r1 of #539).
+(review r1 of #539). Sent after five minutes, its step lapsed, it is
+asked again: the device, holding that passkey, refuses the new
+`create()` (`InvalidStateError`), and the dialog reads the list again,
+which shows it. The Add dialog's options are asked of the authenticator
+once, whatever it answers, so a prompt dismissed asks for new options at
+once, and closing the dialog ends its `create()`: a press fills and
+sends only its own opening's step. A removal under `off`, whose step
+names no options, still lapses with its state, five minutes on, and a
+press after asks for another (review of #539 by Fable 5.1).
 
 ### 3.7 Recovery
 
