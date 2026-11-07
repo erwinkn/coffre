@@ -1166,14 +1166,19 @@ export async function missingMembers(db: Queryable, member?: { type: string; id:
       SELECT ${next(null)}
       UNION ALL
       SELECT ${next(sql`named.principal`)} FROM named WHERE named.principal IS NOT NULL
+    ),
+    -- Those without a row, found before any access entry is looked for: left to the planner, it may look for one of
+    -- every principal first, a step down the subject index and a scan of the members for each (T233).
+    rowless (principal) AS MATERIALIZED (
+      SELECT principal FROM named
+      WHERE (principal LIKE 'user:%' OR principal LIKE 'token:%')
+        AND NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = named.principal)
     )
-    SELECT principal FROM named
-    WHERE (principal LIKE 'user:%' OR principal LIKE 'token:%')
-      AND NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = named.principal)
-      AND EXISTS (
-        SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = named.principal AND decision = 'allow'
-          AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})
-      )
+    SELECT principal FROM rowless
+    WHERE EXISTS (
+      SELECT 1 FROM audit_log WHERE author = 'vault' AND subject_principal = rowless.principal AND decision = 'allow'
+        AND action IN (${sql.join(ACCESS_ACTIONS.map((action) => sql`${action}`), sql`, `)})
+    )
     UNION
     SELECT a.principal FROM (SELECT ${added} AS principal FROM log_changes WHERE ${recorded(engine, sql.raw('log_changes.payload'), 'admitted')}) AS a
     WHERE NOT EXISTS (SELECT 1 FROM vault_members WHERE vault_members.principal = a.principal)
