@@ -222,15 +222,22 @@ its own database did, and holds it to every other check
     file's transaction ending between a call and its controls moved that
     block from one to the next: 9 `log_bulk` blocks beside 8, or 8 beside
     9 (T225; the deleted rows' heap tuples had their xmax set and their
-    index entries were still live). So each batch, before it is weighed,
-    waits until no session older than its deletes is left in the cluster
-    (`deletesSettled`), as long as the test's own timeout lets it, and
-    fails naming those sessions if it runs out. A transaction of that
-    kind, planted in another database, failed 499 of 500 comparisons
-    without the wait when it committed between the asked call and its
-    controls; committed on a random timer of up to 8 s as each batch was
-    weighed, it failed shard 5/6 without the wait and passed it with the
-    wait.
+    index entries were still live). A transaction of that kind, planted in
+    another database, failed 499 of 500 comparisons when it committed
+    between the asked call and its controls. So each batch, before it is
+    weighed, waits until no session of its own database older than its
+    deletes is left (`deletesSettled`), as long as the test's own timeout
+    lets it, and fails naming those sessions if it runs out; then it is
+    weighed under a snapshot held open in that database
+    (`horizonHeld`), which keeps the database's horizon where it was
+    while another database's transaction ends. Waiting on the whole
+    cluster's sessions instead (T225's first fix) held a test up for as
+    long as any session anywhere kept a transaction open (T238); the
+    held snapshot asks nothing of other databases. Ended between a call and
+    its twin, such a transaction left `use-route.test.ts`'s T200 a call
+    35 buffers above its twin without the held snapshot, and none with
+    it (`packages/vault/test/weighing.test.ts` holds the helper to it:
+    66 buffers beside 7 without).
     The twin changes only the
     key's name, and keeps what the isolate remembered of the key: its id,
     a cover. A read by that id would cost the twin as much as the key, so

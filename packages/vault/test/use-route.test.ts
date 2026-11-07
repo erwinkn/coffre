@@ -22,7 +22,7 @@ import type { Names, RouteCall, UseCall } from '../src/use.ts';
 import { openVault, prepareVault } from '../src/vault.ts';
 import { ENGINE, HOT_URL, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { route, routeWorld } from './route-world.ts';
-import { deletesSettled, weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, horizonHeld, weigh, weighingSession, WORLD_TABLES, type HotCall } from '../../../scripts/matrix-weigh.ts';
 import { change, CONFIG, emptyLog, isolate, LOG_015, seal, SIGNING_KEY, useDatabases } from './use-world.ts';
 
 let db: TestDatabase;
@@ -1133,14 +1133,9 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
     // Every row the file's cases deleted or wrote over dead to every session first: a transaction that could still see
     // them (an autovacuum worker's ANALYZE of this database, say) keeps their versions from the VACUUM below, and each
     // scan reads them until it ends; ending between a call and its twin, it left the call 9 to 35 buffers above its twin
-    // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `log_bulk`.
-    const watcher = postgresClient(OWNER_URL, { max: 1 });
-    try {
-      await deletesSettled(watcher, t.signal);
-    } finally {
-      await watcher.end();
-    }
-    await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
+    // (CI, T238; forced, 13 to 42), as T225 found of the matrices' `log_bulk`. Then weighed with the horizon held where
+    // it is, so that a transaction of another database ending between a call and its twin moves nothing either
+    // (`horizonHeld`; T238 r2: 146 buffers beside 111).
     // The twin: the same call of a route the world never saved (`use_route`'s place reading's route; the named call's route).
     const twinOf = (call: HotCall): HotCall => {
       const args = [...call.args];
@@ -1148,10 +1143,19 @@ test("T200: a caller who stands nowhere there reads nothing of the route, its ga
       return { query: call.query, args };
     };
     const read: { label: string; buffers: number; keyBlocks: number; beyond: number }[] = [];
-    for (const { label, call } of asked) {
-      const [one, twin] = [await weigh(session, call), await weigh(session, twinOf(call))];
-      assert.equal(one.keyBlocks, twin.keyBlocks, `${label}: the key's blocks as its twin's`);
-      read.push({ label, buffers: one.buffers, keyBlocks: one.keyBlocks, beyond: one.buffers - twin.buffers });
+    const watcher = postgresClient(OWNER_URL, { max: 1 });
+    try {
+      await deletesSettled(watcher, t.signal);
+      await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
+      await horizonHeld(watcher, async () => {
+        for (const { label, call } of asked) {
+          const [one, twin] = [await weigh(session, call), await weigh(session, twinOf(call))];
+          assert.equal(one.keyBlocks, twin.keyBlocks, `${label}: the key's blocks as its twin's`);
+          read.push({ label, buffers: one.buffers, keyBlocks: one.keyBlocks, beyond: one.buffers - twin.buffers });
+        }
+      });
+    } finally {
+      await watcher.end();
     }
     const beyond = read.map((one) => one.beyond);
     assert.ok(Math.max(...beyond) - Math.min(...beyond) <= 6, JSON.stringify(read));

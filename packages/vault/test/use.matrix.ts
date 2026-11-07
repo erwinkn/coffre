@@ -33,7 +33,7 @@ import { postgresClient } from '@coffre/db/connect';
 import { sql } from 'drizzle-orm';
 
 import { shardOf } from '../../../scripts/matrix-shard.ts';
-import { deletesSettled, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
+import { deletesSettled, horizonHeld, WORLD_TABLES } from '../../../scripts/matrix-weigh.ts';
 import type { Input } from '../src/inputs.ts';
 import { ENGINE, openTestDatabase, OWNER_URL, rows, run, type TestDatabase } from './database.ts';
 import { holding, keyBlocksOf, namedWorld, principalLocks, slowed, turnsApart, weighed, weighedInTurn, weighingSession, type HotCall, type Weighed } from './named-world.ts';
@@ -350,35 +350,38 @@ test(`a caller learns nothing of a key they may not have, whatever the isolate's
     if (ENGINE !== 'postgres') return;
     // The rows the batch deleted (the window passed: its principals' rows of the cap's) dead to every session first, so
     // that no transaction of this database (an autovacuum's ANALYZE, say), ending as the batch is weighed, moves a block
-    // of `log_bulk` from one call to the next (T225, `deletesSettled`).
+    // of `log_bulk` from one call to the next (T225, `deletesSettled`); then weighed with the horizon held where it is,
+    // so that one of another database (another file's, in CI) ending meanwhile moves none either (`horizonHeld`, T238).
     const watcher = postgresClient(OWNER_URL, { max: 1 });
     try {
       await deletesSettled(watcher, t.signal);
+      // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
+      // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
+      // read hundreds of buffers above the rest (CI, W268). The key's relations as they are: vacuumed, their all-visible
+      // pages would let a probe skip the heap and hide work of a key's history (review r4 of W268).
+      await run(db.owner, sql`ANALYZE`);
+      // Each cell is a world of its own, whose own rows its setup wrote over a few times: their tables vacuumed, the key's
+      // own relations not (`WORLD_TABLES`).
+      await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
+      await horizonHeld(watcher, async () => {
+        // One session for them all, so that every call is weighed on the same plans (`weighingSession`).
+        const session = weighingSession();
+        try {
+          for (const r of results) {
+            const warm = await weighed(r.sent, session);
+            const cold = await weighed(r.cold, session);
+            [r.buffers, r.keyBlocks, r.blocks, r.coldBuffers, r.coldKeyBlocks, r.coldBlocks] = [warm?.buffers ?? null, warm?.keyBlocks ?? null, warm?.blocks ?? null, cold?.buffers ?? null, cold?.keyBlocks ?? null, cold?.blocks ?? null];
+          }
+        } finally {
+          await session.end();
+        }
+        // Each in a new session of its own, at the server's planner settings: what a connection's first calls read, before
+        // its plan cache settles, for a key as for every other (T207, Sol's review r2).
+        for (const r of results) if (r.early) r.turns = await weighedInTurn(r.sent);
+      });
     } finally {
       await watcher.end();
     }
-    // The statistics as the batch left them, before it is weighed, and none changing while it is (autovacuum is off on
-    // this database's tables, `before`): an ANALYZE mid-batch would make the session plan anew, and one cell of a row
-    // read hundreds of buffers above the rest (CI, W268). The key's relations as they are: vacuumed, their all-visible
-    // pages would let a probe skip the heap and hide work of a key's history (review r4 of W268).
-    await run(db.owner, sql`ANALYZE`);
-    // Each cell is a world of its own, whose own rows its setup wrote over a few times: their tables vacuumed, the key's
-    // own relations not (`WORLD_TABLES`).
-    await run(db.owner, sql.raw(`VACUUM ${WORLD_TABLES.join(', ')}`));
-    // One session for them all, so that every call is weighed on the same plans (`weighingSession`).
-    const session = weighingSession();
-    try {
-      for (const r of results) {
-        const warm = await weighed(r.sent, session);
-        const cold = await weighed(r.cold, session);
-        [r.buffers, r.keyBlocks, r.blocks, r.coldBuffers, r.coldKeyBlocks, r.coldBlocks] = [warm?.buffers ?? null, warm?.keyBlocks ?? null, warm?.blocks ?? null, cold?.buffers ?? null, cold?.keyBlocks ?? null, cold?.blocks ?? null];
-      }
-    } finally {
-      await session.end();
-    }
-    // Each in a new session of its own, at the server's planner settings: what a connection's first calls read, before
-    // its plan cache settles, for a key as for every other (T207, Sol's review r2).
-    for (const r of results) if (r.early) r.turns = await weighedInTurn(r.sent);
   };
   // The instance's one policy and roles, which the first world makes, before the cells' worlds run side by side.
   await namedWorld(db);
