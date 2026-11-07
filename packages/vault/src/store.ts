@@ -58,23 +58,26 @@ export { accessEntriesAbout, insertGrant, liveProjects } from '@coffre/db/grants
 export { newestVaultEntries } from '@coffre/db/log';
 
 /**
- * On Postgres, fail a lock wait in this transaction after `ms`, rather than
- * wait for ever behind a transaction that never ends; with `statements`,
- * any statement that takes longer, too. A queue for a row each holder
- * updates, as the log's head, is no one wait: a waiter follows each update
- * to the row's new version and waits again, its lock's clock started over,
- * so only the statement's own bound ends it.
+ * On Postgres, fail each lock wait in this transaction after `lockMs`,
+ * rather than wait for ever behind a transaction that never ends; with
+ * `statementMs`, any statement that takes longer, too. A queue for a row each
+ * holder updates, as the log's head, is no one wait: a waiter follows each
+ * update to the row's new version and waits again, its lock's clock started
+ * over, so only the statement's own bound ends it.
  */
-export async function boundLockWaits(tx: Transaction, ms: number, statements = false, { final = false }: { final?: boolean } = {}): Promise<void> {
+export async function boundLockWaits(tx: Transaction, lockMs: number, statementMs?: number, { final = false }: { final?: boolean } = {}): Promise<void> {
   if (engineOf(tx) !== 'postgres') return;
-  const bound = String(Math.trunc(ms));
-  const statement = statements
-    ? sql`SELECT set_config('lock_timeout', ${bound}, true), set_config('statement_timeout', ${bound}, true)`
-    : sql.raw(`SET LOCAL lock_timeout = ${bound}`);
+  const lock = String(Math.trunc(lockMs));
+  const statement = statementMs === undefined
+    ? sql`SELECT set_config('lock_timeout', ${lock}, true)`
+    : sql`SELECT set_config('lock_timeout', ${lock}, true), set_config('statement_timeout', ${String(Math.trunc(Math.min(statementMs, MAX_STATEMENT_MS)))}, true)`;
   // `final`: nothing awaits it, it goes first in what the transaction asks next (`later`).
   if (final) later(tx, statement);
   else await tx.execute(statement);
 }
+
+/** Postgres's `statement_timeout` takes an int of milliseconds: a bound past it is none. */
+const MAX_STATEMENT_MS = 2_147_483_647;
 
 /**
  * How long a release is kept: the longest bulk limit window

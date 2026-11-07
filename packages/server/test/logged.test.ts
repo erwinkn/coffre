@@ -73,7 +73,7 @@ test('a moment\'s 503 says when to ask again, 5 seconds, and nothing else does',
   const lock = new Error('Failed query: select "principal" …', { cause: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }) });
   for (const error of [lock, new ApiError('unavailable', 'coffre cannot check who you are right now')]) {
     const response = errorResponse(error, { 'x-kept': 'yes' });
-    assert.deepEqual([response.status, response.headers.get('retry-after'), response.headers.get('x-kept')], [503, '5', 'yes']);
+    assert.deepEqual([response.status, response.headers.get('retry-after'), response.headers.get('x-kept')], [503, '1', 'yes']);
   }
   // One that waits on an operator, or that says its own wait, is left as it is.
   assert.equal(errorResponse(new ApiError('unavailable', 'the vault holds another key', 'wrong_kek')).headers.get('retry-after'), null);
@@ -88,6 +88,6 @@ test('T169: a change committed and not sealed in time is a 503 that says so, wit
   for (const error of [rpc, new Error('Failed query: select 1', { cause: rpc })]) {
     assert.deepEqual(toErrorBody(error), { status: 503, body: { error: 'unavailable', message: UNSEALED_MESSAGE } });
     const response = errorResponse(error);
-    assert.deepEqual([response.status, response.headers.get('retry-after')], [503, '5']);
+    assert.deepEqual([response.status, response.headers.get('retry-after')], [503, '1']);
   }
 });

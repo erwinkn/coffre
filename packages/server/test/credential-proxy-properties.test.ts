@@ -466,7 +466,7 @@ test("the proxy's own 503 says when to ask again, and only when coffre could not
   const answer = (context: PluginContext) => credentialProxy({ cacheSeconds: 0, credentials: { stripe: { upstream: 'https://api.stripe.example', inject: header('authorization', 'Bearer {API_KEY}') } } })
     .routes!.fetch(new Request(`${PUBLIC}/use/stripe/v1/charges`, { headers: { 'x-coffre-handle': HANDLE } }), context);
   const moment = await answer(failing(new CoffreError(503, 'unavailable', 'coffre cannot check who you are right now')));
-  assert.deepEqual([moment.status, moment.headers.get('retry-after')], [503, '5']);
+  assert.deepEqual([moment.status, moment.headers.get('retry-after')], [503, '1']);
   const lasting = await answer(failing(new CoffreError(503, 'unavailable', 'the vault holds another key', 'wrong_kek')));
   assert.deepEqual([lasting.status, lasting.headers.get('retry-after')], [503, null]);
 });

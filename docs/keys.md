@@ -224,7 +224,11 @@ open but the call could not release. The keys of a read at one place that
 came out alike share one entry, each its item of the intent. So the log
 accounts for every key KMS
 was asked about, and full verification fails on an intent whose outcomes
-never came. A wrapped key that KMS will not decrypt for this secret is
+never came. Nothing is locked while KMS answers: a removal, a revocation
+or a deletion that lands meanwhile commits at once, and the read is then
+refused, each key logged with why (`removed`, `no_grant`, `deleted`…), the
+data keys KMS opened wiped and never released. CloudTrail shows those
+Decrypts, and the log what came of them. A wrapped key that KMS will not decrypt for this secret is
 refused as `bad_claim`, as with a local key.
 
 **Rotation.** KMS rotates the key material once a year under the same ARN,

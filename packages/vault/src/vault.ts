@@ -175,9 +175,10 @@ import {
   type SaveProxyInput,
   isConfirmation,
   type Confirmation,
+  LOCK_WAIT_MS,
 } from '@coffre/core/vault';
 import type { Database, Queryable, Transaction } from '@coffre/db';
-import { engineOf, isUnavailable, isUniqueViolation, SNAPSHOT } from '@coffre/db/dialect';
+import { engineOf, isUnavailable, isUniqueViolation, lockNotAvailable, SNAPSHOT } from '@coffre/db/dialect';
 import { changeName, everyProjectConversion, findingMetadata, newestAccess, newestChangeNames, reportStands, roleColumns, storedRole } from '@coffre/db/grants';
 import { appendEntries, HeadBusy, holdFence, holdIssues, isMovedChange, laterHead, lockLogHead, lockLogHeadQueued, missingEntry, newestAuthentic, newestCommitted, type Appended, type ChangeNumbers, type Authenticity, type HeadLine, type Newest, type NewEntry } from '@coffre/db/log';
 
@@ -224,7 +225,7 @@ export type VaultOptions = {
   clockOffset?: () => number;
   /** How far one call walks the log (`WALKS`); tests shorten them. */
   walks?: Partial<Walks>;
-  /** How long a reservation of code's proxy names (`reserveProxy`) waits for the log's head in all; `LOCK_TIMEOUT_MS` unless set. Tests shorten it. */
+  /** How long a reservation of code's proxy names (`reserveProxy`) waits for the log's head in all; `CALL_DEADLINE_MS` unless set. Tests shorten it. */
   codeWaitMs?: number;
   /**
    * Which log the vault keeps (0.15's plan, "Behind one switch"): 0.15's,
@@ -339,7 +340,7 @@ export async function prepareVault(config: ResolvedVaultConfig, options: VaultOp
   return {
     config,
     ...(await keysOf(config.signingKeys)),
-    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, codeWaitMs: options.codeWaitMs ?? LOCK_TIMEOUT_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
+    options: { keyBudgetMs: options.keyBudgetMs ?? KEY_BUDGET_MS, codeWaitMs: options.codeWaitMs ?? CALL_DEADLINE_MS, clockOffset: options.clockOffset ?? (() => 0), walks: { ...WALKS, ...options.walks } },
     log015: (options.log ?? '0.15') === '0.15' ? log015(config.signingKeys, options.sealThrough, options.heldOutside, options.sealing) : null,
     limited: false,
     cutover: false,
@@ -389,11 +390,8 @@ export function openVault(db: Database, prepared: PreparedVault, hot?: Database)
   return new VaultService(db, prepared, hot);
 }
 
-/** Every key operation of one call, together: a removal waits at most this long for a read at KMS. */
+/** Every key operation of one call, together, with no lock held meanwhile (R75): how long the call waits for its key service. */
 const KEY_BUDGET_MS = 5_000;
-
-/** How long a decision waits for a lock: above the key budget, so a removal outwaits a read in flight. */
-const LOCK_TIMEOUT_MS = 15_000;
 
 /**
  * How long a statement of a read's decision runs, a wait for a lock
@@ -410,8 +408,12 @@ const READ_LOCK_TIMEOUT_MS = 3_000;
  * service, its intent and its own budget (added) included: each transaction's waits are bounded by what is left of it, and
  * past it the call fails as unavailable (`Overdue`) rather than start
  * another. So a caller hears within it, ok or 503, never tens of seconds later.
+ *
+ * A write's work has no such bound (R75: writes may take longer), but its lock waits do: each is `LOCK_WAIT_MS`, and a
+ * decision whose wait gave up is decided again, after a pause, for as long as this much time from its first attempt
+ * allows (`#decideNow`, `retryingLocks`); past it, it fails as unavailable, its last 55P03 said.
  */
-export const READ_DEADLINE_MS = 5_000;
+export const CALL_DEADLINE_MS = 5_000;
 
 /**
  * How many reads may wait for the log's head at once, through all of the
@@ -430,14 +432,19 @@ const READ_QUEUE: HeadQueue = { waiters: READ_HEAD_WAITERS, line: 'reads' };
 /** The code's proxy names' one place in line for the head (`reserveProxy`): one call of a deploy's herd waits; the rest read again. */
 const CODE_QUEUE: HeadQueue = { waiters: 1, line: 'code' };
 
-/** How long a reservation refused the code's place pauses before it reads again, at first; doubled each time, up to the most. */
-const CODE_PAUSE_MS = 25;
-const CODE_PAUSE_MAX_MS = 400;
+/**
+ * A retry policy, not a constraint: how long a call that gave up waiting (a lock past `LOCK_WAIT_MS`, a reservation
+ * refused the code's place) pauses before it tries again, at first, about the few round trips a holder of the log's
+ * head holds it for; doubled each time, up to the most, under one lock wait, so that a call retried tries again within
+ * a wait of its holder's letting go. Jittered (×0.5 to ×1.5), so a herd spreads.
+ */
+const LOCK_PAUSE_MS = 25;
+const LOCK_PAUSE_MAX_MS = 400;
 
 /** How many releases a checkpoint prunes at most: one short statement, a few each scheduled run. */
 const RELEASES_PRUNED = 10_000;
 
-/** A call past its deadline (a read's `READ_DEADLINE_MS`, a reservation's `codeWaitMs`): unavailable, as a statement past its bound (57014) is. */
+/** A call past its deadline (a read's `CALL_DEADLINE_MS`, a reservation's `codeWaitMs`): unavailable, as a statement past its bound (57014) is. */
 class Overdue extends Error {
   readonly code = '57014';
   constructor() {
@@ -452,6 +459,34 @@ function within(deadline: number | undefined, ms: number): number {
   const left = deadline - Date.now();
   if (left <= 0) throw new Overdue();
   return Math.min(ms, left);
+}
+
+/**
+ * `work`, a transaction, again while one of its lock waits gave up (`LOCK_WAIT_MS`, 55P03: it rolled back, having
+ * committed nothing), after a pause (`LOCK_PAUSE_MS`, doubled to `LOCK_PAUSE_MAX_MS`), for as long as `by` allows; then
+ * the give-up is thrown, unavailable (R75: a short wait and retries, never a long wait holding a connection and a place
+ * in a lock's queue). The pause holds no lock, and on Workers no Hyperdrive connection: its transaction is over. Not a
+ * place in line refused (`HeadBusy`, also 55P03), which is overload refused at once (R44).
+ */
+async function retryingLocks<T>(work: () => Promise<T>, by: number): Promise<T> {
+  for (let pause = LOCK_PAUSE_MS; ; pause = Math.min(2 * pause, LOCK_PAUSE_MAX_MS)) {
+    try {
+      return await work();
+    } catch (error) {
+      if (!lockNotAvailable(error) || causedBy(error, HeadBusy)) throw error;
+      const wait = pause * (0.5 + Math.random());
+      if (Date.now() + wait >= by) throw error;
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
+/** Whether `error`, or anything it was caused by, is a `type`. */
+function causedBy(error: unknown, type: abstract new (...args: never[]) => unknown): boolean {
+  for (let cause = error; typeof cause === 'object' && cause !== null; cause = (cause as { cause?: unknown }).cause) {
+    if (cause instanceof type) return true;
+  }
+  return false;
 }
 
 /** A person, and a service account: only a person sets one up (`givesService`). */
@@ -609,7 +644,7 @@ type Decision = {
   members: Map<string, Member>;
   /** The database's clock, read once the members are locked. */
   at: number;
-  /** What the decision reads, in one statement once the members are locked: under the head, unless it takes the head late. */
+  /** What the decision reads, in one statement once the members are locked, under the head. */
   reads: Snapshot;
   log: NewEntry[];
   writes: ((at: number) => Promise<void>)[];
@@ -645,17 +680,13 @@ type Decision = {
 type Reads = Pick<Asked, 'environments' | 'references'> & { released?: { principal: string; keys: readonly string[] } };
 
 /**
- * How a decision runs: `late` takes the log's head only to append, `asked`
- * is what it reads besides its members, and `reads` says it changes none
- * of them (`#decide`).
- */
-/**
- * How a decision is made. `deadline`, a read's (`reads`) or a reservation's
+ * How a decision is made: `asked` is what it reads besides its members, and
+ * `reads` says it changes none of them (`#decide`). `deadline`, a read's (`reads`) or a reservation's
  * of code's names: when its whole call must have answered, every wait in
- * every transaction it takes included (`READ_DEADLINE_MS`, `codeWaitMs`).
+ * every transaction it takes included (`CALL_DEADLINE_MS`, `codeWaitMs`).
  */
 type How<T = unknown> = {
-  late?: boolean; asked?: Reads; reads?: boolean; deadline?: number;
+  asked?: Reads; reads?: boolean; deadline?: number;
   /** Held by another, wait for the head only in one of this line's places, else refuse at once (`HeadBusy`): a read's always. */
   queue?: HeadQueue;
   /**
@@ -873,11 +904,12 @@ class VaultService implements Vault {
    *
    * Every change to the policy, the settings, a member or a place appends
    * under the head, so whatever the decision reads of them stands until it
-   * commits: no decision acts on a policy read before it. A key operation
-   * alone takes the head later (`late`), once its key service has answered,
-   * which it must not wait on holding it, and decides again then (`#keys`).
-   * A read (`reads`) changes no member: it takes their rows shared, so
-   * that one member's reads decide side by side (`lockMembers`).
+   * commits: no decision acts on a policy read before it. A key service
+   * is asked between decisions, never in one (`#keys`, R75). A read
+   * (`reads`) changes no member: it takes their rows shared, so that one
+   * member's reads decide side by side (`lockMembers`). A change waits for
+   * each lock `LOCK_WAIT_MS` at most, and is decided again when it gave up
+   * (`#decideNow`).
    */
   async #decide<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, how: How<T> = {}): Promise<Outcome<T>> {
     const superseded = await this.#settled();
@@ -891,10 +923,13 @@ class VaultService implements Vault {
     await this.#cutOverYet();
     const reports: NewEntry[] = [];
     // A read's call is due from its first decision, unless its caller set when.
-    const due = how.reads === true ? { ...how, deadline: how.deadline ?? Date.now() + READ_DEADLINE_MS } : how;
+    const due = how.reads === true ? { ...how, deadline: how.deadline ?? Date.now() + CALL_DEADLINE_MS } : how;
+    // A change's lock waits, retried until then: a read's give up within its deadline, a refusal at once (R44).
+    const retries = how.reads === true ? null : due.deadline ?? Date.now() + CALL_DEADLINE_MS;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.#decideOnce(principals, decide, reports, due);
+        const once = () => this.#decideOnce(principals, decide, reports, due);
+        return await (retries === null ? once() : retryingLocks(once, retries));
       } catch (error) {
         // A member who had no row when this decision locked theirs, and has
         // one now: another decision admitted them meanwhile. Again, with it.
@@ -905,7 +940,7 @@ class VaultService implements Vault {
     }
   }
 
-  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { late = false, asked = {}, reads: shared = false, deadline, queue, first }: How<T>): Promise<Outcome<T>> {
+  async #decideOnce<T>(principals: readonly string[], decide: (d: Decision) => Promise<T>, reports: NewEntry[], { asked = {}, reads: shared = false, deadline, queue, first }: How<T>): Promise<Outcome<T>> {
     // The changes of the attempt under way, whose failure, heard as the transaction's, they say (`Changes.failed`).
     let staged: Changes | null = null;
     try {
@@ -916,10 +951,13 @@ class VaultService implements Vault {
         // (`snapshot` says why it holds): asked together, they go in that order under one Sync (postgres-js's `gather`).
         const [, members, reads] = await Promise.all([
           // A call with a deadline bounds each statement too: a queue for the head, which each holder updates, starts a
-          // waiter's lock clock over at every holder (`boundLockWaits`; review r16 of #467).
-          store.boundLockWaits(tx, within(deadline, shared ? READ_LOCK_TIMEOUT_MS : LOCK_TIMEOUT_MS), shared || deadline !== undefined),
+          // waiter's lock clock over at every holder (`boundLockWaits`; review r16 of #467). A change's own lock waits
+          // are short (`LOCK_WAIT_MS`), its statements otherwise as long as its work takes.
+          shared
+            ? store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), within(deadline, READ_LOCK_TIMEOUT_MS))
+            : store.boundLockWaits(tx, within(deadline, LOCK_WAIT_MS), deadline === undefined ? undefined : within(deadline, Infinity)),
           principals.length === 0 ? new Map<string, Member>() : store.lockMembers(tx, principals, shared),
-          this.#snapshot(tx, principals, asked, !late, shared ? READ_QUEUE : queue),
+          this.#snapshot(tx, principals, asked, true, shared ? READ_QUEUE : queue),
         ]);
         const log015 = this.#prepared.log015;
         const d: Decision = {
@@ -935,7 +973,7 @@ class VaultService implements Vault {
         // Each member's newest access entry, which their row names (rows.ts).
         const accessSeq = new Map<string, bigint>();
         if (entries.length > 0) {
-          // Under the head the decision's reads took: a remote key's decision takes it late, and reads again with it.
+          // Under the head the decision's reads took.
           if (d.reads.head === null) throw new Error('a decision appends only under the head it read with');
           // Nothing awaits it: what it says comes from the head the snapshot read, and it goes with what follows.
           const appended = await this.#append(tx, entries, d.underLock, d.reads, { final: true });
@@ -979,12 +1017,15 @@ class VaultService implements Vault {
       if (entries.length > 0) {
         // A refusal's entries are written whatever the decision's bound: it answers only once they are. A read's, within
         // its call's deadline: past it, the call fails as unavailable, having released nothing.
-        await this.#db.transaction(async (tx) => {
-          await store.boundLockWaits(tx, shared ? within(deadline, READ_LOCK_TIMEOUT_MS) : LOCK_TIMEOUT_MS, shared);
+        const record = () => this.#db.transaction(async (tx) => {
+          if (shared) await store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), within(deadline, READ_LOCK_TIMEOUT_MS));
+          else await store.boundLockWaits(tx, LOCK_WAIT_MS);
           // In one of the head's places in line, as the read's decision waited, or refused at once.
           if (shared) await lockLogHeadQueued(tx, READ_HEAD_WAITERS);
           await this.#append(tx, entries);
         });
+        // A change's, its lock waits retried as its decision's are, within the call's time.
+        await (shared ? record() : retryingLocks(record, deadline ?? Date.now() + CALL_DEADLINE_MS));
       }
       this.#reported(reports);
       if (error instanceof Outage) throw error.error;
@@ -1578,7 +1619,7 @@ class VaultService implements Vault {
   async #rotate(from: string): Promise<bigint> {
     const reports: NewEntry[] = [];
     const since = await this.#db.transaction(async (tx) => {
-      await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+      await store.boundLockWaits(tx, LOCK_WAIT_MS);
       const principals = (await store.allMembers(tx)).map((row) => row.principal);
       const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
       await lockLogHead(tx);
@@ -1976,7 +2017,7 @@ class VaultService implements Vault {
     for (const secret of secrets) entry(secret, 'allow', null);
     // One deadline for the call: the record of the KEK's check, the decisions, the intent's and the keys', and, with a
     // key service, its own budget besides, spent from it too.
-    const deadline = Date.now() + READ_DEADLINE_MS + (call.remote ? this.#prepared.options.keyBudgetMs : 0);
+    const deadline = Date.now() + CALL_DEADLINE_MS + (call.remote ? this.#prepared.options.keyBudgetMs : 0);
     const wrongKek = await this.#kekMismatch(deadline);
     if (wrongKek !== null) {
       return this.#decide([], async () => {
@@ -2057,8 +2098,10 @@ class VaultService implements Vault {
           metadata: JSON.stringify({
             intent: intentId,
             operation: action,
-            // Member and outcome locks can each wait before accounting is overdue.
-            expiresAt: at + this.#prepared.options.keyBudgetMs + 2 * LOCK_TIMEOUT_MS,
+            // When accounting for it is overdue: its outcomes commit by the call's deadline, each of their statements
+            // bound by what is left of it (`#decideOnce`, a read's); the COMMIT after the last, which nothing bounds, is
+            // given one more call's deadline, a margin, not a measured bound.
+            expiresAt: at + Math.max(0, deadline - Date.now()) + CALL_DEADLINE_MS,
             ...(call.input.purpose === undefined ? {} : { purpose: call.input.purpose }),
             ...traced(call.input),
             keys: secrets.map((secret, item) => ({ item, subject: secret.path, secretId: secret.secretId, version: secret.version })),
@@ -2070,12 +2113,14 @@ class VaultService implements Vault {
       intentSeq = intent.seq;
     }
 
-    // Under the reader's row, which their other reads share and a change to them waits for: the check, the key
-    // operations, and their outcome. With a key in memory, under the
-    // log's head too, from the start (`#decideOnce`): what the check read stands until the commit, as every change it
-    // reads appends under the head, and the head waits on nothing slow. With a key service, which nothing may wait on
-    // holding the head, the head is taken once the keys are open, and what the check read is read again under it.
-    const late = call.remote;
+    // The check, the key operations, and their outcome. With a key in memory, all in one decision, under the reader's
+    // row and the log's head from the start (`#decideOnce`): what the check read stands until the commit, as every change
+    // it reads appends under the head, and the head waits on nothing slow. With a key service, nothing waits on it
+    // holding a lock, nor a transaction or a connection (R75): the intent's check above, then the key operations, outside
+    // any transaction, then the outcome's decision, which takes the reader's row and the head as any read does and
+    // decides it all again on what it reads there (formal/Coffre.tla's StandingRecheckUnderHead): a revocation, a
+    // removal, a deletion, a reference ended, a policy changed or a bulk count passed while the key service answered is
+    // seen, and the keys it opened are withheld (single-database.md, "Releasing a key", superseded by R75).
     const decided = async (d: Decision) => {
       try {
         await check(d);
@@ -2089,62 +2134,63 @@ class VaultService implements Vault {
         throw error;
       }
     };
-    return this.#decide([principal], async (d) => {
-      await decided(d);
-      // A reference ended while this decided refuses it, rather than a read logged after its end.
-      const { vet } = call;
-      if (late && vet !== undefined) {
-        d.underLock.push(async (locked) => {
-          const codes = await vet(locked, d.reads);
-          const first = codes.find((code) => code !== null);
-          if (first === undefined || first === null) return;
-          throw new Refused(refusal(first, REFUSAL_MESSAGES[first]), secrets.map((secret, item) => outcomeEntry(secret, item, 'deny', codes[item] ?? first)));
-        });
-      }
-      const { outcomes, expired } = await settle(operations((secret) => context(secret, owners.get(secret.environmentId))), within(deadline, this.#prepared.options.keyBudgetMs));
+    // What the key operations came to, decided once the check above has passed in the same decision: each key's outcome.
+    const settled = (d: Decision, outcomes: KeyOutcome<T>[], expired: boolean): R => {
       const done = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
-      try {
-        const entries = () => secrets.map((secret, i) =>
-          outcomeEntry(secret, i, 'deny', outcomes[i].ok ? 'withheld' : outcomes[i].code));
-        const fault = outcomes.find((outcome) => !outcome.ok && outcome.code === 'key_error');
-        if (fault !== undefined && !fault.ok) throw new Outage(fault.error, entries());
-        const unanswered = outcomes.filter((outcome) => !outcome.ok && outcome.code !== 'bad_claim').length;
-        if (unanswered > 0) {
-          throw new Outage(
-            new KekUnavailableError(`the key service did not answer for ${unanswered} of ${secrets.length} keys`,
-              outcomes.some((outcome) => !outcome.ok && outcome.code === 'kms_uncertain')),
-            entries(),
-          );
-        }
-        if (expired) throw new Outage(new KekUnavailableError('key operation exceeded its deadline'), entries());
-        if (done.length < outcomes.length) {
-          throw new Refused(refusal('bad_claim', REFUSAL_MESSAGES.bad_claim), entries());
-        }
-        if (late) {
-          // Again under the log's head, the append's, taken a statement early: a
-          // deletion renames its place under it, so one that committed since the
-          // check above is seen here, and nothing is released after it.
-          // A read through a reference: its holder's place too, which a deletion may have taken.
-          // And as the policy is now, under the head every change to it takes: an environment protected, or a role narrowed,
-          // since the check above is seen here, and nothing it refuses now is released. All of it read again, holding the head.
-          d.reads = await this.#snapshot(d.tx, [principal], reads, true, READ_QUEUE);
-          d.at = this.#at(d.reads);
-          await decided(d);
-          const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
-          if (places.some((place) => d.reads.environments.get(place.environmentId)?.deleted ?? false)) {
-            throw new Refused(refusal('deleted', REFUSAL_MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
-          }
-        }
-        const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
-        d.log.push(...released, ...(call.also ?? []));
-        const answer = result(done);
-        // A wrap's answer names its entries, which the app's writes refer to.
-        if (action !== 'secret.read') d.after.push((seqOf) => Object.assign(answer as object, { seqs: released.map(seqOf) }));
-        return answer;
-      } finally {
-        for (const value of done) value.wipe();
+      const entries = () => secrets.map((secret, i) =>
+        outcomeEntry(secret, i, 'deny', outcomes[i].ok ? 'withheld' : outcomes[i].code));
+      const fault = outcomes.find((outcome) => !outcome.ok && outcome.code === 'key_error');
+      if (fault !== undefined && !fault.ok) throw new Outage(fault.error, entries());
+      const unanswered = outcomes.filter((outcome) => !outcome.ok && outcome.code !== 'bad_claim').length;
+      if (unanswered > 0) {
+        throw new Outage(
+          new KekUnavailableError(`the key service did not answer for ${unanswered} of ${secrets.length} keys`,
+            outcomes.some((outcome) => !outcome.ok && outcome.code === 'kms_uncertain')),
+          entries(),
+        );
       }
-    }, { late, asked: reads, reads: true, deadline });
+      if (expired) throw new Outage(new KekUnavailableError('key operation exceeded its deadline'), entries());
+      if (done.length < outcomes.length) {
+        throw new Refused(refusal('bad_claim', REFUSAL_MESSAGES.bad_claim), entries());
+      }
+      const released = secrets.map((secret, i) => outcomeEntry(secret, i, 'allow', null));
+      d.log.push(...released, ...(call.also ?? []));
+      const answer = result(done);
+      // A wrap's answer names its entries, which the app's writes refer to.
+      if (action !== 'secret.read') d.after.push((seqOf) => Object.assign(answer as object, { seqs: released.map(seqOf) }));
+      return answer;
+    };
+    const run = () => settle(operations((secret) => context(secret, owners.get(secret.environmentId))), within(deadline, this.#prepared.options.keyBudgetMs));
+    const wipe = (outcomes: KeyOutcome<T>[]) => {
+      for (const outcome of outcomes) if (outcome.ok) outcome.value.wipe();
+    };
+    if (!call.remote) {
+      return this.#decide([principal], async (d) => {
+        await decided(d);
+        const { outcomes, expired } = await run();
+        try {
+          return settled(d, outcomes, expired);
+        } finally {
+          wipe(outcomes);
+        }
+      }, { asked: reads, reads: true, deadline });
+    }
+    // The key service, with nothing held: its contexts as the intent's check read the places.
+    const { outcomes, expired } = await run();
+    try {
+      return await this.#decide([principal], async (d) => {
+        await decided(d);
+        // A read through a reference: its holder's place too, which a deletion may have taken since the intent.
+        const places = secrets.flatMap((secret, i) => [secret, call.places?.[i] ?? secret]);
+        if (places.some((place) => d.reads.environments.get(place.environmentId)?.deleted ?? false)) {
+          throw new Refused(refusal('deleted', REFUSAL_MESSAGES.deleted), secrets.map((secret, i) => outcomeEntry(secret, i, 'deny', 'deleted')));
+        }
+        return settled(d, outcomes, expired);
+      }, { asked: reads, reads: true, deadline });
+    } finally {
+      // Once every attempt of the decision is done (`#decideNow` decides again on a row moved): the keys were opened once.
+      wipe(outcomes);
+    }
   }
 
   /**
@@ -3379,7 +3425,7 @@ class VaultService implements Vault {
       // checked at the same time may have recorded one first: under the log's lock, the first stays.
       await this.#db.transaction(async (tx) => {
         // Once a process, by its first key operation: a read's waits as the read's, within its deadline.
-        await store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), true);
+        await store.boundLockWaits(tx, within(deadline, READ_LOCK_TIMEOUT_MS), within(deadline, READ_LOCK_TIMEOUT_MS));
         await lockLogHead(tx);
         if ((await this.#checkValues(tx)).has(`${kek.provider}:${kek.keyId}`)) return;
         await this.#append(tx, [
@@ -3772,7 +3818,7 @@ class VaultService implements Vault {
   async #cutOver(tx: Transaction, input: CutoverInput, walked: Walked, reports: NewEntry[]): Promise<bigint> {
     const log015 = this.#log015();
     const { logKeys } = this.#prepared;
-    await store.boundLockWaits(tx, LOCK_TIMEOUT_MS);
+    await store.boundLockWaits(tx, LOCK_WAIT_MS);
     const principals = (await store.allMembers(tx)).map((row) => row.principal);
     const rows = principals.length === 0 ? new Map<string, Member>() : await store.lockMembers(tx, principals);
     const head = await lockLogHead(tx);
@@ -4025,7 +4071,7 @@ class VaultService implements Vault {
     if (log015 === null || !this.#serveWrites()) return unserved('vault');
     validateWriteKeys(input);
     if (!(await this.#cutOverNow())) return unserved('vault');
-    if ((await this.#kekMismatch(Date.now() + READ_DEADLINE_MS)) !== null) return unserved('kek');
+    if ((await this.#kekMismatch(Date.now() + CALL_DEADLINE_MS)) !== null) return unserved('kek');
     const at = Date.now() + this.#prepared.options.clockOffset();
     const read = await callWrite(this.#db, {
       at, tokenHash: Buffer.from(input.tokenHash, 'base64'), project: input.project, environment: input.environment, keys: input.keys.map((key) => key.name),
@@ -4053,7 +4099,7 @@ class VaultService implements Vault {
       path: `${input.project}/${input.environment}/${key.name}`, ...(key.sensitive ? { sensitive: true } : {}),
     }));
     // Each data key wrapped as its version's context binds it: its ids, and whether it is sensitive (no personal config here).
-    const operation = { deadline: Date.now() + READ_DEADLINE_MS, signal: new AbortController().signal };
+    const operation = { deadline: Date.now() + CALL_DEADLINE_MS, signal: new AbortController().signal };
     const wrapped = await Promise.all(secrets.map(async (secret, i) => {
       const dek = Buffer.from(input.keys[i]!.key, 'base64');
       try {
@@ -4156,7 +4202,7 @@ class VaultService implements Vault {
       numbers = await this.#db.transaction(async (tx) => {
         // One Sync, nothing awaited: the bound, the members' rows, then the head, in that order (as `#decideOnce` takes
         // them), each a lock; then the hold, which every write after it rests on.
-        void store.boundLockWaits(tx, LOCK_TIMEOUT_MS, false, { final: true });
+        void store.boundLockWaits(tx, LOCK_WAIT_MS, undefined, { final: true });
         store.laterLockMembers(tx, [actor, principal]);
         laterHead(tx);
         holdAdmit(tx, { tokenHash: Buffer.from(ticket.tokenHash, 'base64'), principal, scope: ticket.scopeSlugs, digest: Buffer.from(ticket.digest, 'hex') });
@@ -4907,7 +4953,7 @@ class VaultService implements Vault {
     // waits for nothing else; the one that writes waits, after the head, for the issue lock and the fence, each within
     // what was left when its attempt began, as every change waits for each lock it takes.
     const deadline = Date.now() + this.#prepared.options.codeWaitMs;
-    for (let pause = CODE_PAUSE_MS; ; pause = Math.min(2 * pause, CODE_PAUSE_MAX_MS)) {
+    for (let pause = LOCK_PAUSE_MS; ; pause = Math.min(2 * pause, LOCK_PAUSE_MAX_MS)) {
       if (reads && sqlite) {
         const found = await this.#reservedAlready(this.#db, keys, wanted);
         if (found !== null) return { ok: true, ...found };

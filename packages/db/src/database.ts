@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-import { getTableName, is, Table, type Assume, type RelationalSchemaConfig } from 'drizzle-orm';
+import { getTableName, is, sql, Table, type Assume, type RelationalSchemaConfig } from 'drizzle-orm';
 import { PgDatabase, PgDialect, type PgQueryResultHKT, type PgTransactionConfig } from 'drizzle-orm/pg-core';
 import { PostgresJsSession, PostgresJsTransaction } from 'drizzle-orm/postgres-js/session';
 
 import { trackCommits } from './commits.ts';
+import { later } from './later.ts';
 import type { Row, RowList } from './postgres-js/index.ts';
 import { textTypes, type PostgresClient } from './postgres.ts';
 import * as schema from './schema.ts';
@@ -117,7 +118,14 @@ function transactionOptions(config: PgTransactionConfig): string {
  */
 export type Client = Pick<PostgresClient, 'unsafe' | 'begin'>;
 
-export function createDatabase(client: Client): Database {
+/**
+ * `lockWaitMs`: how long each lock wait of each transaction waits at most (`lock_timeout`, set in the transaction's
+ * first Sync, a round trip no more: `later`), unless the work sets its own. Past it, the transaction fails with 55P03,
+ * unavailable (`gaveUp`), rather than queue on: the app's, at `LOCK_WAIT_MS` (`@coffre/core/vault`, R75), so that a write
+ * waiting for the fence never holds back the uses behind it longer than half their own wait. None: Postgres's own, for ever.
+ */
+export function createDatabase(client: Client, { lockWaitMs }: { lockWaitMs?: number } = {}): Database {
+  if (lockWaitMs !== undefined && !(Number.isSafeInteger(lockWaitMs) && lockWaitMs > 0)) throw new Error('lockWaitMs is a positive whole number of milliseconds');
   // What `drizzle(client, { schema })` sets up, but with no relational queries.
   if ('options' in client) textTypes(client as PostgresClient);
   const dialect = new PgDialect();
@@ -133,6 +141,7 @@ export function createDatabase(client: Client): Database {
         (tx) =>
           inside.run(open, async () => {
             try {
+              if (lockWaitMs !== undefined) later(tx, sql.raw(`SET LOCAL lock_timeout = ${lockWaitMs}`));
               return await work(tx);
             } finally {
               open.open = false;
