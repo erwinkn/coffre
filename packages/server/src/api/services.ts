@@ -40,7 +40,7 @@ import { settingsShown } from '../db/answers.ts';
 // A row's scope, read and stored (`@coffre/core/access`, where the vault makes a credential's too).
 export { readScope, storedScope } from '@coffre/core/access';
 
-import { credentialsBy, liveCredentialsWhere, memberOf, newestAccessSeq, places, sensitiveFrom, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
+import { credentialsBy, liveCredentialsWhere, memberOf, newestAccessSeq, places, holdingSensitive, updateAuth, type PlaceRow, type StoredGrant } from '../db/queries.ts';
 import type { Caller, PrincipalRef } from './caller.ts';
 import { callerFrom, newestPolicySeq, placeOf } from './caller.ts';
 import { AppChanges, COFFRE_ACTOR, credentialChange } from './changes.ts';
@@ -187,7 +187,7 @@ export const ACCESS_CHANGED = 'access_changed';
 // held and its issuer could give when it was made (`issuesCredential`), and
 // a request made with it holds what both it and the account hold now. Each
 // place says too whether it reads the sensitive values there: only where an
-// Owner of its project issued it (`readsSensitive`, R32).
+// Owner of its project issued it (`readsSensitive`, R32), a reference's too (R71).
 
 /** A credential's scope as the API names it: each place by its path, `market` or `market/dev`, and the role there. */
 export type ScopeByPath = Record<string, Role>;
@@ -307,10 +307,11 @@ export async function issuedScope(
 
 /**
  * The places of a service's scope, by path, that hold a sensitive value now
- * that it will not read: one of a project no Owner of which issued it
- * (`readsSensitive`), its own, a reference's source's, or one a fork
- * inherits from its parents, theirs. A project's, in any of its
- * environments but personal configs, which no service reads.
+ * that it will not read: in a project no Owner of which issued it
+ * (`readsSensitive`), its own, one it reads through a reference, which is
+ * the project's own to give (R71), or one a fork inherits from its
+ * parents. A project's, in any of its environments but personal configs,
+ * which no service reads.
  */
 async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly PlaceRow[]): Promise<string[]> {
   const owned = new Set(scope.filter((grant) => grant.sensitive === true).map((grant) => grant.projectId));
@@ -324,9 +325,10 @@ async function withheldIn(db: Queryable, scope: CredentialScope, known: readonly
   const environmentsOf = (grant: ScopeGrant) => known.find((project) => project.id === grant.projectId)?.environments
     .filter((environment) => environment.owner === null && (grant.environmentId === null || environment.id === grant.environmentId))
     .flatMap((environment) => lineage(environment.id)) ?? [];
-  const from = await sensitiveFrom(db, scope.flatMap(environmentsOf));
-  const withholds = (grant: ScopeGrant) => environmentsOf(grant).some((id) => [...(from.get(id) ?? [])].some((project) => !owned.has(project)));
-  return Object.keys(scopeByPath(scope.filter(withholds), known)!);
+  const unowned = scope.filter((grant) => !owned.has(grant.projectId));
+  const holding = await holdingSensitive(db, unowned.flatMap(environmentsOf));
+  const withholds = (grant: ScopeGrant) => environmentsOf(grant).some((id) => holding.has(id));
+  return Object.keys(scopeByPath(unowned.filter(withholds), known)!);
 }
 
 /**

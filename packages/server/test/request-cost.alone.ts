@@ -30,7 +30,7 @@ import { SigninService } from '../src/api/signin.ts';
 import { WorkloadService } from '../src/api/workloads.ts';
 import {
   distinctSecretCounts, environmentSecrets, insertBinding, liveKeysIn, lock, memberStanding, originsOf, places, resolvePath, secretFolderOf, secretHeads, secretsInFolder,
-  HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, secretObjects, sensitiveFrom, type ChangePoint,
+  HIDDEN_COUNTED, sealedHidden, sealedPage, sealedReach, secretObjects, holdingSensitive, type ChangePoint,
 } from '../src/db/queries.ts';
 import { insertSession } from '../src/db/workloads.ts';
 import { readsByStanding, readsPage, readsStanding } from '../src/db/reads.ts';
@@ -1172,17 +1172,15 @@ test("a read of an environment's keys reads as many pages however many keys the 
   const ids = Object.fromEntries(market!.environments.map((environment) => [environment.slug, environment.id]));
   const everything = [ids.dev!, ids.prod!, ids.busy!];
   // A sensitive value of market/prod's own, and one market/busy reads through a reference into shop. With none, a plan
-  // of `sensitiveFrom` that scans a table can stop at an empty join after a handful of pages, and the count said which
+  // of `holdingSensitive` that scans a table can stop at an empty join after a handful of pages, and the count said which
   // plan Postgres picked, not what the statement reads; with them, a scan shows (T214). The growth above keeps what it
   // made, a sensitive value of market/busy's own among what it may, so these add to what the environments held before.
-  const before = await sensitiveFrom(counted, everything);
+  const before = await holdingSensitive(counted, everything);
   await root.secrets.set('market/prod', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
   await root.secrets.set('shop/dev', { COST_SENSITIVE: { value: 'fake-sensitive', sensitivity: 'sensitive' } });
   await root.secrets.set('market/busy', { COST_REFERS: { ref: 'shop/dev/COST_SENSITIVE' } });
   const shop = (await places(counted)).find((project) => project.slug === 'shop')!;
-  const added = new Map(before);
-  for (const [environment, project] of [[ids.prod!, market!.id], [ids.busy!, shop.id]] as const) added.set(environment, new Set([...(before.get(environment) ?? []), project]));
-  assert.deepEqual(await sensitiveFrom(counted, everything), added);
+  assert.deepEqual(await holdingSensitive(counted, everything), new Set([...before, ids.prod!, ids.busy!]));
   // A key with a value of its own, and market/busy's reference, as 0.15's objects take them (`secretObjects`): its source
   // and its newest reference row read by the holder's index, never through other keys' references (T220).
   const idOf = async (where: SQL) => (await db.owner.execute<{ id: string }>(sql`SELECT id FROM secrets WHERE archived_at IS NULL AND ${where}`))[0]!.id;
@@ -1203,7 +1201,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
     "an archiving environment's lock on keys": () => counted.transaction((tx) => lock(tx, secrets, { projectId: market!.id, environmentId: ids.prod!, key: ['API_KEY', 'DATABASE_URL'] })),
     'the keys of three environments': () => liveKeysIn(counted, everything),
     'their distinct counts': () => distinctSecretCounts(counted, everything),
-    'their sensitive values': () => sensitiveFrom(counted, everything),
+    'their sensitive values': () => holdingSensitive(counted, everything),
     "an environment's heads by key": () => secretHeads(counted, ids.dev!, { keys: ['API_KEY', 'DATABASE_URL'] }),
     'a path with a key': () => resolvePath(counted, { project: 'market', environment: 'dev', key: 'API_KEY' }),
     "an environment's folders": () => secretFolderOf(counted, ids.dev!),
@@ -1216,7 +1214,7 @@ test("a read of an environment's keys reads as many pages however many keys the 
       await run();
       app.recorded = [];
       await run();
-      // By text: a read that runs statements together (`sensitiveFrom`) records them in the order they happen to land.
+      // By text: a read that runs statements together (`holdingSensitive`) records them in the order they happen to land.
       const statements = [...app.recorded].sort((x, y) => x.text.localeCompare(y.text));
       app.recorded = null;
       read[name] = [];

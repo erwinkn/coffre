@@ -9,6 +9,7 @@ export { checkpointMessage, checkpointVerifier, verifyCheckpoint } from './check
 export { Deploying, gated, isDeploying, RELEASE, VAULT_METHODS, versioned, type VaultAnswer, type VaultEntry, type VaultMethod } from './vault-entry.ts';
 export * from './proxy.ts';
 import type { ProxyDefinition } from './proxy.ts';
+export { CLOCK_SKEW_MS } from './clock.ts';
 export { describeAccessFault, type AccessFault, type FaultGrant, type FaultNames } from './access-fault.ts';
 export {
   answerFrom,
@@ -1318,7 +1319,7 @@ export const REFUSAL_MESSAGES: Record<RefusalCode, string> = {
   personal: "a personal config's values are its owner's alone",
   sensitive: "a sensitive value is never shown to anyone, Owners included: `coffre run` gives your app a placeholder for it through the credential proxy, and a service account reads it",
   not_owner_issued: 'a service account reads a sensitive value only on a token or trust binding an Owner of its project issued',
-  use_only: "a workload uses this value through coffre and never holds it: list it in its binding's reads, where the value is held, if it must",
+  use_only: "a workload uses this value through coffre and never holds it: list it in its binding's reads, where it is held, if it must",
   not_allowed: 'not allowed to change this',
   last_owner: 'the last Owner of the whole instance stays one: make someone else an Owner first',
   invalid: 'not something the rules allow',

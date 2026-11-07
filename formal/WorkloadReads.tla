@@ -2,9 +2,13 @@
 (***************************************************************************)
 (* What a workload session reads (docs/design/workload-access.md, 6.1): a  *)
 (* value only if its binding's `reads` lists the key, by ID, at the place  *)
-(* where the value is held, whatever the workload or anyone renames,       *)
-(* references or copies. docs/formal.md says what this covers, what it     *)
-(* abstracts and what it does not prove.                                   *)
+(* where the key is held: a fork's parent for an inherited key, a          *)
+(* reference's holder for a reference, by the reference's own ID, as any   *)
+(* key held there (R71); whatever the workload or anyone renames,          *)
+(* references or copies. A person who reads a value may share it by a      *)
+(* reference or a copy, and the workload reads it where it lands; the      *)
+(* workload may not, of a value it only uses. docs/formal.md says what     *)
+(* this covers, what it abstracts and what it does not prove.              *)
 (*                                                                         *)
 (* No step here races another: each is one vault decision, which reads its *)
 (* rows under its locks (Coffre.tla). What TLC explores is every sequence  *)
@@ -22,9 +26,8 @@ CONSTANTS
     Budget          \* Budget[p]: how many it runs, one after another
 
 CONSTANTS
-    \* The vault checks `reads` at the place where the value is held: a
-    \* reference's source, a fork's parent for an inherited key. Off, at the
-    \* place the request names.
+    \* The vault checks `reads` where the key is held: a fork's parent for an
+    \* inherited key. Off, at the place the request names.
     CheckWhereHeld,
     \* `reads` holds environment and key IDs. Off, key names.
     ReadsByID,
@@ -43,7 +46,7 @@ Reads == [e \in Envs |-> IF e = "dev" THEN [all |-> TRUE, keys |-> {}] ELSE [all
 ReadsByName == [e \in Envs |-> IF e = "dev" THEN [all |-> TRUE, keys |-> {}] ELSE [all |-> FALSE, keys |-> {"W"}]]
 
 VARIABLES
-    keys,           \* keys[id]: [made, gone, env, name, ref, laundered]; a gone ID is never reused
+    keys,           \* keys[id]: [made, gone, env, name, ref, inherits, laundered]; a gone ID is never reused
     pc, op, l, left,  \* l is unused, kept for scripts/formal-trace.mjs
     read            \* history: what each read the vault allowed handed back
 
@@ -55,8 +58,11 @@ vars == <<keys, procs, read>>
 Live(id) == keys[id].made /\ ~keys[id].gone
 Unused == {id \in Ids : ~keys[id].made}
 Named(e, n) == {id \in Ids : Live(id) /\ keys[id].env = e /\ keys[id].name = n}
-\* The value a row stands for: its own, or its reference's source.
+\* The value a row stands for: its own, or its reference's or its parent's.
 Held(id) == IF keys[id].ref = None THEN id ELSE keys[id].ref
+\* The key a read of it is decided as: an inherited key, its parent's; any
+\* other, a reference included, itself (R71).
+At(id) == IF keys[id].inherits THEN keys[id].ref ELSE id
 
 \* What is true: the binding lists the key, by ID, where it is held.
 Listed(id) == Reads[keys[id].env].all \/ id \in Reads[keys[id].env].keys
@@ -64,7 +70,7 @@ Listed(id) == Reads[keys[id].env].all \/ id \in Reads[keys[id].env].keys
 \* What the vault decides (6.1): `reads` at the place it checks, by ID or
 \* by name.
 Allowed(id) ==
-    LET at == IF CheckWhereHeld THEN Held(id) ELSE id
+    LET at == IF CheckWhereHeld THEN At(id) ELSE id
         e == keys[at].env
     IN IF ReadsByID THEN Reads[e].all \/ at \in Reads[e].keys
                     ELSE ReadsByName[e].all \/ keys[at].name \in ReadsByName[e].keys
@@ -91,15 +97,16 @@ Read(p) ==
           /\ UNCHANGED read
        \/ \E id \in Named(op[p].env, op[p].name) :
             read' = IF Live(Held(id)) /\ Allowed(id)
-                      THEN read \cup {[key |-> Held(id), listed |-> Listed(Held(id)), laundered |-> keys[Held(id)].laundered]}
+                      THEN read \cup {[key |-> Held(id), listed |-> Listed(At(id)), laundered |-> keys[At(id)].laundered \/ keys[Held(id)].laundered]}
                       ELSE read
     /\ Done(p)
     /\ UNCHANGED keys
 
 \* A reference or a copy into dev of prod's env/name, by the workload or by
-\* a person. A workload's is refused unless it may read the source; a copy
-\* the workload made of a value it could not read is laundered, a person's
-\* never is: a person who may read it chose to.
+\* a person. A workload's is refused unless it may read the source; one the
+\* workload made of a value it could not read is laundered, a reference as
+\* a copy, since either is read where it lands; a person's never is: a
+\* person who may read it chose to.
 Into(p, copy) ==
     /\ pc[p] = IF copy THEN "copy" ELSE "reference"
     /\ LET srcs == Named(op[p].env, op[p].name)
@@ -113,8 +120,8 @@ Into(p, copy) ==
                       THEN UNCHANGED keys
                       ELSE keys' = [keys EXCEPT ![new] =
                              [made |-> TRUE, env |-> "dev", name |-> op[p].to,
-                              gone |-> FALSE, ref |-> IF copy THEN None ELSE Held(src),
-                              laundered |-> copy /\ (keys[Held(src)].laundered \/ (workload /\ ~Listed(Held(src))))]]
+                              gone |-> FALSE, ref |-> IF copy THEN None ELSE Held(src), inherits |-> FALSE,
+                              laundered |-> keys[At(src)].laundered \/ keys[Held(src)].laundered \/ (workload /\ ~Listed(At(src)))]]
     /\ Done(p)
     /\ UNCHANGED read
 
@@ -140,16 +147,16 @@ Recreate(p) ==
                           new == CHOOSE id \in Unused : TRUE
                       IN [keys EXCEPT ![old].gone = TRUE,
                                       ![new] = [made |-> TRUE, gone |-> FALSE, env |-> op[p].env, name |-> op[p].name,
-                                                ref |-> None, laundered |-> FALSE]]
+                                                ref |-> None, inherits |-> FALSE, laundered |-> FALSE]]
     /\ Done(p)
     /\ UNCHANGED read
 
 Init ==
     /\ keys = [id \in Ids |->
-                 CASE id = "k1" -> [made |-> TRUE, gone |-> FALSE, env |-> "prod", name |-> "S", ref |-> None, laundered |-> FALSE]
-                   [] id = "k2" -> [made |-> TRUE, gone |-> FALSE, env |-> "prod", name |-> "W", ref |-> None, laundered |-> FALSE]
-                   [] id = "k3" -> [made |-> TRUE, gone |-> FALSE, env |-> "dev", name |-> "S", ref |-> "k1", laundered |-> FALSE]
-                   [] OTHER     -> [made |-> FALSE, gone |-> FALSE, env |-> "prod", name |-> "X", ref |-> None, laundered |-> FALSE]]
+                 CASE id = "k1" -> [made |-> TRUE, gone |-> FALSE, env |-> "prod", name |-> "S", ref |-> None, inherits |-> FALSE, laundered |-> FALSE]
+                   [] id = "k2" -> [made |-> TRUE, gone |-> FALSE, env |-> "prod", name |-> "W", ref |-> None, inherits |-> FALSE, laundered |-> FALSE]
+                   [] id = "k3" -> [made |-> TRUE, gone |-> FALSE, env |-> "dev", name |-> "S", ref |-> "k1", inherits |-> TRUE, laundered |-> FALSE]
+                   [] OTHER     -> [made |-> FALSE, gone |-> FALSE, env |-> "prod", name |-> "X", ref |-> None, inherits |-> FALSE, laundered |-> FALSE]]
     /\ pc = [p \in Procs |-> "idle"]
     /\ op = [p \in Procs |-> NoOp]
     /\ l = [p \in Procs |-> [id |-> <<None, 0>>]]
@@ -170,8 +177,8 @@ Spec == Init /\ [][Next]_vars
 TypeOK == \A id \in Ids : keys[id].env \in Envs /\ keys[id].name \in Names
 
 \* A workload reads a value only if `reads` lists the key, by ID, where the
-\* value is held, and the value did not reach that key through a copy the
-\* workload could not have read.
+\* key is held, and the value did not reach that key through a reference or
+\* a copy the workload could not have read.
 NoLaundering == \A a \in read : a.listed /\ ~a.laundered
 
 =============================================================================

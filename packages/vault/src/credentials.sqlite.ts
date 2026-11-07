@@ -1,4 +1,5 @@
 import { MAX_BINDINGS } from '@coffre/core/identity';
+import { CLOCK_SKEW_MS } from '@coffre/core/vault';
 import { tablesOf, type Queryable } from '@coffre/db';
 import { and, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 
@@ -44,7 +45,7 @@ export async function signInOnSqlite(tx: Queryable, c: SignInCall): Promise<Answ
     .where(and(eq(credentials.principal, c.principal), eq(credentials.createdBy, k.createdBy), gt(credentials.createdAt, new Date(now - c.window))))
     .limit(c.rate);
   if (recent.length >= c.rate) return { state: 'busy' };
-  if ((c.validUntil !== null && c.validUntil <= now) || k.expiresAt <= now || k.expiresAt > now + c.longest + 60_000 || (k.notAfter !== null && (k.notAfter <= now || k.expiresAt > k.notAfter))) return { state: 'expired' };
+  if ((c.validUntil !== null && c.validUntil <= now) || k.expiresAt <= now || k.expiresAt > now + c.longest + CLOCK_SKEW_MS || (k.notAfter !== null && (k.notAfter <= now || k.expiresAt > k.notAfter))) return { state: 'expired' };
   if (c.spent !== null) {
     const spent = await tx.insert(spentIdTokens).values({ hash: c.spent }).onConflictDoNothing().returning({ hash: spentIdTokens.hash });
     if (spent.length === 0) return { state: 'replayed' };

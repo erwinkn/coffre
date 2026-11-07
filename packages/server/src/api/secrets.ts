@@ -53,17 +53,15 @@ import { descendantsOf, inheritedRows, type InheritedRow } from './inheritance.t
 import { personalName, resolveRead } from './personal.ts';
 import { openValues, plain, rewrapValue, rewrapValues, sealValues, useRecord, type Decided, type DecidedMany } from './keys.ts';
 import { formatMember, formatPath, type Path } from './paths.ts';
-import { currentReferences, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
+import { currentReferences, heldKey, placeOfRow, readableValues, readersOf, refuseIfRead, unreadParents, type Readable, type ReferenceView, type Resolved, type Unreadable } from './references.ts';
 
 export type SecretKey = {
   key: string;
   /**
    * The reference it is, when it has no value of its own: what it reads,
-   * whether it does, whether you could open its source where it is, and
-   * whether you are an Owner of the source's project, who alone routes a
-   * sensitive source through the proxy (R66; the Proxy tab says so).
+   * whether it does, and whether you could open its source where it is.
    */
-  reference: (ReferenceView & { canOpenSource: boolean; ownsSource: boolean }) | null;
+  reference: (ReferenceView & { canOpenSource: boolean }) | null;
   /** The folder it is listed in within this environment, or null for none. */
   folder: string | null;
   archived: boolean;
@@ -354,8 +352,7 @@ export async function listSecrets(
     if (reference === undefined) return null;
     const { source } = reference;
     const canOpenSource = source !== null && lists(ctx.caller, placeOfRow(source));
-    const ownsSource = source !== null && ownsProject(ctx.caller, source.projectId);
-    return { ...reference.view, canOpenSource, ownsSource };
+    return { ...reference.view, canOpenSource };
   };
   // A reference's value is its source's: as old as the version it reads.
   const writtenAt = (row: SecretRow): Date | null => {
@@ -1960,8 +1957,9 @@ export async function reveal(
     // else, its key is a key like any other.
     const parentOf = (item: Readable) => ({ projectId: environment.projectId, environmentId: item.parent!.environmentId, environmentSlug: item.parent!.slug });
     const told = (item: Readable) => item.parent === undefined || lists(ctx.caller, parentOf(item));
-    // Whether a workload only uses a value, one its scope does not list where the value is held (`useOnly`).
-    const usedOnly = (item: Readable) => !plain(item) && useOnly(ctx.caller, item.secret);
+    // Whether a workload only uses a value, one its scope does not list where the key is held (`useOnly`), a
+    // reference's holder as any key there (R71).
+    const usedOnly = (item: Readable) => !plain(item) && useOnly(ctx.caller, heldKey(item));
     // Whether the caller reads a value where it is held, which the proxy hands back only then: a Contributor only uses,
     // and so does a workload, but for what it lists.
     const readsHere = can(ctx.caller, 'secret.read', placeOf(place.project, place.environment));
@@ -2025,21 +2023,21 @@ export async function reveal(
     if (unlisted.length > 0) {
       const keys = unlisted.map((item) => item.key);
       throw new Refusal(
-        forbidden(`${named.path}: this workload uses ${keys.join(', ')} only through coffre, as its binding's reads do not list ${keys.length === 1 ? 'it where its value is' : 'them where their values are'} held`),
+        forbidden(`${named.path}: this workload uses ${keys.join(', ')} only through coffre, as its binding's reads do not list ${keys.length === 1 ? 'it where it is' : 'them where they are'} held`),
         denied(ctx, 'secret.read', 'use_only', { ...environment, operationId, metadata: { keys } }),
       );
     }
-    // A service's credential reads no sensitive value but of a project an Owner of which issued it: the value's own, a
-    // reference's source's (`readsSensitive`). Refused whole, as the vault would, naming them, and who can.
-    const notIssued = ctx.caller.principal.type === 'service' && handsBack({ purpose })
-      ? rows.filter((item) => item.secret.sensitive === true && !readsSensitive(ctx.caller, item.secret.projectId))
+    // A service's credential reads no sensitive value but of a project an Owner of which issued it: the one the key is
+    // held in, this place's, a reference's or an inherited key's too (`readsSensitive`, R71). Refused whole, as the vault
+    // would, naming them, where a reference reads its value from, and who can.
+    const notIssued = ctx.caller.principal.type === 'service' && handsBack({ purpose }) && !readsSensitive(ctx.caller, place.project.id)
+      ? rows.filter((item) => item.secret.sensitive === true)
       : [];
     if (notIssued.length > 0) {
       const keys = notIssued.map((item) => item.key);
-      // A reference's value is its source's project's to hand out.
-      const whose = notIssued.every((item) => item.secret.projectId === place.project.id) ? place.project.slug : 'the project each value is from';
+      const held = notIssued.map((item) => (item.via === undefined ? item.key : `${item.key} (a reference to ${item.secret.path})`));
       throw new Refusal(
-        forbidden(`${named.path} holds ${keys.join(', ')}, sensitive: a service account reads ${keys.length === 1 ? 'it' : 'them'} only on a token or trust binding an Owner of ${whose} issued`),
+        forbidden(`${named.path} holds ${held.join(', ')}, sensitive: a service account reads ${keys.length === 1 ? 'it' : 'them'} only on a token or trust binding an Owner of ${place.project.slug} issued`),
         denied(ctx, 'secret.read', 'not_owner_issued', { ...environment, operationId, metadata: { keys } }),
       );
     }
@@ -2179,7 +2177,7 @@ export async function environmentVersion(ctx: ApiContext, place: ResolvedPath): 
   const read = await readableValues(ctx.db, place, environment);
   // Of what a read by the caller would open, filtered as `reveal` filters it, before asking what they read.
   const person = ctx.caller.principal.type === 'user';
-  const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true) && (plain(item) || !useOnly(ctx.caller, item.secret))) };
+  const opened = { ...read, items: read.items.filter((item) => !(person && item.secret.sensitive === true) && (plain(item) || !useOnly(ctx.caller, heldKey(item)))) };
   const unread = unreadParents(ctx, environment.projectId, opened, ['secret.read', 'secret.use']);
   if (unread.size > 0) {
     const which = [...unread].map(([slug, keys]) => `${keys.join(', ')} from ${place.project.slug}/${slug}`);

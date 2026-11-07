@@ -11,7 +11,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ROLE_ID, ROLE_ID_MAX } from '@coffre/core/access';
-import { HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, USE_DEADLINE_MS } from '@coffre/core/vault';
+import { CLOCK_SKEW_MS, HOT_LOCK_TIMEOUT_MS, HOT_STATEMENT_TIMEOUT_MS, USE_DEADLINE_MS } from '@coffre/core/vault';
 import { HOT_SETTINGS } from '@coffre/db/migrate';
 import { sql } from 'drizzle-orm';
 
@@ -57,10 +57,11 @@ test("every function's bulk refresh is refreshMs's: least(REFRESH_MAX_MS, window
 });
 
 test('no function holds another copy of the minute or the deadline than the ones above', POSTGRES, () => {
-  // sign_in's own minute (0037): a credential's expiry may run that far past its longest by the app's clock. Not the
-  // use's clock-ahead minute, though the same length; the vault's SQLite path holds it as `60_000` (credentials.sqlite.ts).
-  const signIn = found(/now_ms \+ p_longest \+ 60000\b/g);
+  // sign_in's own minute (0037): a credential's expiry may run that far past its longest by the app's clock, which is
+  // CLOCK_SKEW_MS, the app's clock against the vault's, as the TypeScript checks (credentials.ts, credentials.sqlite.ts).
+  const signIn = found(/now_ms \+ p_longest \+ (\d+)\b/g);
   assert.deepEqual(signIn.map(({ name }) => name), ['sign_in'], "sign_in's minute is sign_in's alone, and written once");
+  assert.deepEqual(signIn.map(({ groups }) => Number(groups[0])), [CLOCK_SKEW_MS], "sign_in's minute is CLOCK_SKEW_MS");
   const minutes = found(/\b(60000)\b/g).length;
   const counted = found(/clock_timestamp\(\)\) \* 1000\)::bigint \+ 60000\b/g).length + found(/deadline_max\(\) - 60000\b/g).length
     + found(/least\(60000, /g).length + signIn.length;

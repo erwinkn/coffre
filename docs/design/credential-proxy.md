@@ -379,13 +379,14 @@ sensitive values there, true only where its issuer was an Owner of the
 project, of the whole instance or by a grant or role scoped to it, as a
 person on no credential's scope (`ownsProject`). The vault hands a
 service a sensitive value only on a credential that says so for the
-value's own project (`readsSensitive`, `not_owner_issued`): a fork's
-parent's for what it inherits, and a reference's source's, whose value
-it lends. Its permission is still decided where it is held: a token an
-Owner of `billing` issued for `billing/dev` reads a reference there into
-`backend/prod` only if it says so for `backend` too, else Bo, a
-Developer of `backend` and an Owner of `billing`, would read prod's
-sensitive values that way. Everything else the account
+project the key is held in (`readsSensitive`, `not_owner_issued`): a
+fork's parent's for what it inherits, and a reference's holder's, as any
+key held there (R71). A reference takes only its value and nature from
+its source, and its source is checked once, when it is made, by its
+maker's reading the value there (R24): a token an Owner of `billing`
+issued for `billing/dev` reads `billing/dev/STRIPE_SECRET_KEY`, a
+reference to `backend/prod`'s, whatever it says for `backend`, and one a
+Developer of `billing` issued does not. Everything else the account
 reads as before, and its credential's maker is told, when it is made,
 which places hold a sensitive value it will not read (`withheld`). A
 personal token or a handle cannot take the path at all: the route that

@@ -31,7 +31,7 @@ export type AwsProofInput = { url: string; headers: Record<string, string>; body
 
 /** The one request STS answers this proof by. */
 export const GET_CALLER_IDENTITY = 'Action=GetCallerIdentity&Version=2011-06-15';
-/** `x-amz-date`'s distance from now, either way; STS itself refuses past 15 minutes. */
+/** `x-amz-date`'s distance from now, either way; STS itself refuses past 15 minutes. Five minutes is Erwin's (#501 D3). */
 export const MAX_SKEW_MS = 5 * 60 * 1000;
 /** The longest header value forwarded; a role's session token is a few kilobytes at most. */
 const MAX_HEADER_BYTES = 8 * 1024;

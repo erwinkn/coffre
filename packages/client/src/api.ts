@@ -254,7 +254,6 @@ export type Api = {
           endedBy: string | null;
           endedAt: string | null;
           canOpenSource: boolean;
-          ownsSource: boolean;
         };
         folder: string | null;
         archived: boolean;
@@ -3244,7 +3243,6 @@ export type SecretKey = {
     endedBy: string | null;
     endedAt: string | null;
     canOpenSource: boolean;
-    ownsSource: boolean;
   };
   folder: string | null;
   archived: boolean;

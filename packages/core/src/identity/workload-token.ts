@@ -12,7 +12,7 @@ export type { JSONWebKeySet };
 
 /** A compact JWS is three base64url parts; the whole token at most this long. */
 export const MAX_TOKEN_BYTES = 8 * 1024;
-/** Each side of every time check. */
+/** Each side of every time check of a CI run's ID token: 30 s, kept by Erwin (#501 D3). */
 export const CLOCK_TOLERANCE_SECONDS = 30;
 /** The oldest token accepted, by its `iat`: tokens handed to a job at its start fit, day-old ones do not. */
 export const MAX_TOKEN_AGE_SECONDS = 3600;

@@ -255,7 +255,7 @@ function KeyNotes({ row, edits }: { row: Row; edits: Edits }) {
           {blockedInWords(row.keys.blocked, edits.place, edits.editor.keys)} Its fields stay as they are{row.removable ? '; you may delete it' : ''}.
         </Note>
       )}
-      {editing && row.state !== 'same' && row.state !== 'deleted' && row.keys.routed.length > 0 && <Note tone="warn">{routedInWords(row.keys.routed, edits.place, edits.editor.keys)}</Note>}
+      {editing && row.state !== 'same' && row.state !== 'deleted' && row.keys.routed.length > 0 && <Note tone="warn">{routedInWords(row.keys.routed)}</Note>}
       {editing && row.state !== 'deleted' && row.keys.missing.length > 0 && <Note tone="warn">{missingInWords(row.keys.missing, edits.place)}</Note>}
     </>
   );

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **A token's end may run at most a minute past its longest by the app's
+  clock, not five (W331, limits D3).** The vault held a service or
+  personal token's end to its longest plus 5 minutes, the room for an app
+  whose clock runs ahead of the database's; it now allows one minute,
+  `CLOCK_SKEW_MS` (`@coffre/core/vault`), the bound every check that a
+  time alone makes fresh already used: a Worker's clock against
+  Postgres's (`USE_AHEAD_MS`), a workload session's end and a CI run's
+  sign-in proof (`EXCHANGE_SKEW_SECONDS`). An app host more than a
+  minute ahead of its database has its longest tokens refused; fix its
+  clock. The checks something else makes fresh keep their own bounds:
+  DPoP's 300 s, an AWS proof's 5 minutes, an ID token's 30 s, Access's 0.
+
 - **`path()` redirects: two cases held by a test, one written down (T211).**
   A `Location` with the token's colon encoded twice (`%253A`), in its path or
   its query, is a 502 with nothing of the answer, and a relative one whose
@@ -73,6 +85,33 @@
   40 whatever `uses: { inFlight: 5000 }` said. `serveVault(config,
   options)` takes `localVault`'s options, as `localVault(config, options)`
   does. No default or value changes.
+
+- **A reference is read as its holder's own key, its sensitive value too
+  (R71, A516).** Once made, a reference was decided where it lives, but
+  three checks still asked its source's project: a service read its
+  sensitive value only on a credential an Owner of the source's project
+  issued, a workload's `reads` had to list it at its source, and only an
+  Owner of the source's project routed it in the Proxy tab. So a token
+  for `landing/prod` alone that an instance Owner issued could not read
+  `landing/prod/CLERK_SECRET_KEY`, a reference to `backend/prod`'s, and
+  the error named "the project each value is from". Each is now decided
+  at the holder, as any key held there: a credential an Owner of
+  `landing` issued reads it, a workload listing `"*"` at `landing/prod`
+  reads it, and an Owner of `landing` routes it. One a Developer of
+  `landing` issued still reads no sensitive value there (R32, at the
+  holder), and its refusal names the key, its source and who can issue
+  one: "landing/prod holds CLERK_SECRET_KEY (a reference to
+  backend/prod/CLERK_SECRET_KEY), sensitive: a service account reads it
+  only on a token or trust binding an Owner of landing issued". Making or
+  repointing a reference still takes reading its source, and using it if
+  sensitive (R24), and a workload still makes none of a value it only
+  uses. Existing references follow the new rule at once: nothing is
+  migrated. A fork copies a sensitive value read through a reference, kept
+  sensitive, as any key of the holder's, where it used to force a
+  reference to the source. The Secrets list's `reference.ownsSource` is
+  gone; `withheld` on a new token or binding, and the CLI's line for it,
+  now name only the holder's project. `formal/WorkloadReads.tla` and the
+  Lean model decide a reference at its holder too.
 
 - **A migration no longer holds up requests for minutes while it waits for
   a table (W331, limits D2).** `coffre migrate` set `lock_timeout = 5min`

@@ -13,7 +13,7 @@ import { applyOp, indexBytes, type Input, type Op, type ProxyInput, type ProxyIt
 import { frozenHoldings } from '../src/proxy.ts';
 import { ENGINE, rows, run, type TestDatabase } from './database.ts';
 import { namedWorld } from './named-world.ts';
-import { change, genesis, ROOT, seal } from './use-world.ts';
+import { change, genesis, onePeriod, ROOT, seal } from './use-world.ts';
 
 /** A change's op as the vault logs it: naming its object, which the log's replay reads it by (`loggedChange`). */
 const named = (ref: Ref, op: Op): Op => ({ ...op, ref }) as unknown as Op;
@@ -120,9 +120,15 @@ export async function routeWorld(db: TestDatabase) {
     });
     made.object = object;
   };
+  /**
+   * The time of the world's uses, fixed by the first: all of a test's uses fall in one refresh period of the cap (a minute),
+   * as `use-world`'s do (`onePeriod`). A clock read for each would let a cold and a warm use land either side of a minute's
+   * turn, where the key's bulk row belongs to an earlier period and the warm use decides again (T236).
+   */
+  let period: number | null = null;
   /** A route use of `route` at dev's place reading, as the handle asks it. */
   const ask = (route: string, extra: Partial<RouteUseInput> = {}): RouteUseInput => {
-    const at = Date.now();
+    const at = (period ??= onePeriod());
     return {
       caller: { kind: 'handle', tokenHash: w.tokenHash.toString('base64'), accepts: { signin: true, issuers: [], passkeys: 'off' as const } },
       named: { place: { project: w.slug, environment: 'dev' }, route }, stable: null, digests: [], purpose: 'use', at, deadline: at + 3000, ...extra,

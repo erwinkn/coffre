@@ -112,8 +112,8 @@ export function keyRefusals(
       if (refused.every((code) => code !== null)) return refused[0] ?? 'no_grant';
     }
     // Through a reference, the holder's grants decide, its source's never: a reference takes its value and nature
-    // (a sensitive one stays use-only) from its source, and its permissions from where it lives. Its maker held what
-    // the source's nature asks when it was made (`reference`).
+    // (a sensitive one stays use-only) from its source, and its permissions from where it lives (R20, R71). Its maker
+    // held what the source's nature asks when it was made (`reference`).
     return refuses(reader, permission, placeIn(at[i]!, environments), gone(secret) || gone(at[i]!));
   };
   // A loosening takes its reader owning the project besides, a personal config's owner too, there.
@@ -127,11 +127,13 @@ export function keyRefusals(
  * Each key's refusal once its sensitivity is weighed too, after `vet`. A
  * sensitive value is only ever used for a person, never handed back, by
  * whatever credential of theirs asks; and handed back to a service account
- * only on a credential an Owner of its own project issued, a reference's
- * source's too, whose value it is (`readsSensitive`, R32). And a fork
- * copies one, for anyone, a service account too, only where its app says
- * it keeps it sensitive (an app of 0.9, mid-deploy, would write the copy as
- * a secret its people read), and never one read through a reference.
+ * only on a credential an Owner of the project it is held in issued
+ * (`readsSensitive`, R32): each secret is that place, a reference's
+ * holder's as any key held there, whatever project its source is in (R71).
+ * And a fork copies one, for anyone, a service account too, only where its
+ * app says it keeps it sensitive (an app of 0.9, mid-deploy, would write
+ * the copy as a secret its people read): one read through a reference as
+ * any, the fork being of the holder's project (R71).
  */
 export function sensitiveRefusals(
   codes: readonly (RefusalCode | null)[],
@@ -142,8 +144,6 @@ export function sensitiveRefusals(
     purpose?: string;
     keepsSensitive?: boolean;
     secrets: readonly { projectId: string; sensitive?: boolean }[];
-    /** Each secret read through a reference. */
-    viaReference?: readonly boolean[];
   },
 ): (RefusalCode | null)[] {
   const copying = call.action === 'secret.read' && call.purpose === 'copy';
@@ -152,9 +152,7 @@ export function sensitiveRefusals(
   return call.secrets.map((secret, i) => {
     const code = codes[i] ?? null;
     if (code !== null || secret.sensitive !== true) return code;
-    // A sensitive value read through a reference is never copied: a fork keeps it a reference to its source, so the
-    // value stays in its own project, where R16/R32 decide who reads it. Copying it would move it to the fork's.
-    if ((copying && call.keepsSensitive !== true) || (copying && call.viaReference?.[i] === true) || (handedBack && person)) return 'sensitive';
+    if ((copying && call.keepsSensitive !== true) || (handedBack && person)) return 'sensitive';
     if (handedBack && !readsSensitive(reader.live, secret.projectId)) return 'not_owner_issued';
     return null;
   });
@@ -164,9 +162,9 @@ export function sensitiveRefusals(
  * Each key's refusal once a workload's listing is weighed too, after `vet`
  * and before its sensitivity (docs/design/workload-access.md, section 6.1).
  * A workload is handed back, for any purpose but the proxy's use, only a
- * value its credential lists where the value is held (`useOnly`): each
- * secret is that place, a reference's source, a fork's parent, whatever
- * place the call checked its permission at. A copy too, kept sensitive or
+ * value its credential lists where the key is held (`useOnly`): each
+ * secret is that place and key, a fork's parent's, or a reference's own at
+ * its holder, as any key held there (R71). A copy too, kept sensitive or
  * not: it would land where the workload may read it. The vault opens no
  * plain value, so every key here is a secret or a sensitive one.
  */
@@ -538,8 +536,9 @@ export function standingRefusal(view: CheckedView, request: UseRequest): UseCode
  *    holder's), whatever it is read through.
  * 4. **0.14's rules, unchanged:** `keyRefusals`, then `useOnlyRefusals`,
  *    then `sensitiveRefusals`, on the reader its principal, credential,
- *    roles and environments make (`readerOf`). Nothing is `vet`ted: a
- *    reference's end is its holder's row, sealed (`ended` above).
+ *    roles and environments make (`readerOf`), each at the key's own
+ *    environment and by its own id, a reference's too (R71). Nothing is
+ *    `vet`ted: a reference's end is its holder's row, sealed (`ended` above).
  * 5. **The bulk cap,** on what the use read of it, with the policy's count.
  *
  * Step 1 refuses only what step 4 would: 0.14's rules decide a key's
@@ -595,10 +594,11 @@ export function decideChecked(view: CheckedView, request: UseRequest): UseCode |
   const environmentRows = new Map([...rows].map(([id, { projectId, slug, owner, parentId, deleted, archived, projectArchived }]) => [id, { projectId, slug, owner, parentId, deleted, archived: archived || projectArchived }]));
   const permission: Permission = request.purpose === 'use' ? 'secret.use' : 'secret.read';
   const byPlace = keyRefusals(reader, { principal: credential.principal, permission, secrets: [place], at: [at], environments: environmentRows, needs: [null] });
-  const listed = useOnlyRefusals(byPlace, reader, { action: 'secret.read', purpose: request.purpose, secrets: [{ ...place, secretId: value.id }] });
+  // Listed, and its sensitive value given a service, where the key is held: a reference's holder, as any key there (R71).
+  const listed = useOnlyRefusals(byPlace, reader, { action: 'secret.read', purpose: request.purpose, secrets: [{ ...at, secretId: secret.id }] });
   const [code] = sensitiveRefusals(listed, reader, {
     action: 'secret.read', principal: credential.principal, purpose: request.purpose, keepsSensitive: request.keepsSensitive,
-    secrets: [{ projectId: value.projectId, sensitive: value.nature === 'sensitive' }], viaReference: [secret.source !== null],
+    secrets: [{ projectId: at.projectId, sensitive: value.nature === 'sensitive' }],
   });
   if (code != null) return code;
   // A plain value counts toward no cap, as when the app handed it back itself; only a named use hands one back.
