@@ -1712,25 +1712,66 @@ export function lockFactor(tx: Transaction, principal: string): Promise<unknown>
 }
 
 /**
- * A person's approved device codes that no CLI has redeemed yet and that name no passkey: what a first passkey denies
- * (section 6.1), each a compare-and-set on its MAC, and a denial names nobody (`device_authorizations_approval_names_principal`).
+ * A person's approved device codes that no CLI has redeemed yet: what a change to their passkeys denies (section 6.1),
+ * each a compare-and-set on its MAC, and a denial names nobody and no passkey (`device_authorizations_approval_names_principal`,
+ * `device_authorizations_passkey_check`).
+ * `unbacked`: only those that name no passkey, a first passkey's; otherwise all of them, a removal's and a reset's.
  * The ids it denied.
  */
-export async function denyUnbackedApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date): Promise<string[]> {
+export async function denyApprovals(tx: Queryable, chainKey: Buffer, principal: string, at: Date, which: { unbacked: boolean }): Promise<string[]> {
   const { deviceAuthorizations } = tablesOf(tx);
   const rows = await tx.select().from(deviceAuthorizations).where(and(
     eq(deviceAuthorizations.principal, principal),
     eq(deviceAuthorizations.decision, 'approved'),
     isNull(deviceAuthorizations.consumedAt),
-    isNull(deviceAuthorizations.passkeyId),
+    which.unbacked ? isNull(deviceAuthorizations.passkeyId) : undefined,
     gt(deviceAuthorizations.expiresAt, at),
   ));
-  const denied: string[] = [];
-  for (const row of rows) {
-    if (!checkAuthRow(chainKey, 'device_authorizations', row)) continue;
-    if ((await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0 })) > 0) denied.push(row.id);
-  }
-  return denied;
+  // A denial names no passkey either (`device_authorizations_passkey_check`; review r1 of #529): the touch that approved
+  // it no longer stands. Each its own compare-and-set, asked together: one round trip for them all.
+  const decided = await Promise.all(rows.filter((row) => checkAuthRow(chainKey, 'device_authorizations', row)).map(async (row) => {
+    const moved = await updateAuth(tx, chainKey, deviceAuthorizations, { id: row.id, authMac: row.authMac }, { decision: 'denied', decidedAt: at, principal: null, generation: 0, passkeyId: null });
+    return moved > 0 ? row.id : null;
+  }));
+  return decided.filter((id) => id !== null);
+}
+
+/**
+ * A live passkey removed (sections 3.6 and 3.7): its removal and who made it, signed again, since the MAC covers
+ * `removed_at`; a compare-and-set on the MAC read, so a row changed since is no row to remove. 1 if it moved, 0 if not.
+ */
+export async function removePasskeyRow(tx: Queryable, chainKey: Buffer, row: PasskeyRow, by: { removedAt: Date; removedBy: string }): Promise<number> {
+  const { passkeys } = tablesOf(tx);
+  const signed = { ...row, removedAt: by.removedAt };
+  return changedRows(
+    await tx
+      .update(passkeys)
+      .set({ ...by, authMac: authMac(chainKey, 'passkeys', signed) })
+      .where(and(eq(passkeys.id, row.id), eq(passkeys.authMac, row.authMac), isNull(passkeys.removedAt))),
+  );
+}
+
+/** A live passkey of the person's renamed (section 3.6): its name is outside the MAC, so nothing is signed again. 1 if it moved, 0 if not. */
+export async function renamePasskeyRow(tx: Queryable, passkey: { id: string; principal: string; generation: number }, name: string): Promise<number> {
+  const { passkeys } = tablesOf(tx);
+  return changedRows(
+    await tx
+      .update(passkeys)
+      .set({ name })
+      .where(and(eq(passkeys.id, passkey.id), eq(passkeys.principal, passkey.principal), eq(passkeys.generation, passkey.generation), isNull(passkeys.removedAt))),
+  );
+}
+
+/**
+ * Every passkey row a person has had, at any generation, removed ones included, oldest first, each held to its MAC (a
+ * row that fails it throws, `verifyAuthRow`): what a removal, a reset or another passkey's add decides on, read under
+ * the person's factor lock, and what their Passkeys tab lists. By `passkeys_principal_idx`.
+ */
+export async function passkeysOf(db: Queryable, chainKey: Buffer, principal: string): Promise<PasskeyRow[]> {
+  const { passkeys } = tablesOf(db);
+  const rows = await db.select().from(passkeys).where(eq(passkeys.principal, principal)).orderBy(asc(passkeys.createdAt));
+  for (const row of rows) verifyAuthRow(chainKey, 'passkeys', row);
+  return rows;
 }
 
 /** A credential as `findCredential` reads it: its row, its sign-in account's, the database's clock, and the newest policy change. */
@@ -2444,6 +2485,11 @@ export function unbackedCredentials(principal: { type: string; id: string }, gen
   return (credentials) => and(eq(credentials.principal, principalOf(principal)), eq(credentials.generation, generation), isNull(credentials.passkeyId), gt(credentials.expiresAt, at));
 }
 
+/** Every credential of a person's live at `at`, whatever names it: what removing one of their passkeys, or a reset, ends (passkeys.md, section 6.1). */
+export function personCredentials(principal: { type: string; id: string }, at: Date): CredentialsWhere {
+  return (credentials) => and(eq(credentials.principal, principalOf(principal)), gt(credentials.expiresAt, at));
+}
+
 /** A member's credentials of a membership before `generation`, live at `at`: expired ones are dead already, and a CI service leaves one behind each run. */
 export function priorCredentials(principal: { type: string; id: string }, generation: number, at: Date): CredentialsWhere {
   return (credentials) => and(eq(credentials.principal, principalOf(principal)), lt(credentials.generation, generation), gt(credentials.expiresAt, at));
@@ -2483,12 +2529,10 @@ export async function liveCredentialsWhere(db: Queryable, chainKey: Buffer, wher
 /** Revoke the live credentials `where` names, each a compare-and-set on its MAC, as `updateAuth` does: the ids it revoked. */
 export async function revokeCredentialsWhere(db: Queryable, chainKey: Buffer, where: CredentialsWhere, by: { revokedAt: Date; revokedBy: string }): Promise<string[]> {
   const { credentials } = tablesOf(db);
-  const revoked: string[] = [];
-  for (const row of await liveCredentialsWhere(db, chainKey, where)) {
-    const done = await update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) });
-    if (done > 0) revoked.push(row.id);
-  }
-  return revoked;
+  // Each its own compare-and-set, asked together: one round trip for them all, however many (review r1 of #529).
+  const rows = await liveCredentialsWhere(db, chainKey, where);
+  const done = await Promise.all(rows.map((row) => update(db, credentials as Tables['credentials'], { id: row.id, authMac: row.authMac, revokedAt: null }, { ...by, authMac: authMac(chainKey, 'credentials', { ...row, ...by }) })));
+  return rows.filter((_, i) => done[i]! > 0).map((row) => row.id);
 }
 
 /**

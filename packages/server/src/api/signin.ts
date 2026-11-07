@@ -30,6 +30,7 @@ import { answerOf, shownActive, type Shows } from '../db/answers.ts';
 import { appLogKey } from '../db/audit.ts';
 import type { AuditEntry } from '../db/audit.ts';
 import { MAX_BODY_NODES } from '../http.ts';
+import { passkeyName, providerName } from '../passkey-names.ts';
 import {
   findBinding,
   findCredential,
@@ -62,13 +63,17 @@ import {
   liveConnections,
   touchPasskey,
   insertPasskey,
-  denyUnbackedApprovals,
+  denyApprovals,
+  passkeysOf,
+  personCredentials,
+  removePasskeyRow,
+  renamePasskeyRow,
   unbackedCredentials,
   type CredentialRead,
   type PasskeyRead,
   type PasskeyRow,
 } from '../db/queries.ts';
-import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type Act, type ActState, type CreateState, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
+import { CeremonyStates, challenge, creationOptions, requestOptions, responseCredentialId, userHandle, type Act, type ActState, type AddState, type CreateState, type RemoveState, type CreationOptionsJSON, type PendingFactor, type RequestOptionsJSON, type StepUpState } from './ceremony.ts';
 import { passkeyChecked, PasskeyRequired, passkeyStands, sourceStands } from '../passkey-check.ts';
 import { callerFrom, projectsReached, type Caller, type PrincipalRef } from './caller.ts';
 import { reachedPlaces } from './render.ts';
@@ -141,7 +146,9 @@ export type SigninRefusal =
   /** A passkey step for another person, membership or issuer than the sign-in it completes: start again. */
   | 'state_mismatch'
   /** A step-up for a session that ended, or that another touch replaced first (section 6.5). */
-  | 'session_ended';
+  | 'session_ended'
+  /** Removing the person's last passkey under `required`: they add another first (section 3.6). */
+  | 'last_passkey';
 
 /**
  * A credential that could not be checked, rather than one checked and
@@ -663,7 +670,7 @@ export class SigninService {
           for (const row of unbacked.connections) {
             if ((await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt: now, revokedBy: principalId })) > 0) ended.connections.push(row.id);
           }
-          ended.approvals.push(...await denyUnbackedApprovals(tx, this.#deps.chainKey, principalOf(principal), now));
+          ended.approvals.push(...await denyApprovals(tx, this.#deps.chainKey, principalOf(principal), now, { unbacked: true }));
           log.push({
             ...base,
             actorId: principalId,
@@ -821,7 +828,13 @@ export class SigninService {
     }
     const person = { email, name: state.account.name, site: this.config.page.title };
     const create: CreateState = { purpose: 'create', challenge: state.challenge, userHandle: userHandle(), issuedAt: state.issuedAt };
-    return { purpose: 'enroll', email, options: creationOptions(this.config.passkeys, create, person, passkeys), state: this.#ceremonies.seal(create) };
+    // An Owner's reset of theirs, which the page says (section 3.7); rows that fail their MAC say nothing here, and the post refuses.
+    const rows = await passkeysOf(this.#deps.db, this.#deps.chainKey, state.principal).catch((error: unknown) => {
+      if (error instanceof AuthRowTampered) return [];
+      throw error;
+    });
+    const reset = lastReset(state.principal, rows.filter((row) => row.generation === state.generation));
+    return { purpose: 'enroll', email, options: creationOptions(this.config.passkeys, create, person, passkeys), state: this.#ceremonies.seal(create), reset };
   }
 
   /**
@@ -867,7 +880,7 @@ export class SigninService {
         transports: JSON.stringify(verified.transports),
         aaguid: verified.aaguid === null ? null : Buffer.from(verified.aaguid),
         synced: verified.backupEligible,
-        name: `Passkey ${state.passkeysEver! + 1}`,
+        name: passkeyName(verified.aaguid, state.passkeysEver!),
       };
       return this.#signedIn(profile, meta, { kind: 'enroll', state, id: row.id, row, replaces });
     }
@@ -1021,6 +1034,333 @@ export class SigninService {
     log.push(allowed(ctx, 'passkey.check', { metadata: { purpose: state.act.kind, passkeyId } }));
   }
 
+  // --- managing passkeys (docs/design/passkeys.md, sections 3.6 and 3.7) ---------------------------------------
+
+  /**
+   * A person's live passkeys, as their Passkeys tab lists them, with what removing one ends and the newest reset of
+   * theirs (section 3.7): their own, or, for an Owner of the whole instance, anyone's, whose reset they weigh. Rows that
+   * fail their MAC refuse the read (`tampered`) rather than list as fewer (R64).
+   */
+  async listPasskeys(ctx: Asker, member: PrincipalRef): Promise<PasskeyList> {
+    const self = ownPasskeys(ctx, member);
+    // A read: a refusal is no attempt at a reset, and the log records none (review: Fable, #529).
+    if (!self && !instanceOwner(ctx)) throw forbidden("only an Owner of the whole instance sees someone's passkeys");
+    if (!self && member.type !== 'user') throw notFound('only people hold passkeys');
+    const standing = self ? null : await this.#standing(member);
+    if (standing !== null && standing.status !== 'active') throw notFound('no such member');
+    const generation = standing?.generation ?? ctx.caller.generation;
+    const principal = principalOf(member);
+    const now = new Date();
+    const [rows, [held], apps] = await Promise.all([
+      passkeysOf(this.#deps.db, this.#deps.chainKey, principal).catch((error: unknown) => {
+        throw error instanceof AuthRowTampered ? tamperedPasskeys() : error;
+      }),
+      members(this.#deps.db, this.#deps.chainKey, { member, standing: false }, now),
+      liveConnections(this.#deps.db, this.#deps.chainKey, principal, now),
+    ]);
+    const mine = rows.filter((row) => row.generation === generation);
+    const live = mine.filter((row) => row.removedAt === null);
+    // What a removal or a reset ends: everything of theirs, but the session asking, which a removal replaces.
+    const others = (held?.credentials ?? []).filter((row) => row.id !== (self ? ctx.credentialId : null));
+    const count = (...kinds: string[]) => others.filter((row) => kinds.includes(row.kind)).length;
+    return {
+      passkeys: live.map(passkeyView),
+      ends: { sessions: count('browser', 'cli'), tokens: count('personal'), handles: count('handle'), apps: apps.filter((row) => row.refreshHash !== null).length },
+      reset: lastReset(principal, mine),
+      max: MAX_PASSKEYS,
+    };
+  }
+
+  /**
+   * The options of a `create()` for another passkey of the person's, from their browser session (section 3.6), which
+   * the router held to a touch in the last five minutes: bound to that session, with a user handle drawn for this
+   * `create()` alone, and the person's live passkeys excluded. A first passkey is added at sign-in instead
+   * (`?passkey=add`), which the router's `add_passkey` asks of a person who holds none.
+   */
+  async addStep(ctx: Asker & Pick<ApiContext, 'session'>, member: PrincipalRef): Promise<{ options: CreationOptionsJSON; state: string }> {
+    this.#adding(ctx, member);
+    const principal = principalOf(member);
+    const rows = await passkeysOf(this.#deps.db, this.#deps.chainKey, principal).catch((error: unknown) => {
+      throw error instanceof AuthRowTampered ? tamperedPasskeys() : error;
+    });
+    const live = rows.filter((row) => row.generation === ctx.caller.generation && row.removedAt === null);
+    addable(live.length);
+    const state: AddState = { purpose: 'add', credentialId: ctx.credentialId!, principal, generation: ctx.caller.generation, userHandle: userHandle(), passkeysEver: rows.length, ...challenge() };
+    const person = { email: member.id, name: null, site: this.config.page.title };
+    return { options: creationOptions(this.config.passkeys, state, person, live), state: this.#ceremonies.seal(state) };
+  }
+
+  /**
+   * Another passkey added (section 3.6): the answer to `addStep`'s `create()`, checked, then, under the person's factor
+   * lock and the log's head, the session it was asked on still live and still backed, the person's passkeys as they
+   * were when it was asked (none added or removed since), and room for one more. It ends nothing: every credential of
+   * theirs names a passkey already, or none while they held none, which this does not reach (section 6.1).
+   */
+  async addPasskey(ctx: Asker & Pick<ApiContext, 'session'>, member: PrincipalRef, answer: TouchAnswer): Promise<{ passkey: PasskeyView }> {
+    this.#adding(ctx, member);
+    const principal = principalOf(member);
+    const state = this.#ceremonies.open(answer.state, ['add']);
+    if (state === null || state.credentialId !== ctx.credentialId || state.principal !== principal || state.generation !== ctx.caller.generation) {
+      throw new ApiError('conflict', 'this passkey was asked for on another session, or too long ago: add it again', 'state_mismatch');
+    }
+    const fail = (reason: string) => new Refusal(new ApiError('touch_failed', 'that passkey could not be added: try again'), denied(ctx, 'passkey.add', reason));
+    try {
+      return await withRefusals(this.#deps, async () => {
+        const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, values: MAX_BODY_NODES };
+        const verified = await verifyRegistration(answer.response, expected);
+        if (!verified.ok) throw fail(verified.reason);
+        const standing = await this.#standing(member);
+        return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+          const [caller, rows] = await Promise.all([this.#currentCaller(tx, ctx, standing), passkeysOf(tx, this.#deps.chainKey, principal)]);
+          if (caller === null) throw fail('session_ended');
+          if (rows.length !== state.passkeysEver) throw new ApiError('conflict', 'your passkeys changed meanwhile: add it again', 'state_mismatch');
+          addable(rows.filter((row) => row.generation === state.generation && row.removedAt === null).length);
+          const row = {
+            id: randomUUID(),
+            principal,
+            generation: state.generation,
+            userHandle: Buffer.from(state.userHandle, 'base64url'),
+            credentialId: Buffer.from(verified.credentialId),
+            publicKey: Buffer.from(verified.publicKey),
+            algorithm: verified.algorithm,
+            signCount: verified.signCount,
+            // Its own challenge is spent: nothing issued before it is answered with it.
+            lastChallengeAt: new Date(state.issuedAt),
+            transports: JSON.stringify(verified.transports),
+            aaguid: verified.aaguid === null ? null : Buffer.from(verified.aaguid),
+            synced: verified.backupEligible,
+            name: passkeyName(verified.aaguid, state.passkeysEver),
+            createdBy: member.id,
+          };
+          await insertPasskey(tx, this.#deps.chainKey, row);
+          log.push(allowed(ctx, 'passkey.add', { metadata: { passkeyId: row.id, name: row.name, aaguid: row.aaguid === null ? null : row.aaguid.toString('hex'), synced: row.synced } }));
+          return { passkey: passkeyView({ ...row, createdAt: new Date(), lastUsedAt: null }) };
+        }, null, principal);
+      });
+    } catch (error) {
+      if (error instanceof AuthRowTampered) throw tamperedPasskeys();
+      // A credential ID a passkey has already, anyone's: the unique index decides it, a race included.
+      if (isUniqueViolation(error)) throw new ApiError('conflict', 'that passkey is added already', 'passkey_exists');
+      throw error;
+    }
+  }
+
+  /** A passkey of the person's renamed (section 3.6): no check, since a name grants nothing and sits outside every MAC. */
+  async renamePasskey(ctx: Asker, member: PrincipalRef, id: string, name: string): Promise<{ passkey: { id: string; name: string } }> {
+    if (!ownPasskeys(ctx, member)) throw forbidden('a person renames their own passkeys');
+    return audited({ ...this.#deps, caller: ctx.caller }, async (tx, log) => {
+      if ((await renamePasskeyRow(tx, { id, principal: principalOf(member), generation: ctx.caller.generation }, name)) === 0) throw notFound('no such passkey');
+      log.push(allowed(ctx, 'passkey.rename', { metadata: { passkeyId: id, name } }));
+      return { passkey: { id, name } };
+    });
+  }
+
+  /**
+   * An Owner's reset of someone's passkeys (section 3.7): every live one removed, and everything the person is signed in
+   * with ended, sessions, terminals, personal tokens, handles, connected apps and approved terminal codes not yet
+   * redeemed, under their factor lock and the log's head (section 6.1; formal/Factor.tla's `reset`). Only an Owner of
+   * the whole instance, signed in as themselves, resets anyone's, and never their own, which they remove with a touch;
+   * the router held them to a touch in the last five minutes. Their next sign-in asks for a new one under `required`,
+   * and the provider alone signs them in under `optional`.
+   */
+  async resetPasskeys(ctx: Asker, member: PrincipalRef): Promise<PasskeyReset> {
+    const principal = principalOf(member);
+    try {
+      return await withRefusals(this.#deps, async () => {
+        // The Owner as the vault answers now, held to under the head: demoted meanwhile, they reset no one (`issuerStill`;
+        // review r1 of #529), as an issuer demoted meanwhile gives a token nothing.
+        const { caller, accessSeq } = await issuerNow(this.#deps, ctx.caller.principal, { ctx, action: 'passkey.reset' });
+        const asker = { ...ctx, caller };
+        mayReset(asker, member);
+        if (caller.principal.id === member.id) {
+          throw new Refusal(forbidden('your own passkeys are removed from Account → Passkeys, with a touch of one you keep'), denied(ctx, 'passkey.reset', 'own_passkeys', { metadata: { principalType: 'user', principalId: member.id } }));
+        }
+        const standing = await this.#standing(member);
+        if (standing.status !== 'active') throw notFound('no such member');
+        const credentialEnded = () => new Refusal(new ApiError('unauthenticated', 'that credential is unknown, expired or revoked'), denied(ctx, 'passkey.reset', 'credential_ended', { metadata: { principalType: 'user', principalId: member.id } }));
+        return await retrying(async () => {
+          const changes = await AppChanges.prepare(this.#deps.vault, formatMember(caller.principal), async () => {
+            const at = new Date();
+            const [held, connected] = await Promise.all([
+              liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(member, at)),
+              liveConnections(this.#deps.db, this.#deps.chainKey, principal, at),
+            ]);
+            return [...revokes(held), ...connectionRevokes(connected)];
+          });
+          return audited({ ...this.#deps, caller }, async (tx, log) => {
+            // Read together, one round trip: the Owner's access as it was weighed, the session they asked on still live and
+            // still backed by the passkey it names, the person still the member they were, and their passkeys.
+            const [, , stands, still, rows] = await Promise.all([
+              issuerStill(tx, caller, accessSeq),
+              credentialStill(asker, tx, 'passkey.reset'),
+              sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, asker),
+              this.#stillMember(tx, member, standing),
+              passkeysOf(tx, this.#deps.chainKey, principal),
+            ]);
+            if (!stands) throw credentialEnded();
+            if (!still) throw notFound('no such member');
+            const live = rows.filter((row) => row.generation === standing.generation && row.removedAt === null);
+            if (live.length === 0) throw new ApiError('conflict', `${member.id} has no passkey to reset`, 'no_passkeys');
+            const now = new Date();
+            const by = { removedAt: now, removedBy: caller.principal.id };
+            // Every write at once, under the person's factor lock, which no issue or sign-in of theirs passes meanwhile:
+            // the removals' compare-and-sets and the revocations, each checked after (review r1 of #529).
+            const [moved, ended] = await Promise.all([
+              Promise.all(live.map((row) => removePasskeyRow(tx, this.#deps.chainKey, row, by))),
+              this.#endEverything(tx, member, now, caller.principal.id, changes),
+            ]);
+            if (moved.some((count) => count === 0)) throw new ObjectMoved();
+            log.push(allowed(asker, 'passkey.reset', {
+              metadata: { principalType: 'user', principalId: member.id, passkeys: live.map((row) => row.id), ended: countsOf(ended) },
+            }));
+            return { reset: live.length, ended: countsOf(ended) };
+          }, changes, principal);
+        });
+      });
+    } catch (error) {
+      if (error instanceof AuthRowTampered) throw tamperedPasskeys();
+      throw error;
+    }
+  }
+
+  /**
+   * What removing one of their passkeys asks the person's browser for (section 3.6): a touch of another live passkey of
+   * theirs, which the new session will name; under `optional`, a touch of the last one, which leaves them none; under
+   * `off`, none. Bound to the browser session it was asked on, which the removal replaces. Null when there is no such
+   * session or passkey; `last_passkey` under `required` for their last one, which they add another before removing.
+   */
+  async removeStep(token: string, passkeyId: string): Promise<{ purpose: 'remove'; email: string; name: string; options: RequestOptionsJSON | null; state: string } | { refused: 'last_passkey' | 'tampered' } | null> {
+    const session = await this.#stepUpSession(token);
+    if (session === null) return null;
+    const rows = await passkeysOf(this.#deps.db, this.#deps.chainKey, session.principal).catch((error: unknown) => {
+      if (error instanceof AuthRowTampered) return null;
+      throw error;
+    });
+    if (rows === null) return { refused: 'tampered' };
+    const live = rows.filter((row) => row.generation === session.generation && row.removedAt === null);
+    const target = live.find((row) => row.id === passkeyId);
+    if (target === undefined) return null;
+    const kept = live.filter((row) => row.id !== passkeyId);
+    const policy = this.config.passkeys.policy;
+    if (policy === 'required' && kept.length === 0) return { refused: 'last_passkey' };
+    const touch: RemoveState['touch'] = policy === 'off' ? 'none' : kept.length > 0 ? 'kept' : 'last';
+    const state: RemoveState = { purpose: 'remove', credentialId: session.id, principal: session.principal, generation: session.generation, passkeyId, touch, ...challenge() };
+    const options = touch === 'none' ? null : requestOptions(this.config.passkeys, state, touch === 'kept' ? kept : [target]);
+    return { purpose: 'remove', email: memberOf(session.principal).id, name: target.name, options, state: this.#ceremonies.seal(state) };
+  }
+
+  /**
+   * A passkey removed by its person (section 3.6), from the browser session `removeStep` bound it to: the touch it
+   * asked for checked, then, under the person's factor lock and the log's head, the passkey removed, everything the
+   * person is signed in with ended, the session it came in on included, and a new session issued to this browser
+   * (rule 1): confirmed now by the passkey touched, or, removing the last one under `optional`, or under `off`, naming
+   * none. Signed out everywhere else: "everywhere else" is a rule a person can predict, since any of their sessions may
+   * have been confirmed by any of their passkeys (section 6.1). `passkey.remove` entries, and `passkey.check` denials.
+   */
+  async removePasskey(sealed: string, token: string, response: unknown, meta: ClientMeta): Promise<SigninResult> {
+    const state = this.#ceremonies.open(sealed, ['remove']);
+    const session = state === null ? null : await this.#stepUpSession(token);
+    if (state === null || session === null || session.id !== state.credentialId) return refusal(new SigninRefused('session_ended'));
+    // The policy it was asked under, still: a redeploy between the two asks again.
+    if ((this.config.passkeys.policy === 'off') !== (state.touch === 'none')) return refusal(new SigninRefused('state_mismatch'));
+    const principal = memberOf(state.principal) as PrincipalRef & { type: 'user' };
+    const entry = (action: string, decision: 'allow' | 'deny', metadata: Record<string, unknown>): AuditEntry => ({
+      actorType: 'user', actorId: principal.id, action, decision, requestId: meta.requestId, sourceIp: meta.sourceIp, metadata: { passkeyId: state.passkeyId, ...metadata },
+    });
+    const deny = (reason: string, touched: string | null = null) => new Refusal(new SigninRefused('passkey_failed'), entry('passkey.check', 'deny', { purpose: 'remove', reason, touched }));
+    try {
+      return await withRefusals(this.#deps, async () => {
+        let touched: { passkey: PasskeyRow; signCount: number } | null = null;
+        if (state.touch !== 'none') {
+          const passkey = await this.#passkeyAnswering(response, state);
+          // The one it asked for: another the person keeps, or, for their last, that one.
+          if (passkey === null || (state.touch === 'kept') === (passkey.id === state.passkeyId)) throw deny('unknown_credential', passkey?.id ?? null);
+          const expected = { challenge: Buffer.from(state.challenge, 'base64url'), origin: this.config.passkeys.origin, rpId: this.config.passkeys.rpId, values: MAX_BODY_NODES, passkey: storedOf(passkey) };
+          const verified = await verifyAssertion(response, expected);
+          if (!verified.ok) throw deny(verified.reason, passkey.id);
+          touched = { passkey, signCount: verified.signCount };
+        }
+        const standing = await this.#standing(principal);
+        return retrying(async () => {
+          const plan = { id: randomUUID(), expiresAt: session.expiresAt, generation: standing.generation };
+          const changes = await AppChanges.prepare(this.#deps.vault, formatMember(principal), async () => {
+            const at = new Date();
+            const [held, connected] = await Promise.all([
+              liveCredentialsWhere(this.#deps.db, this.#deps.chainKey, personCredentials(principal, at)),
+              liveConnections(this.#deps.db, this.#deps.chainKey, state.principal, at),
+            ]);
+            return [this.#issueChange('browser', principal, plan), ...revokes(held), ...connectionRevokes(connected)];
+          });
+          return audited(this.#deps, async (tx, log) => {
+            const [member, rows] = await Promise.all([this.#stillMember(tx, principal, standing), passkeysOf(tx, this.#deps.chainKey, state.principal)]);
+            if (!member || standing.generation !== state.generation) throw new Refusal(new SigninRefused('session_ended'), entry('passkey.remove', 'deny', { reason: 'session_ended' }));
+            const live = rows.filter((row) => row.generation === state.generation && row.removedAt === null);
+            const target = live.find((row) => row.id === state.passkeyId);
+            // Removed meanwhile, or their last one now, or no longer: what the person was asked to touch no longer holds.
+            if (target === undefined) throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.remove', 'deny', { reason: 'removed' }));
+            if (live.length === 1 && this.config.passkeys.policy === 'required') throw new Refusal(new SigninRefused('last_passkey'), entry('passkey.remove', 'deny', { reason: 'last_passkey' }));
+            if ((state.touch === 'last') !== (live.length === 1) && state.touch !== 'none') throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.remove', 'deny', { reason: 'passkeys_changed' }));
+            const now = new Date();
+            // Three compare-and-sets asked together (two round trips: the session's revoke reads its row first), each
+            // checked after, in this order: the session it replaces ended, once (section 6.5: of two removals on one
+            // session, one goes); the touch taken, once, on a passkey still live (section 7.3); the passkey removed. Any
+            // of them not moving rolls everything back.
+            const [replaced, took, moved] = await Promise.all([
+              revokeCredentialsWhere(tx, this.#deps.chainKey, credentialsBy.id(session.id), { revokedAt: now, revokedBy: principal.id }),
+              touched === null ? 1 : touchPasskey(tx, { id: touched.passkey.id, principal: state.principal, generation: state.generation, issuedAt: new Date(state.issuedAt), signCount: touched.signCount }),
+              removePasskeyRow(tx, this.#deps.chainKey, target, { removedAt: now, removedBy: principal.id }),
+            ]);
+            if (replaced.length !== 1) throw new Refusal(new SigninRefused('session_ended'), entry('passkey.remove', 'deny', { reason: 'session_ended' }));
+            if (took === 0) throw new Refusal(new SigninRefused('state_mismatch'), entry('passkey.check', 'deny', { purpose: 'remove', reason: 'replay', touched: touched!.passkey.id }));
+            if (moved === 0) throw new ObjectMoved();
+            // The passkey touched, if it is one the person keeps; none otherwise, and no window opens.
+            const passkeyId = state.touch === 'kept' ? touched!.passkey.id : null;
+            // Everything else of theirs ended before the new session is written, which that would end too.
+            const ended = await this.#endEverything(tx, principal, now, principal.id, changes, replaced);
+            const credential = await this.#issue(tx, 'browser', principal, {
+              ...plan, identityId: session.identityId, label: session.label, createdBy: principal.id, passkeyId, confirmedAt: passkeyId === null ? null : now,
+            });
+            log.push(entry('passkey.remove', 'allow', { name: target.name, touched: touched?.passkey.id ?? null, ended: countsOf(ended), issued: credential.id }));
+            return { ok: true as const, principal, credential, replaced: true as const };
+          }, changes, state.principal);
+        });
+      });
+    } catch (error) {
+      if (error instanceof AuthRowTampered) return refusal(new SigninRefused('tampered'));
+      return refusalOrThrow(error);
+    }
+  }
+
+  /** Who may add a passkey here: the person, from their own browser session, while passkeys are on. */
+  #adding(ctx: Asker & Pick<ApiContext, 'session'>, member: PrincipalRef): void {
+    if (!ownPasskeys(ctx, member) || ctx.session?.kind !== 'browser') throw forbidden('a person adds their own passkeys, from the browser they sign in with');
+    if (this.config.passkeys.policy === 'off') throw new ApiError('conflict', 'passkeys are off on this instance', 'passkeys_off');
+  }
+
+  /**
+   * Everything a person is signed in with, ended (section 6.1): every live credential of theirs, their MCP connections,
+   * and the terminal codes they approved that no CLI redeemed yet. In a transaction holding their factor lock and the
+   * head, whose prepared changes it holds to what it ends (`changes`). `already`: a session the caller ended first.
+   */
+  async #endEverything(tx: Transaction, principal: PrincipalRef, at: Date, by: string, changes: AppChanges | null, already: readonly string[] = []): Promise<Ended> {
+    // Independent, so asked together: the revocations and the two reads in one round trip, the compare-and-sets those
+    // reads lead to in a second (review r1 of #529; change-cost.test.ts).
+    const endConnections = async () => {
+      const rows = await liveConnections(tx, this.#deps.chainKey, principalOf(principal), at);
+      const moved = await Promise.all(rows.map(async (row) => ((await updateAuth(tx, this.#deps.chainKey, mcpConnections, { id: row.id, authMac: row.authMac }, { revokedAt: at, revokedBy: by })) > 0 ? row.id : null)));
+      return moved.filter((id) => id !== null);
+    };
+    const [credentials, connections, approvals] = await Promise.all([
+      revokeCredentialsWhere(tx, this.#deps.chainKey, personCredentials(principal, at), { revokedAt: at, revokedBy: by }),
+      endConnections(),
+      denyApprovals(tx, this.#deps.chainKey, principalOf(principal), at, { unbacked: false }),
+    ]);
+    const ended: Ended = { credentials: [...already, ...credentials], connections, approvals };
+    changes?.expectRevoked(ended.credentials);
+    changes?.expectRevoked(ended.connections, 'connection');
+    return ended;
+  }
+
   /** Bind another provider account to the signed-in person. */
   async linkIdentity(
     ctx: Asker,
@@ -1115,9 +1455,14 @@ export class SigninService {
    * names (passkeys.md, section 6.1), as what it issues names the same. A change to the person's passkeys revokes under the same head.
    */
   async #currentCaller(tx: Transaction, ctx: Asker, standing: Access): Promise<Access | null> {
-    if (standing.generation !== ctx.caller.generation || !(await this.#stillMember(tx, ctx.caller.principal, standing))) return null;
+    if (standing.generation !== ctx.caller.generation) return null;
+    // Read together, one round trip: the member's row, and the credential's.
+    const [member, row] = await Promise.all([
+      this.#stillMember(tx, ctx.caller.principal, standing),
+      ctx.credentialId === null ? null : findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId }),
+    ]);
+    if (!member) return null;
     if (ctx.credentialId !== null) {
-      const row = await findCredential(tx, this.#deps.chainKey, { id: ctx.credentialId });
       if (!this.#liveCredential(row, standing, new Date()) || row?.principal !== principalOf(ctx.caller.principal)) return null;
       if (passkeyChecked(row.kind) && !this.#backed(row, row.passkeyRead!)) return null;
     } else if (ctx.via !== null && !(await sourceStands(tx, this.#deps.chainKey, this.#deps.signin.passkeys.policy, ctx))) {
@@ -2173,7 +2518,7 @@ type Factor =
 /** What the passkey page asks the browser to do, for whom: a touch (`get()`), or a new passkey (`create()`). */
 export type PasskeyStep =
   | { purpose: 'signin' | 'step-up'; email: string; options: RequestOptionsJSON }
-  | { purpose: 'enroll'; email: string; options: CreationOptionsJSON; state: string };
+  | { purpose: 'enroll'; email: string; options: CreationOptionsJSON; state: string; reset: { by: string; at: string } | null };
 
 /** What the callback read and resolved, for the sign-in it completes (`#afterProvider`). */
 type Known = {
@@ -2210,6 +2555,88 @@ class StepWanted extends Error {
 function passkeyRefused(meta: Pick<ClientMeta, 'requestId'>, principal: string, reason: 'passkey_failed' | 'passkey_exists' | 'state_mismatch', why: string): never {
   console.warn('a sign-in stopped at its passkey', { principal, reason, why, requestId: meta.requestId });
   throw new SigninRefused(reason);
+}
+
+// --- managing passkeys ---------------------------------------------------------------------------------------------
+
+/**
+ * How many live passkeys a person holds at most: ten, as the design Erwin approved sets (passkeys.md, section 3.6;
+ * 2026-11-03), a list a person can still read (R70: a policy he set).
+ */
+export const MAX_PASSKEYS = 10;
+
+/** A passkey as the Passkeys tab shows it: its name, its provider's where its AAGUID names one, whether it syncs, and when. */
+export type PasskeyView = { id: string; name: string; provider: string | null; synced: boolean; createdAt: string; lastUsedAt: string | null };
+
+/**
+ * A person's passkeys (`GET /members/:member/passkeys`): the live ones; what removing one, or a reset, ends, the session
+ * asking left out; the newest reset of theirs by someone else, while no passkey was added since; and how many they may hold.
+ */
+export type PasskeyList = {
+  passkeys: PasskeyView[];
+  ends: { sessions: number; tokens: number; handles: number; apps: number };
+  reset: { by: string; at: string } | null;
+  max: number;
+};
+
+/** What a reset did: how many passkeys it removed, and what it ended. */
+export type PasskeyReset = { reset: number; ended: { credentials: number; connections: number; approvals: number } };
+
+/** What a change to a person's passkeys ended, by id. */
+type Ended = { credentials: string[]; connections: string[]; approvals: string[] };
+
+const countsOf = (ended: Ended) => ({ credentials: ended.credentials.length, connections: ended.connections.length, approvals: ended.approvals.length });
+
+function passkeyView(row: Pick<PasskeyRow, 'id' | 'name' | 'aaguid' | 'synced' | 'createdAt' | 'lastUsedAt'>): PasskeyView {
+  return {
+    id: row.id, name: row.name, provider: providerName(row.aaguid), synced: row.synced,
+    createdAt: row.createdAt.toISOString(), lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * The newest reset of a person's passkeys at this membership (section 3.7), while they hold none since: their newest
+ * removal, by someone else than them. What their next pages say ("Ada reset your passkeys on 31 Oct"). Removals alone
+ * are weighed, each dated by the app's clock that wrote it, never against a row's `created_at`, the database's.
+ */
+function lastReset(principal: string, rows: readonly PasskeyRow[]): { by: string; at: string } | null {
+  if (rows.some((row) => row.removedAt === null)) return null;
+  let newest: PasskeyRow | null = null;
+  for (const row of rows) {
+    if (row.removedAt !== null && (newest === null || row.removedAt > newest.removedAt!)) newest = row;
+  }
+  if (newest === null || newest.removedBy === memberOf(principal).id) return null;
+  return { by: newest.removedBy!, at: newest.removedAt!.toISOString() };
+}
+
+/** Whether the caller is this person, signed in as themselves: a session, not a token's scope, nor a connection. */
+function ownPasskeys(ctx: Asker, member: PrincipalRef): boolean {
+  return member.type === 'user' && ctx.caller.principal.type === 'user' && ctx.caller.principal.id === member.id
+    && ctx.caller.credentialScope === null && ctx.via === null && ctx.credentialId !== null;
+}
+
+/** An Owner of the whole instance, signed in as themselves: who sees and resets anyone's passkeys (section 3.7). */
+function instanceOwner(ctx: Asker): boolean {
+  return ctx.caller.principal.type === 'user' && ctx.caller.credentialScope === null && ctx.via === null && ownsInstance(ctx.caller);
+}
+
+/** Only an Owner of the whole instance resets anyone's passkeys, and a refusal is logged as an attempt (section 3.7). */
+function mayReset(ctx: Asker, member: PrincipalRef): void {
+  if (!instanceOwner(ctx)) {
+    throw new Refusal(forbidden("only an Owner of the whole instance resets someone's passkeys"), denied(ctx, 'passkey.reset', 'not_owner', { metadata: { principalType: member.type, principalId: member.id } }));
+  }
+  if (member.type !== 'user') throw notFound('only people hold passkeys');
+}
+
+/** Room for another passkey: one held already (a first is added at sign-in), and fewer than `MAX_PASSKEYS`. */
+function addable(live: number): void {
+  if (live === 0) throw new ApiError('conflict', 'a first passkey is added at sign-in: sign in again to add it', 'first_passkey');
+  if (live >= MAX_PASSKEYS) throw new ApiError('conflict', `you hold ${MAX_PASSKEYS} passkeys, the most there may be: remove one first`, 'too_many_passkeys');
+}
+
+/** A passkey row of the person's that fails its MAC: nothing about their passkeys is changed or shown as fewer (R64). */
+function tamperedPasskeys(): ApiError {
+  return new ApiError('conflict', "one of this person's passkey rows fails its signature: coffre changes none of them", 'tampered');
 }
 
 /** A passkey row as the verifier checks an assertion against it. */

@@ -2305,6 +2305,103 @@ export type Api = {
       reserved: string[];
     };
   };
+  "GET /members/:member/passkeys": {
+    input: undefined;
+    output: {
+      passkeys: {
+        id: string;
+        name: string;
+        provider: string | null;
+        synced: boolean;
+        createdAt: string;
+        lastUsedAt: string | null;
+      }[];
+      ends: {
+        sessions: number;
+        tokens: number;
+        handles: number;
+        apps: number;
+      };
+      reset: null | {
+        by: string;
+        at: string;
+      };
+      max: number;
+    };
+  };
+  "POST /members/:member/passkeys/options": {
+    input: undefined;
+    output: {
+      options: {
+        rp: {
+          id: string;
+          name: string;
+        };
+        user: {
+          id: string;
+          name: string;
+          displayName: string;
+        };
+        challenge: string;
+        pubKeyCredParams: {
+          type: "public-key";
+          alg: number;
+        }[];
+        authenticatorSelection: {
+          residentKey: "preferred";
+          userVerification: "required";
+        };
+        attestation: "none";
+        excludeCredentials: {
+          type: "public-key";
+          id: string;
+          transports?: string[];
+        }[];
+        timeout: number;
+      };
+      state: string;
+    };
+  };
+  "POST /members/:member/passkeys": {
+    input: {
+      state: string;
+      response: {
+        [key: string]: unknown;
+      };
+    };
+    output: {
+      passkey: {
+        id: string;
+        name: string;
+        provider: string | null;
+        synced: boolean;
+        createdAt: string;
+        lastUsedAt: string | null;
+      };
+    };
+  };
+  "PATCH /members/:member/passkeys/:id": {
+    input: {
+      name: string;
+    };
+    output: {
+      passkey: {
+        id: string;
+        name: string;
+      };
+    };
+  };
+  "DELETE /members/:member/passkeys": {
+    input: undefined;
+    output: {
+      reset: number;
+      ended: {
+        credentials: number;
+        connections: number;
+        approvals: number;
+      };
+    };
+  };
 };
 
 export type AccessValue = string | null | {

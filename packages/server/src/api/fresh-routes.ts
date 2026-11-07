@@ -92,6 +92,14 @@ export const FRESH_ROUTES: { [K in RouteKey]: Answer<K> } = {
   'POST /handles': 'never',
   'DELETE /handles/:id': 'never',
   'DELETE /members/:member/tokens/:id': 'never',
+  'GET /members/:member/passkeys': 'never',
+  // Another passkey, from a session a touch confirmed in the last five minutes; a person with none adds a first at sign-in (`add_passkey`).
+  'POST /members/:member/passkeys/options': 'always',
+  'POST /members/:member/passkeys': 'always',
+  // A name grants nothing (section 3.6).
+  'PATCH /members/:member/passkeys/:id': 'never',
+  // Resetting someone's passkeys (section 3.7).
+  'DELETE /members/:member/passkeys': 'always',
   'GET /members/:member/bindings': 'never',
   // A trust binding, and the keys it trusts: what a CI run or a workload signs in with.
   'POST /members/:member/bindings': unlessDry('always'),

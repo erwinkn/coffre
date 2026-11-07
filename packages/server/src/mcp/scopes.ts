@@ -49,6 +49,11 @@ export const ROUTE_SCOPES: { [K in RouteKey]: McpScope | null } = {
   // A placeholder is for a person's own app, made by `coffre run`: a connected app holds no handle.
   'POST /handles': null,
   'DELETE /handles/:id': null,
+  'GET /members/:member/passkeys': null,
+  'POST /members/:member/passkeys/options': null,
+  'POST /members/:member/passkeys': null,
+  'PATCH /members/:member/passkeys/:id': null,
+  'DELETE /members/:member/passkeys': null,
   'GET /members/:member/bindings': 'read',
   'POST /members/:member/bindings': 'manage-access',
   'POST /members/:member/bindings/keys': 'manage-access',

@@ -617,4 +617,9 @@ export const PARITY: { [K in RouteKey]: Reach } = {
   'GET /audit/reads': { commands: ['verify log'] },
   'GET /audit/keys': { commands: ['verify keys'] },
   'POST /audit/loss': { commands: ['audit accept-loss'] },
+  'GET /members/:member/passkeys': { browser: "a person's passkeys are Account → Passkeys': a passkey lives in a browser or a phone, which a terminal cannot touch" },
+  'POST /members/:member/passkeys/options': { browser: 'adding a passkey asks the browser that makes it, on Account → Passkeys, as above' },
+  'POST /members/:member/passkeys': { browser: 'adding a passkey, on that page, as above' },
+  'PATCH /members/:member/passkeys/:id': { browser: 'renaming a passkey, on that page, beside the passkeys it names' },
+  'DELETE /members/:member/passkeys': { browser: "an Owner's reset of someone's passkeys takes the Owner's own touch, in a browser signed in to coffre" },
 };
