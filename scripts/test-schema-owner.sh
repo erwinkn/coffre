@@ -97,8 +97,9 @@ SQL
     guarantees "$database"
 done
 
-# A member of the owner may migrate (a managed Postgres's admin login, say): a function it makes is its own, one it
-# replaces keeps its owner, and each use function runs as its owner, its helpers (which are not SECURITY DEFINER) as
+# A member of the owner may migrate (a managed Postgres's admin login, say). Before T193 what it made stayed its own, as
+# drizzle's migrator leaves it below, and databases it migrated so stay as it left them: a function it made is its own, one it
+# replaced kept its owner, and each use function runs as its owner, its helpers (which are not SECURITY DEFINER) as
 # their caller. So the owner migrates up to 0056, and 0045's and 0051's helpers are handed to the member, as if it had
 # made them (the owner's grant moves with each). The member then runs the rest, one migration at a time, since each
 # meets the running code: 0057 makes `use_covered` and replaces `use_credential`, which stays the owner's and must be
@@ -240,6 +241,54 @@ for call in "write_request($now, $token, 'p', 'e', '{k}')" "admit_read($now, $to
         psql -X -At -v ON_ERROR_STOP=1 -h 127.0.0.1 -U coffre_vault_runtime -d split -c "SELECT $call ->> 'state'")"
     [[ "$answer" == read ]] || { echo "after 0073, ${call%%(*} answered: $answer" >&2; exit 1; }
 done
+
+# The above is how a member migrated before T193, by drizzle's migrator, which leaves what it makes the member's, and
+# what the shipped migrations' grants must still answer. coffre's own migrator, as the member, applies the rest of the
+# database the member migrated through 0058 above, whose helpers and `use_credential` are the member's, then, before
+# it commits, hands the owner each of coffre's objects the member's (the ACLs with them, a grant to the owner of what
+# was the member's folded into its own). Afterwards every one of coffre's objects is the owner's, and the guarantees
+# hold.
+psql_owner -d postgres -c "CREATE DATABASE handover"
+migrate_through handover migration_owner local-owner-only 0056_proxy_definitions
+docker exec -i "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres -d handover <<'SQL'
+ALTER FUNCTION use_stands(uuid, uuid, smallint, bigint, jsonb) OWNER TO migration_member;
+ALTER FUNCTION use_admits(jsonb, text) OWNER TO migration_member;
+ALTER FUNCTION use_stands_personal(uuid, uuid, bigint, jsonb) OWNER TO migration_member;
+ALTER FUNCTION use_scope_holds(uuid, uuid, text, jsonb) OWNER TO migration_member;
+SQL
+migrate_through handover migration_member local-member-only 0058_route_uses
+# A day made by the member's own `make_day`, as its partition: the owner's afterwards too.
+docker exec -i "$container" psql -X -q -v ON_ERROR_STOP=1 -U postgres -d handover <<'SQL'
+ALTER FUNCTION make_day(date) OWNER TO migration_member;
+SET ROLE migration_member;
+SELECT make_day(date '2031-01-01');
+SQL
+DATABASE_URL="postgresql://migration_member:local-member-only@127.0.0.1:$port/handover" pnpm --filter @coffre/db run db:migrate
+foreign="$(psql_owner -d handover -Atc "SELECT string_agg(kind || ' ' || name || '=' || owner, ', ' ORDER BY kind, name) FROM (
+    SELECT 'relation' AS kind, c.oid::regclass::text AS name, pg_get_userbyid(c.relowner) AS owner FROM pg_class c
+     WHERE c.relnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace) AND c.relowner <> 'migration_owner'::regrole
+    UNION ALL
+    SELECT 'function', p.oid::regprocedure::text, pg_get_userbyid(p.proowner) FROM pg_proc p
+     WHERE p.pronamespace = 'public'::regnamespace AND p.proowner <> 'migration_owner'::regrole
+    UNION ALL
+    SELECT 'type', t.oid::regtype::text, pg_get_userbyid(t.typowner) FROM pg_type t
+     WHERE t.typnamespace = 'public'::regnamespace AND t.typowner <> 'migration_owner'::regrole
+    UNION ALL
+    SELECT 'statistics', s.stxname::text, pg_get_userbyid(s.stxowner) FROM pg_statistic_ext s
+     WHERE s.stxnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace) AND s.stxowner <> 'migration_owner'::regrole
+) AS objects")"
+[[ -z "$foreign" ]] || { echo "after the member migrated as the owner, objects not the owner's: $foreign" >&2; exit 1; }
+# No grant names the member, as grantee or grantor: each moved to the owner with its object, a grant to the owner of
+# what was the member's (0057's, 0058's) folded into the owner's own.
+leftover="$(psql_owner -d handover -Atc "SELECT string_agg(name || ' ' || entry, ', ') FROM (
+    SELECT p.oid::regprocedure::text AS name, a::text AS entry FROM pg_proc p, unnest(p.proacl) AS a WHERE p.pronamespace = 'public'::regnamespace
+    UNION ALL
+    SELECT c.oid::regclass::text, a::text FROM pg_class c, unnest(c.relacl) AS a WHERE c.relnamespace IN ('public'::regnamespace, 'drizzle'::regnamespace)
+) AS grants WHERE entry LIKE '%migration_member%'")"
+[[ -z "$leftover" ]] || { echo "after the hand-over, grants naming the member: $leftover" >&2; exit 1; }
+use_grants handover 8
+DATABASE_URL="postgresql://migration_member:local-member-only@127.0.0.1:$port/handover" pnpm --filter @coffre/db run db:migrate
+guarantees handover
 
 # Unsafe groups must fail clearly, rather than trying a forbidden ALTER ROLE.
 for attribute in SUPERUSER REPLICATION BYPASSRLS; do

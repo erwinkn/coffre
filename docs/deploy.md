@@ -252,17 +252,45 @@ runs the previous version, by design. It stops unless:
   another version says to run `pnpm exec coffre migrate`, after `pnpm
   install`.
 - **the login can change coffre's tables.** Migrations change the
-  `drizzle` schema, and the tables and the functions coffre's migrations
-  make, so the login must own them, or be a member of the role that does,
-  one that inherits its privileges. Other tables in `public` are the
-  database's own, whoever owns them. Otherwise it names that role, and
-  whether the login is a member that does not inherit, and stops before
-  it asks: migrate with that role's URL, or, as a role that administers
-  it, `GRANT "<owner>" TO "<login>" WITH INHERIT TRUE` (before Postgres
-  16, `GRANT "<owner>" TO "<login>"`, and `ALTER ROLE "<login>" INHERIT`
-  for a NOINHERIT login). With nothing to apply, a login that can still
-  read the tables gets only a warning: the next migration needs another
-  login.
+  `drizzle` schema, and the tables, functions and types coffre's
+  migrations make, so the login must own them, or be a member of the role
+  that does, one that inherits its privileges. Other tables in `public`
+  are the database's own, whoever owns them. Otherwise it names that
+  role, and whether the login is a member that does not inherit, and
+  stops before it asks: migrate with that role's URL, or, as a role that
+  administers it, `GRANT "<owner>" TO "<login>" WITH INHERIT TRUE` (before
+  Postgres 16, `GRANT "<owner>" TO "<login>"`, and `ALTER ROLE "<login>"
+  INHERIT` for a NOINHERIT login). With nothing to apply, a login that can
+  still read the tables gets only a warning: the next migration needs
+  another login.
+
+  coffre's objects have one owner, the role that owns the `drizzle`
+  schema, which the first migration made. The migrations run as the
+  login, with its own attributes (0019 and 0022 make roles, which takes
+  `CREATEROLE`), and before they commit, in the same transaction, each of
+  coffre's objects whose owner's privileges the login has is handed to
+  that owner, the statistics objects on its tables included (0065, 0067),
+  which an `ALTER TABLE … OWNER TO` leaves their maker's: what they made, and what a member made as itself under an
+  earlier release. So a managed host's admin login, a member of the database's
+  owner, leaves nothing of its own behind, and a superuser's run hands
+  the owner everything. Once, on the run that first hands over the
+  functions a member made, a call of one under way still runs as the
+  member, and a day of the log it makes meanwhile (0022's `make_day` and
+  `make_tiles`, 0049's `make_reads_day`) is the member's. So is a day a
+  call made before the run, in a transaction still open: no run sees it
+  until that transaction commits. Retention cannot drop such a day, and a
+  run as the owner is refused, until a run as the member or a superuser,
+  with or without migrations to apply, after the transaction that made it
+  has committed, hands it over. Nothing is exposed or lost meanwhile: the member already has
+  every privilege the owner has, and a refused run says which login to
+  migrate with. A member that may not become the owner (Postgres
+  16's `WITH SET FALSE`), as handing it an object asks, is refused, with
+  the `GRANT … WITH SET TRUE` that lets it. The owner itself, over a
+  member's objects, whose privileges it lacks (and granting them to it
+  would be a cycle), is told to migrate once with that member's URL or a
+  superuser's. Whoever runs the first migration of a fresh database owns
+  the `drizzle` schema, and so coffre's objects, for good: when that is a
+  member, the owner is told to migrate as the member.
 - **the database is not ahead of that version.** A database a newer coffre
   migrated, as after rolling a deployment back, is refused, each migration
   it does not know named by when it was made and its hash, and nothing is
